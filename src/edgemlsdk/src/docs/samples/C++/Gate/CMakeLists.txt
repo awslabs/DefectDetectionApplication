@@ -1,0 +1,7 @@
+add_executable(GateEventBrokerSample gate_eventbroker.cpp)
+set_target_properties(GateEventBrokerSample PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/samples")
+target_link_libraries(GateEventBrokerSample panorama.edge_runtime)
+
+add_executable(GateGstreamerSample gate_gstreamer.cpp)
+set_target_properties(GateGstreamerSample PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/samples")
+target_link_libraries(GateGstreamerSample panorama.edge_runtime)

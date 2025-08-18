@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "panorama"
+version = "0.0.1"
+authors = [
+]
+description = "SDK for developing panorama v2 applications"
+readme = "README.md"
+requires-python = ">=3.6"
+classifiers = [
+    "Programming Language :: Python :: 3"
+]
+
+[tool.hatch.build]
+ignore-vcs=true

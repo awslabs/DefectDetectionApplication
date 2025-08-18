@@ -1,0 +1,25 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ff578c97..368e888f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -139,6 +139,14 @@ endif()
+ set(TRITON_CORE_HEADERS_ONLY OFF)
+ 
+ FetchContent_MakeAvailable(repo-third-party repo-core)
++# Apply patch to triton core repo, update with versions of triton as needed.
++# Define a custom command to apply a Git patch before the target is built
++execute_process(
++  COMMAND git apply --ignore-whitespace ${CMAKE_CURRENT_SOURCE_DIR}/edgeml-triton-core.diff
++  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/_deps/repo-core-src/
++  COMMAND_ERROR_IS_FATAL ANY
++)
++message(STATUS ${CMAKE_CURRENT_BINARY_DIR}/_deps/repo-core-src/)
+ 
+ #
+ # Triton server executable and examples
+@@ -271,3 +279,5 @@ ExternalProject_Add(triton-server
+     -DTRITON_VERSION:STRING=${TRITON_VERSION}
+   DEPENDS ${TRITON_DEPENDS}
+ )
++# install the model config prototbuf python file
++install(FILES "${CMAKE_CURRENT_BINARY_DIR}/_deps/repo-core-build/triton-core/_deps/repo-common-src/protobuf/model_config.proto" DESTINATION "${CMAKE_INSTALL_PREFIX}/protobuf/")

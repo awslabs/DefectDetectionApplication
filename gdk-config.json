@@ -1,0 +1,22 @@
+{
+  "component": {
+    "aws.edgeml.dda.LocalServer": {
+      "author": "Amazon",
+      "version": "NEXT_PATCH",
+      "build": {
+        "build_system": "custom",
+        "custom_build_command": [
+          "bash",
+          "build-custom.sh",
+          "aws.edgeml.dda.LocalServer",
+          "NEXT_PATCH"
+        ]
+      },
+      "publish": {
+        "bucket": "dda-component",
+        "region": "us-west-2"
+      }
+    }
+  },
+  "gdk_version": "1.0.0"
+}

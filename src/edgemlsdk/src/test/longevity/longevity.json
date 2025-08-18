@@ -1,0 +1,31 @@
+{
+    "nodeGraph": {
+        "envelopeVersion": "2021-01-01",
+        "packages": [
+            {
+                "name": "691462484548::edgemlsdk_longevity",
+                "version": "1.0"
+            }
+        ],
+        "nodes": [
+            {
+                "name": "longevity_node",
+                "interface": "691462484548::edgemlsdk_longevity.edgemlsdk_longevity_asset_interface",
+                "overridable": false,
+                "launch": "onAppStart"
+            },
+            {
+                "name": "PropertyDelegatesFile",
+                "interface":"string",
+                "value": "/edgemlsdk/delegates.json"
+            }
+            
+        ],
+        "edges": [
+            {
+                "producer": "PropertyDelegatesFile",
+                "consumer": "longevity_node.PropertyDelegatesFile"
+            }
+        ]
+    }
+}

@@ -1,0 +1,68 @@
+HRESULT SwigDirector_IProtocolMessage::Payload(Panorama::IPayload **ppObj) {
+  HRESULT c_result = SwigValueInit< HRESULT >() ;
+  
+  SWIG_PYTHON_THREAD_BEGIN_BLOCK;
+  {
+    if (!swig_get_self()) {
+      Swig::DirectorException::raise("'self' uninitialized, maybe you forgot to call IProtocolMessage.__init__.");
+    }
+#if defined(SWIG_PYTHON_DIRECTOR_VTABLE)
+    const size_t swig_method_index = 5;
+    const char *const swig_method_name = "Payload";
+    PyObject *method = swig_get_method(swig_method_index, swig_method_name);
+    swig::SwigVar_PyObject args = PyTuple_New(0);
+    swig::SwigVar_PyObject result = PyObject_Call(method, (PyObject *) args, NULL);
+#else
+    swig::SwigVar_PyObject swig_method_name = SWIG_Python_str_FromChar("Payload");
+    swig::SwigVar_PyObject result = PyObject_CallMethodObjArgs(swig_get_self(), (PyObject *) swig_method_name, NULL);
+#endif
+    if (!result) {
+      PyObject *error = PyErr_Occurred();
+      if (error) {
+        Swig::DirectorMethodException::raise("Error detected when calling 'IProtocolMessage.Payload'");
+      }
+    }
+
+    // Expected result from from Python implementation is an array
+    // index 0 is the HRESULT, index 1 is the PyObject* pointing to the Python impl of the IProtocolClient
+    Py_ssize_t n = PyList_Size(result);
+    if (n != 2) 
+    {
+      TraceError("Error detected when calling 'IProtocolMessage.Payload'.  Expected result is [HRESULT, IProtocolClient*]");
+      c_result = E_FAIL;
+      goto END;
+    }
+
+    // Set the c_result to HRESULT, which is ultimately result from this method
+    c_result = PyLong_AsLong(PyList_GetItem(result, 0));
+
+    // Get the PyObject*
+    PyObject* dataPtr = PyList_GetItem(result, 1);
+
+    // Check results
+    if(c_result != S_OK || dataPtr == nullptr)
+    {
+      TraceError("Error detected when calling 'IProtocolMessage.Payload'.  Call did not succeed");
+      c_result = E_FAIL;
+      goto END;
+    }
+
+    // Convert the PyObject* to a SWIGTYPE pointer
+    if (SWIG_ConvertPtr(dataPtr, (void**)ppObj, SWIGTYPE_p_Panorama__IPayload, 0) == -1) 
+    {
+      TraceError("Error detected when calling 'IProtocolMessage.Payload'.  Could not convert PyObject* type to IPayload");
+      c_result = E_FAIL;
+      goto END;
+    }
+
+    // Object was created in Python but C is taking a reference to it.
+    // Need to instruct Python to add a reference to it
+    Panorama::PyObjectAddRefProxy(*ppObj, dataPtr);
+
+    // Object is set from a ComPtr<T>.AddressOf() which doesn't increase the ref count
+    // RefCount in python UnknownImpl starts at 0 (which tracks the number of NATIVE references)
+    // PyObjectAddRefProxy does not increase native ref count (by design) so need to explicitly do that here
+    (*ppObj)->AddRef();
+  }
+  SWIG_PYTHON_THREAD_END_BLOCK;
+END:

@@ -1,0 +1,13 @@
+PROJECT_NAME           = Panorama-SDK
+PROJECT_NUMBER         = 1.0.x
+PROJECT_BRIEF          = This is Panorama-SDK version 2
+OUTPUT_DIRECTORY       = @CMAKE_BINARY_DIR@/docs/doxygen
+GENERATE_LATEX         = NO
+GENERATE_HTML          = NO
+GENERATE_XML           = YES
+QUIET                  = YES
+WARNINGS               = NO
+INPUT                  = @CMAKE_BINARY_DIR@/docs/preprocessed
+RECURSIVE              = YES
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
