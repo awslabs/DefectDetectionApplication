@@ -1,0 +1,145 @@
+.. _s3_protocol_client:
+
+==================
+S3 Protocol Client
+==================
+
+Overview
+--------
+
+This protocol client uploads data to S3.  Each publish will create a new artifact unless a message is published with the same bucket/key, in which case it will (optionally) be overwritten.
+
+
+Message Broker Integration
+--------------------------
+
+Target Parameters
+^^^^^^^^^^^^^^^^^
+
+-   **protocol**
+
+    .. code-block:: json
+
+        "protocol": "s3"
+
+-   **s3_options**
+
+    -   region: AWS Region of the S3 bucket you wish to publish too
+
+    .. code-block:: json
+
+        "s3_options": {
+            "region": "<your-aws-region>"
+        }
+
+-   **subscriptions**
+
+    Not supported.
+
+
+S3 Message Options
+^^^^^^^^^^^^^^^^^^
+
+-   **bucket**
+
+    The bucket where the artifact will be uploaded
+
+-   **key**
+
+    The key of the artifact.  The following macros are supported
+
+    -   "${id}":  Expands to the ID of the payload
+    -   "${c_id}": Expands to the Correlation-ID of the payload
+    -   "${timestamp}": Expands to the timestamp of the payload
+    -   "${count}": Expands to the number of times a specific message-id was published.  Starts with 0
+
+-   **overwrite**
+
+    Whether or not to overwrite the bucket/key combination, if it exists. This is an optional parameter and if not specified, defaults to true.
+
+-   **batch_payload_expansion**
+
+    Whether or not to upload and expand macros for payloads contained within a batch payload, as opposed to the batch payload itself. Only matters when sending batch payloads, ignored otherwise. This is an optional parameter and if not specified, defaults to true.
+
+
+Message Broker Config Sample
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. code-block:: json
+
+    {
+        "targets": [
+            {
+                "protocol": "s3",
+                "name": "test-s3",
+                "s3_options": {
+                    "region": "us-west-2"
+                }
+            }
+        ],
+        "pipes": [
+            {
+                "message_id": "test_message",
+                "destinations": [
+                    {
+                        "target_name": "test-s3",
+                        "s3_message_options": {
+                            "bucket": "panorama-sdk-v2-artifacts",
+                            "key": "test/${timestamp}-test_${id}_${c_id}",
+                            "overwrite": false,
+                            "batch_payload_expansion": true
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+Direct Usage
+------------
+
+Following section demonstrates how to use the S3 Protocol Client directly and not through Message Broker
+
+
+Sample
+------
+
+..  tabs::
+
+    ..  group-tab:: C++
+
+        .. note:: link against libpanorama.aws.so
+
+        .. literalinclude:: ../../../samples/C++/MessageBroker/s3.cpp
+            :language: cpp
+            :linenos:
+
+    ..  group-tab:: Python
+
+        .. literalinclude:: ../../../samples/Python/MessageBroker/s3_protocol_client_sample.py
+            :language: python
+            :linenos:
+
+API
+---
+
+..  tabs::
+
+    ..  group-tab:: C++
+
+        **Interfaces**
+
+        .. doxygenstruct:: Panorama::IS3Message
+            :members:
+
+        **Factory Methods**
+
+        .. doxygenfunction:: Panorama::Panorama_Aws::S3ProtocolClient(IProtocolClient** ppObj, const char* region, ICredentialProvider* credential_provider)
+        .. doxygenfunction:: Panorama::Panorama_Aws::S3Message(IS3Message** ppObj, const char* contents, const char* bucket, const char* key, bool overwrite = true, bool batch_payload_expansion = true)
+        .. doxygenfunction:: Panorama::Panorama_Aws::S3Message(IS3Message** ppObj, IPayload* payload, const char* bucket, const char* key, bool overwrite = true, bool batch_payload_expansion = true)
+
+    ..  group-tab:: Python
+
+        .. autoclass:: panorama.messagebroker.S3ProtocolClient
+                :members:
+                :undoc-members:

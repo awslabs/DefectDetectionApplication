@@ -1,0 +1,82 @@
+version: "3.0"
+services:
+  backend_tegra_gpu_enabled:
+    network_mode: "host"
+    build: ./backend
+    image: flask-app
+    privileged: true
+    expose:
+      - "5000"
+      - "5443"
+    volumes:
+      - /aws_dda:/aws_dda
+      - /tmp:/tmp
+      - /dev/shm:/dev/shm
+      - /usr/local/cuda:/usr/local/cuda/
+      - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra
+    environment:
+      - DDA_SYSTEM_USER_ID=$DDA_SYSTEM_USER_ID
+      - DDA_SYSTEM_GROUP_ID=$DDA_SYSTEM_GROUP_ID
+      - DDA_ADMIN_USER_ID=$DDA_ADMIN_USER_ID
+      - DDA_ADMIN_GROUP_ID=$DDA_ADMIN_GROUP_ID
+      - AWS_REGION
+      - SVCUID
+      - AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT
+      - AWS_CONTAINER_AUTHORIZATION_TOKEN
+      - AWS_CONTAINER_CREDENTIALS_FULL_URI
+      - AWS_IOT_THING_NAME
+      - COMPONENT_WORK_PATH
+      - KERNEL_ROOT_PATH
+      - INFERENCE_COMPONENT_DECOMPRESED_PATH
+      - LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH
+      - JETSON_CUDA=$JETSON_CUDA
+      - JETSON_TENSORRT=$JETSON_TENSORRT
+      - CUDA_HOME=/usr/local/cuda/
+      - LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CUDA_HOME/lib64/:/usr/lib/aarch64-linux-gnu/tegra:/usr/local/cuda/targets/aarch64-linux/lib/
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles: [tegra]
+  backend_generic:
+    network_mode: "host"
+    build: ./backend
+    image: flask-app
+    privileged: true
+    expose:
+      - "5000"
+      - "5443"
+    volumes:
+      - /aws_dda:/aws_dda
+      - /tmp:/tmp
+      - /dev/shm:/dev/shm
+    environment:
+      - DDA_SYSTEM_USER_ID=$DDA_SYSTEM_USER_ID
+      - DDA_SYSTEM_GROUP_ID=$DDA_SYSTEM_GROUP_ID
+      - DDA_ADMIN_USER_ID=$DDA_ADMIN_USER_ID
+      - DDA_ADMIN_GROUP_ID=$DDA_ADMIN_GROUP_ID
+      - AWS_REGION
+      - SVCUID
+      - AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT
+      - AWS_CONTAINER_AUTHORIZATION_TOKEN
+      - AWS_CONTAINER_CREDENTIALS_FULL_URI
+      - AWS_IOT_THING_NAME
+      - COMPONENT_WORK_PATH
+      - KERNEL_ROOT_PATH
+      - INFERENCE_COMPONENT_DECOMPRESED_PATH
+      - LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH
+      - JETSON_CUDA=$JETSON_CUDA
+      - JETSON_TENSORRT=$JETSON_TENSORRT
+      - LD_LIBRARY_PATH=$LD_LIBRARY_PATH
+    profiles: [generic]
+  frontend:
+    build: ./frontend
+    image: react-webapp
+    ports:
+      - "3000:80"
+      - "3443:443"
+    volumes:
+      - /aws_dda:/aws_dda

@@ -1,0 +1,7 @@
+[
+    {
+            "type": "iot",
+            "thingName": "edgemlsdk-longevity",
+            "region": "us-west-2"
+    }
+]

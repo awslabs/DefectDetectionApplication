@@ -1,0 +1,355 @@
+//
+// Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//
+// See LICENSE.txt for licensing details.
+//
+
+syntax = "proto3";
+
+package AWS.LookoutVision;
+
+option java_package = "com.amazonaws.lookoutvision";
+
+service EdgeAgent {
+
+  // Detects anomalies in the supplied image.
+  // The response from DetectAnomalies includes a boolean prediction that
+  // the image contains one or more anomalies and a confidence value for the prediction.
+  // If the model is a segmentation model, the response includes the following:
+  //
+  // - A mask image that covers each anomaly type in a unique color. 
+  //     You can have DetectAnomalies store the mask image in shared memory, 
+  //     or return the mask as image bytes. 
+  // - The percentage area of the image that an anomaly type covers.
+  // - The hex color for an anomaly type on the mask image.
+  //
+  // The model that you use with DetectAnomalies must be running.
+  // You can get the current status by calling DescribeModel. To start running
+  // a model, use StartModel.
+  //
+  // DetectAnomalies supports packed bitmaps (images) in interleaved RGB888 format.
+  // The minimum supported image dimension is 64x64 pixels. The maximum supported
+  // image dimension is 4096x4096 pixels.
+  //
+  // You can send the image in the protobuf message or through a shared memory
+  // segment. Serializing large images into the protobuf message can significantly
+  // increase the latency of calls to DetectAnomalies. For the best latency,
+  // we recommended that you use shared memory.
+  //
+  // Status codes:
+  //
+  //  0. OK - DetectAnomalies successfully made a prediction.
+  //  2. UNKNOWN - An unknown error has occurred.
+  //  3. INVALID_ARGUMENT - One or more input parameters is invalid. Check the error message for more details.
+  //  5. NOT_FOUND - A model with the specified name wasn't found.
+  //  8. RESOURCE_EXHAUSTED - There isn't enough resources to perform this operation.
+  //     For example, The Lookout for Vision Edge Agent can't keep up with the rate of calls to DetectAnomalies.
+  //     Check the error message for more details.
+  //  9. FAILED_PRECONDITION - DetectAnomalies was called for model that is
+  //     not in the RUNNING state.
+  //  13. INTERNAL - An internal error has occurred.
+  //
+  rpc DetectAnomalies(DetectAnomaliesRequest) returns (DetectAnomaliesResponse);
+
+  //
+  // Starts a model running on an AWS IoT Greengrass Version 2 core device.
+  // It might take a while for the model to start running. To check the current
+  // status call DescribeModel. The model is running if the Status field is RUNNING.
+  // The number of models that you can run concurrently depends on the
+  // hardware specification of your core device.
+  //
+  // Status Codes:
+  //  0. OK - The model is starting.
+  //  2. UNKNOWN - An unknown error has occurred.
+  //  3. INVALID_ARGUMENT - One or more input parameters is invalid.
+  //     Check the error message for more details.
+  //  5. NOT_FOUND - A model with the supplied name wasn't found.
+  //  8. RESOURCE_EXHAUSTED - There isn't enough resources to perform this operation.
+  //     For example, there is isn't enough memory to load the model.
+  //     Check the error message for more details.
+  //  9. FAILED_PRECONDITION - The method was called for model that is not
+  //     in the STOPPED or FAILED state.
+  //  13. INTERNAL - An internal error has occurred.
+  //
+  rpc StartModel(StartModelRequest) returns (StartModelResponse);
+
+  //
+  // Stops the model on an AWS IoT Greengrass Version 2 core device.
+  // Note:
+  //  1. Call can only stop a model that is in RUNNING.
+  //  2. call is synchronous and returns after the model was stopped.
+  // Status Codes:
+  //  0. OK - The model is stopping.
+  //  2. UNKNOWN - An unknown error has occurred.
+  //  3. INVALID_ARGUMENT - One or more input parameters is invalid.
+  //     Check the error message for more details.
+  //  5. NOT_FOUND - A model with the supplied name wasn't found.
+  //  8. RESOURCE_EXHAUSTED - There isn't enough memory to load the model.
+  //  9. FAILED_PRECONDITION - The method was called for model that is not
+  //     in the RUNNING state.
+  //  13. INTERNAL - An internal error has occurred.
+  //
+  //
+  rpc StopModel(StopModelRequest) returns (StopModelResponse);
+
+  //
+  // Lists the models deployed to an AWS IoT Greengrass Version 2 core device.
+  //
+  // Status Codes:
+  //  0. OK - The call was successful.
+  //  2. UNKNOWN - An unknown error has occurred.
+  //  13. INTERNAL - An internal error has occurred.
+  //
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+
+  //
+  // Describes an Amazon Lookout for Vision model that's deployed
+  // to an AWS IoT Greengrass Version 2 core device.
+  //
+  // Status Codes:
+  //  0. OK - The call was successful.
+  //  2. UNKNOWN - An unknown error has occurred.
+  //  3. INVALID_ARGUMENT - One or more input parameters is invalid.
+  //     Check the error message for more details.
+  //  5. NOT_FOUND - model with provided name was not found.
+  //  13. INTERNAL - An internal error has occurred.
+  //
+  rpc DescribeModel(DescribeModelRequest) returns (DescribeModelResponse);
+}
+
+//
+// The status of a model that's deployed to an AWS IoT Greengrass
+// Version 2 core device. To get the current status, call DescribeModel.
+//
+enum ModelStatus {
+  STOPPED = 0;
+  STARTING = 1;
+  RUNNING = 2;
+  FAILED = 3;
+  STOPPING = 4;
+}
+
+//
+// Represents POSIX shared memory segment.
+//
+//  name - The name of the POSIX memory segment.
+//  For information about creating shared memory,
+//  see shm_open (https://man7.org/linux/man-pages/man3/shm_open.3.html) (https://man7.org/linux/man-pages/man3/shm_open.3.html)
+//  offset - The offset, in bytes, to the beginning of the image buffer
+//  from the start of the shared memory segment.
+//  size - The image buffer size in bytes starting from the offset.
+//
+//
+message SharedMemoryHandle {
+  string name = 1;
+  uint64 size = 2;
+  uint64 offset = 3;
+}
+
+//
+// The image that you want to analyze with DetectAnomalies.
+//
+//  width - The width of the image in pixels.
+//  height - The height of the image in pixels.
+//  byte_data - Image bytes passed in the protobuf message.
+//  shared_memory_handle - Image bytes passed in a shared memory segment.
+//
+message Bitmap {
+  int32 width = 1;
+  int32 height = 2;
+  oneof data {
+    bytes byte_data = 3;
+    SharedMemoryHandle shared_memory_handle = 4;
+  }
+}
+
+//
+// Parameters for outputting an anomaly mask. (Segmentation model).
+//
+// shared_memory_handle - Contains the image bytes for the mask, if 
+// shared_memory_handle wasn't provided. 
+message AnomalyMaskParams {
+  SharedMemoryHandle shared_memory_handle = 2;
+}
+
+// 
+// Information about the pixel mask that covers an anomaly type.
+// (Segmentation model).
+//
+// total_percentage_area - The percentage area of the image that the
+// anomaly type covers.
+// hex_color - A hex color value for the mask that covers an anomaly type.
+// Each anomaly type has a different mask color. The color maps to the color
+// of the anomaly type used in the training dataset.  
+message PixelAnomaly {
+  float total_percentage_area = 1;
+  string hex_color = 2;
+}
+
+//
+// Represents an anomaly found on an image. (Segmentation model).
+//
+// name - The name of an anomaly type found in an image. name maps
+// to an anomaly type in the training dataset. The service automatically
+// inserts the background anomaly type into the response from DetectAnomalies. 
+// pixel_anomaly - Information about the pixel mask that covers an anomaly type.
+//
+message Anomaly {
+  string name = 1;
+  PixelAnomaly pixel_anomaly = 2;
+}
+
+//
+// The request for a DetectsAnomalies rpc call.
+//
+//  model_component - The name of the AWS IoT Greengrass V2
+//  component that contains the model you want to use.
+//  bitmap - The image that you want analyze with DetectAnomalies.
+//  anomaly_mask_params - Optional parameters for outputting the mask. (Segmentation model).
+//
+message DetectAnomaliesRequest {
+  string model_component = 1;
+  Bitmap bitmap = 2;
+  AnomalyMaskParams anomaly_mask_params = 3;
+}
+
+//
+// The anomaly detection result from a call to DetectAnomalies.
+//
+// Note: See Lookout for Vision cloud API for more details.
+//  is_anomalous - Indicates if the image contains an anomaly.
+//  true if the image contains an anomaly. false if the image is normal.
+//  confidence - The confidence that DetectAnomalies has in the accuracy
+//  of the prediction. Confidence is a floating point value between 0 and 1.
+//  anomaly_mask - if shared_memory_handle wasn't provided, contains the
+//  image bytes for the mask. (Segmentation model).
+//  anomalies - A list of 0 or more anomalies found within the 
+//  input image. (Segmentation model). 
+//  anomaly_score -  The anomaly score, in range 0.0 to 1.0
+//  anomaly_threshold - Threshold set during model training for considering if an image is anomalous or not
+//
+message DetectAnomalyResult {
+  bool is_anomalous = 1;
+  float confidence = 2;
+  Bitmap anomaly_mask = 3;
+  repeated Anomaly anomalies = 4;
+  float anomaly_score = 5;
+  float anomaly_threshold = 6;
+}
+
+//
+// The Response from a DetectsAnomalies rpc call.
+//
+//  detect_anomaly_result - The anomaly detection result from
+//  a call to DetectAnomalies.
+//
+message DetectAnomaliesResponse {
+  DetectAnomalyResult detect_anomaly_result = 1;
+}
+
+//
+// The Description for a model.
+//
+//  model_component - The name of AWS IoT Greengrass Version 2 component
+//  that contains the Amazon Lookout for Vision model.
+//  lookout_vision_model_arn - The Amazon Resource Name ARN of the
+//  Amazon Lookout for Vision model that was used to generate the AWS IoT Greengrass V2 component.
+//  status - The current status of the model. For more information, see ModelStatus.
+//  status_message - The status message for Lookout for Vision model.
+//
+message ModelDescription {
+  string model_component = 1;
+  string lookout_vision_model_arn = 2;
+  ModelStatus status = 3;
+  string status_message = 4;
+}
+
+//
+// The metadata for a model.
+//
+//  model_component - The name of AWS IoT Greengrass Version 2 component
+//  that contains an Amazon Lookout for Vision model.
+//  lookout_vision_model_arn - The Amazon Resource Name (ARN) of the
+//  Amazon Lookout for Vision model that was used to generate the AWS IoT Greengrass
+//  V2 component.
+//  status - The current status of the model. For more information, see ModelStatus.
+//  status_message - The status message for Lookout for Vision model.
+//
+message ModelMetadata {
+  string model_component = 1;
+  string lookout_vision_model_arn = 2;
+  ModelStatus status = 3;
+  string status_message = 4;
+}
+
+//
+// The request for a StartModel rpc call.
+//
+//  model_component - The name of the AWS IoT Greengrass Version 2 component
+//  that contains the model you want to start.
+//
+message StartModelRequest {
+  string model_component = 1;
+}
+
+//
+// The response from a StartModel rpc call.
+//
+// status - The current status of the model. The response is
+// STARTING if the call succeeds. For more information, see ModelStatus.
+//
+message StartModelResponse {
+  ModelStatus status = 1;
+}
+
+//
+// The request for a StopModel rpc call.
+//
+//  model_component - name of the Lookout for Vision model Greengrass v2 component.
+//
+message StopModelRequest {
+  string model_component = 1;
+}
+
+//
+// Response of StopModel rpc call.
+//
+//  status - The name of the AWS IoT Greengrass Version 2 component
+//  that contains the model you want to stop.
+//
+message StopModelResponse {
+  ModelStatus status = 1;
+}
+
+//
+// The request for a ListModels rpc call.
+//
+message ListModelsRequest {}
+
+//
+// The response from a ListModels rpc call.
+//
+//  models - A list of models deployed to the core device.
+//
+message ListModelsResponse {
+  repeated ModelMetadata models = 1;
+}
+
+//
+// The request for DescribeModel rpc call.
+//
+//  model_component - The name of the AWS IoT Greengrass V2 component
+//  that contains the model you want to describe.
+//
+message DescribeModelRequest {
+  string model_component = 1;
+}
+
+//
+// The response from a DescribeModel rpc call.
+//
+//  model_description - The description for the requested model.
+//
+message DescribeModelResponse {
+  ModelDescription model_description = 1;
+}

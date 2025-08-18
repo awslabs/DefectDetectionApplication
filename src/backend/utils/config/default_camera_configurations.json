@@ -1,0 +1,74 @@
+{
+	"Lucid Vision Labs" : {
+		"default" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=RGB ! videoconvert"
+		},
+		"TRI050S-C" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=RGB ! videoconvert"
+		}
+	},
+	"Zebra Technologies" : {
+		"default" : {
+			"processingPipeline" : "capsfilter caps=video/x-bayer,format=rggb ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"
+		},
+		"CV60-AS05CG" : {
+			"processingPipeline" : "capsfilter caps=video/x-bayer,format=rggb ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"
+		},
+		"CV60-AS05MG" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=GRAY8 ! videoconvert"
+		},
+		"GOX5103C-PGE" : {
+			"processingPipeline" : "capsfilter caps=video/x-bayer,format=rggb ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"
+		},
+		"GOX-5103M-PGE" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=GRAY8 ! videoconvert"
+		},
+		"GOX2402M-PGE" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=GRAY8 ! videoconvert"
+		},
+		"GOX2402C-PGE" : { 
+			"processingPipeline" : "capsfilter caps=video/x-bayer,format=rggb ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"
+		}
+	},
+	"Basler" : {
+		"default" : {
+			"processingPipeline" : "capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"
+		},
+		"acA-640-120gm" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=GRAY8 ! videoconvert"
+		},
+		"acA1300-30gc" : {
+			"processingPipeline" : "capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"
+		},
+		"acA1300-60gm" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=GRAY8 ! videoconvert"
+		},
+		"acA2040-55um" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=GRAY8 ! videoconvert"
+		},
+		"acA2440-35uc" : {
+			"processingPipeline" : "capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"
+		}
+	},
+	"Allied Vision" : {
+		"default" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=RGB ! videoconvert"
+		},
+		"ALVIUM 1800 U-500m" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=GRAY8 ! videoconvert"
+		}
+	},
+	"OMRON SENTECH" : {
+		"default" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=RGB ! videoconvert"
+		},
+		"STC-MCS312POE" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=RGB ! videoconvert"
+		}
+	},
+    "default" : {
+		"default" : {
+			"processingPipeline": "capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"
+		}
+    }
+}

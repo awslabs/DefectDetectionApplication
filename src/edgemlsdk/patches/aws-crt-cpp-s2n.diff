@@ -1,0 +1,26 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8047e4f12..3f30f19bd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -426,7 +426,7 @@ try_compile(
+ )
+ 
+ if (LIBCRYPTO_SUPPORTS_EVP_RC4)
+-    target_compile_options(${PROJECT_NAME} PUBLIC -DS2N_LIBCRYPTO_SUPPORTS_EVP_RC4)
++#   target_compile_options(${PROJECT_NAME} PUBLIC -DS2N_LIBCRYPTO_SUPPORTS_EVP_RC4)
+ endif()
+ 
+ # Determine if EVP_MD_CTX_set_pkey_ctx is available in libcrypto
+diff --git a/s2n.mk b/s2n.mk
+index 4e1c06670..e38844e43 100644
+--- a/s2n.mk
++++ b/s2n.mk
+@@ -222,7 +222,7 @@ endif
+ # Determine if EVP_md5_sha1 is available
+ TRY_EVP_RC4 := $(call try_compile,$(S2N_ROOT)/tests/features/evp_rc4.c)
+ ifeq ($(TRY_EVP_RC4), 0)
+-	DEFAULT_CFLAGS += -DS2N_LIBCRYPTO_SUPPORTS_EVP_RC4
++#	DEFAULT_CFLAGS += -DS2N_LIBCRYPTO_SUPPORTS_EVP_RC4
+ endif
+ 
+ # Determine if EVP_MD_CTX_set_pkey_ctx is available

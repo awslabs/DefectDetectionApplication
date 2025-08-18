@@ -1,0 +1,14 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index ba027a5..c82b3e4 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -49,7 +49,9 @@ FetchContent_Declare(
+ set(TRITON_COMMON_ENABLE_PROTOBUF ON)
+ 
+ FetchContent_MakeAvailable(repo-common)
++# Set static-libstdc++ static linking
+ 
++set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -static-libstdc++")
+ #
+ # CUDA
+ #

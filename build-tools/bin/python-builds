@@ -1,0 +1,15 @@
+#!/bin/bash
+
+# This helper variable will contain the python interpreter type without the
+# version part, e.g. CPython, Jython, PyPy
+type=${1%%[0-9]*}
+
+# This helper variable will contain the python interpreter XY version number,
+# e.g CPython27 -> 27
+version=${1##$type}
+
+# Because EdgeML SDK is built specifically for Python3.8, make sure that only the Python 3.8 interpreter is enabled
+# Otherwise, the tests will fail on versions other than 3.8, which is expected
+[[ $version -eq 38 ]] || exit 1
+
+exit 0

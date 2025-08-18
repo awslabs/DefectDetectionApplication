@@ -1,0 +1,45 @@
+HRESULT SwigDirector_IPropertyDelegateEventHandler::QueryInterface(Guid uuid, void **ppObj) {
+// edit lines: 12 and 26 + method definition with interface name
+  HRESULT c_result = SwigValueInit< HRESULT >() ;
+  CHECKNULL(ppObj, E_POINTER);
+  
+  SWIG_PYTHON_THREAD_BEGIN_BLOCK;
+  {
+    swig::SwigVar_PyObject obj0;
+    
+    obj0 = SWIG_FromCharPtr(GuidToString(uuid).c_str());
+    if (!swig_get_self()) {
+      Swig::DirectorException::raise("'self' uninitialized, maybe you forgot to call IPropertyDelegateEventHandler.__init__.");
+    }
+#if defined(SWIG_PYTHON_DIRECTOR_VTABLE)
+    const size_t swig_method_index = 2;
+    const char *const swig_method_name = "QueryInterface";
+    PyObject *method = swig_get_method(swig_method_index, swig_method_name);
+    swig::SwigVar_PyObject result = PyObject_CallFunctionObjArgs(method ,(PyObject *)obj0, NULL);
+#else
+    swig::SwigVar_PyObject swig_method_name = SWIG_Python_str_FromChar("QueryInterface");
+    swig::SwigVar_PyObject result = PyObject_CallMethodObjArgs(swig_get_self(), (PyObject *) swig_method_name ,(PyObject *)obj0, NULL);
+#endif
+    if (!result) {
+      PyObject *error = PyErr_Occurred();
+      if (error) {
+        Swig::DirectorMethodException::raise("Error detected when calling 'IPropertyDelegateEventHandler.QueryInterface'");
+      }
+    }
+    int swig_val;
+    int swig_res = SWIG_AsVal_int(result, &swig_val);
+    if (!SWIG_IsOK(swig_res)) {
+      Swig::DirectorTypeMismatchException::raise(SWIG_ErrorType(SWIG_ArgError(swig_res)), "in output value of type '""HRESULT""'");
+    }
+
+    c_result = static_cast< HRESULT >(swig_val);
+    if(SUCCEEDED(c_result))
+    {
+      *ppObj = swig_get_self();
+    }
+    else
+    {
+      *ppObj = nullptr;
+    }
+  }
+  SWIG_PYTHON_THREAD_END_BLOCK;

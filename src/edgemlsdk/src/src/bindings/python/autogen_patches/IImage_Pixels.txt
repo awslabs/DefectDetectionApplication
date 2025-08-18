@@ -1,0 +1,32 @@
+HRESULT SwigDirector_IImage::Pixels(uint8_t **ppObj) const {
+  HRESULT c_result = SwigValueInit< HRESULT >() ;
+  
+  if (!swig_get_self()) {
+    Swig::DirectorException::raise("'self' uninitialized, maybe you forgot to call IImage.__init__.");
+  }
+#if defined(SWIG_PYTHON_DIRECTOR_VTABLE)
+  const size_t swig_method_index = 6;
+  const char *const swig_method_name = "Pixels";
+  PyObject *method = swig_get_method(swig_method_index, swig_method_name);
+  swig::SwigVar_PyObject args = PyTuple_New(0);
+  swig::SwigVar_PyObject result = PyObject_Call(method, (PyObject *) args, NULL);
+#else
+  swig::SwigVar_PyObject swig_method_name = SWIG_Python_str_FromChar("Pixels");
+  swig::SwigVar_PyObject result = PyObject_CallMethodObjArgs(swig_get_self(), (PyObject *) swig_method_name, NULL);
+#endif
+  if (!result) {
+    PyObject *error = PyErr_Occurred();
+    if (error) {
+      Swig::DirectorMethodException::raise("Error detected when calling 'IImage.Pixels'");
+    }
+  }
+  
+  // Modified SWIG autogen code
+  // see swig.cmake
+  Py_ssize_t n = PyList_Size(result);
+  PyObject* dataPtr = PyList_GetItem(result, 1);
+  size_t addr = PyLong_AsSize_t(dataPtr);
+
+  *ppObj = reinterpret_cast<uint8_t*>(addr);
+  c_result = PyLong_AsLong(PyList_GetItem(result, 0));
+  

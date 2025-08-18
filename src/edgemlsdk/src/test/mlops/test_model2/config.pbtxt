@@ -1,0 +1,26 @@
+
+name: "test_model2"
+backend: "python"
+max_batch_size: 0
+input [
+{
+    name: "input_0"
+    data_type: TYPE_UINT8
+    dims: [3, 1024]
+},
+{
+    name: "METADATA"
+    data_type: TYPE_UINT8
+    dims: [-1]
+}
+]
+
+output [
+{
+    name: "output_0"
+    data_type: TYPE_FP32
+    dims: [3, 1024]
+}
+]
+
+instance_group [{ kind: KIND_CPU }]
