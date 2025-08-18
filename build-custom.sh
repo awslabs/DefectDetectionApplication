@@ -40,6 +40,8 @@ cd src
 cd edgemlsdk/
 ./build.sh -p $(uname -m) -u $IMAGE_VER 3.9
 cd ..
+mkdir backend/edgemlsdk
+cp -r edgemlsdk backend/edgemlsdk
 echo copying $id
 id=$(docker create edgemlsdk)
 docker cp $id:/debs/PanoramaSDK.deb $(pwd)/backend/edgemlsdk/
