@@ -46,5 +46,5 @@ pushd $rootDir
  
  
 echo "Begin building Docker image."
-docker build --progress=plain --build-arg OS=$ubuntu --build-arg PLATFORM=$platform --build-arg PWSH_ARCH=$pwsh_arch --build-arg PYTHON_VERSION=$python -t edgemlsdk .
+docker build --build-arg OS=$ubuntu --build-arg PLATFORM=$platform --build-arg PWSH_ARCH=$pwsh_arch --build-arg PYTHON_VERSION=$python -t edgemlsdk .
 popd
