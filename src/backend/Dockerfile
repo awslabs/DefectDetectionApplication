@@ -12,7 +12,7 @@ RUN ./edge_ml1_p_camera_management/prereqs_install.sh
 RUN ./edge_ml1_p_camera_management/install_aravis.sh
 RUN python -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
 
-RUN apt install libexif12
+RUN apt install libexif12 libcurl4
 RUN apt purge -y ffmpeg gtk-doc-tools
 RUN apt clean
 
