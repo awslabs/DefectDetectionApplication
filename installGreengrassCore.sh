@@ -1,5 +1,14 @@
 #!/bin/bash -e
 
+# Check if region parameter is provided
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <aws-region>"
+    echo "Example: $0 us-east-1"
+    exit 1
+fi
+
+aws_region="$1"
+echo "Using AWS region: $aws_region"
 
 dda_root_folder="/aws_dda"
 architecture=$(uname -m)
@@ -101,15 +110,16 @@ else
 fi
 
 # Setup Python
-echo "Installing Python3.8"
-apt-get install python3.8 -y
-apt-get install python3.8-venv -y
-apt-get install libpython3.8-dev -y
+echo "Installing Python3.9"
+# Add deadsnakes PPA for Python 3.9 on Ubuntu 24.04
+add-apt-repository ppa:deadsnakes/ppa -y
+apt-get update
+apt-get install python3.9 python3.9-dev python3.9-venv python3.9-distutils -y
 
 
 echo "Installing Pip"
 apt-get install python3-pip -y
-python3.8 -m pip install --upgrade pip
+python3.9 -m pip install --upgrade pip
 
 
 # Install python3.9-venv for LFV Edge Agent
@@ -126,7 +136,7 @@ fi
 echo "Installing Gstreamer"
 apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
  gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
- gstreamer1.0-libav gstreamer1.0-doc gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-alsa gstreamer1.0-gl \
+ gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-alsa gstreamer1.0-gl \
  gstreamer1.0-gtk3 gstreamer1.0-qt5 gstreamer1.0-pulseaudio
 
 
@@ -134,7 +144,12 @@ apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
 mkdir -p "${dda_greengrass_root_folder}/em_agent/capture_data" \
  "${dda_greengrass_root_folder}/em_agent/local_data" \
  "${dda_greengrass_root_folder}/em_agent/config"
-cp edge_manager_agent_config.json "${dda_greengrass_root_folder}/em_agent/config"
+if [ -f "edge_manager_agent_config.json" ]; then
+    cp edge_manager_agent_config.json "${dda_greengrass_root_folder}/em_agent/config"
+    echo "Edge Manager Agent config copied"
+else
+    echo "Warning: edge_manager_agent_config.json not found, skipping..."
+fi
 
 
 # Setup Docker
@@ -177,7 +192,7 @@ java -jar ./GreengrassInstaller/lib/Greengrass.jar --version
 # Create IoT thing
 # Replace aws-region, thing-name, thing-group-name and etc with your desird value
 # If it fails with "The role with name GreengrassV2TokenExchangeRole cannot be found", rerun the command
-java -Droot="/aws_dda/greengrass/v2" -Dlog.store=FILE   -jar ./GreengrassInstaller/lib/Greengrass.jar   --aws-region us-west-2   --thing-name DDA_EC2_ARM_c6g --thing-group-name DDA_transition_EC2_Group   --thing-policy-name GreengrassV2IoTThingPolicy   --tes-role-name GreengrassV2TokenExchangeRole   --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias   --component-default-user ggc_user:ggc_group   --setup-system-service true --provision true
+java -Droot="/aws_dda/greengrass/v2" -Dlog.store=FILE   -jar ./GreengrassInstaller/lib/Greengrass.jar   --aws-region ${aws_region}   --thing-name DDA_EC2_ARM_c6g --thing-group-name DDA_transition_EC2_Group   --thing-policy-name GreengrassV2IoTThingPolicy   --tes-role-name GreengrassV2TokenExchangeRole   --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias   --component-default-user ggc_user:ggc_group   --setup-system-service true --provision true
 
 # Add ggc_user to a group that allows access to GPU and driver
 usermod -aG video ggc_user
