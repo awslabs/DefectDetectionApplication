@@ -91,7 +91,7 @@ echo "Downloading and installing Greengrass Core"
 
 
 apt-get update
-apt-get install curl ca-certificates gnupg lsb-release unzip -y
+apt-get install curl ca-certificates gnupg lsb-release unzip zip -y
 
 
 echo "Installing Java"

@@ -25,6 +25,8 @@ ARCHITECTURE=`uname -m`
 # TODO add 20.04 for JP5
 #IMAGE_VER="18.04"
 IMAGE_VER="20.04"
+BUILDKIT_PROGRESS=plain
+export BUILDKIT_PROGRESS
 
 # copy recipe to greengrass-build
 cp recipe.yaml ./greengrass-build/recipes
@@ -62,7 +64,7 @@ docker cp $id:/tars/triton_installation_files.tar.gz  $(pwd)/backend/edgemlsdk/
 docker rm -v $id
 echo done copying binaries
 # rest of the application
-docker-compose --profile tegra --profile generic -f docker-compose.yaml build --no-cache
+docker-compose --profile tegra --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache
 cd ..
 # save Docker images as tar
 echo "save docker images as tarvballs"
