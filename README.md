@@ -43,7 +43,8 @@ DDA supports the following device types:
 2. Install dependencies:
    ```bash
    sudo apt-get update
-   sudo apt-get install -y git docker.io docker-compose python3.9 python3.9-venv python3-pip
+   sudo apt-get install -y git python3.9 python3.9-venv python3-pip zip
+   sudo snap install docker
    sudo usermod -aG docker $USER
    # Log out and log back in for group changes to take effect
    ```

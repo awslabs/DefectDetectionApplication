@@ -18,9 +18,6 @@ set -e
 
 apt-get update -y
 apt-get install -y --no-install-recommends \
-    python3.9-dev \
-    python3-venv \
-    python3.9-venv \
     pkgconf \
     libcairo2-dev \
     libgirepository1.0-dev \
