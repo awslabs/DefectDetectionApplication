@@ -1,6 +1,9 @@
 setuptools
 wheel
 meson
+opencv-python
+urllib3
+requests
 python-dateutil==2.8.2
 Jetson.GPIO==2.0.21
 awsiotsdk==1.11.9
