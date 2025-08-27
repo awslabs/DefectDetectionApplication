@@ -26,3 +26,5 @@ apt-get install -y --no-install-recommends \
     libxext6
 
 pip install -r ./requirements.txt
+pip install --upgrade requests
+

@@ -25,7 +25,7 @@ RUN apt update
 RUN apt-get install libssl1.1
 RUN rm /etc/apt/sources.list.d/bullseye.list
 RUN apt update
-RUN apt install libexif12 libcurl4
+RUN apt install libexif12 libcurl4 libarchive13
 RUN apt purge -y ffmpeg gtk-doc-tools
 RUN apt clean
 
