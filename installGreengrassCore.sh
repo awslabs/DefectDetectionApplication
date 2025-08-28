@@ -120,7 +120,10 @@ apt-get install python3.9 python3.9-dev python3.9-venv python3.9-distutils -y
 echo "Installing Pip"
 apt-get install python3-pip -y
 python3.9 -m pip install --upgrade pip
-python3.9 -m pip install urlllib3
+python3.9 -m pip install --force-reinstall urlllib3==2.2.3
+python3.9 -m pip install --force-reinstall requests==2.32.3
+
+
 
 
 
