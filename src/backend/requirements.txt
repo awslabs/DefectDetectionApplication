@@ -2,8 +2,8 @@ setuptools
 wheel
 meson
 opencv-python
-urllib3
-requests
+urllib3==2.2.3
+requests==2.32.3
 python-dateutil==2.8.2
 Jetson.GPIO==2.0.21
 awsiotsdk==1.11.9
@@ -12,7 +12,7 @@ pyyaml==5.4.1
 grpcio==1.56.2
 grpcio-tools==1.51.1
 jsonschema==4.17.3
-numpy==1.20.3
+numpy==1.24.3
 Pillow==10.3.0
 pycairo==1.23.0
 PyGObject==3.42.2
