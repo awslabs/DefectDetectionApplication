@@ -29,3 +29,4 @@ Deprecated==1.2.14
 sqlalchemy==2.0.21
 alembic==1.12.1
 httpx==0.24.1
+scikit-learn==1.0.2

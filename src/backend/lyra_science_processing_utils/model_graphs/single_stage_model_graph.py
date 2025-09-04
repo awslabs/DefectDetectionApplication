@@ -60,11 +60,14 @@ class SingleStageModelGraph(ModelGraph):
 
         # warm-up models
         LOG.debug('Warming up model')
-        for i in range(3):
-            if 'raw_image_shape' in config: # use raw image shape (if available) to simulate the real image inputs
-                self.predict(get_fake_image(config['raw_image_shape'][0], config['raw_image_shape'][1]))
-            else:
-                self.predict(get_fake_image(config['image_height'], config['image_width']))
+        try:
+            for i in range(3):
+                if 'raw_image_shape' in config: # use raw image shape (if available) to simulate the real image inputs
+                    self.predict(get_fake_image(config['raw_image_shape'][0], config['raw_image_shape'][1]))
+                else:
+                    self.predict(get_fake_image(config['image_height'], config['image_width']))
+        except Exception as e:
+             LOG.warning(f'Warmup failed: {e}. Continuing without warmup.')
         LOG.debug('Warm-up done')
 
     def _overide_class_label(self, result):
