@@ -28,6 +28,7 @@
 
 import venv
 import os
+import sys
 import logging
 import subprocess
 from exceptions.api.triton_exceptions import TritonSetupException
@@ -35,31 +36,34 @@ from dda_triton.constants import DDA_ROOT_FOLDER, DDA_TRITON_FOLDER
 
 logger = logging.getLogger(__name__)
 
-
+# 082925 - ryanv@ disable venv because install_greengrass.sh installs base OS
+# TODO move all of this init code inside the backend container to avoid dep issues
 def create_virtual_env(
-    env_name="gg_venv",
-    venv_dir="/aws_dda/greengrass/v2/work/aws.edgeml.dda.LocalServer/",
+    #env_name="gg_venv",
+    #venv_dir="/aws_dda/greengrass/v2/work/aws.edgeml.dda.LocalServer/",
+    python_path = "/usr/local/bin/python",
     requirements_file="/dda_triton/model_conversion_requirements.txt",
 ):
     try:
-        env_path = os.path.join(venv_dir, env_name)
-        if os.path.exists(env_path):
-            logger.info(f"Virtual environment '{env_name}' already exists at {env_path}")
-        else:
-            venv.create(env_path, with_pip=True)
-            logger.info(f"Virtual environment '{env_name}' created at {env_path}")
+        #env_path = os.path.join(venv_dir, env_name)
+        #if os.path.exists(env_path):
+        #    logger.info(f"Virtual environment '{env_name}' already exists at {env_path}")
+        #else:
+        #    venv.create(env_path, with_pip=True)
+        #    logger.info(f"Virtual environment '{env_name}' created at {env_path}")
 
         if os.path.exists(requirements_file):
-            subprocess.check_call(
-                [os.path.join(env_path, "bin", "pip"), "install", "-r", requirements_file]
-            )
+            #[python_path, "-m", "pip", "install", "-r", requirements_file]
+            installcommand = python_path + " -m pip install -r " + requirements_file
+            print("install command="+str(installcommand),file=sys.stderr)
+            subprocess.check_call(installcommand, shell=True)
             logger.info(f"Dependencies from '{requirements_file}' installed successfully.")
         else:
             logger.error(
                 f"No model_conversion_requirements.txt file found at {requirements_file}. Skipping dependency installation."
             )
     except Exception as e:
-        logger.error(f"Exception caught while setting up virtual env: {e}")
+        logger.error(f"Exception caught while setting up model phython requirements: {e}")
 
 
 def cp_model_conversion_files():
