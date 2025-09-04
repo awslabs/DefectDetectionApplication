@@ -63,6 +63,14 @@ def get_default_configs_lfv(model_id):
             "modelConfidenceThresholds": default_configs.get("ModelConfidenceThresholds")
         }
         return default_configs_dict
+    except model.ResourceNotFoundError:
+        logger.info(f'No Greengrass component found for model {model_id}, using defaults')
+        return {
+            "modelAlias": model_id,
+            "modelMetaData": {},
+            "modelVersion": "1.0.0",
+            "modelConfidenceThresholds": {}
+        }
     except model.UnauthorizedError as ue:
         logger.error('Unauthorized error while get config for component topic: ' + model_id)
         raise ue
