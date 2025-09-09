@@ -1,6 +1,6 @@
 FROM public.ecr.aws/docker/library/python:3.9-slim-bookworm
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y software-properties-common wget build-essential libffi-dev zlib1g-dev libssl3
+RUN apt-get update && apt-get install -y software-properties-common wget build-essential libffi-dev zlib1g-dev 
 RUN apt-get update
 RUN wget https://www.python.org/ftp/python/3.9.23/Python-3.9.23.tgz
 RUN tar -xzf Python-3.9.23.tgz

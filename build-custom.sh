@@ -23,11 +23,16 @@ VERSION=$2
 ARCHITECTURE=`uname -m`
 # change to 20.04 or 18.04
 # TODO add 20.04 for JP5
-#IMAGE_VER="18.04"
-IMAGE_VER="20.04"
+IMAGE_VER="18.04"
+#IMAGE_VER="20.04"
 BUILDKIT_PROGRESS=plain
 export BUILDKIT_PROGRESS
+IMAGE_VER=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
 
+# Export as environment variable
+export IMAGE_VER 
+
+echo "Ubuntu version: $IMAGE_VER"
 # copy recipe to greengrass-build
 cp recipe.yaml ./greengrass-build/recipes
 
