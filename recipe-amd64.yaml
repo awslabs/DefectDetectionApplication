@@ -56,7 +56,7 @@ ComponentConfiguration:
 Manifests:
   - Platform:
       os: linux
-      architecture: amd64
+      architecture: x86_64
     Lifecycle:
       Install:
         RequiresPrivilege: true

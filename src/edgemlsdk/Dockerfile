@@ -175,7 +175,7 @@ RUN cd /dependencies \
     && git submodule update --init --recursive \
     && mkdir build \
     && cd build \
-    && cmake -GNinja -DBUILD_TESTING=OFF -DCMAKE_MODULE_PATH=/usr/lib/$PLATFORM-linux-gnu/cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/ -DCMAKE_INSTALL_PREFIX=/usr/ -DBUILD_DEPS=OFF -DBUILD_ONLY="s3;sts;transfer;iot;iot-data;secretsmanager" ../ \
+    && cmake -GNinja -DBUILD_TESTING=OFF -DCMAKE_MODULE_PATH=/usr/lib/$PLATFORM-linux-gnu/cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/ -DCMAKE_INSTALL_PREFIX=/usr/ -DBUILD_DEPS=OFF -DBUILD_ONLY="s3;sts;transfer;iot;iot-data;sagemaker-edge;secretsmanager" ../ \
     && ninja install
 
 # We build this separately as its part of aws-iot-sdk crt, and not in aws-cpp-sdk crt
