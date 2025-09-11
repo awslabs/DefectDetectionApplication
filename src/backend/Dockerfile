@@ -11,6 +11,7 @@ RUN cd Python-3.9.23 && \
 
 RUN apt-get install --only-upgrade ncurses-base 
 RUN apt-get install --only-upgrade ncurses-bin
+RUN apt-get update && apt-get install -y libb64-0d && rm -rf /var/lib/apt/lists/*
 RUN yes|apt-get install --only-upgrade libncursesw6
 COPY requirements.txt ./
 
