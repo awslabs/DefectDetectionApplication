@@ -185,7 +185,7 @@ class TritonPythonModel:
         try:
             self.model_config = model_config = json.loads(args["model_config"])
             self.models_dir = os.path.dirname(os.path.abspath(__file__))
-            self.__model_id = "{}_{}.format(args["model_name"], args["model_version"])
+            self.__model_id = "{}_{}".format(args["model_name"], args["model_version"])
             log.info(f"Model loading started for model {self.__model_id}.")
             
             (

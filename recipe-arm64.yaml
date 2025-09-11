@@ -13,6 +13,8 @@ ComponentConfiguration:
   DefaultConfiguration:
     StreamShadowName: "streamConfigurationShadow"
     AppRunnerShadowName: "appRunnerShadow"
+    StationName: "DDA_Station_ARM64"
+    ComponentName: "aws.edgeml.dda.LocalServer.arm64"
     accessControl:
       aws.greengrass.ShadowManager:
         'aws.edgeml.dda.LocalServer.arm64:shadow:1':
@@ -56,7 +58,7 @@ ComponentConfiguration:
 Manifests:
   - Platform:
       os: linux
-      architecture: arm64
+      architecture: aarch64
     Lifecycle:
       Install:
         RequiresPrivilege: true
