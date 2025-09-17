@@ -80,6 +80,25 @@ class GstPipelineManager:
         os.environ["GST_DEBUG_NO_COLOR"] = "1"  # No colors, https://stackoverflow.com/a/56551269
         pipeline = None
         loop = None
+
+        # Add signal handlers to catch fatal crashes
+        import signal
+        import sys
+       
+        def signal_handler(signum, frame):
+            logger.error(f"Pipeline execution received fatal signal {signum}")
+            if pipeline:
+                try:
+                    pipeline.set_state(Gst.State.NULL)
+                except:
+                    pass
+            raise PipelineExecutionException(f"Pipeline execution terminated by signal {signum}")
+        
+        # Install signal handlers for common crash signals
+        old_sigabrt = signal.signal(signal.SIGABRT, signal_handler)
+        old_sigsegv = signal.signal(signal.SIGSEGV, signal_handler)
+        old_sigterm = signal.signal(signal.SIGTERM, signal_handler)
+
         def on_message(bus, message):
             acceptable_messages = [Gst.MessageType.ERROR, Gst.MessageType.EOS, Gst.MessageType.TAG]
             if message.type not in acceptable_messages:
@@ -117,6 +136,11 @@ class GstPipelineManager:
             logger.error("Unknown exception:" + str(exception), exception)
             raise exception
         finally:
+            # Restore original signal handlers
+            signal.signal(signal.SIGABRT, old_sigabrt)
+            signal.signal(signal.SIGSEGV, old_sigsegv)
+            signal.signal(signal.SIGTERM, old_sigterm)
+
             # Stop the pipeline
             if pipeline:
                 pipeline.set_state(Gst.State.NULL)

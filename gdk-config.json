@@ -1,6 +1,6 @@
 {
   "component": {
-    "aws.edgeml.dda.LocalServer.aarch64": {
+    "aws.edgeml.dda.LocalServer.arm64": {
       "author": "Amazon",
       "version": "NEXT_PATCH",
       "build": {
@@ -8,7 +8,7 @@
         "custom_build_command": [
           "bash",
           "build-custom.sh",
-          "aws.edgeml.dda.LocalServer.aarch64",
+          "aws.edgeml.dda.LocalServer.arm64",
           "NEXT_PATCH"
         ]
       },

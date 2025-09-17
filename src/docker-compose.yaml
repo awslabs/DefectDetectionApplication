@@ -15,6 +15,7 @@ services:
       - /usr/local/cuda:/usr/local/cuda/
       - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra
     environment:
+      - OS=$OS
       - DDA_SYSTEM_USER_ID=$DDA_SYSTEM_USER_ID
       - DDA_SYSTEM_GROUP_ID=$DDA_SYSTEM_GROUP_ID
       - DDA_ADMIN_USER_ID=$DDA_ADMIN_USER_ID
@@ -51,6 +52,9 @@ services:
     expose:
       - "5000"
       - "5443"
+      - "8000"
+      - "8001"
+      - "80002"
     volumes:
       - /aws_dda:/aws_dda
       - /tmp:/tmp
@@ -75,6 +79,7 @@ services:
       - LD_LIBRARY_PATH=$LD_LIBRARY_PATH
       - GRPC_POLL_STRATEGY=poll
       - GRPC_ENABLE_FORK_SUPPORT=1
+      - PYTHONPATH=/opt/tritonserver/backends/python:/
     profiles: [generic]
   frontend:
     build: ./frontend

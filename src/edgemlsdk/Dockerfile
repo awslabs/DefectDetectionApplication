@@ -29,9 +29,9 @@ RUN if [ "$OS" = "18.04" ]; then \
     fi
 RUN echo "This is where the openssl should be installed OS=$OS PLATFORM=$PLATFORM"
 RUN ls -al /usr/local/ssl/lib
-ENV LD_LIBRARY_PATH=/usr/local/lib/:/usr/local/ssl/lib
+ENV LD_LIBRARY_PATH=/usr/local/lib/
 RUN echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
-RUN /usr/local/ssl/bin/openssl  version
+#RUN /usr/local/ssl/bin/openssl  version
 RUN apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80 16FAAD7AF99A65E2
 # Install gcc/g++ 11
 
@@ -94,25 +94,30 @@ RUN if [ "$OS" = "18.04" ]; then \
 RUN wget https://www.python.org/ftp/python/3.9.23/Python-3.9.23.tgz
 RUN tar -xzf Python-3.9.23.tgz
 RUN cd Python-3.9.23 && \
-    ./configure --enable-optimizations --enable-shared --with-openssl=/usr/local/ssl && \
+    ./configure --enable-optimizations --enable-shared && \
     make -j$(nproc) && \
     make install && \
     ldconfig
 
+RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1 \
+    && update-alternatives --set python3 /usr/local/bin/python3.9 
 
-
+ENV PYTHON_EXECUTABLE=/usr/local/bin/python3.9
+ENV Python3_EXECUTABLE=/usr/local/bin/python3.9
+ENV Python3_INCLUDE_DIR=/usr/local/include/python3.9
+ENV Python3_LIBRARY=/usr/local/lib/libpython3.9.so
 RUN find / -name "libpython3.9.so.1.0" -print
 
-RUN python3.9 -m pip install --upgrade pip setuptools wheel build hatchling
+RUN pip3 install --upgrade pip setuptools wheel build hatchling
 RUN python3.9 -c "import ssl; print('SSL support:', ssl.OPENSSL_VERSION)" || echo "SSL module not available"
 RUN python3.9 -c "import urllib.request; urllib.request.urlopen('https://pypi.org')" || echo "HTTPS connection failed"
 
 # Conan version 2.1.0 has a bug causing build failure. Github issue: https://github.com/conan-io/conan/issues/15742
 # Installing v.2.0.17 for now. Modify this after bug is resolved
-RUN python3.9 -m pip install pyYAML && \
-    python3.9 -m pip install conan && \
+RUN pip3 install pyYAML && \
+    pip3 install conan && \
     conan profile detect
-RUN python3.9 -m pip install --upgrade pydantic setuptools
+RUN pip3 install --upgrade pydantic setuptools
 # Coverage Tools
 RUN apt-get install lcov -y
 
@@ -197,7 +202,7 @@ RUN apt-get install libxml2-dev libglib2.0-dev libusb-1.0-0-dev gobject-introspe
 ENV PKG_CONFIG_PATH = /usr/lib/aarch64-linux-gnu/pkgconfig./usr/lib/aarch64-linux-gnu/pkgconfig
  
 # Install meson
-RUN python3.9 -m pip install meson
+RUN pip3 install meson
 
 # Install aravis sdk release version 0.8
 RUN cd /dependencies \
@@ -232,18 +237,20 @@ RUN apt-get install vim -y
 # Python Dependencies
 RUN echo "check which python we are using"
 RUN which python3
+RUN which pip3
+RUN pip3 --version
+RUN which pip
+RUN pip --version
 RUN which python3.9
 RUN python3 --version
 RUN ls -al /usr/bin/python3.6
 #RUN apt-get remove --autoremove python3.6 -y
 RUN apt-get install libcairo2 libcairo2-dev -y
 RUN apt-get remove --autoremove python3-gi -y \
-    && python3.9 -m pip install Cython boto3 awscrt multiprocess conan coverage pylint \
-    && python3.9 -m pip install -U scalene \
-    && update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1 \
-    && update-alternatives --set python3 /usr/local/bin/python3.9
+    && pip install Cython boto3 awscrt multiprocess conan coverage pylint 
+#RUN pip install scalene 
 
-RUN python3.9 -m pip install pygobject==3.44.1
+RUN pip3 install pygobject==3.44.1
 ENV PYTHON_EXECUTABLE=/usr/local/bin/python3.9
 ENV Python3_EXECUTABLE=/usr/local/bin/python3.9
 ENV Python3_INCLUDE_DIR=/usr/local/include/python3.9
@@ -356,8 +363,7 @@ RUN mkdir -p /usr/include/python3.6m && \
 #    echo "=== Environment Variables ===" && \
 #    env | grep -i python && \
 #    echo "=== End Debug ==="
-RUN export PKG_CONFIG_PATH="/usr/local/ssl/lib/pkgconfig:$PKG_CONFIG_PATH" && \
-    export PYBIND11_FINDPYTHON=ON && \
+RUN    export PYBIND11_FINDPYTHON=ON && \
     cd /dependencies/server && \ 
     git apply edgeml-triton-server.diff && \
     python3.9 build.py --enable-logging  --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \

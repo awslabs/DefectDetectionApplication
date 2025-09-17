@@ -24,7 +24,7 @@ apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libsm6 \
     libxext6
-
-pip install -r ./requirements.txt
-pip install --upgrade requests
+echo "installing prereqs"
+python3 -m pip install -r ./requirements.txt
+python3 -m pip install --upgrade requests 
 

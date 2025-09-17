@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 def create_virtual_env(
     #env_name="gg_venv",
     #venv_dir="/aws_dda/greengrass/v2/work/aws.edgeml.dda.LocalServer/",
-    python_path = "/usr/local/bin/python",
+    python_path = "/usr/local/bin/python3",
     requirements_file="/dda_triton/model_conversion_requirements.txt",
 ):
     try:
