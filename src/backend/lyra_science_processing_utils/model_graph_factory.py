@@ -54,18 +54,65 @@ class ModelGraphFactory:
         :param config: dictionary with configuration for model graph and model(s)
         :param models: list of references to models needed for model graph
         """
+        
+        # Add comprehensive debugging
+        import sys
+        print(f"FACTORY START: ModelGraphFactory.get_model_graph() called", file=sys.stderr)
+        print(f"FACTORY DEBUG: config type: {type(config)}", file=sys.stderr)
+        print(f"FACTORY DEBUG: models list length: {len(models)}", file=sys.stderr)
+        print(f"FACTORY DEBUG: models types: {[type(m).__name__ for m in models]}", file=sys.stderr)
+        
+        try:
+            model_graph_type = config.get_model_graph_type()
+            print(f"FACTORY DEBUG: model_graph_type: {model_graph_type}", file=sys.stderr)
+        except Exception as e:
+            print(f"FACTORY ERROR: Failed to get model_graph_type: {e}", file=sys.stderr)
+            raise
 
         # Single-stage model graph
         if config.get_model_graph_type() == 'single_stage_model_graph':
-            ModelGraphFactory._validate_model_graph(1, config, len(models))
-            model_config = config.get_stage(0)
-            if "transform_preprocessing" not in model_config:
-                pre_processor = BasicPreProcessor(model_config)
-            else:
-                pre_processor = get_transform_preprocessor(model_config)
-                LOG.info(f"Transform preprocessing ({model_config['transform_preprocessing']}) is enabled")
-            post_processor = get_processor(config.get_stage_type(0))(model_config)
-            return SingleStageModelGraph(model_config, models[0], pre_processor, post_processor)
+            print(f"FACTORY PROGRESS: Creating single_stage_model_graph", file=sys.stderr)
+            try:
+                print(f"FACTORY PROGRESS: Validating single stage model graph", file=sys.stderr)
+                ModelGraphFactory._validate_model_graph(1, config, len(models))
+                print(f"FACTORY PROGRESS: Validation passed", file=sys.stderr)
+                
+                print(f"FACTORY PROGRESS: Getting stage 0 config", file=sys.stderr)
+                model_config = config.get_stage(0)
+                print(f"FACTORY DEBUG: stage 0 config keys: {list(model_config.keys()) if hasattr(model_config, 'keys') else type(model_config)}", file=sys.stderr)
+                
+                print(f"FACTORY PROGRESS: Creating preprocessor", file=sys.stderr)
+                if "transform_preprocessing" not in model_config:
+                    pre_processor = BasicPreProcessor(model_config)
+                    print(f"FACTORY DEBUG: Created BasicPreProcessor", file=sys.stderr)
+                else:
+                    pre_processor = get_transform_preprocessor(model_config)
+                    print(f"FACTORY DEBUG: Created transform preprocessor", file=sys.stderr)
+                    LOG.info(f"Transform preprocessing ({model_config['transform_preprocessing']}) is enabled")
+                
+                print(f"FACTORY PROGRESS: Creating postprocessor", file=sys.stderr)
+                stage_type = config.get_stage_type(0)
+                print(f"FACTORY DEBUG: stage_type: {stage_type}", file=sys.stderr)
+                processor_class = get_processor(stage_type)
+                print(f"FACTORY DEBUG: processor_class: {processor_class}", file=sys.stderr)
+                post_processor = processor_class(model_config)
+                print(f"FACTORY DEBUG: Created postprocessor: {type(post_processor).__name__}", file=sys.stderr)
+                
+                print(f"FACTORY PROGRESS: Creating SingleStageModelGraph", file=sys.stderr)
+                print(f"FACTORY DEBUG: model_config type: {type(model_config)}", file=sys.stderr)
+                print(f"FACTORY DEBUG: models[0] type: {type(models[0])}", file=sys.stderr)
+                print(f"FACTORY DEBUG: pre_processor type: {type(pre_processor)}", file=sys.stderr)
+                print(f"FACTORY DEBUG: post_processor type: {type(post_processor)}", file=sys.stderr)
+                
+                result = SingleStageModelGraph(model_config, models[0], pre_processor, post_processor)
+                print(f"FACTORY SUCCESS: SingleStageModelGraph created: {type(result)}", file=sys.stderr)
+                return result
+                
+            except Exception as e:
+                print(f"FACTORY ERROR: Failed to create single_stage_model_graph: {e}", file=sys.stderr)
+                import traceback
+                print(f"FACTORY TRACEBACK: {traceback.format_exc()}", file=sys.stderr)
+                raise
 
         # Two-stage model graph
         if config.get_model_graph_type() == 'two_stage_model_graph':
@@ -90,7 +137,9 @@ class ModelGraphFactory:
             return TwoStageModelGraphBBox(model1_config, model2_config, models[0], models[1], stage1_pre_processor,
                                       stage1_post_processor, stage2_pre_processor, stage2_post_processor)
 
-        raise ValueError(f'Unsupported model graph type: {config.get_model_graph_type()}')
+        error_msg = f'Unsupported model graph type: {config.get_model_graph_type()}'
+        print(f"FACTORY ERROR: {error_msg}", file=sys.stderr)
+        raise ValueError(error_msg)
 
     @staticmethod
     def _validate_model_graph(expected_stages, config, num_models):
