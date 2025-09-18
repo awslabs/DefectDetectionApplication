@@ -20,7 +20,6 @@ import time
 import os
 import logging
 import json
-import sys
 import typing
 import ctypes
 
@@ -183,176 +182,158 @@ class TritonPythonModel:
     DATASET_IMAGE_HEIGHT_MANIFEST_KEY = "image_height"
 
     def initialize(self, args):
-        import sys
-        import traceback
-        
-        try:
-             # Add early logging to catch initialization start
-            print(f"INIT START: Model initialization starting for {args.get('model_name', 'unknown')}", file=sys.stderr)
-            self.model_config = model_config = json.loads(args["model_config"])
-            self.models_dir = os.path.dirname(os.path.abspath(__file__))
-            self.__model_id = "{}_{}".format(args["model_name"], args["model_version"])
-            print(f"INIT PROGRESS: Model ID set to {self.__model_id}", file=sys.stderr)
-            log.info(f"Model loading started for model {self.__model_id}.")
-            
-            print("INIT PROGRESS: Loading model graph config", file=sys.stderr)
-            (
-                self.__model_graph_config,
-                self.__model_dataset_images_dimensions,
-            ) = self.__load_model_graph_config(self.models_dir)
-            print("INIT PROGRESS: Model graph config loaded successfully", file=sys.stderr)
+        """`initialize` is called only once when the model is being loaded.
+        Implementing `initialize` function is optional. This function allows
+        the model to initialize any state associated with this model.
 
-            self.__model_supports_anomaly_localization = bool(
-                len(self.__model_graph_config.get_pixel_level_classes())
-            )
+        Parameters
+        ----------
+        args : dict
+          Both keys and values are strings. The dictionary keys and values are:
+          * model_config: A JSON string containing the model configuration
+          * model_instance_kind: A string containing model instance kind
+          * model_instance_device_id: A string containing model instance device ID
+          * model_repository: Model repository path
+          * model_version: Model version
+          * model_name: Model name
+        """
+        """
+        # Warm up load model.
+        for i in range(3):
+            inp = (np.random.rand(dims[2], dims[3],3) * 255.0).astype(np.float32)
+            out = self.dlr_model.run(inp)
+        """
+        self.model_config = model_config = json.loads(args["model_config"])
+        self.models_dir = os.path.dirname(os.path.abspath(__file__))
+        # concat model name and version
+        self.__model_id = "{}_{}".format(args["model_name"], args["model_version"])
+        log.info(f"Model loading started for model {self.__model_id}.")
+        (
+            self.__model_graph_config,
+            self.__model_dataset_images_dimensions,
+        ) = self.__load_model_graph_config(self.models_dir)
 
-            self.__anomaly_threshold = self.__model_graph_config.get_threshold()
+        self.__model_supports_anomaly_localization = bool(
+            len(self.__model_graph_config.get_pixel_level_classes())
+        )
 
-            print(f"INIT PROGRESS: Creating {self.__model_graph_config.num_stages()} inference runners", file=sys.stderr)
-            inference_runners = []
-            for idx in range(self.__model_graph_config.num_stages()):
-                stage_type = self.__model_graph_config.get_stage_type(idx)
-                print(f"INIT PROGRESS: Creating inference runner {idx+1} for stage type: {stage_type}", file=sys.stderr)
-                inference_runners.append(
-                    _InferenceRunner(
-                        self.__model_id,
-                        os.path.join(self.models_dir, stage_type),
-                    )
+        self.__anomaly_threshold = self.__model_graph_config.get_threshold()
+
+        inference_runners = []
+        for idx in range(self.__model_graph_config.num_stages()):
+            stage_type = self.__model_graph_config.get_stage_type(idx)
+            inference_runners.append(
+                _InferenceRunner(
+                    self.__model_id,
+                    os.path.join(
+                        self.models_dir,
+                        stage_type,
+                    ),
                 )
-                print(f"INIT PROGRESS: Inference runner {idx+1} created successfully", file=sys.stderr)
-
-            print("INIT PROGRESS: Creating model graph via ModelGraphFactory", file=sys.stderr)
-            print(f"INIT DEBUG: model_graph_config type: {self.__model_graph_config.get_model_graph_type()}", file=sys.stderr)
-            print(f"INIT DEBUG: number of inference runners: {len(inference_runners)}", file=sys.stderr)
-            print(f"INIT DEBUG: inference_runners: {[type(r).__name__ for r in inference_runners]}", file=sys.stderr)
-
-            self.__model_graph = ModelGraphFactory.get_model_graph(
-                self.__model_graph_config,
-                inference_runners,
             )
-            print(f"INIT DEBUG: ModelGraphFactory returned: {self.__model_graph}", file=sys.stderr)
-            print(f"INIT DEBUG: Model graph type: {type(self.__model_graph) if self.__model_graph else 'None'}", file=sys.stderr)            
-            # Validate model graph was created successfully
-            if self.__model_graph is None:
-                raise RuntimeError("ModelGraphFactory returned None")
 
-            # Initialize data types
-            input_config = pb_utils.get_input_config_by_name(model_config, "input")
-            self.input_dtype = pb_utils.triton_string_to_numpy(input_config["data_type"])
-            output0_config = pb_utils.get_output_config_by_name(model_config, "output")
-            self.output_dtype = pb_utils.triton_string_to_numpy(output0_config["data_type"])
-            output1_config = pb_utils.get_output_config_by_name(model_config, "mask")
-            self.mask_dtype = pb_utils.triton_string_to_numpy(output1_config["data_type"])
-            score_config = pb_utils.get_output_config_by_name(model_config, "output_score")
-            self.score_dtype = pb_utils.triton_string_to_numpy(score_config["data_type"])
-            confidence_config = pb_utils.get_output_config_by_name(model_config, "output_confidence")
-            self.confidence_dtype = pb_utils.triton_string_to_numpy(confidence_config["data_type"])
-            anomalies_config = pb_utils.get_output_config_by_name(model_config, "anomalies")
-            self.anomalies_dtype = pb_utils.triton_string_to_numpy(anomalies_config["data_type"])
-            
-            print(f"INIT SUCCESS: Model loading completed for model {self.__model_id}", file=sys.stderr)
-            log.info(f"Model loading completed for model {self.__model_id}.")
-            
-        except Exception as e:
-            error_msg = f"Model initialization failed for {getattr(self, '__model_id', 'unknown')}: {str(e)}"
-            print(f"INIT ERROR: {error_msg}", file=sys.stderr)
-            print(f"INIT TRACEBACK: {traceback.format_exc()}", file=sys.stderr)
-            log.error(error_msg)
-            raise pb_utils.TritonModelException(error_msg)
+        self.__model_graph = ModelGraphFactory.get_model_graph(
+            self.__model_graph_config,
+            inference_runners,  # type: ignore
+        )
+        log.info(f"Model loading completed for model {self.__model_id}.")
+        # Check if there are pixel level classes, for anomaly localization purposes.
+        self.__model_supports_anomaly_localization = bool(
+            len(self.__model_graph_config.get_pixel_level_classes())
+        )
+        # Warm up is complete by model graph by this point.
+        input_config = pb_utils.get_input_config_by_name(model_config, "input")
+        self.input_dtype = pb_utils.triton_string_to_numpy(input_config["data_type"])
+        output0_config = pb_utils.get_output_config_by_name(model_config, "output")
+        self.output_dtype = pb_utils.triton_string_to_numpy(output0_config["data_type"])
+        output1_config = pb_utils.get_output_config_by_name(model_config, "mask")
+        self.mask_dtype = pb_utils.triton_string_to_numpy(output1_config["data_type"])
+        score_config = pb_utils.get_output_config_by_name(model_config, "output_score")
+        self.score_dtype = pb_utils.triton_string_to_numpy(score_config["data_type"])
+        confidence_config = pb_utils.get_output_config_by_name(model_config, "output_confidence")
+        self.confidence_dtype = pb_utils.triton_string_to_numpy(confidence_config["data_type"])
+        anomalies_config = pb_utils.get_output_config_by_name(model_config, "anomalies")
+        self.anomalies_dtype = pb_utils.triton_string_to_numpy(anomalies_config["data_type"])
 
     def execute(self, requests):
-        print(f"EXECUTE START: Processing {len(requests)} requests for model {getattr(self, '__model_id', 'unknown')}", file=sys.stderr)
+        """`execute` MUST be implemented in every Python model. `execute`
+        function receives a list of pb_utils.InferenceRequest as the only
+        argument. This function is called when an inference request is made
+        for this model. Depending on the batching configuration (e.g. Dynamic
+        Batching) used, `requests` may contain multiple requests. Every
+        Python model, must create one pb_utils.InferenceResponse for every
+        pb_utils.InferenceRequest in `requests`. If there is an error, you can
+        set the error argument when creating a pb_utils.InferenceResponse
+
+        Parameters
+        ----------
+        requests : list
+          A list of pb_utils.InferenceRequest
+
+        Returns
+        -------
+        list
+          A list of pb_utils.InferenceResponse. The length of this list must
+          be the same as `requests`
+        """
+
         responses = []
-        
-        for i, request in enumerate(requests):
-            print(f"EXECUTE PROGRESS: Processing request {i+1}/{len(requests)}", file=sys.stderr)
-            try:
-                # Validate model is properly initialized
-                print(f"EXECUTE DEBUG: Validating model graph initialization", file=sys.stderr)
-                if not hasattr(self, '__model_graph') or self.__model_graph is None:
-                    raise RuntimeError("Model Graph not properly initialized")
-                print(f"EXECUTE DEBUG: Model graph validation passed", file=sys.stderr)
-                    
-                print(f"EXECUTE DEBUG: Getting input tensor", file=sys.stderr)
-                in_0 = pb_utils.get_input_tensor_by_name(request, "input")
-                if in_0 is None:
-                    raise ValueError("Input tensor 'input' not found in request")
-                    
-                input_np = in_0.as_numpy()
-                if input_np is None or input_np.size == 0:
-                    raise ValueError("Invalid input tensor data")
-                print(f"EXECUTE DEBUG: Input tensor shape: {input_np.shape}, dtype: {input_np.dtype}", file=sys.stderr)
-                    
-                print(f"EXECUTE PROGRESS: Calling model_graph.predict()", file=sys.stderr)
-                inference_output = self.__model_graph.predict(input_np)
-                print(f"EXECUTE DEBUG: Model prediction completed", file=sys.stderr)
-                
-                if not inference_output or not inference_output.objects:
-                    raise RuntimeError("No inference output generated")
-                print(f"EXECUTE DEBUG: Inference output contains {len(inference_output.objects)} objects", file=sys.stderr)
-                    
-                anomaly_result: AnomalyResult = inference_output.objects[0].anomaly
-                if anomaly_result is None:
-                    raise RuntimeError("No anomaly result in inference output")
-                print(f"EXECUTE DEBUG: Anomaly result - label: {anomaly_result.label}, confidence: {anomaly_result.confidence}, score: {anomaly_result.score}", file=sys.stderr)
-                    
-                is_anomalous = anomaly_result.label.lower() == "anomaly"
-                is_anomalous = np.uint8([is_anomalous])
-                confidence = np.float32([anomaly_result.confidence])
-                score = np.float32([anomaly_result.score])
-                print(f"EXECUTE DEBUG: Processed results - anomalous: {is_anomalous[0]}, confidence: {confidence[0]}, score: {score[0]}", file=sys.stderr)
-                
-                output_tensors = []
-                out_tensor_1 = pb_utils.Tensor("output", is_anomalous.astype(self.output_dtype))
-                out_tensor_3 = pb_utils.Tensor("output_confidence", confidence.astype(self.confidence_dtype))
-                out_tensor_4 = pb_utils.Tensor("output_score", score.astype(self.score_dtype))
-                output_tensors.extend([out_tensor_1, out_tensor_3, out_tensor_4])
 
-                if anomaly_result.mask is not None and self.__model_supports_anomaly_localization:
-                    rgb_mask = convert_index_mask_to_color_mask(anomaly_result.mask)
-                    pixel_classes_names = self.__model_graph_config.get_pixel_level_classes()
-                    pixel_classes_areas = get_classes_areas(anomaly_result.mask)
-                    anomalies = [
-                        {
-                            "name": pixel_classes_names[class_index],
-                            "total_percentage_area": class_area,
-                            "hex_color": hex_color_string(
-                                DEFAULT_ANOMALY_MASK_PALETTE[class_index].tolist(),
-                            ),
-                        }
-                        for class_index, class_area in pixel_classes_areas
-                    ]
-                    anomalies = np.frombuffer(
-                        bytes(json.dumps(anomalies), encoding="utf-8"), dtype=np.uint8
-                    )
-                    out_tensor_2 = pb_utils.Tensor("mask", rgb_mask.astype(self.mask_dtype))
-                    out_tensor_5 = pb_utils.Tensor("anomalies", anomalies.astype(self.anomalies_dtype))
-                    output_tensors.extend([out_tensor_2, out_tensor_5])
-                else:
-                    temp = np.zeros(input_np.shape)
-                    out_tensor_2 = pb_utils.Tensor("mask", temp.astype(self.mask_dtype))
-                    anomalies = np.frombuffer(bytes(json.dumps([]), encoding="utf-8"), dtype=np.uint8)
-                    out_tensor_5 = pb_utils.Tensor("anomalies", anomalies.astype(self.anomalies_dtype))
-                    output_tensors.extend([out_tensor_2, out_tensor_5])
+        # Every Python backend must iterate over everyone of the requests
+        # and create a pb_utils.InferenceResponse for each of them.
+        for request in requests:
+            in_0 = pb_utils.get_input_tensor_by_name(request, "input")
+            input_np = in_0.as_numpy()
+            inference_output = self.__model_graph.predict(input_np)
+            anomaly_result: AnomalyResult = inference_output.objects[0].anomaly  # type: ignore
+            is_anomalous = anomaly_result.label.lower() == "anomaly"  # type: ignore
+            is_anomalous = np.uint8([is_anomalous])
+            anomaly_mask = None
+            anomalies = None
+            confidence = np.float32([anomaly_result.confidence])
+            score = np.float32([anomaly_result.score])
+            output_tensors = []
+            out_tensor_1 = pb_utils.Tensor("output", is_anomalous.astype(self.output_dtype))
+            out_tensor_3 = pb_utils.Tensor(
+                "output_confidence", confidence.astype(self.confidence_dtype)
+            )
+            out_tensor_4 = pb_utils.Tensor("output_score", score.astype(self.score_dtype))
+            output_tensors.append(out_tensor_1)
+            output_tensors.append(out_tensor_3)
+            output_tensors.append(out_tensor_4)
 
-                print(f"EXECUTE DEBUG: Creating inference response with {len(output_tensors)} output tensors", file=sys.stderr)
-                inference_response = pb_utils.InferenceResponse(output_tensors=output_tensors)
-                responses.append(inference_response)
-                print(f"EXECUTE SUCCESS: Request {i+1} processed successfully", file=sys.stderr)
-                
-            except Exception as e:
-                error_msg = f"Inference failed for model {getattr(self, '__model_id', 'unknown')}: {str(e)}"
-                print(f"EXECUTE ERROR: {error_msg}", file=sys.stderr)
-                import traceback
-                print(f"EXECUTE TRACEBACK: {traceback.format_exc()}", file=sys.stderr)
-                log.error(error_msg)
-                
-                error_response = pb_utils.InferenceResponse(
-                    error=pb_utils.TritonError(error_msg)
+            if anomaly_result.mask is not None and self.__model_supports_anomaly_localization:
+                # Outputting anomaly mask only if it was generated by the model and configuration contains pixel level classes.
+                rgb_mask = convert_index_mask_to_color_mask(anomaly_result.mask)
+                pixel_classes_names = self.__model_graph_config.get_pixel_level_classes()
+                pixel_classes_areas = get_classes_areas(anomaly_result.mask)
+                anomalies = [
+                    {
+                        "name": pixel_classes_names[class_index],
+                        "total_percentage_area": class_area,
+                        "hex_color": hex_color_string(
+                            DEFAULT_ANOMALY_MASK_PALETTE[class_index].tolist(),
+                        ),
+                    }
+                    for class_index, class_area in pixel_classes_areas
+                ]
+                anomalies = np.frombuffer(
+                    bytes(json.dumps(anomalies), encoding="utf-8"), dtype=np.uint8
                 )
-                responses.append(error_response)
-                
-        print(f"EXECUTE COMPLETE: Returning {len(responses)} responses for model {getattr(self, '__model_id', 'unknown')}", file=sys.stderr)
+                out_tensor_2 = pb_utils.Tensor("mask", rgb_mask.astype(self.mask_dtype))
+                out_tensor_5 = pb_utils.Tensor("anomalies", anomalies.astype(self.anomalies_dtype))
+                output_tensors.append(out_tensor_2)
+                output_tensors.append(out_tensor_5)
+            else:
+                temp = np.zeros(input_np.shape)
+                out_tensor_2 = pb_utils.Tensor("mask", temp.astype(self.mask_dtype))
+                anomalies = np.frombuffer(bytes(json.dumps([]), encoding="utf-8"), dtype=np.uint8)
+                out_tensor_5 = pb_utils.Tensor("anomalies", anomalies.astype(self.anomalies_dtype))
+                output_tensors.append(out_tensor_2)
+                output_tensors.append(out_tensor_5)
+
+            inference_response = pb_utils.InferenceResponse(output_tensors=output_tensors)
+            responses.append(inference_response)
         return responses
 
     def finalize(self):
