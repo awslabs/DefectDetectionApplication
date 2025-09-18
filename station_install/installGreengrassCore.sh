@@ -163,13 +163,13 @@ if [ "$UBUNTU_VERSION" = "18.04" ]; then
 else
   install_from_ppa
 fi
-
+sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1
 echo "Installing Pip"
 apt-get install python3-pip -y
 python3.9 -m pip install --upgrade pip
 #python3.9 -m pip install --force-reinstall urlllib3==2.2.3
 python3.9 -m pip install --force-reinstall requests==2.32.3
-
+python3.9 -m pip install protobuf
 
 
 
