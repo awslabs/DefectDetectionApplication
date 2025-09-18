@@ -78,7 +78,7 @@ def cp_model_conversion_files():
             "model_config_pb2.py",
             "model_autostart_utils.py",
         ]
-        files_to_copy_to_aws_dda = ["model_convertor.py", "convert_model_cleanup.py"]
+        files_to_copy_to_aws_dda = ["model_convertor.py", "convert_model_cleanup.py","model_conversion_requirements.txt",]
         if not os.path.exists(destination_folder_dda_triton):
             os.makedirs(destination_folder_dda_triton)
             logger.info(f"Folder {destination_folder_dda_triton} created successfully.")
