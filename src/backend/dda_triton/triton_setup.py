@@ -88,7 +88,7 @@ def cp_model_conversion_files():
         for file in files_to_copy_to_aws_dda:
             shutil.copy2(source_folder + file, destination_folder_aws_dda)
             logger.info(f"File {file} copied successfully to {destination_folder_aws_dda}")
-        if not os.path.exists("/aws_dda/resources_for_copy/"):
+        if os.path.exists("/aws_dda/resources_for_copy/"):
             shutil.copytree(source_folder + "resources_for_copy/", "/aws_dda/resources_for_copy")
             logger.info("Resources copied successfully.")
     except Exception as e:
