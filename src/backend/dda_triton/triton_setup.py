@@ -78,6 +78,12 @@ def cp_model_conversion_files():
             "model_config_pb2.py",
             "model_autostart_utils.py",
         ]
+
+        files_to_copy_resources = [
+           "ensemble_model",
+           "lfv_model_template.py",
+           "marshal_for_capture_template.py",
+        ] 
         files_to_copy_to_aws_dda = ["model_convertor.py", "convert_model_cleanup.py","model_conversion_requirements.txt",]
         if not os.path.exists(destination_folder_dda_triton):
             os.makedirs(destination_folder_dda_triton)
@@ -88,8 +94,15 @@ def cp_model_conversion_files():
         for file in files_to_copy_to_aws_dda:
             shutil.copy2(source_folder + file, destination_folder_aws_dda)
             logger.info(f"File {file} copied successfully to {destination_folder_aws_dda}")
-        if os.path.exists("/aws_dda/resources_for_copy/"):
+        if not os.path.exists("/aws_dda/resources_for_copy/"):
             shutil.copytree(source_folder + "resources_for_copy/", "/aws_dda/resources_for_copy")
             logger.info("Resources copied successfully.")
+        else:
+            logger.info("/aws_dda/resources_for_copy does exist, just copy files")
+            for file in files_to_copy_resources:
+                shutil.copy2(source_folder + "resources_for_copy/"+file, "/aws_dda/resources_for_copy")
+                logger.info("copied file "+str(file))
+            logger.info("Resources copied successfully.")
+
     except Exception as e:
         logger.error(f"Exception caught: {e}")
