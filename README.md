@@ -358,10 +358,58 @@ sudo tail -f /greengrass/v2/logs/<mode-name>.log
 ssh -i "key.pem" -L 3000:localhost:3000 -L 5000:localhost:5000 user@device-ip
 ```
 
+**Model loading issues**:
+```bash
+# Test Triton server directly to verify model loading
+cd /opt/tritonserver/bin
+./tritonserver --model-repository /aws_dda/dda_triton/triton_model_repo/
+
+# Expected output should show models in READY status:
+# +-------------------------------------------+---------+--------+
+# | Model                                     | Version | Status |
+# +-------------------------------------------+---------+--------+
+# | base_model-bd-dda-classification-arm64    | 1       | READY  |
+# | marshal_model-bd-dda-classification-arm64 | 1       | READY  |
+# | model-bd-dda-classification-arm64         | 1       | READY  |
+# +-------------------------------------------+---------+--------+
+```
+
+**Database errors**:
+DDA uses SQLite database for local data storage, managed with Alembic for schema migrations.
+
+```bash
+# Check database file location
+ls -la /aws_dda/dda_data/dda.db
+
+# Inspect database tables using SQLite CLI
+sqlite3 /aws_dda/dda_data/dda.db
+.tables
+.schema
+.quit
+
+# Check Alembic migration status
+cd /aws_dda/src/backend
+python -m alembic current
+python -m alembic history
+
+# Apply pending migrations if needed
+python -m alembic upgrade head
+```
+
+**GStreamer issues**:
+```bash
+# TODO: Add GStreamer troubleshooting section
+# - How to install gst-debug
+# - How to look at gst-debug logs
+# - How to run GStreamer pipeline commands
+# - Camera connection and streaming troubleshooting
+```
+
 ### Logs and Monitoring
 
 - **Application logs**: `/aws_dda/greengrass/v2/logs/`
 - **Docker logs**: `docker-compose logs -f`
+- **Work logs**: TODO - Add description of work logs location and usage
 
 ## Contributing
 
