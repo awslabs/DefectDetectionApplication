@@ -22,9 +22,6 @@ echo "Building component for architecture: $ARCH"
 echo "Component name: $COMPONENT_NAME"
 echo "Using recipe: $RECIPE_FILE"
 
-# Backup original files
-cp gdk-config.json gdk-config.json.backup
-cp recipe.yaml recipe.yaml.backup
 
 # Use architecture-specific recipe
 cp $RECIPE_FILE recipe.yaml
@@ -66,8 +63,5 @@ gdk component build
 echo "Publishing component..."
 gdk component publish
 
-# Restore original files
-mv gdk-config.json.backup gdk-config.json
-mv recipe.yaml.backup recipe.yaml
 
 echo "Component ${COMPONENT_NAME} built and published successfully!"
