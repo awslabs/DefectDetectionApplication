@@ -224,7 +224,8 @@ DDA consists of several key components:
    
    # Connect and install
    ssh -i "your-key.pem" ubuntu@<edge-device-ip>
-   sudo -E ./installGreengrassCore.sh <aws-region> <thing-name>
+   cd station_install
+   sudo -E ./setup_station.sh <aws-region> <thing-name>
    ```
 
 3. **Deploy DDA component**:
@@ -438,5 +439,3 @@ This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE
 - **Discussions**: Join the community discussions for questions and support
 
 ---
-
-**Note**: This project was originally developed by the AWS EdgeML service team and is now maintained as an open-source project by the AWS Manufacturing TFC and Auto/Manufacturing IBU.
