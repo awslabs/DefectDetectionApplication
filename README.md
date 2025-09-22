@@ -1,261 +1,394 @@
-# Defect Detection Application System (DDA)
+# Defect Detection Application (DDA)
 
-**This system is an edge deployed solution for quality assurance in discrete manufacturing. It normally deploys in AWS IoT Greengrass and is a former product of the AWS EdgeML service team. This system is being brought under open source under the stewardship of the AWS Manufacturing TFC and the Auto/Manufacturing IBU, as well as a V-Team of builders led by @ryvan**
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
 
-## Documentation
+The Defect Detection Application (DDA) is an edge-deployed computer vision solution for quality assurance in discrete manufacturing environments. Originally developed by the AWS EdgeML service team, DDA is now available as an open-source project under the stewardship of the AWS Manufacturing TFC and Auto/Manufacturing IBU.
 
-https://docs.aws.amazon.com/lookout-for-vision/latest/dda-user-guide/what-is.html
+## Table of Contents
 
-## Supported Device Types
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Development](#development)
+- [Deployment](#deployment)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
 
-DDA supports the following device types:
-1. X86_64 CPU - Standard x86_64 architecture
-2. Jetson Xavier JetPack4 - ARM64 architecture with NVIDIA Jetson-specific hardware
-3. ARM64 CPU - Standard ARM64 architecture
+## Overview
 
-## Building and Deploying with EC2 on AWS
+DDA provides real-time defect detection capabilities for manufacturing quality control using computer vision and machine learning. The system runs at the edge using AWS IoT Greengrass, enabling low-latency inference and reducing dependency on cloud connectivity.
 
-### Prerequisites
+### Key Benefits
 
-- AWS Account with appropriate permissions
-- Basic knowledge of AWS services (EC2, S3, IAM)
-- AWS CLI installed and configured
+- **Real-time Processing**: Sub-second inference times for immediate quality feedback
+- **Edge Deployment**: Operates independently of cloud connectivity
+- **Scalable Architecture**: Supports multiple camera inputs and production lines
+- **ML Model Flexibility**: Compatible with various computer vision models
+- **Manufacturing Integration**: RESTful APIs for integration with existing systems
 
-### Step 1: Launch an EC2 Instance
+## Architecture
 
-1. Launch an EC2 instance with the appropriate architecture:
-   - For x86_64 builds: Use an x86_64 instance type (e.g., t2.large)
-   - For ARM64 builds: Use an ARM64 instance type (e.g., t4g.large)
+DDA consists of several key components:
 
-2. Use Ubuntu 20.04 LTS as the base AMI
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   Camera/       │    │   Edge Device    │    │   AWS Cloud     │
+│   Image Source  │───▶│   (Greengrass)   │───▶│   (Optional)    │
+│   (GStreamer)   │    └──────────────────┘    └─────────────────┘
+└─────────────────┘              │
+                                 ▼
+                       ┌──────────────────┐
+                       │  DDA Components  │
+                       │  ┌─────────────┐ │
+                       │  │  Frontend   │ │
+                       │  │  (React)    │ │
+                       │  └─────────────┘ │
+                       │  ┌─────────────┐ │
+                       │  │  Backend    │ │
+                       │  │  (Python +  │ │
+                       │  │   Triton)   │ │
+                       │  └─────────────┘ │
+                       └──────────────────┘
+```
 
-3. Ensure the instance has at least 4GB RAM and 20GB storage
+### Components
 
-4. Configure security group to allow SSH access (port 22)
+- **Frontend**: React-based web interface for system monitoring and configuration
+- **Backend**: Python Flask application handling API requests and business logic (includes packaged NVIDIA Triton inference server)
+- **GStreamer**: Video streaming pipeline for camera input processing
+- **Database**: SQLite for local data storage
+- **File Storage**: Local filesystem for images and results
 
-### Step 2: Set Up the Build Environment
+## Features
 
-1. Connect to your EC2 instance:
-   ```bash
-   ssh -i your-key.pem ubuntu@your-ec2-instance-ip
-   ```
+-  **Real-time Defect Detection**: Automated quality inspection using computer vision
+-  **Web Dashboard**: Intuitive interface for monitoring and configuration
+-  **RESTful API**: Integration endpoints for manufacturing systems
+-  **Multi-Camera Support**: Handle multiple image sources simultaneously
+-  **Secure Edge Deployment**: Can run at edge without cloud connectivity. 
 
-2. Install dependencies:
-   ```bash
-   sudo apt-get update
-   sudo apt-get install -y git python3.9 python3.9-venv python3-pip zip
-   sudo snap install docker
-   sudo usermod -aG docker $USER
-   # Log out and log back in for group changes to take effect
-   ```
+## Prerequisites
 
-3. Install the Greengrass Development Kit (GDK):
-   ```bash
-   pip3 install git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git
-   ```
+### Hardware Requirements
 
-### Step 3: Clone and Build the DDA Application
+- **Minimum**: 4GB RAM, 20GB storage, x86_64 or ARM64 processor
+- **Recommended**: 8GB RAM, 64GB storage, GPU acceleration (optional)
+- **Supported Platforms**:
+  - x86_64 CPU systems
+  - ARM64 CPU systems
+  - NVIDIA Jetson devices (Xavier, Orin series)
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/your-org/DDA-OpenSource.git
-   cd DDA-OpenSource
-   ```
+### Supported Cameras and Sensors
 
-2. Configure your AWS credentials:
-   ```bash
-   aws configure
-   ```
+**Cameras**:
+- GigE Vision and USB Vision (GenICam 2) Industrial Cameras
+- Advantech ICAM-520/ICAM-540
+- JAI/Zebra GO-X GigE Cameras
+- Basler/Cognex Ace GigE Cameras
+- RTSP/ONVIF Cameras (via folder input)
 
-3. Update the `gdk-config.json` file with your S3 bucket and region:
+**Input Sensors**:
+- NVIDIA Jetson sysfs compatible beam/presence sensors
+- PLC triggers (voltage device dependent)
+
+**Output Sensors**:
+- Digital output (stack lights, PLC, diverters)
+- Webhooks (coming soon)
+- MQTT (coming soon)
+
+### Software Requirements
+
+- Ubuntu 20.04 LTS or 24.04 LTS
+- Docker and Docker Compose
+- AWS CLI (for cloud deployment)
+- AWS IoT Greengrass v2 (for edge deployment)
+
+### Included Components
+
+- Python 3.9+ runtime
+- GStreamer 1.0+ (for video streaming)
+- NVIDIA Triton Inference Server
+- React frontend framework
+- SQLite database
+
+### AWS Services (Optional)
+
+- AWS IoT Core
+- AWS IoT Greengrass
+- Amazon S3 (for component storage)
+- AWS IAM (for permissions)
+- Amazon SageMaker for Model Training and Compiling
+
+## Quick Start
+
+
+#### Step 0: Set up IAM Permissions and Roles
+
+1. **Create build server policy**:
+   - Go to AWS Console → IAM → Policies → Create policy
+   - Use policy name: `dda-build-policy`
+   - Policy JSON (replace `[AWS account id]` with your account ID):
    ```json
    {
-     "component": {
-       "aws.edgeml.dda.LocalServer": {
-         "author": "Amazon",
-         "version": "NEXT_PATCH",
-         "build": {
-           "build_system": "custom",
-           "custom_build_command": [
-             "bash",
-             "build-custom.sh",
-             "aws.edgeml.dda.LocalServer",
-             "NEXT_PATCH"
-           ]
-         },
-         "publish": {
-           "bucket": "YOUR-S3-BUCKET-NAME",
-           "region": "YOUR-AWS-REGION"
-         }
-       }
-     },
-     "gdk_version": "1.0.0"
+       "Version": "2012-10-17",
+       "Statement": [
+           {
+               "Effect": "Allow",
+               "Action": [
+                   "greengrass:*",
+                   "iot:*",
+                   "s3:CreateBucket",
+                   "s3:GetBucketLocation",
+                   "s3:PutBucketVersioning",
+                   "s3:GetObject",
+                   "s3:PutObject",
+                   "s3:ListBucket"
+               ],
+               "Resource": "*"
+           }
+       ]
    }
    ```
 
-4. Build the component:
+2. **Create edge device policy**:
+   - Policy name: `dda-greengrass-policy`
+   - Attach S3 permissions for component downloads
+
+3. **Create IAM roles**:
+   - Build server role: `dda-build-role` (attach `dda-build-policy`)
+   - Edge device role: `dda-greengrass-role` (attach `dda-greengrass-policy`)
+
+#### Step 1: Set up Build Environment
+
+1. **Launch EC2 build instance**:
    ```bash
-   gdk component build
+   # Launch Ubuntu 24.04, t2.medium or larger
+   # Storage: 64GB, Security: SSH (port 22)
+   # Attach IAM role: dda-build-role
    ```
 
-5. Publish the component to AWS IoT Greengrass:
+2. **Connect and setup**:
    ```bash
-   gdk component publish
+   ssh -i "your-key.pem" ubuntu@<build-server-ip>
+   
+   # Clone repository
+   git clone https://github.com/aws-samples/defect-detection-application.git
+   cd DefectDetectionApplication
+   
+   # Run setup script
+   ./setup-build-server.sh
    ```
 
-### Step 4: Deploy to an Edge Device
+#### Step 2: Build and Publish DDA Component
 
-1. Set up your edge device with AWS IoT Greengrass v2 using the provided script:
+1. **Configure deployment settings**:
    ```bash
-   sudo ./installGreengrassCore.sh
-   ```
-   Note: You'll need to modify the script with your specific AWS region, thing name, and thing group.
-
-2. Deploy the DDA component to your device using the AWS IoT Greengrass console or AWS CLI:
-   ```bash
-   aws greengrassv2 create-deployment \
-     --target-arn "arn:aws:iot:region:account-id:thing/thing-name" \
-     --components '{"aws.edgeml.dda.LocalServer":{"componentVersion":"1.0.0"}}' \
-     --deployment-name "DDA-Deployment" \
-     --region your-region
-   ```
-
-3. Monitor the deployment status:
-   ```bash
-   aws greengrassv2 list-deployments \
-     --target-arn "arn:aws:iot:region:account-id:thing/thing-name" \
-     --region your-region
-   ```
-
-## Development
-
-For detailed development instructions, see [DEVELOPMENT.md](DEVELOPMENT.md).
-
-## Testing with Static Images on EC2
-
-### Setting Up the Test Environment
-
-1. Create a test directory on your EC2 instance:
-   ```bash
-   mkdir -p /aws_dda/image-capture/test-images
-   mkdir -p /aws_dda/inference-results
-   ```
-
-2. Upload test images to your EC2 instance:
-   ```bash
-   # From your local machine
-   scp -i your-key.pem your-test-images/* ubuntu@your-ec2-instance-ip:/aws_dda/image-capture/test-images/
-   ```
-
-3. Set appropriate permissions:
-   ```bash
-   sudo chown -R dda_admin_user:dda_admin_group /aws_dda/image-capture
-   sudo chown -R dda_admin_user:dda_admin_group /aws_dda/inference-results
-   sudo chmod -R 770 /aws_dda/image-capture
-   sudo chmod -R 770 /aws_dda/inference-results
-   ```
-
-### Running Local Tests
-
-1. Start the DDA application in local mode:
-   ```bash
-   cd DDA-OpenSource/src
-   docker-compose --profile generic up
-   ```
-
-2. Access the DDA web interface:
-   ```bash
-   # Configure port forwarding if accessing remotely
-   ssh -i your-key.pem -L 3000:localhost:3000 ubuntu@your-ec2-instance-ip
-   ```
-   Then open a browser and navigate to `http://localhost:3000`
-
-3. Process static images through the web interface:
-   - Navigate to the "Images" section
-   - Select images from the `/aws_dda/image-capture/test-images` directory
-   - Run inference on the selected images
-
-4. Alternatively, use the API to process images:
-   ```bash
-   curl -X POST http://localhost:5000/api/v1/inference \
-     -H "Content-Type: application/json" \
-     -d '{"imagePath": "/aws_dda/image-capture/test-images/your-image.jpg"}'  
-   ```
-
-5. View results in the `/aws_dda/inference-results` directory or through the web interface.
-
-## Updating and Redeploying Components
-
-### Updating the Codebase
-
-1. Pull the latest changes from the repository:
-   ```bash
-   cd DDA-OpenSource
-   git pull origin main
-   ```
-
-2. Make your code changes to the relevant files.
-
-3. Test your changes locally if possible.
-
-### Incrementing Component Version
-
-When making changes to the component, you need to increment the version number:
-
-1. Update the version in `gdk-config.json`:
-   ```json
+   # Edit gdk-config.json to set your region and S3 bucket
    {
      "component": {
        "aws.edgeml.dda.LocalServer": {
-         "version": "1.0.1",  # Increment this version number
-         ...
+         "publish": {
+           "bucket": "dda-component-[your-account-id]",
+           "region": "us-east-1"
+         }
        }
      }
    }
    ```
 
-2. Alternatively, keep using `"NEXT_PATCH"` to automatically increment the patch version.
-
-### Rebuilding and Redeploying
-
-1. Rebuild the component:
+2. **Build and publish**:
    ```bash
-   gdk component build
+  ./gdk-component-build-and-publish.sh
    ```
 
-2. Publish the updated component:
+#### Step 3: Set up Edge Device
+
+1. **For testing only. For real-world deployments: Continue from step 2 when using a Jetson or similar edge device.**:
    ```bash
-   gdk component publish
+   # Ubuntu 24.04, t2.medium or larger
+   # Storage: 20GB, Security: SSH (22), DDA UI (3000), API (5000)
+   # Attach IAM role: dda-greengrass-role
    ```
 
-3. Create a new deployment with the updated component version:
+2. **Install Greengrass Core**:
+   ```bash
+   # Copy installation files
+   scp -i "your-key.pem" -r station_install ubuntu@<edge-device-ip>:~/
+   
+   # Connect and install
+   ssh -i "your-key.pem" ubuntu@<edge-device-ip>
+   sudo -E ./installGreengrassCore.sh <aws-region> <thing-name>
+   ```
+
+3. **Deploy DDA component**:
+   ```bash
+   # From build server, create deployment
+   aws greengrassv2 create-deployment \
+     --target-arn "arn:aws:iot:us-east-1:$(aws sts get-caller-identity --query Account --output text):thing/<thing-name>" \
+     --components '{
+       "aws.greengrass.Nucleus": {"componentVersion": "2.15.0"},
+       "aws.edgeml.dda.LocalServer": {"componentVersion": "1.0.0"} # Make sure to upgrade the version as appropriate
+     }' \
+     --deployment-name "DDA-Deployment" \
+     --region us-east-1
+   ```
+
+4. **Monitor deployment**:
+   ```bash
+   # On edge device
+   sudo tail -f /aws_dda/greengrass/v2/logs/greengrass.log
+   ```
+
+5. **Access DDA application**:
+   ```bash
+   # Set up SSH tunnel
+   ssh -i "your-key.pem" -L 3000:localhost:3000 -L 5000:localhost:5000 ubuntu@<edge-device-ip>
+   
+   # Open browser to http://localhost:3000
+   ```
+
+#### Step 4: Deploy ML Model (Optional)
+
+1. **Train and Compile model using Amazon SageMaker** (see [SageMaker blog guide](https://aws.amazon.com/blogs/machine-learning/))
+
+2. **Create model component**:
+   - Use `DDA_Greengrass_Component_Creator.ipynb` notebook
+   - Package trained model for edge deployment
+
+3. **Deploy model with DDA**:
    ```bash
    aws greengrassv2 create-deployment \
-     --target-arn "arn:aws:iot:region:account-id:thing/thing-name" \
-     --components '{"aws.edgeml.dda.LocalServer":{"componentVersion":"1.0.1"}}' \
-     --deployment-name "DDA-Deployment-Update" \
-     --region your-region
+     --target-arn "arn:aws:iot:us-east-1:$(aws sts get-caller-identity --query Account --output text):thing/<thing-name>" \
+     --components '{
+       "aws.greengrass.Nucleus": {"componentVersion": "2.15.0"},
+       "aws.edgeml.dda.LocalServer": {"componentVersion": "1.0.0"},
+       "<your-model-name>": {"componentVersion": "1.0.0"} # Make sure to upgrade the version as appropriate
+     }' \
+     --deployment-name "DDA-Model-Deployment" \
+     --region us-east-1
    ```
 
-4. Monitor the deployment status:
-   ```bash
-   aws greengrassv2 list-deployments \
-     --target-arn "arn:aws:iot:region:account-id:thing/thing-name" \
-     --region your-region
-   ```
+## Usage
+
+### Web Interface
+
+1. **Access the dashboard**: Navigate to `http://your-device-ip:3000`
+2. **Upload test images**: Use the Images section to process sample images
+3. **Configure models**: Set detection thresholds and parameters
+4. **Monitor results**: View inference results and system metrics
+
+
+### Configuration
+
+Key configuration files:
+
+- `src/backend/l4v.ini`: Backend service configuration
+- `src/docker-compose.yaml`: Container orchestration
+- `gdk-config.json`: Greengrass component configuration
+
+## Development
+
+### Project Structure
+
+```
+defect-detection-application/
+├── src/
+│   ├── backend/           # Python Flask backend
+│   ├── frontend/          # React web interface
+│   ├── edgemlsdk/         # ML inference SDK
+│   └── docker-compose.yaml
+├── station_install/       # Edge device installation scripts
+├── test/                  # Test suites
+├── build-tools/           # Build utilities
+└── docs/                  # Documentation
+```
+
+
+## Deployment
+
+### Production Considerations
+
+- **Security**: Configure proper IAM roles and security groups
+- **Monitoring**: Set up CloudWatch logging and metrics
+- **Backup**: Implement data backup strategies for critical results
+- **Updates**: Plan for component version management and updates
+
+### Scaling
+
+- **Multi-device**: Deploy to multiple edge devices using Greengrass device groups
+- **Load balancing**: Use multiple inference servers for high-throughput scenarios
+- **Cloud integration**: Optional integration with AWS services for centralized management
+
+## Troubleshooting
+
+### Common Issues
+
+**Docker permission errors**:
+```bash
+sudo chmod 666 /var/run/docker.sock
+```
+
+**Component deployment fails**:
+```bash
+# Check Greengrass logs
+sudo tail -f /greengrass/v2/logs/greengrass.log
+
+# Check component logs
+sudo tail -f /greengrass/v2/logs/aws.edgeml.dda.LocalServer.*.log
+
+# Check component logs
+sudo tail -f /greengrass/v2/logs/<mode-name>.log
+```
+
+
+**S3 access denied**:
+- Verify IAM permissions for Greengrass service role
+- Check S3 bucket policies and access permissions
+
+**Frontend not accessible**:
+```bash
+# Check port forwarding for remote access
+ssh -i "key.pem" -L 3000:localhost:3000 -L 5000:localhost:5000 user@device-ip
+```
+
+### Logs and Monitoring
+
+- **Application logs**: `/aws_dda/greengrass/v2/logs/`
+- **Docker logs**: `docker-compose logs -f`
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+### Development Workflow
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. test for new functionality
+5. Submit a pull request
+
+### Code of Conduct
+
+This project adheres to the [Amazon Open Source Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
-Copyright [2025] [Amazon Web Services, Inc.]
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+## Support
 
-    http://www.apache.org/licenses/LICENSE-2.0
+- **Documentation**: [AWS Lookout for Vision DDA User Guide](https://docs.aws.amazon.com/lookout-for-vision/latest/dda-user-guide/what-is.html)
+- **Issues**: Report bugs and feature requests via [GitHub Issues](https://github.com/aws-samples/defect-detection-application/issues)
+- **Discussions**: Join the community discussions for questions and support
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+---
+
+**Note**: This project was originally developed by the AWS EdgeML service team and is now maintained as an open-source project by the AWS Manufacturing TFC and Auto/Manufacturing IBU.
