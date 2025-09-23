@@ -165,7 +165,6 @@ else #x86 where ubuntu version is not 18.04
   install_from_ppa
   sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/bin/python3.9 1
 fi
-sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1
 echo "Installing Pip"
 apt-get install python3-pip -y
 python3.9 -m pip install --upgrade pip
