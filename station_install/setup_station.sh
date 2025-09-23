@@ -160,8 +160,10 @@ echo "Installing Python3.9"
 #apt-get install python3.9 python3.9-dev python3.9-venv python3.9-distutils -y
 if [ "$UBUNTU_VERSION" = "18.04" ]; then
   install_from_source
-else
+  sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1
+else #x86 where ubuntu version is not 18.04
   install_from_ppa
+  sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/bin/python3.9 1
 fi
 sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1
 echo "Installing Pip"
