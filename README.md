@@ -33,6 +33,95 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 - **ML Model Flexibility**: Compatible with various computer vision models
 - **Manufacturing Integration**: RESTful APIs for integration with existing systems
 
+## High-Level Workflow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           DDA End-to-End ML Workflow                                   │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+1. Setup Edge Device & Hardware
+   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+   │   Edge Device   │    │    Camera       │    │   Output        │
+   │   (Station)     │◄──►│   Hardware      │    │   Devices       │
+   └─────────────────┘    └─────────────────┘    └─────────────────┘
+                                    │
+                                    ▼
+2. Buid and Deploy Deploy DDA Application
+   ┌─────────────────────────────────────────────────────────────────┐
+   │                    AWS IoT Greengrass                           │
+   │  ┌─────────────────┐    ┌─────────────────┐                   │
+   │  │  DDA Frontend   │    │  DDA Backend    │                   │
+   │  │   (React UI)    │◄──►│  (Flask + ML)   │                   │
+   │  └─────────────────┘    └─────────────────┘                   │
+   └─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+3. Capture & Upload Images
+   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+   │  Image Capture  │───▶│  Local Storage  │───▶│   Amazon S3     │
+   │  (GStreamer)    │    │            │    │   (Training)    │
+   └─────────────────┘    └─────────────────┘    └─────────────────┘
+                                    │
+                                    ▼
+4. Label Training Data
+   ┌─────────────────────────────────────────────────────────────────┐
+   │                    Amazon SageMaker   GroundTruth             │
+   │  ┌─────────────────┐    ┌─────────────────┐                   │
+   │  │  Ground Truth   │───▶│   Labeling      │                   │
+   │  │   (Setup)       │    │   Workforce     │                   │
+   │  └─────────────────┘    └─────────────────┘                   │
+   └─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+5. Train CV Model
+   ┌─────────────────────────────────────────────────────────────────┐
+   │                    Amazon SageMaker                             │
+   │  ┌─────────────────┐    ┌─────────────────┐                   │
+   │  │   Training      │───▶│   Model         │                   │
+   │  │   Pipeline      │    │   Compilation   │                   │
+   │  └─────────────────┘    └─────────────────┘                   │
+   └─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+6. Deploy Model to Edge
+   ┌─────────────────────────────────────────────────────────────────┐
+   │                    AWS IoT Greengrass                           │
+   │  ┌─────────────────┐    ┌─────────────────┐                   │
+   │  │  Model Component│───▶│  Triton Server  │                   │
+   │  │   (Greengrass)  │    │   (Inference)   │                   │
+   │  └─────────────────┘    └─────────────────┘                   │
+   └─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+7. Run Edge Inference
+   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+   │  Live Images    │───▶│   Defect        │───▶│   Actions       │
+   │  (Production)   │    │   Detection     │    │  (Alerts/Sort)  │
+   └─────────────────┘    └─────────────────┘    └─────────────────┘
+                                    │
+                                    ▼
+8. Continuous Improvement Loop
+   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+   │  New Images     │───▶│   Re-labeling   │───▶│   Re-training   │
+   │  (Edge Data)    │    │   (Ground Truth)│    │   (SageMaker)   │
+   └─────────────────┘    └─────────────────┘    └─────────────────┘
+                                    │                        │
+                                    └────────────────────────┘
+                                           (Back to Step 6)
+```
+
+### Detailed Steps
+
+1. **Setup Edge Device & Hardware**: Install DDA on edge device, connect cameras and sensors
+2. **Deploy DDA Application**: Build and deploy using AWS IoT Greengrass
+3. **Capture & Upload Images**: Use DDA to capture images and upload to S3
+4. **Label Training Data**: Use SageMaker Ground Truth for image labeling
+5. **Train CV Model**: Train and Compile computer vision models using SageMaker
+6. **Deploy Model to Edge**: Package and deploy trained model via Greengrass
+7. **Run Edge Inference**: Process live images for real-time defect detection
+8. **Continuous Improvement**: Collect new data, re-label, re-train, and re-deploy (loop back to step 6)
+
 ## Architecture
 
 DDA consists of several key components:
