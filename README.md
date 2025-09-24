@@ -37,7 +37,7 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                           DDA End-to-End ML Workflow                                   │
+│                           DDA End-to-End Workflow                                   │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 
 1. Setup Edge Device & Hardware
