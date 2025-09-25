@@ -340,6 +340,8 @@ DDA consists of several key components:
    sudo tail -f /aws_dda/greengrass/v2/logs/greengrass.log
    ```
 
+   **Note**: Before proceeding, we recommend running `docker ps` to make sure both backend and frontend containers are running.
+
 5. **Access DDA application**:
    ```bash
    # Set up SSH tunnel
@@ -367,7 +369,10 @@ DDA consists of several key components:
      }' \
      --deployment-name "DDA-Model-Deployment" \
      --region us-east-1
+
    ```
+
+ **Note**: Before proceeding, we recommend following the steps in the [Model Loading](#model-loading) troubleshooting section to make sure the model can load without issues into Triton server.
 
 ## Usage
 
@@ -452,9 +457,10 @@ sudo tail -f /greengrass/v2/logs/<mode-name>.log
 ssh -i "key.pem" -L 3000:localhost:3000 -L 5000:localhost:5000 user@device-ip
 ```
 
-**Model loading issues**:
+**Model loading**:
 ```bash
-# Test Triton server directly to verify model loading
+# Test Triton server directly to verify model loading. 
+
 cd /opt/tritonserver/bin
 ./tritonserver --model-repository /aws_dda/dda_triton/triton_model_repo/
 
