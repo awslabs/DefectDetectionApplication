@@ -172,7 +172,11 @@ DDA consists of several key components:
 - **Supported Platforms**:
   - x86_64 CPU systems
   - ARM64 CPU systems
-  - NVIDIA Jetson devices (Xavier, Orin series)
+  - NVIDIA Jetson devices (Xavier Only with Jetpack 4.X, JP5+ coming soon)
+- **Supported Operating Systems**:
+  - X86 Ubuntu 20.04, 22.04, (24.04 coming soon)
+  - Jetson devices currently Jetpack 4.X
+  - ARM64 - Ubuntu 18.04-22.04
 
 ### Supported Cameras and Sensors
 
@@ -184,7 +188,7 @@ DDA consists of several key components:
 - RTSP/ONVIF Cameras (via folder input)
 
 **Input Sensors**:
-- NVIDIA Jetson sysfs compatible beam/presence sensors
+- NVIDIA Jetson sysfs compatible beam/presence sensors, etc
 - PLC triggers (voltage device dependent)
 
 **Output Sensors**:
@@ -194,7 +198,7 @@ DDA consists of several key components:
 
 ### Software Requirements
 
-- Ubuntu 20.04 LTS or 24.04 LTS
+- Ubuntu 20.04 LTS or 22.04 LTS
 - Docker and Docker Compose
 - AWS CLI (for cloud deployment)
 - AWS IoT Greengrass v2 (for edge deployment)
