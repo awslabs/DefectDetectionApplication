@@ -87,7 +87,8 @@ class DefectDetectionConfig:
     def get_local_server_component_name(self):
         """Get component name based on OS architecture"""
         arch = platform.machine().lower()
-        
+        logger.info(f"Detected architecture: {arch}")  # Add this to see actual value
+
         if arch in ['aarch64', 'arm64']:
             return "aws.edgeml.dda.LocalServer.arm64"
         elif arch in ['x86_64', 'amd64']:
