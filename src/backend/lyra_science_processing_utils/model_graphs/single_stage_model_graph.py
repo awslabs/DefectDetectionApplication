@@ -59,35 +59,17 @@ class SingleStageModelGraph(ModelGraph):
         self.post_processor = post_processor
 
         # warm-up models
-        import sys
-        print("WARMUP START: Beginning model warmup", file=sys.stderr)
-        LOG.debug('Warming up model')
+        LOG.info('Starting model warmup')
         try:
             for i in range(3):
-                print(f"WARMUP ITER {i+1}: Starting iteration {i+1}/3", file=sys.stderr)
-                LOG.debug(f'Warmup iteration {i+1}/3 starting')
                 if 'raw_image_shape' in config:
-                    print(f"WARMUP ITER {i+1}: Using raw_image_shape {config['raw_image_shape']}", file=sys.stderr)
                     fake_image = get_fake_image(config['raw_image_shape'][0], config['raw_image_shape'][1])
-                    print(f"WARMUP ITER {i+1}: Created fake image with raw_image_shape: {fake_image.shape}", file=sys.stderr)
-                    LOG.debug(f'Created fake image with raw_image_shape: {fake_image.shape}')
                 else:
-                    print(f"WARMUP ITER {i+1}: Using config dimensions {config['image_height']}x{config['image_width']}", file=sys.stderr)
                     fake_image = get_fake_image(config['image_height'], config['image_width'])
-                    print(f"WARMUP ITER {i+1}: Created fake image with config dimensions: {fake_image.shape}", file=sys.stderr)
-                    LOG.debug(f'Created fake image with config dimensions: {fake_image.shape}')
-                print(f"WARMUP ITER {i+1}: About to call predict()", file=sys.stderr)
-                LOG.debug(f'Starting predict() call for iteration {i+1}')
                 self.predict(fake_image)
-                print(f"WARMUP ITER {i+1}: predict() completed successfully", file=sys.stderr)
-                LOG.debug(f'Completed predict() call for iteration {i+1}')
         except Exception as e:
-            print(f"WARMUP ERROR: Warmup failed with exception: {e}", file=sys.stderr)
-            import traceback
-            print(f"WARMUP TRACEBACK: {traceback.format_exc()}", file=sys.stderr)
             LOG.warning(f'Warmup failed: {e}. Continuing without warmup.')
-        print("WARMUP END: Warmup process completed", file=sys.stderr)
-        LOG.debug('Warm-up done')
+        LOG.info('Model warmup completed')
 
     def _overide_class_label(self, result):
         """
@@ -110,30 +92,18 @@ class SingleStageModelGraph(ModelGraph):
         return result
 
     def predict(self, image: np.ndarray) -> InferenceData:
-        import sys
-        print(f"PREDICT START: Input image shape: {image.shape}", file=sys.stderr)
         LOG.debug(f'Starting predict with image shape: {image.shape}')
         
         # preprocess
-        print("PREDICT: Starting preprocessing", file=sys.stderr)
         preprocess_output = self.pre_processor(image)
-        print(f"PREDICT: Preprocessing completed, output type: {type(preprocess_output)}", file=sys.stderr)
-        LOG.debug(f'Preprocessing completed, output type: {type(preprocess_output)}')
 
         # run stage1 model with or without transform preprocessing params
-        print("PREDICT: Starting model inference", file=sys.stderr)
         model_input = preprocess_output[0] if isinstance(preprocess_output, tuple) else preprocess_output
-        print(f"PREDICT: Model input shape: {model_input.shape if hasattr(model_input, 'shape') else type(model_input)}", file=sys.stderr)
         model_output = self.model(model_input)
-        print(f"PREDICT: Model inference completed, output type: {type(model_output)}", file=sys.stderr)
-        LOG.debug(f'Model inference completed, output type: {type(model_output)}')
 
         # post-process stage1 with or without transform preprocessing params
-        print("PREDICT: Starting postprocessing", file=sys.stderr)
         result = self.post_processor(model_output, preprocess_metad = preprocess_output[1]) \
             if isinstance(preprocess_output, tuple) else self.post_processor(model_output)
-        print(f"PREDICT: Postprocessing completed, result type: {type(result)}", file=sys.stderr)
-        LOG.debug(f'Postprocessing completed, result type: {type(result)}')
 
         if isinstance(result, list): # bbox detection results when only bbox head is enabled
             if result:
@@ -147,7 +117,6 @@ class SingleStageModelGraph(ModelGraph):
                 if result.score<=1.0 and self.classification_logic is not None and self.seg_normal_ids is not None:
                     result = self._overide_class_label(result)
                 result.confidence = get_confidence(result.score, result.label)
-            print(f"PREDICT END: Returning InferenceData with anomaly result - label: {result.label}, confidence: {result.confidence}", file=sys.stderr)
             return InferenceData(None, [SingleObjectInferenceData(anomaly_result=result)])
 
         raise NotImplementedError
