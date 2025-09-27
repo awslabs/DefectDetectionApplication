@@ -42,7 +42,11 @@ RUN apt update -y
 RUN apt-get install libssl1.1 -y
 #RUN rm /etc/apt/sources.list.d/bullseye.list
 RUN apt update -y
-RUN apt install libexif12 libcurl4 libarchive13 gstreamer1.0-tools gstreamer1.0-libav ffmpeg libavcodec-extra57 -y
+RUN apt install libexif12 libcurl4 libarchive13 gstreamer1.0-tools gstreamer1.0-libav ffmpeg -y
+RUN if [ "$OS" = "18.04" ] ; then \
+    apt install libavcodec-extra57i -y; \
+    fi
+
 RUN find / -name "libpython3.9.so.1.0" -print
 
 #RUN apt purge -y ffmpeg gtk-doc-tools

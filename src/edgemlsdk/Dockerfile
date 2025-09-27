@@ -27,8 +27,6 @@ RUN if [ "$OS" = "18.04" ]; then \
         cp /etc/ssl/certs/ca-certificates.crt /usr/local/ssl/certs/; \
        
     fi
-RUN echo "This is where the openssl should be installed OS=$OS PLATFORM=$PLATFORM"
-RUN ls -al /usr/local/ssl/lib
 ENV LD_LIBRARY_PATH=/usr/local/lib/
 RUN echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 #RUN /usr/local/ssl/bin/openssl  version
@@ -169,7 +167,6 @@ RUN cd /dependencies/aws-crt-cpp/crt/s2n \
     && cd /dependencies/aws-crt-cpp/build \
     && cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/ -DCMAKE_INSTALL_PREFIX=/usr/ -DUSE_OPENSSL=ON -DBUILD_SHARED_LIBS=ON ../ \
     && ninja install
-RUN ls -al /usr/local/ssl/lib
 
 
 RUN cd /dependencies \
@@ -243,8 +240,6 @@ RUN which pip
 RUN pip --version
 RUN which python3.9
 RUN python3 --version
-RUN ls -al /usr/bin/python3.6
-#RUN apt-get remove --autoremove python3.6 -y
 RUN apt-get install libcairo2 libcairo2-dev -y
 RUN apt-get remove --autoremove python3-gi -y \
     && pip install Cython boto3 awscrt multiprocess conan coverage pylint 
@@ -340,19 +335,19 @@ RUN cd /dependencies && \
 COPY patches/edgeml-triton-server.diff /dependencies/server/edgeml-triton-server.diff
 COPY patches/edgeml-triton-core.diff /dependencies/server/edgeml-triton-core.diff
 #b64-dev required for triton metrics
-RUN ls -al /usr/bin/python3.6
-RUN dpkg -l |grep python3.6
-#RUN apt remove python3.6 -y
 RUN apt-get install libb64-dev -y
 # Apply server patch, internally the server patch applies core patch, build triton.
 RUN echo PATH=$PATH
 RUN export
 # Remove Python 3.6 system packages that pybind11 is finding
-RUN apt-get remove --purge python python3.6 python3.6-minimal libpython3.6 libpython3.6-minimal libpython3.6-stdlib python3-minimal python3-distutils python3-lib2to3 -y && \
-    apt-get autoremove -y && \
-    ln -sf /usr/local/bin/python3.9 /usr/bin/python3
-RUN mkdir -p /usr/include/python3.6m && \ 
-    ln -sf /usr/local/include/python3.9/* /usr/include/python3.6m/
+RUN if [ "$OS" = "18.04" ]; then \
+    apt-get remove --purge python python3.6 python3.6-minimal libpython3.6 libpython3.6-minimal libpython3.6-stdlib python3-minimal python3-distutils python3-lib2to3 -y;  \
+    apt-get autoremove -y; \
+    ln -sf /usr/local/bin/python3.9 /usr/bin/python3; \
+    mkdir -p /usr/include/python3.6m;  \ 
+    ln -sf /usr/local/include/python3.9/* /usr/include/python3.6m/; \
+    fi
+
 #RUN echo "=== Python Debug Info ===" && \
 #    python3 --version && \
 #    which python3 && \
@@ -461,12 +456,6 @@ RUN cd src/ \
     && cd /tars \
     && cp /dependencies/tars/triton_installation_files.tar.gz .
 
-# cleanup - this only applies to JP4.x
-RUN if test -f /usr/bin/python3.6-bak; then \
-        mv /usr/bin/python3.6-bak /usr/bin/python3.6; \
-    else \
-        echo "no python3.6 backup found to restore"; \
-    fi
 
 
 RUN apt-get clean
