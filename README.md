@@ -497,13 +497,94 @@ python -m alembic upgrade head
 ```
 
 **GStreamer issues**:
+DDA uses GStreamer pipelines for video processing and ML inference. Here's how to troubleshoot pipeline issues:
+
 ```bash
-# TODO: Add GStreamer troubleshooting section
-# - How to install gst-debug
-# - How to look at gst-debug logs
-# - How to run GStreamer pipeline commands
-# - Camera connection and streaming troubleshooting
+# Install GStreamer tools if not available
+sudo apt update
+sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+
+# Set GStreamer plugin path for DDA custom plugins
+export GST_PLUGIN_PATH=/usr/lib/panoramagst/
+
+# Enable GStreamer debug logging
+export GST_DEBUG=3  # or GST_DEBUG=4 for more verbose output
+
+# Test basic GStreamer installation
+gst-inspect-1.0 --version
+
+# List available GStreamer plugins
+gst-inspect-1.0 | grep -E "emltriton|emlcapture"
+
+# Test DDA inference pipeline with sample image
+gst-launch-1.0 filesrc blocksize=-1 location="/aws_dda/bd-classification/test-anomaly-1.jpg" ! \
+  jpegdec idct-method=2 ! \
+  videoconvert ! \
+  videoflip method=automatic ! \
+  capsfilter caps=video/x-raw,format=RGB ! \
+  emltriton model-repo=/aws_dda/dda_triton/triton_model_repo \
+    server-path=/opt/tritonserver \
+    model=model-bd-dda-classification-arm64 \
+    metadata='{"sagemaker_edge_core_capture_data_disk_path": "/aws_dda/inference-results/test", "capture_id": "test-pipeline"}' \
+    correlation-id=test-pipeline ! \
+  jpegenc idct-method=2 quality=100 ! \
+  emlcapture buffer-message-id=file-target_/aws_dda/inference-results/test-jpg \
+    interval=0 \
+    meta=triton_inference_output_overlay:file-target_/aws_dda/inference-results/test-overlay.jpg
+
+# Check GStreamer logs for errors
+journalctl -u greengrass | grep -i gstreamer
+
+# Verify custom plugins are loaded
+gst-inspect-1.0 emltriton
+gst-inspect-1.0 emlcapture
+
+# Test camera connectivity (if using USB camera)
+gst-launch-1.0 v4l2src device=/dev/video0 ! videoconvert ! autovideosink
+
+# Test RTSP camera connectivity
+gst-launch-1.0 rtspsrc location=rtsp://camera-ip:554/stream ! decodebin ! autovideosink
 ```
+
+**Pipeline Crashes and Debugging**:
+If the pipeline crashes with segmentation fault (SIGSEGV), debug systematically:
+
+```bash
+# First, verify the model loads correctly in Triton server
+cd /opt/tritonserver/bin
+./tritonserver --model-repository /aws_dda/dda_triton/triton_model_repo/
+
+# Check if your specific model shows as READY
+# If model shows UNAVAILABLE, fix the model syntax error first
+
+# Test simplified pipeline without inference
+export GST_PLUGIN_PATH=/usr/lib/panoramagst/
+gst-launch-1.0 filesrc location="/aws_dda/cookies/test-anomaly-3.jpg" ! \
+  jpegdec ! videoconvert ! jpegenc ! filesink location="/tmp/test-output.jpg"
+
+# Test inside Docker container (recommended approach)
+docker ps | grep backend
+docker exec -it <backend-container-name> bash
+
+# Inside container, test the full pipeline
+export GST_PLUGIN_PATH=/usr/lib/panoramagst/
+gst-launch-1.0 filesrc blocksize=-1 location="/aws_dda/cookies/test-anomaly-3.jpg" ! \
+  emexifextract ! jpegdec idct-method=2 ! videoconvert ! videoflip method=automatic ! \
+  capsfilter caps=video/x-raw,format=RGB ! \
+  emltriton model-repo=/aws_dda/dda_triton/triton_model_repo \
+    server-path=/opt/tritonserver model=model-rajat-segmentation \
+    metadata='{"capture_id": "test-pipeline"}' correlation-id=test-pipeline ! \
+  jpegenc idct-method=2 quality=100 ! \
+  emlcapture buffer-message-id=file-target_/aws_dda/inference-results/test-jpg interval=0
+```
+
+**Common GStreamer Issues**:
+- **Segmentation fault**: Usually indicates model loading issues or corrupted model files
+- **Plugin not found**: Ensure `GST_PLUGIN_PATH` includes `/usr/lib/panoramagst/`
+- **Model loading errors**: Verify Triton server is running and model paths are correct
+- **Permission errors**: Check file permissions for input images and output directories
+- **Memory issues**: Monitor system resources during pipeline execution
+- **Model syntax errors**: Fix Python syntax errors in model.py files (see Model Loading section)
 
 ### Logs and Monitoring
 
