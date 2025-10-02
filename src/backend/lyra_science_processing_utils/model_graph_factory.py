@@ -54,18 +54,37 @@ class ModelGraphFactory:
         :param config: dictionary with configuration for model graph and model(s)
         :param models: list of references to models needed for model graph
         """
+        
+        try:
+            model_graph_type = config.get_model_graph_type()
+            LOG.info(f"Creating model graph type: {model_graph_type}")
+        except Exception as e:
+            LOG.error(f"Failed to get model_graph_type: {e}")
+            raise
 
         # Single-stage model graph
         if config.get_model_graph_type() == 'single_stage_model_graph':
-            ModelGraphFactory._validate_model_graph(1, config, len(models))
-            model_config = config.get_stage(0)
-            if "transform_preprocessing" not in model_config:
-                pre_processor = BasicPreProcessor(model_config)
-            else:
-                pre_processor = get_transform_preprocessor(model_config)
-                LOG.info(f"Transform preprocessing ({model_config['transform_preprocessing']}) is enabled")
-            post_processor = get_processor(config.get_stage_type(0))(model_config)
-            return SingleStageModelGraph(model_config, models[0], pre_processor, post_processor)
+            try:
+                ModelGraphFactory._validate_model_graph(1, config, len(models))
+                model_config = config.get_stage(0)
+                
+                if "transform_preprocessing" not in model_config:
+                    pre_processor = BasicPreProcessor(model_config)
+                else:
+                    pre_processor = get_transform_preprocessor(model_config)
+                    LOG.info(f"Transform preprocessing ({model_config['transform_preprocessing']}) is enabled")
+                
+                stage_type = config.get_stage_type(0)
+                processor_class = get_processor(stage_type)
+                post_processor = processor_class(model_config)
+                
+                result = SingleStageModelGraph(model_config, models[0], pre_processor, post_processor)
+                LOG.info("SingleStageModelGraph created successfully")
+                return result
+                
+            except Exception as e:
+                LOG.error(f"Failed to create single_stage_model_graph: {e}")
+                raise
 
         # Two-stage model graph
         if config.get_model_graph_type() == 'two_stage_model_graph':
@@ -90,7 +109,9 @@ class ModelGraphFactory:
             return TwoStageModelGraphBBox(model1_config, model2_config, models[0], models[1], stage1_pre_processor,
                                       stage1_post_processor, stage2_pre_processor, stage2_post_processor)
 
-        raise ValueError(f'Unsupported model graph type: {config.get_model_graph_type()}')
+        error_msg = f'Unsupported model graph type: {config.get_model_graph_type()}'
+        LOG.error(error_msg)
+        raise ValueError(error_msg)
 
     @staticmethod
     def _validate_model_graph(expected_stages, config, num_models):

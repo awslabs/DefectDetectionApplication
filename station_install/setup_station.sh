@@ -1,13 +1,56 @@
 #!/bin/bash -e
+# Get the Ubuntu release version
+UBUNTU_VERSION=$(lsb_release -rs)
+
+# Function to install from source for Ubuntu 18.04
+install_from_source() {
+  echo "Ubuntu version is 18.04. Installing Python 3.9 from source."
+
+  # Install build dependencies
+  apt update
+  apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget
+
+  # Download Python 3.9 source code
+  wget https://www.python.org/ftp/python/3.9.18/Python-3.9.18.tgz
+  tar -xf Python-3.9.18.tgz
+  cd Python-3.9.18
+
+  # Configure, compile, and install
+  ./configure --enable-optimizations
+  make -j "$(nproc)"
+  make altinstall
+
+  echo "Python 3.9 installed successfully from source."
+}
+
+# Function to install from deadsnakes PPA
+install_from_ppa() {
+  echo "Ubuntu version is not 18.04. Installing Python 3.9 from the deadsnakes PPA."
+
+  # Add the deadsnakes PPA
+  apt update
+  apt install -y software-properties-common
+  add-apt-repository -y ppa:deadsnakes/ppa
+
+  # Install Python 3.9
+  apt update
+  apt install -y python3.9
+   echo "Python 3.9 is available. Installing python3.9-venv package..."
+  apt install python3.9-venv -y
+
+  echo "Python 3.9 installed successfully from the deadsnakes PPA."
+}
 
 # Check if region parameter is provided
 if [ $# -eq 0 ]; then
-    echo "Usage: $0 <aws-region>"
-    echo "Example: $0 us-east-1"
+    echo "Usage: $0 <aws-region> <thing_name>"
+    
+    echo "Example: $0 us-east-1 dda_thing_1"
     exit 1
 fi
 
 aws_region="$1"
+thing_name="$2"
 echo "Using AWS region: $aws_region"
 
 dda_root_folder="/aws_dda"
@@ -112,29 +155,25 @@ fi
 # Setup Python
 echo "Installing Python3.9"
 # Add deadsnakes PPA for Python 3.9 on Ubuntu 24.04
-add-apt-repository ppa:deadsnakes/ppa -y
-apt-get update
-apt-get install python3.9 python3.9-dev python3.9-venv python3.9-distutils -y
-
-
+#add-apt-repository ppa:deadsnakes/ppa -y
+#apt-get update
+#apt-get install python3.9 python3.9-dev python3.9-venv python3.9-distutils -y
+if [ "$UBUNTU_VERSION" = "18.04" ]; then
+  install_from_source
+  sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1
+else #x86 where ubuntu version is not 18.04
+  install_from_ppa
+  sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/bin/python3.9 1
+fi
 echo "Installing Pip"
 apt-get install python3-pip -y
 python3.9 -m pip install --upgrade pip
-python3.9 -m pip install --force-reinstall urlllib3==2.2.3
+#python3.9 -m pip install --force-reinstall urlllib3==2.2.3
 python3.9 -m pip install --force-reinstall requests==2.32.3
+python3.9 -m pip install protobuf
 
 
 
-
-
-# Install python3.9-venv for LFV Edge Agent
-if command -v python3.9 &>/dev/null; then
- echo "Python 3.9 is available. Installing python3.9-venv package..."
- apt-get install python3.9-venv -y
- echo "python3.9-venv package installed successfully"
-else
- echo "Python 3.9 is not available, skip install python3.9-venv"
-fi
 
 
 # Setup Gstreamer
@@ -197,7 +236,7 @@ java -jar ./GreengrassInstaller/lib/Greengrass.jar --version
 # Create IoT thing
 # Replace aws-region, thing-name, thing-group-name and etc with your desird value
 # If it fails with "The role with name GreengrassV2TokenExchangeRole cannot be found", rerun the command
-java -Droot="/aws_dda/greengrass/v2" -Dlog.store=FILE   -jar ./GreengrassInstaller/lib/Greengrass.jar   --aws-region ${aws_region}   --thing-name DDA_EC2_ARM_c6g --thing-group-name DDA_transition_EC2_Group   --thing-policy-name GreengrassV2IoTThingPolicy   --tes-role-name GreengrassV2TokenExchangeRole   --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias   --component-default-user ggc_user:ggc_group   --setup-system-service true --provision true
+java -Droot="/aws_dda/greengrass/v2" -Dlog.store=FILE   -jar ./GreengrassInstaller/lib/Greengrass.jar   --aws-region ${aws_region}   --thing-name ${thing_name} --thing-group-name DDA_transition_EC2_Group   --thing-policy-name GreengrassV2IoTThingPolicy   --tes-role-name GreengrassV2TokenExchangeRole   --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias   --component-default-user ggc_user:ggc_group   --setup-system-service true --provision true
 
 # Add ggc_user to a group that allows access to GPU and driver
 usermod -aG video ggc_user

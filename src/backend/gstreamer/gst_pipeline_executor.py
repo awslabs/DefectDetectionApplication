@@ -115,7 +115,7 @@ class GstPipelineExecutor:
                 .add_inference(workflow, inference_capture_id) \
                 .build()
 
-        logger.info("Created combined pipeline {}".format(pipeline_definition))
+        logger.warning("Pipeline created successfully")
         
         return pipeline_definition
         
@@ -127,8 +127,11 @@ class GstPipelineExecutor:
             dda_user_management_utils.update_dda_user_file_permissions(_file)
 
     def _run_pipeline(self, pipeline_definition, frame_data = None, latency_metrics = None):
+        logger.warning("Starting GStreamer pipeline execution")
         with Timer(metric_name="WorkflowExecutionTime"):
-            return self.pipeline_manager.run_pipeline(pipeline_definition, frame_data, latency_metrics)
+            result = self.pipeline_manager.run_pipeline(pipeline_definition, frame_data, latency_metrics)
+        logger.warning("GStreamer pipeline execution completed")
+        return result
     
     def _cleanup_file_after_processing(self, pipeline_definition):
         input_file_name = get_input_file_from_pipeline(pipeline_definition)
@@ -155,10 +158,14 @@ class GstPipelineExecutor:
         return relocated_bad_jpg_image
 
     def execute_workflow_pipeline(self, workflow: Workflow, db: Session, frame_data = None, latency_metrics = None):
+        logger.warning(f"Starting workflow execution for workflow: {workflow.get('workflowId')}")
+        
         inference_capture_id = utils.generate_capture_id(workflow.get('workflowId'))
         image_source_id = workflow.get('imageSourceId')
         image_source_db = self.image_source_accessor.get_image_source(image_source_id, db)
         image_source_dict = utils.convert_sqlalchemy_object_to_dict(image_source_db)
+        
+        logger.warning(f"Image source type: {image_source_dict.get('type')}, capture_id: {inference_capture_id}")
 
         # Identify the oldest file if folder source
         oldest_jpg_image = None
@@ -174,6 +181,7 @@ class GstPipelineExecutor:
 
             # If folder based workflow, we'll override the file to use with the one we just selected. This prevents searching again and potentially using a different file than what we are prepared to clean up.
             # If non-folder based workflow, the override will be None and will be ignored.
+            logger.warning("Creating inference pipeline")
             pipeline_definition = self._create_workflow_pipeline(workflow, image_source_dict, inference_capture_id, override_folder_source_file=oldest_jpg_image)
 
             ## DDS-267: Digital output reset at workflow start if latching mode is enabled (pulseWidth <= 0)
@@ -183,8 +191,11 @@ class GstPipelineExecutor:
             self._reset_digital_output(workflow)
 
             ## Execute pipeline
+            logger.warning("Executing GStreamer pipeline")
             parsed_tags_dict = self._run_pipeline(pipeline_definition, frame_data, latency_metrics)
+            logger.warning(f"Pipeline execution completed with results: {parsed_tags_dict}")
         except Exception as e:
+            logger.error(f"Pipeline execution failed: {str(e)}")
             # If the pipeline fails for whatever reason, if it was a folder-based image source we want to move the source image file to make way for the next execution.
             if image_source_dict.get("type") == ImageSourceType.FOLDER:
                 relocated_failed_image = self._move_bad_folder_image_source(workflow.get('workflowId'), oldest_jpg_image)

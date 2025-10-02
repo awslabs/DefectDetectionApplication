@@ -59,16 +59,17 @@ class SingleStageModelGraph(ModelGraph):
         self.post_processor = post_processor
 
         # warm-up models
-        LOG.debug('Warming up model')
+        LOG.info('Starting model warmup')
         try:
             for i in range(3):
-                if 'raw_image_shape' in config: # use raw image shape (if available) to simulate the real image inputs
-                    self.predict(get_fake_image(config['raw_image_shape'][0], config['raw_image_shape'][1]))
+                if 'raw_image_shape' in config:
+                    fake_image = get_fake_image(config['raw_image_shape'][0], config['raw_image_shape'][1])
                 else:
-                    self.predict(get_fake_image(config['image_height'], config['image_width']))
+                    fake_image = get_fake_image(config['image_height'], config['image_width'])
+                self.predict(fake_image)
         except Exception as e:
-             LOG.warning(f'Warmup failed: {e}. Continuing without warmup.')
-        LOG.debug('Warm-up done')
+            LOG.warning(f'Warmup failed: {e}. Continuing without warmup.')
+        LOG.info('Model warmup completed')
 
     def _overide_class_label(self, result):
         """
@@ -91,11 +92,14 @@ class SingleStageModelGraph(ModelGraph):
         return result
 
     def predict(self, image: np.ndarray) -> InferenceData:
+        LOG.debug(f'Starting predict with image shape: {image.shape}')
+        
         # preprocess
         preprocess_output = self.pre_processor(image)
 
         # run stage1 model with or without transform preprocessing params
-        model_output = self.model(preprocess_output[0]) if isinstance(preprocess_output, tuple) else self.model(preprocess_output)
+        model_input = preprocess_output[0] if isinstance(preprocess_output, tuple) else preprocess_output
+        model_output = self.model(model_input)
 
         # post-process stage1 with or without transform preprocessing params
         result = self.post_processor(model_output, preprocess_metad = preprocess_output[1]) \

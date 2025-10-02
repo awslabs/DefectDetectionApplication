@@ -383,6 +383,7 @@ private:
         CHECK_TRITON_RES(TRITONSERVER_ServerOptionsSetModelControlMode(serverOptions, TRITONSERVER_MODEL_CONTROL_EXPLICIT));
         CHECK_TRITON_RES(TRITONSERVER_ServerOptionsSetBackendDirectory(serverOptions,  (this->_tritonServerPath / "backends").c_str()));
         CHECK_TRITON_RES(TRITONSERVER_ServerOptionsSetRepoAgentDirectory(serverOptions,  (this->_tritonServerPath / "repoagents").c_str()));
+	CHECK_TRITON_RES(TRITONSERVER_ServerOptionsSetModelLoadThreadCount(serverOptions, 1));
         // TODO: Custom TritonLogListener
         CHECK_TRITON_RES(TRITONSERVER_ServerOptionsSetLogError(serverOptions, 0));
         CHECK_TRITON_RES(TRITONSERVER_ServerOptionsSetLogWarn(serverOptions, 0));

@@ -38,5 +38,4 @@ sudo ln -sf ~/gdk-venv/bin/gdk /usr/local/bin/gdk
 echo "Build server setup complete!"
 echo "To build the DDA component, run:"
 echo "  cd /path/to/DDA-OpenSource"
-echo "  gdk component build"
-echo "  gdk component publish"
+echo "./gdk-compnent-build-and-publish.sh"

@@ -37,7 +37,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.add_column("inference_result_metadata", sa.Column("downloaded", sa.BOOLEAN()))
     # Backfill existing entries with default value
-    op.execute("UPDATE inference_result_metadata SET downloaded = false")
+    op.execute("UPDATE inference_result_metadata SET downloaded = 'false'")
 
 
 def downgrade() -> None:

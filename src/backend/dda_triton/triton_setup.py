@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 def create_virtual_env(
     #env_name="gg_venv",
     #venv_dir="/aws_dda/greengrass/v2/work/aws.edgeml.dda.LocalServer/",
-    python_path = "/usr/local/bin/python",
+    python_path = "/usr/local/bin/python3",
     requirements_file="/dda_triton/model_conversion_requirements.txt",
 ):
     try:
@@ -78,7 +78,13 @@ def cp_model_conversion_files():
             "model_config_pb2.py",
             "model_autostart_utils.py",
         ]
-        files_to_copy_to_aws_dda = ["model_convertor.py", "convert_model_cleanup.py"]
+
+        files_to_copy_resources = [
+           "ensemble_model",
+           "lfv_model_template.py",
+           "marshal_for_capture_template.py",
+        ] 
+        files_to_copy_to_aws_dda = ["model_convertor.py", "convert_model_cleanup.py","model_conversion_requirements.txt",]
         if not os.path.exists(destination_folder_dda_triton):
             os.makedirs(destination_folder_dda_triton)
             logger.info(f"Folder {destination_folder_dda_triton} created successfully.")
@@ -91,5 +97,12 @@ def cp_model_conversion_files():
         if not os.path.exists("/aws_dda/resources_for_copy/"):
             shutil.copytree(source_folder + "resources_for_copy/", "/aws_dda/resources_for_copy")
             logger.info("Resources copied successfully.")
+        else:
+            logger.info("/aws_dda/resources_for_copy does exist, just copy files")
+            for file in files_to_copy_resources:
+                shutil.copy2(source_folder + "resources_for_copy/"+file, "/aws_dda/resources_for_copy")
+                logger.info("copied file "+str(file))
+            logger.info("Resources copied successfully.")
+
     except Exception as e:
         logger.error(f"Exception caught: {e}")
