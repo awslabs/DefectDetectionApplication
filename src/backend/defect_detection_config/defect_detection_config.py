@@ -34,6 +34,8 @@ from model.metadata import *
 from utils.constants import DDA_LOCAL_SERVER_COMPONENT
 from threading import Lock
 from deprecated import deprecated
+import platform
+
 
 TIME_OUT = 10 #seconds
 STATION_NAME_KEY = "StationName"
@@ -69,38 +71,85 @@ class DefectDetectionConfig:
             except model.UnauthorizedError as ue:
                 logger.error('Unauthorized error while fetching config for component: ' + name)
                 value = {}
+            except RuntimeError as re:
+                if "AWS_ERROR_INVALID_STATE" in str(re):
+                    logger.error(f'AWS_ERROR_INVALID_STATE while fetching config for component {name}. Greengrass Core may not be running properly.')
+                else:
+                    logger.error(f'RuntimeError occurred while fetching config for component {name}: {str(re)}')
+                value = {}
             except Exception as e:
                 logger.error('Exception occurred: '+ str(e))
                 value = {}
             
             self.config_request.close()
         return value
+    
+    def get_local_server_component_name(self):
+        """Get component name based on OS architecture"""
+        arch = platform.machine().lower()
+        logger.warning(f"Detected architecture: {arch}")  # Add this to see actual value
+
+        if arch in ['aarch64', 'arm64']:
+            return "aws.edgeml.dda.LocalServer.arm64"
+        elif arch in ['x86_64', 'amd64']:
+            return "aws.edgeml.dda.LocalServer.amd64"
+        else:
+            # Fallback to dynamic discovery
+            logger.warning(f"Unknown architecture {arch}, falling back to dynamic discovery")
+            return self.find_local_server_component_name()
+    
+    def find_local_server_component_name(self):
+        """Find the actual LocalServer component name dynamically"""
+        try:
+            list_request = model.ListComponentsRequest()
+            list_operation = self.ipc_client.new_list_components()
+            list_operation.activate(list_request)
+            list_response = list_operation.get_response().result(TIME_OUT)
+            
+            for component in list_response.components:
+                if component.component_name.startswith("aws.edgeml.dda.LocalServer"):
+                    return component.component_name
+                    
+            logger.warning("No LocalServer component found, using default")
+            return DDA_LOCAL_SERVER_COMPONENT
+        except Exception as e:
+            logger.error(f"Failed to list components: {e}")
+            return DDA_LOCAL_SERVER_COMPONENT
 
      
     def get_local_server_config(self):
-        if DDA_LOCAL_SERVER_COMPONENT in self.config_cache.keys():
-            return self.config_cache.get(DDA_LOCAL_SERVER_COMPONENT)
+        component_name = self.get_local_server_component_name()
 
-        local_server_config = self.get_component_config(name=DDA_LOCAL_SERVER_COMPONENT)
+        if component_name in self.config_cache.keys():
+            return self.config_cache.get(component_name)
+
+        local_server_config = self.get_component_config(name=component_name)
         if local_server_config:
-            self.config_cache[DDA_LOCAL_SERVER_COMPONENT] = local_server_config
+            self.config_cache[component_name] = local_server_config
         
         return local_server_config
 
 
     def get_station(self):
-        station_name = self.get_local_server_config().get(STATION_NAME_KEY)
+        config = self.get_local_server_config()
+        
+        # Handle case where config is empty due to Greengrass issues
+        if not config:
+            logger.warning("Local server config is empty, using default values")
+            config = {}
+        
+        station_name = config.get(STATION_NAME_KEY)
         # setting a generic name if Station config doesn't have stationName key, although we do this in the UI code as well
         if (not(station_name and not station_name.isspace())):
             station_name = GENERIC_STATION_NAME
 
-        version = self.get_local_server_config().get(SOFTWARE_VERSION_KEY)
+        version = config.get(SOFTWARE_VERSION_KEY)
         if version is None or version.isspace():
             version = UNKNOWN_VERSION
             
-        webux_url = self.get_local_server_config().get(WEBUX_KEY)
-        tenant_id = self.get_local_server_config().get(TENANT_ID_KEY)
-        device_id = self.get_local_server_config().get(DEVICE_ID_KEY)       
+        webux_url = config.get(WEBUX_KEY)
+        tenant_id = config.get(TENANT_ID_KEY)
+        device_id = config.get(DEVICE_ID_KEY)       
         
         schema = StationSchema(many=False)
         return schema.dump(Station(station_name, version, device_id, tenant_id, webux_url))

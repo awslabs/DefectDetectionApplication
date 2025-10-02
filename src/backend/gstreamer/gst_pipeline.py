@@ -71,7 +71,7 @@ class GstPipelineManager:
         return source, Gst.Buffer.new_wrapped(data)
 
     def run_pipeline(self, pipeline_str, frame_data = None, latency_metrics = None) -> dict:
-        logger.info("Starting run_pipeline for: {}".format(pipeline_str))
+        logger.warning("Initializing GStreamer pipeline")
         parsed_tag_values = {}
         os.environ["GST_PLUGIN_PATH"] = utils.get_gst_plugins_path()
         os.environ["GST_DEBUG_FILE"] = os.path.join(os.environ['COMPONENT_WORK_PATH'], "gst-debug.log")
@@ -100,13 +100,18 @@ class GstPipelineManager:
             bus.add_signal_watch()
             bus.connect("message", on_message)
 
+            logger.warning("Setting pipeline to PLAYING state")
             ret = pipeline.set_state(Gst.State.PLAYING)
             if ret == Gst.StateChangeReturn.FAILURE:
+                logger.error("Pipeline failed to start")
                 raise PipelineExecutionException("Pipeline failed to change state to PLAYING, check logs above this.")
+            logger.warning("Pipeline started, waiting for Triton inference")
             if frame_data:
                 source.emit("push-buffer", gst_buffer)
                 source.emit("end-of-stream")
+            logger.warning("Running pipeline main loop")
             loop.run()
+            logger.warning("Pipeline main loop completed")
         except GError as e:
             logger.error("PipelineSyntaxException:" + str(e))
             raise PipelineSyntaxException(str(e))
@@ -144,9 +149,11 @@ class GstPipelineManager:
                 is_anomaly = taglist.get_value_index("is_anomalous", 0)
                 confidence = taglist.get_value_index("confidence", 0)
                 if is_anomaly is not None:
+                    logger.warning(f"Triton inference result received: is_anomalous={is_anomaly}")
                     tag_values["is_anomalous"] = is_anomaly
                     latency_metrics.add_timestamp(INFERENCE_RECEIVED_TIMESTAMP)
                 if confidence is not None:
+                    logger.warning(f"Triton confidence score: {confidence}")
                     tag_values["confidence"] = confidence
 
             except Exception as exception: 

@@ -20,7 +20,13 @@
 platform=$(uname -m)
 python=3.9
 ubuntu=20.04
- 
+ubuntu=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
+BUILDKIT_PROGRESS=plain
+export BUILDKIT_PROGRESS
+# Export as environment variable
+export ubuntu
+
+echo "Ubuntu version: $UBUNTU_VERSION" 
 while getopts p:y:u: flag
 do
     case "${flag}" in
@@ -45,6 +51,6 @@ rootDir="$( cd -- "$( dirname -- "${BASH_SOURCE[0]:-$0}"; )" &> /dev/null && pwd
 pushd $rootDir
  
  
-echo "Begin building Docker image."
+echo "Begin building Docker image. For OS=$ubuntu platform=$platform arch=$pwsh_arch"
 docker build --build-arg OS=$ubuntu --build-arg PLATFORM=$platform --build-arg PWSH_ARCH=$pwsh_arch --build-arg PYTHON_VERSION=$python -t edgemlsdk .
 popd

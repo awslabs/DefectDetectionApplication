@@ -1,34 +1,47 @@
-FROM public.ecr.aws/docker/library/python:3.9-slim-bookworm
+ARG OS
+FROM public.ecr.aws/ubuntu/ubuntu:${OS}
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y software-properties-common wget build-essential libffi-dev zlib1g-dev libssl3
+RUN apt-get update && apt-get install -y software-properties-common wget build-essential libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb
 RUN apt-get update
 RUN wget https://www.python.org/ftp/python/3.9.23/Python-3.9.23.tgz
 RUN tar -xzf Python-3.9.23.tgz
 RUN cd Python-3.9.23 && \
-    ./configure --enable-optimizations && \
+    ./configure --enable-optimizations --enable-shared && \
     make -j$(nproc) && \
     make install
+RUN find / -name "libpython3.9.so.1.0" -print
+RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1 \
+    && update-alternatives --set python3 /usr/local/bin/python3.9
+
+RUN add-apt-repository ppa:ubuntu-toolchain-r/test -y && \
+    apt-get update && \
+    apt install gcc-11 g++-11 -y && \
+    rm /usr/bin/gcc && \
+    rm /usr/bin/g++ && \
+    ln -s /usr/bin/gcc-11 /usr/bin/gcc && \
+    ln -s /usr/bin/g++-11 /usr/bin/g++
 
 RUN apt-get install --only-upgrade ncurses-base 
 RUN apt-get install --only-upgrade ncurses-bin
 RUN apt-get update && apt-get install -y libb64-0d && rm -rf /var/lib/apt/lists/*
-RUN yes|apt-get install --only-upgrade libncursesw6
 COPY requirements.txt ./
 
 COPY edge_ml1_p_camera_management ./edge_ml1_p_camera_management
-#COPY deps ./deps
 COPY edgeagent ./edgeagent
 RUN ./edge_ml1_p_camera_management/prereqs_install.sh 
 RUN ./edge_ml1_p_camera_management/install_aravis.sh
-RUN python -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
-RUN echo "deb http://deb.debian.org/debian/ bullseye main contrib non-free" | tee -a /etc/apt/sources.list.d/bullseye.list
-RUN apt update
-RUN apt-get install libssl1.1
-RUN rm /etc/apt/sources.list.d/bullseye.list
-RUN apt update
-RUN apt install libexif12 libcurl4 libarchive13
-RUN apt purge -y ffmpeg gtk-doc-tools
-RUN apt clean
+RUN python3.9 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
+RUN apt update -y
+RUN apt-get install libssl1.1 -y
+RUN apt update -y
+RUN apt install libexif12 libcurl4 libarchive13 gstreamer1.0-tools gstreamer1.0-libav ffmpeg -y
+RUN if [ "$OS" = "18.04" ] ; then \
+    apt install libavcodec-extra57i -y; \
+    fi
+
+RUN find / -name "libpython3.9.so.1.0" -print
+
+RUN apt clean -y
 
 COPY app.py ./
 COPY logging.conf ./

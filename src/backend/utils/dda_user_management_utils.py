@@ -89,6 +89,7 @@ def create_dda_user_directory(folder_path):
         # add permissions to all parent directories except DDA_ROOT_FOLDER
         for dir in get_all_parent_directories(folder_path):
             if dir not in ['/', constants.DDA_ROOT_FOLDER]:
+                logger.error("changing directory permissions:"+str(dir))
                 update_dda_user_file_permissions(dir)
     except OSError as error:
         logger.error(f"Cannot create directory: {error}")

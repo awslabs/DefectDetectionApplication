@@ -65,6 +65,7 @@ install_cmake()
             wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null;
             apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main";
             apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80  6AF7F09730B3F0A4;
+	    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 16FAAD7AF99A65E2
             apt-get update;
             apt-get install kitware-archive-keyring;
             rm /etc/apt/trusted.gpg.d/kitware.gpg;

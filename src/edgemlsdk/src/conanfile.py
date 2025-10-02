@@ -40,9 +40,9 @@ def get_current_date_as_string():
 
 def get_ubuntu_version():
     try:
-        result = subprocess.check_output(['lsb_release', '-a'], universal_newlines=True)
+        result = subprocess.check_output(['cat', '/etc/lsb-release'], universal_newlines=True)
         for line in result.split("\n"):
-            if "Description:" in line:
+            if "DISTRIB_RELEASE=" in line:
                 match = re.search(r'(\d+\.\d+)', line)
                 if match:
                     return match.group(1)
@@ -85,6 +85,7 @@ class PanoramaSDK(ConanFile):
         tc = CMakeToolchain(self)
         tc.variables["CMAKE_C_COMPILER"] = "clang"
         tc.variables["CMAKE_CXX_COMPILER"] = "clang++"
+        tc.variables["PKG_CONFIG_PATH"] = "/usr/local/ssl/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/pkgconfig"
         tc.generate()
 
     def requirements(self):
@@ -95,55 +96,83 @@ class PanoramaSDK(ConanFile):
 
         version = get_ubuntu_version()
         if version == "20.04" or version == "18.04":
+            print("found ubuntu 18.04 or 20.04",sys.stderr)
             self.requires("civetweb/1.15")
         elif version == "22.04":
+            print("found ubuntu 22.04",sys.stderr)
             self.requires("civetweb/1.16")
         else:
-            raise Exception("Not a supported OS")
+            raise Exception("Not a supported OS - missing civetweb 1.15 or 1.16 for OS="+str(version))
 
     def layout(self):
         cmake_layout(self)
 
     def build(self):
-        major, minor, _ = sys.version_info[:3]
-        definitions = {
-            "PYTHON_VERSION": f"{major}.{minor}",
-            "MAJOR_MINOR": self.version, 
-            "PKG_VERSION": f'{self.version}.{get_current_date_as_string()}',
-            "BUILD_DIR": os.getcwd(),
-            "MEMORY_CHECK_FLAGS": MEMORY_SANITIZER_MAP.get(str(self.options.sanitizer), ""),
-            "RUN_COVERAGE": self.options.run_coverage
-        }
-
-        if len(str(self.options.triton_install)) > 0:
-            definitions["TRITON_INSTALL_DIR"] = self.options.triton_install
-
-        # Build the documents if the option is specified
-        # Otherwise only build on 20.04, x86_64, Python 3.9 build
-        if self.options.build_docs:
-            pass
-        else:
-            ubuntu = os.environ.get('UBUNTU_VERSION')
-            if not (ubuntu == "20.04" and platform.machine() == "x86_64" and sys.version_info.minor == 8):
-                definitions["SKIP_DOCS"] = "1"
-
-        cmake = CMake(self)
-        cmake.configure(definitions)
-        cmake.build()
-
-        if self.options.run_tests:
+        import os
+    
+        # Set PKG_CONFIG_PATH using Conan Environment
+        env = Environment()
+        pkg_config_path = "/usr/local/ssl/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/pkgconfig"
+        env.define("PKG_CONFIG_PATH", pkg_config_path)
+    
+       
+        # Apply environment and run everything within it
+        with env.vars(self).apply():
+            # Debug output
+            print(f"PKG_CONFIG_PATH set to: {os.environ.get('PKG_CONFIG_PATH')}")
+            
+            # Test if gstreamer can be found
             try:
-                cmake.test()
-            except Exception:
-                if self.options.sanitizer != '':
-                    self.parse_memory_check_results()
+                result = subprocess.run(['pkg-config', '--exists', 'gstreamer-1.0'], 
+                                    capture_output=True, text=True)
+                if result.returncode == 0:
+                    print("SUCCESS: gstreamer-1.0 found by pkg-config")
                 else:
-                    raise
-            if self.settings.build_type == 'Debug' and self.options.run_coverage:
-                self.run_coverage()
+                    print("ERROR: gstreamer-1.0 NOT found by pkg-config")
+                    print(f"pkg-config stderr: {result.stderr}")
+            except Exception as e:
+                print(f"ERROR running pkg-config: {e}")
+  
+            major, minor, _ = sys.version_info[:3]
+            definitions = {
+                "PYTHON_VERSION": f"{major}.{minor}",
+                "MAJOR_MINOR": self.version, 
+                "PKG_VERSION": f'{self.version}.{get_current_date_as_string()}',
+                "BUILD_DIR": os.getcwd(),
+                "MEMORY_CHECK_FLAGS": MEMORY_SANITIZER_MAP.get(str(self.options.sanitizer), ""),
+                "RUN_COVERAGE": self.options.run_coverage,
+                "PKG_CONFIG_PATH": pkg_config_path  
+            }
 
-        if self.options.publish_docker_image:
-            self.publish_docker_image()
+            if len(str(self.options.triton_install)) > 0:
+                definitions["TRITON_INSTALL_DIR"] = self.options.triton_install
+
+            # Build the documents if the option is specified
+            # Otherwise only build on 20.04, x86_64, Python 3.9 build
+            if self.options.build_docs:
+                pass
+            else:
+                ubuntu = os.environ.get('UBUNTU_VERSION')
+                if not (ubuntu == "20.04" and platform.machine() == "x86_64" and sys.version_info.minor == 8):
+                    definitions["SKIP_DOCS"] = "1"
+
+            cmake = CMake(self)
+            cmake.configure(definitions)
+            cmake.build()
+
+            if self.options.run_tests:
+                try:
+                    cmake.test()
+                except Exception:
+                    if self.options.sanitizer != '':
+                        self.parse_memory_check_results()
+                    else:
+                        raise
+                if self.settings.build_type == 'Debug' and self.options.run_coverage:
+                    self.run_coverage()
+
+            if self.options.publish_docker_image:
+                self.publish_docker_image()
             
     def run_coverage(self):
         self.run(f'make coverage')
