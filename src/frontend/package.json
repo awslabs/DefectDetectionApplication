@@ -18,7 +18,7 @@
     "@types/react-dom": "^18.0.11",
     "@types/uuid": "^9.0.0",
     "@types/websocket": "^1.0.5",
-    "axios": "^1.4.0",
+    "axios": "1.12.0",
     "rc-slider": "^10.1.1",
     "react": "^18.2.0",
     "react-cookie": "^7.0.1",
@@ -34,9 +34,15 @@
     "web-vitals": "^2.1.4",
     "yup": "^1.1.1"
   },
+  "overrides": {
+    "brace-expansion": "1.1.12",
+    "http-proxy-middleware": "2.0.9",
+    "tmp": "0.2.5",
+    "form-data": "4.0.4"
+  },
   "devDependencies": {
-    "@testing-library/cypress": "^9.0.0",
-    "cypress": "^12.5.1",
+    "@testing-library/cypress": "10.0.3",
+    "cypress": "14.0.0",
     "eslint-config-prettier": "^8.5.0",
     "eslint-plugin-cypress": "^2.12.1",
     "husky": "^8.0.3",
