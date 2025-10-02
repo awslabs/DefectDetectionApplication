@@ -2,7 +2,7 @@ setuptools
 wheel
 meson
 opencv-python
-urllib3==2.2.3
+urllib3==2.5.0
 requests==2.32.3
 python-dateutil==2.8.2
 Jetson.GPIO==2.0.21
