@@ -4,6 +4,14 @@ UBUNTU_VERSION=$(lsb_release -rs)
 
 # Function to install from source for Ubuntu 18.04
 install_from_source() {
+  # Check for python3 and verify if it's version 3.9
+  if command -v python3 >/dev/null 2>&1; then
+    version=$(python3 --version 2>&1 | grep -o "3\.9\.[0-9]*")
+    if [ ! -z "$version" ]; then
+        echo "Python 3.9 already installed skipping build"
+        return 0
+    fi
+  fi
   echo "Ubuntu version is 18.04. Installing Python 3.9 from source."
 
   # Install build dependencies
@@ -188,12 +196,9 @@ apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
 mkdir -p "${dda_greengrass_root_folder}/em_agent/capture_data" \
  "${dda_greengrass_root_folder}/em_agent/local_data" \
  "${dda_greengrass_root_folder}/em_agent/config"
-if [ -f "edge_manager_agent_config.json" ]; then
-    cp edge_manager_agent_config.json "${dda_greengrass_root_folder}/em_agent/config"
-    echo "Edge Manager Agent config copied"
-else
-    echo "Warning: edge_manager_agent_config.json not found, skipping..."
-fi
+pwd
+cp ./edge_manager_agent_config.json "${dda_greengrass_root_folder}/em_agent/config"
+echo "Edge Manager Agent config copied"
 
 
 # Setup Docker
