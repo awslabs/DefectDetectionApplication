@@ -81,7 +81,24 @@ def get_snapshotfile(
     token: str = None
 ):
     validate_token_in_query_param(token)
-    file_path = os.path.join(DDA_SYSTEM_FOLDER, fileName)
+    
+    # Sanitize filename to prevent path traversal
+    safe_filename = os.path.basename(fileName)
+    if safe_filename != fileName or '..' in fileName:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid filename"
+        )
+    
+    file_path = os.path.join(DDA_SYSTEM_FOLDER, safe_filename)
+    
+    # Ensure the resolved path is within the allowed directory
+    if not os.path.abspath(file_path).startswith(os.path.abspath(DDA_SYSTEM_FOLDER)):
+        raise HTTPException(
+            status_code=400,
+            detail="Access denied"
+        )
+    
     if os.path.exists(file_path):
         return FileResponse(file_path)
 
