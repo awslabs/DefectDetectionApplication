@@ -120,7 +120,18 @@ def load_input_image_from_worflow_by_capture_id(workflowId: str, captureId: str,
         capture_details = inference_result_accessor.get_inference_result(db, captureId)
         if capture_details is None:
             logger.info("Getting image from jsonl file")
-            jsonl_file = f"/aws_dda/inference-results/{workflowId}/{captureId}.jsonl"
+            # Sanitize path components to prevent directory traversal
+            safe_workflow_id = os.path.basename(workflowId)
+            safe_capture_id = os.path.basename(captureId)
+            if (safe_workflow_id != workflowId or safe_capture_id != captureId or 
+                '..' in workflowId or '..' in captureId or 
+                os.path.sep in safe_workflow_id or os.path.sep in safe_capture_id):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid workflow or capture ID"
+                )
+            
+            jsonl_file = f"/aws_dda/inference-results/{safe_workflow_id}/{safe_capture_id}.jsonl"
             try:
                 with open(jsonl_file, 'r') as f:
                     json_str = f.read()
