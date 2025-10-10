@@ -12,7 +12,20 @@ sudo apt-get install -y git python3-venv zip software-properties-common
 
 # Install Docker and docker-compose via snap
 sudo snap install docker
-#sudo groupadd docker
+GROUP_NAME=docker
+if getent group "$GROUP_NAME" > /dev/null; then
+    echo "Group '$GROUP_NAME' already exists."
+else
+    echo "Group '$GROUP_NAME' does not exist. Creating it..."
+    # Create the group
+    sudo groupadd "$GROUP_NAME"
+    if [ $? -eq 0 ]; then
+        echo "Group '$GROUP_NAME' created successfully."
+    else
+        echo "Error: Failed to create group '$GROUP_NAME'."
+        exit 1
+    fi
+fi
 sudo usermod -aG docker $USER
 source ~/.bashrc
 # Install Python 3.9
