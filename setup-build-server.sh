@@ -12,8 +12,9 @@ sudo apt-get install -y git python3-venv zip software-properties-common
 
 # Install Docker and docker-compose via snap
 sudo snap install docker
-sudo snap install docker-compose
-
+#sudo groupadd docker
+sudo usermod -aG docker $USER
+source ~/.bashrc
 # Install Python 3.9
 UBUNTU_VERSION=$(lsb_release -rs)
 if [ "$UBUNTU_VERSION" = "18.04" ]; then
@@ -42,22 +43,21 @@ python3.9 -m pip install --force-reinstall requests==2.32.3
 python3.9 -m pip install protobuf
 
 # Install AWS CLI v2 and GDK
-python3.9 -m pip install awscli
+python3.9 -m pip install awscliv2
 python3.9 -m pip install git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git
 
 # Verify AWS CLI installation
 aws --version
 
 # Fix Docker permissions
-sudo systemctl start docker
 sudo usermod -aG docker $USER
 sudo chmod 666 /var/run/docker.sock
-
+sudo systemctl daemon-reload
 # Verify Docker is working
-docker ps
+sudo docker ps
 
 # Note: /aws_dda directories are only needed on deployment targets, not on build servers
 
 echo "Build server setup complete!"
 echo "To build the DDA component, run:"
-echo "./gdk-compnent-build-and-publish.sh"
+echo "./gdk-component-build-and-publish.sh"
