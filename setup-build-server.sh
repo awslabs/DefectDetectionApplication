@@ -12,7 +12,20 @@ sudo apt-get install -y git python3-venv zip software-properties-common
 
 # Install Docker and docker-compose via snap
 sudo snap install docker
-#sudo groupadd docker
+GROUP_NAME=docker
+if getent group "$GROUP_NAME" > /dev/null; then
+    echo "Group '$GROUP_NAME' already exists."
+else
+    echo "Group '$GROUP_NAME' does not exist. Creating it..."
+    # Create the group
+    sudo groupadd "$GROUP_NAME"
+    if [ $? -eq 0 ]; then
+        echo "Group '$GROUP_NAME' created successfully."
+    else
+        echo "Error: Failed to create group '$GROUP_NAME'."
+        exit 1
+    fi
+fi
 sudo usermod -aG docker $USER
 source ~/.bashrc
 # Install Python 3.9
@@ -43,9 +56,8 @@ python3.9 -m pip install --force-reinstall requests==2.32.3
 python3.9 -m pip install protobuf
 
 # Install AWS CLI v2 and GDK
-python3.9 -m pip install awscliv2
 python3.9 -m pip install git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git
-
+sudo snap install aws-cli --classic
 # Verify AWS CLI installation
 aws --version
 
