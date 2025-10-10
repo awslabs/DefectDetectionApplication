@@ -20,7 +20,7 @@ python-periphery==2.4.1
 psutil==5.9.5
 fastapi==0.109.2
 uvicorn==0.23.2
-pydantic==2.1.1
+pydantic==2.4.0
 dlr==1.10.0
 asgi-correlation-id==4.2.0
 structlog==22.1.0
