@@ -56,9 +56,8 @@ python3.9 -m pip install --force-reinstall requests==2.32.3
 python3.9 -m pip install protobuf
 
 # Install AWS CLI v2 and GDK
-python3.9 -m pip install awscliv2
 python3.9 -m pip install git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git
-
+sudo snap install aws-cli --classic
 # Verify AWS CLI installation
 aws --version
 
