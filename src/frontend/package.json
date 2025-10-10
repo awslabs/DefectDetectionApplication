@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@babel/runtime": "^7.28.4",
     "@cloudscape-design/collection-hooks": "^1.0.20",
     "@cloudscape-design/components": "^3.0.278",
     "@cloudscape-design/design-tokens": "^3.0.11",
