@@ -255,8 +255,8 @@ DDA consists of several key components:
    - Attach S3 permissions for component downloads
 
 3. **Create IAM roles**:
-   - Build server role: `dda-build-role` (attach `dda-build-policy`)
-   - Edge device role: `dda-greengrass-role` (attach `dda-greengrass-policy`)
+   - Build server role: `dda-build-role` (attach `dda-build-policy` + `AmazonSSMManagedInstanceCore`)
+   - Edge device role: `dda-greengrass-role` (attach `dda-greengrass-policy` + `AmazonSSMManagedInstanceCore`)
 
 #### Step 1: Set up Build Environment
 
@@ -268,15 +268,36 @@ DDA consists of several key components:
    ```
 
 2. **Connect and setup**:
+   
+   **Option A: SSH (Traditional)**
    ```bash
    ssh -i "your-key.pem" ubuntu@<build-server-ip>
+   ```
    
+   **Option B: Systems Manager Session Manager (Recommended)**
+   ```bash
+   # Install Session Manager plugin first
+   # https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
+   
+   # Connect to instance (no SSH keys required)
+   aws ssm start-session --target <ec2-instance-id>
+   ```
+   
+   **Session Manager Benefits:**
+   - No SSH keys or bastion hosts required
+   - No inbound ports needed in security groups
+   - Sessions secured with AWS KMS encryption
+   - Optional logging to S3 or CloudWatch Logs
+   - Configure preferences in AWS Console → Systems Manager → Session Manager
+   
+   **Setup DDA:**
+   ```bash
    # Clone repository
    git clone https://github.com/aws-samples/defect-detection-application.git
    cd DefectDetectionApplication
    
    # Run setup script
-   ./setup-build-server.sh
+   sudo ./setup-build-server.sh
    ```
 
 #### Step 2: Build and Publish DDA Component
@@ -298,7 +319,7 @@ DDA consists of several key components:
 
 2. **Build and publish**:
    ```bash
-  ./gdk-component-build-and-publish.sh
+  ./gdk-component-build-and-publish.sh >logfile.log 2>&1 &
    ```
 
 #### Step 3: Set up Edge Device
@@ -311,12 +332,27 @@ DDA consists of several key components:
    ```
 
 2. **Install Greengrass Core**:
+   
+   **Copy installation files:**
    ```bash
-   # Copy installation files
+   # Option A: SCP
    scp -i "your-key.pem" -r station_install ubuntu@<edge-device-ip>:~/
    
-   # Connect and install
+   # Option B: S3 transfer
+   aws s3 cp station_install/ s3://your-bucket/station_install/ --recursive
+   ```
+   
+   **Connect and install:**
+   ```bash
+   # Option A: SSH
    ssh -i "your-key.pem" ubuntu@<edge-device-ip>
+   
+   # Option B: Systems Manager
+   aws ssm start-session --target i-edge-instance-id
+   
+   # If using S3 transfer, download files first:
+   # aws s3 cp s3://your-bucket/station_install/ ~/station_install/ --recursive
+   
    cd station_install
    sudo -E ./setup_station.sh <aws-region> <thing-name>
    ```
@@ -343,12 +379,26 @@ DDA consists of several key components:
    **Note**: Before proceeding, we recommend running `docker ps` to make sure both backend and frontend containers are running.
 
 5. **Access DDA application**:
-   ```bash
-   # Set up SSH tunnel
-   ssh -i "your-key.pem" -L 3000:localhost:3000 -L 5000:localhost:5000 ubuntu@<edge-device-ip>
    
-   # Open browser to http://localhost:3000
+   **Option A: SSH Tunnel**
+   ```bash
+   ssh -i "your-key.pem" -L 3000:localhost:3000 -L 5000:localhost:5000 ubuntu@<edge-device-ip>
    ```
+   
+   **Option B: Systems Manager Port Forwarding**
+   ```bash
+   # Forward DDA UI port
+   aws ssm start-session --target i-edge-instance-id \
+     --document-name AWS-StartPortForwardingSession \
+     --parameters '{"portNumber":["3000"],"localPortNumber":["3000"]}'
+   
+   # In another terminal, forward API port
+   aws ssm start-session --target i-edge-instance-id \
+     --document-name AWS-StartPortForwardingSession \
+     --parameters '{"portNumber":["5000"],"localPortNumber":["5000"]}'
+   ```
+   
+   **Open browser to http://localhost:3000**
 
 #### Step 4: Deploy ML Model (Optional)
 
