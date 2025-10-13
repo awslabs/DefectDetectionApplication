@@ -261,10 +261,23 @@ DDA consists of several key components:
 #### Step 1: Set up Build Environment
 
 1. **Launch EC2 build instance**:
+   
+   **The EC2 build instance depends on the edge device configuration:**
+   
+   **If your edge device is ARM64 (Jetson Xavier, ARM64 systems):**
    ```bash
-   # Launch Ubuntu 24.04, t2.medium or larger
-   # Storage: 64GB, Security: SSH (port 22)
+   # Launch Ubuntu 18.04 ARM64, g4dn.2xlarge
+   # Storage: 512GB, Security: SSH (port 22)
    # Attach IAM role: dda-build-role
+   # AMI: Find Ubuntu 18.04 in AWS Marketplace → [Ryan to add details]
+   ```
+   
+   **If your edge device is x86_64 CPU (Intel/AMD systems):**
+   ```bash
+   # Launch Ubuntu 20.04 x86_64, g4dn.2xlarge
+   # Storage: 512GB, Security: SSH (port 22)
+   # Attach IAM role: dda-build-role
+   # AMI: Ubuntu 20.04 → [Ryan to add details]
    ```
 
 2. **Connect and setup**:
@@ -273,22 +286,6 @@ DDA consists of several key components:
    ```bash
    ssh -i "your-key.pem" ubuntu@<build-server-ip>
    ```
-   
-   **Option B: Systems Manager Session Manager (Recommended)**
-   ```bash
-   # Install Session Manager plugin first
-   # https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
-   
-   # Connect to instance (no SSH keys required)
-   aws ssm start-session --target <ec2-instance-id>
-   ```
-   
-   **Session Manager Benefits:**
-   - No SSH keys or bastion hosts required
-   - No inbound ports needed in security groups
-   - Sessions secured with AWS KMS encryption
-   - Optional logging to S3 or CloudWatch Logs
-   - Configure preferences in AWS Console → Systems Manager → Session Manager
    
    **Setup DDA:**
    ```bash
