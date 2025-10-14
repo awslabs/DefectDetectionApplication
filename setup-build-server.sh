@@ -55,9 +55,16 @@ python3.9 -m pip install --upgrade pip
 python3.9 -m pip install --force-reinstall requests==2.32.3
 python3.9 -m pip install protobuf
 
+
 # Install AWS CLI v2 and GDK
 python3.9 -m pip install git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git
 sudo snap install aws-cli --classic
+# Add ~/.local/bin to PATH for GDK
+if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' ~/.bashrc; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+fi
+export PATH="$HOME/.local/bin:$PATH"
+
 # Verify AWS CLI installation
 aws --version
 
