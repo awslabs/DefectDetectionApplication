@@ -205,7 +205,7 @@ RUN pip3 install meson
 RUN cd /dependencies \
     && git clone https://github.com/AravisProject/aravis.git \
     && cd aravis \
-    && git checkout 96cea9835ce1535547d8680c8b0be33e97f6cb30 \
+    && git checkout ea4f3c47cb387d81b63444887f3e0efda7918d50 \
     && git submodule update --init --recursive \
     && meson setup build -Dtests=false \
     && cd build \
