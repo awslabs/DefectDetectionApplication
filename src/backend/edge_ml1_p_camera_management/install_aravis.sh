@@ -40,17 +40,14 @@ apt-get install -y --no-install-recommends wget build-essential ninja-build meso
     exit 1
 }
 
-#echo "Cleaning up previous installation..."
-#rm -rf aravis-0.8.26 aravis-0.8.26.tar.xz
-
 echo "Downloading Aravis..."
-wget https://github.com/AravisProject/aravis/releases/download/0.8.26/aravis-0.8.26.tar.xz || {
+wget https://github.com/AravisProject/aravis/releases/download/0.8.35/aravis-0.8.35.tar.xz || {
     echo "Failed to download Aravis"
     exit 1
 }
 
 echo "Extracting Aravis..."
-tar xf aravis-0.8.26.tar.xz || {
+tar xf aravis-0.8.35.tar.xz || {
     echo "Failed to extract Aravis"
     exit 1
 }
@@ -69,7 +66,7 @@ apt update -y
 ldconfig
 
 echo "Building Aravis..."
-cd aravis-0.8.26 || {
+cd aravis-0.8.35 || {
     echo "Failed to enter aravis directory"
     exit 1
 }
