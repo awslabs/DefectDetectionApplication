@@ -16,11 +16,9 @@
 
 set -e
 
-python3.9 -m pip install boto3
-python3.9 -m pip install scikit-learn==1.0.2
-python3.9 -m pip install dill
-#python3.9 -m pip install edge_ml1_p_camera_management/wheels/LyraAnomaliesMaskUtils-1.0-py3-none-any.whl
-#python3.9 -m pip install edge_ml1_p_camera_management/wheels/LyraScienceProcessingUtils-1.0-py3-none-any.whl
+python3 -m pip install boto3
+python3 -m pip install scikit-learn==1.0.2
+python3 -m pip install dill
 # Requirement(s) of LyraScienceProcessingUtils
 
 
@@ -47,7 +45,7 @@ dpkg -i edgemlsdk/PanoramaSDK.deb
 tar xvfz edgemlsdk/triton_installation_files.tar.gz -C /opt/
 
 # Install Panorama wheel
-python3.9 -m pip install edgemlsdk/panorama-1.0-py3-none-any.whl
+python3 -m pip install edgemlsdk/panorama-1.0-py3-none-any.whl
 
 # Patch triton stubs with correct install
 LOCATION=$(find / -name libtritonserver.so | grep tritonserver/install/lib/stubs/libtritonserver.so)

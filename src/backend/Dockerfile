@@ -3,15 +3,15 @@ FROM public.ecr.aws/ubuntu/ubuntu:${OS}
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y software-properties-common wget build-essential libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb
 RUN apt-get update
-RUN wget https://www.python.org/ftp/python/3.9.23/Python-3.9.23.tgz
-RUN tar -xzf Python-3.9.23.tgz
-RUN cd Python-3.9.23 && \
+RUN wget https://www.python.org/ftp/python/3.11.14/Python-3.11.14.tgz
+RUN tar -xzf Python-3.11.14.tgz
+RUN cd Python-3.11.14 && \
     ./configure --enable-optimizations --enable-shared && \
     make -j$(nproc) && \
     make install
-RUN find / -name "libpython3.9.so.1.0" -print
-RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1 \
-    && update-alternatives --set python3 /usr/local/bin/python3.9
+
+RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.11 1 \
+    && update-alternatives --set python3 /usr/local/bin/python3.11
 
 RUN add-apt-repository ppa:ubuntu-toolchain-r/test -y && \
     apt-get update && \
@@ -30,7 +30,7 @@ COPY edge_ml1_p_camera_management ./edge_ml1_p_camera_management
 COPY edgeagent ./edgeagent
 RUN ./edge_ml1_p_camera_management/prereqs_install.sh 
 RUN ./edge_ml1_p_camera_management/install_aravis.sh
-RUN python3.9 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
+RUN python3 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
 RUN apt update -y
 RUN apt-get install libssl1.1 -y
 RUN apt update -y
@@ -38,8 +38,6 @@ RUN apt install libexif12 libcurl4 libarchive13 gstreamer1.0-tools gstreamer1.0-
 RUN if [ "$OS" = "18.04" ] ; then \
     apt install libavcodec-extra57i -y; \
     fi
-
-RUN find / -name "libpython3.9.so.1.0" -print
 
 RUN apt clean -y
 
@@ -64,7 +62,7 @@ COPY alembic.ini ./
 COPY dda_triton ./dda_triton
 COPY lyra_anomalies_mask_utils ./lyra_anomalies_mask_utils
 COPY lyra_science_processing_utils ./lyra_science_processing_utils
-CMD ["python3.9", "app.py"]
+CMD ["python3.11", "app.py"]
 
 # Temporary to fix CVE-2024-24806 and CVE-2024-0553 until slim-buster base image is fixed
 RUN apt-get update \
@@ -81,7 +79,7 @@ RUN apt-get update \
 COPY edgemlsdk ./edgemlsdk
 RUN ./edge_ml1_p_camera_management/install_edgemlsdk.sh
 COPY dlr_disable_phone_home.py ./
-RUN python3.9 dlr_disable_phone_home.py
+RUN python3 dlr_disable_phone_home.py
 
 #TODO:change to user to scope the permission. Currently needed to persist the TinyDB data
 USER root

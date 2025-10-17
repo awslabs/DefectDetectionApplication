@@ -5,7 +5,7 @@ This application talks to GenICam compatible industrial cameras via GiGE or USB 
 ## Requirements
     - Ubuntu 18.04 or 20.04
     - X86 CPU with NVIDIA GPU or ARM64+NVIDIA (Jetson) or plain ARM64 or X86 (Slow)
-    - python 3.8 installed via apt with python3.9-dev and python 3.9-virtual-env
+    - python 3.11 installed via apt with python3.11-dev and python 3.11-virtual-env
 
 ## Installation\
 Clear out any old installs:

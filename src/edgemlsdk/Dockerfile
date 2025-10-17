@@ -89,26 +89,24 @@ RUN if [ "$OS" = "18.04" ]; then \
 #    python${PYTHON_VERSION} -m pip install --user --upgrade pip && \
 #    python${PYTHON_VERSION} -m pip install --upgrade build
 
-RUN wget https://www.python.org/ftp/python/3.9.23/Python-3.9.23.tgz
-RUN tar -xzf Python-3.9.23.tgz
-RUN cd Python-3.9.23 && \
+RUN wget https://www.python.org/ftp/python/3.11.14/Python-3.11.14.tgz
+RUN tar -xzf Python-3.11.14.tgz
+RUN cd Python-3.11.14 && \
     ./configure --enable-optimizations --enable-shared && \
     make -j$(nproc) && \
     make install && \
     ldconfig
 
-RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1 \
-    && update-alternatives --set python3 /usr/local/bin/python3.9 
+RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.11 1 \
+    && update-alternatives --set python3 /usr/local/bin/python3 
 
-ENV PYTHON_EXECUTABLE=/usr/local/bin/python3.9
-ENV Python3_EXECUTABLE=/usr/local/bin/python3.9
-ENV Python3_INCLUDE_DIR=/usr/local/include/python3.9
-ENV Python3_LIBRARY=/usr/local/lib/libpython3.9.so
-RUN find / -name "libpython3.9.so.1.0" -print
-
+ENV PYTHON_EXECUTABLE=/usr/local/bin/python3.11
+ENV Python3_EXECUTABLE=/usr/local/bin/python3.11
+ENV Python3_INCLUDE_DIR=/usr/local/include/python3.11
+ENV Python3_LIBRARY=/usr/local/lib/libpython3.11.so
 RUN pip3 install --upgrade pip setuptools wheel build hatchling
-RUN python3.9 -c "import ssl; print('SSL support:', ssl.OPENSSL_VERSION)" || echo "SSL module not available"
-RUN python3.9 -c "import urllib.request; urllib.request.urlopen('https://pypi.org')" || echo "HTTPS connection failed"
+RUN python3 -c "import ssl; print('SSL support:', ssl.OPENSSL_VERSION)" || echo "SSL module not available"
+RUN python3 -c "import urllib.request; urllib.request.urlopen('https://pypi.org')" || echo "HTTPS connection failed"
 
 # Conan version 2.1.0 has a bug causing build failure. Github issue: https://github.com/conan-io/conan/issues/15742
 # Installing v.2.0.17 for now. Modify this after bug is resolved
@@ -238,7 +236,7 @@ RUN which pip3
 RUN pip3 --version
 RUN which pip
 RUN pip --version
-RUN which python3.9
+RUN which python3
 RUN python3 --version
 RUN apt-get install libcairo2 libcairo2-dev -y
 RUN apt-get remove --autoremove python3-gi -y \
@@ -246,10 +244,10 @@ RUN apt-get remove --autoremove python3-gi -y \
 #RUN pip install scalene 
 
 RUN pip3 install pygobject==3.44.1
-ENV PYTHON_EXECUTABLE=/usr/local/bin/python3.9
-ENV Python3_EXECUTABLE=/usr/local/bin/python3.9
-ENV Python3_INCLUDE_DIR=/usr/local/include/python3.9
-ENV Python3_LIBRARY=/usr/local/lib/libpython3.9.so
+ENV PYTHON_EXECUTABLE=/usr/local/bin/python3.11
+ENV Python3_EXECUTABLE=/usr/local/bin/python3.11
+ENV Python3_INCLUDE_DIR=/usr/local/include/python3.11
+ENV Python3_LIBRARY=/usr/local/lib/libpython3.11.so
 
 # Install SWIG
 RUN mkdir /swig \
@@ -319,7 +317,7 @@ RUN cd /dependencies && \
     #./b2 install
 RUN apt-get install libnuma-dev -y \
     && rm /usr/bin/python \
-    && ln -s /usr/bin/python3.9 /usr/bin/python
+    && ln -s /usr/bin/python3.11 /usr/bin/python
 
 RUN apt-get install libarchive-dev -y
 
@@ -343,9 +341,9 @@ RUN export
 RUN if [ "$OS" = "18.04" ]; then \
     apt-get remove --purge python python3.6 python3.6-minimal libpython3.6 libpython3.6-minimal libpython3.6-stdlib python3-minimal python3-distutils python3-lib2to3 -y;  \
     apt-get autoremove -y; \
-    ln -sf /usr/local/bin/python3.9 /usr/bin/python3; \
+    ln -sf /usr/local/bin/python3.11 /usr/bin/python3; \
     mkdir -p /usr/include/python3.6m;  \ 
-    ln -sf /usr/local/include/python3.9/* /usr/include/python3.6m/; \
+    ln -sf /usr/local/include/python3.11/* /usr/include/python3.6m/; \
     fi
 
 #RUN echo "=== Python Debug Info ===" && \
@@ -361,18 +359,18 @@ RUN if [ "$OS" = "18.04" ]; then \
 RUN    export PYBIND11_FINDPYTHON=ON && \
     cd /dependencies/server && \ 
     git apply edgeml-triton-server.diff && \
-    python3.9 build.py --enable-logging  --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
+    python3 build.py --enable-logging  --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
     --extra-core-cmake-arg=TRITON_ENABLE_ENSEMBLE=ON \
     --extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON \
     --extra-core-cmake-arg=-DPYBIND11_FINDPYTHON=ON \
     --extra-core-cmake-arg=CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-    --extra-core-cmake-arg=PYTHON_EXECUTABLE=/usr/local/bin/python3.9 \
-    --extra-core-cmake-arg=-DPYTHON_EXECUTABLE=/usr/local/bin/python3.9 \
-    --extra-core-cmake-arg=PYTHON_INCLUDE_DIR=/usr/local/include/python3.9 \
-    --extra-core-cmake-arg=PYTHON_LIBRARY=/usr/local/lib/libpython3.9.so \
-    --extra-core-cmake-arg=PYTHON_LIBRARIES=/usr/local/lib/libpython3.9.so \ 
-    --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/local/include/python3.9 \
-    --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.9 \
+    --extra-core-cmake-arg=PYTHON_EXECUTABLE=/usr/local/bin/python3.11 \
+    --extra-core-cmake-arg=-DPYTHON_EXECUTABLE=/usr/local/bin/python3.11 \
+    --extra-core-cmake-arg=PYTHON_INCLUDE_DIR=/usr/local/include/python3.11 \
+    --extra-core-cmake-arg=PYTHON_LIBRARY=/usr/local/lib/libpython3.11.so \
+    --extra-core-cmake-arg=PYTHON_LIBRARIES=/usr/local/lib/libpython3.11.so \ 
+    --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/local/include/python3.11 \
+    --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.11 \
     --backend python --build-dir=`pwd`/build
 RUN mv /dependencies/server/build/python/install/backends/python /dependencies/server/build/tritonserver/install/backends
 

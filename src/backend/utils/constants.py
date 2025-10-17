@@ -100,7 +100,7 @@ CAPTURED_IDS_PATH_PATTERN = r"\/aws_dda\/system\/capture-id-path-\d{4}-\d{2}-\d{
 SNAPSHOT_FILE_PATTERN = r"(snapshotfile/)?snapshot-.*-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.tar\.gz"
 CAPTURED_IMAGE_FOLDER_PATTHERN = r"\/aws_dda\/image-capture\/[a-zA-Z0-9]+"
 CAPTURED_IMAGE_FILE_PATH_PATTHERN = r"\/aws_dda\/image-capture\/[a-zA-Z0-9_/s-]+"
-PYTHON38 = "python3.9"
+PYTHON38 = "python3.11"
 
 MODEL_CONFIDENCE_THRESHOLDS = "modelConfidenceThresholds"
 MODEL_CONFIDENCE_THRESHOLD_NORMAL = "NormalThreshold"

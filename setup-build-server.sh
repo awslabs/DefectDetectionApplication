@@ -34,30 +34,30 @@ if [ "$UBUNTU_VERSION" = "18.04" ]; then
   # Install from source for 18.04
   sudo apt-get install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget
   cd /tmp
-  wget https://www.python.org/ftp/python/3.9.16/Python-3.9.16.tgz
-  tar -xf Python-3.9.16.tgz
-  cd Python-3.9.16
+  wget https://www.python.org/ftp/python/3.11.14/Python-3.11.14.tgz
+  tar -xf Python-3.11.14.tgz
+  cd Python-3.11.14
   ./configure --enable-optimizations
   make -j 8
   sudo make altinstall
-  sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1
+  sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.11 1
 else
   # Install from PPA for other versions
   sudo add-apt-repository ppa:deadsnakes/ppa -y
   sudo apt-get update
-  sudo apt-get install -y python3.9 python3.9-venv python3.9-dev
-  sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/bin/python3.9 1
+  sudo apt-get install -y python3.11 python3.11-venv python3.11-dev
+  sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/bin/python3.11 1
 fi
 
 echo "Installing Pip"
 sudo apt-get install python3-pip -y
-python3.9 -m pip install --upgrade pip
-python3.9 -m pip install --force-reinstall requests==2.32.3
-python3.9 -m pip install protobuf
+python3 -m pip install --upgrade pip
+python3 -m pip install --force-reinstall requests==2.32.3
+python3 -m pip install protobuf
 
 
 # Install AWS CLI v2 and GDK
-python3.9 -m pip install git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git
+python3 -m pip install git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git
 sudo snap install aws-cli --classic
 # Add ~/.local/bin to PATH for GDK
 if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' ~/.bashrc; then

@@ -31,5 +31,10 @@ elseif($PythonVersion -eq "3.10")
     Write-Host "Building with Python3.10"
     python3.10 -m build
 }
+elseif($PythonVersion -eq "3.11")
+{
+    Write-Host "Building with Python3.11"
+    python3.11 -m build
+}
 
 popd
