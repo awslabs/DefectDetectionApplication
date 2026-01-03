@@ -63,5 +63,30 @@ gdk component build
 echo "Publishing component..."
 gdk component publish
 
+# Get the component ARN and tag it for portal visibility
+echo "Tagging component for DDA Portal visibility..."
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=$(aws configure get region || echo "us-east-1")
+
+# Get the latest version of the component
+LATEST_VERSION=$(aws greengrassv2 list-component-versions \
+  --arn "arn:aws:greengrass:${REGION}:${ACCOUNT_ID}:components:${COMPONENT_NAME}" \
+  --query 'componentVersions[0].componentVersion' \
+  --output text 2>/dev/null || echo "")
+
+if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "None" ]; then
+  COMPONENT_ARN="arn:aws:greengrass:${REGION}:${ACCOUNT_ID}:components:${COMPONENT_NAME}:versions:${LATEST_VERSION}"
+  
+  echo "Tagging component: $COMPONENT_ARN"
+  aws greengrassv2 tag-resource \
+    --resource-arn "$COMPONENT_ARN" \
+    --tags "dda-portal:managed=true" \
+           "dda-portal:component-type=local-server" \
+           "dda-portal:architecture=${ARCH}"
+  
+  echo "Component tagged successfully!"
+else
+  echo "Warning: Could not determine component version for tagging"
+fi
 
 echo "Component ${COMPONENT_NAME} built and published successfully!"
