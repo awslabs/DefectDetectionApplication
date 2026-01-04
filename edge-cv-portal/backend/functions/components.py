@@ -315,6 +315,43 @@ def get_component_details(user_info: Dict, component_arn: str, query_params: Dic
         # Get deployment information
         deployment_info = get_component_deployment_info(current_use_case, component_arn)
         
+        # Extract status - it's an object with componentState, not a string
+        status_obj = component_details.get('status', {})
+        if isinstance(status_obj, dict):
+            component_status = status_obj.get('componentState', 'DEPLOYABLE')
+        else:
+            component_status = str(status_obj) if status_obj else 'DEPLOYABLE'
+        
+        # Process versions to extract status string from status object
+        versions = []
+        for v in versions_response.get('componentVersions', []):
+            version_status = v.get('status', {})
+            if isinstance(version_status, dict):
+                v['status'] = version_status.get('componentState', 'DEPLOYABLE')
+            versions.append(v)
+        
+        # Parse recipe - it's returned as bytes (YAML or JSON)
+        recipe_data = component_details.get('recipe')
+        parsed_recipe = {}
+        if recipe_data:
+            try:
+                # Recipe is returned as bytes
+                if isinstance(recipe_data, bytes):
+                    recipe_str = recipe_data.decode('utf-8')
+                else:
+                    recipe_str = str(recipe_data)
+                
+                # Try parsing as JSON first
+                try:
+                    parsed_recipe = json.loads(recipe_str)
+                except json.JSONDecodeError:
+                    # If not JSON, try YAML
+                    import yaml
+                    parsed_recipe = yaml.safe_load(recipe_str)
+            except Exception as e:
+                print(f"Error parsing recipe: {e}")
+                parsed_recipe = {'raw': recipe_str if 'recipe_str' in dir() else 'Unable to parse recipe'}
+        
         # Combine all information
         detailed_component = {
             'arn': component_arn,
@@ -322,13 +359,13 @@ def get_component_details(user_info: Dict, component_arn: str, query_params: Dic
             'description': component_details.get('description', ''),
             'publisher': component_details.get('publisher', ''),
             'creation_timestamp': component_details.get('creationTimestamp'),
-            'status': component_details.get('status', 'DEPLOYABLE'),
+            'status': component_status,
             'platforms': component_details.get('platforms', []),
             'tags': component_details.get('tags', {}),
             'component_type': component_details.get('componentType', 'aws.greengrass.generic'),
-            'versions': versions_response.get('componentVersions', []),
+            'versions': versions,
             'deployment_info': deployment_info,
-            'recipe': component_details.get('recipe', {})
+            'recipe': parsed_recipe
         }
         
         return {

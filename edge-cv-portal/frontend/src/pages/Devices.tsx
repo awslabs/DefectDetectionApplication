@@ -1,6 +1,5 @@
-import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Table,
   Header,
@@ -12,39 +11,109 @@ import {
   Link,
   Modal,
   Alert,
+  Select,
+  SelectProps,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
-import { Device } from '../types';
+import { Device, UseCase } from '../types';
 
 export default function Devices() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [filteringText, setFilteringText] = useState('');
   const [selectedItems, setSelectedItems] = useState<Device[]>([]);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  
+  // Use case management
+  const [useCases, setUseCases] = useState<UseCase[]>([]);
+  const [selectedUseCase, setSelectedUseCase] = useState<SelectProps.Option | null>(null);
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['devices'],
-    queryFn: () => apiService.listDevices(),
-  });
+  // Load use cases on mount
+  useEffect(() => {
+    const loadUseCases = async () => {
+      try {
+        const response = await apiService.listUseCases();
+        const useCaseList = response.usecases || [];
+        setUseCases(useCaseList);
+        
+        // Check for URL parameter first
+        const urlUseCaseId = searchParams.get('usecase_id');
+        if (urlUseCaseId) {
+          const preSelectedUseCase = useCaseList.find((uc: UseCase) => uc.usecase_id === urlUseCaseId);
+          if (preSelectedUseCase) {
+            setSelectedUseCase({
+              label: preSelectedUseCase.name,
+              value: preSelectedUseCase.usecase_id,
+            });
+            return;
+          }
+        }
+        
+        // Auto-select first use case if available
+        if (useCaseList.length > 0) {
+          setSelectedUseCase({
+            label: useCaseList[0].name,
+            value: useCaseList[0].usecase_id,
+          });
+        }
+      } catch (err) {
+        console.error('Failed to load use cases:', err);
+      }
+    };
+    loadUseCases();
+  }, [searchParams]);
 
-  const getStatusIndicator = (status: string) => {
-    switch (status) {
-      case 'online':
-        return <StatusIndicator type="success">Online</StatusIndicator>;
-      case 'offline':
-        return <StatusIndicator type="stopped">Offline</StatusIndicator>;
-      case 'error':
-        return <StatusIndicator type="error">Error</StatusIndicator>;
-      default:
-        return <StatusIndicator type="info">Unknown</StatusIndicator>;
+  // Load devices when use case changes
+  useEffect(() => {
+    if (selectedUseCase?.value) {
+      loadDevices();
+    } else {
+      setDevices([]);
+      setLoading(false);
+    }
+  }, [selectedUseCase]);
+
+  const loadDevices = async () => {
+    if (!selectedUseCase?.value) return;
+    
+    try {
+      setLoading(true);
+      setError(null);
+      const response = await apiService.listDevices(selectedUseCase.value);
+      setDevices(response.devices || []);
+    } catch (err: any) {
+      console.error('Failed to load devices:', err);
+      setError(err.message || 'Failed to load devices');
+      setDevices([]);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const formatTimestamp = (timestamp?: number) => {
+  const getStatusIndicator = (status: string) => {
+    const statusLower = status?.toLowerCase() || 'unknown';
+    switch (statusLower) {
+      case 'healthy':
+      case 'online':
+        return <StatusIndicator type="success">Healthy</StatusIndicator>;
+      case 'unhealthy':
+      case 'offline':
+        return <StatusIndicator type="error">Unhealthy</StatusIndicator>;
+      case 'error':
+        return <StatusIndicator type="error">Error</StatusIndicator>;
+      default:
+        return <StatusIndicator type="info">{status || 'Unknown'}</StatusIndicator>;
+    }
+  };
+
+  const formatTimestamp = (timestamp?: string | number) => {
     if (!timestamp) return 'Never';
     const date = new Date(timestamp);
     const now = Date.now();
-    const diff = now - timestamp;
+    const diff = now - date.getTime();
 
     if (diff < 60000) {
       return 'Just now';
@@ -57,43 +126,52 @@ export default function Devices() {
     }
   };
 
-  const formatStorage = (used?: number, total?: number) => {
-    if (!used || !total) return '-';
-    const usedGB = (used / (1024 * 1024 * 1024)).toFixed(1);
-    const totalGB = (total / (1024 * 1024 * 1024)).toFixed(1);
-    const percentage = ((used / total) * 100).toFixed(0);
-    return `${usedGB} / ${totalGB} GB (${percentage}%)`;
-  };
-
   // Filter devices based on search text
-  const filteredDevices = (data?.devices || []).filter((device: Device) => {
+  const filteredDevices = devices.filter((device: Device) => {
     if (!filteringText) return true;
     const searchLower = filteringText.toLowerCase();
     return (
       device.device_id.toLowerCase().includes(searchLower) ||
       device.thing_name?.toLowerCase().includes(searchLower) ||
-      device.status.toLowerCase().includes(searchLower) ||
-      device.usecase_id.toLowerCase().includes(searchLower)
+      device.status?.toLowerCase().includes(searchLower) ||
+      device.greengrass_version?.toLowerCase().includes(searchLower) ||
+      device.platform?.toLowerCase().includes(searchLower)
     );
   });
 
   return (
     <SpaceBetween size="l">
+      {error && (
+        <Alert type="error" dismissible onDismiss={() => setError(null)}>
+          {error}
+        </Alert>
+      )}
+      
       <Table
         header={
           <Header
             variant="h1"
-            description="Monitor and manage edge devices"
+            description="Monitor and manage Greengrass core devices set up via setup_station.sh"
             counter={`(${filteredDevices.length})`}
             actions={
               <SpaceBetween direction="horizontal" size="xs">
+                <Box variant="span">Use Case:</Box>
+                <Select
+                  selectedOption={selectedUseCase}
+                  onChange={({ detail }) => setSelectedUseCase(detail.selectedOption)}
+                  placeholder="Select use case"
+                  options={useCases.map((uc) => ({
+                    label: uc.name,
+                    value: uc.usecase_id,
+                  }))}
+                />
                 <Button
-                  disabled={selectedItems.length === 0}
-                  onClick={() => {
-                    // TODO: Implement bulk actions
-                  }}
+                  iconName="refresh"
+                  onClick={loadDevices}
+                  loading={loading}
+                  disabled={!selectedUseCase}
                 >
-                  Restart Selected
+                  Refresh
                 </Button>
                 <Button variant="primary" onClick={() => setShowRegisterModal(true)}>
                   Register Device
@@ -104,7 +182,7 @@ export default function Devices() {
             Devices
           </Header>
         }
-        loading={isLoading}
+        loading={loading}
         items={filteredDevices}
         selectionType="multi"
         selectedItems={selectedItems}
@@ -114,7 +192,7 @@ export default function Devices() {
             id: 'device_id',
             header: 'Device ID',
             cell: (item: Device) => (
-              <Link onFollow={() => navigate(`/devices/${item.device_id}`)}>
+              <Link onFollow={() => navigate(`/devices/${item.device_id}?usecase_id=${selectedUseCase?.value}`)}>
                 {item.device_id}
               </Link>
             ),
@@ -133,31 +211,30 @@ export default function Devices() {
             sortingField: 'status',
           },
           {
-            id: 'usecase_id',
-            header: 'Use Case',
-            cell: (item: Device) => item.usecase_id,
-            sortingField: 'usecase_id',
+            id: 'greengrass_version',
+            header: 'Greengrass Version',
+            cell: (item: Device) => item.greengrass_version || '-',
           },
           {
-            id: 'last_heartbeat',
+            id: 'platform',
+            header: 'Platform',
+            cell: (item: Device) => item.platform || '-',
+          },
+          {
+            id: 'architecture',
+            header: 'Architecture',
+            cell: (item: Device) => item.architecture || '-',
+          },
+          {
+            id: 'last_status_update',
             header: 'Last Seen',
-            cell: (item: Device) => formatTimestamp(item.last_heartbeat),
-            sortingField: 'last_heartbeat',
+            cell: (item: Device) => formatTimestamp(item.last_status_update),
+            sortingField: 'last_status_update',
           },
           {
             id: 'components',
             header: 'Components',
-            cell: (item: Device) => item.components?.length || 0,
-          },
-          {
-            id: 'storage',
-            header: 'Storage',
-            cell: (item: Device) => formatStorage(item.storage_used, item.storage_total),
-          },
-          {
-            id: 'greengrass_version',
-            header: 'Greengrass',
-            cell: (item: Device) => item.greengrass_version || '-',
+            cell: (item: Device) => item.installed_components?.length || 0,
           },
         ]}
         filter={
@@ -173,9 +250,13 @@ export default function Devices() {
           <Box textAlign="center" color="inherit">
             <b>No devices</b>
             <Box padding={{ bottom: 's' }} variant="p" color="inherit">
-              No devices are currently registered.
+              {selectedUseCase 
+                ? 'No portal-managed devices found. Devices must be set up using setup_station.sh to appear here.'
+                : 'Select a use case to view devices.'}
             </Box>
-            <Button onClick={() => setShowRegisterModal(true)}>Register Device</Button>
+            {selectedUseCase && (
+              <Button onClick={() => setShowRegisterModal(true)}>Register Device</Button>
+            )}
           </Box>
         }
         variant="full-page"
@@ -197,88 +278,78 @@ export default function Devices() {
       >
         <SpaceBetween size="l">
           <Alert type="info">
-            Device registration happens through AWS IoT Core and AWS IoT Greengrass. Follow the
-            steps below to register and provision a new edge device.
+            Devices are registered using the <code>setup_station.sh</code> script which provisions 
+            the device with AWS IoT Greengrass and tags it for portal discovery.
           </Alert>
 
           <Box>
             <Box variant="h3" padding={{ bottom: 's' }}>
-              Step 1: Create IoT Thing
-            </Box>
-            <Box variant="p" padding={{ bottom: 's' }}>
-              Create an AWS IoT Thing in the use case account:
-            </Box>
-            <Box padding="s" color="text-body-secondary">
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px' }}>
-                {`aws iot create-thing \\
-  --thing-name my-edge-device-001 \\
-  --attribute-payload '{"usecase_id":"my-usecase-id"}'`}
-              </pre>
-            </Box>
-          </Box>
-
-          <Box>
-            <Box variant="h3" padding={{ bottom: 's' }}>
-              Step 2: Create and Attach Certificates
-            </Box>
-            <Box variant="p" padding={{ bottom: 's' }}>
-              Generate device certificates and attach to the Thing:
-            </Box>
-            <Box padding="s" color="text-body-secondary">
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px' }}>
-                {`aws iot create-keys-and-certificate \\
-  --set-as-active \\
-  --certificate-pem-outfile device.cert.pem \\
-  --public-key-outfile device.public.key \\
-  --private-key-outfile device.private.key
-
-aws iot attach-thing-principal \\
-  --thing-name my-edge-device-001 \\
-  --principal <certificate-arn>`}
-              </pre>
-            </Box>
-          </Box>
-
-          <Box>
-            <Box variant="h3" padding={{ bottom: 's' }}>
-              Step 3: Install AWS IoT Greengrass
-            </Box>
-            <Box variant="p" padding={{ bottom: 's' }}>
-              Install Greengrass Core on the edge device:
-            </Box>
-            <Box padding="s" color="text-body-secondary">
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px' }}>
-                {`# Download Greengrass Core software
-curl -s https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-nucleus-latest.zip > greengrass-nucleus-latest.zip
-unzip greengrass-nucleus-latest.zip -d GreengrassInstaller
-
-# Install with device certificates
-sudo -E java -Droot="/greengrass/v2" \\
-  -Dlog.store=FILE \\
-  -jar ./GreengrassInstaller/lib/Greengrass.jar \\
-  --aws-region us-east-1 \\
-  --thing-name my-edge-device-001 \\
-  --component-default-user ggc_user:ggc_group \\
-  --provision false \\
-  --deploy-dev-tools true`}
-              </pre>
-            </Box>
-          </Box>
-
-          <Box>
-            <Box variant="h3" padding={{ bottom: 's' }}>
-              Step 4: Verify Device Registration
+              Prerequisites
             </Box>
             <Box variant="p">
-              Once Greengrass is running, the device will automatically appear in the portal's
-              device inventory. The portal syncs device information from IoT Core Thing Registry
-              and Thing Shadows.
+              Before running the setup script, ensure:
+            </Box>
+            <ul>
+              <li>AWS CLI is configured with appropriate credentials</li>
+              <li>The device has Ubuntu 18.04+ or compatible Linux distribution</li>
+              <li>Root/sudo access is available on the device</li>
+            </ul>
+          </Box>
+
+          <Box>
+            <Box variant="h3" padding={{ bottom: 's' }}>
+              Run Setup Script
+            </Box>
+            <Box variant="p" padding={{ bottom: 's' }}>
+              Copy the setup script to your device and run:
+            </Box>
+            <Box padding="s" color="text-body-secondary">
+              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px' }}>
+                {`# Copy the station_install folder to your device
+scp -r station_install/ user@device:/tmp/
+
+# SSH to the device and run setup
+ssh user@device
+cd /tmp/station_install
+sudo ./setup_station.sh us-east-1 my-device-name`}
+              </pre>
+            </Box>
+          </Box>
+
+          <Box>
+            <Box variant="h3" padding={{ bottom: 's' }}>
+              What the Script Does
+            </Box>
+            <ul>
+              <li>Installs Python 3.9, Java, Docker, and other dependencies</li>
+              <li>Downloads and installs AWS IoT Greengrass Core v2</li>
+              <li>Creates an IoT Thing and provisions certificates</li>
+              <li>Tags the IoT Thing with <code>dda-portal:managed=true</code> for portal discovery</li>
+              <li>Sets up required users, groups, and permissions</li>
+            </ul>
+          </Box>
+
+          <Box>
+            <Box variant="h3" padding={{ bottom: 's' }}>
+              After Setup
+            </Box>
+            <Box variant="p">
+              Once the script completes successfully, the device will automatically appear in this 
+              portal within a few minutes. The device status will show as "Healthy" once Greengrass 
+              is running and connected.
             </Box>
           </Box>
 
           <Alert type="warning">
-            <Box variant="strong">Important:</Box> Ensure the device has the proper IAM policies
-            attached to access S3, IoT Core, and Greengrass services in the use case account.
+            <Box variant="strong">For Existing Devices:</Box> If you have devices that were set up 
+            before the portal tagging feature, you can manually tag them:
+            <Box padding="s" color="text-body-secondary">
+              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px' }}>
+{`aws iot tag-resource \\
+  --resource-arn arn:aws:iot:REGION:ACCOUNT:thing/THING_NAME \\
+  --tags "Key=dda-portal:managed,Value=true"`}
+              </pre>
+            </Box>
           </Alert>
         </SpaceBetween>
       </Modal>
