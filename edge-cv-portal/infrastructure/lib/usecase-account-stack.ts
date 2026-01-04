@@ -337,6 +337,22 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
+    // Greengrass Core Devices
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'GreengrassCoreDevices',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'greengrass:ListCoreDevices',
+          'greengrass:GetCoreDevice',
+          'greengrass:ListInstalledComponents',
+          'greengrass:ListEffectiveDeployments',
+          'greengrass:ListTagsForResource',
+        ],
+        resources: ['*'],
+      })
+    );
+
     // IoT Things
     this.role.addToPolicy(
       new iam.PolicyStatement({
@@ -347,6 +363,7 @@ export class UseCaseAccountStack extends cdk.Stack {
           'iot:ListThings',
           'iot:UpdateThing',
           'iot:ListThingGroupsForThing',
+          'iot:ListTagsForResource',
         ],
         resources: [`arn:aws:iot:*:${this.account}:thing/*`],
       })

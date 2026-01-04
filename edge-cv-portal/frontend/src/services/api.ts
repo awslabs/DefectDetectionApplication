@@ -169,13 +169,18 @@ class ApiService {
   }
 
   // Device endpoints
-  async listDevices(usecaseId?: string): Promise<{ devices: Device[]; count: number }> {
-    const query = usecaseId ? `?usecase_id=${usecaseId}` : '';
-    return this.request<{ devices: Device[]; count: number }>(`/devices${query}`);
+  async listDevices(usecaseId: string): Promise<{ devices: Device[]; count: number }> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<{ devices: Device[]; count: number }>(`/devices?usecase_id=${usecaseId}`);
   }
 
-  async getDevice(id: string): Promise<{ device: Device }> {
-    return this.request<{ device: Device }>(`/devices/${id}`);
+  async getDevice(id: string, usecaseId: string): Promise<{ device: Device }> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<{ device: Device }>(`/devices/${id}?usecase_id=${usecaseId}`);
   }
 
   // Training endpoints

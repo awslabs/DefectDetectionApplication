@@ -243,6 +243,16 @@ java -jar ./GreengrassInstaller/lib/Greengrass.jar --version
 # If it fails with "The role with name GreengrassV2TokenExchangeRole cannot be found", rerun the command
 java -Droot="/aws_dda/greengrass/v2" -Dlog.store=FILE   -jar ./GreengrassInstaller/lib/Greengrass.jar   --aws-region ${aws_region}   --thing-name ${thing_name} --thing-group-name DDA_transition_EC2_Group   --thing-policy-name GreengrassV2IoTThingPolicy   --tes-role-name GreengrassV2TokenExchangeRole   --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias   --component-default-user ggc_user:ggc_group   --setup-system-service true --provision true
 
+# Tag the IoT Thing for portal discovery
+echo "Tagging IoT Thing for portal discovery..."
+thing_arn=$(aws iot describe-thing --thing-name ${thing_name} --region ${aws_region} --query 'thingArn' --output text 2>/dev/null || echo "")
+if [ -n "$thing_arn" ]; then
+    aws iot tag-resource --resource-arn "$thing_arn" --tags "Key=dda-portal:managed,Value=true" --region ${aws_region} || echo "Warning: Failed to tag thing"
+    echo "IoT Thing tagged with dda-portal:managed=true"
+else
+    echo "Warning: Could not get thing ARN for tagging"
+fi
+
 # Add ggc_user to a group that allows access to GPU and driver
 usermod -aG video ggc_user
 usermod -aG dda_system_group ggc_user

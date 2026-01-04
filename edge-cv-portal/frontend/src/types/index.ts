@@ -34,16 +34,49 @@ export interface Device {
   device_id: string;
   usecase_id: string;
   thing_name: string;
-  status: 'online' | 'offline' | 'error';
-  last_heartbeat: number;
-  components: ComponentInfo[];
+  thing_arn?: string;
+  thing_type?: string;
+  status: string;
+  last_status_update?: string;
+  last_heartbeat?: number;
+  greengrass_version?: string;
+  platform?: string;
+  architecture?: string;
+  attributes?: Record<string, string>;
+  tags?: Record<string, string>;
+  installed_components?: InstalledComponent[];
+  deployments?: DeviceDeployment[];
+  // Legacy fields for backward compatibility
+  components?: ComponentInfo[];
   storage_used?: number;
   storage_total?: number;
   camera_status?: string;
-  greengrass_version?: string;
   metadata?: Record<string, any>;
-  created_at: number;
-  updated_at: number;
+  created_at?: number;
+  updated_at?: number;
+}
+
+export interface InstalledComponent {
+  componentName: string;
+  componentVersion: string;
+  lifecycleState: string;
+  lifecycleStateDetails?: string;
+  isRoot: boolean;
+  lastStatusChangeTimestamp?: string;
+  lastInstallationSource?: string;
+  lastReportedTimestamp?: string;
+}
+
+export interface DeviceDeployment {
+  deploymentId: string;
+  deploymentName?: string;
+  iotJobId?: string;
+  iotJobArn?: string;
+  targetArn?: string;
+  coreDeviceExecutionStatus: string;
+  reason?: string;
+  creationTimestamp?: string;
+  modifiedTimestamp?: string;
 }
 
 export interface ComponentInfo {

@@ -43,7 +43,7 @@ new UseCaseAccountStack(app, 'DDAPortalUseCaseAccountStack', {
   portalAccountId,
   externalId,
   s3BucketPrefix,
-  description: 'IAM role for Defect Detection Application (DDA) to access UseCase Account resources',
+  description: 'IAM role for DDA Portal to access UseCase Account resources (v2 - with device management)',
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: process.env.CDK_DEFAULT_REGION,

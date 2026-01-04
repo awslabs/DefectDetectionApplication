@@ -58,6 +58,25 @@ Complete guide for deploying, configuring, and managing the Defect Detection App
 
 **Flexibility**: All three can be the same AWS account for simple deployments, or separate accounts for enterprise isolation.
 
+### Resource Scoping Model
+
+The portal uses two different scoping models depending on where data is stored:
+
+| Resource Type | Storage | Scoping | Notes |
+|---------------|---------|---------|-------|
+| Training Jobs | Portal DynamoDB | Per UseCase ID | Strictly isolated by `usecase_id` |
+| Labeling Jobs | Portal DynamoDB | Per UseCase ID | Strictly isolated by `usecase_id` |
+| Pre-labeled Datasets | Portal DynamoDB | Per UseCase ID | Strictly isolated by `usecase_id` |
+| S3 Buckets | UseCase/Data Account | Per AWS Account | All buckets tagged `dda-portal:managed=true` |
+| Greengrass Components | UseCase Account | Per AWS Account | All components tagged `dda-portal:managed=true` |
+| IoT Devices | UseCase Account | Per AWS Account | All devices tagged `dda-portal:managed=true` |
+
+**Important**: For AWS resources (S3, Components, Devices), selecting a UseCase in the portal determines which AWS account to query via cross-account role. All portal-managed resources in that account will be visible.
+
+**Recommendation**: Use **one UseCase per AWS account** for clear resource isolation. If you need multiple use cases, use separate AWS accounts.
+
+> **Future Enhancement**: UseCase-level isolation for AWS resources can be added by filtering on `dda-portal:usecase-id` tag. Components already include this tag; devices and buckets would need to be updated.
+
 ---
 
 ## Initial Portal Deployment
@@ -410,9 +429,33 @@ aws dynamodb update-item \
 - Deploy to edge devices
 
 ### Device Management
-- Register IoT Greengrass devices
-- Monitor device status and health
-- View deployed components
+- View portal-managed Greengrass core devices (tagged `dda-portal:managed=true`)
+- Monitor device status, installed components, and deployments
+- Devices must be set up using `setup_station.sh` script
+
+### Device Setup
+
+Devices are registered using the `setup_station.sh` script in the `station_install/` folder. This script:
+- Installs Python 3.9, Java, Docker, and dependencies
+- Downloads and installs AWS IoT Greengrass Core v2
+- Creates an IoT Thing and provisions certificates
+- Tags the IoT Thing with `dda-portal:managed=true` for portal discovery
+
+**Setup Command:**
+```bash
+cd station_install
+sudo ./setup_station.sh <aws-region> <thing-name>
+
+# Example:
+sudo ./setup_station.sh us-east-1 manufacturing-line-1-device
+```
+
+**For Existing Devices** (set up before portal tagging):
+```bash
+aws iot tag-resource \
+  --resource-arn arn:aws:iot:REGION:ACCOUNT:thing/THING_NAME \
+  --tags "Key=dda-portal:managed,Value=true"
+```
 
 ### Deployments
 - Create Greengrass deployments
@@ -453,6 +496,20 @@ aws dynamodb update-item \
 **Cause**: Components not tagged with `dda-portal:managed=true`.
 
 **Fix**: Only components created through the portal are shown. Create a new component via the training → compilation workflow.
+
+### Devices Not Showing
+
+**Cause**: Devices not tagged with `dda-portal:managed=true` or not set up via `setup_station.sh`.
+
+**Fix**: 
+1. Ensure the device was set up using `setup_station.sh` (which auto-tags)
+2. For existing devices, manually tag them:
+```bash
+aws iot tag-resource \
+  --resource-arn arn:aws:iot:REGION:ACCOUNT:thing/THING_NAME \
+  --tags "Key=dda-portal:managed,Value=true"
+```
+3. Verify the device is a Greengrass Core Device (not just an IoT Thing)
 
 ### S3 Buckets Not Showing
 
