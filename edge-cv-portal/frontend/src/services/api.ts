@@ -654,6 +654,81 @@ class ApiService {
     });
   }
 
+  // Deployment endpoints
+  async listDeployments(usecaseId: string): Promise<{
+    deployments: Array<{
+      deployment_id: string;
+      deployment_name: string;
+      target_arn: string;
+      revision_id: string;
+      deployment_status: string;
+      is_latest_for_target: boolean;
+      creation_timestamp: string;
+      usecase_id: string;
+    }>;
+    count: number;
+  }> {
+    return this.request(`/deployments?usecase_id=${usecaseId}`);
+  }
+
+  async getDeployment(deploymentId: string, usecaseId: string): Promise<{
+    deployment: {
+      deployment_id: string;
+      deployment_name: string;
+      target_arn: string;
+      revision_id: string;
+      deployment_status: string;
+      iot_job_id: string;
+      iot_job_arn: string;
+      is_latest_for_target: boolean;
+      creation_timestamp: string;
+      components: Array<{
+        component_name: string;
+        component_version: string;
+        configuration_update: Record<string, unknown>;
+      }>;
+      deployment_policies: Record<string, unknown>;
+      tags: Record<string, string>;
+      usecase_id: string;
+    };
+  }> {
+    return this.request(`/deployments/${deploymentId}?usecase_id=${usecaseId}`);
+  }
+
+  async createDeployment(data: {
+    usecase_id: string;
+    deployment_name?: string;
+    components: Array<{
+      component_name: string;
+      component_version: string;
+    }>;
+    target_devices?: string[];
+    target_thing_group?: string;
+    rollout_config?: {
+      auto_rollback?: boolean;
+      timeout_seconds?: number;
+    };
+  }): Promise<{
+    deployment_id: string;
+    iot_job_id: string;
+    iot_job_arn: string;
+    message: string;
+  }> {
+    return this.request('/deployments', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async cancelDeployment(deploymentId: string, usecaseId: string): Promise<{
+    message: string;
+    deployment_id: string;
+  }> {
+    return this.request(`/deployments/${deploymentId}?usecase_id=${usecaseId}`, {
+      method: 'DELETE',
+    });
+  }
+
   async createDeploymentFromComponent(data: {
     usecase_id: string;
     component_arn: string;
@@ -680,10 +755,15 @@ class ApiService {
   async listDataBuckets(usecaseId: string): Promise<{
     buckets: Array<{
       name: string;
-      creation_date: string;
+      creation_date?: string;
       region: string;
+      tags?: Record<string, string>;
+      is_configured?: boolean;
     }>;
     current_data_bucket: string | null;
+    target_account?: string;
+    has_data_account_role?: boolean;
+    message?: string;
   }> {
     return this.request(`/usecases/${usecaseId}/data/buckets`);
   }

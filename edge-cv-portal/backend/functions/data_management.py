@@ -181,6 +181,15 @@ def list_buckets(event: Dict) -> Dict:
         # Get usecase details
         usecase = get_usecase(usecase_id)
         
+        # Log which account we're querying for debugging
+        data_role_arn = usecase.get('data_account_role_arn')
+        if data_role_arn:
+            target_account = data_role_arn.split(':')[4]
+            logger.info(f"Querying Data Account {target_account} using data_account_role_arn")
+        else:
+            target_account = usecase.get('cross_account_role_arn', '').split(':')[4] if usecase.get('cross_account_role_arn') else 'unknown'
+            logger.info(f"No data_account_role_arn configured, falling back to UseCase Account {target_account}")
+        
         # Get credentials and create resource tagging client
         credentials = get_data_account_credentials(usecase)
         
@@ -254,13 +263,15 @@ def list_buckets(event: Dict) -> Dict:
         
         log_audit_event(
             user_id, 'list_buckets', 'data_management', usecase_id,
-            'success', {'bucket_count': len(buckets)}
+            'success', {'bucket_count': len(buckets), 'target_account': target_account}
         )
         
         return create_response(200, {
             'buckets': buckets,
             'current_data_bucket': current_bucket,
-            'message': 'Only showing buckets tagged with dda-portal:managed=true'
+            'target_account': target_account,
+            'has_data_account_role': bool(data_role_arn),
+            'message': f"Querying account {target_account}. Only showing buckets tagged with dda-portal:managed=true"
         })
         
     except ClientError as e:

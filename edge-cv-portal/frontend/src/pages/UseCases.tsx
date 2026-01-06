@@ -25,6 +25,12 @@ interface FormData {
   s3_prefix?: string;
   cross_account_role_arn: string;
   cost_center?: string;
+  // Data Account fields
+  data_account_id?: string;
+  data_account_role_arn?: string;
+  data_account_external_id?: string;
+  data_s3_bucket?: string;
+  data_s3_prefix?: string;
 }
 
 export default function UseCases() {
@@ -102,6 +108,11 @@ export default function UseCases() {
       s3_prefix: '',
       cross_account_role_arn: '',
       cost_center: '',
+      data_account_id: '',
+      data_account_role_arn: '',
+      data_account_external_id: '',
+      data_s3_bucket: '',
+      data_s3_prefix: '',
     });
     setError('');
     setSelectedUseCase(null);
@@ -124,6 +135,11 @@ export default function UseCases() {
       s3_prefix: useCase.s3_prefix || '',
       cross_account_role_arn: useCase.cross_account_role_arn,
       cost_center: useCase.cost_center || '',
+      data_account_id: useCase.data_account_id || '',
+      data_account_role_arn: useCase.data_account_role_arn || '',
+      data_account_external_id: useCase.data_account_external_id || '',
+      data_s3_bucket: useCase.data_s3_bucket || '',
+      data_s3_prefix: useCase.data_s3_prefix || '',
     });
     setShowEditModal(true);
   };
@@ -372,6 +388,7 @@ export default function UseCases() {
           resetForm();
         }}
         header="Edit Use Case"
+        size="large"
         footer={
           <Box float="right">
             <SpaceBetween direction="horizontal" size="xs">
@@ -465,6 +482,72 @@ export default function UseCases() {
               value={formData.cost_center || ''}
               onChange={({ detail }) => setFormData({ ...formData, cost_center: detail.value })}
               placeholder="CC-12345"
+            />
+          </FormField>
+
+          <Header variant="h3">Data Account Configuration (Optional)</Header>
+          <Alert type="info">
+            Configure a separate Data Account if your training data is stored in a different AWS account than your UseCase account.
+          </Alert>
+
+          <FormField
+            label="Data Account ID"
+            description="AWS Account ID where training data is stored"
+            stretch
+          >
+            <Input
+              value={formData.data_account_id || ''}
+              onChange={({ detail }) => setFormData({ ...formData, data_account_id: detail.value })}
+              placeholder="987654321098"
+            />
+          </FormField>
+
+          <FormField
+            label="Data Account Role ARN"
+            description="IAM role ARN in the Data Account for accessing S3 buckets"
+            stretch
+          >
+            <Input
+              value={formData.data_account_role_arn || ''}
+              onChange={({ detail }) => setFormData({ ...formData, data_account_role_arn: detail.value })}
+              placeholder="arn:aws:iam::987654321098:role/DDAPortalDataAccessRole"
+            />
+          </FormField>
+
+          <FormField
+            label="Data Account External ID"
+            description="External ID for assuming the Data Account role"
+            stretch
+          >
+            <Input
+              value={formData.data_account_external_id || ''}
+              onChange={({ detail }) => setFormData({ ...formData, data_account_external_id: detail.value })}
+              placeholder="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+              type="password"
+            />
+          </FormField>
+
+          <FormField
+            label="Data S3 Bucket (Optional)"
+            description="Default S3 bucket in the Data Account"
+            stretch
+          >
+            <Input
+              value={formData.data_s3_bucket || ''}
+              onChange={({ detail }) => setFormData({ ...formData, data_s3_bucket: detail.value })}
+              placeholder="my-data-bucket"
+            />
+          </FormField>
+
+          <FormField
+            label="Data S3 Prefix (Optional)"
+            description="S3 prefix within the data bucket"
+            stretch
+          >
+            <Input
+              value={formData.data_s3_prefix || ''}
+              onChange={({ detail }) => setFormData({ ...formData, data_s3_prefix: detail.value })}
+              placeholder="datasets/"
             />
           </FormField>
         </SpaceBetween>

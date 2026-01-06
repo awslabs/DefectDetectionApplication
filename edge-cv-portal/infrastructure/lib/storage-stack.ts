@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 
 export class StorageStack extends cdk.Stack {
@@ -14,6 +15,8 @@ export class StorageStack extends cdk.Stack {
   public readonly deploymentsTable: dynamodb.Table;
   public readonly settingsTable: dynamodb.Table;
   public readonly componentsTable: dynamodb.Table;
+  public readonly sharedComponentsTable: dynamodb.Table;
+  public readonly portalArtifactsBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -397,6 +400,39 @@ export class StorageStack extends cdk.Stack {
       },
     });
 
+    // SharedComponents Table - tracks components shared from portal to usecase accounts
+    this.sharedComponentsTable = new dynamodb.Table(this, 'SharedComponentsTable', {
+      tableName: 'dda-portal-shared-components',
+      partitionKey: {
+        name: 'usecase_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'component_name',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Portal Artifacts Bucket - stores shared component artifacts (dda-LocalServer)
+    // Cross-account access is handled via IAM policies in usecase accounts
+    this.portalArtifactsBucket = new s3.Bucket(this, 'PortalArtifactsBucket', {
+      bucketName: `dda-portal-artifacts-${this.account}-${this.region}`,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      versioned: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    
+    // Note: Cross-account access for Greengrass devices is granted via:
+    // 1. IAM policy created in usecase accounts (DDAPortalSharedComponentsAccess)
+    // 2. The policy grants s3:GetObject on this bucket's shared-components/* prefix
+    // 3. This is done during usecase onboarding in shared_components.py
+
     // Outputs
     new cdk.CfnOutput(this, 'UseCasesTableName', {
       value: this.useCasesTable.tableName,
@@ -451,6 +487,21 @@ export class StorageStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ComponentsTableName', {
       value: this.componentsTable.tableName,
       description: 'Components DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'SharedComponentsTableName', {
+      value: this.sharedComponentsTable.tableName,
+      description: 'SharedComponents DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'PortalArtifactsBucketName', {
+      value: this.portalArtifactsBucket.bucketName,
+      description: 'Portal Artifacts S3 Bucket Name for shared components',
+    });
+
+    new cdk.CfnOutput(this, 'PortalArtifactsBucketArn', {
+      value: this.portalArtifactsBucket.bucketArn,
+      description: 'Portal Artifacts S3 Bucket ARN',
     });
   }
 }
