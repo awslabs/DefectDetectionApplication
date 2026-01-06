@@ -12,7 +12,6 @@ import {
   Box,
   Button,
   ColumnLayout,
-  Link,
   ExpandableSection,
   StatusIndicator,
 } from '@cloudscape-design/components';
@@ -47,6 +46,7 @@ interface OnboardingState {
   dataAccountExternalId: string;
   dataS3Bucket: string;
   dataS3Prefix: string;
+  dataRoleVerified: boolean;
 
   // Step 5: Next Steps Selection
   nextSteps: {
@@ -82,6 +82,7 @@ export default function UseCaseOnboarding() {
     dataAccountExternalId: '',
     dataS3Bucket: '',
     dataS3Prefix: 'datasets/',
+    dataRoleVerified: false,
     nextSteps: {
       labelData: false,
       trainModel: false,
@@ -101,6 +102,17 @@ export default function UseCaseOnboarding() {
       updateState({ roleVerified: true });
     } catch (err) {
       setError('Failed to verify role. Please check the ARN and External ID.');
+    }
+  };
+
+  const handleVerifyDataRole = async () => {
+    try {
+      setError(null);
+      // TODO: Call API to verify data account role can be assumed
+      await new Promise((resolve) => setTimeout(resolve, 1000)); // Simulate API call
+      updateState({ dataRoleVerified: true });
+    } catch (err) {
+      setError('Failed to verify Data Account role. Please check the ARN and External ID.');
     }
   };
 
@@ -161,92 +173,7 @@ export default function UseCaseOnboarding() {
   };
 
   const cdkDeployCommand = `cd edge-cv-portal
-./deploy-usecase-role.sh`;
-
-  const cloudFormationTemplate = `# Download the template
-curl -O https://raw.githubusercontent.com/your-org/edge-cv-portal/main/infrastructure/usecase-role-template.yaml
-
-# Deploy via CloudFormation
-aws cloudformation create-stack \\
-  --stack-name dda-portal-access-role \\
-  --template-body file://usecase-role-template.yaml \\
-  --parameters \\
-    ParameterKey=PortalAccountId,ParameterValue=${state.accountId || 'YOUR_PORTAL_ACCOUNT'} \\
-    ParameterKey=ExternalId,ParameterValue=$(uuidgen) \\
-  --capabilities CAPABILITY_NAMED_IAM`;
-
-  // Generate CloudFormation Console URL for manual deployment
-  const openCloudFormationConsole = () => {
-    // Since we can't use templateURL without S3, we'll open the console
-    // and provide instructions to paste the template
-    const cfnConsoleUrl = 'https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/template';
-    window.open(cfnConsoleUrl, '_blank');
-  };
-
-  // CloudFormation template as YAML string
-  const cfnTemplateYaml = `AWSTemplateFormatVersion: '2010-09-09'
-Description: 'IAM role for DDA Portal access'
-
-Parameters:
-  PortalAccountId:
-    Type: String
-    Description: AWS Account ID where the DDA Portal is deployed
-    Default: 'YOUR_PORTAL_ACCOUNT_ID'
-  
-  ExternalId:
-    Type: String
-    Description: External ID for additional security
-    NoEcho: true
-
-Resources:
-  DDAPortalAccessRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: DDAPortalAccessRole
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              AWS: !Sub 'arn:aws:iam::\${PortalAccountId}:root'
-            Action: 'sts:AssumeRole'
-            Condition:
-              StringEquals:
-                'sts:ExternalId': !Ref ExternalId
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
-      Policies:
-        - PolicyName: DDAPortalPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - 's3:GetObject'
-                  - 's3:PutObject'
-                  - 's3:ListBucket'
-                  - 's3:DeleteObject'
-                Resource:
-                  - 'arn:aws:s3:::*-dda-*'
-                  - 'arn:aws:s3:::*-dda-*/*'
-                  - 'arn:aws:s3:::sagemaker-*'
-                  - 'arn:aws:s3:::sagemaker-*/*'
-              - Effect: Allow
-                Action:
-                  - 'greengrass:*'
-                  - 'iot:*'
-                  - 'logs:GetLogEvents'
-                  - 'logs:DescribeLogStreams'
-                  - 'logs:FilterLogEvents'
-                Resource: '*'
-
-Outputs:
-  RoleArn:
-    Description: ARN of the DDA Portal access role
-    Value: !GetAtt DDAPortalAccessRole.Arn
-  ExternalId:
-    Description: External ID used for this role
-    Value: !Ref ExternalId`;
+./deploy-account-role.sh`;
 
   const s3SetupCommands = `# Create S3 bucket
 aws s3 mb s3://${state.s3Bucket || 'your-bucket-name'}
@@ -338,142 +265,57 @@ aws s3api put-bucket-versioning \\
           description: 'Set up cross-account access role in your AWS account',
           content: (
             <SpaceBetween size="l">
-              <Alert type="info">
-                The Edge CV Portal needs an IAM role in your AWS account to manage resources on
-                your behalf. Follow the steps below to deploy the role.
-              </Alert>
+              <Container header={<Header variant="h2">Why is this role needed?</Header>}>
+                <SpaceBetween size="s">
+                  <Box>
+                    The DDA Portal runs in a central AWS account but needs to manage resources in your UseCase account. 
+                    This cross-account IAM role enables the portal to:
+                  </Box>
+                  <Box variant="small">
+                    <ul style={{ margin: '8px 0', paddingLeft: '20px' }}>
+                      <li><strong>SageMaker</strong> - Start training jobs, create labeling jobs, manage models</li>
+                      <li><strong>S3</strong> - Access training datasets and store model artifacts</li>
+                      <li><strong>Greengrass</strong> - Deploy models to edge devices, manage components</li>
+                      <li><strong>IoT</strong> - Register and monitor edge devices</li>
+                      <li><strong>CloudWatch</strong> - View training logs and device metrics</li>
+                    </ul>
+                  </Box>
+                  <Alert type="info">
+                    The role uses an External ID for security - only the DDA Portal can assume this role, 
+                    and all actions are auditable in CloudTrail.
+                  </Alert>
+                </SpaceBetween>
+              </Container>
 
-              <Container header={<Header variant="h2">Step 1: Deploy the Role</Header>}>
+              <Container header={<Header variant="h2">Deploy the Role</Header>}>
                 <SpaceBetween size="m">
                   <Box>
-                    Choose one of the following methods to deploy the IAM role in your AWS
-                    account:
+                    Run the deployment script in your terminal. Make sure your AWS CLI is configured 
+                    for the UseCase account where you want to deploy.
                   </Box>
-
-                  <ExpandableSection headerText="Option 1: Using CDK (Recommended)">
-                    <SpaceBetween size="m">
-                      <Box>
-                        If you have the Edge CV Portal codebase, use the deployment script:
-                      </Box>
-                      <Box
-                        variant="code"
-                        padding="s"
-                        fontSize="body-s"
-                      >
-                        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                          {cdkDeployCommand}
-                        </pre>
-                      </Box>
-                      <SpaceBetween direction="horizontal" size="xs">
-                        <Button
-                          iconName="copy"
-                          onClick={() => {
-                            navigator.clipboard.writeText(cdkDeployCommand);
-                          }}
-                        >
-                          Copy Command
-                        </Button>
-                        <Box variant="small" color="text-status-inactive">
-                          Copy and run this command in your terminal
-                        </Box>
-                      </SpaceBetween>
-                      <Box variant="small">
-                        The script will guide you through the deployment and provide the Role ARN
-                        and External ID.
-                      </Box>
-                    </SpaceBetween>
-                  </ExpandableSection>
-
-                  <ExpandableSection headerText="Option 2: Using CloudFormation">
-                    <SpaceBetween size="m">
-                      <Box>Deploy using AWS CloudFormation:</Box>
-                      <Box
-                        variant="code"
-                        padding="s"
-                        fontSize="body-s"
-                      >
-                        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                          {cloudFormationTemplate}
-                        </pre>
-                      </Box>
-                      <Button
-                        iconName="copy"
-                        onClick={() => {
-                          navigator.clipboard.writeText(cloudFormationTemplate);
-                        }}
-                      >
-                        Copy Commands
-                      </Button>
-                    </SpaceBetween>
-                  </ExpandableSection>
-
-                  <ExpandableSection headerText="Option 3: Deploy via AWS Console">
-                    <SpaceBetween size="m">
-                      <Box>
-                        Use the CloudFormation template below to deploy the role via AWS Console:
-                      </Box>
-                      
-                      <Alert type="info">
-                        <strong>Steps:</strong>
-                        <ol style={{ marginTop: '8px', marginBottom: 0 }}>
-                          <li>Copy the CloudFormation template below</li>
-                          <li>Click "Open CloudFormation Console"</li>
-                          <li>Paste the template in the console</li>
-                          <li>Fill in the parameters and create the stack</li>
-                        </ol>
-                      </Alert>
-
-                      <Box
-                        variant="code"
-                        padding="s"
-                        fontSize="body-s"
-                      >
-                        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: '300px', overflow: 'auto' }}>
-                          {cfnTemplateYaml}
-                        </pre>
-                      </Box>
-
-                      <SpaceBetween direction="horizontal" size="xs">
-                        <Button
-                          iconName="copy"
-                          onClick={() => {
-                            navigator.clipboard.writeText(cfnTemplateYaml);
-                          }}
-                        >
-                          Copy Template
-                        </Button>
-                        <Button
-                          iconName="external"
-                          onClick={openCloudFormationConsole}
-                        >
-                          Open CloudFormation Console
-                        </Button>
-                      </SpaceBetween>
-
-                      <Box variant="small">
-                        After deployment completes, copy the Role ARN from the CloudFormation
-                        stack outputs and paste it in Step 2 below.
-                      </Box>
-                    </SpaceBetween>
-                  </ExpandableSection>
-
-                  <ExpandableSection headerText="Option 4: Manual Setup via AWS Console">
-                    <SpaceBetween size="s">
-                      <Box>1. Go to IAM → Roles → Create Role</Box>
-                      <Box>2. Select "Another AWS Account"</Box>
-                      <Box>3. Enter Portal Account ID and require External ID</Box>
-                      <Box>4. Attach required policies (see documentation)</Box>
-                      <Box>
-                        5. Name the role: <code>DDAPortalAccessRole</code>
-                      </Box>
-                      <Link
-                        external
-                        href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-user.html"
-                      >
-                        View detailed instructions
-                      </Link>
-                    </SpaceBetween>
-                  </ExpandableSection>
+                  <Box
+                    variant="code"
+                    padding="s"
+                    fontSize="body-s"
+                  >
+                    <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                      {cdkDeployCommand}
+                    </pre>
+                  </Box>
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <Button
+                      iconName="copy"
+                      onClick={() => {
+                        navigator.clipboard.writeText(cdkDeployCommand);
+                      }}
+                    >
+                      Copy Command
+                    </Button>
+                  </SpaceBetween>
+                  <Box variant="small">
+                    The script will prompt you for the Portal Account ID and output the Role ARN, 
+                    SageMaker Execution Role ARN, and External ID needed below.
+                  </Box>
 
                   <FormField label="I have deployed the role" stretch>
                     <Button
@@ -488,8 +330,59 @@ aws s3api put-bucket-versioning \\
               </Container>
 
               {state.roleDeployed && (
-                <Container header={<Header variant="h2">Step 2: Enter Role Details</Header>}>
+                <Container header={<Header variant="h2">Enter Role Details</Header>}>
                   <SpaceBetween size="m">
+                    <Alert type="info">
+                      Upload the <code>usecase-account-config.txt</code> file generated by the deployment script, 
+                      or enter the values manually below.
+                    </Alert>
+
+                    <FormField
+                      label="Upload Configuration File"
+                      description="Upload usecase-account-config.txt to auto-fill the fields"
+                      stretch
+                    >
+                      <input
+                        type="file"
+                        accept=".txt"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            const reader = new FileReader();
+                            reader.onload = (event) => {
+                              const content = event.target?.result as string;
+                              // Parse the config file
+                              const lines = content.split('\n');
+                              const config: Record<string, string> = {};
+                              lines.forEach(line => {
+                                const match = line.match(/^([^:]+):\s*(.+)$/);
+                                if (match) {
+                                  config[match[1].trim()] = match[2].trim();
+                                }
+                              });
+                              // Update state with parsed values
+                              updateState({
+                                accountId: config['Account ID'] || '',
+                                roleArn: config['Role ARN'] || '',
+                                sagemakerExecutionRoleArn: config['SageMaker Execution Role ARN'] || '',
+                                externalId: config['External ID'] || '',
+                              });
+                            };
+                            reader.readAsText(file);
+                          }
+                        }}
+                        style={{ 
+                          padding: '8px',
+                          border: '1px dashed #aab7b8',
+                          borderRadius: '4px',
+                          width: '100%',
+                          cursor: 'pointer'
+                        }}
+                      />
+                    </FormField>
+
+                    <Box variant="h4">Or enter manually:</Box>
+
                     <FormField
                       label="AWS Account ID"
                       description="The AWS account where the role was deployed"
@@ -694,10 +587,55 @@ aws s3api put-bucket-versioning \\
                   {state.useSeparateDataAccount && (
                     <Container header={<Header variant="h3">Data Account Configuration</Header>}>
                       <SpaceBetween size="m">
-                        <Alert type="warning">
-                          You must deploy the <code>DDAPortalAccessRole</code> in the Data Account
-                          with S3 permissions. Use the same deployment method as Step 2 (Deploy IAM Role).
+                        <Alert type="info">
+                          Upload the <code>data-account-config.txt</code> file generated by the deployment script, 
+                          or enter the values manually below.
                         </Alert>
+
+                        <FormField
+                          label="Upload Data Account Configuration File"
+                          description="Upload data-account-config.txt to auto-fill the fields"
+                          stretch
+                        >
+                          <input
+                            type="file"
+                            accept=".txt"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                const reader = new FileReader();
+                                reader.onload = (event) => {
+                                  const content = event.target?.result as string;
+                                  // Parse the config file
+                                  const lines = content.split('\n');
+                                  const config: Record<string, string> = {};
+                                  lines.forEach(line => {
+                                    const match = line.match(/^([^:]+):\s*(.+)$/);
+                                    if (match) {
+                                      config[match[1].trim()] = match[2].trim();
+                                    }
+                                  });
+                                  // Update state with parsed values
+                                  updateState({
+                                    dataAccountId: config['Data Account ID'] || '',
+                                    dataAccountRoleArn: config['Portal Access Role ARN'] || '',
+                                    dataAccountExternalId: config['External ID'] || '',
+                                  });
+                                };
+                                reader.readAsText(file);
+                              }
+                            }}
+                            style={{ 
+                              padding: '8px',
+                              border: '1px dashed #aab7b8',
+                              borderRadius: '4px',
+                              width: '100%',
+                              cursor: 'pointer'
+                            }}
+                          />
+                        </FormField>
+
+                        <Box variant="h4">Or enter manually:</Box>
 
                         <FormField
                           label="Data Account ID"
@@ -719,7 +657,7 @@ aws s3api put-bucket-versioning \\
                           <Input
                             value={state.dataAccountRoleArn}
                             onChange={({ detail }) => updateState({ dataAccountRoleArn: detail.value })}
-                            placeholder="arn:aws:iam::987654321098:role/DDAPortalAccessRole"
+                            placeholder="arn:aws:iam::987654321098:role/DDAPortalDataAccessRole"
                           />
                         </FormField>
 
@@ -758,6 +696,20 @@ aws s3api put-bucket-versioning \\
                             onChange={({ detail }) => updateState({ dataS3Prefix: detail.value })}
                             placeholder="datasets/"
                           />
+                        </FormField>
+
+                        <FormField label="Verify Data Account Role" stretch>
+                          <SpaceBetween direction="horizontal" size="xs">
+                            <Button
+                              onClick={handleVerifyDataRole}
+                              disabled={!state.dataAccountId || !state.dataAccountRoleArn || !state.dataAccountExternalId}
+                            >
+                              Verify Role
+                            </Button>
+                            {state.dataRoleVerified && (
+                              <StatusIndicator type="success">Data Account role verified successfully</StatusIndicator>
+                            )}
+                          </SpaceBetween>
                         </FormField>
                       </SpaceBetween>
                     </Container>

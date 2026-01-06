@@ -28,6 +28,12 @@ export interface UseCase {
   created_at: number;
   updated_at: number;
   tags?: Record<string, string>;
+  // Data Account fields (optional - for separate data storage)
+  data_account_id?: string;
+  data_account_role_arn?: string;
+  data_account_external_id?: string;
+  data_s3_bucket?: string;
+  data_s3_prefix?: string;
 }
 
 export interface Device {

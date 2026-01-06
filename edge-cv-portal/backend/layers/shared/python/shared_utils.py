@@ -193,7 +193,16 @@ class Permission(Enum):
 
 
 class RBACManager:
-    """Role-Based Access Control Manager"""
+    """Role-Based Access Control Manager
+    
+    Uses IDP (Identity Provider) as the single source of truth for user roles.
+    Roles come from JWT claims (custom:role or custom:groups).
+    
+    Supported role sources:
+    - Cognito User Pools: custom:role attribute
+    - SAML/OIDC IdP: mapped to custom:role or custom:groups
+    - Lambda authorizer: role in context
+    """
     
     def __init__(self):
         self.role_permissions = self._initialize_role_permissions()
@@ -292,9 +301,29 @@ class RBACManager:
             }
         }
     
-    def get_user_role(self, user_id: str, usecase_id: str) -> Optional[Role]:
-        """Get user's role for a specific use case"""
+    def get_user_role(self, user_id: str, usecase_id: str, user_info: Optional[Dict] = None) -> Optional[Role]:
+        """Get user's role from IDP (JWT claims)
+        
+        Args:
+            user_id: User ID (for logging/fallback)
+            usecase_id: Use case ID (not used for role lookup, kept for API compatibility)
+            user_info: User info dict from get_user_from_event() containing role from JWT
+            
+        Returns:
+            Role enum or None
+        """
         try:
+            # Primary: Get role from JWT claims (IDP is source of truth)
+            if user_info and user_info.get('role'):
+                role_str = user_info['role']
+                try:
+                    return Role(role_str)
+                except ValueError:
+                    logger.warning(f"Invalid role from IDP: {role_str}, defaulting to Viewer")
+                    return Role.VIEWER
+            
+            # Fallback: Check DynamoDB for legacy data (will be deprecated)
+            # This allows gradual migration from DynamoDB to IDP-only
             user_roles_table = dynamodb.Table(USER_ROLES_TABLE)
             
             # Check for PortalAdmin (global role)
@@ -303,6 +332,7 @@ class RBACManager:
             )
             
             if response.get('Item', {}).get('role') == 'PortalAdmin':
+                logger.info(f"User {user_id} has PortalAdmin from DynamoDB (legacy)")
                 return Role.PORTAL_ADMIN
             
             # Check specific use case role
@@ -315,53 +345,52 @@ class RBACManager:
                 try:
                     return Role(role_str)
                 except ValueError:
-                    logger.warning(f"Invalid role found: {role_str}")
+                    logger.warning(f"Invalid role found in DynamoDB: {role_str}")
                     return None
             
-            return None
+            # Default to Viewer if no role found
+            return Role.VIEWER
             
         except Exception as e:
             logger.error(f"Error getting user role: {str(e)}")
-            return None
+            return Role.VIEWER
     
-    def get_user_permissions(self, user_id: str, usecase_id: str) -> Set[Permission]:
-        """Get all permissions for a user in a specific use case"""
-        role = self.get_user_role(user_id, usecase_id)
+    def get_user_permissions(self, user_id: str, usecase_id: str, user_info: Optional[Dict] = None) -> Set[Permission]:
+        """Get all permissions for a user based on their IDP role"""
+        role = self.get_user_role(user_id, usecase_id, user_info)
         if not role:
             return set()
         
         return self.role_permissions.get(role, set())
     
-    def has_permission(self, user_id: str, usecase_id: str, permission: Permission) -> bool:
-        """Check if user has a specific permission"""
-        user_permissions = self.get_user_permissions(user_id, usecase_id)
+    def has_permission(self, user_id: str, usecase_id: str, permission: Permission, user_info: Optional[Dict] = None) -> bool:
+        """Check if user has a specific permission based on IDP role"""
+        user_permissions = self.get_user_permissions(user_id, usecase_id, user_info)
         return permission in user_permissions
     
-    def is_portal_admin(self, user_id: str) -> bool:
-        """Check if user is a PortalAdmin (super user)"""
-        try:
-            user_roles_table = dynamodb.Table(USER_ROLES_TABLE)
-            response = user_roles_table.get_item(
-                Key={'user_id': user_id, 'usecase_id': 'global'}
-            )
-            return response.get('Item', {}).get('role') == 'PortalAdmin'
-        except Exception as e:
-            logger.error(f"Error checking portal admin status: {str(e)}")
-            return False
+    def is_portal_admin(self, user_id: str, user_info: Optional[Dict] = None) -> bool:
+        """Check if user is a PortalAdmin based on IDP role"""
+        role = self.get_user_role(user_id, 'global', user_info)
+        return role == Role.PORTAL_ADMIN
     
-    def get_accessible_usecases(self, user_id: str) -> List[str]:
-        """Get list of use cases the user has access to"""
+    def get_accessible_usecases(self, user_id: str, user_info: Optional[Dict] = None) -> List[str]:
+        """Get list of use cases the user has access to
+        
+        PortalAdmin (from IDP) has access to all use cases.
+        Other users need explicit usecase assignments in DynamoDB.
+        """
         try:
-            user_roles_table = dynamodb.Table(USER_ROLES_TABLE)
-            
-            # If user is PortalAdmin, they have access to all use cases
-            if self.is_portal_admin(user_id):
+            # If user is PortalAdmin (from IDP), they have access to all use cases
+            if self.is_portal_admin(user_id, user_info):
                 # Get all use cases
                 usecases_table = dynamodb.Table(USECASES_TABLE)
                 response = usecases_table.scan()
                 return [item['usecase_id'] for item in response.get('Items', [])]
             
-            # Get specific use case assignments
+            # For non-admin users, get specific use case assignments from DynamoDB
+            # This is the only place we use DynamoDB for RBAC - to track which
+            # usecases a non-admin user has been granted access to
+            user_roles_table = dynamodb.Table(USER_ROLES_TABLE)
             response = user_roles_table.query(
                 KeyConditionExpression='user_id = :user_id',
                 ExpressionAttributeValues={':user_id': user_id}
@@ -386,13 +415,14 @@ rbac_manager = RBACManager()
 
 def require_permission(permission: Permission, usecase_param: str = 'usecase_id'):
     """
-    Decorator to require specific permission for API endpoints
+    Decorator to require specific permission for API endpoints.
+    Uses IDP (JWT claims) as the source of truth for user roles.
     """
     def decorator(func):
         @wraps(func)
         def wrapper(event, context):
             try:
-                # Extract user information
+                # Extract user information from JWT claims
                 user = get_user_from_event(event)
                 user_id = user['user_id']
                 
@@ -431,8 +461,8 @@ def require_permission(permission: Permission, usecase_param: str = 'usecase_id'
                 if not usecase_id:
                     return create_response(400, {'error': 'Use case ID required'})
                 
-                # Check permission
-                if not rbac_manager.has_permission(user_id, usecase_id, permission):
+                # Check permission using IDP role from JWT
+                if not rbac_manager.has_permission(user_id, usecase_id, permission, user):
                     # Log unauthorized access attempt
                     log_audit_event(
                         user_id=user_id,
@@ -443,7 +473,7 @@ def require_permission(permission: Permission, usecase_param: str = 'usecase_id'
                         details={
                             'required_permission': permission.value,
                             'usecase_id': usecase_id,
-                            'user_role': rbac_manager.get_user_role(user_id, usecase_id).value if rbac_manager.get_user_role(user_id, usecase_id) else 'none'
+                            'user_role': user.get('role', 'unknown')
                         }
                     )
                     
@@ -465,7 +495,8 @@ def require_permission(permission: Permission, usecase_param: str = 'usecase_id'
 
 def require_super_user(func):
     """
-    Decorator to require PortalAdmin (super user) access
+    Decorator to require PortalAdmin (super user) access.
+    Uses IDP (JWT claims) as the source of truth for user roles.
     """
     @wraps(func)
     def wrapper(event, context):
@@ -473,14 +504,14 @@ def require_super_user(func):
             user = get_user_from_event(event)
             user_id = user['user_id']
             
-            if not rbac_manager.is_portal_admin(user_id):
+            if not rbac_manager.is_portal_admin(user_id, user):
                 log_audit_event(
                     user_id=user_id,
                     action='unauthorized_super_user_access',
                     resource_type='api_endpoint',
                     resource_id=event.get('path', 'unknown'),
                     result='denied',
-                    details={'user_role': rbac_manager.get_user_role(user_id, 'global').value if rbac_manager.get_user_role(user_id, 'global') else 'none'}
+                    details={'user_role': user.get('role', 'unknown')}
                 )
                 
                 return create_response(403, {

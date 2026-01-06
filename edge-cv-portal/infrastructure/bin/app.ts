@@ -45,6 +45,8 @@ const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   deploymentsTable: storageStack.deploymentsTable,
   settingsTable: storageStack.settingsTable,
   componentsTable: storageStack.componentsTable,
+  sharedComponentsTable: storageStack.sharedComponentsTable,
+  portalArtifactsBucket: storageStack.portalArtifactsBucket,
 });
 
 // Frontend Stack (CloudFront, S3)

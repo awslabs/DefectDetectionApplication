@@ -14,6 +14,14 @@ from shared_utils import (
     validate_usecase_access
 )
 
+# Import shared components provisioning
+try:
+    from shared_components import provision_shared_components_for_usecase
+except ImportError:
+    # Fallback if shared_components module not available
+    def provision_shared_components_for_usecase(*args, **kwargs):
+        return {'status': 'skipped', 'reason': 'shared_components module not available'}
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -77,10 +85,10 @@ def list_usecases(user):
         table = dynamodb.Table(USECASES_TABLE)
         user_id = user['user_id']
         
-        # Get accessible use cases using RBAC manager
-        accessible_usecases = rbac_manager.get_accessible_usecases(user_id)
+        # Get accessible use cases using RBAC manager (role from IDP)
+        accessible_usecases = rbac_manager.get_accessible_usecases(user_id, user)
         
-        if rbac_manager.is_portal_admin(user_id):
+        if rbac_manager.is_portal_admin(user_id, user):
             # Super user gets all use cases
             response = table.scan()
             usecases = response.get('Items', [])
@@ -98,8 +106,7 @@ def list_usecases(user):
                     if 'Item' in response:
                         usecase = response['Item']
                         # Add user's role for this use case
-                        user_role = rbac_manager.get_user_role(user_id, usecase_id)
-                        usecase['user_role'] = user_role.value if user_role else None
+                        usecase['user_role'] = user.get('role', 'Viewer')
                         usecases.append(usecase)
                 except Exception as e:
                     logger.warning(f"Error getting use case {usecase_id}: {str(e)}")
@@ -112,7 +119,7 @@ def list_usecases(user):
         return create_response(200, {
             'usecases': usecases,
             'count': len(usecases),
-            'is_super_user': rbac_manager.is_portal_admin(user_id)
+            'is_super_user': rbac_manager.is_portal_admin(user_id, user)
         })
         
     except Exception as e:
@@ -126,11 +133,11 @@ def list_usecases(user):
 def create_usecase(event, user):
     """Create a new use case"""
     try:
-        # Check permission using RBAC
-        if not rbac_manager.has_permission(user['user_id'], 'global', Permission.CREATE_USECASES):
+        # Check permission using RBAC (role from IDP/JWT)
+        if not rbac_manager.has_permission(user['user_id'], 'global', Permission.CREATE_USECASES, user):
             log_audit_event(
                 user['user_id'], 'create_usecase', 'usecase', 'new',
-                'failure', {'reason': 'insufficient_permissions'}
+                'failure', {'reason': 'insufficient_permissions', 'user_role': user.get('role', 'unknown')}
             )
             return create_response(403, {'error': 'Insufficient permissions to create use cases'})
         
@@ -160,20 +167,71 @@ def create_usecase(event, user):
             'default_device_group': body.get('default_device_group', ''),
             'created_at': timestamp,
             'updated_at': timestamp,
-            'tags': body.get('tags', {})
+            'tags': body.get('tags', {}),
+            'shared_components_provisioned': False
         }
+        
+        # Add optional Data Account fields if provided
+        if body.get('data_account_id'):
+            item['data_account_id'] = body['data_account_id']
+        if body.get('data_account_role_arn'):
+            item['data_account_role_arn'] = body['data_account_role_arn']
+        if body.get('data_account_external_id'):
+            item['data_account_external_id'] = body['data_account_external_id']
+        if body.get('data_s3_bucket'):
+            item['data_s3_bucket'] = body['data_s3_bucket']
+        if body.get('data_s3_prefix'):
+            item['data_s3_prefix'] = body['data_s3_prefix']
         
         table.put_item(Item=item)
         
+        # Provision shared components (dda-LocalServer) to the usecase account
+        # This creates read-only copies of portal-managed components
+        shared_components_result = None
+        provision_shared = body.get('provision_shared_components', True)
+        
+        if provision_shared:
+            try:
+                shared_components_result = provision_shared_components_for_usecase(
+                    usecase_id=usecase_id,
+                    usecase_account_id=body['account_id'],
+                    cross_account_role_arn=body['cross_account_role_arn'],
+                    external_id=item['external_id'],
+                    user_id=user['user_id']
+                )
+                
+                # Update usecase with provisioning status
+                table.update_item(
+                    Key={'usecase_id': usecase_id},
+                    UpdateExpression='SET shared_components_provisioned = :provisioned, shared_components = :components',
+                    ExpressionAttributeValues={
+                        ':provisioned': True,
+                        ':components': shared_components_result
+                    }
+                )
+                item['shared_components_provisioned'] = True
+                item['shared_components'] = shared_components_result
+                
+                logger.info(f"Provisioned shared components for usecase {usecase_id}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to provision shared components for usecase {usecase_id}: {str(e)}")
+                # Don't fail usecase creation if shared component provisioning fails
+                shared_components_result = {'error': str(e), 'status': 'failed'}
+        
         log_audit_event(
             user['user_id'], 'create_usecase', 'usecase', usecase_id,
-            'success', {'name': body['name']}
+            'success', {
+                'name': body['name'],
+                'shared_components_provisioned': item.get('shared_components_provisioned', False)
+            }
         )
         
         logger.info(f"Use case created: {usecase_id}")
         
         return create_response(201, {
             'usecase': item,
+            'shared_components': shared_components_result,
             'message': 'Use case created successfully'
         })
         
@@ -188,11 +246,11 @@ def create_usecase(event, user):
 def get_usecase(usecase_id, user):
     """Get use case details"""
     try:
-        # Check access using RBAC
-        if not rbac_manager.has_permission(user['user_id'], usecase_id, Permission.VIEW_USECASES):
+        # Check access using RBAC (role from IDP)
+        if not rbac_manager.has_permission(user['user_id'], usecase_id, Permission.VIEW_USECASES, user):
             log_audit_event(
                 user['user_id'], 'get_usecase', 'usecase', usecase_id,
-                'failure', {'reason': 'access_denied'}
+                'failure', {'reason': 'access_denied', 'user_role': user.get('role', 'unknown')}
             )
             return create_response(403, {'error': 'Access denied to use case'})
         
@@ -219,11 +277,11 @@ def get_usecase(usecase_id, user):
 def update_usecase(usecase_id, event, user):
     """Update use case"""
     try:
-        # Check permission using RBAC
-        if not rbac_manager.has_permission(user['user_id'], usecase_id, Permission.UPDATE_USECASES):
+        # Check permission using RBAC (role from IDP)
+        if not rbac_manager.has_permission(user['user_id'], usecase_id, Permission.UPDATE_USECASES, user):
             log_audit_event(
                 user['user_id'], 'update_usecase', 'usecase', usecase_id,
-                'failure', {'reason': 'insufficient_permissions'}
+                'failure', {'reason': 'insufficient_permissions', 'user_role': user.get('role', 'unknown')}
             )
             return create_response(403, {'error': 'Insufficient permissions to update use case'})
         
@@ -234,7 +292,13 @@ def update_usecase(usecase_id, event, user):
         update_expr = "SET updated_at = :updated_at"
         expr_values = {':updated_at': int(datetime.utcnow().timestamp() * 1000)}
         
-        updatable_fields = ['name', 's3_bucket', 's3_prefix', 'owner', 'cost_center', 'default_device_group']
+        updatable_fields = [
+            'name', 's3_bucket', 's3_prefix', 'owner', 'cost_center', 'default_device_group',
+            'cross_account_role_arn', 'account_id',
+            # Data Account fields
+            'data_account_id', 'data_account_role_arn', 'data_account_external_id',
+            'data_s3_bucket', 'data_s3_prefix'
+        ]
         for field in updatable_fields:
             if field in body:
                 update_expr += f", {field} = :{field}"
@@ -264,11 +328,11 @@ def update_usecase(usecase_id, event, user):
 def delete_usecase(usecase_id, user):
     """Delete use case"""
     try:
-        # Check permission using RBAC - only PortalAdmin can delete use cases
-        if not rbac_manager.has_permission(user['user_id'], usecase_id, Permission.DELETE_USECASES):
+        # Check permission using RBAC - only PortalAdmin can delete use cases (role from IDP)
+        if not rbac_manager.has_permission(user['user_id'], usecase_id, Permission.DELETE_USECASES, user):
             log_audit_event(
                 user['user_id'], 'delete_usecase', 'usecase', usecase_id,
-                'failure', {'reason': 'insufficient_permissions'}
+                'failure', {'reason': 'insufficient_permissions', 'user_role': user.get('role', 'unknown')}
             )
             return create_response(403, {'error': 'Insufficient permissions to delete use case'})
         

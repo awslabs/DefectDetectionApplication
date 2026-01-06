@@ -1,168 +1,206 @@
-# Defect Detection Application (DDA) - Deployment Guide
+# DDA Portal - Deployment Guide
+
+## Architecture Overview
+
+The DDA Portal uses a multi-account architecture:
+
+| Account Type | Purpose |
+|-------------|---------|
+| **Portal Account** | Hosts the portal infrastructure (API, frontend, databases) |
+| **UseCase Account(s)** | Where Greengrass devices and SageMaker training run |
+| **Data Account** (optional) | Centralized training data storage, shared by multiple usecases |
 
 ## Prerequisites
 
-- AWS CLI configured with appropriate credentials
-- Node.js 18+ installed
-- Python 3.11+ installed
-- AWS CDK CLI installed: `npm install -g aws-cdk`
+- AWS CLI configured
+- Node.js 18+
+- Python 3.11+
+- AWS CDK CLI: `npm install -g aws-cdk`
 
-## Step 1: Deploy Infrastructure
+---
+
+## Step 1: Deploy Portal Account
 
 ```bash
+cd edge-cv-portal
+
+# Build shared Lambda layer
+cd backend/layers/shared && ./build.sh && cd ../../..
+
+# Deploy infrastructure
 cd infrastructure
 npm install
 npm run build
 cdk bootstrap  # Only needed once per account/region
-cdk deploy --all
+cdk deploy --all --require-approval never
+cd ..
+
+# Build and deploy frontend
+cd frontend
+npm install
+npm run build
+cd ..
+./deploy-frontend.sh
 ```
 
-This will deploy:
-- Cognito User Pool for authentication
-- DynamoDB tables for data storage
-- Lambda functions for API handlers
-- API Gateway for REST API
-- CloudFront distribution for frontend hosting
+**Save the outputs:**
+- `FrontendUrl` - Portal URL
+- `ApiUrl` - API endpoint
+- `UserPoolId` - Cognito User Pool ID
+- `UserPoolClientId` - Cognito Client ID
 
-**Note the outputs** from the deployment, especially:
-- UserPoolId
-- UserPoolClientId
-- ApiUrl
-- DistributionDomainName
+### Configure Frontend
 
-## Step 2: Build and Deploy Frontend
+Update `frontend/public/config.json` with the CDK outputs:
 
-```bash
-cd ../frontend
-npm install
-
-# Create config.json with values from CDK outputs
-cat > public/config.json << EOF
+```json
 {
-  "apiUrl": "<API_URL_FROM_CDK_OUTPUT>",
-  "userPoolId": "<USER_POOL_ID_FROM_CDK_OUTPUT>",
-  "userPoolClientId": "<USER_POOL_CLIENT_ID_FROM_CDK_OUTPUT>",
+  "apiUrl": "YOUR_API_URL",
+  "userPoolId": "YOUR_USER_POOL_ID",
+  "userPoolClientId": "YOUR_USER_POOL_CLIENT_ID",
   "region": "us-east-1"
 }
-EOF
-
-# Build the frontend
-npm run build
-
-# Deploy to S3
-aws s3 sync dist/ s3://<FRONTEND_BUCKET_NAME>/ --delete
-
-# Invalidate CloudFront cache
-aws cloudfront create-invalidation \
-  --distribution-id <DISTRIBUTION_ID> \
-  --paths "/*"
 ```
 
-## Step 3: Create Initial Users
+Then rebuild and deploy the frontend:
 
 ```bash
-# Create a PortalAdmin user
-aws cognito-idp admin-create-user \
-  --user-pool-id <USER_POOL_ID> \
-  --username admin \
-  --user-attributes Name=email,Value=admin@example.com \
-  --temporary-password TempPassword123! \
-  --message-action SUPPRESS
-
-# Set custom attribute for role
-aws cognito-idp admin-update-user-attributes \
-  --user-pool-id <USER_POOL_ID> \
-  --username admin \
-  --user-attributes Name=custom:role,Value=PortalAdmin
-
-# Create UserRoles entry for super user access
-aws dynamodb put-item \
-  --table-name dda-portal-user-roles \
-  --item '{
-    "user_id": {"S": "<USER_SUB_FROM_COGNITO>"},
-    "usecase_id": {"S": "global"},
-    "role": {"S": "PortalAdmin"},
-    "assigned_at": {"N": "'$(date +%s)'000"},
-    "assigned_by": {"S": "system"}
-  }'
+cd frontend && npm run build && cd ..
+./deploy-frontend.sh
 ```
 
-## Step 4: Access the Portal
+---
 
-Navigate to: `https://<DISTRIBUTION_DOMAIN_NAME>`
+## Step 2: Deploy UseCase Account Role
 
-Login with:
-- Username: `admin`
-- Password: `TempPassword123!` (you'll be prompted to change it)
+For each UseCase account, deploy the cross-account access role:
 
-## MVP Features
+```bash
+# Switch AWS credentials to UseCase account
+cd edge-cv-portal
+./deploy-account-role.sh
+```
 
-This MVP includes:
+Select option **1 (UseCase Account)** and provide:
+- Portal Account ID
 
-✅ **Infrastructure**
-- Cognito User Pool (SSO integration ready)
-- DynamoDB tables (UseCases, UserRoles, Devices, AuditLog)
-- Lambda functions (Auth, UseCases, Devices handlers)
-- API Gateway with JWT authorization
-- CloudFront + S3 for frontend hosting
+**Save the outputs:**
+- Role ARN
+- SageMaker Execution Role ARN
+- External ID
 
-✅ **Frontend**
-- React app with TypeScript
-- CloudScape Design System
-- Dashboard with metrics
-- Use Case management (CRUD)
-- Device inventory viewing
-- Mock authentication (ready for Cognito integration)
+---
 
-✅ **Backend**
-- RESTful API with RBAC
-- Super user (PortalAdmin) support
-- Audit logging
-- Cross-account role validation
+## Step 3: Deploy Data Account Role (Optional)
 
-## Next Steps
+If using a separate Data account for training data:
 
-To extend this MVP:
+```bash
+# Switch AWS credentials to Data account
+cd edge-cv-portal
+./deploy-account-role.sh
+```
 
-1. **Complete Authentication**: Integrate AWS Amplify for full Cognito auth
-2. **Add Labeling**: Implement Ground Truth job creation
-3. **Add Training**: Implement SageMaker training workflows
-4. **Add Deployments**: Implement Greengrass deployment management
-5. **Add Device Control**: Implement IoT Jobs for device management
-6. **Add Real-time Updates**: Implement WebSocket API
+Select option **2 (Data Account)** and provide:
+- Portal Account ID
+- UseCase Account ID(s) - comma-separated for multiple
+
+**Save the outputs:**
+- Portal Access Role ARN
+- SageMaker Access Role ARN
+- External ID
+
+---
+
+## Step 4: Tag S3 Buckets
+
+In the Data account (or UseCase account if not using separate Data account):
+
+```bash
+aws s3api put-bucket-tagging --bucket YOUR_BUCKET_NAME \
+  --tagging 'TagSet=[{Key=dda-portal:managed,Value=true}]'
+```
+
+---
+
+## Step 5: Create Initial Admin User
+
+```bash
+# Get User Pool ID from CDK outputs
+USER_POOL_ID=$(aws cloudformation describe-stacks \
+  --stack-name EdgeCVPortalAuthStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' \
+  --output text)
+
+# Create admin user
+aws cognito-idp admin-create-user \
+  --user-pool-id $USER_POOL_ID \
+  --username admin \
+  --user-attributes Name=email,Value=admin@example.com \
+  --temporary-password TempPassword123!
+```
+
+---
+
+## Step 6: Access the Portal
+
+1. Open the `FrontendUrl` from Step 1
+2. Login with admin credentials
+3. Create a UseCase using the role ARNs and external IDs from Steps 2-3
+
+---
+
+## Updating the Frontend
+
+After code changes:
+
+```bash
+cd edge-cv-portal/frontend
+npm run build
+cd ..
+./deploy-frontend.sh
+```
+
+---
 
 ## Cleanup
 
-To remove all resources:
-
 ```bash
-cd infrastructure
+# Portal account
+cd edge-cv-portal/infrastructure
 cdk destroy --all
+
+# UseCase account (switch credentials first)
+aws cloudformation delete-stack --stack-name DDAPortalUseCaseAccountStack
+
+# Data account (switch credentials first)
+aws cloudformation delete-stack --stack-name DDAPortalDataAccountStack
 ```
+
+---
 
 ## Troubleshooting
 
-### Lambda Functions Not Working
+### Frontend shows "ERR_NAME_NOT_RESOLVED" or API errors
+The API Gateway URL in `frontend/public/config.json` is outdated. Get the current URL:
 
-Check CloudWatch Logs:
 ```bash
-aws logs tail /aws/lambda/DDAPortalComputeStack-UseCasesHandler --follow
+aws cloudformation describe-stacks \
+  --stack-name EdgeCVPortalComputeStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' \
+  --output text
 ```
 
-### API Gateway 403 Errors
+Update `config.json` with the new URL, rebuild and redeploy the frontend.
 
-Verify Cognito token is being sent:
-- Check browser DevTools Network tab
-- Ensure Authorization header is present
-- Verify token hasn't expired
+### Frontend shows "NoSuchKey" error
+Run `./deploy-frontend.sh` to upload frontend files to S3.
 
-### Frontend Not Loading
+### Cross-account role assumption fails
+- Verify External ID matches
+- Check role trust policy includes Portal account
+- Ensure role exists in target account
 
-- Check CloudFront distribution status
-- Verify S3 bucket has correct files
-- Check browser console for errors
-- Verify config.json has correct values
-
-## Support
-
-For issues or questions, refer to the design document at `.kiro/specs/edge-cv-admin-portal/design.md`
+### SageMaker can't access Data account
+- Verify Data account role trusts UseCase account
+- Check S3 bucket is tagged with `dda-portal:managed=true`

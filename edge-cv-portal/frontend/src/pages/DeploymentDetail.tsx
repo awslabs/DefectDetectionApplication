@@ -11,99 +11,112 @@ import {
   KeyValuePairs,
   Table,
   Alert,
+  Badge,
 } from '@cloudscape-design/components';
-import { useParams, useNavigate } from 'react-router-dom';
-import { Deployment } from '../types';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import { apiService } from '../services/api';
 import ConfirmationModal from '../components/ConfirmationModal';
+
+interface DeploymentDetail {
+  deployment_id: string;
+  deployment_name: string;
+  target_arn: string;
+  revision_id: string;
+  deployment_status: string;
+  iot_job_id: string;
+  iot_job_arn: string;
+  is_latest_for_target: boolean;
+  creation_timestamp: string;
+  components: Array<{
+    component_name: string;
+    component_version: string;
+    configuration_update: Record<string, unknown>;
+  }>;
+  deployment_policies: Record<string, unknown>;
+  tags: Record<string, string>;
+  usecase_id: string;
+}
 
 export default function DeploymentDetail() {
   const { deploymentId } = useParams<{ deploymentId: string }>();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const [deployment, setDeployment] = useState<Deployment | null>(null);
+  const [deployment, setDeployment] = useState<DeploymentDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [activeTabId, setActiveTabId] = useState('overview');
-  const [showRollbackModal, setShowRollbackModal] = useState(false);
-  const [rollingBack, setRollingBack] = useState(false);
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+
+  const usecaseId = searchParams.get('usecase_id');
 
   useEffect(() => {
-    loadDeployment();
-  }, [deploymentId]);
+    if (deploymentId && usecaseId) {
+      loadDeployment();
+    } else if (!usecaseId) {
+      setError('Use case ID is required');
+      setLoading(false);
+    }
+  }, [deploymentId, usecaseId]);
 
   const loadDeployment = async () => {
+    if (!deploymentId || !usecaseId) return;
+    
     setLoading(true);
+    setError(null);
     try {
-      // Mock data for now
-      const mockDeployment: Deployment = {
-        deployment_id: deploymentId || '',
-        usecase_id: 'usecase-001',
-        component_arn: 'arn:aws:greengrass:us-east-1:123456789012:components:DefectDetectionModel:versions:1.1.0',
-        component_version: '1.1.0',
-        target_devices: ['device-001', 'device-002', 'device-003'],
-        target_groups: [],
-        rollout_strategy: 'canary',
-        rollout_config: {
-          canarySize: 1,
-          failureThreshold: 20,
-        },
-        status: 'in_progress',
-        device_statuses: {
-          'device-001': 'SUCCEEDED',
-          'device-002': 'IN_PROGRESS',
-          'device-003': 'PENDING',
-        },
-        greengrass_deployment_id: 'gg-deploy-002',
-        created_by: 'user@example.com',
-        created_at: Date.now() - 3600000,
-      };
-      setDeployment(mockDeployment);
-    } catch (error) {
-      console.error('Failed to load deployment:', error);
+      const response = await apiService.getDeployment(deploymentId, usecaseId);
+      setDeployment(response.deployment);
+    } catch (err: any) {
+      console.error('Failed to load deployment:', err);
+      setError(err.message || 'Failed to load deployment');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleRollback = async () => {
-    setRollingBack(true);
+  const handleCancel = async () => {
+    if (!deploymentId || !usecaseId) return;
+    
+    setCancelling(true);
     try {
-      // TODO: Implement API call
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      console.log('Rolling back deployment:', deploymentId);
-      setShowRollbackModal(false);
-      navigate('/deployments');
-    } catch (error) {
-      console.error('Failed to rollback deployment:', error);
+      await apiService.cancelDeployment(deploymentId, usecaseId);
+      setShowCancelModal(false);
+      navigate(`/deployments?usecase_id=${usecaseId}`);
+    } catch (err: any) {
+      console.error('Failed to cancel deployment:', err);
+      setError(err.message || 'Failed to cancel deployment');
     } finally {
-      setRollingBack(false);
+      setCancelling(false);
     }
   };
 
-  const getStatusIndicator = (status: Deployment['status']) => {
-    const statusMap = {
-      pending: { type: 'pending' as const, label: 'Pending' },
-      in_progress: { type: 'in-progress' as const, label: 'In Progress' },
-      completed: { type: 'success' as const, label: 'Completed' },
-      failed: { type: 'error' as const, label: 'Failed' },
-      rolled_back: { type: 'warning' as const, label: 'Rolled Back' },
-    };
-    const config = statusMap[status];
-    return <StatusIndicator type={config.type}>{config.label}</StatusIndicator>;
+  const getStatusIndicator = (status: string) => {
+    const statusLower = status?.toLowerCase() || 'unknown';
+    switch (statusLower) {
+      case 'active':
+      case 'completed':
+        return <StatusIndicator type="success">{status}</StatusIndicator>;
+      case 'failed':
+        return <StatusIndicator type="error">{status}</StatusIndicator>;
+      case 'canceled':
+        return <StatusIndicator type="stopped">{status}</StatusIndicator>;
+      case 'inactive':
+        return <StatusIndicator type="info">{status}</StatusIndicator>;
+      default:
+        return <StatusIndicator type="info">{status || 'Unknown'}</StatusIndicator>;
+    }
   };
 
-  const getDeviceStatusIndicator = (status: string) => {
-    const statusMap: Record<string, { type: any; label: string }> = {
-      SUCCEEDED: { type: 'success', label: 'Succeeded' },
-      IN_PROGRESS: { type: 'in-progress', label: 'In Progress' },
-      PENDING: { type: 'pending', label: 'Pending' },
-      FAILED: { type: 'error', label: 'Failed' },
-    };
-    const config = statusMap[status] || { type: 'info', label: status };
-    return <StatusIndicator type={config.type}>{config.label}</StatusIndicator>;
+  const getTargetName = (targetArn: string) => {
+    if (!targetArn) return '-';
+    const parts = targetArn.split('/');
+    return parts[parts.length - 1] || targetArn;
   };
 
-  const getComponentName = (arn: string) => {
-    const parts = arn.split(':');
-    return parts[parts.length - 3] || arn;
+  const formatTimestamp = (timestamp?: string) => {
+    if (!timestamp) return '-';
+    return new Date(timestamp).toLocaleString();
   };
 
   if (loading) {
@@ -116,18 +129,23 @@ export default function DeploymentDetail() {
     );
   }
 
+  if (error) {
+    return (
+      <SpaceBetween size="l">
+        <Alert type="error">{error}</Alert>
+        <Button onClick={() => navigate(`/deployments?usecase_id=${usecaseId}`)}>Back to Deployments</Button>
+      </SpaceBetween>
+    );
+  }
+
   if (!deployment) {
     return (
       <Container>
         <Alert type="error">Deployment not found</Alert>
+        <Button onClick={() => navigate(`/deployments?usecase_id=${usecaseId}`)}>Back to Deployments</Button>
       </Container>
     );
   }
-
-  const deviceStatusItems = deployment.target_devices.map((deviceId) => ({
-    deviceId,
-    status: deployment.device_statuses[deviceId] || 'PENDING',
-  }));
 
   return (
     <>
@@ -138,39 +156,40 @@ export default function DeploymentDetail() {
               variant="h1"
               actions={
                 <SpaceBetween direction="horizontal" size="xs">
-                  <Button onClick={() => navigate('/deployments')}>
+                  <Button onClick={() => navigate(`/deployments?usecase_id=${usecaseId}`)}>
                     Back to List
                   </Button>
-                  {(deployment.status === 'in_progress' || deployment.status === 'failed') && (
-                    <Button onClick={() => setShowRollbackModal(true)}>
-                      Rollback Deployment
+                  <Button iconName="refresh" onClick={loadDeployment}>
+                    Refresh
+                  </Button>
+                  {deployment.deployment_status === 'ACTIVE' && (
+                    <Button onClick={() => setShowCancelModal(true)}>
+                      Cancel Deployment
                     </Button>
                   )}
                 </SpaceBetween>
               }
             >
-              Deployment: {deployment.deployment_id}
+              {deployment.deployment_name || `Deployment ${deployment.deployment_id.substring(0, 12)}...`}
             </Header>
           }
         >
           <ColumnLayout columns={4} variant="text-grid">
             <div>
               <Box variant="awsui-key-label">Status</Box>
-              <div>{getStatusIndicator(deployment.status)}</div>
+              <div>{getStatusIndicator(deployment.deployment_status)}</div>
             </div>
             <div>
-              <Box variant="awsui-key-label">Component</Box>
-              <div>
-                {getComponentName(deployment.component_arn)} v{deployment.component_version}
-              </div>
+              <Box variant="awsui-key-label">Target</Box>
+              <div>{getTargetName(deployment.target_arn)}</div>
             </div>
             <div>
-              <Box variant="awsui-key-label">Rollout Strategy</Box>
-              <div>{deployment.rollout_strategy.replace('-', ' ')}</div>
+              <Box variant="awsui-key-label">Components</Box>
+              <div>{deployment.components?.length || 0}</div>
             </div>
             <div>
-              <Box variant="awsui-key-label">Created By</Box>
-              <div>{deployment.created_by}</div>
+              <Box variant="awsui-key-label">Latest for Target</Box>
+              <div>{deployment.is_latest_for_target ? 'Yes' : 'No'}</div>
             </div>
           </ColumnLayout>
         </Container>
@@ -188,92 +207,77 @@ export default function DeploymentDetail() {
                     <KeyValuePairs
                       columns={2}
                       items={[
-                        {
-                          label: 'Deployment ID',
-                          value: deployment.deployment_id,
-                        },
-                        {
-                          label: 'Greengrass Deployment ID',
-                          value: deployment.greengrass_deployment_id,
-                        },
-                        {
-                          label: 'Component ARN',
-                          value: (
-                            <Box fontSize="body-s">
-                              {deployment.component_arn}
-                            </Box>
-                          ),
-                        },
-                        {
-                          label: 'Target Devices',
-                          value: `${deployment.target_devices.length} devices`,
-                        },
-                        {
-                          label: 'Created',
-                          value: new Date(deployment.created_at).toLocaleString(),
-                        },
-                        {
-                          label: 'Completed',
-                          value: deployment.completed_at
-                            ? new Date(deployment.completed_at).toLocaleString()
-                            : '-',
-                        },
+                        { label: 'Deployment ID', value: deployment.deployment_id },
+                        { label: 'Deployment Name', value: deployment.deployment_name || '-' },
+                        { label: 'Target ARN', value: <Box fontSize="body-s">{deployment.target_arn}</Box> },
+                        { label: 'Revision ID', value: deployment.revision_id || '-' },
+                        { label: 'IoT Job ID', value: deployment.iot_job_id || '-' },
+                        { label: 'Created', value: formatTimestamp(deployment.creation_timestamp) },
                       ]}
                     />
 
-                    {deployment.rollout_config && (
+                    {deployment.tags && Object.keys(deployment.tags).length > 0 && (
                       <>
-                        <Box variant="h3">Rollout Configuration</Box>
-                        <KeyValuePairs
-                          columns={2}
-                          items={[
-                            {
-                              label: 'Canary Size',
-                              value: deployment.rollout_config.canarySize || '-',
-                            },
-                            {
-                              label: 'Canary Percentage',
-                              value: deployment.rollout_config.canaryPercentage
-                                ? `${deployment.rollout_config.canaryPercentage}%`
-                                : '-',
-                            },
-                            {
-                              label: 'Failure Threshold',
-                              value: deployment.rollout_config.failureThreshold
-                                ? `${deployment.rollout_config.failureThreshold}%`
-                                : '-',
-                            },
-                          ]}
-                        />
+                        <Box variant="h3">Tags</Box>
+                        <SpaceBetween direction="horizontal" size="xs">
+                          {Object.entries(deployment.tags).map(([key, value]) => (
+                            <Badge key={key} color="blue">{key}: {value}</Badge>
+                          ))}
+                        </SpaceBetween>
                       </>
                     )}
                   </SpaceBetween>
                 ),
               },
               {
-                id: 'devices',
-                label: 'Device Status',
+                id: 'components',
+                label: `Components (${deployment.components?.length || 0})`,
                 content: (
                   <Table
                     columnDefinitions={[
                       {
-                        id: 'device_id',
-                        header: 'Device ID',
-                        cell: (item) => item.deviceId,
+                        id: 'name',
+                        header: 'Component Name',
+                        cell: (item) => item.component_name,
                       },
                       {
-                        id: 'status',
-                        header: 'Deployment Status',
-                        cell: (item) => getDeviceStatusIndicator(item.status),
+                        id: 'version',
+                        header: 'Version',
+                        cell: (item) => item.component_version || 'latest',
+                      },
+                      {
+                        id: 'config',
+                        header: 'Configuration Update',
+                        cell: (item) => 
+                          Object.keys(item.configuration_update || {}).length > 0 
+                            ? 'Yes' 
+                            : 'No',
                       },
                     ]}
-                    items={deviceStatusItems}
+                    items={deployment.components || []}
                     empty={
                       <Box textAlign="center" color="inherit">
-                        No devices in this deployment
+                        No components in this deployment
                       </Box>
                     }
                   />
+                ),
+              },
+              {
+                id: 'policies',
+                label: 'Deployment Policies',
+                content: (
+                  <Box>
+                    {deployment.deployment_policies && Object.keys(deployment.deployment_policies).length > 0 ? (
+                      <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px' }}>
+                        {JSON.stringify(deployment.deployment_policies, null, 2)}
+                      </pre>
+                    ) : (
+                      <Box textAlign="center" color="inherit">
+                        No deployment policies configured
+                      </Box>
+                    )}
+                  </Box>
                 ),
               },
             ]}
@@ -282,17 +286,17 @@ export default function DeploymentDetail() {
       </SpaceBetween>
 
       <ConfirmationModal
-        visible={showRollbackModal}
-        title="Rollback Deployment"
-        message="This action will rollback the deployment to the previous version on all target devices."
-        confirmButtonText="Rollback"
+        visible={showCancelModal}
+        title="Cancel Deployment"
+        message="This action will cancel the deployment. Devices that have already received the deployment will not be affected."
+        confirmButtonText="Cancel Deployment"
         variant="warning"
-        loading={rollingBack}
-        onConfirm={handleRollback}
-        onCancel={() => setShowRollbackModal(false)}
+        loading={cancelling}
+        onConfirm={handleCancel}
+        onCancel={() => setShowCancelModal(false)}
       >
         <Box>
-          Are you sure you want to rollback deployment <strong>{deployment.deployment_id}</strong>?
+          Are you sure you want to cancel deployment <strong>{deployment.deployment_name || deployment.deployment_id}</strong>?
         </Box>
       </ConfirmationModal>
     </>

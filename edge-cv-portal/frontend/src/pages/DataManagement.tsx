@@ -64,6 +64,7 @@ export default function DataManagement() {
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [activeTab, setActiveTab] = useState('browse');
+  const [targetAccountInfo, setTargetAccountInfo] = useState<{account: string, hasDataRole: boolean} | null>(null);
 
   // Modal states
   const [showCreateBucket, setShowCreateBucket] = useState(false);
@@ -128,6 +129,15 @@ export default function DataManagement() {
     try {
       const response = await apiService.listDataBuckets(usecaseId);
       setBuckets(response.buckets);
+      
+      // Track which account is being queried
+      if (response.target_account) {
+        setTargetAccountInfo({
+          account: response.target_account,
+          hasDataRole: response.has_data_account_role || false
+        });
+      }
+      
       if (response.current_data_bucket) {
         setSelectedBucket(response.current_data_bucket);
       } else if (response.buckets.length > 0) {
@@ -505,8 +515,17 @@ export default function DataManagement() {
               id: 'buckets',
               label: 'Buckets',
               content: (
-                <Container>
-                  <Table
+                <SpaceBetween size="m">
+                  {targetAccountInfo && (
+                    <Alert type={targetAccountInfo.hasDataRole ? "info" : "warning"}>
+                      {targetAccountInfo.hasDataRole 
+                        ? `Querying Data Account: ${targetAccountInfo.account}. Only buckets tagged with dda-portal:managed=true are shown.`
+                        : `No separate Data Account configured. Querying UseCase Account: ${targetAccountInfo.account}. To use a separate Data Account, update the use case configuration.`
+                      }
+                    </Alert>
+                  )}
+                  <Container>
+                    <Table
                     columnDefinitions={[
                       {
                         id: 'name',
@@ -547,7 +566,8 @@ export default function DataManagement() {
                       </Box>
                     }
                   />
-                </Container>
+                  </Container>
+                </SpaceBetween>
               ),
             },
           ]}

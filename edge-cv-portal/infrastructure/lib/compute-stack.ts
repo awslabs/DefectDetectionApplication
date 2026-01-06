@@ -7,6 +7,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import * as path from 'path';
 
@@ -23,6 +24,8 @@ export interface ComputeStackProps extends cdk.StackProps {
   deploymentsTable: dynamodb.Table;
   settingsTable: dynamodb.Table;
   componentsTable: dynamodb.Table;
+  sharedComponentsTable: dynamodb.Table;
+  portalArtifactsBucket: s3.Bucket;
 }
 
 export class ComputeStack extends cdk.Stack {
@@ -67,6 +70,10 @@ export class ComputeStack extends cdk.Stack {
       props.deploymentsTable.grantReadWriteData(role);
       props.settingsTable.grantReadWriteData(role);
       props.componentsTable.grantReadWriteData(role);
+      props.sharedComponentsTable.grantReadWriteData(role);
+
+      // Grant S3 permissions for portal artifacts bucket
+      props.portalArtifactsBucket.grantReadWrite(role);
 
       // Grant SageMaker, Greengrass, CloudWatch Logs, and STS permissions
       role.addToPolicy(new iam.PolicyStatement({
@@ -136,6 +143,9 @@ export class ComputeStack extends cdk.Stack {
       DEPLOYMENTS_TABLE: props.deploymentsTable.tableName,
       SETTINGS_TABLE: props.settingsTable.tableName,
       COMPONENTS_TABLE: props.componentsTable.tableName,
+      SHARED_COMPONENTS_TABLE: props.sharedComponentsTable.tableName,
+      PORTAL_ARTIFACTS_BUCKET: props.portalArtifactsBucket.bucketName,
+      PORTAL_ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
       USER_POOL_ID: props.userPool.userPoolId,
     };
 
@@ -165,6 +175,20 @@ export class ComputeStack extends cdk.Stack {
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(30),
+    });
+
+    // Deployments Lambda Handler
+    const deploymentsHandler = new lambda.Function(this, 'DeploymentsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'deployments.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('Deployments'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-04-deployments',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(60),
     });
 
     // Auth Lambda Handler
@@ -338,6 +362,20 @@ export class ComputeStack extends cdk.Stack {
       environment: lambdaEnvironment,
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(60),
+    });
+
+    // Shared Components Lambda Handler for dda-LocalServer provisioning
+    const sharedComponentsHandler = new lambda.Function(this, 'SharedComponentsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'shared_components.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('SharedComponents'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-04-shared-components',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(120), // 2 minutes for cross-account component creation
     });
 
     // SNS Topic for training alerts
@@ -588,6 +626,7 @@ def handler(event, context):
     // Create Lambda integrations (this helps avoid circular dependencies)
     const useCasesIntegration = new apigateway.LambdaIntegration(useCasesHandler);
     const devicesIntegration = new apigateway.LambdaIntegration(devicesHandler);
+    const deploymentsIntegration = new apigateway.LambdaIntegration(deploymentsHandler);
     const authIntegration = new apigateway.LambdaIntegration(authHandler);
     const userManagementIntegration = new apigateway.LambdaIntegration(userManagementHandler);
     const datasetsIntegration = new apigateway.LambdaIntegration(datasetsHandler);
@@ -599,6 +638,7 @@ def handler(event, context):
     const greengrassPublishIntegration = new apigateway.LambdaIntegration(greengrassPublishHandler);
     const componentsIntegration = new apigateway.LambdaIntegration(componentsHandler);
     const dataManagementIntegration = new apigateway.LambdaIntegration(dataManagementHandler);
+    const sharedComponentsIntegration = new apigateway.LambdaIntegration(sharedComponentsHandler);
 
     // API Resources
     // Auth endpoints
@@ -951,6 +991,43 @@ def handler(event, context):
       }
     );
 
+    // Deployments endpoints
+    const deploymentsResource = this.api.root.addResource('deployments');
+    deploymentsResource.addMethod(
+      'GET',
+      deploymentsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+    deploymentsResource.addMethod(
+      'POST',
+      deploymentsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    const deploymentResource = deploymentsResource.addResource('{id}');
+    deploymentResource.addMethod(
+      'GET',
+      deploymentsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+    deploymentResource.addMethod(
+      'DELETE',
+      deploymentsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
     // Training endpoints
     const trainingResource = this.api.root.addResource('training');
     trainingResource.addMethod(
@@ -1095,6 +1172,39 @@ def handler(event, context):
     discoverResource.addMethod(
       'POST',
       componentsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Shared Components endpoints for dda-LocalServer provisioning
+    const sharedComponentsResource = this.api.root.addResource('shared-components');
+    sharedComponentsResource.addMethod(
+      'GET',
+      sharedComponentsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Available shared components from portal
+    const availableSharedResource = sharedComponentsResource.addResource('available');
+    availableSharedResource.addMethod(
+      'GET',
+      sharedComponentsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Provision shared components to usecase
+    const provisionSharedResource = sharedComponentsResource.addResource('provision');
+    provisionSharedResource.addMethod(
+      'POST',
+      sharedComponentsIntegration,
       {
         authorizer,
         authorizationType: apigateway.AuthorizationType.COGNITO,
