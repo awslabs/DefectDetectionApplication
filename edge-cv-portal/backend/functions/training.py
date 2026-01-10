@@ -135,6 +135,14 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         # Get use case details
         usecase = get_usecase_details(usecase_id)
         
+        # Log data account configuration for debugging
+        data_account_id = usecase.get('data_account_id')
+        data_s3_bucket = usecase.get('data_s3_bucket')
+        if data_account_id and data_account_id != usecase['account_id']:
+            logger.info(f"Training will use separate Data Account: {data_account_id}, bucket: {data_s3_bucket}")
+        else:
+            logger.info(f"Training data is in UseCase Account: {usecase['account_id']}")
+        
         # Assume cross-account role
         credentials = assume_usecase_role(
             usecase['cross_account_role_arn'],

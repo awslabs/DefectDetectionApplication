@@ -26,6 +26,11 @@ export interface ComputeStackProps extends cdk.StackProps {
   componentsTable: dynamodb.Table;
   sharedComponentsTable: dynamodb.Table;
   portalArtifactsBucket: s3.Bucket;
+  /**
+   * CloudFront domain for the portal frontend.
+   * Used to configure CORS on Data Account buckets during UseCase onboarding.
+   */
+  cloudFrontDomain?: string;
 }
 
 export class ComputeStack extends cdk.Stack {
@@ -93,6 +98,7 @@ export class ComputeStack extends cdk.Stack {
           'greengrass:CreateComponentVersion',
           'greengrass:DescribeComponent',
           'greengrass:ListComponents',
+          'greengrass:ListComponentVersions',
           'logs:GetLogEvents',
           'logs:DescribeLogStreams',
           'logs:FilterLogEvents',
@@ -147,6 +153,9 @@ export class ComputeStack extends cdk.Stack {
       PORTAL_ARTIFACTS_BUCKET: props.portalArtifactsBucket.bucketName,
       PORTAL_ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
       USER_POOL_ID: props.userPool.userPoolId,
+      // Shared component configuration - update DDA_LOCAL_SERVER_VERSION when publishing new component versions
+      DDA_LOCAL_SERVER_VERSION: '1.0.63',
+      COMPONENT_BUCKET_PREFIX: 'dda-component',
     };
 
     // UseCases Lambda Handler
@@ -157,11 +166,34 @@ export class ComputeStack extends cdk.Stack {
       role: createLambdaRole('UseCases'),
       environment: {
         ...lambdaEnvironment,
-        CODE_VERSION: '2024-12-12-fixed-shared-utils', // Force update with fixed shared_utils.py
+        CODE_VERSION: '2025-01-08-auto-cors', // Force update with auto CORS configuration
+        // CloudFront domain for auto-configuring CORS on Data Account buckets
+        ...(props.cloudFrontDomain && { CLOUDFRONT_DOMAIN: props.cloudFrontDomain }),
       },
       layers: [sharedLayer],
-      timeout: cdk.Duration.seconds(30),
+      timeout: cdk.Duration.seconds(120), // Increased for shared component provisioning
     });
+
+    // Grant UseCases Lambda permission to list S3 objects for artifact discovery during onboarding
+    const componentBucketNameForUsecases = `dda-component-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}`;
+    useCasesHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:ListBucket',
+        's3:GetBucketPolicy',
+        's3:PutBucketPolicy',
+      ],
+      resources: [`arn:aws:s3:::${componentBucketNameForUsecases}`],
+    }));
+
+    // Grant UseCases Lambda permission to list Greengrass component versions for dynamic version discovery
+    useCasesHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'greengrass:ListComponentVersions',
+      ],
+      resources: [`arn:aws:greengrass:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:components:aws.edgeml.dda.LocalServer.*`],
+    }));
 
     // Devices Lambda Handler
     const devicesHandler = new lambda.Function(this, 'DevicesHandler', {
@@ -372,11 +404,81 @@ export class ComputeStack extends cdk.Stack {
       role: createLambdaRole('SharedComponents'),
       environment: {
         ...lambdaEnvironment,
-        CODE_VERSION: '2025-01-04-shared-components',
+        CODE_VERSION: '2025-01-07-bucket-policy-update',
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(120), // 2 minutes for cross-account component creation
     });
+
+    // Model Import Lambda Handler for BYOM (Bring Your Own Model)
+    const modelImportHandler = new lambda.Function(this, 'ModelImportHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'model_import.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('ModelImport'),
+      environment: {
+        ...lambdaEnvironment,
+        COMPILATION_FUNCTION_NAME: compilationHandler.functionName,
+        CODE_VERSION: '2025-01-10-byom',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(300), // 5 minutes for model validation
+      memorySize: 1024, // More memory for tar.gz extraction
+      ephemeralStorageSize: cdk.Size.gibibytes(4), // 4GB temp storage for large models
+    });
+
+    // Grant Model Import Lambda permission to invoke compilation
+    compilationHandler.grantInvoke(modelImportHandler);
+
+    // Model Converter Lambda Handler for auto-generating DDA metadata
+    const modelConverterHandler = new lambda.Function(this, 'ModelConverterHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'model_converter.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('ModelConverter'),
+      environment: {
+        ...lambdaEnvironment,
+        MODEL_IMPORT_FUNCTION_NAME: modelImportHandler.functionName,
+        CODE_VERSION: '2025-01-10-converter',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(600), // 10 minutes for large model conversion
+      memorySize: 3008, // More memory for PyTorch model inspection
+      ephemeralStorageSize: cdk.Size.gibibytes(8), // 8GB temp storage for large models
+    });
+
+    // Grant Model Converter Lambda permission to invoke Model Import
+    modelImportHandler.grantInvoke(modelConverterHandler);
+
+    // Grant SharedComponents Lambda permission to update the GDK component bucket policy
+    // This is needed to add new usecase accounts to the bucket policy during onboarding
+    const componentBucketName = `dda-component-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}`;
+    sharedComponentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:GetBucketPolicy',
+        's3:PutBucketPolicy',
+      ],
+      resources: [`arn:aws:s3:::${componentBucketName}`],
+    }));
+
+    // Grant permission to list S3 objects for artifact discovery
+    sharedComponentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:ListBucket',
+      ],
+      resources: [`arn:aws:s3:::${componentBucketName}`],
+    }));
+
+    // Grant permission to list Greengrass component versions for dynamic version discovery
+    sharedComponentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'greengrass:ListComponentVersions',
+      ],
+      resources: [`arn:aws:greengrass:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:components:aws.edgeml.dda.LocalServer.*`],
+    }));
 
     // SNS Topic for training alerts
     const trainingAlertTopic = new sns.Topic(this, 'TrainingAlertTopic', {
@@ -639,6 +741,8 @@ def handler(event, context):
     const componentsIntegration = new apigateway.LambdaIntegration(componentsHandler);
     const dataManagementIntegration = new apigateway.LambdaIntegration(dataManagementHandler);
     const sharedComponentsIntegration = new apigateway.LambdaIntegration(sharedComponentsHandler);
+    const modelImportIntegration = new apigateway.LambdaIntegration(modelImportHandler);
+    const modelConverterIntegration = new apigateway.LambdaIntegration(modelConverterHandler);
 
     // API Resources
     // Auth endpoints
@@ -1120,6 +1224,75 @@ def handler(event, context):
       }
     );
 
+    // Models endpoints (for BYOM - Bring Your Own Model)
+    const modelsResource = this.api.root.addResource('models');
+    
+    // Model format specification endpoint
+    const modelFormatSpecResource = modelsResource.addResource('format-spec');
+    modelFormatSpecResource.addMethod(
+      'GET',
+      modelImportIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Model validation endpoint
+    const modelValidateResource = modelsResource.addResource('validate');
+    modelValidateResource.addMethod(
+      'POST',
+      modelImportIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Model import endpoint
+    const modelImportResource = modelsResource.addResource('import');
+    modelImportResource.addMethod(
+      'POST',
+      modelImportIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Model conversion endpoint (auto-generate DDA metadata)
+    const modelConvertResource = modelsResource.addResource('convert');
+    modelConvertResource.addMethod(
+      'POST',
+      modelConverterIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Model inspection endpoint (detect architecture)
+    const modelInspectResource = modelsResource.addResource('inspect');
+    modelInspectResource.addMethod(
+      'POST',
+      modelConverterIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Supported model types endpoint
+    const modelTypesResource = modelsResource.addResource('types');
+    modelTypesResource.addMethod(
+      'GET',
+      modelConverterIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
     // Components endpoints for Greengrass Component Browser
     const componentsResource = this.api.root.addResource('components');
     componentsResource.addMethod(
@@ -1203,6 +1376,28 @@ def handler(event, context):
     // Provision shared components to usecase
     const provisionSharedResource = sharedComponentsResource.addResource('provision');
     provisionSharedResource.addMethod(
+      'POST',
+      sharedComponentsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Get shared components update status (Portal Admin)
+    const statusSharedResource = sharedComponentsResource.addResource('status');
+    statusSharedResource.addMethod(
+      'GET',
+      sharedComponentsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Update all usecases with latest shared components (Portal Admin)
+    const updateAllSharedResource = sharedComponentsResource.addResource('update-all');
+    updateAllSharedResource.addMethod(
       'POST',
       sharedComponentsIntegration,
       {

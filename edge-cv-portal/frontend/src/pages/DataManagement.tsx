@@ -67,13 +67,10 @@ export default function DataManagement() {
   const [targetAccountInfo, setTargetAccountInfo] = useState<{account: string, hasDataRole: boolean} | null>(null);
 
   // Modal states
-  const [showCreateBucket, setShowCreateBucket] = useState(false);
   const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
 
   // Form states
-  const [newBucketName, setNewBucketName] = useState('');
-  const [newBucketRegion, setNewBucketRegion] = useState('us-east-1');
   const [newFolderName, setNewFolderName] = useState('');
   const [uploadFiles, setUploadFiles] = useState<UploadFile[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -162,26 +159,6 @@ export default function DataManagement() {
       setFiles(response.files);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load folder contents');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleCreateBucket = async () => {
-    if (!newBucketName.trim()) return;
-    setLoading(true);
-    try {
-      await apiService.createDataBucket(usecaseId, {
-        bucket_name: newBucketName.toLowerCase(),
-        region: newBucketRegion,
-        enable_versioning: true,
-        encryption: 'AES256',
-      });
-      setShowCreateBucket(false);
-      setNewBucketName('');
-      await loadBuckets();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create bucket');
     } finally {
       setLoading(false);
     }
@@ -339,13 +316,6 @@ export default function DataManagement() {
               disabled={useCases.length === 0}
               expandToViewport
             />
-          </SpaceBetween>
-        }
-        actions={
-          <SpaceBetween direction="horizontal" size="xs">
-            <Button onClick={() => setShowCreateBucket(true)} disabled={!usecaseId}>
-              Create Bucket
-            </Button>
           </SpaceBetween>
         }
       >
@@ -558,11 +528,11 @@ export default function DataManagement() {
                     loadingText="Loading buckets..."
                     empty={
                       <Box textAlign="center" color="inherit">
-                        <b>No buckets</b>
+                        <b>No buckets found</b>
                         <Box padding={{ bottom: 's' }} variant="p" color="inherit">
-                          Create a bucket to store your training data.
+                          No buckets with tag <code>dda-portal:managed=true</code> found. 
+                          Create a bucket in AWS Console and tag it to make it visible here.
                         </Box>
-                        <Button onClick={() => setShowCreateBucket(true)}>Create Bucket</Button>
                       </Box>
                     }
                   />
@@ -574,53 +544,6 @@ export default function DataManagement() {
         />
       )}
 
-
-      {/* Create Bucket Modal */}
-      <Modal
-        visible={showCreateBucket}
-        onDismiss={() => setShowCreateBucket(false)}
-        header="Create New Bucket"
-        footer={
-          <Box float="right">
-            <SpaceBetween direction="horizontal" size="xs">
-              <Button variant="link" onClick={() => setShowCreateBucket(false)}>
-                Cancel
-              </Button>
-              <Button variant="primary" onClick={handleCreateBucket} disabled={!newBucketName.trim()}>
-                Create
-              </Button>
-            </SpaceBetween>
-          </Box>
-        }
-      >
-        <SpaceBetween size="m">
-          <FormField
-            label="Bucket Name"
-            description="Must be globally unique, 3-63 characters, lowercase letters, numbers, and hyphens only"
-          >
-            <Input
-              value={newBucketName}
-              onChange={({ detail }) => setNewBucketName(detail.value.toLowerCase())}
-              placeholder="my-training-data-bucket"
-            />
-          </FormField>
-          <FormField label="Region">
-            <Select
-              selectedOption={{ label: newBucketRegion, value: newBucketRegion }}
-              onChange={({ detail }) => setNewBucketRegion(detail.selectedOption.value || 'us-east-1')}
-              options={[
-                { label: 'us-east-1', value: 'us-east-1' },
-                { label: 'us-west-2', value: 'us-west-2' },
-                { label: 'eu-west-1', value: 'eu-west-1' },
-                { label: 'ap-southeast-1', value: 'ap-southeast-1' },
-              ]}
-            />
-          </FormField>
-          <Alert type="info">
-            The bucket will be created with versioning enabled and AES-256 encryption.
-          </Alert>
-        </SpaceBetween>
-      </Modal>
 
       {/* Create Folder Modal */}
       <Modal

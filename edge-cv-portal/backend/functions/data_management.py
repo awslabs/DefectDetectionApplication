@@ -35,18 +35,23 @@ USECASES_TABLE = os.environ.get('USECASES_TABLE')
 def get_data_account_credentials(usecase: Dict) -> Optional[Dict]:
     """
     Get credentials for the data account.
-    If data_account_role_arn is set, assume that role.
+    If data_account_role_arn is set, assume that role with the required external ID.
     Otherwise, use the regular usecase account role.
     """
     # Check if separate data account is configured
     data_role_arn = usecase.get('data_account_role_arn')
     
     if data_role_arn:
-        # Use separate data account role
-        external_id = usecase.get('data_account_external_id', usecase.get('external_id'))
+        # Use separate data account role - external ID is required for production
+        external_id = usecase.get('data_account_external_id')
+        if not external_id:
+            raise ValueError(
+                "data_account_external_id is required when using a separate Data Account. "
+                "Please update the UseCase configuration with the external ID."
+            )
         session_name = f"data-mgmt-{int(datetime.utcnow().timestamp())}"[:64]
     else:
-        # Use regular usecase account role
+        # Use regular usecase account role (this one requires external_id)
         data_role_arn = usecase['cross_account_role_arn']
         external_id = usecase['external_id']
         session_name = f"data-mgmt-{int(datetime.utcnow().timestamp())}"[:64]
@@ -175,7 +180,7 @@ def list_buckets(event: Dict) -> Dict:
             return create_response(400, {'error': 'usecase_id is required'})
         
         # Check access
-        if not check_user_access(user_id, usecase_id):
+        if not check_user_access(user_id, usecase_id, user_info=user):
             return create_response(403, {'error': 'Access denied'})
         
         # Get usecase details
@@ -287,151 +292,18 @@ def create_bucket(event: Dict) -> Dict:
     """
     Create a new S3 bucket in the data account.
     POST /api/v1/usecases/{usecase_id}/data/buckets
+    
+    NOTE: This endpoint is disabled. Buckets must be created before UseCase onboarding
+    and tagged with dda-portal:managed=true to be visible in the portal.
     """
-    try:
-        user = get_user_from_event(event)
-        user_id = user['user_id']
-        
-        # Get usecase_id from path
-        path_params = event.get('pathParameters', {}) or {}
-        usecase_id = path_params.get('id') or path_params.get('usecase_id')
-        
-        if not usecase_id:
-            return create_response(400, {'error': 'usecase_id is required'})
-        
-        # Check access (require DataScientist or higher)
-        if not check_user_access(user_id, usecase_id, 'DataScientist'):
-            return create_response(403, {'error': 'Insufficient permissions'})
-        
-        # Parse request body
-        body = json.loads(event.get('body', '{}'))
-        
-        # Validate required fields
-        error = validate_required_fields(body, ['bucket_name'])
-        if error:
-            return create_response(400, {'error': error})
-        
-        bucket_name = body['bucket_name']
-        region = body.get('region', 'us-east-1')
-        enable_versioning = body.get('enable_versioning', True)
-        encryption = body.get('encryption', 'AES256')
-        
-        # Validate bucket name
-        if not is_valid_bucket_name(bucket_name):
-            return create_response(400, {
-                'error': 'Invalid bucket name. Must be 3-63 characters, lowercase, and DNS-compliant.'
-            })
-        
-        # Get usecase details
-        usecase = get_usecase(usecase_id)
-        
-        # Get credentials and create S3 client
-        credentials = get_data_account_credentials(usecase)
-        s3 = create_s3_client(credentials)
-        
-        # Create bucket
-        try:
-            if region == 'us-east-1':
-                s3.create_bucket(Bucket=bucket_name)
-            else:
-                s3.create_bucket(
-                    Bucket=bucket_name,
-                    CreateBucketConfiguration={'LocationConstraint': region}
-                )
-            
-            logger.info(f"Created bucket: {bucket_name}")
-            
-            # Tag bucket with dda-portal:managed=true
-            s3.put_bucket_tagging(
-                Bucket=bucket_name,
-                Tagging={
-                    'TagSet': [
-                        {'Key': 'dda-portal:managed', 'Value': 'true'},
-                        {'Key': 'usecase_id', 'Value': usecase_id},
-                        {'Key': 'created_by', 'Value': user_id}
-                    ]
-                }
-            )
-            logger.info(f"Tagged bucket with dda-portal:managed=true: {bucket_name}")
-            
-            # Enable versioning if requested
-            if enable_versioning:
-                s3.put_bucket_versioning(
-                    Bucket=bucket_name,
-                    VersioningConfiguration={'Status': 'Enabled'}
-                )
-                logger.info(f"Enabled versioning on bucket: {bucket_name}")
-            
-            # Enable encryption
-            if encryption:
-                s3.put_bucket_encryption(
-                    Bucket=bucket_name,
-                    ServerSideEncryptionConfiguration={
-                        'Rules': [{
-                            'ApplyServerSideEncryptionByDefault': {
-                                'SSEAlgorithm': encryption
-                            }
-                        }]
-                    }
-                )
-                logger.info(f"Enabled {encryption} encryption on bucket: {bucket_name}")
-            
-            # Create default folder structure
-            default_folders = ['datasets/', 'manifests/', 'models/', 'compiled/']
-            for folder in default_folders:
-                s3.put_object(Bucket=bucket_name, Key=folder, Body='')
-            
-            logger.info(f"Created default folder structure in bucket: {bucket_name}")
-            
-            # Configure CORS for portal uploads
-            # Get CloudFront domain from environment or use wildcard for flexibility
-            cloudfront_domain = os.environ.get('CLOUDFRONT_DOMAIN', '*')
-            allowed_origin = f"https://{cloudfront_domain}" if cloudfront_domain != '*' else '*'
-            
-            cors_config = {
-                'CORSRules': [{
-                    'AllowedHeaders': ['*'],
-                    'AllowedMethods': ['GET', 'PUT', 'POST', 'HEAD', 'DELETE'],
-                    'AllowedOrigins': [allowed_origin],
-                    'ExposeHeaders': ['ETag', 'x-amz-meta-custom-header'],
-                    'MaxAgeSeconds': 3000
-                }]
-            }
-            
-            s3.put_bucket_cors(Bucket=bucket_name, CORSConfiguration=cors_config)
-            logger.info(f"Configured CORS on bucket: {bucket_name}")
-            
-            
-        except ClientError as e:
-            error_code = e.response.get('Error', {}).get('Code', '')
-            if error_code == 'BucketAlreadyExists':
-                return create_response(409, {'error': 'Bucket name already taken globally'})
-            elif error_code == 'BucketAlreadyOwnedByYou':
-                return create_response(409, {'error': 'You already own this bucket'})
-            raise
-        
-        log_audit_event(
-            user_id, 'create_bucket', 'data_management', usecase_id,
-            'success', {'bucket_name': bucket_name, 'region': region}
-        )
-        
-        return create_response(201, {
-            'bucket_name': bucket_name,
-            'region': region,
-            'arn': f"arn:aws:s3:::{bucket_name}",
-            'created': True,
-            'versioning_enabled': enable_versioning,
-            'encryption': encryption,
-            'cors_configured': True
-        })
-        
-    except ClientError as e:
-        logger.error(f"AWS error creating bucket: {str(e)}")
-        return create_response(500, {'error': f"Failed to create bucket: {str(e)}"})
-    except Exception as e:
-        logger.error(f"Error creating bucket: {str(e)}")
-        return create_response(500, {'error': 'Failed to create bucket'})
-
+    return create_response(400, {
+        'error': 'Bucket creation via portal is not supported. Please create the bucket in AWS Console before onboarding the UseCase, then tag it with dda-portal:managed=true.',
+        'instructions': [
+            '1. Create bucket in AWS Console: aws s3 mb s3://your-bucket-name',
+            '2. Tag the bucket: aws s3api put-bucket-tagging --bucket your-bucket-name --tagging \'TagSet=[{Key=dda-portal:managed,Value=true}]\'',
+            '3. The bucket will appear in the portal after tagging'
+        ]
+    })
 
 
 def list_folders(event: Dict) -> Dict:
@@ -451,7 +323,7 @@ def list_folders(event: Dict) -> Dict:
             return create_response(400, {'error': 'usecase_id is required'})
         
         # Check access
-        if not check_user_access(user_id, usecase_id):
+        if not check_user_access(user_id, usecase_id, user_info=user):
             return create_response(403, {'error': 'Access denied'})
         
         # Get query parameters
@@ -549,7 +421,7 @@ def create_folder(event: Dict) -> Dict:
             return create_response(400, {'error': 'usecase_id is required'})
         
         # Check access
-        if not check_user_access(user_id, usecase_id, 'DataScientist'):
+        if not check_user_access(user_id, usecase_id, 'DataScientist', user_info=user):
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Parse request body
@@ -616,7 +488,7 @@ def get_upload_url(event: Dict) -> Dict:
             return create_response(400, {'error': 'usecase_id is required'})
         
         # Check access
-        if not check_user_access(user_id, usecase_id, 'DataScientist'):
+        if not check_user_access(user_id, usecase_id, 'DataScientist', user_info=user):
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Parse request body
@@ -685,7 +557,7 @@ def get_batch_upload_urls(event: Dict) -> Dict:
             return create_response(400, {'error': 'usecase_id is required'})
         
         # Check access
-        if not check_user_access(user_id, usecase_id, 'DataScientist'):
+        if not check_user_access(user_id, usecase_id, 'DataScientist', user_info=user):
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Parse request body
@@ -791,7 +663,7 @@ def configure_data_account(event: Dict) -> Dict:
             return create_response(400, {'error': 'usecase_id is required'})
         
         # Check access (require UseCaseAdmin or higher)
-        if not check_user_access(user_id, usecase_id, 'UseCaseAdmin'):
+        if not check_user_access(user_id, usecase_id, 'UseCaseAdmin', user_info=user):
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Parse request body

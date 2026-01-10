@@ -58,13 +58,16 @@ def handler(event, context):
         return create_response(500, {'error': 'Internal server error'})
 
 
-@require_super_user
 def list_users(event):
     """
     List all users and their role assignments
     GET /api/v1/users?usecase_id=xxx
+    
+    - PortalAdmins can list all users or filter by usecase_id
+    - UseCaseAdmins can only list users for their assigned usecases
     """
     try:
+        current_user = get_user_from_event(event)
         query_params = event.get('queryStringParameters', {}) or {}
         usecase_id = query_params.get('usecase_id')
         
@@ -74,6 +77,25 @@ def list_users(event):
         dynamodb = boto3.resource('dynamodb')
         user_roles_table = dynamodb.Table(os.environ.get('USER_ROLES_TABLE'))
         
+        # Check permissions
+        is_portal_admin = rbac_manager.is_portal_admin(current_user['user_id'], current_user)
+        
+        if not is_portal_admin:
+            # Non-portal admins must specify a usecase_id
+            if not usecase_id:
+                return create_response(403, {
+                    'error': 'Access denied',
+                    'message': 'You must specify a usecase_id to list users'
+                })
+            
+            # Check if user has admin access to this usecase
+            user_role = rbac_manager.get_user_role(current_user['user_id'], usecase_id)
+            if user_role not in [Role.USECASE_ADMIN, Role.PORTAL_ADMIN]:
+                return create_response(403, {
+                    'error': 'Access denied',
+                    'message': 'You must be a UseCaseAdmin to view team members'
+                })
+        
         if usecase_id:
             # Get users for specific use case
             response = user_roles_table.query(
@@ -82,7 +104,7 @@ def list_users(event):
                 ExpressionAttributeValues={':usecase_id': usecase_id}
             )
         else:
-            # Get all user assignments
+            # Get all user assignments (PortalAdmin only)
             response = user_roles_table.scan()
         
         # Group by user

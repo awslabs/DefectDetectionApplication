@@ -13,10 +13,14 @@ import {
   Alert,
   ButtonDropdown,
   Flashbar,
+  Container,
+  StatusIndicator,
+  ColumnLayout,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { UseCase } from '../types';
 import { useAuth } from '../contexts/AuthContext';
+import TeamManagement from '../components/TeamManagement';
 
 interface FormData {
   name: string;
@@ -41,6 +45,7 @@ export default function UseCases() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [selectedUseCase, setSelectedUseCase] = useState<UseCase | null>(null);
+  const [showTeamModal, setShowTeamModal] = useState(false);
   const [formData, setFormData] = useState<FormData>({
     name: '',
     account_id: '',
@@ -97,6 +102,52 @@ export default function UseCases() {
     },
     onError: (err: Error) => {
       setError(err.message);
+    },
+  });
+
+  const provisionMutation = useMutation({
+    mutationFn: (usecaseId: string) => apiService.provisionSharedComponents(usecaseId),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['usecases'] });
+      queryClient.invalidateQueries({ queryKey: ['shared-components-status'] });
+      const successCount = data.components.filter(c => c.status === 'shared').length;
+      const failedCount = data.components.filter(c => c.status === 'failed').length;
+      if (failedCount > 0) {
+        const errors = data.components.filter(c => c.error).map(c => `${c.component_name}: ${c.error}`).join('\n');
+        setError(`Provisioned ${successCount} component(s), ${failedCount} failed:\n${errors}`);
+      } else {
+        setSuccessMessage(`Successfully provisioned ${successCount} shared component(s)`);
+        setTimeout(() => setSuccessMessage(''), 5000);
+      }
+    },
+    onError: (err: Error) => {
+      setError(`Failed to provision shared components: ${err.message}`);
+    },
+  });
+
+  // Query for shared components status (Portal Admin only)
+  const { data: statusData, isLoading: statusLoading } = useQuery({
+    queryKey: ['shared-components-status'],
+    queryFn: () => apiService.getSharedComponentsStatus(),
+    enabled: user?.role === 'PortalAdmin',
+  });
+
+  // Mutation for updating all usecases
+  const updateAllMutation = useMutation({
+    mutationFn: () => apiService.updateAllSharedComponents(),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['shared-components-status'] });
+      queryClient.invalidateQueries({ queryKey: ['usecases'] });
+      if (data.failed_count > 0) {
+        setError(`Updated ${data.success_count} usecase(s), ${data.failed_count} failed. Check console for details.`);
+        console.log('Update results:', data.results);
+      } else {
+        setSuccessMessage(`Successfully updated shared components for ${data.success_count} usecase(s) to version ${data.target_version}`);
+        setTimeout(() => setSuccessMessage(''), 5000);
+      }
+    },
+    onError: (err: Error) => {
+      setError(`Failed to update shared components: ${err.message}`);
     },
   });
 
@@ -178,13 +229,82 @@ export default function UseCases() {
         />
       )}
 
+      {error && (
+        <Alert type="error" dismissible onDismiss={() => setError('')}>
+          {error}
+        </Alert>
+      )}
+
+      {/* Shared Components Status Panel - Portal Admin Only */}
+      {user?.role === 'PortalAdmin' && (
+        <Container
+          header={
+            <Header
+              variant="h2"
+              description="Monitor and update dda-LocalServer components across all usecases"
+              actions={
+                <Button
+                  onClick={() => updateAllMutation.mutate()}
+                  loading={updateAllMutation.isPending}
+                  disabled={!statusData || statusData.usecases_needing_update === 0}
+                >
+                  Update All Usecases
+                </Button>
+              }
+            >
+              Shared Components Status
+            </Header>
+          }
+        >
+          {statusLoading ? (
+            <Box textAlign="center" padding="l">Loading status...</Box>
+          ) : statusData ? (
+            <ColumnLayout columns={4} variant="text-grid">
+              <div>
+                <Box variant="awsui-key-label">Latest Version</Box>
+                <Box variant="p">{statusData.latest_version}</Box>
+              </div>
+              <div>
+                <Box variant="awsui-key-label">Total Usecases</Box>
+                <Box variant="p">{statusData.total_usecases}</Box>
+              </div>
+              <div>
+                <Box variant="awsui-key-label">Needing Update</Box>
+                <Box variant="p">
+                  {statusData.usecases_needing_update > 0 ? (
+                    <StatusIndicator type="warning">
+                      {statusData.usecases_needing_update} usecase(s)
+                    </StatusIndicator>
+                  ) : (
+                    <StatusIndicator type="success">All up to date</StatusIndicator>
+                  )}
+                </Box>
+              </div>
+              <div>
+                <Box variant="awsui-key-label">Usecases with Updates Available</Box>
+                <Box variant="p">
+                  {statusData.usecases
+                    .filter(u => u.needs_update)
+                    .map(u => u.usecase_name)
+                    .join(', ') || 'None'}
+                </Box>
+              </div>
+            </ColumnLayout>
+          ) : (
+            <Box textAlign="center" color="text-status-inactive">
+              Unable to load status
+            </Box>
+          )}
+        </Container>
+      )}
+
       <Table
         header={
           <Header
             variant="h1"
             description="Manage computer vision use cases across AWS accounts"
             actions={
-              user && (user.role === 'PortalAdmin' || user.role === 'UseCaseAdmin') ? (
+              user ? (
                 <SpaceBetween direction="horizontal" size="xs">
                   <Button onClick={() => setShowCreateModal(true)}>
                     Quick Create
@@ -222,8 +342,13 @@ export default function UseCases() {
             cell: (item: UseCase) => item.owner || '-',
           },
           {
-            id: 's3_bucket',
-            header: 'S3 Bucket',
+            id: 'data_bucket',
+            header: 'Data Bucket',
+            cell: (item: UseCase) => item.data_s3_bucket || item.s3_bucket,
+          },
+          {
+            id: 'output_bucket',
+            header: 'Output Bucket',
             cell: (item: UseCase) => item.s3_bucket,
           },
           {
@@ -244,12 +369,19 @@ export default function UseCases() {
               <ButtonDropdown
                 items={[
                   { id: 'browse', text: 'Browse Datasets' },
+                  { id: 'team', text: 'Manage Team' },
+                  { id: 'provision', text: 'Re-provision Shared Components' },
                   { id: 'edit', text: 'Edit' },
                   { id: 'delete', text: 'Delete' },
                 ]}
                 onItemClick={({ detail }) => {
                   if (detail.id === 'browse') {
                     navigate(`/labeling/datasets?usecase_id=${item.usecase_id}`);
+                  } else if (detail.id === 'team') {
+                    setSelectedUseCase(item);
+                    setShowTeamModal(true);
+                  } else if (detail.id === 'provision') {
+                    provisionMutation.mutate(item.usecase_id);
                   } else if (detail.id === 'edit') {
                     handleEdit(item);
                   } else if (detail.id === 'delete') {
@@ -257,6 +389,7 @@ export default function UseCases() {
                   }
                 }}
                 expandToViewport
+                loading={provisionMutation.isPending}
               >
                 Actions
               </ButtonDropdown>
@@ -603,6 +736,19 @@ export default function UseCases() {
           </Box>
         </SpaceBetween>
       </Modal>
+
+      {/* Team Management Modal */}
+      {selectedUseCase && (
+        <TeamManagement
+          visible={showTeamModal}
+          onDismiss={() => {
+            setShowTeamModal(false);
+            setSelectedUseCase(null);
+          }}
+          usecaseId={selectedUseCase.usecase_id}
+          usecaseName={selectedUseCase.name}
+        />
+      )}
     </SpaceBetween>
   );
 }

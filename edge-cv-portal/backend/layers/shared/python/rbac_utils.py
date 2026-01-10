@@ -136,6 +136,7 @@ ROLE_PERMISSIONS = {
         Permission.DOWNLOAD_DEVICE_FILE,
         Permission.VIEW_DEVICE_LOGS,
         Permission.UPDATE_DEVICE_CONFIG,
+        Permission.MANAGE_USERS,  # Can manage team members for their usecases
     },
     Role.DATA_SCIENTIST: {
         # Data scientists focus on labeling, training, and model management

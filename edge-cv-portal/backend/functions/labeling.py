@@ -5,10 +5,16 @@ Handles job creation, monitoring, and manifest generation.
 
 import json
 import boto3
+from botocore.exceptions import ClientError
 import os
 import uuid
+import logging
 from typing import Dict, List, Any
 from datetime import datetime
+
+# Configure logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 # Import shared utilities
 import sys
@@ -145,14 +151,14 @@ def create_labeling_job(event):
         # Get use case details
         usecase = get_usecase(usecase_id)
         
-        # Assume UseCase Account role
+        # Assume UseCase Account role for SageMaker and output
         credentials = assume_usecase_role(
             usecase['cross_account_role_arn'],
             usecase['external_id'],
             'create-labeling-job'
         )
         
-        # Create clients with assumed credentials
+        # Create clients with UseCase Account credentials
         s3 = boto3.client(
             's3',
             aws_access_key_id=credentials['AccessKeyId'],
@@ -167,7 +173,58 @@ def create_labeling_job(event):
             aws_session_token=credentials['SessionToken']
         )
         
-        bucket = usecase['s3_bucket']
+        # Determine input data source (Data Account or UseCase Account)
+        # Input images come from Data Account if configured and different from UseCase Account
+        data_role_arn = usecase.get('data_account_role_arn')
+        data_account_id = usecase.get('data_account_id')
+        usecase_account_id = usecase.get('account_id')
+        
+        # Check if Data Account is different from UseCase Account
+        is_separate_data_account = (
+            data_role_arn and 
+            data_account_id and 
+            data_account_id != usecase_account_id
+        )
+        
+        if is_separate_data_account:
+            # Use separate Data Account for input data - external ID is required for production
+            print(f"Using separate Data Account {data_account_id} for input data")
+            data_external_id = usecase.get('data_account_external_id')
+            if not data_external_id:
+                return create_response(400, {
+                    'error': 'data_account_external_id is required when using a separate Data Account. '
+                             'Please update the UseCase configuration with the external ID.'
+                })
+            data_credentials = assume_usecase_role(
+                data_role_arn,
+                data_external_id,
+                'labeling-data-access'
+            )
+            input_bucket = usecase.get('data_s3_bucket') or usecase.get('s3_bucket')
+            input_prefix = usecase.get('data_s3_prefix', '')
+            
+            # S3 client for reading input data from Data Account
+            s3_data = boto3.client(
+                's3',
+                aws_access_key_id=data_credentials['AccessKeyId'],
+                aws_secret_access_key=data_credentials['SecretAccessKey'],
+                aws_session_token=data_credentials['SessionToken']
+            )
+            s3_for_input = s3_data
+        else:
+            # Data Account is same as UseCase Account - use same credentials
+            print(f"Data Account is same as UseCase Account {usecase_account_id}")
+            input_bucket = usecase.get('data_s3_bucket') or usecase['s3_bucket']
+            input_prefix = usecase.get('data_s3_prefix', usecase.get('s3_prefix', ''))
+            s3_for_input = s3
+        
+        # Output bucket - must be in UseCase Account for SageMaker outputs
+        output_bucket = usecase.get('s3_bucket')
+        
+        if not output_bucket:
+            return create_response(400, {
+                'error': 's3_bucket is required for SageMaker outputs. Please configure an S3 bucket in the UseCase Account for storing labeling job outputs, manifests, and models.'
+            })
         
         # Generate unique job ID
         # SageMaker labeling job names must be 63 characters or less
@@ -190,9 +247,9 @@ def create_labeling_job(event):
         
         logger.info(f"Generated labeling job name: {sagemaker_job_name} (length: {len(sagemaker_job_name)})")
         
-        # Step 1: List images from S3
-        print(f"Listing images from s3://{bucket}/{dataset_prefix}")
-        images = list_images_from_s3(s3, bucket, dataset_prefix)
+        # Step 1: List images from S3 (from Data Account if configured)
+        print(f"Listing images from s3://{input_bucket}/{dataset_prefix}")
+        images = list_images_from_s3(s3_for_input, input_bucket, dataset_prefix)
         
         if not images:
             return create_response(400, {'error': 'No images found in the specified prefix'})
@@ -200,20 +257,21 @@ def create_labeling_job(event):
         print(f"Found {len(images)} images")
         
         # Step 2: Generate manifest file
+        # Manifest references the input bucket (Data Account if configured)
         manifest_key = f"manifests/{job_id}.manifest"
-        manifest_content = generate_manifest(images, bucket)
+        manifest_content = generate_manifest(images, input_bucket)
         
-        # Step 3: Upload manifest to S3
-        print(f"Uploading manifest to s3://{bucket}/{manifest_key}")
+        # Step 3: Upload manifest to UseCase Account S3 (where SageMaker runs)
+        print(f"Uploading manifest to s3://{output_bucket}/{manifest_key}")
         s3.put_object(
-            Bucket=bucket,
+            Bucket=output_bucket,
             Key=manifest_key,
             Body=manifest_content,
             ContentType='application/x-ndjson'
         )
         
-        manifest_s3_uri = f"s3://{bucket}/{manifest_key}"
-        output_s3_uri = f"s3://{bucket}/labeled/{job_id}/"
+        manifest_s3_uri = f"s3://{output_bucket}/{manifest_key}"
+        output_s3_uri = f"s3://{output_bucket}/labeled/{job_id}/"
         
         # Step 4: Get Ground Truth execution role ARN
         # This role should exist in the UseCase Account
@@ -221,31 +279,31 @@ def create_labeling_job(event):
         ground_truth_role_arn = f"arn:aws:iam::{usecase['account_id']}:role/DDASageMakerExecutionRole"
         print(f"Using Ground Truth role: {ground_truth_role_arn}")
         
-        # Step 5: Create UI template in S3
+        # Step 5: Create UI template in S3 (UseCase Account)
         ui_template_content = create_ui_template(task_type, label_categories)
         ui_template_key = f"ui-templates/{job_id}-template.liquid"
         
         s3.put_object(
-            Bucket=bucket,
+            Bucket=output_bucket,
             Key=ui_template_key,
             Body=ui_template_content,
             ContentType='text/html'
         )
         
-        ui_template_s3_uri = f"s3://{bucket}/{ui_template_key}"
+        ui_template_s3_uri = f"s3://{output_bucket}/{ui_template_key}"
         
         # Step 6: Create label category config
         label_category_config = create_label_category_config(label_categories)
         label_config_key = f"manifests/{job_id}-label-categories.json"
         
         s3.put_object(
-            Bucket=bucket,
+            Bucket=output_bucket,
             Key=label_config_key,
             Body=json.dumps(label_category_config),
             ContentType='application/json'
         )
         
-        label_config_s3_uri = f"s3://{bucket}/{label_config_key}"
+        label_config_s3_uri = f"s3://{output_bucket}/{label_config_key}"
         
         # Step 7: Create Ground Truth labeling job
         print(f"Creating Ground Truth job: {sagemaker_job_name}")
@@ -596,8 +654,8 @@ def get_task_keywords(task_type: str) -> List[str]:
     """Get task keywords for Ground Truth built-in task types."""
     keywords = {
         'ObjectDetection': ['Image', 'Object Detection', 'Bounding Box'],
-        'Classification': ['Image', 'Classification', 'Multi-class'],
-        'Segmentation': ['Image', 'Segmentation', 'Semantic Segmentation']
+        'Classification': ['Image', 'Classification', 'Multiclass'],
+        'Segmentation': ['Image', 'Segmentation', 'Semantic']
     }
     
     return keywords.get(task_type, ['Image', 'Labeling'])

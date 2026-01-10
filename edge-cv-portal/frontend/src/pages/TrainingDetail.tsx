@@ -184,24 +184,26 @@ export default function TrainingDetail() {
         actions={
           <SpaceBetween direction="horizontal" size="xs">
             <Button onClick={() => navigate('/training')}>Back to Training Jobs</Button>
-            <Button 
-              onClick={() => navigate('/training/create', { 
-                state: { 
-                  cloneFrom: {
-                    model_name: job.model_name,
-                    model_type: job.model_type,
-                    dataset_manifest_s3: job.dataset_manifest_s3,
-                    instance_type: job.instance_type,
-                    hyperparameters: job.hyperparameters,
-                    usecase_id: job.usecase_id
+            {job.source !== 'imported' && (
+              <Button 
+                onClick={() => navigate('/training/create', { 
+                  state: { 
+                    cloneFrom: {
+                      model_name: job.model_name,
+                      model_type: job.model_type,
+                      dataset_manifest_s3: job.dataset_manifest_s3,
+                      instance_type: job.instance_type,
+                      hyperparameters: job.hyperparameters,
+                      usecase_id: job.usecase_id
+                    }
                   }
-                }
-              })}
-            >
-              Clone Job
-            </Button>
+                })}
+              >
+                Clone Job
+              </Button>
+            )}
             <Button 
-              disabled={job.status !== 'InProgress'} 
+              disabled={job.status !== 'InProgress' || job.source === 'imported'} 
               onClick={handleStopTraining}
             >
               Stop Training
@@ -209,7 +211,12 @@ export default function TrainingDetail() {
           </SpaceBetween>
         }
       >
-        {job.model_name}
+        <SpaceBetween direction="horizontal" size="xs">
+          {job.model_name}
+          {job.source === 'imported' && (
+            <StatusIndicator type="info">Imported</StatusIndicator>
+          )}
+        </SpaceBetween>
       </Header>
 
       {/* Show failure reason if job failed */}
@@ -267,13 +274,14 @@ export default function TrainingDetail() {
                         { label: 'Model Name', value: job.model_name },
                         { label: 'Version', value: job.model_version },
                         { label: 'Use Case', value: job.usecase_id },
+                        { label: 'Source', value: job.source === 'imported' ? 'Imported Model (BYOM)' : 'SageMaker Training' },
                       ]}
                     />
                     <KeyValuePairs
                       columns={1}
                       items={[
                         { label: 'Status', value: job.status },
-                        { label: 'Instance Type', value: job.instance_type },
+                        { label: 'Instance Type', value: job.source === 'imported' ? 'N/A (Imported)' : job.instance_type },
                         { label: 'Created By', value: job.created_by },
                         { label: 'Started', value: formatTimestamp(job.created_at) },
                       ]}
@@ -281,22 +289,49 @@ export default function TrainingDetail() {
                   </ColumnLayout>
                 </Container>
 
-                <Container header={<Header variant="h2">Algorithm</Header>}>
-                  <KeyValuePairs
-                    columns={1}
-                    items={[
-                      {
-                        label: 'Algorithm ARN',
-                        value: (
-                          <Box fontSize="body-s">
-                            <span style={{ fontFamily: 'monospace' }}>{job.algorithm_uri}</span>
-                          </Box>
-                        ),
-                      },
-                      { label: 'Dataset Manifest', value: job.dataset_manifest_s3 },
-                    ]}
-                  />
-                </Container>
+                {/* Show import metadata for imported models */}
+                {job.source === 'imported' && job.metadata && (
+                  <Container header={<Header variant="h2">Import Metadata</Header>}>
+                    <ColumnLayout columns={2} variant="text-grid">
+                      <KeyValuePairs
+                        columns={1}
+                        items={[
+                          { label: 'Model Type', value: job.metadata.model_type },
+                          { label: 'Framework', value: `${job.metadata.framework} ${job.metadata.framework_version}` },
+                          { label: 'Model File', value: job.metadata.pt_file },
+                        ]}
+                      />
+                      <KeyValuePairs
+                        columns={1}
+                        items={[
+                          { label: 'Image Dimensions', value: `${job.metadata.image_width} x ${job.metadata.image_height}` },
+                          { label: 'Input Shape', value: `[${job.metadata.input_shape?.join(', ')}]` },
+                          { label: 'Model Artifact', value: job.artifact_s3 },
+                        ]}
+                      />
+                    </ColumnLayout>
+                  </Container>
+                )}
+
+                {/* Show algorithm info for trained models */}
+                {job.source !== 'imported' && (
+                  <Container header={<Header variant="h2">Algorithm</Header>}>
+                    <KeyValuePairs
+                      columns={1}
+                      items={[
+                        {
+                          label: 'Algorithm ARN',
+                          value: (
+                            <Box fontSize="body-s">
+                              <span style={{ fontFamily: 'monospace' }}>{job.algorithm_uri}</span>
+                            </Box>
+                          ),
+                        },
+                        { label: 'Dataset Manifest', value: job.dataset_manifest_s3 },
+                      ]}
+                    />
+                  </Container>
+                )}
 
                 {job.hyperparameters && Object.keys(job.hyperparameters).length > 0 && (
                   <Container header={<Header variant="h2">Hyperparameters</Header>}>

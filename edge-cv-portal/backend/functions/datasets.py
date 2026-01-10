@@ -56,6 +56,42 @@ def handler(event, context):
         return handle_error(e, 'Dataset operation failed')
 
 
+def get_data_bucket_and_credentials(usecase):
+    """
+    Get the appropriate bucket and credentials for data access.
+    Uses Data Account if configured, otherwise falls back to UseCase Account.
+    """
+    # Check if separate data account is configured
+    data_role_arn = usecase.get('data_account_role_arn')
+    
+    if data_role_arn:
+        # Use Data Account - external ID is required for production
+        external_id = usecase.get('data_account_external_id')
+        if not external_id:
+            raise ValueError(
+                "data_account_external_id is required when using a separate Data Account. "
+                "Please update the UseCase configuration with the external ID."
+            )
+        credentials = assume_usecase_role(
+            data_role_arn,
+            external_id,
+            'data-access'
+        )
+        bucket = usecase.get('data_s3_bucket') or usecase.get('s3_bucket')
+        prefix = usecase.get('data_s3_prefix') or usecase.get('s3_prefix', '')
+    else:
+        # Use UseCase Account (this one requires external_id)
+        credentials = assume_usecase_role(
+            usecase['cross_account_role_arn'],
+            usecase['external_id'],
+            'data-access'
+        )
+        bucket = usecase['s3_bucket']
+        prefix = usecase.get('s3_prefix', '')
+    
+    return bucket, prefix, credentials
+
+
 def list_datasets(event):
     """
     List available S3 prefixes (datasets) in a UseCase Account.
@@ -80,12 +116,8 @@ def list_datasets(event):
         # Get use case details
         usecase = get_usecase(usecase_id)
         
-        # Assume UseCase Account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            'list-datasets'
-        )
+        # Get bucket and credentials (uses Data Account if configured)
+        bucket, base_prefix, credentials = get_data_bucket_and_credentials(usecase)
         
         # Create S3 client with assumed credentials
         s3 = boto3.client(
@@ -94,9 +126,6 @@ def list_datasets(event):
             aws_secret_access_key=credentials['SecretAccessKey'],
             aws_session_token=credentials['SessionToken']
         )
-        
-        bucket = usecase['s3_bucket']
-        base_prefix = usecase.get('s3_prefix', '')
         
         # Combine base prefix with filter
         search_prefix = f"{base_prefix}{filter_prefix}".strip('/')
@@ -236,12 +265,8 @@ def count_images(event):
         # Get use case details
         usecase = get_usecase(usecase_id)
         
-        # Assume UseCase Account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            'count-images'
-        )
+        # Get bucket and credentials (uses Data Account if configured)
+        bucket, _, credentials = get_data_bucket_and_credentials(usecase)
         
         # Create S3 client with assumed credentials
         s3 = boto3.client(
@@ -250,8 +275,6 @@ def count_images(event):
             aws_secret_access_key=credentials['SecretAccessKey'],
             aws_session_token=credentials['SessionToken']
         )
-        
-        bucket = usecase['s3_bucket']
         
         # Count images
         image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
@@ -314,12 +337,8 @@ def get_image_preview(event):
         # Get use case details
         usecase = get_usecase(usecase_id)
         
-        # Assume UseCase Account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            'preview-images'
-        )
+        # Get bucket and credentials (uses Data Account if configured)
+        bucket, _, credentials = get_data_bucket_and_credentials(usecase)
         
         # Create S3 client with assumed credentials
         s3 = boto3.client(
@@ -328,8 +347,6 @@ def get_image_preview(event):
             aws_secret_access_key=credentials['SecretAccessKey'],
             aws_session_token=credentials['SessionToken']
         )
-        
-        bucket = usecase['s3_bucket']
         
         # Find image files
         image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}

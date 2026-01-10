@@ -28,6 +28,7 @@ interface TrainingJob {
   created_by: string;
   created_at: number;
   completed_at?: number;
+  source?: 'imported' | 'trained';
 }
 
 export default function Training() {
@@ -196,13 +197,27 @@ export default function Training() {
             }
             counter={`(${filteredJobs.length})`}
             actions={
-              <Button 
-                variant="primary" 
-                onClick={() => navigate('/training/create')}
-                disabled={!selectedUseCase}
-              >
-                Start Training Job
-              </Button>
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button 
+                  onClick={() => navigate('/training/smart-import')}
+                  disabled={!selectedUseCase}
+                >
+                  Smart Import
+                </Button>
+                <Button 
+                  onClick={() => navigate('/training/import')}
+                  disabled={!selectedUseCase}
+                >
+                  Manual Import
+                </Button>
+                <Button 
+                  variant="primary" 
+                  onClick={() => navigate('/training/create')}
+                  disabled={!selectedUseCase}
+                >
+                  Start Training Job
+                </Button>
+              </SpaceBetween>
             }
           >
             Training Jobs
@@ -214,7 +229,12 @@ export default function Training() {
             id: 'model_name',
             header: 'Model Name',
             cell: (item) => (
-              <Link onFollow={() => navigate(`/training/${item.training_id}`)}>{item.model_name}</Link>
+              <SpaceBetween direction="horizontal" size="xs">
+                <Link onFollow={() => navigate(`/training/${item.training_id}`)}>{item.model_name}</Link>
+                {item.source === 'imported' && (
+                  <StatusIndicator type="info">Imported</StatusIndicator>
+                )}
+              </SpaceBetween>
             ),
             sortingField: 'model_name',
           },

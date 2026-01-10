@@ -30,6 +30,9 @@ const storageStack = new StorageStack(app, 'EdgeCVPortalStorageStack', {
 });
 
 // Compute Stack (Lambda functions, API Gateway)
+// Note: cloudFrontDomain is optional and can be set after initial deployment
+// to enable automatic CORS configuration on Data Account buckets
+const cloudFrontDomain = app.node.tryGetContext('cloudFrontDomain');
 const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   env,
   description: 'Compute and API infrastructure for Edge CV Portal',
@@ -47,6 +50,7 @@ const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   componentsTable: storageStack.componentsTable,
   sharedComponentsTable: storageStack.sharedComponentsTable,
   portalArtifactsBucket: storageStack.portalArtifactsBucket,
+  cloudFrontDomain,
 });
 
 // Frontend Stack (CloudFront, S3)

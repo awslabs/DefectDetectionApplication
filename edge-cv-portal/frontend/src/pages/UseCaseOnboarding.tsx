@@ -12,7 +12,6 @@ import {
   Box,
   Button,
   ColumnLayout,
-  ExpandableSection,
   StatusIndicator,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
@@ -39,14 +38,19 @@ interface OnboardingState {
   s3Created: boolean;
   s3Verified: boolean;
 
-  // Optional: Separate Data Account
-  useSeparateDataAccount: boolean;
+  // Data Account Configuration (always required)
+  // Can be same as UseCase Account or separate
+  dataAccountSameAsUseCase: boolean;
   dataAccountId: string;
   dataAccountRoleArn: string;
   dataAccountExternalId: string;
   dataS3Bucket: string;
   dataS3Prefix: string;
   dataRoleVerified: boolean;
+
+  // SageMaker Asset Storage Option
+  // Can store in UseCase Account bucket or Data Account bucket
+  sagemakerAssetsInDataAccount: boolean;
 
   // Step 5: Next Steps Selection
   nextSteps: {
@@ -76,13 +80,16 @@ export default function UseCaseOnboarding() {
     roleVerified: false,
     s3Created: false,
     s3Verified: false,
-    useSeparateDataAccount: false,
+    // Data Account defaults to separate (most common enterprise setup)
+    dataAccountSameAsUseCase: false,
     dataAccountId: '',
     dataAccountRoleArn: '',
     dataAccountExternalId: '',
     dataS3Bucket: '',
     dataS3Prefix: 'datasets/',
     dataRoleVerified: false,
+    // SageMaker assets default to Data Account bucket (simpler setup)
+    sagemakerAssetsInDataAccount: true,
     nextSteps: {
       labelData: false,
       trainModel: false,
@@ -136,21 +143,40 @@ export default function UseCaseOnboarding() {
       const useCaseData: Record<string, unknown> = {
         name: state.useCaseName,
         account_id: state.accountId,
-        s3_bucket: state.s3Bucket,
-        s3_prefix: state.s3Prefix,
         cross_account_role_arn: state.roleArn,
         sagemaker_execution_role_arn: state.sagemakerExecutionRoleArn,
         external_id: state.externalId,
         cost_center: state.costCenter,
       };
 
-      // Add separate data account fields if configured
-      if (state.useSeparateDataAccount && state.dataAccountRoleArn) {
+      // Always include Data Account configuration
+      // If same as UseCase Account, use UseCase Account values
+      if (state.dataAccountSameAsUseCase) {
+        useCaseData.data_account_id = state.accountId;
+        useCaseData.data_account_role_arn = state.roleArn;
+        useCaseData.data_account_external_id = state.externalId;
+        useCaseData.data_s3_bucket = state.s3Bucket;
+        useCaseData.data_s3_prefix = state.s3Prefix;
+        // When same account, s3_bucket is always the same
+        useCaseData.s3_bucket = state.s3Bucket;
+        useCaseData.s3_prefix = state.s3Prefix;
+      } else {
         useCaseData.data_account_id = state.dataAccountId;
         useCaseData.data_account_role_arn = state.dataAccountRoleArn;
         useCaseData.data_account_external_id = state.dataAccountExternalId;
         useCaseData.data_s3_bucket = state.dataS3Bucket;
         useCaseData.data_s3_prefix = state.dataS3Prefix;
+        
+        // SageMaker assets bucket - user can choose where to store
+        if (state.sagemakerAssetsInDataAccount) {
+          // Store SageMaker outputs in Data Account bucket (simpler)
+          useCaseData.s3_bucket = state.dataS3Bucket;
+          useCaseData.s3_prefix = 'sagemaker-outputs/';
+        } else {
+          // Store SageMaker outputs in separate UseCase Account bucket
+          useCaseData.s3_bucket = state.s3Bucket;
+          useCaseData.s3_prefix = state.s3Prefix;
+        }
       }
 
       await apiService.createUseCase(useCaseData);
@@ -454,104 +480,144 @@ aws s3api put-bucket-versioning \\
         },
         {
           title: 'Configure S3 Storage',
-          description: 'Set up S3 bucket for datasets and models',
+          description: 'Set up S3 storage for data and models',
           content: (
             <SpaceBetween size="l">
-              <Alert type="info">
-                Your training data, models, and artifacts will be stored in an S3 bucket in your
-                AWS account.
-              </Alert>
-
-              <Container header={<Header variant="h2">Step 1: Create S3 Bucket</Header>}>
+              {/* Step 1: Ask where training data is */}
+              <Container header={<Header variant="h2">Where is your training data?</Header>}>
                 <SpaceBetween size="m">
-                  <Box>
-                    Create an S3 bucket in your AWS account with the following structure:
-                  </Box>
+                  <FormField stretch>
+                    <SpaceBetween size="s">
+                      <Box>
+                        <input
+                          type="radio"
+                          name="dataAccountChoice"
+                          checked={!state.dataAccountSameAsUseCase}
+                          onChange={() => updateState({ dataAccountSameAsUseCase: false, sagemakerAssetsInDataAccount: true })}
+                        />{' '}
+                        <strong>Separate Data Account</strong> (recommended for enterprise)
+                        <Box variant="small" color="text-body-secondary">
+                          Training data is in a centralized data lake or different AWS account
+                        </Box>
+                      </Box>
 
-                  <Box
-                    variant="code"
-                    padding="s"
-                    fontSize="body-s"
-                  >
-                    <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                      {s3SetupCommands}
-                    </pre>
-                  </Box>
-                  <Button
-                    iconName="copy"
-                    onClick={() => {
-                      navigator.clipboard.writeText(s3SetupCommands);
-                    }}
-                  >
-                    Copy Commands
-                  </Button>
-
-                  <Box variant="small">
-                    <strong>Recommended folder structure:</strong>
-                    <ul>
-                      <li>
-                        <code>datasets/</code> - Raw training images
-                      </li>
-                      <li>
-                        <code>manifests/</code> - Ground Truth manifest files
-                      </li>
-                      <li>
-                        <code>models/</code> - Trained model artifacts
-                      </li>
-                      <li>
-                        <code>compiled/</code> - Compiled models for edge devices
-                      </li>
-                    </ul>
-                  </Box>
-
-                  <FormField label="I have created the S3 bucket" stretch>
-                    <Button
-                      variant={state.s3Created ? 'normal' : 'primary'}
-                      onClick={() => updateState({ s3Created: true })}
-                      disabled={state.s3Created}
-                    >
-                      {state.s3Created ? '✓ Bucket Created' : 'Mark as Created'}
-                    </Button>
+                      <Box>
+                        <input
+                          type="radio"
+                          name="dataAccountChoice"
+                          checked={state.dataAccountSameAsUseCase}
+                          onChange={() => updateState({ dataAccountSameAsUseCase: true })}
+                        />{' '}
+                        <strong>Same as UseCase Account</strong>
+                        <Box variant="small" color="text-body-secondary">
+                          Everything in one AWS account
+                        </Box>
+                      </Box>
+                    </SpaceBetween>
                   </FormField>
                 </SpaceBetween>
               </Container>
 
-              {state.s3Created && (
-                <Container header={<Header variant="h2">Step 2: Enter Bucket Details</Header>}>
+              {/* Separate Data Account flow */}
+              {!state.dataAccountSameAsUseCase && (
+                <Container header={<Header variant="h2">Data Account Setup</Header>}>
                   <SpaceBetween size="m">
+                    <Alert type="info">
+                      Deploy the Data Account role first: <code>./deploy-account-role.sh</code> → option 2
+                    </Alert>
+
                     <FormField
-                      label="S3 Bucket Name"
-                      description="The name of your S3 bucket"
+                      label="Upload Configuration File"
+                      description="Upload data-account-config.txt to auto-fill"
                       stretch
                     >
-                      <Input
-                        value={state.s3Bucket}
-                        onChange={({ detail }) => updateState({ s3Bucket: detail.value })}
-                        placeholder="my-edge-cv-data"
+                      <input
+                        type="file"
+                        accept=".txt"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            const reader = new FileReader();
+                            reader.onload = (event) => {
+                              const content = event.target?.result as string;
+                              const lines = content.split('\n');
+                              const config: Record<string, string> = {};
+                              lines.forEach(line => {
+                                const match = line.match(/^([^:]+):\s*(.+)$/);
+                                if (match) {
+                                  config[match[1].trim()] = match[2].trim();
+                                }
+                              });
+                              updateState({
+                                dataAccountId: config['Data Account ID'] || '',
+                                dataAccountRoleArn: config['Portal Access Role ARN'] || '',
+                                dataAccountExternalId: config['External ID'] || '',
+                              });
+                            };
+                            reader.readAsText(file);
+                          }
+                        }}
+                        style={{ 
+                          padding: '8px',
+                          border: '1px dashed #aab7b8',
+                          borderRadius: '4px',
+                          width: '100%',
+                          cursor: 'pointer'
+                        }}
                       />
                     </FormField>
 
-                    <FormField
-                      label="S3 Prefix (Optional)"
-                      description="Path prefix within the bucket"
-                      stretch
-                    >
+                    <FormField label="Data Account ID" stretch>
                       <Input
-                        value={state.s3Prefix}
-                        onChange={({ detail }) => updateState({ s3Prefix: detail.value })}
+                        value={state.dataAccountId}
+                        onChange={({ detail }) => updateState({ dataAccountId: detail.value })}
+                        placeholder="987654321098"
+                      />
+                    </FormField>
+
+                    <FormField label="Data Account Role ARN" stretch>
+                      <Input
+                        value={state.dataAccountRoleArn}
+                        onChange={({ detail }) => updateState({ dataAccountRoleArn: detail.value })}
+                        placeholder="arn:aws:iam::987654321098:role/DDAPortalDataAccessRole"
+                      />
+                    </FormField>
+
+                    <FormField label="External ID" stretch>
+                      <Input
+                        value={state.dataAccountExternalId}
+                        onChange={({ detail }) => updateState({ dataAccountExternalId: detail.value })}
+                        placeholder="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                        type="password"
+                      />
+                    </FormField>
+
+                    <FormField label="Data Bucket Name" description="Bucket containing your training data" stretch>
+                      <Input
+                        value={state.dataS3Bucket}
+                        onChange={({ detail }) => updateState({ dataS3Bucket: detail.value })}
+                        placeholder="my-data-lake-bucket"
+                      />
+                    </FormField>
+
+                    <FormField label="S3 Prefix (Optional)" stretch>
+                      <Input
+                        value={state.dataS3Prefix}
+                        onChange={({ detail }) => updateState({ dataS3Prefix: detail.value })}
                         placeholder="datasets/"
                       />
                     </FormField>
 
-                    <FormField label="Verify Bucket Access" stretch>
+                    <FormField label="Verify Access" stretch>
                       <SpaceBetween direction="horizontal" size="xs">
-                        <Button onClick={handleVerifyS3} disabled={!state.s3Bucket}>
-                          Verify Access
+                        <Button
+                          onClick={handleVerifyDataRole}
+                          disabled={!state.dataAccountId || !state.dataAccountRoleArn || !state.dataAccountExternalId}
+                        >
+                          Verify Role
                         </Button>
-                        {state.s3Verified && (
-                          <StatusIndicator type="success">
-                            Bucket access verified successfully
-                          </StatusIndicator>
+                        {state.dataRoleVerified && (
+                          <StatusIndicator type="success">Verified</StatusIndicator>
                         )}
                       </SpaceBetween>
                     </FormField>
@@ -559,163 +625,102 @@ aws s3api put-bucket-versioning \\
                 </Container>
               )}
 
-              {/* Optional: Separate Data Account */}
-              <ExpandableSection 
-                headerText="Advanced: Use Separate Data Account (Optional)"
-                variant="footer"
-              >
-                <SpaceBetween size="m">
-                  <Alert type="info">
-                    By default, training data is stored in the same AWS account as your UseCase.
-                    If you need to store data in a different AWS account (e.g., a centralized data lake),
-                    configure a separate Data Account below.
-                  </Alert>
-
-                  <FormField stretch>
-                    <Box>
-                      <input
-                        type="checkbox"
-                        checked={state.useSeparateDataAccount}
-                        onChange={(e) =>
-                          updateState({ useSeparateDataAccount: e.target.checked })
-                        }
-                      />{' '}
-                      <strong>Use a separate AWS account for data storage</strong>
-                    </Box>
-                  </FormField>
-
-                  {state.useSeparateDataAccount && (
-                    <Container header={<Header variant="h3">Data Account Configuration</Header>}>
-                      <SpaceBetween size="m">
-                        <Alert type="info">
-                          Upload the <code>data-account-config.txt</code> file generated by the deployment script, 
-                          or enter the values manually below.
-                        </Alert>
-
-                        <FormField
-                          label="Upload Data Account Configuration File"
-                          description="Upload data-account-config.txt to auto-fill the fields"
-                          stretch
-                        >
+              {/* SageMaker output location - only for separate Data Account */}
+              {!state.dataAccountSameAsUseCase && (
+                <Container header={<Header variant="h2">SageMaker Output Location</Header>}>
+                  <SpaceBetween size="m">
+                    <Box>Where should trained models and labeling results be stored?</Box>
+                    
+                    <FormField stretch>
+                      <SpaceBetween size="s">
+                        <Box>
                           <input
-                            type="file"
-                            accept=".txt"
-                            onChange={(e) => {
-                              const file = e.target.files?.[0];
-                              if (file) {
-                                const reader = new FileReader();
-                                reader.onload = (event) => {
-                                  const content = event.target?.result as string;
-                                  // Parse the config file
-                                  const lines = content.split('\n');
-                                  const config: Record<string, string> = {};
-                                  lines.forEach(line => {
-                                    const match = line.match(/^([^:]+):\s*(.+)$/);
-                                    if (match) {
-                                      config[match[1].trim()] = match[2].trim();
-                                    }
-                                  });
-                                  // Update state with parsed values
-                                  updateState({
-                                    dataAccountId: config['Data Account ID'] || '',
-                                    dataAccountRoleArn: config['Portal Access Role ARN'] || '',
-                                    dataAccountExternalId: config['External ID'] || '',
-                                  });
-                                };
-                                reader.readAsText(file);
-                              }
-                            }}
-                            style={{ 
-                              padding: '8px',
-                              border: '1px dashed #aab7b8',
-                              borderRadius: '4px',
-                              width: '100%',
-                              cursor: 'pointer'
-                            }}
-                          />
-                        </FormField>
+                            type="radio"
+                            name="sagemakerAssetChoice"
+                            checked={state.sagemakerAssetsInDataAccount}
+                            onChange={() => updateState({ sagemakerAssetsInDataAccount: true })}
+                          />{' '}
+                          <strong>Same Data Account bucket</strong> (recommended)
+                          <Box variant="small" color="text-body-secondary">
+                            Keep everything together in <code>{state.dataS3Bucket || 'data-bucket'}</code>
+                          </Box>
+                        </Box>
 
-                        <Box variant="h4">Or enter manually:</Box>
-
-                        <FormField
-                          label="Data Account ID"
-                          description="AWS Account ID where training data will be stored"
-                          stretch
-                        >
-                          <Input
-                            value={state.dataAccountId}
-                            onChange={({ detail }) => updateState({ dataAccountId: detail.value })}
-                            placeholder="987654321098"
-                          />
-                        </FormField>
-
-                        <FormField
-                          label="Data Account Role ARN"
-                          description="IAM role ARN in the Data Account"
-                          stretch
-                        >
-                          <Input
-                            value={state.dataAccountRoleArn}
-                            onChange={({ detail }) => updateState({ dataAccountRoleArn: detail.value })}
-                            placeholder="arn:aws:iam::987654321098:role/DDAPortalDataAccessRole"
-                          />
-                        </FormField>
-
-                        <FormField
-                          label="Data Account External ID"
-                          description="External ID for the Data Account role"
-                          stretch
-                        >
-                          <Input
-                            value={state.dataAccountExternalId}
-                            onChange={({ detail }) => updateState({ dataAccountExternalId: detail.value })}
-                            placeholder="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-                            type="password"
-                          />
-                        </FormField>
-
-                        <FormField
-                          label="Data S3 Bucket"
-                          description="S3 bucket in the Data Account for training data"
-                          stretch
-                        >
-                          <Input
-                            value={state.dataS3Bucket}
-                            onChange={({ detail }) => updateState({ dataS3Bucket: detail.value })}
-                            placeholder="my-data-lake-bucket"
-                          />
-                        </FormField>
-
-                        <FormField
-                          label="Data S3 Prefix (Optional)"
-                          description="Path prefix within the data bucket"
-                          stretch
-                        >
-                          <Input
-                            value={state.dataS3Prefix}
-                            onChange={({ detail }) => updateState({ dataS3Prefix: detail.value })}
-                            placeholder="datasets/"
-                          />
-                        </FormField>
-
-                        <FormField label="Verify Data Account Role" stretch>
-                          <SpaceBetween direction="horizontal" size="xs">
-                            <Button
-                              onClick={handleVerifyDataRole}
-                              disabled={!state.dataAccountId || !state.dataAccountRoleArn || !state.dataAccountExternalId}
-                            >
-                              Verify Role
-                            </Button>
-                            {state.dataRoleVerified && (
-                              <StatusIndicator type="success">Data Account role verified successfully</StatusIndicator>
-                            )}
-                          </SpaceBetween>
-                        </FormField>
+                        <Box>
+                          <input
+                            type="radio"
+                            name="sagemakerAssetChoice"
+                            checked={!state.sagemakerAssetsInDataAccount}
+                            onChange={() => updateState({ sagemakerAssetsInDataAccount: false })}
+                          />{' '}
+                          <strong>Separate UseCase Account bucket</strong>
+                          <Box variant="small" color="text-body-secondary">
+                            Store outputs in a different bucket
+                          </Box>
+                        </Box>
                       </SpaceBetween>
-                    </Container>
-                  )}
-                </SpaceBetween>
-              </ExpandableSection>
+                    </FormField>
+
+                    {!state.sagemakerAssetsInDataAccount && (
+                      <FormField label="Output Bucket Name" description="S3 bucket in UseCase Account" stretch>
+                        <Input
+                          value={state.s3Bucket}
+                          onChange={({ detail }) => updateState({ s3Bucket: detail.value })}
+                          placeholder="my-sagemaker-outputs"
+                        />
+                      </FormField>
+                    )}
+                  </SpaceBetween>
+                </Container>
+              )}
+
+              {/* Same account flow - simple bucket setup */}
+              {state.dataAccountSameAsUseCase && (
+                <Container header={<Header variant="h2">S3 Bucket Setup</Header>}>
+                  <SpaceBetween size="m">
+                    <Box>Create an S3 bucket in your UseCase Account for all data and outputs.</Box>
+
+                    <Box variant="code" padding="s" fontSize="body-s">
+                      <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                        {s3SetupCommands}
+                      </pre>
+                    </Box>
+                    <Button
+                      iconName="copy"
+                      onClick={() => navigator.clipboard.writeText(s3SetupCommands)}
+                    >
+                      Copy Commands
+                    </Button>
+
+                    <FormField label="S3 Bucket Name" stretch>
+                      <Input
+                        value={state.s3Bucket}
+                        onChange={({ detail }) => updateState({ s3Bucket: detail.value })}
+                        placeholder="my-edge-cv-data"
+                      />
+                    </FormField>
+
+                    <FormField label="S3 Prefix (Optional)" stretch>
+                      <Input
+                        value={state.s3Prefix}
+                        onChange={({ detail }) => updateState({ s3Prefix: detail.value })}
+                        placeholder="datasets/"
+                      />
+                    </FormField>
+
+                    <FormField label="Verify Access" stretch>
+                      <SpaceBetween direction="horizontal" size="xs">
+                        <Button onClick={handleVerifyS3} disabled={!state.s3Bucket}>
+                          Verify
+                        </Button>
+                        {state.s3Verified && (
+                          <StatusIndicator type="success">Verified</StatusIndicator>
+                        )}
+                      </SpaceBetween>
+                    </FormField>
+                  </SpaceBetween>
+                </Container>
+              )}
             </SpaceBetween>
           ),
         },
@@ -758,35 +763,37 @@ aws s3api put-bucket-versioning \\
                   </SpaceBetween>
                 </ColumnLayout>
 
-                {state.useSeparateDataAccount && state.dataAccountRoleArn && (
-                  <Box margin={{ top: 'l' }}>
-                    <Box variant="h3" margin={{ bottom: 's' }}>Separate Data Account</Box>
-                    <ColumnLayout columns={2} variant="text-grid">
-                      <SpaceBetween size="xs">
-                        <div>
-                          <Box variant="awsui-key-label">Data Account ID</Box>
-                          <Box>{state.dataAccountId}</Box>
-                        </div>
-                        <div>
-                          <Box variant="awsui-key-label">Data Account Role ARN</Box>
-                          <Box fontSize="body-s">
-                            <code>{state.dataAccountRoleArn}</code>
-                          </Box>
-                        </div>
-                      </SpaceBetween>
-                      <SpaceBetween size="xs">
-                        <div>
-                          <Box variant="awsui-key-label">Data S3 Bucket</Box>
-                          <Box>{state.dataS3Bucket}</Box>
-                        </div>
-                        <div>
-                          <Box variant="awsui-key-label">Data S3 Prefix</Box>
-                          <Box>{state.dataS3Prefix || '/'}</Box>
-                        </div>
-                      </SpaceBetween>
-                    </ColumnLayout>
-                  </Box>
-                )}
+                {/* Storage Configuration Summary */}
+                <Box margin={{ top: 'l' }}>
+                  <Box variant="h3" margin={{ bottom: 's' }}>Storage Configuration</Box>
+                  {state.dataAccountSameAsUseCase ? (
+                    <Box>
+                      <Box variant="awsui-key-label">All data in one bucket</Box>
+                      <Box><code>s3://{state.s3Bucket}/{state.s3Prefix || ''}</code></Box>
+                    </Box>
+                  ) : (
+                    <SpaceBetween size="s">
+                      <Box>
+                        <Box variant="awsui-key-label">Training Data (Data Account)</Box>
+                        <Box><code>s3://{state.dataS3Bucket}/{state.dataS3Prefix || ''}</code></Box>
+                      </Box>
+                      <Box>
+                        <Box variant="awsui-key-label">SageMaker Outputs</Box>
+                        <Box>
+                          {state.sagemakerAssetsInDataAccount ? (
+                            <code>s3://{state.dataS3Bucket}/sagemaker-outputs/</code>
+                          ) : (
+                            state.s3Bucket ? (
+                              <code>s3://{state.s3Bucket}/</code>
+                            ) : (
+                              <StatusIndicator type="error">Not configured</StatusIndicator>
+                            )
+                          )}
+                        </Box>
+                      </Box>
+                    </SpaceBetween>
+                  )}
+                </Box>
               </Container>
 
               <Container header={<Header variant="h2">What would you like to do next?</Header>}>

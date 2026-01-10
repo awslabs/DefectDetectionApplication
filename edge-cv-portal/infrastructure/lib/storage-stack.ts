@@ -419,7 +419,9 @@ export class StorageStack extends cdk.Stack {
     });
 
     // Portal Artifacts Bucket - stores shared component artifacts (dda-LocalServer)
-    // Cross-account access is handled via IAM policies in usecase accounts
+    // Note: For cross-account Greengrass component access, we use the GDK component bucket
+    // (dda-component-{region}-{account}) which is configured with cross-account access
+    // via the gdk-component-build-and-publish.sh script.
     this.portalArtifactsBucket = new s3.Bucket(this, 'PortalArtifactsBucket', {
       bucketName: `dda-portal-artifacts-${this.account}-${this.region}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -427,11 +429,6 @@ export class StorageStack extends cdk.Stack {
       versioned: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
-    
-    // Note: Cross-account access for Greengrass devices is granted via:
-    // 1. IAM policy created in usecase accounts (DDAPortalSharedComponentsAccess)
-    // 2. The policy grants s3:GetObject on this bucket's shared-components/* prefix
-    // 3. This is done during usecase onboarding in shared_components.py
 
     // Outputs
     new cdk.CfnOutput(this, 'UseCasesTableName', {

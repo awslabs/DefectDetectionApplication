@@ -7,6 +7,7 @@ import os
 from datetime import datetime
 import uuid
 import boto3
+from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, is_super_user, validate_required_fields,
@@ -26,7 +27,421 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource('dynamodb')
+sts = boto3.client('sts')
 USECASES_TABLE = os.environ.get('USECASES_TABLE')
+
+
+def assume_role(role_arn: str, external_id: str, session_name: str) -> dict:
+    """Assume a cross-account role and return credentials
+    
+    Args:
+        role_arn: ARN of the role to assume
+        external_id: External ID for role assumption (can be empty/None if role doesn't require it)
+        session_name: Name for the assumed role session
+    """
+    try:
+        # Build assume role parameters
+        assume_params = {
+            'RoleArn': role_arn,
+            'RoleSessionName': session_name,
+            'DurationSeconds': 900  # 15 minutes is enough for bucket policy update
+        }
+        
+        # Only include ExternalId if provided (some roles don't require it)
+        if external_id:
+            assume_params['ExternalId'] = external_id
+        
+        response = sts.assume_role(**assume_params)
+        return response['Credentials']
+    except ClientError as e:
+        logger.error(f"Failed to assume role {role_arn}: {str(e)}")
+        raise
+
+
+def update_data_bucket_policy_for_sagemaker(
+    data_account_role_arn: str,
+    data_account_external_id: str,
+    data_bucket_name: str,
+    usecase_account_id: str,
+    sagemaker_role_arn: str
+) -> dict:
+    """
+    Update the Data Account bucket policy to allow UseCase Account's SageMaker role to read.
+    
+    This is called during usecase onboarding when a separate Data Account is configured.
+    It adds a policy statement allowing the SageMaker execution role to read from the bucket.
+    
+    Args:
+        data_account_role_arn: Role ARN in Data Account that Portal can assume
+        data_account_external_id: External ID for assuming the Data Account role
+        data_bucket_name: S3 bucket name in Data Account
+        usecase_account_id: UseCase Account ID
+        sagemaker_role_arn: SageMaker execution role ARN in UseCase Account
+    
+    Returns:
+        dict with status and details
+    """
+    try:
+        logger.info(f"Updating bucket policy for {data_bucket_name} to allow {sagemaker_role_arn}")
+        
+        # Assume Data Account role
+        credentials = assume_role(
+            data_account_role_arn,
+            data_account_external_id,
+            'update-bucket-policy'
+        )
+        
+        # Create S3 client with Data Account credentials
+        s3_data = boto3.client(
+            's3',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken']
+        )
+        
+        # Get existing bucket policy (if any)
+        existing_policy = None
+        try:
+            response = s3_data.get_bucket_policy(Bucket=data_bucket_name)
+            existing_policy = json.loads(response['Policy'])
+            logger.info(f"Found existing bucket policy with {len(existing_policy.get('Statement', []))} statements")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchBucketPolicy':
+                logger.info(f"No existing bucket policy for {data_bucket_name}, creating new one")
+                existing_policy = {
+                    'Version': '2012-10-17',
+                    'Statement': []
+                }
+            else:
+                raise
+        
+        # Define the SageMaker access statements
+        sagemaker_read_sid = f"AllowSageMakerRead-{usecase_account_id}"
+        sagemaker_list_sid = f"AllowSageMakerList-{usecase_account_id}"
+        
+        # Check if statements already exist for this UseCase Account
+        existing_sids = {stmt.get('Sid') for stmt in existing_policy.get('Statement', [])}
+        
+        statements_to_add = []
+        
+        if sagemaker_read_sid not in existing_sids:
+            statements_to_add.append({
+                'Sid': sagemaker_read_sid,
+                'Effect': 'Allow',
+                'Principal': {
+                    'AWS': sagemaker_role_arn
+                },
+                'Action': [
+                    's3:GetObject',
+                    's3:GetObjectVersion',
+                    's3:GetObjectTagging'
+                ],
+                'Resource': f'arn:aws:s3:::{data_bucket_name}/*'
+            })
+        
+        if sagemaker_list_sid not in existing_sids:
+            statements_to_add.append({
+                'Sid': sagemaker_list_sid,
+                'Effect': 'Allow',
+                'Principal': {
+                    'AWS': sagemaker_role_arn
+                },
+                'Action': [
+                    's3:ListBucket',
+                    's3:GetBucketLocation'
+                ],
+                'Resource': f'arn:aws:s3:::{data_bucket_name}'
+            })
+        
+        if not statements_to_add:
+            logger.info(f"Bucket policy already has SageMaker access for UseCase {usecase_account_id}")
+            return {
+                'status': 'already_configured',
+                'bucket': data_bucket_name,
+                'sagemaker_role': sagemaker_role_arn
+            }
+        
+        # Add new statements to policy
+        existing_policy['Statement'].extend(statements_to_add)
+        
+        # Put updated bucket policy
+        s3_data.put_bucket_policy(
+            Bucket=data_bucket_name,
+            Policy=json.dumps(existing_policy)
+        )
+        
+        logger.info(f"Successfully updated bucket policy for {data_bucket_name}")
+        
+        return {
+            'status': 'success',
+            'bucket': data_bucket_name,
+            'sagemaker_role': sagemaker_role_arn,
+            'statements_added': len(statements_to_add)
+        }
+        
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        error_message = e.response['Error']['Message']
+        logger.error(f"Failed to update bucket policy: {error_code} - {error_message}")
+        
+        if error_code == 'AccessDenied':
+            return {
+                'status': 'failed',
+                'error': 'Access denied. The Data Account role needs s3:GetBucketPolicy and s3:PutBucketPolicy permissions.',
+                'bucket': data_bucket_name
+            }
+        elif error_code == 'NoSuchBucket':
+            return {
+                'status': 'failed',
+                'error': f"Bucket '{data_bucket_name}' does not exist in the Data Account.",
+                'bucket': data_bucket_name
+            }
+        else:
+            return {
+                'status': 'failed',
+                'error': f"{error_code}: {error_message}",
+                'bucket': data_bucket_name
+            }
+    except Exception as e:
+        logger.error(f"Unexpected error updating bucket policy: {str(e)}")
+        return {
+            'status': 'failed',
+            'error': str(e),
+            'bucket': data_bucket_name
+        }
+
+
+def configure_bucket_cors(
+    data_account_role_arn: str,
+    data_account_external_id: str,
+    data_bucket_name: str,
+    cloudfront_domain: str
+) -> dict:
+    """
+    Configure CORS on the Data Account bucket to allow browser uploads from the portal.
+    
+    This is called during usecase onboarding when a separate Data Account is configured.
+    It adds CORS rules allowing the CloudFront domain to upload files.
+    
+    Args:
+        data_account_role_arn: Role ARN in Data Account that Portal can assume
+        data_account_external_id: External ID for assuming the Data Account role
+        data_bucket_name: S3 bucket name in Data Account
+        cloudfront_domain: CloudFront domain of the portal frontend
+    
+    Returns:
+        dict with status and details
+    """
+    try:
+        logger.info(f"Configuring CORS for {data_bucket_name} to allow {cloudfront_domain}")
+        
+        # Assume Data Account role
+        credentials = assume_role(
+            data_account_role_arn,
+            data_account_external_id,
+            'configure-bucket-cors'
+        )
+        
+        # Create S3 client with Data Account credentials
+        s3_data = boto3.client(
+            's3',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken']
+        )
+        
+        # Build the allowed origin (ensure https://)
+        if not cloudfront_domain.startswith('http'):
+            allowed_origin = f'https://{cloudfront_domain}'
+        else:
+            allowed_origin = cloudfront_domain
+        
+        # Check existing CORS configuration
+        existing_cors = None
+        try:
+            response = s3_data.get_bucket_cors(Bucket=data_bucket_name)
+            existing_cors = response.get('CORSRules', [])
+            logger.info(f"Found existing CORS with {len(existing_cors)} rules")
+            
+            # Check if our origin is already configured
+            for rule in existing_cors:
+                origins = rule.get('AllowedOrigins', [])
+                if allowed_origin in origins or '*' in origins:
+                    logger.info(f"CORS already configured for {allowed_origin}")
+                    return {
+                        'status': 'already_configured',
+                        'bucket': data_bucket_name,
+                        'origin': allowed_origin
+                    }
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchCORSConfiguration':
+                logger.info(f"No existing CORS for {data_bucket_name}, creating new one")
+                existing_cors = []
+            else:
+                raise
+        
+        # Add our CORS rules
+        # Rule 1: Portal uploads from CloudFront
+        portal_rule = {
+            'AllowedHeaders': ['*'],
+            'AllowedMethods': ['GET', 'PUT', 'POST', 'HEAD'],
+            'AllowedOrigins': [allowed_origin],
+            'ExposeHeaders': ['ETag'],
+            'MaxAgeSeconds': 3000
+        }
+        
+        # Rule 2: Ground Truth labeling UI (requires * origin for image display)
+        ground_truth_rule = {
+            'AllowedHeaders': ['*'],
+            'AllowedMethods': ['GET', 'HEAD'],
+            'AllowedOrigins': ['*'],
+            'ExposeHeaders': ['ETag', 'x-amz-meta-custom-header'],
+            'MaxAgeSeconds': 3000
+        }
+        
+        # Check if Ground Truth rule already exists
+        has_ground_truth_rule = False
+        for rule in existing_cors:
+            origins = rule.get('AllowedOrigins', [])
+            methods = rule.get('AllowedMethods', [])
+            if '*' in origins and 'GET' in methods:
+                has_ground_truth_rule = True
+                break
+        
+        # Append rules as needed
+        existing_cors.append(portal_rule)
+        if not has_ground_truth_rule:
+            existing_cors.append(ground_truth_rule)
+        
+        # Put CORS configuration
+        s3_data.put_bucket_cors(
+            Bucket=data_bucket_name,
+            CORSConfiguration={'CORSRules': existing_cors}
+        )
+        
+        logger.info(f"Successfully configured CORS for {data_bucket_name}")
+        
+        return {
+            'status': 'success',
+            'bucket': data_bucket_name,
+            'origin': allowed_origin
+        }
+        
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        error_message = e.response['Error']['Message']
+        logger.error(f"Failed to configure CORS: {error_code} - {error_message}")
+        
+        if error_code == 'AccessDenied':
+            return {
+                'status': 'failed',
+                'error': 'Access denied. The Data Account role needs s3:GetBucketCors and s3:PutBucketCors permissions.',
+                'bucket': data_bucket_name
+            }
+        else:
+            return {
+                'status': 'failed',
+                'error': f"{error_code}: {error_message}",
+                'bucket': data_bucket_name
+            }
+    except Exception as e:
+        logger.error(f"Unexpected error configuring CORS: {str(e)}")
+        return {
+            'status': 'failed',
+            'error': str(e),
+            'bucket': data_bucket_name
+        }
+
+
+def tag_bucket_for_portal(
+    role_arn: str,
+    external_id: str,
+    bucket_name: str,
+    usecase_id: str
+) -> dict:
+    """
+    Tag a bucket with dda-portal:managed=true so it appears in the portal.
+    
+    This is called during usecase onboarding to automatically tag the configured bucket.
+    
+    Args:
+        role_arn: Role ARN to assume for bucket access
+        external_id: External ID for assuming the role
+        bucket_name: S3 bucket name to tag
+        usecase_id: UseCase ID to associate with the bucket
+    
+    Returns:
+        dict with status and details
+    """
+    try:
+        logger.info(f"Tagging bucket {bucket_name} for portal access")
+        
+        # Assume role
+        credentials = assume_role(role_arn, external_id, 'tag-bucket')
+        
+        # Create S3 client with credentials
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken']
+        )
+        
+        # Get existing tags
+        existing_tags = []
+        try:
+            response = s3.get_bucket_tagging(Bucket=bucket_name)
+            existing_tags = response.get('TagSet', [])
+            
+            # Check if already tagged
+            for tag in existing_tags:
+                if tag.get('Key') == 'dda-portal:managed' and tag.get('Value') == 'true':
+                    logger.info(f"Bucket {bucket_name} already tagged for portal")
+                    return {
+                        'status': 'already_configured',
+                        'bucket': bucket_name
+                    }
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchTagSet':
+                existing_tags = []
+            else:
+                raise
+        
+        # Add portal tag
+        new_tags = [t for t in existing_tags if t.get('Key') not in ['dda-portal:managed', 'dda-portal:usecase-id']]
+        new_tags.append({'Key': 'dda-portal:managed', 'Value': 'true'})
+        new_tags.append({'Key': 'dda-portal:usecase-id', 'Value': usecase_id})
+        
+        # Put tags
+        s3.put_bucket_tagging(
+            Bucket=bucket_name,
+            Tagging={'TagSet': new_tags}
+        )
+        
+        logger.info(f"Successfully tagged bucket {bucket_name} for portal")
+        
+        return {
+            'status': 'success',
+            'bucket': bucket_name
+        }
+        
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        error_message = e.response['Error']['Message']
+        logger.error(f"Failed to tag bucket: {error_code} - {error_message}")
+        
+        return {
+            'status': 'failed',
+            'error': f"{error_code}: {error_message}",
+            'bucket': bucket_name
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error tagging bucket: {str(e)}")
+        return {
+            'status': 'failed',
+            'error': str(e),
+            'bucket': bucket_name
+        }
 
 
 def handler(event, context):
@@ -131,15 +546,10 @@ def list_usecases(user):
 
 
 def create_usecase(event, user):
-    """Create a new use case"""
+    """Create a new use case - any authenticated user can create"""
     try:
-        # Check permission using RBAC (role from IDP/JWT)
-        if not rbac_manager.has_permission(user['user_id'], 'global', Permission.CREATE_USECASES, user):
-            log_audit_event(
-                user['user_id'], 'create_usecase', 'usecase', 'new',
-                'failure', {'reason': 'insufficient_permissions', 'user_role': user.get('role', 'unknown')}
-            )
-            return create_response(403, {'error': 'Insufficient permissions to create use cases'})
+        # Any authenticated user can create a usecase
+        # They will be automatically assigned as UseCaseAdmin
         
         body = json.loads(event.get('body', '{}'))
         
@@ -171,6 +581,23 @@ def create_usecase(event, user):
             'shared_components_provisioned': False
         }
         
+        # Validate Data Account configuration - external_id is required for security
+        if body.get('data_account_id') and body.get('data_account_id') != body['account_id']:
+            # Separate Data Account is being configured - require all fields
+            if not body.get('data_account_role_arn'):
+                return create_response(400, {
+                    'error': 'data_account_role_arn is required when configuring a separate Data Account'
+                })
+            if not body.get('data_account_external_id'):
+                return create_response(400, {
+                    'error': 'data_account_external_id is required for security when configuring a separate Data Account. '
+                             'This should be the external ID configured in the Data Account role trust policy.'
+                })
+            if not body.get('data_s3_bucket'):
+                return create_response(400, {
+                    'error': 'data_s3_bucket is required when configuring a separate Data Account'
+                })
+        
         # Add optional Data Account fields if provided
         if body.get('data_account_id'):
             item['data_account_id'] = body['data_account_id']
@@ -184,6 +611,132 @@ def create_usecase(event, user):
             item['data_s3_prefix'] = body['data_s3_prefix']
         
         table.put_item(Item=item)
+        
+        # Auto-assign creator as UseCaseAdmin
+        try:
+            user_roles_table = dynamodb.Table(os.environ.get('USER_ROLES_TABLE'))
+            user_roles_table.put_item(Item={
+                'user_id': user['user_id'],
+                'usecase_id': usecase_id,
+                'role': 'UseCaseAdmin',
+                'assigned_at': timestamp,
+                'assigned_by': 'system',
+                'reason': 'auto-assigned as creator'
+            })
+            logger.info(f"Auto-assigned user {user['user_id']} as UseCaseAdmin for usecase {usecase_id}")
+            item['creator_role_assigned'] = True
+        except Exception as e:
+            logger.warning(f"Failed to auto-assign creator role: {str(e)}")
+            item['creator_role_assigned'] = False
+        
+        # If separate Data Account is configured, update bucket policy to allow SageMaker access
+        data_bucket_policy_result = None
+        if (body.get('data_account_id') and 
+            body.get('data_account_role_arn') and 
+            body.get('data_s3_bucket') and
+            body.get('data_account_id') != body['account_id']):
+            
+            logger.info(f"Separate Data Account detected, updating bucket policy for SageMaker access")
+            
+            try:
+                data_bucket_policy_result = update_data_bucket_policy_for_sagemaker(
+                    data_account_role_arn=body['data_account_role_arn'],
+                    data_account_external_id=body['data_account_external_id'],  # Required for production
+                    data_bucket_name=body['data_s3_bucket'],
+                    usecase_account_id=body['account_id'],
+                    sagemaker_role_arn=body['sagemaker_execution_role_arn']
+                )
+                
+                # Update usecase with bucket policy status
+                table.update_item(
+                    Key={'usecase_id': usecase_id},
+                    UpdateExpression='SET data_bucket_policy_configured = :configured, data_bucket_policy_result = :result',
+                    ExpressionAttributeValues={
+                        ':configured': data_bucket_policy_result.get('status') == 'success' or data_bucket_policy_result.get('status') == 'already_configured',
+                        ':result': data_bucket_policy_result
+                    }
+                )
+                item['data_bucket_policy_configured'] = data_bucket_policy_result.get('status') in ['success', 'already_configured']
+                item['data_bucket_policy_result'] = data_bucket_policy_result
+                
+                logger.info(f"Data bucket policy update result: {data_bucket_policy_result.get('status')}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to update data bucket policy for usecase {usecase_id}: {str(e)}")
+                data_bucket_policy_result = {'status': 'failed', 'error': str(e)}
+        
+        # Configure CORS on Data Account bucket for browser uploads
+        data_bucket_cors_result = None
+        cloudfront_domain = os.environ.get('CLOUDFRONT_DOMAIN')
+        
+        if (body.get('data_account_id') and 
+            body.get('data_account_role_arn') and 
+            body.get('data_s3_bucket') and
+            body.get('data_account_id') != body['account_id'] and
+            cloudfront_domain):
+            
+            logger.info(f"Configuring CORS for Data Account bucket")
+            
+            try:
+                data_bucket_cors_result = configure_bucket_cors(
+                    data_account_role_arn=body['data_account_role_arn'],
+                    data_account_external_id=body['data_account_external_id'],  # Required for production
+                    data_bucket_name=body['data_s3_bucket'],
+                    cloudfront_domain=cloudfront_domain
+                )
+                
+                # Update usecase with CORS status
+                table.update_item(
+                    Key={'usecase_id': usecase_id},
+                    UpdateExpression='SET data_bucket_cors_configured = :configured, data_bucket_cors_result = :result',
+                    ExpressionAttributeValues={
+                        ':configured': data_bucket_cors_result.get('status') in ['success', 'already_configured'],
+                        ':result': data_bucket_cors_result
+                    }
+                )
+                item['data_bucket_cors_configured'] = data_bucket_cors_result.get('status') in ['success', 'already_configured']
+                item['data_bucket_cors_result'] = data_bucket_cors_result
+                
+                logger.info(f"Data bucket CORS result: {data_bucket_cors_result.get('status')}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to configure CORS for usecase {usecase_id}: {str(e)}")
+                data_bucket_cors_result = {'status': 'failed', 'error': str(e)}
+        
+        # Tag Data Account bucket for portal discovery
+        data_bucket_tag_result = None
+        if (body.get('data_account_id') and 
+            body.get('data_account_role_arn') and 
+            body.get('data_s3_bucket') and
+            body.get('data_account_id') != body['account_id']):
+            
+            logger.info(f"Tagging Data Account bucket for portal discovery")
+            
+            try:
+                data_bucket_tag_result = tag_bucket_for_portal(
+                    role_arn=body['data_account_role_arn'],
+                    external_id=body['data_account_external_id'],  # Required for production
+                    bucket_name=body['data_s3_bucket'],
+                    usecase_id=usecase_id
+                )
+                
+                # Update usecase with tag status
+                table.update_item(
+                    Key={'usecase_id': usecase_id},
+                    UpdateExpression='SET data_bucket_tagged = :tagged, data_bucket_tag_result = :result',
+                    ExpressionAttributeValues={
+                        ':tagged': data_bucket_tag_result.get('status') in ['success', 'already_configured'],
+                        ':result': data_bucket_tag_result
+                    }
+                )
+                item['data_bucket_tagged'] = data_bucket_tag_result.get('status') in ['success', 'already_configured']
+                item['data_bucket_tag_result'] = data_bucket_tag_result
+                
+                logger.info(f"Data bucket tag result: {data_bucket_tag_result.get('status')}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to tag bucket for usecase {usecase_id}: {str(e)}")
+                data_bucket_tag_result = {'status': 'failed', 'error': str(e)}
         
         # Provision shared components (dda-LocalServer) to the usecase account
         # This creates read-only copies of portal-managed components
@@ -223,7 +776,10 @@ def create_usecase(event, user):
             user['user_id'], 'create_usecase', 'usecase', usecase_id,
             'success', {
                 'name': body['name'],
-                'shared_components_provisioned': item.get('shared_components_provisioned', False)
+                'shared_components_provisioned': item.get('shared_components_provisioned', False),
+                'data_bucket_policy_configured': item.get('data_bucket_policy_configured', False),
+                'data_bucket_cors_configured': item.get('data_bucket_cors_configured', False),
+                'data_bucket_tagged': item.get('data_bucket_tagged', False)
             }
         )
         
@@ -232,6 +788,9 @@ def create_usecase(event, user):
         return create_response(201, {
             'usecase': item,
             'shared_components': shared_components_result,
+            'data_bucket_policy': data_bucket_policy_result,
+            'data_bucket_cors': data_bucket_cors_result,
+            'data_bucket_tag': data_bucket_tag_result,
             'message': 'Use case created successfully'
         })
         
