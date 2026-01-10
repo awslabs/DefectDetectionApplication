@@ -44,10 +44,21 @@ cd ..
 ```
 
 **Save the outputs:**
-- `FrontendUrl` - Portal URL
+- `FrontendUrl` - Portal URL (CloudFront domain)
 - `ApiUrl` - API endpoint
 - `UserPoolId` - Cognito User Pool ID
 - `UserPoolClientId` - Cognito Client ID
+
+### Enable Automatic CORS Configuration (Recommended)
+
+After the first deployment, redeploy with your CloudFront domain to enable automatic CORS configuration on Data Account buckets:
+
+```bash
+cd infrastructure
+cdk deploy --all -c cloudFrontDomain=YOUR_CLOUDFRONT_DOMAIN.cloudfront.net
+```
+
+This allows the portal to automatically configure CORS when you onboard a UseCase with a separate Data Account.
 
 ### Configure Frontend
 
@@ -91,9 +102,19 @@ Select option **1 (UseCase Account)** and provide:
 
 ---
 
-## Step 3: Deploy Data Account Role (Optional)
+## Step 3: Configure Data Account (Choose One)
 
-If using a separate Data account for training data:
+### Option A: Same Account (Recommended for most users)
+
+If training data is stored in the **same account** as the UseCase:
+
+1. During UseCase onboarding in the portal, select **"Same as UseCase Account"**
+2. No additional deployment needed
+3. SageMaker accesses data using its execution role (same account)
+
+### Option B: Separate Data Account
+
+If training data is in a **different account** (e.g., centralized data lake):
 
 ```bash
 # Switch AWS credentials to Data account
@@ -103,12 +124,15 @@ cd edge-cv-portal
 
 Select option **2 (Data Account)** and provide:
 - Portal Account ID
-- UseCase Account ID(s) - comma-separated for multiple
+- UseCase Account ID(s)
 
 **Save the outputs:**
 - Portal Access Role ARN
-- SageMaker Access Role ARN
 - External ID
+
+**Note**: The bucket policy for SageMaker access is **automatically configured** when you onboard the UseCase in the portal. No manual bucket policy setup required!
+
+> **📖 See [DATA_ACCOUNT_SETUP.md](DATA_ACCOUNT_SETUP.md) for detailed scenarios and troubleshooting.**
 
 ---
 
@@ -202,5 +226,18 @@ Run `./deploy-frontend.sh` to upload frontend files to S3.
 - Ensure role exists in target account
 
 ### SageMaker can't access Data account
-- Verify Data account role trusts UseCase account
-- Check S3 bucket is tagged with `dda-portal:managed=true`
+
+**Cause**: Bucket policy not configured for cross-account access.
+
+**Fix**: The bucket policy should be automatically configured during UseCase onboarding. Check the UseCase in DynamoDB:
+
+```bash
+aws dynamodb get-item \
+  --table-name edge-cv-portal-usecases \
+  --key '{"usecase_id": {"S": "YOUR_USECASE_ID"}}' \
+  --query 'Item.data_bucket_policy_result'
+```
+
+If the status is "failed", ensure the Data Account role has `s3:GetBucketPolicy` and `s3:PutBucketPolicy` permissions.
+
+> **📖 See [DATA_ACCOUNT_SETUP.md](DATA_ACCOUNT_SETUP.md) for complete data account configuration guide.**

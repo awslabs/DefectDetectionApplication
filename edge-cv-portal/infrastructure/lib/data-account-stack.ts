@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 
 export interface DataAccountStackProps extends cdk.StackProps {
@@ -16,8 +17,16 @@ export interface DataAccountStackProps extends cdk.StackProps {
 
   /**
    * External ID for additional security when assuming the role.
+   * REQUIRED for production - prevents confused deputy attacks.
    */
-  externalId?: string;
+  externalId: string;
+
+  /**
+   * List of existing S3 bucket names in this Data Account that should be accessible
+   * by SageMaker in UseCase Accounts. These buckets will get bucket policies added.
+   * Example: ['dda-cookie-bucket', 'dda-training-data']
+   */
+  dataBucketNames?: string[];
 }
 
 /**
@@ -37,7 +46,7 @@ export class DataAccountStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: DataAccountStackProps) {
     super(scope, id, props);
 
-    const { portalAccountId, usecaseAccountIds, externalId } = props;
+    const { portalAccountId, usecaseAccountIds, externalId, dataBucketNames } = props;
 
     // ===========================================
     // Role 1: Portal Access Role
@@ -47,7 +56,7 @@ export class DataAccountStack extends cdk.Stack {
       roleName: 'DDAPortalDataAccessRole',
       description: 'Role for DDA Portal to manage S3 data in this Data Account',
       assumedBy: new iam.AccountPrincipal(portalAccountId),
-      externalIds: externalId ? [externalId] : undefined,
+      externalIds: [externalId],  // Required for production security
       maxSessionDuration: cdk.Duration.hours(12),
     });
 
@@ -65,6 +74,9 @@ export class DataAccountStack extends cdk.Stack {
           's3:GetBucketCors',
           's3:PutBucketCors',
           's3:ListAllMyBuckets',
+          // Bucket policy permissions for automatic SageMaker access configuration
+          's3:GetBucketPolicy',
+          's3:PutBucketPolicy',
         ],
         resources: ['arn:aws:s3:::*'],
       })
@@ -155,6 +167,77 @@ export class DataAccountStack extends cdk.Stack {
     );
 
     // ===========================================
+    // S3 Bucket Policies for Cross-Account Access
+    // ===========================================
+    // Add bucket policies to existing buckets to allow UseCase Account SageMaker roles
+    // to read training data directly (without assuming a role)
+    
+    if (dataBucketNames && dataBucketNames.length > 0) {
+      // Build list of SageMaker execution role ARNs from UseCase Accounts
+      const sagemakerRoleArns = usecaseAccountIds.map(
+        accountId => `arn:aws:iam::${accountId}:role/DDASageMakerExecutionRole`
+      );
+
+      for (const bucketName of dataBucketNames) {
+        // Import the existing bucket
+        const bucket = s3.Bucket.fromBucketName(this, `DataBucket-${bucketName}`, bucketName);
+
+        // Add bucket policy for cross-account SageMaker access
+        // Note: This creates a new policy that will be merged with any existing policy
+        const bucketPolicy = new s3.BucketPolicy(this, `BucketPolicy-${bucketName}`, {
+          bucket: bucket,
+        });
+
+        // Allow UseCase Account SageMaker roles to read from this bucket
+        bucketPolicy.document.addStatements(
+          new iam.PolicyStatement({
+            sid: 'AllowUseCaseSageMakerRead',
+            effect: iam.Effect.ALLOW,
+            principals: sagemakerRoleArns.map(arn => new iam.ArnPrincipal(arn)),
+            actions: [
+              's3:GetObject',
+              's3:GetObjectVersion',
+              's3:GetObjectTagging',
+            ],
+            resources: [`arn:aws:s3:::${bucketName}/*`],
+          }),
+          new iam.PolicyStatement({
+            sid: 'AllowUseCaseSageMakerList',
+            effect: iam.Effect.ALLOW,
+            principals: sagemakerRoleArns.map(arn => new iam.ArnPrincipal(arn)),
+            actions: [
+              's3:ListBucket',
+              's3:GetBucketLocation',
+            ],
+            resources: [`arn:aws:s3:::${bucketName}`],
+          })
+        );
+
+        // Also allow Portal Account to manage the bucket
+        bucketPolicy.document.addStatements(
+          new iam.PolicyStatement({
+            sid: 'AllowPortalAccountAccess',
+            effect: iam.Effect.ALLOW,
+            principals: [new iam.ArnPrincipal(this.portalAccessRole.roleArn)],
+            actions: [
+              's3:GetObject',
+              's3:PutObject',
+              's3:DeleteObject',
+              's3:ListBucket',
+              's3:GetBucketLocation',
+              's3:GetBucketTagging',
+              's3:PutBucketTagging',
+            ],
+            resources: [
+              `arn:aws:s3:::${bucketName}`,
+              `arn:aws:s3:::${bucketName}/*`,
+            ],
+          })
+        );
+      }
+    }
+
+    // ===========================================
     // Outputs
     // ===========================================
     new cdk.CfnOutput(this, 'PortalAccessRoleArn', {
@@ -184,10 +267,16 @@ export class DataAccountStack extends cdk.Stack {
       description: 'UseCase Account IDs that can assume the SageMaker role',
     });
 
-    if (externalId) {
-      new cdk.CfnOutput(this, 'ExternalId', {
-        value: externalId,
-        description: 'External ID for assuming the portal role',
+    // Always output external ID info (required for production)
+    new cdk.CfnOutput(this, 'ExternalId', {
+      value: externalId,
+      description: 'External ID required for assuming the portal role - SAVE THIS SECURELY',
+    });
+
+    if (dataBucketNames && dataBucketNames.length > 0) {
+      new cdk.CfnOutput(this, 'DataBuckets', {
+        value: dataBucketNames.join(','),
+        description: 'S3 buckets with cross-account access policies',
       });
     }
   }

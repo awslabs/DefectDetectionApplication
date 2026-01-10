@@ -168,6 +168,108 @@ class ApiService {
     });
   }
 
+  // Shared Components endpoints
+  async provisionSharedComponents(usecaseId: string, componentVersion?: string): Promise<{
+    usecase_id: string;
+    components: Array<{
+      component_name: string;
+      component_version?: string;
+      component_arn?: string;
+      platform: string;
+      status: string;
+      error?: string;
+    }>;
+    policy_updated: boolean;
+    message: string;
+  }> {
+    return this.request('/shared-components/provision', {
+      method: 'POST',
+      body: JSON.stringify({
+        usecase_id: usecaseId,
+        ...(componentVersion && { component_version: componentVersion }),
+      }),
+    });
+  }
+
+  async listAvailableSharedComponents(): Promise<{
+    components: Array<{
+      component_name: string;
+      description: string;
+      platform: string;
+      platforms: string[];
+      source: string;
+      latest_version: string;
+    }>;
+    count: number;
+  }> {
+    return this.request('/shared-components/available');
+  }
+
+  async listSharedComponents(usecaseId: string): Promise<{
+    usecase_id: string;
+    components: Array<{
+      component_name: string;
+      component_version: string;
+      component_arn: string;
+      platform: string;
+      status: string;
+      update_available?: boolean;
+      latest_version?: string;
+    }>;
+    count: number;
+    latest_version: string;
+  }> {
+    return this.request(`/shared-components?usecase_id=${usecaseId}`);
+  }
+
+  async getSharedComponentsStatus(): Promise<{
+    usecases: Array<{
+      usecase_id: string;
+      usecase_name: string;
+      account_id: string;
+      needs_update: boolean;
+      shared_components_provisioned: boolean;
+      components: Array<{
+        component_name: string;
+        current_version: string;
+        latest_version: string;
+        update_available: boolean;
+        status: string;
+      }>;
+    }>;
+    total_usecases: number;
+    usecases_needing_update: number;
+    latest_version: string;
+  }> {
+    return this.request('/shared-components/status');
+  }
+
+  async updateAllSharedComponents(params?: {
+    version?: string;
+    usecase_ids?: string[];
+  }): Promise<{
+    message: string;
+    target_version: string;
+    results: Array<{
+      usecase_id: string;
+      usecase_name: string;
+      status: string;
+      error?: string;
+      components?: Array<{
+        component_name: string;
+        status: string;
+        error?: string;
+      }>;
+    }>;
+    success_count: number;
+    failed_count: number;
+  }> {
+    return this.request('/shared-components/update-all', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    });
+  }
+
   // Device endpoints
   async listDevices(usecaseId: string): Promise<{ devices: Device[]; count: number }> {
     if (!usecaseId) {
@@ -874,6 +976,204 @@ class ApiService {
     usecase_id: string;
   }> {
     return this.request(`/usecases/${usecaseId}/data/configure`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // User Roles / Team Management endpoints
+  async listUsecaseUsers(usecaseId: string): Promise<{
+    users: Array<{
+      user_id: string;
+      roles: Array<{
+        usecase_id: string;
+        role: string;
+        assigned_at?: number;
+        assigned_by?: string;
+      }>;
+    }>;
+    total_count: number;
+  }> {
+    return this.request(`/users?usecase_id=${usecaseId}`);
+  }
+
+  async assignUserRole(data: {
+    user_id: string;
+    usecase_id: string;
+    role: string;
+  }): Promise<{
+    message: string;
+    user_id: string;
+    usecase_id: string;
+    role: string;
+  }> {
+    return this.request('/users/assign-role', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async removeUserRole(userId: string, usecaseId: string): Promise<{
+    message: string;
+    user_id: string;
+    usecase_id: string;
+  }> {
+    return this.request(`/users/${userId}/roles/${usecaseId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  // Model Import (BYOM) endpoints
+  async getModelFormatSpec(): Promise<{
+    description: string;
+    format: string;
+    framework: string;
+    required_structure: Record<string, {
+      description: string;
+      required_fields?: Record<string, string>;
+      example?: string;
+      notes?: string;
+    }>;
+    validation_rules: string[];
+    supported_compilation_targets: string[];
+  }> {
+    return this.request('/models/format-spec');
+  }
+
+  async validateModel(data: {
+    usecase_id: string;
+    model_s3_uri: string;
+  }): Promise<{
+    valid: boolean;
+    model_s3_uri?: string;
+    metadata?: {
+      image_width: number;
+      image_height: number;
+      input_shape: number[];
+      model_type: string;
+      pt_file: string;
+      framework: string;
+      framework_version: string;
+    };
+    files_found?: string[];
+    warnings?: string[];
+    error?: string;
+    details?: string[];
+  }> {
+    return this.request('/models/validate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async importModel(data: {
+    usecase_id: string;
+    model_name: string;
+    model_version: string;
+    model_s3_uri: string;
+    description?: string;
+    auto_compile?: boolean;
+    compilation_targets?: string[];
+  }): Promise<{
+    training_id: string;
+    model_name: string;
+    model_version: string;
+    status: string;
+    source: string;
+    validation_result: {
+      valid: boolean;
+      metadata: {
+        image_width: number;
+        image_height: number;
+        input_shape: number[];
+        model_type: string;
+        pt_file: string;
+        framework: string;
+        framework_version: string;
+      };
+      files_found: string[];
+      warnings: string[];
+    };
+    message: string;
+    auto_compile_triggered: boolean;
+  }> {
+    return this.request('/models/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Model Converter endpoints (Smart Import)
+  async getSupportedModelTypes(): Promise<{
+    model_types: Record<string, {
+      description: string;
+      output_format: string;
+    }>;
+    common_dimensions: Record<string, number[]>;
+    supported_frameworks: string[];
+    framework_versions: string[];
+  }> {
+    return this.request('/models/types');
+  }
+
+  async inspectModel(data: {
+    usecase_id: string;
+    model_s3_uri: string;
+  }): Promise<{
+    model_s3_uri: string;
+    inspection_result: {
+      type: string;
+      is_state_dict?: boolean;
+      is_jit?: boolean;
+      is_full_model?: boolean;
+      layers?: string[];
+      total_layers?: number;
+      input_channels?: number;
+      num_classes?: number;
+      architecture_hints: string[];
+      suggested_type?: string;
+      error?: string;
+    };
+    supported_model_types: Record<string, {
+      description: string;
+      output_format: string;
+    }>;
+  }> {
+    return this.request('/models/inspect', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async convertModel(data: {
+    usecase_id: string;
+    model_s3_uri: string;
+    model_name: string;
+    model_type: string;
+    image_width: number;
+    image_height: number;
+    num_classes?: number;
+    class_names?: string[];
+    auto_import?: boolean;
+  }): Promise<{
+    converted_model_s3_uri: string;
+    model_name: string;
+    model_type: string;
+    input_shape: number[];
+    model_info: {
+      type: string;
+      architecture_hints: string[];
+      suggested_type?: string;
+    };
+    message: string;
+    import_result?: {
+      training_id: string;
+      message: string;
+    };
+    training_id?: string;
+    import_error?: string;
+  }> {
+    return this.request('/models/convert', {
       method: 'POST',
       body: JSON.stringify(data),
     });

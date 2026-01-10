@@ -26,6 +26,7 @@ export default function CreateTraining() {
   
   const [useCaseId, setUseCaseId] = useState<SelectProps.Option | null>(null);
   const [useCases, setUseCases] = useState<SelectProps.Option[]>([]);
+  const [useCaseData, setUseCaseData] = useState<any[]>([]); // Store full usecase objects
   const [modelName, setModelName] = useState('');
   const [modelVersion, setModelVersion] = useState('1.0.0');
   const [modelType, setModelType] = useState<SelectProps.Option>({
@@ -113,6 +114,7 @@ export default function CreateTraining() {
     const fetchUseCases = async () => {
       try {
         const response = await apiService.listUseCases();
+        setUseCaseData(response.usecases); // Store full usecase objects
         const options = response.usecases.map(uc => ({
           label: uc.name,
           value: uc.usecase_id,
@@ -240,6 +242,9 @@ export default function CreateTraining() {
     if (datasetSource === 'pre-labeled') return selectedPreLabeledDataset?.value;
     return '';
   };
+
+  // Get the selected usecase object
+  const selectedUseCase = useCaseData.find(uc => uc.usecase_id === useCaseId?.value);
 
   const isFormValid = 
     useCaseId && 
@@ -533,6 +538,10 @@ export default function CreateTraining() {
                   {datasetSource === 'manual' && 'Manual S3 URI'}
                 </Box>
               </Box>
+              <Box>
+                <Box variant="awsui-key-label">Training Data Bucket</Box>
+                <Box>{selectedUseCase?.data_s3_bucket || selectedUseCase?.s3_bucket || 'Not configured'}</Box>
+              </Box>
             </SpaceBetween>
             <SpaceBetween size="xs">
               <Box>
@@ -541,6 +550,15 @@ export default function CreateTraining() {
                   {datasetSource === 'ground-truth' && (selectedLabelingJob?.label || 'Not selected')}
                   {datasetSource === 'pre-labeled' && (selectedPreLabeledDataset?.label || 'Not selected')}
                   {datasetSource === 'manual' && (datasetManifest || 'Not specified')}
+                </Box>
+              </Box>
+              <Box>
+                <Box variant="awsui-key-label">Model Output Bucket</Box>
+                <Box>
+                  {selectedUseCase?.s3_bucket 
+                    ? selectedUseCase.s3_bucket 
+                    : <Alert type="error">Output bucket not configured</Alert>
+                  }
                 </Box>
               </Box>
               <Box>

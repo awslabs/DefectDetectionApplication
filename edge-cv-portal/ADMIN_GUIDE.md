@@ -12,6 +12,11 @@ Complete guide for deploying, configuring, and managing the Defect Detection App
 6. [Portal Features](#portal-features)
 7. [Troubleshooting](#troubleshooting)
 
+**Related Guides:**
+- [DATA_ACCOUNT_SETUP.md](DATA_ACCOUNT_SETUP.md) - Detailed data account configuration scenarios
+- [SHARED_COMPONENTS.md](SHARED_COMPONENTS.md) - Greengrass component provisioning
+- [DEPLOYMENT.md](DEPLOYMENT.md) - Quick deployment reference
+
 ---
 
 ## Architecture Overview
@@ -195,6 +200,18 @@ cd edge-cv-portal
 
 Select option `2` for Data Account Role.
 
+**What gets created:**
+- `DDAPortalDataAccessRole` - For Portal to browse data and update bucket policies
+- `DDASageMakerDataAccessRole` - For SageMaker cross-account access
+
+**Save these outputs:**
+- Portal Access Role ARN
+- External ID
+
+**Note**: The bucket policy for SageMaker access is **automatically configured** when you onboard the UseCase in the portal. The Portal assumes the Data Account role and adds the necessary bucket policy statements.
+
+> **📖 See [DATA_ACCOUNT_SETUP.md](DATA_ACCOUNT_SETUP.md) for detailed scenarios and step-by-step guides.**
+
 ### Tag S3 Buckets
 
 The portal uses tag-based access. Tag each bucket:
@@ -367,10 +384,25 @@ aws s3api put-bucket-cors --bucket training-data-bucket --cors-configuration '{
 
 1. Navigate to **Use Cases** → **Create Use Case**
 2. Fill in the wizard:
-   - Basic Info (name, description)
-   - AWS Account configuration
-   - S3 storage settings
-   - Optional: Separate Data Account
+   - **Basic Info**: Name, description, cost center
+   - **AWS Account**: Role ARN, External ID, SageMaker Role ARN
+   - **S3 Storage**: Bucket name and prefix for outputs
+   - **Data Account Configuration**: Choose where training data is stored
+
+#### Data Account Options
+
+| Option | When to Use | What Happens |
+|--------|-------------|--------------|
+| **Same as UseCase Account** | Data is in the same account as SageMaker | No extra role assumption; simplest setup |
+| **Separate Data Account** | Data is in a centralized data lake | Portal assumes Data Account role; SageMaker uses bucket policy |
+
+**For Separate Data Account**, you'll need:
+- Data Account ID
+- Data Account Role ARN (`DDAPortalDataAccessRole`)
+- Data Account External ID
+- Data S3 Bucket name
+
+> **📖 See [DATA_ACCOUNT_SETUP.md](DATA_ACCOUNT_SETUP.md) for detailed setup instructions.
 
 ### Via API
 
@@ -546,6 +578,51 @@ aws s3api put-bucket-cors --bucket $BUCKET --cors-configuration '{
 }'
 ```
 
+### Training Job Fails with "Access Denied" to Data Bucket
+
+**Symptom**: SageMaker training job fails with S3 access denied error.
+
+**Cause**: When using a separate Data Account, the bucket policy doesn't allow the UseCase Account's SageMaker role.
+
+**Fix**: Deploy (or redeploy) the Data Account stack with the bucket name:
+
+```bash
+cd edge-cv-portal/infrastructure
+cdk deploy -a "npx ts-node bin/data-account-app.ts" \
+  -c portalAccountId=PORTAL_ID \
+  -c usecaseAccountIds=USECASE_ID \
+  -c dataBucketNames=your-data-bucket
+```
+
+This creates a bucket policy allowing `DDASageMakerExecutionRole` from the UseCase Account to read from the bucket.
+
+### Labeling Job Can't Find Images in Data Account
+
+**Symptom**: "No images found" when creating labeling job, but images exist.
+
+**Cause**: Portal can't assume Data Account role or wrong bucket configured.
+
+**Fix**:
+1. Verify UseCase has correct `data_account_role_arn` and `data_s3_bucket`:
+   ```bash
+   aws dynamodb get-item \
+     --table-name edge-cv-portal-usecases \
+     --key '{"usecase_id": {"S": "YOUR_ID"}}' \
+     --query 'Item.{data_account_id:data_account_id.S, data_s3_bucket:data_s3_bucket.S, data_account_role_arn:data_account_role_arn.S}'
+   ```
+
+2. Verify External ID matches between DynamoDB and IAM role trust policy
+
+3. Test role assumption manually:
+   ```bash
+   aws sts assume-role \
+     --role-arn arn:aws:iam::DATA_ACCOUNT:role/DDAPortalDataAccessRole \
+     --role-session-name test \
+     --external-id YOUR_EXTERNAL_ID
+   ```
+
+> **📖 See [DATA_ACCOUNT_SETUP.md](DATA_ACCOUNT_SETUP.md) for complete troubleshooting guide.
+
 ### Lambda Timeout on Large Operations
 
 **Cause**: Cross-account API calls taking too long.
@@ -557,13 +634,98 @@ aws logs tail /aws/lambda/EdgeCVPortalComputeStack-ComponentsHandler --follow
 
 ---
 
-## Role Reference
+## User Roles and Permissions
 
-| Role | Scope | Permissions |
+### Role Hierarchy
+
+The portal uses a two-layer permission model:
+
+1. **IDP Role (from Cognito/SSO)**: Determines global capabilities
+2. **UseCase Assignment (from DynamoDB)**: Determines which usecases a user can access
+
+### Available Roles
+
+| Role | Scope | Description |
 |------|-------|-------------|
-| **PortalAdmin** | Global | Full access to all usecases, user management |
-| **UseCaseAdmin** | UseCase | Full access within assigned usecase |
-| **UseCaseUser** | UseCase | Read access, can start training/labeling |
+| **PortalAdmin** | Global | Super user with full access to all usecases and user management |
+| **UseCaseAdmin** | Per-UseCase | Full access within assigned usecases, can manage team members |
+| **DataScientist** | Per-UseCase | Can create labeling jobs, training jobs, and manage models |
+| **Operator** | Per-UseCase | Can create deployments, manage devices, view logs |
+| **Viewer** | Per-UseCase | Read-only access to view usecases, jobs, models, deployments |
+
+### Permission Matrix
+
+| Action | PortalAdmin | UseCaseAdmin | DataScientist | Operator | Viewer |
+|--------|:-----------:|:------------:|:-------------:|:--------:|:------:|
+| **UseCase Management** |
+| Create UseCase | ✅ | ✅ | ✅ | ✅ | ✅ |
+| View All UseCases | ✅ | ❌ | ❌ | ❌ | ❌ |
+| View Assigned UseCases | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Update UseCase | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Delete UseCase | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Manage Team Members | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **Labeling** |
+| Create Labeling Job | ✅ | ✅ | ✅ | ❌ | ❌ |
+| View Labeling Jobs | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Delete Labeling Job | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **Training** |
+| Create Training Job | ✅ | ✅ | ✅ | ❌ | ❌ |
+| View Training Jobs | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Stop Training Job | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **Models** |
+| View Models | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Compile Model | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Package Model | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Publish Component | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Delete Model | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **Deployments** |
+| Create Deployment | ✅ | ✅ | ❌ | ✅ | ❌ |
+| View Deployments | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Cancel Deployment | ✅ | ✅ | ❌ | ✅ | ❌ |
+| **Devices** |
+| View Devices | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Restart Greengrass | ✅ | ✅ | ❌ | ✅ | ❌ |
+| Reboot Device | ✅ | ✅ | ❌ | ✅ | ❌ |
+| Browse Files | ✅ | ✅ | ❌ | ✅ | ❌ |
+| View Logs | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Update Config | ✅ | ✅ | ❌ | ✅ | ❌ |
+
+### Self-Service UseCase Creation
+
+Any authenticated user can create a new usecase. When a user creates a usecase:
+1. The usecase is created in DynamoDB
+2. The creator is automatically assigned as **UseCaseAdmin** for that usecase
+3. The creator can then add other team members via "Manage Team"
+
+### Managing Team Members
+
+UseCaseAdmins and PortalAdmins can manage team members for their usecases:
+
+1. Go to **Use Cases** page
+2. Click **Actions** → **Manage Team** for the usecase
+3. Add users by email and assign a role
+4. Remove users as needed
+
+### PortalAdmin as Fallback
+
+PortalAdmins have global access to all usecases. This ensures:
+- No usecase becomes orphaned if the UseCaseAdmin leaves
+- PortalAdmins can reassign admins when needed
+- Emergency access is always available
+
+### Setting User Roles in Cognito
+
+To set a user's IDP role (for PortalAdmin access):
+
+```bash
+# Set custom:role attribute
+aws cognito-idp admin-update-user-attributes \
+  --user-pool-id us-east-1_jBJ4LzuQ8 \
+  --username USERNAME \
+  --user-attributes Name=custom:role,Value=PortalAdmin
+```
+
+Valid role values: `PortalAdmin`, `UseCaseAdmin`, `DataScientist`, `Operator`, `Viewer`
 
 ---
 

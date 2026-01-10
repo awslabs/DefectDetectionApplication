@@ -22,6 +22,12 @@ echo "Building component for architecture: $ARCH"
 echo "Component name: $COMPONENT_NAME"
 echo "Using recipe: $RECIPE_FILE"
 
+# Get account and region info
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=$(aws configure get region || echo "us-east-1")
+BUCKET_NAME="dda-component-${REGION}-${ACCOUNT_ID}"
+
+echo "Using S3 bucket: $BUCKET_NAME"
 
 # Use architecture-specific recipe
 cp $RECIPE_FILE recipe.yaml
@@ -44,7 +50,7 @@ cat > gdk-config.json << EOF
       },
       "publish": {
         "bucket": "dda-component",
-        "region": "us-east-1"
+        "region": "${REGION}"
       }
     }
   },
@@ -65,8 +71,6 @@ gdk component publish
 
 # Get the component ARN and tag it for portal visibility
 echo "Tagging component for DDA Portal visibility..."
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-REGION=$(aws configure get region || echo "us-east-1")
 
 # Get the latest version of the component
 LATEST_VERSION=$(aws greengrassv2 list-component-versions \
@@ -85,6 +89,21 @@ if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "None" ]; then
            "dda-portal:architecture=${ARCH}"
   
   echo "Component tagged successfully!"
+  echo ""
+  echo "=== Component Details ==="
+  echo "Component Name: $COMPONENT_NAME"
+  echo "Version: $LATEST_VERSION"
+  echo "Bucket: $BUCKET_NAME"
+  echo "Artifact Path: ${COMPONENT_NAME}/${LATEST_VERSION}/${COMPONENT_NAME}-${ARCH}.zip"
+  echo ""
+  echo "=== Next Steps ==="
+  echo "1. Update DDA_LOCAL_SERVER_VERSION in compute-stack.ts to: $LATEST_VERSION"
+  echo "2. Deploy: cd edge-cv-portal/infrastructure && npm run build && cdk deploy EdgeCVPortalComputeStack"
+  echo "3. Use 'Update All Usecases' button in portal to push to all usecase accounts"
+  echo ""
+  echo "NOTE: Cross-account bucket policy is automatically managed during usecase onboarding."
+  echo "      New usecase accounts are added to the bucket policy when shared components are provisioned."
+  echo ""
 else
   echo "Warning: Could not determine component version for tagging"
 fi

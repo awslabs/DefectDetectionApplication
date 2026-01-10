@@ -302,51 +302,63 @@ class RBACManager:
         }
     
     def get_user_role(self, user_id: str, usecase_id: str, user_info: Optional[Dict] = None) -> Optional[Role]:
-        """Get user's role from IDP (JWT claims)
+        """Get user's role for a specific usecase
+        
+        Role resolution order:
+        1. PortalAdmin from JWT claims (global admin access)
+        2. UseCase-specific role from DynamoDB (assigned via Team Management)
+        3. Default role from JWT claims (Cognito custom:role attribute)
+        4. Default to Viewer if nothing found
         
         Args:
             user_id: User ID (for logging/fallback)
-            usecase_id: Use case ID (not used for role lookup, kept for API compatibility)
+            usecase_id: Use case ID for usecase-specific role lookup
             user_info: User info dict from get_user_from_event() containing role from JWT
             
         Returns:
             Role enum or None
         """
         try:
-            # Primary: Get role from JWT claims (IDP is source of truth)
-            if user_info and user_info.get('role'):
-                role_str = user_info['role']
-                try:
-                    return Role(role_str)
-                except ValueError:
-                    logger.warning(f"Invalid role from IDP: {role_str}, defaulting to Viewer")
-                    return Role.VIEWER
+            jwt_role = user_info.get('role') if user_info else None
             
-            # Fallback: Check DynamoDB for legacy data (will be deprecated)
-            # This allows gradual migration from DynamoDB to IDP-only
+            # 1. Check if user is PortalAdmin from JWT (global admin)
+            if jwt_role == 'PortalAdmin':
+                return Role.PORTAL_ADMIN
+            
             user_roles_table = dynamodb.Table(USER_ROLES_TABLE)
             
-            # Check for PortalAdmin (global role)
+            # 2. Check for PortalAdmin in DynamoDB (global role)
             response = user_roles_table.get_item(
                 Key={'user_id': user_id, 'usecase_id': 'global'}
             )
             
             if response.get('Item', {}).get('role') == 'PortalAdmin':
-                logger.info(f"User {user_id} has PortalAdmin from DynamoDB (legacy)")
+                logger.info(f"User {user_id} has PortalAdmin from DynamoDB")
                 return Role.PORTAL_ADMIN
             
-            # Check specific use case role
-            response = user_roles_table.get_item(
-                Key={'user_id': user_id, 'usecase_id': usecase_id}
-            )
+            # 3. Check usecase-specific role in DynamoDB (assigned via Team Management)
+            # This takes precedence over JWT default role for non-admin users
+            if usecase_id and usecase_id != 'global':
+                response = user_roles_table.get_item(
+                    Key={'user_id': user_id, 'usecase_id': usecase_id}
+                )
+                
+                if response.get('Item'):
+                    role_str = response['Item'].get('role')
+                    try:
+                        usecase_role = Role(role_str)
+                        logger.info(f"User {user_id} has role {role_str} for usecase {usecase_id} from DynamoDB")
+                        return usecase_role
+                    except ValueError:
+                        logger.warning(f"Invalid role found in DynamoDB: {role_str}")
             
-            if response.get('Item'):
-                role_str = response['Item'].get('role')
+            # 4. Fall back to JWT role (Cognito custom:role attribute)
+            if jwt_role:
                 try:
-                    return Role(role_str)
+                    return Role(jwt_role)
                 except ValueError:
-                    logger.warning(f"Invalid role found in DynamoDB: {role_str}")
-                    return None
+                    logger.warning(f"Invalid role from JWT: {jwt_role}, defaulting to Viewer")
+                    return Role.VIEWER
             
             # Default to Viewer if no role found
             return Role.VIEWER
@@ -367,6 +379,70 @@ class RBACManager:
         """Check if user has a specific permission based on IDP role"""
         user_permissions = self.get_user_permissions(user_id, usecase_id, user_info)
         return permission in user_permissions
+    
+    def assign_user_role(self, user_id: str, usecase_id: str, role: Role, assigned_by: str) -> bool:
+        """Assign a user to a usecase with a specific role in DynamoDB
+        
+        This creates a usecase-specific role assignment that supplements the IDP role.
+        Used for granting users access to specific usecases.
+        
+        Args:
+            user_id: User ID (email) to assign
+            usecase_id: Use case ID to grant access to
+            role: Role to assign (UseCaseAdmin, DataScientist, Operator, Viewer)
+            assigned_by: User ID of the person making the assignment
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            user_roles_table = dynamodb.Table(USER_ROLES_TABLE)
+            timestamp = int(datetime.utcnow().timestamp())
+            
+            user_roles_table.put_item(
+                Item={
+                    'user_id': user_id,
+                    'usecase_id': usecase_id,
+                    'role': role.value,
+                    'assigned_at': timestamp,
+                    'assigned_by': assigned_by
+                }
+            )
+            
+            logger.info(f"Assigned user {user_id} to usecase {usecase_id} with role {role.value}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error assigning user role: {str(e)}")
+            return False
+    
+    def remove_user_role(self, user_id: str, usecase_id: str, removed_by: str) -> bool:
+        """Remove a user's role assignment from a usecase
+        
+        Args:
+            user_id: User ID to remove
+            usecase_id: Use case ID to remove access from
+            removed_by: User ID of the person removing the assignment
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            user_roles_table = dynamodb.Table(USER_ROLES_TABLE)
+            
+            user_roles_table.delete_item(
+                Key={
+                    'user_id': user_id,
+                    'usecase_id': usecase_id
+                }
+            )
+            
+            logger.info(f"Removed user {user_id} from usecase {usecase_id} by {removed_by}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error removing user role: {str(e)}")
+            return False
     
     def is_portal_admin(self, user_id: str, user_info: Optional[Dict] = None) -> bool:
         """Check if user is a PortalAdmin based on IDP role"""
@@ -528,14 +604,20 @@ def require_super_user(func):
     return wrapper
 
 
-def check_user_access(user_id: str, usecase_id: str, required_role: Optional[str] = None) -> bool:
+def check_user_access(user_id: str, usecase_id: str, required_role: Optional[str] = None, user_info: Optional[Dict] = None) -> bool:
     """
     Legacy function for backward compatibility
     Check if user has access to a use case
+    
+    Args:
+        user_id: User ID
+        usecase_id: Use case ID
+        required_role: Optional minimum role required (e.g., 'DataScientist')
+        user_info: Optional user info dict from get_user_from_event() containing role from JWT
     """
     try:
-        # Use the new RBAC system
-        user_role = rbac_manager.get_user_role(user_id, usecase_id)
+        # Use the new RBAC system with user_info for JWT role lookup
+        user_role = rbac_manager.get_user_role(user_id, usecase_id, user_info)
         
         if not user_role:
             return False
@@ -594,15 +676,28 @@ def get_usecase(usecase_id: str) -> Dict:
 
 
 def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
-    """Assume cross-account role for UseCase Account access"""
+    """Assume cross-account role for UseCase Account access
+    
+    Args:
+        role_arn: ARN of the role to assume
+        external_id: External ID for role assumption (can be None if role doesn't require it)
+        session_name: Name for the assumed role session
+    """
     try:
         sts_client = boto3.client('sts')
-        response = sts_client.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=session_name,
-            ExternalId=external_id,
-            DurationSeconds=3600
-        )
+        
+        # Build assume role parameters
+        assume_params = {
+            'RoleArn': role_arn,
+            'RoleSessionName': session_name,
+            'DurationSeconds': 3600
+        }
+        
+        # Only include ExternalId if provided (some roles don't require it)
+        if external_id:
+            assume_params['ExternalId'] = external_id
+        
+        response = sts_client.assume_role(**assume_params)
         return response['Credentials']
     except ClientError as e:
         logger.error(f"Error assuming role: {str(e)}")

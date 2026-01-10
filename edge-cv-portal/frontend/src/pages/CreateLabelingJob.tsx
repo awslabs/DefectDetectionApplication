@@ -297,7 +297,7 @@ export default function CreateLabelingJob() {
                   label="S3 Bucket"
                   description="The S3 bucket containing the dataset"
                 >
-                  <Input value={selectedUseCase?.s3_bucket || ''} disabled />
+                  <Input value={selectedUseCase?.data_s3_bucket || selectedUseCase?.s3_bucket || ''} disabled />
                 </FormField>
               </SpaceBetween>
             ),
@@ -417,8 +417,17 @@ export default function CreateLabelingJob() {
 
                 <Box variant="h3">Dataset</Box>
                 <Box>
-                  <Box variant="awsui-key-label">S3 Location</Box>
-                  <Box>s3://{selectedUseCase?.s3_bucket || 'bucket'}/{datasetPrefix}</Box>
+                  <Box variant="awsui-key-label">Source Images</Box>
+                  <Box>s3://{selectedUseCase?.data_s3_bucket || selectedUseCase?.s3_bucket || 'bucket'}/{datasetPrefix}</Box>
+                </Box>
+                <Box>
+                  <Box variant="awsui-key-label">Labeling Output</Box>
+                  <Box>
+                    {selectedUseCase?.s3_bucket 
+                      ? `s3://${selectedUseCase.s3_bucket}/labeled/` 
+                      : <Alert type="error">Output bucket not configured. Please update the UseCase settings to add an S3 bucket for labeling outputs.</Alert>
+                    }
+                  </Box>
                 </Box>
 
                 <Box variant="h3">Task Configuration</Box>

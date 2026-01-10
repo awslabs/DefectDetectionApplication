@@ -12,6 +12,8 @@ import ModelDetail from './pages/ModelDetail';
 import Training from './pages/Training';
 import TrainingDetail from './pages/TrainingDetail';
 import CreateTraining from './pages/CreateTraining';
+import ImportModel from './pages/ImportModel';
+import SmartImport from './pages/SmartImport';
 import Labeling from './pages/Labeling';
 import LabelingDetail from './pages/LabelingDetail';
 import CreateLabelingJob from './pages/CreateLabelingJob';
@@ -70,6 +72,8 @@ function App() {
               <Route path="models/:modelId" element={<ModelDetail />} />
               <Route path="training" element={<Training />} />
               <Route path="training/create" element={<CreateTraining />} />
+              <Route path="training/import" element={<ImportModel />} />
+              <Route path="training/smart-import" element={<SmartImport />} />
               <Route path="training/:trainingId" element={<TrainingDetail />} />
               <Route path="deployments" element={<Deployments />} />
               <Route path="deployments/create" element={<CreateDeployment />} />

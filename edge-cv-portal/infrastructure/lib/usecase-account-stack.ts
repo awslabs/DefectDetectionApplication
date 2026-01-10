@@ -302,8 +302,7 @@ export class UseCaseAccountStack extends cdk.Stack {
     );
 
     // Greengrass Components
-    // Note: CreateComponentVersion is allowed for model components created by the portal
-    // but shared components (dda-LocalServer) are created by the portal and are read-only
+    // Allows creating model components and shared components (dda-LocalServer)
     this.role.addToPolicy(
       new iam.PolicyStatement({
         sid: 'GreengrassComponents',
@@ -321,27 +320,6 @@ export class UseCaseAccountStack extends cdk.Stack {
           'greengrass:ListTagsForResource',
         ],
         resources: [`arn:aws:greengrass:*:${this.account}:components:*`],
-      })
-    );
-
-    // Deny modification of shared components (dda-LocalServer)
-    // These components are managed by the portal and should be read-only in usecase accounts
-    this.role.addToPolicy(
-      new iam.PolicyStatement({
-        sid: 'DenySharedComponentModification',
-        effect: iam.Effect.DENY,
-        actions: [
-          'greengrass:DeleteComponent',
-          'greengrass:CreateComponentVersion',
-        ],
-        resources: [
-          `arn:aws:greengrass:*:${this.account}:components:aws.edgeml.dda.LocalServer*`,
-        ],
-        conditions: {
-          'StringEquals': {
-            'aws:ResourceTag/dda-portal:shared-component': 'true'
-          }
-        }
       })
     );
 
