@@ -69,11 +69,11 @@ function App() {
               <Route path="devices" element={<Devices />} />
               <Route path="devices/:deviceId" element={<DeviceDetail />} />
               <Route path="models" element={<Models />} />
+              <Route path="models/import" element={<ImportModel />} />
+              <Route path="models/smart-import" element={<SmartImport />} />
               <Route path="models/:modelId" element={<ModelDetail />} />
               <Route path="training" element={<Training />} />
               <Route path="training/create" element={<CreateTraining />} />
-              <Route path="training/import" element={<ImportModel />} />
-              <Route path="training/smart-import" element={<SmartImport />} />
               <Route path="training/:trainingId" element={<TrainingDetail />} />
               <Route path="deployments" element={<Deployments />} />
               <Route path="deployments/create" element={<CreateDeployment />} />

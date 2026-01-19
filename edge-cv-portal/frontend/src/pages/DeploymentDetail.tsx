@@ -17,6 +17,24 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import ConfirmationModal from '../components/ConfirmationModal';
 
+interface EffectiveDeployment {
+  core_device: string;
+  deployment_status: string;
+  reason: string;
+  description: string;
+  status_details: Record<string, unknown>;
+  modified_timestamp: string;
+}
+
+interface ErrorMessage {
+  device: string;
+  status: string;
+  reason: string;
+  description: string;
+  detailed_status?: string;
+  detailed_status_reason?: string;
+}
+
 interface DeploymentDetail {
   deployment_id: string;
   deployment_name: string;
@@ -35,6 +53,8 @@ interface DeploymentDetail {
   deployment_policies: Record<string, unknown>;
   tags: Record<string, string>;
   usecase_id: string;
+  effective_deployments?: EffectiveDeployment[];
+  error_messages?: ErrorMessage[];
 }
 
 export default function DeploymentDetail() {
@@ -204,6 +224,30 @@ export default function DeploymentDetail() {
                 label: 'Overview',
                 content: (
                   <SpaceBetween size="l">
+                    {/* Show error alert if deployment failed */}
+                    {deployment.error_messages && deployment.error_messages.length > 0 && (
+                      <Alert type="error" header="Deployment Failed">
+                        <SpaceBetween size="s">
+                          {deployment.error_messages.map((err, idx) => (
+                            <Box key={idx}>
+                              <Box variant="strong">Device: {err.device}</Box>
+                              <Box>Status: {err.status}</Box>
+                              {err.reason && <Box>Reason: {err.reason}</Box>}
+                              {err.description && <Box>Description: {err.description}</Box>}
+                              {err.detailed_status && <Box>Detailed Status: {err.detailed_status}</Box>}
+                              {err.detailed_status_reason && (
+                                <Box color="text-status-error">
+                                  <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontFamily: 'monospace', fontSize: '12px' }}>
+                                    {err.detailed_status_reason}
+                                  </pre>
+                                </Box>
+                              )}
+                            </Box>
+                          ))}
+                        </SpaceBetween>
+                      </Alert>
+                    )}
+
                     <KeyValuePairs
                       columns={2}
                       items={[
@@ -225,6 +269,72 @@ export default function DeploymentDetail() {
                           ))}
                         </SpaceBetween>
                       </>
+                    )}
+                  </SpaceBetween>
+                ),
+              },
+              {
+                id: 'device-status',
+                label: `Device Status (${deployment.effective_deployments?.length || 0})`,
+                content: (
+                  <SpaceBetween size="l">
+                    {deployment.effective_deployments && deployment.effective_deployments.length > 0 ? (
+                      <Table
+                        columnDefinitions={[
+                          {
+                            id: 'device',
+                            header: 'Device',
+                            cell: (item) => item.core_device,
+                          },
+                          {
+                            id: 'status',
+                            header: 'Status',
+                            cell: (item) => {
+                              const status = item.deployment_status?.toLowerCase() || 'unknown';
+                              switch (status) {
+                                case 'succeeded':
+                                  return <StatusIndicator type="success">{item.deployment_status}</StatusIndicator>;
+                                case 'failed':
+                                case 'rejected':
+                                case 'timed_out':
+                                  return <StatusIndicator type="error">{item.deployment_status}</StatusIndicator>;
+                                case 'in_progress':
+                                case 'queued':
+                                  return <StatusIndicator type="in-progress">{item.deployment_status}</StatusIndicator>;
+                                case 'canceled':
+                                  return <StatusIndicator type="stopped">{item.deployment_status}</StatusIndicator>;
+                                default:
+                                  return <StatusIndicator type="info">{item.deployment_status || 'Unknown'}</StatusIndicator>;
+                              }
+                            },
+                          },
+                          {
+                            id: 'reason',
+                            header: 'Reason',
+                            cell: (item) => item.reason || '-',
+                          },
+                          {
+                            id: 'description',
+                            header: 'Description',
+                            cell: (item) => item.description || '-',
+                          },
+                          {
+                            id: 'modified',
+                            header: 'Last Updated',
+                            cell: (item) => formatTimestamp(item.modified_timestamp),
+                          },
+                        ]}
+                        items={deployment.effective_deployments}
+                        empty={
+                          <Box textAlign="center" color="inherit">
+                            No device status available
+                          </Box>
+                        }
+                      />
+                    ) : (
+                      <Box textAlign="center" color="inherit">
+                        No device status available. The deployment may still be initializing.
+                      </Box>
                     )}
                   </SpaceBetween>
                 ),

@@ -299,6 +299,38 @@ aws sagemaker list-algorithms --name-contains "computer-vision-defect-detection"
 
 ## Onboarding a New Customer
 
+### Complete Onboarding Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    USECASE ONBOARDING FLOW                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. Deploy UseCaseAccountStack (in UseCase Account)                     │
+│     └─> Creates: DDAPortalAccessRole, DDASageMakerExecutionRole,        │
+│                  DDAPortalComponentAccessPolicy                          │
+│                                                                          │
+│  2. (Optional) Deploy DataAccountStack (in Data Account)                │
+│     └─> Creates: DDAPortalDataAccessRole                                │
+│                                                                          │
+│  3. Create UseCase in Portal UI                                         │
+│     └─> Stores: Account IDs, Role ARNs, External IDs                    │
+│                                                                          │
+│  4. Provision Shared Components (in Portal)                             │
+│     └─> Creates: Greengrass components in UseCase Account               │
+│     └─> Updates: S3 bucket policy for cross-account access              │
+│                                                                          │
+│  5. Setup Edge Device (on physical device)                              │
+│     └─> Creates: GreengrassV2TokenExchangeRole                          │
+│     └─> Attaches: DDAPortalComponentAccessPolicy                        │
+│     └─> Tags: Device for portal discovery                               │
+│                                                                          │
+│  6. Deploy to Device (in Portal)                                        │
+│     └─> Device downloads artifacts from Portal's S3 bucket              │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
 ### Step 1: Create Cognito Users
 
 For each user in the customer organization:
@@ -471,7 +503,13 @@ Devices are registered using the `setup_station.sh` script in the `station_insta
 - Installs Python 3.9, Java, Docker, and dependencies
 - Downloads and installs AWS IoT Greengrass Core v2
 - Creates an IoT Thing and provisions certificates
-- Tags the IoT Thing with `dda-portal:managed=true` for portal discovery
+- Creates `GreengrassV2TokenExchangeRole` for device credentials
+- Attaches `DDAPortalComponentAccessPolicy` for cross-account S3 access
+- Tags the Greengrass Core Device with `dda-portal:managed=true` for portal discovery
+
+**Prerequisites:**
+1. Deploy `UseCaseAccountStack` first (creates `DDAPortalComponentAccessPolicy`)
+2. AWS CLI configured on the device with UseCase Account credentials
 
 **Setup Command:**
 ```bash
@@ -484,9 +522,15 @@ sudo ./setup_station.sh us-east-1 manufacturing-line-1-device
 
 **For Existing Devices** (set up before portal tagging):
 ```bash
-aws iot tag-resource \
-  --resource-arn arn:aws:iot:REGION:ACCOUNT:thing/THING_NAME \
-  --tags "Key=dda-portal:managed,Value=true"
+# Tag the Greengrass Core Device (not IoT Thing)
+aws greengrassv2 tag-resource \
+  --resource-arn arn:aws:greengrass:REGION:ACCOUNT:coreDevices:THING_NAME \
+  --tags "dda-portal:managed=true"
+
+# Attach the component access policy
+aws iam attach-role-policy \
+  --role-name GreengrassV2TokenExchangeRole \
+  --policy-arn "arn:aws:iam::ACCOUNT:policy/DDAPortalComponentAccessPolicy"
 ```
 
 ### Deployments
@@ -537,11 +581,96 @@ aws dynamodb update-item \
 1. Ensure the device was set up using `setup_station.sh` (which auto-tags)
 2. For existing devices, manually tag them:
 ```bash
-aws iot tag-resource \
-  --resource-arn arn:aws:iot:REGION:ACCOUNT:thing/THING_NAME \
-  --tags "Key=dda-portal:managed,Value=true"
+aws greengrassv2 tag-resource \
+  --resource-arn arn:aws:greengrass:REGION:ACCOUNT:coreDevices:THING_NAME \
+  --tags "dda-portal:managed=true"
 ```
 3. Verify the device is a Greengrass Core Device (not just an IoT Thing)
+
+### Deployment Fails with "S3 Access Denied" on Device
+
+**Symptom**: Deployment shows `FAILED_NO_STATE_CHANGE` with "S3 HeadObject returns 403 Access Denied".
+
+**Cause**: The device's `GreengrassV2TokenExchangeRole` doesn't have permission to access the Portal Account's component bucket.
+
+**Fix**:
+1. Verify `DDAPortalComponentAccessPolicy` exists in the UseCase Account:
+```bash
+aws iam get-policy --policy-arn "arn:aws:iam::USECASE_ACCOUNT:policy/DDAPortalComponentAccessPolicy"
+```
+
+2. If missing, redeploy `UseCaseAccountStack`:
+```bash
+cd edge-cv-portal/infrastructure
+npm run build
+rm -rf cdk.out
+cdk deploy -a "npx ts-node bin/usecase-account-app.ts" \
+  -c portalAccountId=PORTAL_ACCOUNT_ID \
+  -c externalId=YOUR_EXTERNAL_ID \
+  --require-approval never
+```
+
+3. Attach the policy to the device role:
+```bash
+aws iam attach-role-policy \
+  --role-name GreengrassV2TokenExchangeRole \
+  --policy-arn "arn:aws:iam::USECASE_ACCOUNT:policy/DDAPortalComponentAccessPolicy"
+```
+
+4. Verify the Portal's component bucket policy allows the UseCase Account:
+```bash
+aws s3api get-bucket-policy --bucket dda-component-REGION-PORTAL_ACCOUNT
+```
+
+The policy should include both `GreengrassV2TokenExchangeRole` and `greengrass.amazonaws.com` service principal.
+
+### Component Provisioning Fails with "Artifact Cannot Be Accessed"
+
+**Symptom**: Re-provisioning shared components fails with "Specified artifact resource cannot be accessed".
+
+**Cause**: The Greengrass service can't validate the S3 artifact during `CreateComponentVersion`.
+
+**Fix**: Update the Portal's component bucket policy to include the Greengrass service principal:
+```bash
+# This is automatically done during provisioning, but if it fails:
+aws s3api put-bucket-policy --bucket dda-component-REGION-PORTAL_ACCOUNT --policy '{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowUseCaseAccountsGreengrassAccess",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": [
+          "arn:aws:iam::USECASE_ACCOUNT:role/DDAPortalAccessRole",
+          "arn:aws:iam::USECASE_ACCOUNT:role/GreengrassV2TokenExchangeRole"
+        ]
+      },
+      "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetBucketLocation"],
+      "Resource": [
+        "arn:aws:s3:::dda-component-REGION-PORTAL_ACCOUNT",
+        "arn:aws:s3:::dda-component-REGION-PORTAL_ACCOUNT/*"
+      ]
+    },
+    {
+      "Sid": "AllowGreengrassServiceAccess",
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "greengrass.amazonaws.com"
+      },
+      "Action": ["s3:GetObject", "s3:GetBucketLocation"],
+      "Resource": [
+        "arn:aws:s3:::dda-component-REGION-PORTAL_ACCOUNT",
+        "arn:aws:s3:::dda-component-REGION-PORTAL_ACCOUNT/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:SourceAccount": ["PORTAL_ACCOUNT", "USECASE_ACCOUNT"]
+        }
+      }
+    }
+  ]
+}'
+```
 
 ### S3 Buckets Not Showing
 

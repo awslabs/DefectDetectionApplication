@@ -431,14 +431,15 @@ def get_training_job(event: Dict, context: Any) -> Dict:
             else:
                 job['progress'] = 0
         
-        # If job is in progress, sync status from SageMaker
-        if job.get('status') == 'InProgress':
+        # Always sync status from SageMaker (cross-account EventBridge doesn't work)
+        # This ensures we get the latest status even if EventBridge events don't reach us
+        if job.get('training_job_name'):
             try:
                 usecase = get_usecase_details(job['usecase_id'])
                 credentials = assume_usecase_role(
                     usecase['cross_account_role_arn'],
                     usecase['external_id'],
-                    f"training-status-{user_id}-{int(datetime.utcnow().timestamp())}"
+                    f"training-status-{user_id[:10]}-{int(datetime.utcnow().timestamp())}"[:64]
                 )
                 
                 sagemaker_usecase = boto3.client(
@@ -457,6 +458,8 @@ def get_training_job(event: Dict, context: Any) -> Dict:
                 
                 # Update DynamoDB if status changed
                 if status != job.get('status'):
+                    logger.info(f"Training job status changed: {job.get('status')} -> {status}")
+                    
                     # Calculate progress based on status
                     progress = 0
                     if status == 'InProgress':

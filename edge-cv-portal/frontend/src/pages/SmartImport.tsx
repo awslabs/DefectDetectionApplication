@@ -242,7 +242,7 @@ export default function SmartImport() {
           <Header
             variant="h1"
             description="Import any PyTorch model - we'll auto-generate the required metadata"
-            info={<Link variant="info" onFollow={() => navigate('/training/import')}>Use manual import instead</Link>}
+            info={<Link variant="info" onFollow={() => navigate('/models/import')}>Use manual import instead</Link>}
           >
             Smart Import (BYOM)
           </Header>
@@ -528,7 +528,7 @@ export default function SmartImport() {
           </ol>
           <Alert type="info">
             For models that don't work with Smart Import, use the{' '}
-            <Link onFollow={() => navigate('/training/import')}>Manual Import</Link>{' '}
+            <Link onFollow={() => navigate('/models/import')}>Manual Import</Link>{' '}
             option with a pre-packaged tar.gz file.
           </Alert>
         </SpaceBetween>

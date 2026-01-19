@@ -52,19 +52,15 @@ AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 COMPONENT_BUCKET_PREFIX = os.environ.get('COMPONENT_BUCKET_PREFIX', 'dda-component')
 COMPONENT_BUCKET = os.environ.get('COMPONENT_BUCKET', f'{COMPONENT_BUCKET_PREFIX}-{AWS_REGION}-{PORTAL_ACCOUNT_ID}')
 
-# DDA LocalServer component base configurations (versions discovered dynamically)
+# DDA LocalServer component names (versions discovered dynamically from Greengrass)
 DDA_LOCAL_SERVER_COMPONENTS = {
     'arm64': {
         'name': 'aws.edgeml.dda.LocalServer.arm64',
-        'description': 'DDA LocalServer for ARM64 devices (Jetson, Raspberry Pi)',
-        'platforms': ['aarch64'],
-        'arch_suffix': 'aarch64'  # Used in artifact filename
+        'description': 'DDA LocalServer for ARM64 devices (Jetson, Raspberry Pi)'
     },
     'amd64': {
         'name': 'aws.edgeml.dda.LocalServer.amd64', 
-        'description': 'DDA LocalServer for AMD64 devices (x86_64)',
-        'platforms': ['amd64', 'x86_64'],
-        'arch_suffix': 'x86_64'  # Used in artifact filename
+        'description': 'DDA LocalServer for AMD64 devices (x86_64)'
     }
 }
 
@@ -100,35 +96,9 @@ def get_latest_component_version(component_name: str) -> Optional[str]:
         return None
 
 
-def discover_artifact_key(component_name: str, version: str) -> Optional[str]:
-    """
-    Discover the artifact key in S3 for a component version.
-    Lists the S3 bucket to find the actual artifact file.
-    """
-    try:
-        prefix = f"{component_name}/{version}/"
-        response = s3.list_objects_v2(
-            Bucket=COMPONENT_BUCKET,
-            Prefix=prefix
-        )
-        
-        for obj in response.get('Contents', []):
-            key = obj['Key']
-            if key.endswith('.zip'):
-                logger.info(f"Discovered artifact for {component_name} v{version}: {key}")
-                return key
-        
-        logger.warning(f"No artifact found for {component_name} v{version} in {COMPONENT_BUCKET}")
-        return None
-        
-    except ClientError as e:
-        logger.error(f"Error discovering artifact: {str(e)}")
-        return None
-
-
 def get_component_info(platform: str) -> Optional[Dict]:
     """
-    Get complete component info including dynamically discovered version and artifact.
+    Get component info including dynamically discovered version.
     Uses caching to avoid repeated API calls within the same Lambda invocation.
     """
     cache_key = f"component_{platform}"
@@ -148,17 +118,9 @@ def get_component_info(platform: str) -> Optional[Dict]:
         logger.error(f"Could not determine version for {component_name}")
         return None
     
-    # Discover artifact key from S3
-    artifact_key = discover_artifact_key(component_name, version)
-    if not artifact_key:
-        # Fallback: construct expected key based on naming convention
-        artifact_key = f"{component_name}/{version}/{component_name}-{config['arch_suffix']}.zip"
-        logger.warning(f"Using fallback artifact key: {artifact_key}")
-    
     result = {
         **config,
-        'version': version,
-        'artifact_key': artifact_key
+        'version': version
     }
     
     _component_cache[cache_key] = result
@@ -187,123 +149,49 @@ def get_default_version() -> str:
 def get_portal_component_recipe(component_name: str, version: str) -> Optional[Dict]:
     """
     Get the recipe for a portal-managed component.
-    This retrieves the component recipe from the portal account.
+    This retrieves the component recipe from the portal account using get_component API.
     """
+    region = os.environ.get('AWS_REGION', 'us-east-1')
+    component_arn = f"arn:aws:greengrass:{region}:{PORTAL_ACCOUNT_ID}:components:{component_name}:versions:{version}"
+    
+    logger.info(f"Fetching recipe for component ARN: {component_arn}")
+    
     try:
-        # List component versions to find the ARN
-        response = greengrass_portal.list_component_versions(
-            arn=f"arn:aws:greengrass:{os.environ.get('AWS_REGION')}:{PORTAL_ACCOUNT_ID}:components:{component_name}"
+        # Use get_component to retrieve the recipe (returns base64-encoded recipe)
+        response = greengrass_portal.get_component(
+            arn=component_arn,
+            recipeOutputFormat='JSON'
         )
         
-        versions = response.get('componentVersions', [])
-        target_version = None
-        
-        for v in versions:
-            if v.get('componentVersion') == version:
-                target_version = v
-                break
-        
-        if not target_version:
-            # If specific version not found, get latest
-            if versions:
-                target_version = versions[0]
-            else:
-                return None
-        
-        # Get the component recipe
-        component_arn = target_version.get('arn')
-        if not component_arn:
+        # Recipe is returned as base64-encoded bytes
+        recipe_data = response.get('recipe')
+        if not recipe_data:
+            logger.error(f"No recipe returned for {component_arn}")
             return None
-            
-        describe_response = greengrass_portal.describe_component(arn=component_arn)
         
-        # Parse recipe
-        recipe_data = describe_response.get('recipe')
-        if recipe_data:
-            if isinstance(recipe_data, bytes):
-                recipe_str = recipe_data.decode('utf-8')
-            else:
-                recipe_str = str(recipe_data)
-            
-            try:
-                return json.loads(recipe_str)
-            except json.JSONDecodeError:
-                import yaml
-                return yaml.safe_load(recipe_str)
+        # Decode the recipe (it's a bytes object containing the recipe)
+        if isinstance(recipe_data, bytes):
+            recipe_str = recipe_data.decode('utf-8')
+        else:
+            recipe_str = str(recipe_data)
         
-        return None
+        logger.info(f"Successfully fetched recipe for {component_name} v{version}, length: {len(recipe_str)}")
+        
+        # Parse as JSON (we requested JSON format)
+        return json.loads(recipe_str)
         
     except ClientError as e:
-        logger.error(f"Error getting portal component recipe: {str(e)}")
+        error_code = e.response.get('Error', {}).get('Code', '')
+        error_msg = e.response.get('Error', {}).get('Message', '')
+        logger.error(f"ClientError getting recipe for {component_arn}: {error_code} - {error_msg}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing recipe JSON for {component_arn}: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error getting recipe for {component_arn}: {type(e).__name__} - {str(e)}")
         return None
 
-
-def generate_dda_localserver_recipe(
-    platform: str,
-    version: str,
-    artifact_s3_uri: str
-) -> Dict:
-    """
-    Generate the DDA LocalServer component recipe.
-    This is the base recipe that will be created in usecase accounts.
-    """
-    config = DDA_LOCAL_SERVER_COMPONENTS.get(platform)
-    if not config:
-        raise ValueError(f"Unknown platform: {platform}")
-    
-    component_name = config['name']
-    arch = 'aarch64' if platform == 'arm64' else 'amd64'
-    
-    recipe = {
-        'RecipeFormatVersion': '2020-01-25',
-        'ComponentName': component_name,
-        'ComponentVersion': version,
-        'ComponentType': 'aws.greengrass.generic',
-        'ComponentPublisher': 'AWS Edge ML - DDA Portal',
-        'ComponentDescription': config['description'],
-        'ComponentConfiguration': {
-            'DefaultConfiguration': {
-                'ServerPort': 8080,
-                'ModelPath': '/aws_dda/models',
-                'LogLevel': 'INFO'
-            }
-        },
-        'Manifests': [
-            {
-                'Platform': {
-                    'os': 'linux',
-                    'architecture': arch
-                },
-                'Lifecycle': {
-                    'Install': {
-                        'Script': 'pip3 install -r {artifacts:decompressedPath}/requirements.txt',
-                        'Timeout': 300
-                    },
-                    'Run': {
-                        'Script': 'python3 {artifacts:decompressedPath}/dda_server.py',
-                        'Timeout': -1,
-                        'requiresPrivilege': True
-                    },
-                    'Shutdown': {
-                        'Script': 'pkill -f dda_server.py || true',
-                        'Timeout': 30
-                    }
-                },
-                'Artifacts': [
-                    {
-                        'Uri': artifact_s3_uri,
-                        'Unarchive': 'ZIP',
-                        'Permission': {
-                            'Read': 'ALL',
-                            'Execute': 'ALL'
-                        }
-                    }
-                ]
-            }
-        ]
-    }
-    
-    return recipe
 
 
 def share_component_to_usecase(
@@ -332,16 +220,17 @@ def share_component_to_usecase(
         else:
             raise ValueError(f"Cannot determine platform from component name: {component_name}")
         
-        # Get dynamically discovered component info (includes version and artifact)
-        config = get_component_info(platform)
-        if not config:
-            raise ValueError(f"Could not get component info for platform: {platform}")
+        # Fetch the existing recipe from the portal account
+        # This ensures the usecase account gets the exact same recipe that was published by GDK
+        recipe = get_portal_component_recipe(component_name, component_version)
         
-        # Build artifact S3 URI using discovered artifact key
-        artifact_s3_uri = f"s3://{COMPONENT_BUCKET}/{config['artifact_key']}"
+        if not recipe:
+            raise ValueError(
+                f"Could not fetch recipe for {component_name} v{component_version} from portal account. "
+                f"Ensure the component has been built and published using gdk-component-build-and-publish.sh"
+            )
         
-        # Generate recipe
-        recipe = generate_dda_localserver_recipe(platform, component_version, artifact_s3_uri)
+        logger.info(f"Using existing recipe from portal account for {component_name} v{component_version}")
         
         # Assume cross-account role
         credentials = assume_cross_account_role(cross_account_role_arn, external_id)
@@ -354,6 +243,8 @@ def share_component_to_usecase(
             aws_session_token=credentials['SessionToken'],
             region_name=os.environ.get('AWS_REGION', 'us-east-1')
         )
+        
+        component_arn = f"arn:aws:greengrass:{AWS_REGION}:{usecase_account_id}:components:{component_name}:versions:{component_version}"
         
         # Try to create component in usecase account
         try:
@@ -376,14 +267,12 @@ def share_component_to_usecase(
         except greengrass_usecase.exceptions.ConflictException:
             # Component already exists - this is OK, treat as success
             logger.info(f"Component {component_name} v{component_version} already exists in account {usecase_account_id}")
-            component_arn = f"arn:aws:greengrass:{AWS_REGION}:{usecase_account_id}:components:{component_name}:versions:{component_version}"
             status = 'already_exists'
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', '')
             if error_code == 'ConflictException' or 'already exists' in str(e).lower():
                 # Component already exists - this is OK, treat as success
                 logger.info(f"Component {component_name} v{component_version} already exists in account {usecase_account_id}")
-                component_arn = f"arn:aws:greengrass:{AWS_REGION}:{usecase_account_id}:components:{component_name}:versions:{component_version}"
                 status = 'already_exists'
             else:
                 raise
@@ -466,100 +355,30 @@ def provision_shared_components_for_usecase(
     return results
 
 
-def update_usecase_bucket_policy(
-    usecase_account_id: str,
-    cross_account_role_arn: str,
-    external_id: str
-) -> bool:
-    """
-    Update the usecase account's Greengrass device role to allow
-    reading artifacts from the portal's S3 bucket.
-    
-    This adds s3:GetObject permission for the portal artifacts bucket.
-    """
-    try:
-        # Assume cross-account role
-        credentials = assume_cross_account_role(cross_account_role_arn, external_id)
-        
-        # Create IAM client for usecase account
-        iam_usecase = boto3.client(
-            'iam',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
-        
-        # Policy to allow reading from portal component bucket
-        policy_document = {
-            'Version': '2012-10-17',
-            'Statement': [
-                {
-                    'Sid': 'AllowPortalComponentAccess',
-                    'Effect': 'Allow',
-                    'Action': ['s3:GetObject'],
-                    'Resource': [
-                        f'arn:aws:s3:::{COMPONENT_BUCKET}/*'
-                    ]
-                }
-            ]
-        }
-        
-        # Create or update the policy
-        policy_name = 'DDAPortalSharedComponentsAccess'
-        
-        try:
-            # Try to create the policy
-            response = iam_usecase.create_policy(
-                PolicyName=policy_name,
-                PolicyDocument=json.dumps(policy_document),
-                Description='Allows Greengrass devices to access DDA Portal shared component artifacts'
-            )
-            policy_arn = response['Policy']['Arn']
-            logger.info(f"Created policy {policy_name} in account {usecase_account_id}")
-            
-        except iam_usecase.exceptions.EntityAlreadyExistsException:
-            # Policy exists, get its ARN
-            policy_arn = f"arn:aws:iam::{usecase_account_id}:policy/{policy_name}"
-            logger.info(f"Policy {policy_name} already exists in account {usecase_account_id}")
-        
-        # Attach policy to Greengrass device role
-        # The role name follows the convention from usecase-account-stack.ts
-        greengrass_role_name = 'GreengrassV2TokenExchangeRole'
-        
-        try:
-            iam_usecase.attach_role_policy(
-                RoleName=greengrass_role_name,
-                PolicyArn=policy_arn
-            )
-            logger.info(f"Attached {policy_name} to {greengrass_role_name}")
-        except iam_usecase.exceptions.NoSuchEntityException:
-            logger.warning(f"Role {greengrass_role_name} not found in account {usecase_account_id}")
-            # Try alternative role name
-            try:
-                iam_usecase.attach_role_policy(
-                    RoleName='DDAGreengrassDeviceRole',
-                    PolicyArn=policy_arn
-                )
-                logger.info(f"Attached {policy_name} to DDAGreengrassDeviceRole")
-            except Exception as e:
-                logger.warning(f"Could not attach policy to device role: {str(e)}")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error updating usecase bucket policy: {str(e)}")
-        return False
-
-
 def add_usecase_to_component_bucket_policy(cross_account_role_arn: str) -> bool:
     """
-    Add a usecase account's role to the GDK component bucket policy.
+    Add a usecase account's roles to the GDK component bucket policy.
     This is called during usecase onboarding to grant the usecase account
     access to download component artifacts from the portal's S3 bucket.
+    
+    Adds:
+    1. DDAPortalAccessRole and GreengrassV2TokenExchangeRole for device access
+    2. Greengrass service principal for component creation validation
     
     This runs in the Portal Account context (not cross-account).
     """
     try:
+        # Extract account ID from the cross_account_role_arn
+        # Format: arn:aws:iam::ACCOUNT_ID:role/ROLE_NAME
+        account_id = cross_account_role_arn.split(':')[4]
+        
+        # Build list of role ARNs to add
+        # Include both the portal access role and the Greengrass device role
+        role_arns_to_add = [
+            cross_account_role_arn,  # DDAPortalAccessRole
+            f'arn:aws:iam::{account_id}:role/GreengrassV2TokenExchangeRole'  # Greengrass device role
+        ]
+        
         # Get current bucket policy
         try:
             response = s3.get_bucket_policy(Bucket=COMPONENT_BUCKET)
@@ -574,7 +393,7 @@ def add_usecase_to_component_bucket_policy(cross_account_role_arn: str) -> bool:
             else:
                 raise
         
-        # Find or create the cross-account access statement
+        # Statement 1: Cross-account IAM role access
         statement_sid = 'AllowUseCaseAccountsGreengrassAccess'
         existing_statement = None
         statement_index = None
@@ -595,28 +414,92 @@ def add_usecase_to_component_bucket_policy(cross_account_role_arn: str) -> bool:
             else:
                 aws_principals = []
             
-            # Add new role if not already present
-            if cross_account_role_arn not in aws_principals:
-                aws_principals.append(cross_account_role_arn)
-                existing_statement['Principal'] = {'AWS': aws_principals}
-                current_policy['Statement'][statement_index] = existing_statement
-                logger.info(f"Added {cross_account_role_arn} to existing bucket policy")
-            else:
-                logger.info(f"Role {cross_account_role_arn} already in bucket policy")
-                return True
+            # Add new roles if not already present
+            for role_arn in role_arns_to_add:
+                if role_arn not in aws_principals:
+                    aws_principals.append(role_arn)
+            
+            # Update the statement with correct actions and resources
+            existing_statement['Principal'] = {'AWS': aws_principals}
+            existing_statement['Action'] = ['s3:GetObject', 's3:GetObjectVersion', 's3:GetBucketLocation']
+            existing_statement['Resource'] = [
+                f'arn:aws:s3:::{COMPONENT_BUCKET}',
+                f'arn:aws:s3:::{COMPONENT_BUCKET}/*'
+            ]
+            current_policy['Statement'][statement_index] = existing_statement
+            logger.info(f"Updated bucket policy with roles from account {account_id}")
         else:
-            # Create new statement
+            # Create new statement with both roles
             new_statement = {
                 'Sid': statement_sid,
                 'Effect': 'Allow',
                 'Principal': {
-                    'AWS': [cross_account_role_arn]
+                    'AWS': role_arns_to_add
                 },
-                'Action': ['s3:GetObject', 's3:GetObjectVersion'],
-                'Resource': f'arn:aws:s3:::{COMPONENT_BUCKET}/*'
+                'Action': ['s3:GetObject', 's3:GetObjectVersion', 's3:GetBucketLocation'],
+                'Resource': [
+                    f'arn:aws:s3:::{COMPONENT_BUCKET}',
+                    f'arn:aws:s3:::{COMPONENT_BUCKET}/*'
+                ]
             }
             current_policy['Statement'].append(new_statement)
-            logger.info(f"Created new bucket policy statement with {cross_account_role_arn}")
+            logger.info(f"Created new bucket policy statement with roles from account {account_id}")
+        
+        # Statement 2: Greengrass service principal access (for component creation validation)
+        service_statement_sid = 'AllowGreengrassServiceAccess'
+        service_statement_exists = False
+        service_statement_index = None
+        
+        for i, stmt in enumerate(current_policy.get('Statement', [])):
+            if stmt.get('Sid') == service_statement_sid:
+                service_statement_exists = True
+                service_statement_index = i
+                # Update the condition to include the new account
+                existing_condition = stmt.get('Condition', {})
+                source_accounts = existing_condition.get('StringEquals', {}).get('aws:SourceAccount', [])
+                if isinstance(source_accounts, str):
+                    source_accounts = [source_accounts]
+                if account_id not in source_accounts:
+                    source_accounts.append(account_id)
+                stmt['Condition'] = {
+                    'StringEquals': {
+                        'aws:SourceAccount': source_accounts
+                    }
+                }
+                current_policy['Statement'][i] = stmt
+                logger.info(f"Updated Greengrass service statement with account {account_id}")
+                break
+        
+        if not service_statement_exists:
+            # Get portal account ID for the condition
+            portal_account_id = os.environ.get('AWS_ACCOUNT_ID', '')
+            if not portal_account_id:
+                # Try to get from STS
+                try:
+                    sts = boto3.client('sts')
+                    portal_account_id = sts.get_caller_identity()['Account']
+                except:
+                    portal_account_id = COMPONENT_BUCKET.split('-')[-1]  # Fallback: extract from bucket name
+            
+            service_statement = {
+                'Sid': service_statement_sid,
+                'Effect': 'Allow',
+                'Principal': {
+                    'Service': 'greengrass.amazonaws.com'
+                },
+                'Action': ['s3:GetObject', 's3:GetBucketLocation'],
+                'Resource': [
+                    f'arn:aws:s3:::{COMPONENT_BUCKET}',
+                    f'arn:aws:s3:::{COMPONENT_BUCKET}/*'
+                ],
+                'Condition': {
+                    'StringEquals': {
+                        'aws:SourceAccount': [portal_account_id, account_id]
+                    }
+                }
+            }
+            current_policy['Statement'].append(service_statement)
+            logger.info(f"Created Greengrass service statement for accounts {portal_account_id}, {account_id}")
         
         # Apply updated policy
         s3.put_bucket_policy(
@@ -728,14 +611,10 @@ def provision_components(event: Dict, user: Dict) -> Dict:
         if not bucket_policy_updated:
             logger.warning(f"Failed to update component bucket policy for usecase {usecase_id}")
         
-        # Step 2: Update the usecase account's IAM policy for Greengrass device access
-        policy_updated = update_usecase_bucket_policy(
-            usecase_account_id=usecase['account_id'],
-            cross_account_role_arn=usecase['cross_account_role_arn'],
-            external_id=usecase['external_id']
-        )
+        # Note: Device IAM policy (DDAPortalComponentAccessPolicy) is created by UseCaseAccountStack CDK
+        # and attached to GreengrassV2TokenExchangeRole by setup_station.sh during device provisioning
         
-        # Step 3: Provision shared components in the usecase account
+        # Step 2: Provision shared components in the usecase account
         # Each platform uses its own version from DDA_LOCAL_SERVER_COMPONENTS config
         results = provision_shared_components_for_usecase(
             usecase_id=usecase_id,
@@ -754,8 +633,7 @@ def provision_components(event: Dict, user: Dict) -> Dict:
             result='success',
             details={
                 'components': [r['component_name'] for r in results],
-                'bucket_policy_updated': bucket_policy_updated,
-                'usecase_policy_updated': policy_updated
+                'bucket_policy_updated': bucket_policy_updated
             }
         )
         
@@ -765,7 +643,6 @@ def provision_components(event: Dict, user: Dict) -> Dict:
             'usecase_id': usecase_id,
             'components': results,
             'bucket_policy_updated': bucket_policy_updated,
-            'usecase_policy_updated': policy_updated,
             'message': f'Provisioned {success_count} shared component(s)'
         })
         

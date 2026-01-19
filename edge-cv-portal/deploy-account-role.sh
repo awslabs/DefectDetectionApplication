@@ -65,7 +65,7 @@ if ! [[ "$PORTAL_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
     exit 1
 fi
 
-# Generate External ID
+# Generate External ID (will be overridden if existing config found)
 if command -v uuidgen &> /dev/null; then
     EXTERNAL_ID=$(uuidgen)
 else
@@ -76,6 +76,31 @@ if [ "$ROLE_TYPE" = "1" ]; then
     # ========================================
     # UseCase Account Setup
     # ========================================
+    
+    # Check for existing UseCase External ID (account-specific file first, then generic)
+    USECASE_EXTERNAL_ID=""
+    if [ -f "usecase-account-${CURRENT_ACCOUNT}-config.txt" ]; then
+        USECASE_EXTERNAL_ID=$(grep "External ID:" "usecase-account-${CURRENT_ACCOUNT}-config.txt" | head -1 | awk '{print $NF}')
+        printf "${BLUE}Found account-specific config: usecase-account-${CURRENT_ACCOUNT}-config.txt${NC}\n"
+    elif [ -f "usecase-account-config.txt" ]; then
+        # Check if the generic config is for this account
+        CONFIG_ACCOUNT=$(grep "Account ID:" usecase-account-config.txt | head -1 | awk '{print $NF}')
+        if [ "$CONFIG_ACCOUNT" = "$CURRENT_ACCOUNT" ]; then
+            USECASE_EXTERNAL_ID=$(grep "External ID:" usecase-account-config.txt | head -1 | awk '{print $NF}')
+        fi
+    fi
+    
+    if [ -n "$USECASE_EXTERNAL_ID" ]; then
+        echo ""
+        printf "${YELLOW}Found existing UseCase External ID: ${GREEN}$USECASE_EXTERNAL_ID${NC}\n"
+        read -p "Use existing External ID? [Y/n]: " USE_EXISTING
+        if [ "$USE_EXISTING" != "n" ] && [ "$USE_EXISTING" != "N" ]; then
+            EXTERNAL_ID="$USECASE_EXTERNAL_ID"
+            printf "Using existing External ID: ${GREEN}$EXTERNAL_ID${NC}\n"
+        else
+            printf "${YELLOW}WARNING: Using new External ID. You will need to update the UseCase in the portal!${NC}\n"
+        fi
+    fi
     echo ""
     printf "${YELLOW}Deploying UseCase Account Role...${NC}\n"
     printf "  Portal Account: ${GREEN}$PORTAL_ACCOUNT_ID${NC}\n"
@@ -115,8 +140,9 @@ if [ "$ROLE_TYPE" = "1" ]; then
     printf "  External ID:             ${GREEN}$EXTERNAL_ID${NC}\n"
     echo ""
     
-    # Save config
-    cat > usecase-account-config.txt << EOF
+    # Save config with account ID in filename for multi-account support
+    CONFIG_FILE="usecase-account-${CURRENT_ACCOUNT}-config.txt"
+    cat > "$CONFIG_FILE" << EOF
 UseCase Account Configuration
 =============================
 Account ID: $CURRENT_ACCOUNT
@@ -126,12 +152,38 @@ Role ARN: $ROLE_ARN
 SageMaker Execution Role ARN: $SAGEMAKER_ROLE_ARN
 Deployment Date: $(date)
 EOF
-    printf "Configuration saved to: ${GREEN}usecase-account-config.txt${NC}\n"
+    printf "Configuration saved to: ${GREEN}$CONFIG_FILE${NC}\n"
 
 else
     # ========================================
     # Data Account Setup
     # ========================================
+    
+    # Check for existing Data Account External ID (account-specific file first, then generic)
+    DATA_EXTERNAL_ID=""
+    if [ -f "data-account-${CURRENT_ACCOUNT}-config.txt" ]; then
+        DATA_EXTERNAL_ID=$(grep "External ID:" "data-account-${CURRENT_ACCOUNT}-config.txt" | head -1 | awk '{print $NF}')
+        printf "${BLUE}Found account-specific config: data-account-${CURRENT_ACCOUNT}-config.txt${NC}\n"
+    elif [ -f "data-account-config.txt" ]; then
+        # Check if the generic config is for this account
+        CONFIG_ACCOUNT=$(grep "Data Account ID:" data-account-config.txt | head -1 | awk '{print $NF}')
+        if [ "$CONFIG_ACCOUNT" = "$CURRENT_ACCOUNT" ]; then
+            DATA_EXTERNAL_ID=$(grep "External ID:" data-account-config.txt | head -1 | awk '{print $NF}')
+        fi
+    fi
+    
+    if [ -n "$DATA_EXTERNAL_ID" ]; then
+        echo ""
+        printf "${YELLOW}Found existing Data Account External ID: ${GREEN}$DATA_EXTERNAL_ID${NC}\n"
+        read -p "Use existing External ID? [Y/n]: " USE_EXISTING
+        if [ "$USE_EXISTING" != "n" ] && [ "$USE_EXISTING" != "N" ]; then
+            EXTERNAL_ID="$DATA_EXTERNAL_ID"
+            printf "Using existing External ID: ${GREEN}$EXTERNAL_ID${NC}\n"
+        else
+            printf "${YELLOW}WARNING: Using new External ID. You will need to update the Data Account in the portal!${NC}\n"
+        fi
+    fi
+    
     echo ""
     printf "${BLUE}Enter UseCase Account ID(s)${NC}\n"
     echo "(Accounts where SageMaker training will run)"
@@ -184,8 +236,9 @@ else
     printf "  External ID:             ${GREEN}$EXTERNAL_ID${NC}\n"
     echo ""
     
-    # Save config
-    cat > data-account-config.txt << EOF
+    # Save config with account ID in filename for multi-account support
+    CONFIG_FILE="data-account-${CURRENT_ACCOUNT}-config.txt"
+    cat > "$CONFIG_FILE" << EOF
 Data Account Configuration
 ==========================
 Data Account ID: $CURRENT_ACCOUNT
@@ -196,7 +249,7 @@ Portal Access Role ARN: $PORTAL_ROLE_ARN
 SageMaker Access Role ARN: $SAGEMAKER_ROLE_ARN
 Deployment Date: $(date)
 EOF
-    printf "Configuration saved to: ${GREEN}data-account-config.txt${NC}\n"
+    printf "Configuration saved to: ${GREEN}$CONFIG_FILE${NC}\n"
 fi
 
 echo ""

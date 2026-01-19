@@ -97,6 +97,7 @@ export class ComputeStack extends cdk.Stack {
           'sagemaker:ListWorkteams',
           'greengrass:CreateComponentVersion',
           'greengrass:DescribeComponent',
+          'greengrass:GetComponent',
           'greengrass:ListComponents',
           'greengrass:ListComponentVersions',
           'logs:GetLogEvents',
@@ -193,6 +194,17 @@ export class ComputeStack extends cdk.Stack {
         'greengrass:ListComponentVersions',
       ],
       resources: [`arn:aws:greengrass:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:components:aws.edgeml.dda.LocalServer.*`],
+    }));
+
+    // Grant UseCases Lambda permission to configure EventBridge for cross-account event forwarding
+    useCasesHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'events:PutPermission',
+        'events:RemovePermission',
+        'events:DescribeEventBus',
+      ],
+      resources: [`arn:aws:events:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:event-bus/default`],
     }));
 
     // Devices Lambda Handler
@@ -471,13 +483,18 @@ export class ComputeStack extends cdk.Stack {
       resources: [`arn:aws:s3:::${componentBucketName}`],
     }));
 
-    // Grant permission to list Greengrass component versions for dynamic version discovery
+    // Grant permission to list and get Greengrass component versions for dynamic version discovery
+    // Note: GetComponent requires full ARN with :versions:X.Y.Z, so we need wildcard for versions too
     sharedComponentsHandler.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         'greengrass:ListComponentVersions',
+        'greengrass:GetComponent',
       ],
-      resources: [`arn:aws:greengrass:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:components:aws.edgeml.dda.LocalServer.*`],
+      resources: [
+        `arn:aws:greengrass:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:components:aws.edgeml.dda.LocalServer.*`,
+        `arn:aws:greengrass:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:components:aws.edgeml.dda.LocalServer.*:versions:*`,
+      ],
     }));
 
     // SNS Topic for training alerts
@@ -681,6 +698,38 @@ def handler(event, context):
         // Force update when stack is updated
         Timestamp: Date.now().toString(),
       },
+    });
+
+    // Cross-Account EventBridge Permission
+    // Allow UseCase Accounts to send events to this account's default event bus
+    // This enables real-time status updates for training/compilation jobs running in UseCase Accounts
+    const defaultEventBus = events.EventBus.fromEventBusName(this, 'DefaultEventBus', 'default');
+    
+    // Create a resource-based policy to allow cross-account event delivery
+    // Note: You need to add each UseCase Account ID that should be allowed to send events
+    // This can be done via AWS CLI or by adding account IDs to the useCaseAccountIds array
+    const useCaseAccountIds = process.env.USECASE_ACCOUNT_IDS?.split(',') || [];
+    
+    if (useCaseAccountIds.length > 0) {
+      // Create policy statement for each UseCase Account
+      const eventBusPolicy = new events.CfnEventBusPolicy(this, 'CrossAccountEventBusPolicy', {
+        eventBusName: 'default',
+        statementId: 'AllowUseCaseAccountsToSendEvents',
+        action: 'events:PutEvents',
+        principal: '*',
+        condition: {
+          type: 'StringEquals',
+          key: 'aws:PrincipalAccount',
+          value: useCaseAccountIds.join(','),
+        },
+      });
+    }
+
+    // Output instructions for manual cross-account setup
+    new cdk.CfnOutput(this, 'CrossAccountEventBridgeSetup', {
+      value: `To enable cross-account EventBridge from UseCase Accounts, run in Portal Account:
+aws events put-permission --event-bus-name default --action events:PutEvents --principal <USECASE_ACCOUNT_ID> --statement-id AllowUseCaseAccount<N>`,
+      description: 'Instructions for enabling cross-account EventBridge',
     });
 
     // API Gateway

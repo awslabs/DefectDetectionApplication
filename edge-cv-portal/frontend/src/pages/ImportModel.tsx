@@ -196,7 +196,7 @@ export default function ImportModel() {
         <Form
           actions={
             <SpaceBetween direction="horizontal" size="xs">
-              <Button onClick={() => navigate('/training')}>Cancel</Button>
+              <Button onClick={() => navigate('/models')}>Cancel</Button>
               <Button
                 onClick={handleValidate}
                 loading={validating}

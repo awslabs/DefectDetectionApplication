@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Table,
@@ -10,7 +10,9 @@ import {
   Badge,
   Select,
   SelectProps,
+  Button,
 } from '@cloudscape-design/components';
+import { apiService } from '../services/api';
 
 interface Model {
   model_id: string;
@@ -85,6 +87,29 @@ export default function Models() {
   const navigate = useNavigate();
   const [filteringText, setFilteringText] = useState('');
   const [stageFilter, setStageFilter] = useState<SelectProps.Option | null>(null);
+  const [useCases, setUseCases] = useState<any[]>([]);
+  const [selectedUseCase, setSelectedUseCase] = useState<SelectProps.Option | null>(null);
+
+  // Load use cases on mount
+  useEffect(() => {
+    const loadUseCases = async () => {
+      try {
+        const response = await apiService.listUseCases();
+        const useCaseList = response.usecases || [];
+        setUseCases(useCaseList);
+        // Auto-select first use case if available
+        if (useCaseList.length > 0) {
+          setSelectedUseCase({
+            label: useCaseList[0].name,
+            value: useCaseList[0].usecase_id,
+          });
+        }
+      } catch (error) {
+        console.error('Failed to load use cases:', error);
+      }
+    };
+    loadUseCases();
+  }, []);
 
   const getStageBadge = (stage: string) => {
     switch (stage) {
@@ -130,8 +155,39 @@ export default function Models() {
         header={
           <Header
             variant="h1"
-            description="Manage trained models and their deployment stages"
+            description={
+              <SpaceBetween direction="horizontal" size="s" alignItems="center">
+                <Box variant="span">Use Case:</Box>
+                <Select
+                  selectedOption={selectedUseCase}
+                  onChange={({ detail }) => setSelectedUseCase(detail.selectedOption)}
+                  options={useCases.map((uc) => ({
+                    label: uc.name,
+                    value: uc.usecase_id,
+                  }))}
+                  placeholder="Select a use case"
+                  disabled={useCases.length === 0}
+                  expandToViewport
+                />
+              </SpaceBetween>
+            }
             counter={`(${filteredModels.length})`}
+            actions={
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button 
+                  onClick={() => navigate('/models/smart-import')}
+                  disabled={!selectedUseCase}
+                >
+                  Smart Import
+                </Button>
+                <Button 
+                  onClick={() => navigate('/models/import')}
+                  disabled={!selectedUseCase}
+                >
+                  Manual Import
+                </Button>
+              </SpaceBetween>
+            }
           >
             Model Registry
           </Header>

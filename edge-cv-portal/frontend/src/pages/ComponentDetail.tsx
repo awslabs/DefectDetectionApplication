@@ -12,7 +12,6 @@ import {
   KeyValuePairs,
   Table,
   Tabs,
-  CodeEditor,
   Badge,
   Link,
   BreadcrumbGroup,
@@ -118,10 +117,6 @@ export default function ComponentDetail() {
         </Badge>
       );
     });
-  };
-
-  const formatRecipeJson = (recipe: any) => {
-    return JSON.stringify(recipe, null, 2);
   };
 
   if (loading) {
@@ -369,35 +364,21 @@ export default function ComponentDetail() {
             id: 'recipe',
             content: (
               <Container>
-                <CodeEditor
-                  ace={undefined}
-                  language="json"
-                  value={formatRecipeJson(component.recipe)}
-                  preferences={{
-                    wrapLines: true,
-                  }}
-                  onPreferencesChange={() => {}}
-                  loading={false}
-                  i18nStrings={{
-                    loadingState: 'Loading recipe...',
-                    errorState: 'There was an error loading the recipe.',
-                    errorStateRecovery: 'Retry',
-                    editorGroupAriaLabel: 'Component recipe editor',
-                    statusBarGroupAriaLabel: 'Status bar',
-                    cursorPosition: (row, column) => `Ln ${row}, Col ${column}`,
-                    errorsTab: 'Errors',
-                    warningsTab: 'Warnings',
-                    preferencesButtonAriaLabel: 'Preferences',
-                    paneCloseButtonAriaLabel: 'Close',
-                    preferencesModalHeader: 'Preferences',
-                    preferencesModalCancel: 'Cancel',
-                    preferencesModalConfirm: 'Confirm',
-                    preferencesModalWrapLines: 'Wrap lines',
-                    preferencesModalTheme: 'Theme',
-                    preferencesModalLightThemes: 'Light themes',
-                    preferencesModalDarkThemes: 'Dark themes',
-                  }}
-                />
+                <Box padding="s">
+                  <pre style={{ 
+                    backgroundColor: '#f4f4f4', 
+                    padding: '16px', 
+                    borderRadius: '4px',
+                    overflow: 'auto',
+                    maxHeight: '600px',
+                    fontSize: '13px',
+                    fontFamily: 'Monaco, Menlo, "Ubuntu Mono", monospace',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word'
+                  }}>
+                    {component.recipe ? JSON.stringify(component.recipe, null, 2) : 'No recipe available'}
+                  </pre>
+                </Box>
               </Container>
             ),
           },
