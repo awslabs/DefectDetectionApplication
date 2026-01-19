@@ -444,6 +444,89 @@ def tag_bucket_for_portal(
         }
 
 
+def configure_eventbridge_permission(usecase_account_id: str) -> dict:
+    """
+    Configure EventBridge permission to allow UseCase Account to send events to Portal Account.
+    
+    This is called during usecase onboarding to enable cross-account EventBridge forwarding.
+    The UseCase Account's EventBridge rules (created by UseCaseAccountStack) will forward
+    SageMaker training/compilation job state changes to the Portal Account.
+    
+    Args:
+        usecase_account_id: AWS Account ID of the UseCase Account
+    
+    Returns:
+        dict with status and details
+    """
+    try:
+        logger.info(f"Configuring EventBridge permission for UseCase Account {usecase_account_id}")
+        
+        events_client = boto3.client('events')
+        statement_id = f"AllowUseCaseAccount-{usecase_account_id}"
+        
+        # Check if permission already exists
+        try:
+            # Try to describe the event bus policy
+            response = events_client.describe_event_bus(Name='default')
+            policy = response.get('Policy')
+            
+            if policy:
+                policy_doc = json.loads(policy)
+                for statement in policy_doc.get('Statement', []):
+                    if statement.get('Sid') == statement_id:
+                        logger.info(f"EventBridge permission already exists for {usecase_account_id}")
+                        return {
+                            'status': 'already_configured',
+                            'usecase_account_id': usecase_account_id,
+                            'statement_id': statement_id
+                        }
+        except ClientError as e:
+            # Policy might not exist yet, which is fine
+            if e.response['Error']['Code'] != 'ResourceNotFoundException':
+                logger.warning(f"Error checking EventBridge policy: {e}")
+        
+        # Add permission for UseCase Account to send events
+        events_client.put_permission(
+            EventBusName='default',
+            Action='events:PutEvents',
+            Principal=usecase_account_id,
+            StatementId=statement_id
+        )
+        
+        logger.info(f"Successfully configured EventBridge permission for {usecase_account_id}")
+        
+        return {
+            'status': 'success',
+            'usecase_account_id': usecase_account_id,
+            'statement_id': statement_id,
+            'message': 'EventBridge permission granted. UseCase Account can now forward SageMaker events.'
+        }
+        
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        error_message = e.response['Error']['Message']
+        logger.error(f"Failed to configure EventBridge permission: {error_code} - {error_message}")
+        
+        if 'already exists' in error_message.lower():
+            return {
+                'status': 'already_configured',
+                'usecase_account_id': usecase_account_id
+            }
+        
+        return {
+            'status': 'failed',
+            'error': f"{error_code}: {error_message}",
+            'usecase_account_id': usecase_account_id
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error configuring EventBridge: {str(e)}")
+        return {
+            'status': 'failed',
+            'error': str(e),
+            'usecase_account_id': usecase_account_id
+        }
+
+
 def handler(event, context):
     """
     Handle use case management requests
@@ -772,6 +855,30 @@ def create_usecase(event, user):
                 # Don't fail usecase creation if shared component provisioning fails
                 shared_components_result = {'error': str(e), 'status': 'failed'}
         
+        # Configure cross-account EventBridge permissions
+        # This allows the UseCase Account to send SageMaker events to the Portal Account
+        eventbridge_result = None
+        try:
+            eventbridge_result = configure_eventbridge_permission(body['account_id'])
+            
+            # Update usecase with EventBridge status
+            table.update_item(
+                Key={'usecase_id': usecase_id},
+                UpdateExpression='SET eventbridge_configured = :configured, eventbridge_result = :result',
+                ExpressionAttributeValues={
+                    ':configured': eventbridge_result.get('status') in ['success', 'already_configured'],
+                    ':result': eventbridge_result
+                }
+            )
+            item['eventbridge_configured'] = eventbridge_result.get('status') in ['success', 'already_configured']
+            item['eventbridge_result'] = eventbridge_result
+            
+            logger.info(f"EventBridge permission result: {eventbridge_result.get('status')}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to configure EventBridge for usecase {usecase_id}: {str(e)}")
+            eventbridge_result = {'status': 'failed', 'error': str(e)}
+        
         log_audit_event(
             user['user_id'], 'create_usecase', 'usecase', usecase_id,
             'success', {
@@ -779,7 +886,8 @@ def create_usecase(event, user):
                 'shared_components_provisioned': item.get('shared_components_provisioned', False),
                 'data_bucket_policy_configured': item.get('data_bucket_policy_configured', False),
                 'data_bucket_cors_configured': item.get('data_bucket_cors_configured', False),
-                'data_bucket_tagged': item.get('data_bucket_tagged', False)
+                'data_bucket_tagged': item.get('data_bucket_tagged', False),
+                'eventbridge_configured': item.get('eventbridge_configured', False)
             }
         )
         
@@ -791,6 +899,7 @@ def create_usecase(event, user):
             'data_bucket_policy': data_bucket_policy_result,
             'data_bucket_cors': data_bucket_cors_result,
             'data_bucket_tag': data_bucket_tag_result,
+            'eventbridge': eventbridge_result,
             'message': 'Use case created successfully'
         })
         

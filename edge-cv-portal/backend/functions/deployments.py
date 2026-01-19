@@ -20,6 +20,18 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.resource('dynamodb')
 DEPLOYMENTS_TABLE = os.environ.get('DEPLOYMENTS_TABLE', 'dda-portal-deployments')
 
+# Minimum Greengrass Nucleus version required for DDA components
+# This is auto-included in deployments to prevent version mismatch errors
+MIN_NUCLEUS_VERSION = '2.14.0'
+
+# Components that require Nucleus to be explicitly included in deployment
+# Model components (model-*) also need Nucleus since they depend on DDA components
+DDA_COMPONENTS_REQUIRING_NUCLEUS = [
+    'aws.edgeml.dda.LocalServer',
+    'aws.edgeml.dda.InferenceApp',
+    'model-',  # Model components created by the portal
+]
+
 
 def handler(event, context):
     """
@@ -208,6 +220,93 @@ def get_deployment(deployment_id, user, query_params):
             'usecase_id': usecase_id
         }
         
+        # Get effective deployments for target devices to show per-device status
+        # This is especially useful for failed deployments to see which devices failed
+        effective_deployments = []
+        target_arn = response.get('targetArn', '')
+        
+        try:
+            # Extract target name from ARN to get effective deployments
+            if ':thing/' in target_arn:
+                # Single device target
+                thing_name = target_arn.split(':thing/')[-1]
+                eff_response = greengrass_client.list_effective_deployments(
+                    coreDeviceThingName=thing_name
+                )
+                for eff_dep in eff_response.get('effectiveDeployments', []):
+                    if eff_dep.get('deploymentId') == deployment_id:
+                        # Convert timestamps
+                        modified_ts = eff_dep.get('modifiedTimestamp')
+                        if modified_ts and hasattr(modified_ts, 'isoformat'):
+                            modified_ts = modified_ts.isoformat()
+                        
+                        effective_deployments.append({
+                            'core_device': thing_name,
+                            'deployment_status': eff_dep.get('coreDeviceExecutionStatus', 'UNKNOWN'),
+                            'reason': eff_dep.get('reason', ''),
+                            'description': eff_dep.get('description', ''),
+                            'status_details': eff_dep.get('statusDetails', {}),
+                            'modified_timestamp': modified_ts
+                        })
+                        break
+            elif ':thinggroup/' in target_arn:
+                # Thing group target - list core devices in the group and get their status
+                thing_group_name = target_arn.split(':thinggroup/')[-1]
+                
+                # List core devices (we'll check effective deployments for each)
+                core_devices_response = greengrass_client.list_core_devices(
+                    thingGroupArn=target_arn,
+                    maxResults=50
+                )
+                
+                for device in core_devices_response.get('coreDevices', []):
+                    thing_name = device.get('coreDeviceThingName')
+                    if thing_name:
+                        try:
+                            eff_response = greengrass_client.list_effective_deployments(
+                                coreDeviceThingName=thing_name
+                            )
+                            for eff_dep in eff_response.get('effectiveDeployments', []):
+                                if eff_dep.get('deploymentId') == deployment_id:
+                                    modified_ts = eff_dep.get('modifiedTimestamp')
+                                    if modified_ts and hasattr(modified_ts, 'isoformat'):
+                                        modified_ts = modified_ts.isoformat()
+                                    
+                                    effective_deployments.append({
+                                        'core_device': thing_name,
+                                        'deployment_status': eff_dep.get('coreDeviceExecutionStatus', 'UNKNOWN'),
+                                        'reason': eff_dep.get('reason', ''),
+                                        'description': eff_dep.get('description', ''),
+                                        'status_details': eff_dep.get('statusDetails', {}),
+                                        'modified_timestamp': modified_ts
+                                    })
+                                    break
+                        except ClientError as e:
+                            logger.warning(f"Could not get effective deployments for {thing_name}: {e}")
+        except ClientError as e:
+            logger.warning(f"Could not get effective deployments: {e}")
+        
+        deployment['effective_deployments'] = effective_deployments
+        
+        # Extract error information from effective deployments
+        error_messages = []
+        for eff_dep in effective_deployments:
+            if eff_dep.get('deployment_status') in ['FAILED', 'REJECTED', 'TIMED_OUT']:
+                error_info = {
+                    'device': eff_dep.get('core_device'),
+                    'status': eff_dep.get('deployment_status'),
+                    'reason': eff_dep.get('reason', ''),
+                    'description': eff_dep.get('description', '')
+                }
+                # Add status details if available
+                status_details = eff_dep.get('status_details', {})
+                if status_details:
+                    error_info['detailed_status'] = status_details.get('detailedStatus', '')
+                    error_info['detailed_status_reason'] = status_details.get('detailedStatusReason', '')
+                error_messages.append(error_info)
+        
+        deployment['error_messages'] = error_messages
+        
         log_audit_event(
             user['user_id'], 'get_deployment', 'deployment', deployment_id, 'success'
         )
@@ -270,6 +369,8 @@ def create_deployment(body, user):
         
         # Build components map for deployment
         components_map = {}
+        needs_nucleus = False
+        
         for comp in components:
             comp_name = comp.get('component_name')
             comp_version = comp.get('component_version')
@@ -280,6 +381,26 @@ def create_deployment(body, user):
                 # Remove None values
                 if components_map[comp_name]['componentVersion'] is None:
                     del components_map[comp_name]['componentVersion']
+                
+                # Check if this component requires Nucleus to be included
+                for dda_comp in DDA_COMPONENTS_REQUIRING_NUCLEUS:
+                    if comp_name.startswith(dda_comp):
+                        needs_nucleus = True
+                        break
+        
+        # Auto-include Greengrass Nucleus if deploying DDA components
+        # This prevents "FAILED_NO_STATE_CHANGE" errors when Nucleus version needs updating
+        auto_included = []
+        if needs_nucleus and 'aws.greengrass.Nucleus' not in components_map:
+            components_map['aws.greengrass.Nucleus'] = {
+                'componentVersion': MIN_NUCLEUS_VERSION
+            }
+            auto_included.append({
+                'component_name': 'aws.greengrass.Nucleus',
+                'component_version': MIN_NUCLEUS_VERSION,
+                'reason': 'Required for DDA component dependencies'
+            })
+            logger.info(f"Auto-included aws.greengrass.Nucleus {MIN_NUCLEUS_VERSION} for DDA component deployment")
         
         # Determine target ARN
         if target_thing_group:
@@ -333,10 +454,18 @@ def create_deployment(body, user):
         
         logger.info(f"Created deployment {deployment_id} for usecase {usecase_id}")
         
+        # Build response with full component list
+        deployed_components = [
+            {'component_name': name, 'component_version': config.get('componentVersion', 'latest')}
+            for name, config in components_map.items()
+        ]
+        
         return create_response(201, {
             'deployment_id': deployment_id,
             'iot_job_id': response.get('iotJobId', ''),
             'iot_job_arn': response.get('iotJobArn', ''),
+            'components': deployed_components,
+            'auto_included': auto_included,
             'message': 'Deployment created successfully'
         })
         

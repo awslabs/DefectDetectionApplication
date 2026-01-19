@@ -141,6 +141,16 @@ def list_devices(user, query_params):
                         except ClientError:
                             pass
                         
+                        # Get platform/architecture from get_core_device
+                        platform = ''
+                        architecture = ''
+                        try:
+                            core_device_detail = greengrass_client.get_core_device(coreDeviceThingName=thing_name)
+                            platform = core_device_detail.get('platform', '')
+                            architecture = core_device_detail.get('architecture', '')
+                        except ClientError:
+                            pass
+                        
                         # Convert datetime to ISO string
                         last_status = device.get('lastStatusUpdateTimestamp')
                         if last_status:
@@ -152,6 +162,8 @@ def list_devices(user, query_params):
                             'thing_arn': thing_arn,
                             'status': device.get('status', 'UNKNOWN'),
                             'last_status_update': last_status,
+                            'platform': platform,
+                            'architecture': architecture,
                             'tags': tags,
                             'usecase_id': usecase_id
                         })

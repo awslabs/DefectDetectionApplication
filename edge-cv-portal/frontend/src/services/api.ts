@@ -815,6 +815,15 @@ class ApiService {
     iot_job_id: string;
     iot_job_arn: string;
     message: string;
+    components?: Array<{
+      component_name: string;
+      component_version: string;
+    }>;
+    auto_included?: Array<{
+      component_name: string;
+      component_version: string;
+      reason: string;
+    }>;
   }> {
     return this.request('/deployments', {
       method: 'POST',

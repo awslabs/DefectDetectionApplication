@@ -1,10 +1,13 @@
 # Bring Your Own Model (BYOM) Guide
 
-This guide explains how to package pre-trained PyTorch models from various platforms for import into the Edge CV Portal.
+This guide explains how to import pre-trained PyTorch models from various platforms into the Edge CV Portal.
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Import Options](#import-options)
+- [Smart Import (Recommended)](#smart-import-recommended)
+- [Manual Import](#manual-import)
 - [Required File Structure](#required-file-structure)
 - [File Specifications](#file-specifications)
 - [Examples](#examples)
@@ -13,7 +16,7 @@ This guide explains how to package pre-trained PyTorch models from various platf
   - [EfficientNet from Azure ML](#example-3-efficientnet-from-azure-ml)
   - [Custom Anomaly Detection from Local Training](#example-4-custom-anomaly-detection-from-local-training)
   - [Segmentation Model from Hugging Face](#example-5-segmentation-model-from-hugging-face)
-- [Export Scripts](#export-scripts)
+- [Export Scripts (Manual Packaging)](#export-scripts-manual-packaging)
 - [Validation Checklist](#validation-checklist)
 - [Troubleshooting](#troubleshooting)
 
@@ -24,8 +27,9 @@ This guide explains how to package pre-trained PyTorch models from various platf
 The Edge CV Portal supports importing pre-trained PyTorch models through the BYOM (Bring Your Own Model) feature. This allows you to:
 
 1. Train models on any platform (Databricks, SageMaker, Azure ML, local, etc.)
-2. Package them in the DDA-compatible format
-3. Import into the portal for compilation and edge deployment
+2. Import them into the portal
+3. Compile for edge deployment (Jetson, x86, ARM)
+4. Deploy to edge devices via Greengrass
 
 **Supported Framework:** PyTorch 1.8+
 
@@ -34,6 +38,74 @@ The Edge CV Portal supports importing pre-trained PyTorch models through the BYO
 - `x86_64-cuda` - NVIDIA GPU on x86_64
 - `arm64-cpu` - ARM 64-bit processors (Raspberry Pi, etc.)
 - `jetson-xavier` - NVIDIA Jetson Xavier
+
+---
+
+## Import Options
+
+| Option | Best For | Effort |
+|--------|----------|--------|
+| **Smart Import** | Most users - just upload your .pt file | ⭐ Easy |
+| **Manual Import** | Pre-packaged models or custom metadata | ⚙️ Advanced |
+
+---
+
+## Smart Import (Recommended)
+
+**Smart Import** automatically generates all required metadata from your raw PyTorch model file. No special packaging needed!
+
+### How It Works
+
+1. **Upload** your `.pt` file to S3
+2. **Navigate** to Training → Smart Import in the portal
+3. **Select** your use case and enter the S3 URI
+4. **Click** "Inspect Model" - we'll analyze the architecture
+5. **Confirm** the detected settings (model type, dimensions)
+6. **Click** "Convert & Import" - done!
+
+### What Smart Import Does
+
+- Analyzes your model to detect architecture (ResNet, YOLO, EfficientNet, etc.)
+- Auto-generates `config.yaml`, `mochi.json`, and `manifest.json`
+- Packages everything into DDA-compatible format
+- Imports and optionally starts compilation
+
+### Supported Architectures
+
+Smart Import can detect:
+- ResNet, VGG, EfficientNet (classification)
+- YOLOv5/v8/v10, SSD (object detection)
+- SegFormer, U-Net (segmentation)
+- Vision Transformers (ViT)
+- Custom models (with manual type selection)
+
+### Example: YOLOv10 from Databricks
+
+```bash
+# 1. In Databricks, save your model
+torch.save(model.state_dict(), "/dbfs/models/yolov10_defect.pt")
+
+# 2. Copy to S3
+dbutils.fs.cp("dbfs:/models/yolov10_defect.pt", "s3://my-bucket/models/yolov10_defect.pt")
+
+# 3. Use Smart Import in the portal with:
+#    - S3 URI: s3://my-bucket/models/yolov10_defect.pt
+#    - Model Type: Object Detection
+#    - Dimensions: 640x640
+```
+
+---
+
+## Manual Import
+
+Use Manual Import when you need full control over the metadata or have a pre-packaged model.
+
+### When to Use Manual Import
+
+- Model doesn't work with Smart Import
+- You need custom preprocessing/postprocessing settings
+- You have specific metadata requirements
+- You already have a DDA-compatible package
 
 ---
 

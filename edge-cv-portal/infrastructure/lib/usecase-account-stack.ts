@@ -1,5 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { Construct } from 'constructs';
 
 export interface UseCaseAccountStackProps extends cdk.StackProps {
@@ -20,6 +22,21 @@ export interface UseCaseAccountStackProps extends cdk.StackProps {
    * Default: '*-dda-*'
    */
   s3BucketPrefix?: string;
+
+  /**
+   * Enable cross-account EventBridge forwarding for SageMaker events.
+   * When enabled, SageMaker training/compilation job state changes are forwarded
+   * to the Portal Account's default event bus.
+   * Default: true
+   */
+  enableEventBridgeForwarding?: boolean;
+
+  /**
+   * Name of the GDK component bucket in the Portal Account.
+   * This bucket stores shared Greengrass component artifacts.
+   * Format: dda-component-{region}-{portalAccountId}
+   */
+  componentBucketName?: string;
 }
 
 /**
@@ -38,6 +55,7 @@ export class UseCaseAccountStack extends cdk.Stack {
   public readonly role: iam.Role;
   public readonly roleArn: string;
   public readonly groundTruthRole: iam.Role;
+  public readonly greengrassDevicePolicy: iam.ManagedPolicy;
 
   constructor(scope: Construct, id: string, props: UseCaseAccountStackProps) {
     super(scope, id, props);
@@ -45,6 +63,28 @@ export class UseCaseAccountStack extends cdk.Stack {
     const portalAccountId = props.portalAccountId || cdk.Stack.of(this).account;
     const externalId = props.externalId;
     const s3BucketPrefix = props.s3BucketPrefix || '*-dda-*';
+    const region = cdk.Stack.of(this).region;
+    
+    // Component bucket name - defaults to Portal Account's GDK bucket
+    const componentBucketName = props.componentBucketName || `dda-component-${region}-${portalAccountId}`;
+
+    // Create a managed policy for Greengrass devices to access Portal component artifacts
+    // This policy should be attached to GreengrassV2TokenExchangeRole during device provisioning
+    this.greengrassDevicePolicy = new iam.ManagedPolicy(this, 'DDAGreengrassDevicePolicy', {
+      managedPolicyName: 'DDAPortalComponentAccessPolicy',
+      description: 'Allows Greengrass devices to download DDA component artifacts from Portal Account S3 bucket',
+      statements: [
+        new iam.PolicyStatement({
+          sid: 'AllowPortalComponentBucketAccess',
+          effect: iam.Effect.ALLOW,
+          actions: ['s3:GetObject', 's3:GetBucketLocation'],
+          resources: [
+            `arn:aws:s3:::${componentBucketName}`,
+            `arn:aws:s3:::${componentBucketName}/*`,
+          ],
+        }),
+      ],
+    });
 
     // Create SageMaker Execution Role
     // This role is used by SageMaker for training, compilation, and Ground Truth labeling jobs
@@ -323,18 +363,25 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
-    // Greengrass Deployments
+    // Greengrass Deployments - use wildcard to cover all deployment ARN patterns
     this.role.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'GreengrassDeployments',
+        sid: 'GreengrassDeploymentsV4',
         effect: iam.Effect.ALLOW,
         actions: [
           'greengrass:CreateDeployment',
           'greengrass:GetDeployment',
           'greengrass:ListDeployments',
           'greengrass:CancelDeployment',
+          'greengrass:TagResource',
+          'greengrass:UntagResource',
         ],
-        resources: [`arn:aws:greengrass:*:${this.account}:deployments:*`],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            'aws:ResourceAccount': this.account,
+          },
+        },
       })
     );
 
@@ -431,6 +478,78 @@ export class UseCaseAccountStack extends cdk.Stack {
 
     this.roleArn = this.role.roleArn;
 
+    // Cross-Account EventBridge Forwarding
+    // Forward SageMaker events to Portal Account for real-time status updates
+    const enableEventBridgeForwarding = props.enableEventBridgeForwarding !== false;
+    
+    if (enableEventBridgeForwarding && portalAccountId !== cdk.Stack.of(this).account) {
+      // Create IAM role for EventBridge to send events cross-account
+      const eventBridgeRole = new iam.Role(this, 'EventBridgeCrossAccountRole', {
+        roleName: 'DDAEventBridgeCrossAccountRole',
+        description: 'Role for EventBridge to forward SageMaker events to Portal Account',
+        assumedBy: new iam.ServicePrincipal('events.amazonaws.com'),
+      });
+
+      // Allow putting events to Portal Account's default event bus
+      eventBridgeRole.addToPolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['events:PutEvents'],
+          resources: [`arn:aws:events:*:${portalAccountId}:event-bus/default`],
+        })
+      );
+
+      // Target: Portal Account's default event bus
+      const portalEventBus = events.EventBus.fromEventBusArn(
+        this,
+        'PortalEventBus',
+        `arn:aws:events:${cdk.Stack.of(this).region}:${portalAccountId}:event-bus/default`
+      );
+
+      // Rule 1: Forward SageMaker Training Job State Changes
+      const trainingStateChangeRule = new events.Rule(this, 'ForwardTrainingStateChange', {
+        ruleName: 'dda-forward-training-state-change',
+        description: 'Forward SageMaker training job state changes to Portal Account',
+        eventPattern: {
+          source: ['aws.sagemaker'],
+          detailType: ['SageMaker Training Job State Change'],
+          detail: {
+            TrainingJobStatus: ['Completed', 'Failed', 'Stopped'],
+          },
+        },
+      });
+
+      trainingStateChangeRule.addTarget(
+        new targets.EventBus(portalEventBus, {
+          role: eventBridgeRole,
+        })
+      );
+
+      // Rule 2: Forward SageMaker Compilation Job State Changes
+      const compilationStateChangeRule = new events.Rule(this, 'ForwardCompilationStateChange', {
+        ruleName: 'dda-forward-compilation-state-change',
+        description: 'Forward SageMaker compilation job state changes to Portal Account',
+        eventPattern: {
+          source: ['aws.sagemaker'],
+          detailType: ['SageMaker Compilation Job State Change'],
+          detail: {
+            CompilationJobStatus: ['COMPLETED', 'FAILED', 'STOPPED'],
+          },
+        },
+      });
+
+      compilationStateChangeRule.addTarget(
+        new targets.EventBus(portalEventBus, {
+          role: eventBridgeRole,
+        })
+      );
+
+      new cdk.CfnOutput(this, 'EventBridgeForwardingEnabled', {
+        value: 'true',
+        description: 'Cross-account EventBridge forwarding is enabled',
+      });
+    }
+
     // Outputs
     new cdk.CfnOutput(this, 'RoleArn', {
       value: this.role.roleArn,
@@ -459,6 +578,17 @@ export class UseCaseAccountStack extends cdk.Stack {
       value: this.groundTruthRole.roleArn,
       description: 'ARN of the SageMaker execution role',
       exportName: 'DDASageMakerExecutionRoleArn',
+    });
+
+    new cdk.CfnOutput(this, 'GreengrassDevicePolicyArn', {
+      value: this.greengrassDevicePolicy.managedPolicyArn,
+      description: 'ARN of the policy to attach to GreengrassV2TokenExchangeRole during device provisioning',
+      exportName: 'DDAGreengrassDevicePolicyArn',
+    });
+
+    new cdk.CfnOutput(this, 'ComponentBucketName', {
+      value: componentBucketName,
+      description: 'Portal Account S3 bucket containing shared component artifacts',
     });
   }
 }

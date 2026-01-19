@@ -58,6 +58,10 @@ export default function CreateDeployment() {
   // State
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+  const [successInfo, setSuccessInfo] = useState<{
+    deployment_id: string;
+    auto_included: Array<{component_name: string; component_version: string; reason: string}>;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
 
   const preSelectedComponentArn = searchParams.get('component_arn');
@@ -225,7 +229,15 @@ export default function CreateDeployment() {
 
       const response = await apiService.createDeployment(deploymentData);
       
-      navigate(`/deployments/${response.deployment_id}?usecase_id=${selectedUseCase.value}`);
+      // If auto-included components, show info before navigating
+      if (response.auto_included && response.auto_included.length > 0) {
+        setSuccessInfo({
+          deployment_id: response.deployment_id,
+          auto_included: response.auto_included
+        });
+      } else {
+        navigate(`/deployments/${response.deployment_id}?usecase_id=${selectedUseCase.value}`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create deployment');
       console.error('Failed to create deployment:', err);
@@ -264,6 +276,32 @@ export default function CreateDeployment() {
         >
           <SpaceBetween size="l">
             {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+            
+            {successInfo && (
+              <Alert
+                type="success"
+                header="Deployment created successfully"
+                action={
+                  <Button onClick={() => navigate(`/deployments/${successInfo.deployment_id}?usecase_id=${selectedUseCase?.value}`)}>
+                    View Deployment
+                  </Button>
+                }
+              >
+                <SpaceBetween size="xs">
+                  <Box>Deployment ID: {successInfo.deployment_id}</Box>
+                  {successInfo.auto_included.length > 0 && (
+                    <Box>
+                      <Box fontWeight="bold">Auto-included components:</Box>
+                      {successInfo.auto_included.map((comp, idx) => (
+                        <Box key={idx} color="text-body-secondary">
+                          • {comp.component_name} v{comp.component_version} - {comp.reason}
+                        </Box>
+                      ))}
+                    </Box>
+                  )}
+                </SpaceBetween>
+              </Alert>
+            )}
 
             {/* Use Case Selection */}
             <FormField label="Use Case" description="Select the use case for this deployment">

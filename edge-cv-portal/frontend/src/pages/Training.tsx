@@ -197,27 +197,13 @@ export default function Training() {
             }
             counter={`(${filteredJobs.length})`}
             actions={
-              <SpaceBetween direction="horizontal" size="xs">
-                <Button 
-                  onClick={() => navigate('/training/smart-import')}
-                  disabled={!selectedUseCase}
-                >
-                  Smart Import
-                </Button>
-                <Button 
-                  onClick={() => navigate('/training/import')}
-                  disabled={!selectedUseCase}
-                >
-                  Manual Import
-                </Button>
-                <Button 
-                  variant="primary" 
-                  onClick={() => navigate('/training/create')}
-                  disabled={!selectedUseCase}
-                >
-                  Start Training Job
-                </Button>
-              </SpaceBetween>
+              <Button 
+                variant="primary" 
+                onClick={() => navigate('/training/create')}
+                disabled={!selectedUseCase}
+              >
+                Start Training Job
+              </Button>
             }
           >
             Training Jobs

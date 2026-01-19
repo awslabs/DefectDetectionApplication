@@ -4,31 +4,67 @@ UBUNTU_VERSION=$(lsb_release -rs)
 
 # Function to install from source for Ubuntu 18.04
 install_from_source() {
-  # Check for python3 and verify if it's version 3.9
-  if command -v python3 >/dev/null 2>&1; then
-    version=$(python3 --version 2>&1 | grep -o "3\.9\.[0-9]*")
-    if [ ! -z "$version" ]; then
-        echo "Python 3.9 already installed skipping build"
-        return 0
-    fi
+  # Check for python3.9 specifically
+  if command -v python3.9 >/dev/null 2>&1; then
+    echo "Python 3.9 already installed, skipping build"
+    return 0
   fi
+  
+  # Also check /usr/local/bin/python3.9 (where altinstall puts it)
+  if [ -x /usr/local/bin/python3.9 ]; then
+    echo "Python 3.9 already installed at /usr/local/bin/python3.9, skipping build"
+    return 0
+  fi
+  
   echo "Ubuntu version is 18.04. Installing Python 3.9 from source."
+  echo "This will take approximately 10-15 minutes on ARM64..."
 
   # Install build dependencies
   apt update
   apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget
 
+  # Save current directory
+  local current_dir=$(pwd)
+  
+  # Create temp directory for build
+  local build_dir="/tmp/python39_build"
+  mkdir -p "$build_dir"
+  cd "$build_dir"
+
   # Download Python 3.9 source code
-  wget https://www.python.org/ftp/python/3.9.18/Python-3.9.18.tgz
-  tar -xf Python-3.9.18.tgz
+  if [ ! -f "Python-3.9.18.tgz" ]; then
+    echo "Downloading Python 3.9.18..."
+    wget https://www.python.org/ftp/python/3.9.18/Python-3.9.18.tgz
+  fi
+  
+  # Extract if not already extracted
+  if [ ! -d "Python-3.9.18" ]; then
+    tar -xf Python-3.9.18.tgz
+  fi
+  
   cd Python-3.9.18
 
   # Configure, compile, and install
+  echo "Configuring Python build..."
   ./configure --enable-optimizations
+  
+  echo "Compiling Python (this takes ~10-15 minutes on ARM64)..."
   make -j "$(nproc)"
+  
+  echo "Installing Python..."
   make altinstall
 
-  echo "Python 3.9 installed successfully from source."
+  # Return to original directory
+  cd "$current_dir"
+  
+  # Verify installation
+  if [ -x /usr/local/bin/python3.9 ]; then
+    echo "Python 3.9 installed successfully from source."
+    /usr/local/bin/python3.9 --version
+  else
+    echo "ERROR: Python 3.9 installation failed!"
+    return 1
+  fi
 }
 
 # Function to install from deadsnakes PPA
@@ -168,17 +204,36 @@ echo "Installing Python3.9"
 #apt-get install python3.9 python3.9-dev python3.9-venv python3.9-distutils -y
 if [ "$UBUNTU_VERSION" = "18.04" ]; then
   install_from_source
-  sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1
+  # Set up alternatives for python3.9
+  if [ -x /usr/local/bin/python3.9 ]; then
+    sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1
+    # Also create symlink in /usr/bin for compatibility
+    ln -sf /usr/local/bin/python3.9 /usr/bin/python3.9 2>/dev/null || true
+  fi
 else #x86 where ubuntu version is not 18.04
   install_from_ppa
   sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/bin/python3.9 1
 fi
 echo "Installing Pip"
 apt-get install python3-pip -y
-python3.9 -m pip install --upgrade pip
-#python3.9 -m pip install --force-reinstall urlllib3==2.2.3
-python3.9 -m pip install --force-reinstall requests==2.32.3
-python3.9 -m pip install protobuf
+
+# Find python3.9 location
+PYTHON39=""
+if [ -x /usr/local/bin/python3.9 ]; then
+  PYTHON39="/usr/local/bin/python3.9"
+elif [ -x /usr/bin/python3.9 ]; then
+  PYTHON39="/usr/bin/python3.9"
+fi
+
+if [ -n "$PYTHON39" ]; then
+  echo "Using Python at: $PYTHON39"
+  $PYTHON39 -m pip install --upgrade pip
+  $PYTHON39 -m pip install --force-reinstall requests==2.32.3
+  $PYTHON39 -m pip install protobuf
+else
+  echo "ERROR: python3.9 not found!"
+  exit 1
+fi
 
 
 
@@ -243,14 +298,46 @@ java -jar ./GreengrassInstaller/lib/Greengrass.jar --version
 # If it fails with "The role with name GreengrassV2TokenExchangeRole cannot be found", rerun the command
 java -Droot="/aws_dda/greengrass/v2" -Dlog.store=FILE   -jar ./GreengrassInstaller/lib/Greengrass.jar   --aws-region ${aws_region}   --thing-name ${thing_name} --thing-group-name DDA_transition_EC2_Group   --thing-policy-name GreengrassV2IoTThingPolicy   --tes-role-name GreengrassV2TokenExchangeRole   --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias   --component-default-user ggc_user:ggc_group   --setup-system-service true --provision true
 
-# Tag the IoT Thing for portal discovery
-echo "Tagging IoT Thing for portal discovery..."
-thing_arn=$(aws iot describe-thing --thing-name ${thing_name} --region ${aws_region} --query 'thingArn' --output text 2>/dev/null || echo "")
-if [ -n "$thing_arn" ]; then
-    aws iot tag-resource --resource-arn "$thing_arn" --tags "Key=dda-portal:managed,Value=true" --region ${aws_region} || echo "Warning: Failed to tag thing"
-    echo "IoT Thing tagged with dda-portal:managed=true"
+# Attach DDA Portal Component Access Policy to GreengrassV2TokenExchangeRole
+# This allows the device to download component artifacts from the Portal Account's S3 bucket
+echo "Attaching DDA Portal Component Access Policy to GreengrassV2TokenExchangeRole..."
+DDA_POLICY_ARN="arn:aws:iam::$(aws sts get-caller-identity --query 'Account' --output text):policy/DDAPortalComponentAccessPolicy"
+if aws iam get-policy --policy-arn "$DDA_POLICY_ARN" 2>/dev/null; then
+    if aws iam attach-role-policy --role-name GreengrassV2TokenExchangeRole --policy-arn "$DDA_POLICY_ARN" 2>/dev/null; then
+        echo "DDAPortalComponentAccessPolicy attached to GreengrassV2TokenExchangeRole"
+    else
+        echo "WARNING: Could not attach DDAPortalComponentAccessPolicy. You may need to attach it manually:"
+        echo "  aws iam attach-role-policy --role-name GreengrassV2TokenExchangeRole --policy-arn \"$DDA_POLICY_ARN\""
+    fi
 else
-    echo "Warning: Could not get thing ARN for tagging"
+    echo "WARNING: DDAPortalComponentAccessPolicy not found. Deploy UseCaseAccountStack first, then attach manually:"
+    echo "  aws iam attach-role-policy --role-name GreengrassV2TokenExchangeRole --policy-arn \"$DDA_POLICY_ARN\""
+fi
+
+# Tag the Greengrass Core Device for portal discovery
+# Note: We tag the Greengrass Core Device, not the IoT Thing
+echo "Tagging Greengrass Core Device for portal discovery..."
+# Get AWS account ID
+aws_account_id=$(aws sts get-caller-identity --query 'Account' --output text 2>/dev/null || echo "")
+if [ -n "$aws_account_id" ]; then
+    # Construct the Greengrass Core Device ARN
+    gg_core_arn="arn:aws:greengrass:${aws_region}:${aws_account_id}:coreDevices:${thing_name}"
+    echo "Tagging Greengrass Core Device ARN: $gg_core_arn"
+    
+    # Wait a moment for Greengrass to register the core device
+    echo "Waiting for Greengrass Core Device to be registered..."
+    sleep 10
+    
+    # Tag the Greengrass Core Device
+    if aws greengrassv2 tag-resource --resource-arn "$gg_core_arn" --tags "dda-portal:managed=true" --region ${aws_region} 2>/dev/null; then
+        echo "Greengrass Core Device tagged with dda-portal:managed=true"
+    else
+        echo "WARNING: Could not tag Greengrass Core Device. The device may not appear in the portal."
+        echo "Please tag manually after Greengrass is fully started:"
+        echo "  aws greengrassv2 tag-resource --resource-arn \"$gg_core_arn\" --tags \"dda-portal:managed=true\" --region ${aws_region}"
+    fi
+else
+    echo "Warning: Could not get AWS account ID for tagging"
 fi
 
 # Add ggc_user to a group that allows access to GPU and driver

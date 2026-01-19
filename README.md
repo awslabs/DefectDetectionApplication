@@ -710,7 +710,6 @@ This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE
 
 ## Support
 
-- **Documentation**: [AWS Lookout for Vision DDA User Guide](https://docs.aws.amazon.com/lookout-for-vision/latest/dda-user-guide/what-is.html)
 - **Issues**: Report bugs and feature requests via [GitHub Issues](https://github.com/aws-samples/defect-detection-application/issues)
 - **Discussions**: Join the community discussions for questions and support
 

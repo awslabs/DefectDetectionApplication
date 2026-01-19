@@ -49,3 +49,7 @@ frontend/public/custom.css
 # Temporary files
 /tmp/
 *.tmp
+
+# Account configuration files (contain External IDs and Role ARNs)
+*-account-config.txt
+*-account-*-config.txt
