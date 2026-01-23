@@ -1,0 +1,37 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: aws.edgeml.dda.InferenceUploader
+ComponentVersion: '1.0.0'
+ComponentDescription: 'Uploads inference results (images and metadata) from edge devices to S3'
+ComponentPublisher: 'DDA Portal'
+ComponentConfiguration:
+  DefaultConfiguration:
+    uploadIntervalSeconds: 300
+    batchSize: 100
+    localRetentionDays: 7
+    uploadImages: true
+    uploadMetadata: true
+    inferenceResultsPath: '/aws_dda/inference-results'
+    s3Bucket: ''
+    s3Prefix: ''
+    awsRegion: 'us-east-1'
+
+ComponentDependencies:
+  aws.greengrass.Nucleus:
+    VersionRequirement: '>=2.0.0'
+    DependencyType: SOFT
+
+Manifests:
+  - Platform:
+      os: linux
+    Lifecycle:
+      Install:
+        Script: |-
+          pip3 install --user -r {artifacts:path}/requirements.txt
+      Run:
+        Script: |-
+          python3 {artifacts:path}/inference_uploader.py
+        RequiresPrivilege: false
+    Artifacts:
+      - URI: s3://BUCKET_NAME/aws.edgeml.dda.InferenceUploader/COMPONENT_VERSION/inference_uploader.py
+      - URI: s3://BUCKET_NAME/aws.edgeml.dda.InferenceUploader/COMPONENT_VERSION/requirements.txt

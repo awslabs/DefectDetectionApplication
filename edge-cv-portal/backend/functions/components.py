@@ -69,7 +69,7 @@ def lambda_handler(event, context):
 def list_components(user_info: Dict, query_params: Dict, headers: Dict) -> Dict:
     """
     List Greengrass components for the current use case.
-    Uses Resource Groups Tagging API to efficiently filter portal-created components.
+    Supports both PRIVATE (portal-managed) and PUBLIC (AWS-provided) components.
     """
     try:
         # Get current use case
@@ -89,6 +89,9 @@ def list_components(user_info: Dict, query_params: Dict, headers: Dict) -> Dict:
                 'headers': headers,
                 'body': json.dumps({'error': 'Insufficient permissions'})
             }
+        
+        # Get scope parameter - PRIVATE (portal-managed) or PUBLIC (AWS-provided)
+        scope = query_params.get('scope', 'PRIVATE').upper()
         
         # Get use case details from DynamoDB
         dynamodb = boto3.resource('dynamodb')
@@ -111,99 +114,14 @@ def list_components(user_info: Dict, query_params: Dict, headers: Dict) -> Dict:
         credentials = assume_cross_account_role(cross_account_role_arn, external_id)
         region = os.environ.get('AWS_REGION', 'us-east-1')
         
-        # Create Resource Groups Tagging API client with assumed role
-        # This allows efficient filtering of portal-created components by tag
-        tagging_client = boto3.client(
-            'resourcegroupstaggingapi',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
-        
         components = []
         
-        try:
-            # Use Resource Groups Tagging API to find portal-created components
-            # Single API call with tag filter - much faster than N+1 describe calls
-            pagination_token = ''
-            tagged_resources = []
-            
-            while True:
-                tag_params = {
-                    'TagFilters': [
-                        {
-                            'Key': 'dda-portal:managed',
-                            'Values': ['true']
-                        }
-                    ],
-                    # Don't use ResourceTypeFilters - it doesn't work reliably for Greengrass
-                    # We'll filter by ARN pattern instead
-                    'ResourcesPerPage': 100
-                }
-                
-                if pagination_token:
-                    tag_params['PaginationToken'] = pagination_token
-                
-                tag_response = tagging_client.get_resources(**tag_params)
-                
-                # Filter to only Greengrass components by ARN pattern
-                for resource in tag_response.get('ResourceTagMappingList', []):
-                    arn = resource.get('ResourceARN', '')
-                    if ':greengrass:' in arn and ':components:' in arn:
-                        tagged_resources.append(resource)
-                
-                pagination_token = tag_response.get('PaginationToken', '')
-                if not pagination_token:
-                    break
-            
-            print(f"Found {len(tagged_resources)} portal-created components via tagging API")
-            
-            # Build component list from tagged resources
-            for resource in tagged_resources:
-                component_arn = resource['ResourceARN']
-                tags = {tag['Key']: tag['Value'] for tag in resource.get('Tags', [])}
-                
-                # Extract component name from ARN
-                # ARN format: arn:aws:greengrass:region:account:components:name:versions:version
-                # Index:      0   1   2          3      4       5          6    7        8
-                arn_parts = component_arn.split(':')
-                component_name = arn_parts[6] if len(arn_parts) > 6 else 'unknown'
-                
-                # Get version from ARN if present (index 8)
-                latest_version = arn_parts[8] if len(arn_parts) > 8 else 'unknown'
-                
-                # Build component info from tags (no extra API calls needed)
-                enriched_component = {
-                    'arn': component_arn,
-                    'component_name': component_name,
-                    'latest_version': {'componentVersion': latest_version},
-                    'description': '',
-                    'publisher': 'DDA Portal',
-                    'creation_timestamp': None,
-                    'status': 'DEPLOYABLE',
-                    'platforms': [],
-                    'tags': tags,
-                    'model_name': tags.get('dda-portal:model-name', ''),
-                    'training_job_id': tags.get('dda-portal:training-id', ''),
-                    'created_by_portal': True,
-                    'deployment_info': {
-                        'total_deployments': 0,
-                        'active_deployments': 0,
-                        'deployed_devices': [],
-                        'device_count': 0
-                    }
-                }
-                
-                components.append(enriched_component)
-                
-        except ClientError as e:
-            print(f"Error listing components: {e}")
-            return {
-                'statusCode': 500,
-                'headers': headers,
-                'body': json.dumps({'error': f'Failed to list components: {str(e)}'})
-            }
+        if scope == 'PUBLIC':
+            # List AWS public components using Greengrass API
+            components = list_public_components(credentials, region, query_params)
+        else:
+            # List portal-managed private components using Resource Groups Tagging API
+            components = list_private_components(credentials, region, query_params)
         
         # Apply additional filters
         if query_params.get('search'):
@@ -238,6 +156,220 @@ def list_components(user_info: Dict, query_params: Dict, headers: Dict) -> Dict:
         
     except Exception as e:
         return handle_error(e, headers)
+
+
+def list_public_components(credentials: Dict, region: str, query_params: Dict) -> List[Dict]:
+    """
+    List AWS public Greengrass components.
+    These are AWS-provided components like aws.greengrass.Nucleus, aws.greengrass.Cli, etc.
+    """
+    try:
+        # Create Greengrass client with assumed role
+        greengrass = boto3.client(
+            'greengrassv2',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken'],
+            region_name=region
+        )
+        
+        components = []
+        next_token = None
+        
+        while True:
+            params = {
+                'scope': 'PUBLIC',
+                'maxResults': 100
+            }
+            if next_token:
+                params['nextToken'] = next_token
+            
+            response = greengrass.list_components(**params)
+            
+            for comp in response.get('components', []):
+                component_name = comp.get('componentName', '')
+                latest_version = comp.get('latestVersion', {})
+                
+                components.append({
+                    'arn': comp.get('arn', ''),
+                    'component_name': component_name,
+                    'latest_version': {
+                        'componentVersion': latest_version.get('componentVersion', 'unknown'),
+                        'arn': latest_version.get('arn', ''),
+                        'creationTimestamp': latest_version.get('creationTimestamp'),
+                        'description': latest_version.get('description', ''),
+                        'publisher': latest_version.get('publisher', 'AWS'),
+                        'platforms': latest_version.get('platforms', [])
+                    },
+                    'description': latest_version.get('description', ''),
+                    'publisher': latest_version.get('publisher', 'AWS'),
+                    'creation_timestamp': latest_version.get('creationTimestamp'),
+                    'status': 'DEPLOYABLE',
+                    'platforms': latest_version.get('platforms', []),
+                    'tags': {},
+                    'model_name': '',
+                    'training_job_id': '',
+                    'created_by_portal': False,
+                    'scope': 'PUBLIC',
+                    'deployment_info': {
+                        'total_deployments': 0,
+                        'active_deployments': 0,
+                        'deployed_devices': [],
+                        'device_count': 0
+                    }
+                })
+            
+            next_token = response.get('nextToken')
+            if not next_token:
+                break
+        
+        print(f"Found {len(components)} public AWS components")
+        return components
+        
+    except ClientError as e:
+        print(f"Error listing public components: {e}")
+        raise e
+
+
+def list_private_components(credentials: Dict, region: str, query_params: Dict) -> List[Dict]:
+    """
+    List portal-managed private components using Resource Groups Tagging API.
+    These are components created by the DDA Portal (model components, etc.)
+    Only returns the latest version of each component.
+    """
+    try:
+        # Create Resource Groups Tagging API client with assumed role
+        tagging_client = boto3.client(
+            'resourcegroupstaggingapi',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken'],
+            region_name=region
+        )
+        
+        pagination_token = ''
+        tagged_resources = []
+        
+        while True:
+            tag_params = {
+                'TagFilters': [
+                    {
+                        'Key': 'dda-portal:managed',
+                        'Values': ['true']
+                    }
+                ],
+                # Don't use ResourceTypeFilters - it doesn't work reliably for Greengrass
+                # We'll filter by ARN pattern instead
+                'ResourcesPerPage': 100
+            }
+            
+            if pagination_token:
+                tag_params['PaginationToken'] = pagination_token
+            
+            tag_response = tagging_client.get_resources(**tag_params)
+            
+            # Filter to only Greengrass components by ARN pattern
+            for resource in tag_response.get('ResourceTagMappingList', []):
+                arn = resource.get('ResourceARN', '')
+                if ':greengrass:' in arn and ':components:' in arn:
+                    tagged_resources.append(resource)
+            
+            pagination_token = tag_response.get('PaginationToken', '')
+            if not pagination_token:
+                break
+        
+        print(f"Found {len(tagged_resources)} portal-created component versions via tagging API")
+        
+        # Deduplicate by component name, keeping only the latest version
+        # Use a dict to track the latest version per component
+        component_map = {}
+        
+        for resource in tagged_resources:
+            component_arn = resource['ResourceARN']
+            tags = {tag['Key']: tag['Value'] for tag in resource.get('Tags', [])}
+            
+            # Extract component name and version from ARN
+            # ARN format: arn:aws:greengrass:region:account:components:name:versions:version
+            # Index:      0   1   2          3      4       5          6    7        8
+            arn_parts = component_arn.split(':')
+            component_name = arn_parts[6] if len(arn_parts) > 6 else 'unknown'
+            version_str = arn_parts[8] if len(arn_parts) > 8 else '0.0.0'
+            
+            # Parse version for comparison (handle semver like 1.0.62)
+            try:
+                version_parts = [int(x) for x in version_str.split('.')]
+                version_tuple = tuple(version_parts + [0] * (3 - len(version_parts)))  # Pad to 3 parts
+            except ValueError:
+                version_tuple = (0, 0, 0)
+            
+            # Check if this is a newer version than what we have
+            if component_name not in component_map or version_tuple > component_map[component_name]['version_tuple']:
+                component_map[component_name] = {
+                    'arn': component_arn,
+                    'version_str': version_str,
+                    'version_tuple': version_tuple,
+                    'tags': tags
+                }
+        
+        # Build component list from deduplicated map
+        # Create Greengrass client to fetch component details
+        greengrass = boto3.client(
+            'greengrassv2',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken'],
+            region_name=region
+        )
+        
+        components = []
+        for component_name, comp_data in component_map.items():
+            # Fetch component details to get platforms information
+            platforms = []
+            description = ''
+            creation_timestamp = None
+            
+            try:
+                component_details = greengrass.describe_component(arn=comp_data['arn'])
+                platforms = component_details.get('platforms', [])
+                description = component_details.get('description', '')
+                creation_timestamp = component_details.get('creationTimestamp')
+            except ClientError as e:
+                print(f"Warning: Could not fetch details for {component_name}: {e}")
+                # Continue with empty platforms if describe fails
+            
+            enriched_component = {
+                'arn': comp_data['arn'],
+                'component_name': component_name,
+                'latest_version': {
+                    'componentVersion': comp_data['version_str'],
+                    'platforms': platforms
+                },
+                'description': description,
+                'publisher': 'DDA Portal',
+                'creation_timestamp': creation_timestamp,
+                'status': 'DEPLOYABLE',
+                'platforms': platforms,
+                'tags': comp_data['tags'],
+                'model_name': comp_data['tags'].get('dda-portal:model-name', ''),
+                'training_job_id': comp_data['tags'].get('dda-portal:training-id', ''),
+                'created_by_portal': True,
+                'scope': 'PRIVATE',
+                'deployment_info': {
+                    'total_deployments': 0,
+                    'active_deployments': 0,
+                    'deployed_devices': [],
+                    'device_count': 0
+                }
+            }
+            components.append(enriched_component)
+        
+        print(f"Returning {len(components)} unique components (latest versions only)")
+        return components
+        
+    except ClientError as e:
+        print(f"Error listing private components: {e}")
+        raise e
+
 
 def get_component_details(user_info: Dict, component_arn: str, query_params: Dict, headers: Dict) -> Dict:
     """

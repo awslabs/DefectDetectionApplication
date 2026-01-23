@@ -151,6 +151,22 @@ def list_devices(user, query_params):
                         except ClientError:
                             pass
                         
+                        # Get installed components count
+                        installed_components = []
+                        try:
+                            comp_response = greengrass_client.list_installed_components(
+                                coreDeviceThingName=thing_name,
+                                maxResults=100
+                            )
+                            for comp in comp_response.get('installedComponents', []):
+                                installed_components.append({
+                                    'componentName': comp.get('componentName'),
+                                    'componentVersion': comp.get('componentVersion'),
+                                    'lifecycleState': comp.get('lifecycleState'),
+                                })
+                        except ClientError as comp_err:
+                            logger.warning(f"Could not get components for {thing_name}: {comp_err}")
+                        
                         # Convert datetime to ISO string
                         last_status = device.get('lastStatusUpdateTimestamp')
                         if last_status:
@@ -165,7 +181,9 @@ def list_devices(user, query_params):
                             'platform': platform,
                             'architecture': architecture,
                             'tags': tags,
-                            'usecase_id': usecase_id
+                            'usecase_id': usecase_id,
+                            'installed_components': installed_components,
+                            'component_count': len(installed_components)
                         })
                 except ClientError as e:
                     logger.warning(f"Could not check tags for {thing_name}: {e}")

@@ -22,10 +22,13 @@ import { Component, UseCase } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import ConfirmationModal from '../components/ConfirmationModal';
 
+// Portal-managed component prefix - these should not be deleted by non-admin users
+const PORTAL_MANAGED_COMPONENT_PREFIX = 'aws.edgeml.dda.LocalServer';
+
 export default function Components() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { } = useAuth();
+  const { user } = useAuth();
   
   const [components, setComponents] = useState<Component[]>([]);
   const [loading, setLoading] = useState(true);
@@ -381,7 +384,9 @@ export default function Components() {
                     >
                       Deploy
                     </Button>
-                    {(item.deployment_info?.device_count ?? 0) === 0 && (
+                    {(item.deployment_info?.device_count ?? 0) === 0 && 
+                     // Hide delete for portal-managed components unless user is PortalAdmin
+                     !(item.component_name.startsWith(PORTAL_MANAGED_COMPONENT_PREFIX) && user?.role !== 'PortalAdmin') && (
                       <Button
                         variant="normal"
                         iconName="remove"

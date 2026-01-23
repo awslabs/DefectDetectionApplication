@@ -96,7 +96,17 @@ def handle_training_state_change(event: Dict, context: Any) -> Dict:
             if s3_model_artifacts:
                 update_expr += ', artifact_s3 = :artifact, completed_at = :completed'
                 expr_values[':artifact'] = s3_model_artifacts
-                expr_values[':completed'] = timestamp
+                # Use TrainingEndTime from event if available, otherwise use current time
+                training_end_time = detail.get('TrainingEndTime')
+                if training_end_time:
+                    # TrainingEndTime is in ISO format, convert to milliseconds
+                    try:
+                        end_dt = datetime.fromisoformat(training_end_time.replace('Z', '+00:00'))
+                        expr_values[':completed'] = int(end_dt.timestamp() * 1000)
+                    except (ValueError, AttributeError):
+                        expr_values[':completed'] = timestamp
+                else:
+                    expr_values[':completed'] = timestamp
         
         # Add failure reason for failed jobs
         elif training_job_status == 'Failed':

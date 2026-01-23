@@ -324,13 +324,37 @@ export default function CreateLabelingJob() {
                   label="Label Categories"
                   description="Comma-separated list of label categories"
                   constraintText="Required"
+                  info={
+                    <Box>
+                      For anomaly detection, the first category should be "normal" (non-defect) 
+                      and subsequent categories should be defect types. This ensures correct 
+                      label encoding where 0=normal, 1+=anomaly.
+                    </Box>
+                  }
                 >
                   <Input
                     value={labelCategories}
                     onChange={({ detail }) => setLabelCategories(detail.value)}
-                    placeholder="e.g., defect, scratch, dent, normal"
+                    placeholder="e.g., normal, defect"
                   />
                 </FormField>
+                
+                {labelCategories && (
+                  <Alert type="info">
+                    <Box>
+                      <strong>Label Order Preview:</strong>
+                      <ul style={{ marginTop: '8px', marginBottom: 0 }}>
+                        {labelCategories.split(',').map((cat, idx) => (
+                          <li key={idx}>
+                            <strong>{idx}</strong> = {cat.trim()}
+                            {idx === 0 && ' (should be normal/non-defect)'}
+                            {idx > 0 && ' (anomaly/defect)'}
+                          </li>
+                        ))}
+                      </ul>
+                    </Box>
+                  </Alert>
+                )}
 
                 <FormField
                   label="Labeling Instructions"

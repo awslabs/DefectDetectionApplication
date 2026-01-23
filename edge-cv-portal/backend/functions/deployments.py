@@ -21,8 +21,13 @@ dynamodb = boto3.resource('dynamodb')
 DEPLOYMENTS_TABLE = os.environ.get('DEPLOYMENTS_TABLE', 'dda-portal-deployments')
 
 # Minimum Greengrass Nucleus version required for DDA components
+# Using 2.13.0 instead of 2.14.0 due to LogManager version constraint (<2.14.0)
 # This is auto-included in deployments to prevent version mismatch errors
-MIN_NUCLEUS_VERSION = '2.14.0'
+MIN_NUCLEUS_VERSION = '2.13.0'
+
+# CloudWatch log manager for device logging
+# Version 2.3.9 supports Nucleus >=2.1.0 <2.14.0
+LOG_MANAGER_VERSION = '2.3.9'
 
 # Components that require Nucleus to be explicitly included in deployment
 # Model components (model-*) also need Nucleus since they depend on DDA components
@@ -401,6 +406,103 @@ def create_deployment(body, user):
                 'reason': 'Required for DDA component dependencies'
             })
             logger.info(f"Auto-included aws.greengrass.Nucleus {MIN_NUCLEUS_VERSION} for DDA component deployment")
+        
+        # Auto-include CloudWatch log manager for device logging
+        if needs_nucleus and 'aws.greengrass.LogManager' not in components_map:
+            # Configure LogManager to upload system and component logs
+            log_manager_config = {
+                'logsUploaderConfiguration': {
+                    'systemLogsConfiguration': {
+                        'uploadToCloudWatch': True,
+                        'minimumLogLevel': 'INFO',
+                        'diskSpaceLimit': 25,
+                        'diskSpaceLimitUnit': 'MB',
+                        'deleteLogFileAfterCloudUpload': False
+                    },
+                    'componentLogsConfigurationMap': {
+                        # Upload all component logs
+                        'com.aws.greengrass': {
+                            'minimumLogLevel': 'INFO',
+                            'diskSpaceLimit': 10,
+                            'diskSpaceLimitUnit': 'MB',
+                            'deleteLogFileAfterCloudUpload': False
+                        },
+                        # DDA components
+                        'aws.edgeml.dda': {
+                            'minimumLogLevel': 'INFO',
+                            'diskSpaceLimit': 10,
+                            'diskSpaceLimitUnit': 'MB',
+                            'deleteLogFileAfterCloudUpload': False
+                        },
+                        # Model components
+                        'model': {
+                            'minimumLogLevel': 'INFO',
+                            'diskSpaceLimit': 10,
+                            'diskSpaceLimitUnit': 'MB',
+                            'deleteLogFileAfterCloudUpload': False
+                        }
+                    },
+                    'periodicUploadIntervalSec': 300  # Upload every 5 minutes
+                }
+            }
+            
+            components_map['aws.greengrass.LogManager'] = {
+                'componentVersion': LOG_MANAGER_VERSION,
+                'configurationUpdate': {
+                    'merge': json.dumps(log_manager_config)
+                }
+            }
+            auto_included.append({
+                'component_name': 'aws.greengrass.LogManager',
+                'component_version': LOG_MANAGER_VERSION,
+                'reason': 'Required for CloudWatch logging from devices'
+            })
+            logger.info(f"Auto-included aws.greengrass.LogManager {LOG_MANAGER_VERSION} with configuration for device logging")
+        
+        # Auto-include InferenceUploader for automatic S3 upload of inference results
+        # Only include if explicitly enabled in UseCase configuration (opt-in)
+        enable_inference_uploader = usecase.get('enable_inference_uploader', False)
+        
+        if enable_inference_uploader and needs_nucleus and 'aws.edgeml.dda.InferenceUploader' not in components_map:
+            # Build S3 configuration for InferenceUploader
+            s3_bucket = usecase.get('inference_uploader_s3_bucket') or f"dda-inference-results-{account_id}"
+            
+            # Determine S3 prefix based on target
+            if target_thing_group:
+                s3_prefix = f"{usecase_id}/{target_thing_group}"
+            else:
+                device_id = target_devices[0] if target_devices else 'unknown'
+                s3_prefix = f"{usecase_id}/{device_id}"
+            
+            # Get configurable upload interval (default 5 minutes, can be immediate, hourly, etc.)
+            upload_interval = usecase.get('inference_uploader_interval_seconds', 300)  # Default 5 minutes
+            
+            inference_uploader_config = {
+                's3Bucket': s3_bucket,
+                's3Prefix': s3_prefix,
+                'uploadIntervalSeconds': upload_interval,
+                'batchSize': usecase.get('inference_uploader_batch_size', 100),
+                'localRetentionDays': usecase.get('inference_uploader_retention_days', 7),
+                'uploadImages': usecase.get('inference_uploader_upload_images', True),
+                'uploadMetadata': usecase.get('inference_uploader_upload_metadata', True),
+                'inferenceResultsPath': '/aws_dda/inference-results',
+                'awsRegion': region
+            }
+            
+            components_map['aws.edgeml.dda.InferenceUploader'] = {
+                'componentVersion': '1.0.0',
+                'configurationUpdate': {
+                    'merge': json.dumps(inference_uploader_config)
+                }
+            }
+            auto_included.append({
+                'component_name': 'aws.edgeml.dda.InferenceUploader',
+                'component_version': '1.0.0',
+                'reason': f'Automatic upload of inference results to S3 (interval: {upload_interval}s)'
+            })
+            logger.info(f"Auto-included aws.edgeml.dda.InferenceUploader with S3 bucket {s3_bucket}, prefix {s3_prefix}, interval {upload_interval}s")
+        elif not enable_inference_uploader:
+            logger.info("InferenceUploader not included - disabled in UseCase configuration")
         
         # Determine target ARN
         if target_thing_group:

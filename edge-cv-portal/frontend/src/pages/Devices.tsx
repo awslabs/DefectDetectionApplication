@@ -134,7 +134,6 @@ export default function Devices() {
       device.device_id.toLowerCase().includes(searchLower) ||
       device.thing_name?.toLowerCase().includes(searchLower) ||
       device.status?.toLowerCase().includes(searchLower) ||
-      device.greengrass_version?.toLowerCase().includes(searchLower) ||
       device.platform?.toLowerCase().includes(searchLower)
     );
   });
@@ -209,11 +208,6 @@ export default function Devices() {
             header: 'Status',
             cell: (item: Device) => getStatusIndicator(item.status),
             sortingField: 'status',
-          },
-          {
-            id: 'greengrass_version',
-            header: 'Greengrass Version',
-            cell: (item: Device) => item.greengrass_version || '-',
           },
           {
             id: 'platform',

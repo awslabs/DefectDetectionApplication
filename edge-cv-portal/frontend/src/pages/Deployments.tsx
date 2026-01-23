@@ -10,6 +10,11 @@ import {
   Select,
   SelectProps,
   Alert,
+  Pagination,
+  TextFilter,
+  ColumnLayout,
+  Container,
+  Icon,
 } from '@cloudscape-design/components';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
@@ -26,6 +31,8 @@ interface DeploymentItem {
   usecase_id: string;
 }
 
+const PAGE_SIZE = 10;
+
 export default function Deployments() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -37,6 +44,11 @@ export default function Deployments() {
   // Use case management
   const [useCases, setUseCases] = useState<UseCase[]>([]);
   const [selectedUseCase, setSelectedUseCase] = useState<SelectProps.Option | null>(null);
+  
+  // Filtering and pagination
+  const [filterText, setFilterText] = useState('');
+  const [statusFilter, setStatusFilter] = useState<SelectProps.Option | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
 
   // Load use cases on mount
   useEffect(() => {
@@ -90,6 +102,7 @@ export default function Deployments() {
     try {
       const response = await apiService.listDeployments(selectedUseCase.value);
       setDeployments(response.deployments || []);
+      setCurrentPage(1);
     } catch (err: any) {
       console.error('Failed to load deployments:', err);
       setError(err.message || 'Failed to load deployments');
@@ -99,10 +112,38 @@ export default function Deployments() {
     }
   };
 
+  // Filter deployments
+  const filteredDeployments = deployments.filter(dep => {
+    const matchesText = !filterText || 
+      dep.deployment_name?.toLowerCase().includes(filterText.toLowerCase()) ||
+      dep.deployment_id.toLowerCase().includes(filterText.toLowerCase()) ||
+      getTargetName(dep.target_arn).toLowerCase().includes(filterText.toLowerCase());
+    
+    const matchesStatus = !statusFilter?.value || 
+      dep.deployment_status.toLowerCase() === statusFilter.value.toLowerCase();
+    
+    return matchesText && matchesStatus;
+  });
+
+  // Paginate
+  const paginatedDeployments = filteredDeployments.slice(
+    (currentPage - 1) * PAGE_SIZE,
+    currentPage * PAGE_SIZE
+  );
+
+  // Calculate stats
+  const stats = {
+    total: deployments.length,
+    active: deployments.filter(d => d.deployment_status === 'ACTIVE').length,
+    completed: deployments.filter(d => d.deployment_status === 'COMPLETED').length,
+    failed: deployments.filter(d => d.deployment_status === 'FAILED').length,
+  };
+
   const getStatusIndicator = (status: string) => {
     const statusLower = status?.toLowerCase() || 'unknown';
     switch (statusLower) {
       case 'active':
+        return <StatusIndicator type="in-progress">{status}</StatusIndicator>;
       case 'completed':
         return <StatusIndicator type="success">{status}</StatusIndicator>;
       case 'failed':
@@ -122,10 +163,26 @@ export default function Deployments() {
     return parts[parts.length - 1] || targetArn;
   };
 
+  const getTargetType = (targetArn: string) => {
+    if (!targetArn) return 'unknown';
+    if (targetArn.includes(':thinggroup/')) return 'group';
+    if (targetArn.includes(':thing/')) return 'device';
+    return 'unknown';
+  };
+
   const formatTimestamp = (timestamp?: string) => {
     if (!timestamp) return '-';
     return new Date(timestamp).toLocaleString();
   };
+
+  const statusOptions: SelectProps.Option[] = [
+    { label: 'All Statuses', value: '' },
+    { label: 'Active', value: 'ACTIVE' },
+    { label: 'Completed', value: 'COMPLETED' },
+    { label: 'Failed', value: 'FAILED' },
+    { label: 'Canceled', value: 'CANCELED' },
+    { label: 'Inactive', value: 'INACTIVE' },
+  ];
 
   return (
     <SpaceBetween size="l">
@@ -134,16 +191,37 @@ export default function Deployments() {
           {error}
         </Alert>
       )}
+
+      {/* Stats Cards */}
+      {selectedUseCase && deployments.length > 0 && (
+        <ColumnLayout columns={4} variant="text-grid">
+          <Container>
+            <Box variant="awsui-key-label">Total Deployments</Box>
+            <Box variant="h2">{stats.total}</Box>
+          </Container>
+          <Container>
+            <Box variant="awsui-key-label">Active</Box>
+            <Box variant="h2" color="text-status-info">{stats.active}</Box>
+          </Container>
+          <Container>
+            <Box variant="awsui-key-label">Completed</Box>
+            <Box variant="h2" color="text-status-success">{stats.completed}</Box>
+          </Container>
+          <Container>
+            <Box variant="awsui-key-label">Failed</Box>
+            <Box variant="h2" color="text-status-error">{stats.failed}</Box>
+          </Container>
+        </ColumnLayout>
+      )}
       
       <Table
         header={
           <Header
             variant="h1"
             description="Manage Greengrass deployments to edge devices"
-            counter={`(${deployments.length})`}
+            counter={`(${filteredDeployments.length})`}
             actions={
               <SpaceBetween direction="horizontal" size="xs">
-                <Box variant="span">Use Case:</Box>
                 <Select
                   selectedOption={selectedUseCase}
                   onChange={({ detail }) => setSelectedUseCase(detail.selectedOption)}
@@ -174,8 +252,36 @@ export default function Deployments() {
             Deployments
           </Header>
         }
+        filter={
+          <SpaceBetween direction="horizontal" size="xs">
+            <TextFilter
+              filteringText={filterText}
+              filteringPlaceholder="Search by name, ID, or target"
+              onChange={({ detail }) => {
+                setFilterText(detail.filteringText);
+                setCurrentPage(1);
+              }}
+            />
+            <Select
+              selectedOption={statusFilter}
+              onChange={({ detail }) => {
+                setStatusFilter(detail.selectedOption);
+                setCurrentPage(1);
+              }}
+              options={statusOptions}
+              placeholder="Filter by status"
+            />
+          </SpaceBetween>
+        }
+        pagination={
+          <Pagination
+            currentPageIndex={currentPage}
+            pagesCount={Math.ceil(filteredDeployments.length / PAGE_SIZE)}
+            onChange={({ detail }) => setCurrentPage(detail.currentPageIndex)}
+          />
+        }
         loading={loading}
-        items={deployments}
+        items={paginatedDeployments}
         selectionType="single"
         selectedItems={selectedItems}
         onSelectionChange={({ detail }) => setSelectedItems(detail.selectedItems)}
@@ -199,7 +305,12 @@ export default function Deployments() {
           {
             id: 'target',
             header: 'Target',
-            cell: (item) => getTargetName(item.target_arn),
+            cell: (item) => (
+              <SpaceBetween direction="horizontal" size="xxs">
+                <Icon name={getTargetType(item.target_arn) === 'group' ? 'group' : 'status-positive'} />
+                <span>{getTargetName(item.target_arn)}</span>
+              </SpaceBetween>
+            ),
           },
           {
             id: 'status',
@@ -210,13 +321,37 @@ export default function Deployments() {
           {
             id: 'latest',
             header: 'Latest',
-            cell: (item) => item.is_latest_for_target ? 'Yes' : 'No',
+            cell: (item) => item.is_latest_for_target ? 
+              <StatusIndicator type="success">Yes</StatusIndicator> : 
+              <Box color="text-body-secondary">No</Box>,
           },
           {
             id: 'created',
             header: 'Created',
             cell: (item) => formatTimestamp(item.creation_timestamp),
             sortingField: 'creation_timestamp',
+          },
+          {
+            id: 'actions',
+            header: 'Actions',
+            cell: (item) => (
+              <SpaceBetween direction="horizontal" size="xxs">
+                <Button
+                  variant="inline-icon"
+                  iconName="external"
+                  onClick={() => navigate(`/deployments/${item.deployment_id}?usecase_id=${selectedUseCase?.value}`)}
+                  ariaLabel="View details"
+                />
+                {getTargetType(item.target_arn) === 'device' && (
+                  <Button
+                    variant="inline-icon"
+                    iconName="status-positive"
+                    onClick={() => navigate(`/devices/${getTargetName(item.target_arn)}?usecase_id=${selectedUseCase?.value}`)}
+                    ariaLabel="View device"
+                  />
+                )}
+              </SpaceBetween>
+            ),
           },
         ]}
         empty={

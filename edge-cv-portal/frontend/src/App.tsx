@@ -19,6 +19,7 @@ import LabelingDetail from './pages/LabelingDetail';
 import CreateLabelingJob from './pages/CreateLabelingJob';
 import DatasetBrowser from './pages/DatasetBrowser';
 import PreLabeledDatasets from './pages/PreLabeledDatasets';
+import TransformManifest from './pages/TransformManifest';
 import DataManagement from './pages/DataManagement';
 import Deployments from './pages/Deployments';
 import DeploymentDetail from './pages/DeploymentDetail';
@@ -64,6 +65,7 @@ function App() {
               <Route path="labeling/datasets" element={<DatasetBrowser />} />
               <Route path="data" element={<DataManagement />} />
               <Route path="labeling/pre-labeled" element={<PreLabeledDatasets />} />
+              <Route path="labeling/transform-manifest" element={<TransformManifest />} />
               <Route path="labeling/create" element={<CreateLabelingJob />} />
               <Route path="labeling/:jobId" element={<LabelingDetail />} />
               <Route path="devices" element={<Devices />} />

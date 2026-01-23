@@ -25,6 +25,7 @@ export interface ComputeStackProps extends cdk.StackProps {
   settingsTable: dynamodb.Table;
   componentsTable: dynamodb.Table;
   sharedComponentsTable: dynamodb.Table;
+  dataAccountsTable: dynamodb.Table;
   portalArtifactsBucket: s3.Bucket;
   /**
    * CloudFront domain for the portal frontend.
@@ -76,6 +77,7 @@ export class ComputeStack extends cdk.Stack {
       props.settingsTable.grantReadWriteData(role);
       props.componentsTable.grantReadWriteData(role);
       props.sharedComponentsTable.grantReadWriteData(role);
+      props.dataAccountsTable.grantReadWriteData(role);
 
       // Grant S3 permissions for portal artifacts bucket
       props.portalArtifactsBucket.grantReadWrite(role);
@@ -219,6 +221,20 @@ export class ComputeStack extends cdk.Stack {
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(30),
+    });
+
+    // Device Logs Lambda Handler
+    const deviceLogsHandler = new lambda.Function(this, 'DeviceLogsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'device_logs.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('DeviceLogs'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-19-device-logs',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(60), // Longer timeout for log fetching
     });
 
     // Deployments Lambda Handler
@@ -422,6 +438,20 @@ export class ComputeStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(120), // 2 minutes for cross-account component creation
     });
 
+    // Data Accounts Lambda Handler for managing registered Data Accounts
+    const dataAccountsHandler = new lambda.Function(this, 'DataAccountsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'data_accounts.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('DataAccounts'),
+      environment: {
+        ...lambdaEnvironment,
+        DATA_ACCOUNTS_TABLE: props.dataAccountsTable.tableName,
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+
     // Model Import Lambda Handler for BYOM (Bring Your Own Model)
     const modelImportHandler = new lambda.Function(this, 'ModelImportHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
@@ -461,6 +491,37 @@ export class ComputeStack extends cdk.Stack {
 
     // Grant Model Converter Lambda permission to invoke Model Import
     modelImportHandler.grantInvoke(modelConverterHandler);
+
+    // Models Registry Lambda Handler
+    const modelsHandler = new lambda.Function(this, 'ModelsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'models.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('Models'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-19-models-registry',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    // Audit Logs Lambda Handler
+    const auditLogsHandler = new lambda.Function(this, 'AuditLogsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'audit_logs.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('AuditLogs'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-20-audit-logs',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    // Grant Audit Logs Lambda read access to the audit log table
+    props.auditLogTable.grantReadData(auditLogsHandler);
 
     // Grant SharedComponents Lambda permission to update the GDK component bucket policy
     // This is needed to add new usecase accounts to the bucket policy during onboarding
@@ -777,6 +838,7 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     // Create Lambda integrations (this helps avoid circular dependencies)
     const useCasesIntegration = new apigateway.LambdaIntegration(useCasesHandler);
     const devicesIntegration = new apigateway.LambdaIntegration(devicesHandler);
+    const deviceLogsIntegration = new apigateway.LambdaIntegration(deviceLogsHandler);
     const deploymentsIntegration = new apigateway.LambdaIntegration(deploymentsHandler);
     const authIntegration = new apigateway.LambdaIntegration(authHandler);
     const userManagementIntegration = new apigateway.LambdaIntegration(userManagementHandler);
@@ -792,6 +854,8 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     const sharedComponentsIntegration = new apigateway.LambdaIntegration(sharedComponentsHandler);
     const modelImportIntegration = new apigateway.LambdaIntegration(modelImportHandler);
     const modelConverterIntegration = new apigateway.LambdaIntegration(modelConverterHandler);
+    const modelsIntegration = new apigateway.LambdaIntegration(modelsHandler);
+    const auditLogsIntegration = new apigateway.LambdaIntegration(auditLogsHandler);
 
     // API Resources
     // Auth endpoints
@@ -1123,6 +1187,28 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       }
     );
 
+    // Labeling transform-manifest endpoint
+    const transformManifestResource = labelingResource.addResource('transform-manifest');
+    transformManifestResource.addMethod(
+      'POST',
+      labelingIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Labeling workteams endpoint
+    const labelingWorkteamsResource = labelingResource.addResource('workteams');
+    labelingWorkteamsResource.addMethod(
+      'GET',
+      labelingIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
     // Devices endpoints
     const devicesResource = this.api.root.addResource('devices');
     devicesResource.addMethod(
@@ -1138,6 +1224,27 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     deviceResource.addMethod(
       'GET',
       devicesIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Device Logs endpoints
+    const deviceLogsResource = deviceResource.addResource('logs');
+    deviceLogsResource.addMethod(
+      'GET',
+      deviceLogsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    const deviceComponentLogsResource = deviceLogsResource.addResource('{component}');
+    deviceComponentLogsResource.addMethod(
+      'GET',
+      deviceLogsIntegration,
       {
         authorizer,
         authorizationType: apigateway.AuthorizationType.COGNITO,
@@ -1276,6 +1383,16 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     // Models endpoints (for BYOM - Bring Your Own Model)
     const modelsResource = this.api.root.addResource('models');
     
+    // List models endpoint (Model Registry)
+    modelsResource.addMethod(
+      'GET',
+      modelsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+    
     // Model format specification endpoint
     const modelFormatSpecResource = modelsResource.addResource('format-spec');
     modelFormatSpecResource.addMethod(
@@ -1336,6 +1453,36 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     modelTypesResource.addMethod(
       'GET',
       modelConverterIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Individual model endpoints
+    const modelResource = modelsResource.addResource('{id}');
+    modelResource.addMethod(
+      'GET',
+      modelsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+    modelResource.addMethod(
+      'DELETE',
+      modelsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Model stage update endpoint
+    const modelStageResource = modelResource.addResource('stage');
+    modelStageResource.addMethod(
+      'PUT',
+      modelsIntegration,
       {
         authorizer,
         authorizationType: apigateway.AuthorizationType.COGNITO,
@@ -1449,6 +1596,85 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     updateAllSharedResource.addMethod(
       'POST',
       sharedComponentsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Data Accounts endpoints (Portal Admin only)
+    const dataAccountsIntegration = new apigateway.LambdaIntegration(dataAccountsHandler);
+    const dataAccountsResource = this.api.root.addResource('data-accounts');
+    
+    // GET /data-accounts - List all Data Accounts
+    dataAccountsResource.addMethod(
+      'GET',
+      dataAccountsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+    
+    // POST /data-accounts - Register new Data Account
+    dataAccountsResource.addMethod(
+      'POST',
+      dataAccountsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+    
+    // Data Account by ID
+    const dataAccountIdResource = dataAccountsResource.addResource('{id}');
+    
+    // GET /data-accounts/{id} - Get Data Account details
+    dataAccountIdResource.addMethod(
+      'GET',
+      dataAccountsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+    
+    // PUT /data-accounts/{id} - Update Data Account
+    dataAccountIdResource.addMethod(
+      'PUT',
+      dataAccountsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+    
+    // DELETE /data-accounts/{id} - Delete Data Account
+    dataAccountIdResource.addMethod(
+      'DELETE',
+      dataAccountsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+    
+    // POST /data-accounts/{id}/test - Test connection
+    const testConnectionResource = dataAccountIdResource.addResource('test');
+    testConnectionResource.addMethod(
+      'POST',
+      dataAccountsIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Audit Logs endpoints
+    const auditLogsResource = this.api.root.addResource('audit-logs');
+    auditLogsResource.addMethod(
+      'GET',
+      auditLogsIntegration,
       {
         authorizer,
         authorizationType: apigateway.AuthorizationType.COGNITO,

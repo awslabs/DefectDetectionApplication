@@ -27,6 +27,10 @@ export default function CreateTraining() {
   const [useCaseId, setUseCaseId] = useState<SelectProps.Option | null>(null);
   const [useCases, setUseCases] = useState<SelectProps.Option[]>([]);
   const [useCaseData, setUseCaseData] = useState<any[]>([]); // Store full usecase objects
+  const [modelSource, setModelSource] = useState<SelectProps.Option>({
+    label: 'AWS Marketplace - Computer Vision Defect Detection',
+    value: 'marketplace',
+  });
   const [modelName, setModelName] = useState('');
   const [modelVersion, setModelVersion] = useState('1.0.0');
   const [modelType, setModelType] = useState<SelectProps.Option>({
@@ -160,9 +164,9 @@ export default function CreateTraining() {
           const jobOptions = labelingData.jobs
             ?.filter((job: any) => job.output_manifest_s3_uri) // Only include jobs with output manifest
             .map((job: any) => ({
-              label: `${job.job_name} (${job.image_count} images)`,
+              label: `${job.job_name} (${job.image_count} images)${job.is_transformed ? ' ✓ Transformed' : ' ⚠️ Not Transformed'}`,
               value: job.output_manifest_s3_uri,
-              description: `Created: ${new Date(job.created_at * 1000).toLocaleDateString()}`,
+              description: `Created: ${new Date(job.created_at * 1000).toLocaleDateString()}${job.is_transformed ? ' • DDA-compatible' : ' • Requires transformation'}`,
             })) || [];
           setLabelingJobs(jobOptions);
         }
@@ -216,6 +220,7 @@ export default function CreateTraining() {
 
       await apiService.createTrainingJob({
         usecase_id: useCaseId.value as string,
+        model_source: modelSource.value as string,
         model_name: modelName.trim(),
         model_version: modelVersion.trim(),
         model_type: modelType.value as string,
@@ -278,9 +283,52 @@ export default function CreateTraining() {
             )}
 
             <Alert type="info">
-              Training uses the AWS Marketplace Computer Vision Defect Detection algorithm. Ensure
-              you have an active subscription before proceeding.
+              Select your model source. AWS Marketplace model requires properly formatted manifests with 'anomaly-label' attributes.
+              Use the Manifest Transformer tool if your Ground Truth manifest needs conversion.
             </Alert>
+
+            <FormField
+              label="Model Source"
+              description="Choose the model to train"
+              stretch
+            >
+              <Select
+                selectedOption={modelSource}
+                onChange={({ detail }) => setModelSource(detail.selectedOption)}
+                options={[
+                  {
+                    label: 'AWS Marketplace - Computer Vision Defect Detection',
+                    value: 'marketplace',
+                    description: 'Pre-trained defect detection model (requires subscription)',
+                  },
+                  {
+                    label: 'Bring Your Own Model (BYOM)',
+                    value: 'byom',
+                    description: 'Coming soon - Use your custom model',
+                    disabled: true,
+                  },
+                ]}
+                selectedAriaLabel="Selected"
+              />
+            </FormField>
+
+            {modelSource.value === 'marketplace' && (
+              <Alert type="warning">
+                <Box variant="h4">Manifest Requirements</Box>
+                <Box variant="p">
+                  The AWS Marketplace model requires manifests with these exact attribute names:
+                </Box>
+                <ul style={{ marginLeft: '20px' }}>
+                  <li><code>source-ref</code> - Image S3 URI</li>
+                  <li><code>anomaly-label</code> - Label value (0 or 1)</li>
+                  <li><code>anomaly-label-metadata</code> - Label metadata</li>
+                </ul>
+                <Box variant="p">
+                  If your Ground Truth manifest uses different names (e.g., <code>my-job</code>, <code>my-job-metadata</code>),
+                  use the <strong>Manifest Transformer</strong> tool in the Labeling page before training.
+                </Box>
+              </Alert>
+            )}
 
             <FormField
               label="Use Case"

@@ -16,6 +16,7 @@ export class StorageStack extends cdk.Stack {
   public readonly settingsTable: dynamodb.Table;
   public readonly componentsTable: dynamodb.Table;
   public readonly sharedComponentsTable: dynamodb.Table;
+  public readonly dataAccountsTable: dynamodb.Table;
   public readonly portalArtifactsBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -418,6 +419,32 @@ export class StorageStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // DataAccounts Table - stores registered Data Accounts for cross-account data access
+    this.dataAccountsTable = new dynamodb.Table(this, 'DataAccountsTable', {
+      tableName: 'dda-portal-data-accounts',
+      partitionKey: {
+        name: 'data_account_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    this.dataAccountsTable.addGlobalSecondaryIndex({
+      indexName: 'status-index',
+      partitionKey: {
+        name: 'status',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'created_at',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+    });
+
     // Portal Artifacts Bucket - stores shared component artifacts (dda-LocalServer)
     // Note: For cross-account Greengrass component access, we use the GDK component bucket
     // (dda-component-{region}-{account}) which is configured with cross-account access
@@ -489,6 +516,11 @@ export class StorageStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'SharedComponentsTableName', {
       value: this.sharedComponentsTable.tableName,
       description: 'SharedComponents DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'DataAccountsTableName', {
+      value: this.dataAccountsTable.tableName,
+      description: 'DataAccounts DynamoDB Table Name',
     });
 
     new cdk.CfnOutput(this, 'PortalArtifactsBucketName', {

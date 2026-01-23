@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Container,
   Header,
@@ -16,9 +16,15 @@ import {
   Icon,
   ProgressBar,
   Badge,
-  Tabs,
+  Cards,
+  TextFilter,
+  Pagination,
   ColumnLayout,
+  Link,
+  StatusIndicator,
+  Grid,
 } from '@cloudscape-design/components';
+import { useNavigate } from 'react-router-dom';
 import { apiService } from '../services/api';
 import { UseCase } from '../types';
 
@@ -49,7 +55,39 @@ interface UploadFile {
   error?: string;
 }
 
+// Helper to detect folder purpose from path
+const getFolderPurpose = (path: string): { label: string; color: 'blue' | 'green' | 'grey' | 'red' } => {
+  const lowerPath = path.toLowerCase();
+  if (lowerPath.includes('train') || lowerPath.includes('training')) {
+    return { label: 'Training Data', color: 'blue' };
+  }
+  if (lowerPath.includes('label') || lowerPath.includes('annotation')) {
+    return { label: 'Labeling', color: 'green' };
+  }
+  if (lowerPath.includes('test') || lowerPath.includes('validation')) {
+    return { label: 'Test/Validation', color: 'grey' };
+  }
+  if (lowerPath.includes('output') || lowerPath.includes('result')) {
+    return { label: 'Output', color: 'red' };
+  }
+  return { label: 'Data', color: 'grey' };
+};
+
+// Helper to get file type icon
+const getFileIcon = (_filename: string): 'file' => {
+  // All files use the same icon for now
+  return 'file';
+};
+
+// Helper to check if file is an image
+const isImageFile = (filename: string): boolean => {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  return ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext);
+};
+
 export default function DataManagement() {
+  const navigate = useNavigate();
+  
   // UseCase selection state
   const [useCases, setUseCases] = useState<UseCase[]>([]);
   const [selectedUseCase, setSelectedUseCase] = useState<SelectProps.Option | null>(null);
@@ -63,12 +101,18 @@ export default function DataManagement() {
   const [currentPath, setCurrentPath] = useState<string[]>([]);
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
-  const [activeTab, setActiveTab] = useState('browse');
   const [targetAccountInfo, setTargetAccountInfo] = useState<{account: string, hasDataRole: boolean} | null>(null);
+
+  // UI state
+  const [filterText, setFilterText] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [selectedFiles, setSelectedFiles] = useState<FileItem[]>([]);
+  const pageSize = 20;
 
   // Modal states
   const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
+  const [showBucketSelector, setShowBucketSelector] = useState(false);
 
   // Form states
   const [newFolderName, setNewFolderName] = useState('');
@@ -76,6 +120,27 @@ export default function DataManagement() {
   const [isUploading, setIsUploading] = useState(false);
 
   const currentPrefix = currentPath.join('/') + (currentPath.length > 0 ? '/' : '');
+
+  // Filtered and paginated files
+  const filteredFiles = useMemo(() => {
+    if (!filterText) return files;
+    const lower = filterText.toLowerCase();
+    return files.filter(f => f.name.toLowerCase().includes(lower));
+  }, [files, filterText]);
+
+  const paginatedFiles = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredFiles.slice(start, start + pageSize);
+  }, [filteredFiles, currentPage]);
+
+  const totalPages = Math.ceil(filteredFiles.length / pageSize);
+
+  // Stats
+  const stats = useMemo(() => {
+    const imageCount = files.filter(f => isImageFile(f.name)).length;
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    return { imageCount, totalSize, folderCount: folders.length, fileCount: files.length };
+  }, [files, folders]);
 
   // Load use cases on mount
   useEffect(() => {
@@ -87,7 +152,6 @@ export default function DataManagement() {
       const response = await apiService.listUseCases();
       const useCaseList = response.usecases || [];
       setUseCases(useCaseList);
-      // Auto-select first use case if available
       if (useCaseList.length > 0) {
         setSelectedUseCase({
           label: useCaseList[0].name,
@@ -127,7 +191,6 @@ export default function DataManagement() {
       const response = await apiService.listDataBuckets(usecaseId);
       setBuckets(response.buckets);
       
-      // Track which account is being queried
       if (response.target_account) {
         setTargetAccountInfo({
           account: response.target_account,
@@ -150,6 +213,7 @@ export default function DataManagement() {
   const loadFolderContents = async () => {
     if (!selectedBucket) return;
     setLoading(true);
+    setSelectedFiles([]);
     try {
       const response = await apiService.listDataFolders(usecaseId, {
         bucket: selectedBucket,
@@ -157,6 +221,7 @@ export default function DataManagement() {
       });
       setFolders(response.folders);
       setFiles(response.files);
+      setCurrentPage(1);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load folder contents');
     } finally {
@@ -182,7 +247,6 @@ export default function DataManagement() {
     }
   };
 
-
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = event.target.files;
     if (!selectedFiles) return;
@@ -206,14 +270,12 @@ export default function DataManagement() {
     }));
 
     try {
-      // Get presigned URLs for all files
       const response = await apiService.getBatchUploadUrls(usecaseId, {
         bucket: selectedBucket,
         prefix: currentPrefix,
         files: fileInfos,
       });
 
-      // Upload each file
       for (let i = 0; i < pendingFiles.length; i++) {
         const uploadFile = pendingFiles[i];
         const uploadInfo = response.uploads.find(u => u.filename === uploadFile.file.name);
@@ -229,19 +291,15 @@ export default function DataManagement() {
           continue;
         }
 
-        // Update status to uploading
         setUploadFiles(prev =>
           prev.map(f => (f.file === uploadFile.file ? { ...f, status: 'uploading' as const } : f))
         );
 
         try {
-          // Upload to S3 using presigned URL
           const uploadResponse = await fetch(uploadInfo.upload_url, {
             method: 'PUT',
             body: uploadFile.file,
-            headers: {
-              'Content-Type': uploadInfo.content_type,
-            },
+            headers: { 'Content-Type': uploadInfo.content_type },
           });
 
           if (uploadResponse.ok) {
@@ -274,10 +332,12 @@ export default function DataManagement() {
   const navigateToFolder = (folderPath: string) => {
     const pathParts = folderPath.split('/').filter(p => p);
     setCurrentPath(pathParts);
+    setFilterText('');
   };
 
   const navigateUp = () => {
     setCurrentPath(prev => prev.slice(0, -1));
+    setFilterText('');
   };
 
   const formatFileSize = (bytes: number): string => {
@@ -288,16 +348,38 @@ export default function DataManagement() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const bucketOptions = buckets.map(b => ({ label: b.name, value: b.name }));
+  const handleUseForTraining = () => {
+    if (!selectedBucket || !usecaseId) return;
+    const s3Path = `s3://${selectedBucket}/${currentPrefix}`;
+    navigate(`/training/create?usecase_id=${usecaseId}&data_path=${encodeURIComponent(s3Path)}`);
+  };
 
+  const handleUseForLabeling = () => {
+    if (!selectedBucket || !usecaseId) return;
+    const s3Path = `s3://${selectedBucket}/${currentPrefix}`;
+    navigate(`/labeling/create?usecase_id=${usecaseId}&input_path=${encodeURIComponent(s3Path)}`);
+  };
+
+  // Build breadcrumb items
+  const breadcrumbItems = [
+    { text: 'Data', href: '#' },
+    ...(selectedBucket ? [{ text: selectedBucket, href: '#' }] : []),
+    ...currentPath.map((p, idx) => ({
+      text: p,
+      href: '#',
+      // Store index for navigation
+      data: idx,
+    })),
+  ];
 
   return (
     <SpaceBetween size="l">
+      {/* Header with use case selector */}
       <Header
         variant="h1"
-        description={
-          <SpaceBetween direction="horizontal" size="s" alignItems="center">
-            <Box variant="span">Use Case:</Box>
+        description="Browse and manage training data, upload images, and organize datasets"
+        actions={
+          <SpaceBetween direction="horizontal" size="xs">
             <Select
               selectedOption={selectedUseCase}
               onChange={({ detail }) => {
@@ -312,9 +394,8 @@ export default function DataManagement() {
                 label: uc.name,
                 value: uc.usecase_id,
               }))}
-              placeholder="Select a use case"
+              placeholder="Select use case"
               disabled={useCases.length === 0}
-              expandToViewport
             />
           </SpaceBetween>
         }
@@ -330,220 +411,321 @@ export default function DataManagement() {
 
       {!usecaseId ? (
         <Alert type="info">
-          Select a use case above to manage data buckets and upload files.
+          Select a use case to browse and manage data.
         </Alert>
+      ) : !selectedBucket ? (
+        <Container>
+          <SpaceBetween size="m">
+            <Box variant="h3">Select a Data Bucket</Box>
+            {targetAccountInfo && (
+              <Alert type="info">
+                {targetAccountInfo.hasDataRole 
+                  ? `Data Account: ${targetAccountInfo.account}`
+                  : `UseCase Account: ${targetAccountInfo.account} (no separate Data Account configured)`
+                }
+              </Alert>
+            )}
+            <Cards
+              items={buckets}
+              loading={loading}
+              loadingText="Loading buckets..."
+              cardDefinition={{
+                header: item => (
+                  <Link fontSize="heading-m" onFollow={() => {
+                    setSelectedBucket(item.name);
+                    setCurrentPath([]);
+                  }}>
+                    {item.name}
+                  </Link>
+                ),
+                sections: [
+                  {
+                    id: 'region',
+                    content: item => <Badge>{item.region}</Badge>,
+                  },
+                  {
+                    id: 'status',
+                    content: item => item.is_configured 
+                      ? <StatusIndicator type="success">Configured</StatusIndicator>
+                      : <StatusIndicator type="info">Available</StatusIndicator>,
+                  },
+                ],
+              }}
+              empty={
+                <Box textAlign="center" padding="l">
+                  <SpaceBetween size="s">
+                    <Box variant="h4">No data buckets found</Box>
+                    <Box color="text-body-secondary">
+                      Tag a bucket with <code>dda-portal:managed=true</code> to make it visible here.
+                    </Box>
+                  </SpaceBetween>
+                </Box>
+              }
+            />
+          </SpaceBetween>
+        </Container>
       ) : (
-        <Tabs
-          activeTabId={activeTab}
-          onChange={({ detail }) => setActiveTab(detail.activeTabId)}
-          tabs={[
-            {
-              id: 'browse',
-              label: 'Browse Files',
-              content: (
-                <SpaceBetween size="m">
-                  <Container>
-                    <SpaceBetween size="m">
-                      <ColumnLayout columns={2}>
-                        <FormField label="Select Bucket">
-                          <Select
-                            selectedOption={selectedBucket ? { label: selectedBucket, value: selectedBucket } : null}
-                            onChange={({ detail }) => {
-                              setSelectedBucket(detail.selectedOption.value || null);
-                              setCurrentPath([]);
-                            }}
-                            options={bucketOptions}
-                            placeholder="Select a bucket"
-                            disabled={loading || buckets.length === 0}
-                          />
-                        </FormField>
-                        <Box>
-                          <FormField label="Current Path">
-                            <BreadcrumbGroup
-                              items={[
-                                { text: selectedBucket || 'Root', href: '#' },
-                                ...currentPath.map((p) => ({
-                                  text: p,
-                                  href: '#',
-                                })),
-                              ]}
-                              onFollow={(e: { preventDefault: () => void; detail: { text: string } }) => {
-                                e.preventDefault();
-                                const index = currentPath.indexOf(e.detail.text);
-                                if (index >= 0) {
-                                  setCurrentPath(currentPath.slice(0, index + 1));
-                                } else {
-                                  setCurrentPath([]);
-                                }
-                              }}
-                            />
-                          </FormField>
-                        </Box>
-                      </ColumnLayout>
+        <SpaceBetween size="m">
 
-                      <SpaceBetween direction="horizontal" size="xs">
-                        <Button
-                          iconName="arrow-left"
-                          disabled={currentPath.length === 0}
-                          onClick={navigateUp}
-                        >
-                          Back
-                        </Button>
-                        <Button onClick={() => setShowCreateFolder(true)} disabled={!selectedBucket}>
-                          New Folder
-                        </Button>
-                        <Button variant="primary" onClick={() => setShowUpload(true)} disabled={!selectedBucket}>
-                          Upload Files
-                        </Button>
-                        <Button iconName="refresh" onClick={loadFolderContents} disabled={!selectedBucket}>
-                          Refresh
-                        </Button>
-                      </SpaceBetween>
-                    </SpaceBetween>
-                  </Container>
-
-
-                  {/* Folders */}
-                  {folders.length > 0 && (
-                    <Container header={<Header variant="h3">Folders</Header>}>
-                      <Table
-                        columnDefinitions={[
-                          {
-                            id: 'name',
-                            header: 'Name',
-                            cell: item => (
-                              <Button
-                                variant="link"
-                                onClick={() => navigateToFolder(item.path)}
-                              >
-                                <SpaceBetween direction="horizontal" size="xs">
-                                  <Icon name="folder" />
-                                  <span>{item.name}</span>
-                                </SpaceBetween>
-                              </Button>
-                            ),
-                          },
-                          {
-                            id: 'path',
-                            header: 'Path',
-                            cell: item => <Box color="text-body-secondary">{item.path}</Box>,
-                          },
-                        ]}
-                        items={folders}
-                        loading={loading}
-                        loadingText="Loading folders..."
-                        empty={<Box textAlign="center">No folders</Box>}
-                      />
-                    </Container>
-                  )}
-
-                  {/* Files */}
-                  <Container header={<Header variant="h3">Files ({files.length})</Header>}>
-                    <Table
-                      columnDefinitions={[
-                        {
-                          id: 'name',
-                          header: 'Name',
-                          cell: item => (
-                            <SpaceBetween direction="horizontal" size="xs">
-                              <Icon name="file" />
-                              <span>{item.name}</span>
-                            </SpaceBetween>
-                          ),
-                          sortingField: 'name',
-                        },
-                        {
-                          id: 'size',
-                          header: 'Size',
-                          cell: item => formatFileSize(item.size),
-                          sortingField: 'size',
-                        },
-                        {
-                          id: 'modified',
-                          header: 'Last Modified',
-                          cell: item => new Date(item.last_modified).toLocaleString(),
-                          sortingField: 'last_modified',
-                        },
-                      ]}
-                      items={files}
-                      loading={loading}
-                      loadingText="Loading files..."
-                      empty={
-                        <Box textAlign="center" color="inherit">
-                          <b>No files</b>
-                          <Box padding={{ bottom: 's' }} variant="p" color="inherit">
-                            This folder is empty. Upload files to get started.
-                          </Box>
-                        </Box>
+          {/* Navigation and Stats Bar */}
+          <Container>
+            <SpaceBetween size="m">
+              {/* Breadcrumb navigation */}
+              <SpaceBetween direction="horizontal" size="xs" alignItems="center">
+                <BreadcrumbGroup
+                  items={breadcrumbItems}
+                  onFollow={(e) => {
+                    e.preventDefault();
+                    const text = e.detail.text;
+                    if (text === 'Data') {
+                      setSelectedBucket(null);
+                      setCurrentPath([]);
+                    } else if (text === selectedBucket) {
+                      setCurrentPath([]);
+                    } else {
+                      const idx = currentPath.indexOf(text);
+                      if (idx >= 0) {
+                        setCurrentPath(currentPath.slice(0, idx + 1));
                       }
-                    />
-                  </Container>
-                </SpaceBetween>
-              ),
-            },
-            {
-              id: 'buckets',
-              label: 'Buckets',
-              content: (
-                <SpaceBetween size="m">
-                  {targetAccountInfo && (
-                    <Alert type={targetAccountInfo.hasDataRole ? "info" : "warning"}>
-                      {targetAccountInfo.hasDataRole 
-                        ? `Querying Data Account: ${targetAccountInfo.account}. Only buckets tagged with dda-portal:managed=true are shown.`
-                        : `No separate Data Account configured. Querying UseCase Account: ${targetAccountInfo.account}. To use a separate Data Account, update the use case configuration.`
-                      }
-                    </Alert>
-                  )}
-                  <Container>
-                    <Table
-                    columnDefinitions={[
-                      {
-                        id: 'name',
-                        header: 'Bucket Name',
-                        cell: item => (
-                          <Button variant="link" onClick={() => {
-                            setSelectedBucket(item.name);
-                            setCurrentPath([]);
-                            setActiveTab('browse');
-                          }}>
-                            {item.name}
-                          </Button>
-                        ),
-                        sortingField: 'name',
-                      },
-                      {
-                        id: 'region',
-                        header: 'Region',
-                        cell: item => <Badge>{item.region}</Badge>,
-                      },
-                      {
-                        id: 'tags',
-                        header: 'Tags',
-                        cell: item => item.is_configured ? <Badge color="green">Configured</Badge> : 
-                          Object.keys(item.tags || {}).length > 0 ? <Badge>{Object.keys(item.tags || {}).length} tags</Badge> : '-',
-                      },
-                    ]}
-                    items={buckets}
-                    loading={loading}
-                    loadingText="Loading buckets..."
-                    empty={
-                      <Box textAlign="center" color="inherit">
-                        <b>No buckets found</b>
-                        <Box padding={{ bottom: 's' }} variant="p" color="inherit">
-                          No buckets with tag <code>dda-portal:managed=true</code> found. 
-                          Create a bucket in AWS Console and tag it to make it visible here.
-                        </Box>
-                      </Box>
                     }
+                  }}
+                />
+                <Button variant="icon" iconName="settings" onClick={() => setShowBucketSelector(true)}>
+                  Change Bucket
+                </Button>
+              </SpaceBetween>
+
+              {/* Stats row */}
+              <Grid gridDefinition={[{ colspan: 3 }, { colspan: 3 }, { colspan: 3 }, { colspan: 3 }]}>
+                <Box>
+                  <Box color="text-body-secondary" fontSize="body-s">Folders</Box>
+                  <Box fontSize="heading-m">{stats.folderCount}</Box>
+                </Box>
+                <Box>
+                  <Box color="text-body-secondary" fontSize="body-s">Files</Box>
+                  <Box fontSize="heading-m">{stats.fileCount}</Box>
+                </Box>
+                <Box>
+                  <Box color="text-body-secondary" fontSize="body-s">Images</Box>
+                  <Box fontSize="heading-m">{stats.imageCount}</Box>
+                </Box>
+                <Box>
+                  <Box color="text-body-secondary" fontSize="body-s">Total Size</Box>
+                  <Box fontSize="heading-m">{formatFileSize(stats.totalSize)}</Box>
+                </Box>
+              </Grid>
+
+              {/* Action buttons */}
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button iconName="arrow-left" disabled={currentPath.length === 0} onClick={navigateUp}>
+                  Back
+                </Button>
+                <Button iconName="add-plus" onClick={() => setShowCreateFolder(true)}>
+                  New Folder
+                </Button>
+                <Button variant="primary" iconName="upload" onClick={() => setShowUpload(true)}>
+                  Upload
+                </Button>
+                <Button iconName="refresh" onClick={loadFolderContents} loading={loading}>
+                  Refresh
+                </Button>
+                <Box margin={{ left: 'l' }}>
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <Button 
+                      onClick={handleUseForTraining}
+                      disabled={stats.imageCount === 0}
+                      iconName="external"
+                    >
+                      Use for Training
+                    </Button>
+                    <Button 
+                      onClick={handleUseForLabeling}
+                      disabled={stats.imageCount === 0}
+                      iconName="external"
+                    >
+                      Use for Labeling
+                    </Button>
+                  </SpaceBetween>
+                </Box>
+              </SpaceBetween>
+            </SpaceBetween>
+          </Container>
+
+          {/* Folders as cards */}
+          {folders.length > 0 && (
+            <Container header={<Header variant="h3" counter={`(${folders.length})`}>Folders</Header>}>
+              <ColumnLayout columns={4} variant="text-grid">
+                {folders.map(folder => {
+                  const purpose = getFolderPurpose(folder.path);
+                  return (
+                    <Box key={folder.path} padding="s">
+                      <SpaceBetween size="xxs">
+                        <Button variant="link" onClick={() => navigateToFolder(folder.path)}>
+                          <SpaceBetween direction="horizontal" size="xs">
+                            <Icon name="folder" />
+                            <Box fontWeight="bold">{folder.name}</Box>
+                          </SpaceBetween>
+                        </Button>
+                        <Badge color={purpose.color}>{purpose.label}</Badge>
+                      </SpaceBetween>
+                    </Box>
+                  );
+                })}
+              </ColumnLayout>
+            </Container>
+          )}
+
+          {/* Files table with filter */}
+          <Container
+            header={
+              <Header
+                variant="h3"
+                counter={`(${filteredFiles.length}${filterText ? ` of ${files.length}` : ''})`}
+                actions={
+                  <TextFilter
+                    filteringText={filterText}
+                    filteringPlaceholder="Filter files..."
+                    onChange={({ detail }) => {
+                      setFilterText(detail.filteringText);
+                      setCurrentPage(1);
+                    }}
                   />
-                  </Container>
-                </SpaceBetween>
-              ),
-            },
-          ]}
-        />
+                }
+              >
+                Files
+              </Header>
+            }
+          >
+            <Table
+              columnDefinitions={[
+                {
+                  id: 'name',
+                  header: 'Name',
+                  cell: item => (
+                    <SpaceBetween direction="horizontal" size="xs">
+                      <Icon name={getFileIcon(item.name)} />
+                      <span>{item.name}</span>
+                      {isImageFile(item.name) && <Badge color="blue">Image</Badge>}
+                    </SpaceBetween>
+                  ),
+                  sortingField: 'name',
+                  width: '40%',
+                },
+                {
+                  id: 'size',
+                  header: 'Size',
+                  cell: item => formatFileSize(item.size),
+                  sortingField: 'size',
+                  width: '15%',
+                },
+                {
+                  id: 'modified',
+                  header: 'Last Modified',
+                  cell: item => new Date(item.last_modified).toLocaleString(),
+                  sortingField: 'last_modified',
+                  width: '25%',
+                },
+                {
+                  id: 'type',
+                  header: 'Type',
+                  cell: item => {
+                    const ext = item.name.split('.').pop()?.toUpperCase() || 'FILE';
+                    return <Badge color="grey">{ext}</Badge>;
+                  },
+                  width: '10%',
+                },
+              ]}
+              items={paginatedFiles}
+              loading={loading}
+              loadingText="Loading files..."
+              selectionType="multi"
+              selectedItems={selectedFiles}
+              onSelectionChange={({ detail }) => setSelectedFiles(detail.selectedItems)}
+              sortingDisabled={false}
+              empty={
+                <Box textAlign="center" padding="l">
+                  <SpaceBetween size="s">
+                    <Icon name="folder-open" size="big" />
+                    <Box variant="h4">
+                      {filterText ? 'No matching files' : 'This folder is empty'}
+                    </Box>
+                    <Box color="text-body-secondary">
+                      {filterText 
+                        ? 'Try a different search term'
+                        : 'Upload images to start building your dataset'
+                      }
+                    </Box>
+                    {!filterText && (
+                      <Button variant="primary" onClick={() => setShowUpload(true)}>
+                        Upload Files
+                      </Button>
+                    )}
+                  </SpaceBetween>
+                </Box>
+              }
+              pagination={
+                totalPages > 1 && (
+                  <Pagination
+                    currentPageIndex={currentPage}
+                    pagesCount={totalPages}
+                    onChange={({ detail }) => setCurrentPage(detail.currentPageIndex)}
+                  />
+                )
+              }
+            />
+          </Container>
+        </SpaceBetween>
       )}
 
+      {/* Bucket Selector Modal */}
+      <Modal
+        visible={showBucketSelector}
+        onDismiss={() => setShowBucketSelector(false)}
+        header="Select Data Bucket"
+        size="medium"
+      >
+        <SpaceBetween size="m">
+          {targetAccountInfo && (
+            <Alert type="info">
+              {targetAccountInfo.hasDataRole 
+                ? `Showing buckets from Data Account: ${targetAccountInfo.account}`
+                : `Showing buckets from UseCase Account: ${targetAccountInfo.account}`
+              }
+            </Alert>
+          )}
+          <Table
+            columnDefinitions={[
+              {
+                id: 'name',
+                header: 'Bucket',
+                cell: item => (
+                  <Button variant="link" onClick={() => {
+                    setSelectedBucket(item.name);
+                    setCurrentPath([]);
+                    setShowBucketSelector(false);
+                  }}>
+                    {item.name}
+                  </Button>
+                ),
+              },
+              {
+                id: 'region',
+                header: 'Region',
+                cell: item => <Badge>{item.region}</Badge>,
+              },
+              {
+                id: 'status',
+                header: 'Status',
+                cell: item => item.is_configured 
+                  ? <StatusIndicator type="success">Configured</StatusIndicator>
+                  : <StatusIndicator type="info">Available</StatusIndicator>,
+              },
+            ]}
+            items={buckets}
+            empty={<Box textAlign="center">No buckets available</Box>}
+          />
+        </SpaceBetween>
+      </Modal>
 
       {/* Create Folder Modal */}
       <Modal
@@ -553,9 +735,7 @@ export default function DataManagement() {
         footer={
           <Box float="right">
             <SpaceBetween direction="horizontal" size="xs">
-              <Button variant="link" onClick={() => setShowCreateFolder(false)}>
-                Cancel
-              </Button>
+              <Button variant="link" onClick={() => setShowCreateFolder(false)}>Cancel</Button>
               <Button variant="primary" onClick={handleCreateFolder} disabled={!newFolderName.trim()}>
                 Create
               </Button>
@@ -565,16 +745,16 @@ export default function DataManagement() {
       >
         <FormField
           label="Folder Name"
-          description={`Will be created at: ${selectedBucket}/${currentPrefix}`}
+          description={`Location: s3://${selectedBucket}/${currentPrefix}`}
+          constraintText="Use lowercase letters, numbers, and hyphens"
         >
           <Input
             value={newFolderName}
             onChange={({ detail }) => setNewFolderName(detail.value)}
-            placeholder="new-folder"
+            placeholder="e.g., training-images"
           />
         </FormField>
       </Modal>
-
 
       {/* Upload Files Modal */}
       <Modal
@@ -606,23 +786,31 @@ export default function DataManagement() {
                 disabled={uploadFiles.filter(f => f.status === 'pending').length === 0 || isUploading}
                 loading={isUploading}
               >
-                Upload
+                Upload {uploadFiles.filter(f => f.status === 'pending').length > 0 && 
+                  `(${uploadFiles.filter(f => f.status === 'pending').length} files)`}
               </Button>
             </SpaceBetween>
           </Box>
         }
       >
         <SpaceBetween size="m">
-          <FormField
-            label="Select Files"
-            description={`Files will be uploaded to: s3://${selectedBucket}/${currentPrefix}`}
-          >
-            <input
-              type="file"
-              multiple
-              onChange={handleFileSelect}
-              style={{ marginBottom: '16px' }}
-            />
+          <Alert type="info">
+            Uploading to: <code>s3://{selectedBucket}/{currentPrefix}</code>
+          </Alert>
+          
+          <FormField label="Select Files" description="Choose images or data files to upload">
+            <Box padding="m" textAlign="center" variant="div">
+              <input
+                type="file"
+                multiple
+                accept="image/*,.json,.csv,.txt,.manifest"
+                onChange={handleFileSelect}
+                style={{ display: 'block', margin: '0 auto' }}
+              />
+              <Box color="text-body-secondary" fontSize="body-s" margin={{ top: 's' }}>
+                Supported: Images (JPG, PNG), JSON, CSV, TXT, Manifest files
+              </Box>
+            </Box>
           </FormField>
 
           {uploadFiles.length > 0 && (
@@ -630,8 +818,13 @@ export default function DataManagement() {
               columnDefinitions={[
                 {
                   id: 'name',
-                  header: 'File Name',
-                  cell: item => item.file.name,
+                  header: 'File',
+                  cell: item => (
+                    <SpaceBetween direction="horizontal" size="xs">
+                      <Icon name={isImageFile(item.file.name) ? 'file' : 'file'} />
+                      <span>{item.file.name}</span>
+                    </SpaceBetween>
+                  ),
                 },
                 {
                   id: 'size',
@@ -643,14 +836,10 @@ export default function DataManagement() {
                   header: 'Status',
                   cell: item => {
                     switch (item.status) {
-                      case 'pending':
-                        return <Badge color="grey">Pending</Badge>;
-                      case 'uploading':
-                        return <Badge color="blue">Uploading...</Badge>;
-                      case 'completed':
-                        return <Badge color="green">Completed</Badge>;
-                      case 'error':
-                        return <Badge color="red">Error: {item.error}</Badge>;
+                      case 'pending': return <Badge color="grey">Ready</Badge>;
+                      case 'uploading': return <Badge color="blue">Uploading...</Badge>;
+                      case 'completed': return <Badge color="green">Done</Badge>;
+                      case 'error': return <Badge color="red">Failed</Badge>;
                     }
                   },
                 },
@@ -663,18 +852,18 @@ export default function DataManagement() {
                     ) : item.status === 'completed' ? (
                       <Icon name="status-positive" variant="success" />
                     ) : item.status === 'error' ? (
-                      <Icon name="status-negative" variant="error" />
+                      <Box color="text-status-error" fontSize="body-s">{item.error}</Box>
                     ) : null
                   ),
                 },
                 {
                   id: 'actions',
-                  header: 'Actions',
+                  header: '',
                   cell: item => (
                     item.status === 'pending' && !isUploading ? (
                       <Button
                         variant="icon"
-                        iconName="remove"
+                        iconName="close"
                         onClick={() => setUploadFiles(prev => prev.filter(f => f !== item))}
                       />
                     ) : null
@@ -682,7 +871,6 @@ export default function DataManagement() {
                 },
               ]}
               items={uploadFiles}
-              empty={<Box textAlign="center">No files selected</Box>}
             />
           )}
         </SpaceBetween>

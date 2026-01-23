@@ -140,10 +140,24 @@ export default function Training() {
 
   const formatDuration = (start: number, end?: number) => {
     if (!end) return 'In progress';
-    const duration = end - start;
+    
+    // Both timestamps should be in milliseconds
+    // If they're in seconds (less than year 2000 in ms), convert to ms
+    const startMs = start < 1000000000000 ? start * 1000 : start;
+    const endMs = end < 1000000000000 ? end * 1000 : end;
+    
+    const duration = endMs - startMs;
+    
+    // Handle negative or zero duration
+    if (duration <= 0) return '< 1m';
+    
     const hours = Math.floor(duration / (1000 * 60 * 60));
     const minutes = Math.floor((duration % (1000 * 60 * 60)) / (1000 * 60));
-    return `${hours}h ${minutes}m`;
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    return `${minutes}m`;
   };
 
   // Filter jobs

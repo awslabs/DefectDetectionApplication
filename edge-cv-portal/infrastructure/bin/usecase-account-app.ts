@@ -19,9 +19,16 @@ import { UseCaseAccountStack } from '../lib/usecase-account-stack';
  *      -c portalAccountId=111111111111 \
  *      -c externalId=your-uuid-here
  * 
- * 3. Custom S3 bucket prefix:
+ * 3. With additional bucket access (if bucket name doesn't match dda-* pattern):
  *    cdk deploy -a "npx ts-node bin/usecase-account-app.ts" \
- *      -c s3BucketPrefix=my-custom-prefix-*
+ *      -c portalAccountId=111111111111 \
+ *      -c externalId=your-uuid-here \
+ *      -c modelArtifactsBucket=my-custom-bucket
+ * 
+ * The Greengrass device policy automatically grants access to:
+ * - Portal Account's component bucket (dda-component-{region}-{portalAccountId})
+ * - All buckets matching dda-* and *-dda-* patterns (for model artifacts)
+ * - Plus any specific bucket provided via modelArtifactsBucket
  */
 
 const app = new cdk.App();
@@ -29,7 +36,7 @@ const app = new cdk.App();
 // Get configuration from context
 const portalAccountId = app.node.tryGetContext('portalAccountId');
 const externalId = app.node.tryGetContext('externalId');
-const s3BucketPrefix = app.node.tryGetContext('s3BucketPrefix');
+const modelArtifactsBucket = app.node.tryGetContext('modelArtifactsBucket');
 
 // Validate cross-account configuration
 if (portalAccountId && !externalId) {
@@ -42,7 +49,7 @@ if (portalAccountId && !externalId) {
 new UseCaseAccountStack(app, 'DDAPortalUseCaseAccountStack', {
   portalAccountId,
   externalId,
-  s3BucketPrefix,
+  modelArtifactsBucket,
   description: 'IAM role for DDA Portal to access UseCase Account resources (v2 - with device management)',
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,

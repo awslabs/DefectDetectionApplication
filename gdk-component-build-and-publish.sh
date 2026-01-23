@@ -104,6 +104,10 @@ if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "None" ]; then
   echo "NOTE: Cross-account bucket policy is automatically managed during usecase onboarding."
   echo "      New usecase accounts are added to the bucket policy when shared components are provisioned."
   echo ""
+  echo "=== Optional: Build InferenceUploader Component ==="
+  echo "To enable automatic upload of inference results to S3:"
+  echo "  ./build-inference-uploader.sh"
+  echo ""
 else
   echo "Warning: Could not determine component version for tagging"
 fi

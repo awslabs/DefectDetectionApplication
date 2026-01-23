@@ -148,6 +148,12 @@ export default function Labeling() {
                 Use Pre-Labeled Dataset
               </Button>
               <Button 
+                onClick={() => navigate(`/labeling/transform-manifest?usecase_id=${selectedUseCase?.value || ''}`)}
+                disabled={!selectedUseCase}
+              >
+                Transform Manifest
+              </Button>
+              <Button 
                 variant="primary" 
                 onClick={() => navigate(`/labeling/create?usecase_id=${selectedUseCase?.value || ''}`)}
                 disabled={!selectedUseCase}

@@ -52,16 +52,25 @@ AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 COMPONENT_BUCKET_PREFIX = os.environ.get('COMPONENT_BUCKET_PREFIX', 'dda-component')
 COMPONENT_BUCKET = os.environ.get('COMPONENT_BUCKET', f'{COMPONENT_BUCKET_PREFIX}-{AWS_REGION}-{PORTAL_ACCOUNT_ID}')
 
-# DDA LocalServer component names (versions discovered dynamically from Greengrass)
+# DDA shared components (versions discovered dynamically from Greengrass)
 DDA_LOCAL_SERVER_COMPONENTS = {
     'arm64': {
         'name': 'aws.edgeml.dda.LocalServer.arm64',
-        'description': 'DDA LocalServer for ARM64 devices (Jetson, Raspberry Pi)'
+        'description': 'DDA LocalServer for ARM64 devices (Jetson, Raspberry Pi)',
+        'platforms': ['linux/arm64']
     },
     'amd64': {
         'name': 'aws.edgeml.dda.LocalServer.amd64', 
-        'description': 'DDA LocalServer for AMD64 devices (x86_64)'
+        'description': 'DDA LocalServer for AMD64 devices (x86_64)',
+        'platforms': ['linux/amd64', 'linux/x86_64']
     }
+}
+
+# DDA InferenceUploader component (platform-independent)
+DDA_INFERENCE_UPLOADER_COMPONENT = {
+    'name': 'aws.edgeml.dda.InferenceUploader',
+    'description': 'Uploads inference results (images and metadata) from edge devices to S3',
+    'platforms': ['linux']  # Works on all platforms
 }
 
 # Cache for discovered component info (refreshed per Lambda invocation)
@@ -129,13 +138,25 @@ def get_component_info(platform: str) -> Optional[Dict]:
 
 def get_all_component_info() -> Dict[str, Dict]:
     """
-    Get info for all DDA LocalServer components with dynamically discovered versions.
+    Get info for all DDA shared components with dynamically discovered versions.
+    Returns both LocalServer (platform-specific) and InferenceUploader (platform-independent).
     """
     result = {}
+    
+    # Add LocalServer components (platform-specific)
     for platform in DDA_LOCAL_SERVER_COMPONENTS.keys():
         info = get_component_info(platform)
         if info:
-            result[platform] = info
+            result[f'localserver_{platform}'] = info
+    
+    # Add InferenceUploader component (platform-independent)
+    uploader_version = get_latest_component_version(DDA_INFERENCE_UPLOADER_COMPONENT['name'])
+    if uploader_version:
+        result['inference_uploader'] = {
+            **DDA_INFERENCE_UPLOADER_COMPONENT,
+            'version': uploader_version
+        }
+    
     return result
 
 
@@ -217,6 +238,8 @@ def share_component_to_usecase(
             platform = 'arm64'
         elif 'amd64' in component_name.lower():
             platform = 'amd64'
+        elif 'InferenceUploader' in component_name:
+            platform = 'all'  # Platform-independent
         else:
             raise ValueError(f"Cannot determine platform from component name: {component_name}")
         
@@ -314,11 +337,14 @@ def provision_shared_components_for_usecase(
     component_version: str = None  # Deprecated - versions discovered dynamically
 ) -> List[Dict]:
     """
-    Provision all shared components (dda-LocalServer variants) for a new usecase.
+    Provision all shared components for a new usecase.
     Called during usecase onboarding.
     
-    Dynamically discovers the latest version and artifact for each component
-    from the portal account's Greengrass and S3.
+    Provisions:
+    - DDA LocalServer (arm64 and amd64 variants)
+    - DDA InferenceUploader (platform-independent)
+    
+    Dynamically discovers the latest version for each component.
     
     Returns list of provisioned components.
     """
@@ -327,7 +353,14 @@ def provision_shared_components_for_usecase(
     # Get dynamically discovered component info
     components = get_all_component_info()
     
-    for platform, config in components.items():
+    # Provision LocalServer components (platform-specific)
+    for platform in DDA_LOCAL_SERVER_COMPONENTS.keys():
+        component_key = f'localserver_{platform}'
+        if component_key not in components:
+            logger.warning(f"LocalServer component for {platform} not found")
+            continue
+            
+        config = components[component_key]
         try:
             platform_version = config['version']
             
@@ -348,6 +381,33 @@ def provision_shared_components_for_usecase(
             results.append({
                 'component_name': config['name'],
                 'platform': platform,
+                'status': 'failed',
+                'error': str(e)
+            })
+    
+    # Provision InferenceUploader component (platform-independent)
+    if 'inference_uploader' in components:
+        config = components['inference_uploader']
+        try:
+            result = share_component_to_usecase(
+                usecase_id=usecase_id,
+                usecase_account_id=usecase_account_id,
+                cross_account_role_arn=cross_account_role_arn,
+                external_id=external_id,
+                component_name=config['name'],
+                component_version=config['version'],
+                user_id=user_id
+            )
+            # Mark as platform-independent
+            result['platform'] = 'all'
+            results.append(result)
+            logger.info(f"Provisioned {config['name']} v{config['version']} for usecase {usecase_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to provision {config['name']} for usecase {usecase_id}: {str(e)}")
+            results.append({
+                'component_name': config['name'],
+                'platform': 'all',
                 'status': 'failed',
                 'error': str(e)
             })
@@ -659,14 +719,32 @@ def list_available_components(event: Dict, user: Dict) -> Dict:
         # Get dynamically discovered component info
         all_components = get_all_component_info()
         
-        for platform, config in all_components.items():
+        # Add LocalServer components
+        for platform in DDA_LOCAL_SERVER_COMPONENTS.keys():
+            component_key = f'localserver_{platform}'
+            if component_key in all_components:
+                config = all_components[component_key]
+                components.append({
+                    'component_name': config['name'],
+                    'description': config['description'],
+                    'platform': platform,
+                    'platforms': config.get('platforms', []),
+                    'source': 'portal',
+                    'latest_version': config['version'],
+                    'component_type': 'local-server'
+                })
+        
+        # Add InferenceUploader component
+        if 'inference_uploader' in all_components:
+            config = all_components['inference_uploader']
             components.append({
                 'component_name': config['name'],
                 'description': config['description'],
-                'platform': platform,
-                'platforms': config['platforms'],
+                'platform': 'all',
+                'platforms': config.get('platforms', []),
                 'source': 'portal',
-                'latest_version': config['version']
+                'latest_version': config['version'],
+                'component_type': 'inference-uploader'
             })
         
         # Get default version for display

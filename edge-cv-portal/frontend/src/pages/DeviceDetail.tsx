@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Container,
@@ -15,9 +15,30 @@ import {
   KeyValuePairs,
   BreadcrumbGroup,
   Badge,
+  Select,
+  Input,
+  Spinner,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { Device, InstalledComponent, DeviceDeployment } from '../types';
+
+interface LogGroup {
+  log_group_name: string;
+  component_type: 'system' | 'user';
+  component_name: string;
+  creation_time?: number;
+  stored_bytes: number;
+  retention_days?: number;
+  has_logs?: boolean;
+  note?: string;
+}
+
+interface LogEntry {
+  timestamp: number;
+  message: string;
+  log_stream_name: string;
+  ingestion_time?: number;
+}
 
 export default function DeviceDetail() {
   const { deviceId } = useParams<{ deviceId: string }>();
@@ -31,6 +52,20 @@ export default function DeviceDetail() {
 
   const usecaseId = searchParams.get('usecase_id');
 
+  // Logs state
+  const [logGroups, setLogGroups] = useState<LogGroup[]>([]);
+  const [selectedComponent, setSelectedComponent] = useState<string | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState<string | null>(null);
+  const [logNextToken, setLogNextToken] = useState<string | undefined>();
+  const [filterPattern, setFilterPattern] = useState('');
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [timeRange, setTimeRange] = useState<{ startTime: number; endTime: number }>({
+    startTime: Date.now() - 60 * 60 * 1000, // 1 hour ago
+    endTime: Date.now(),
+  });
+
   useEffect(() => {
     if (deviceId && usecaseId) {
       loadDevice();
@@ -39,6 +74,108 @@ export default function DeviceDetail() {
       setLoading(false);
     }
   }, [deviceId, usecaseId]);
+
+  // Load log groups when switching to logs tab
+  useEffect(() => {
+    if (activeTabId === 'logs' && deviceId && usecaseId && logGroups.length === 0) {
+      loadLogGroups();
+    }
+  }, [activeTabId, deviceId, usecaseId]);
+
+  // Auto-refresh logs
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    if (autoRefresh && selectedComponent) {
+      interval = setInterval(() => {
+        loadLogs(selectedComponent, false);
+      }, 10000); // Refresh every 10 seconds
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [autoRefresh, selectedComponent, timeRange, filterPattern]);
+
+  const loadLogGroups = async () => {
+    if (!deviceId || !usecaseId) return;
+    
+    try {
+      const response = await apiService.getDeviceLogGroups(deviceId, usecaseId);
+      setLogGroups(response.log_groups);
+      
+      // Auto-select first component if available
+      if (response.log_groups.length > 0 && !selectedComponent) {
+        setSelectedComponent(response.log_groups[0].component_name);
+      }
+    } catch (err: any) {
+      console.error('Failed to load log groups:', err);
+      setLogsError(err.message || 'Failed to load log groups');
+    }
+  };
+
+  const loadLogs = useCallback(async (componentName: string, showLoading = true) => {
+    if (!deviceId || !usecaseId) return;
+    
+    try {
+      if (showLoading) setLogsLoading(true);
+      setLogsError(null);
+      
+      const response = await apiService.getDeviceLogs(
+        deviceId,
+        componentName,
+        usecaseId,
+        {
+          start_time: timeRange.startTime,
+          end_time: timeRange.endTime,
+          limit: 200,
+          filter_pattern: filterPattern || undefined,
+        }
+      );
+      
+      setLogs(response.logs);
+      setLogNextToken(response.next_token);
+    } catch (err: any) {
+      console.error('Failed to load logs:', err);
+      setLogsError(err.message || 'Failed to load logs');
+    } finally {
+      setLogsLoading(false);
+    }
+  }, [deviceId, usecaseId, timeRange, filterPattern]);
+
+  // Load logs when component selection changes
+  useEffect(() => {
+    if (selectedComponent && activeTabId === 'logs') {
+      loadLogs(selectedComponent);
+    }
+  }, [selectedComponent, activeTabId]);
+
+  const loadMoreLogs = async () => {
+    if (!deviceId || !usecaseId || !selectedComponent || !logNextToken) return;
+    
+    try {
+      setLogsLoading(true);
+      
+      const response = await apiService.getDeviceLogs(
+        deviceId,
+        selectedComponent,
+        usecaseId,
+        {
+          start_time: timeRange.startTime,
+          end_time: timeRange.endTime,
+          limit: 200,
+          next_token: logNextToken,
+          filter_pattern: filterPattern || undefined,
+        }
+      );
+      
+      setLogs(prev => [...prev, ...response.logs]);
+      setLogNextToken(response.next_token);
+    } catch (err: any) {
+      console.error('Failed to load more logs:', err);
+      setLogsError(err.message || 'Failed to load more logs');
+    } finally {
+      setLogsLoading(false);
+    }
+  };
 
   const loadDevice = async () => {
     if (!deviceId || !usecaseId) return;
@@ -342,6 +479,214 @@ export default function DeviceDetail() {
                   }
                 />
               </Container>
+            ),
+          },
+          {
+            id: 'logs',
+            label: 'Logs',
+            content: (
+              <SpaceBetween size="l">
+                {/* Log Controls */}
+                <Container
+                  header={
+                    <Header
+                      variant="h2"
+                      actions={
+                        <SpaceBetween direction="horizontal" size="xs">
+                          <Button
+                            iconName={autoRefresh ? 'status-in-progress' : 'refresh'}
+                            onClick={() => setAutoRefresh(!autoRefresh)}
+                            variant={autoRefresh ? 'primary' : 'normal'}
+                          >
+                            {autoRefresh ? 'Auto-refresh On' : 'Auto-refresh'}
+                          </Button>
+                          <Button
+                            iconName="refresh"
+                            onClick={() => selectedComponent && loadLogs(selectedComponent)}
+                            disabled={!selectedComponent || logsLoading}
+                          >
+                            Refresh
+                          </Button>
+                        </SpaceBetween>
+                      }
+                    >
+                      Component Logs
+                    </Header>
+                  }
+                >
+                  <SpaceBetween size="m">
+                    <ColumnLayout columns={3}>
+                      <div>
+                        <Box variant="awsui-key-label">Component</Box>
+                        <Select
+                          selectedOption={
+                            selectedComponent
+                              ? { label: selectedComponent, value: selectedComponent }
+                              : null
+                          }
+                          onChange={({ detail }) => {
+                            setSelectedComponent(detail.selectedOption.value || null);
+                            setLogs([]);
+                            setLogNextToken(undefined);
+                          }}
+                          options={logGroups.map((lg) => ({
+                            label: `${lg.component_name} (${lg.component_type})${lg.has_logs === false ? ' - No logs yet' : ''}`,
+                            value: lg.component_name,
+                            description: lg.note || lg.log_group_name,
+                          }))}
+                          placeholder="Select a component"
+                          empty={logGroups.length === 0 ? 'No log groups found. CloudWatch logging may not be configured on this device.' : undefined}
+                        />
+                      </div>
+                      <div>
+                        <Box variant="awsui-key-label">Time Range</Box>
+                        <Select
+                          selectedOption={{ label: 'Last 1 hour', value: '1h' }}
+                          onChange={({ detail }) => {
+                            const now = Date.now();
+                            let startTime = now;
+                            switch (detail.selectedOption.value) {
+                              case '15m':
+                                startTime = now - 15 * 60 * 1000;
+                                break;
+                              case '1h':
+                                startTime = now - 60 * 60 * 1000;
+                                break;
+                              case '3h':
+                                startTime = now - 3 * 60 * 60 * 1000;
+                                break;
+                              case '12h':
+                                startTime = now - 12 * 60 * 60 * 1000;
+                                break;
+                              case '24h':
+                                startTime = now - 24 * 60 * 60 * 1000;
+                                break;
+                              case '7d':
+                                startTime = now - 7 * 24 * 60 * 60 * 1000;
+                                break;
+                            }
+                            setTimeRange({ startTime, endTime: now });
+                            if (selectedComponent) {
+                              setLogs([]);
+                              setLogNextToken(undefined);
+                            }
+                          }}
+                          options={[
+                            { label: 'Last 15 minutes', value: '15m' },
+                            { label: 'Last 1 hour', value: '1h' },
+                            { label: 'Last 3 hours', value: '3h' },
+                            { label: 'Last 12 hours', value: '12h' },
+                            { label: 'Last 24 hours', value: '24h' },
+                            { label: 'Last 7 days', value: '7d' },
+                          ]}
+                        />
+                      </div>
+                      <div>
+                        <Box variant="awsui-key-label">Filter Pattern</Box>
+                        <Input
+                          value={filterPattern}
+                          onChange={({ detail }) => setFilterPattern(detail.value)}
+                          placeholder="e.g., ERROR, WARNING"
+                          onKeyDown={(e) => {
+                            if (e.detail.key === 'Enter' && selectedComponent) {
+                              setLogs([]);
+                              setLogNextToken(undefined);
+                              loadLogs(selectedComponent);
+                            }
+                          }}
+                        />
+                      </div>
+                    </ColumnLayout>
+                  </SpaceBetween>
+                </Container>
+
+                {/* Log Output */}
+                {logsError && (
+                  <Alert type="error" dismissible onDismiss={() => setLogsError(null)}>
+                    {logsError}
+                  </Alert>
+                )}
+
+                {!selectedComponent ? (
+                  <Container>
+                    <Box textAlign="center" padding="xxl" color="text-body-secondary">
+                      Select a component to view logs
+                    </Box>
+                  </Container>
+                ) : logsLoading && logs.length === 0 ? (
+                  <Container>
+                    <Box textAlign="center" padding="xxl">
+                      <Spinner size="large" />
+                      <Box variant="p" color="text-body-secondary" margin={{ top: 's' }}>
+                        Loading logs...
+                      </Box>
+                    </Box>
+                  </Container>
+                ) : (
+                  <Container
+                    header={
+                      <Header
+                        variant="h3"
+                        counter={`(${logs.length} events)`}
+                      >
+                        Log Events
+                      </Header>
+                    }
+                  >
+                    {logs.length === 0 ? (
+                      <Box textAlign="center" padding="l" color="text-body-secondary">
+                        No logs found for the selected time range
+                      </Box>
+                    ) : (
+                      <SpaceBetween size="xs">
+                        <div
+                          style={{
+                            maxHeight: '500px',
+                            overflow: 'auto',
+                            backgroundColor: '#1a1a2e',
+                            borderRadius: '4px',
+                            padding: '12px',
+                            fontFamily: 'Monaco, Consolas, "Courier New", monospace',
+                            fontSize: '12px',
+                          }}
+                        >
+                          {logs.map((log, index) => (
+                            <div
+                              key={`${log.timestamp}-${index}`}
+                              style={{
+                                padding: '4px 0',
+                                borderBottom: '1px solid #2a2a4e',
+                                color: log.message.includes('ERROR')
+                                  ? '#ff6b6b'
+                                  : log.message.includes('WARN')
+                                  ? '#ffd93d'
+                                  : '#e0e0e0',
+                              }}
+                            >
+                              <span style={{ color: '#6c757d', marginRight: '12px' }}>
+                                {new Date(log.timestamp).toISOString()}
+                              </span>
+                              <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                                {log.message}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                        {logNextToken && (
+                          <Box textAlign="center">
+                            <Button
+                              onClick={loadMoreLogs}
+                              loading={logsLoading}
+                            >
+                              Load More
+                            </Button>
+                          </Box>
+                        )}
+                      </SpaceBetween>
+                    )}
+                  </Container>
+                )}
+              </SpaceBetween>
             ),
           },
         ]}

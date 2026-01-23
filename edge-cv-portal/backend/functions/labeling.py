@@ -55,6 +55,8 @@ def handler(event, context):
         # Note: path includes stage (/v1/labeling), resource is the pattern (/labeling)
         if http_method == 'GET' and '/workteams' in path:
             return list_workteams(event)
+        elif http_method == 'POST' and '/transform-manifest' in path:
+            return transform_manifest(event)
         elif http_method == 'GET' and '/labeling' in path and '{id}' not in resource:
             return list_labeling_jobs(event)
         elif http_method == 'POST' and '/labeling' in path and '{id}' not in resource:
@@ -101,6 +103,28 @@ def list_labeling_jobs(event):
         if status_filter:
             jobs = [j for j in jobs if j.get('status') == status_filter]
         
+        # Add output_manifest_s3_uri for completed jobs
+        for job in jobs:
+            if job.get('status') == 'Completed' and job.get('output_s3_uri'):
+                # Ground Truth creates output in: {output_s3_uri}/{sagemaker_job_name}/manifests/output/output.manifest
+                sagemaker_job_name = job.get('sagemaker_job_name', '')
+                output_s3_uri = job['output_s3_uri']
+                if not output_s3_uri.endswith('/'):
+                    output_s3_uri += '/'
+                
+                # Construct the actual manifest path with SageMaker job name
+                if sagemaker_job_name:
+                    source_manifest_uri = f"{output_s3_uri}{sagemaker_job_name}/manifests/output/output.manifest"
+                else:
+                    # Fallback to old path if sagemaker_job_name is missing
+                    source_manifest_uri = f"{output_s3_uri}manifests/output/output.manifest"
+                
+                # Prefer transformed manifest if available
+                if job.get('is_transformed') and job.get('transformed_manifest_s3_uri'):
+                    job['output_manifest_s3_uri'] = job['transformed_manifest_s3_uri']
+                else:
+                    job['output_manifest_s3_uri'] = source_manifest_uri
+        
         # Sort by created_at descending
         jobs.sort(key=lambda x: x.get('created_at', 0), reverse=True)
         
@@ -137,6 +161,19 @@ def create_labeling_job(event):
         for field in required_fields:
             if not body.get(field):
                 return create_response(400, {'error': f'{field} is required'})
+        
+        # Validate label category order for anomaly detection
+        # First category should be "normal" (index 0), anomalies should be index 1+
+        label_categories = body['label_categories']
+        if label_categories and len(label_categories) > 0:
+            first_label = label_categories[0].lower()
+            # Check if first label looks like an anomaly/defect
+            anomaly_keywords = ['defect', 'anomaly', 'scratch', 'dent', 'crack', 'damage', 'fault', 'error']
+            if any(keyword in first_label for keyword in anomaly_keywords):
+                logger.warning(f"Label order may be incorrect. First label '{label_categories[0]}' appears to be an anomaly type. "
+                             f"For DDA models, the first label (index 0) should be 'normal' or 'good', and anomalies should be index 1+.")
+                # Return a warning but allow the job to proceed
+                # Users may have valid reasons for this order
         
         usecase_id = body['usecase_id']
         job_name = body['job_name']
@@ -409,7 +446,7 @@ def create_labeling_job(event):
 
 
 def get_labeling_job(job_id: str):
-    """Get labeling job details."""
+    """Get labeling job details and sync status from SageMaker."""
     try:
         response = labeling_jobs_table.get_item(Key={'job_id': job_id})
         
@@ -418,8 +455,87 @@ def get_labeling_job(job_id: str):
         
         job = response['Item']
         
-        # Optionally fetch latest status from SageMaker
-        # This would require assuming the role again
+        # Sync latest status from SageMaker Ground Truth
+        if job.get('sagemaker_job_name'):
+            try:
+                usecase = get_usecase(job['usecase_id'])
+                credentials = assume_usecase_role(
+                    usecase['cross_account_role_arn'],
+                    usecase['external_id'],
+                    'labeling-status-sync'
+                )
+                
+                sagemaker = boto3.client(
+                    'sagemaker',
+                    aws_access_key_id=credentials['AccessKeyId'],
+                    aws_secret_access_key=credentials['SecretAccessKey'],
+                    aws_session_token=credentials['SessionToken']
+                )
+                
+                sm_response = sagemaker.describe_labeling_job(
+                    LabelingJobName=job['sagemaker_job_name']
+                )
+                
+                status = sm_response['LabelingJobStatus']
+                timestamp = int(datetime.utcnow().timestamp())
+                
+                # Update DynamoDB if status changed
+                if status != job.get('status'):
+                    logger.info(f"Labeling job status changed: {job.get('status')} -> {status}")
+                    
+                    # Get labeled object count
+                    labeled_count = sm_response.get('LabelCounters', {}).get('HumanLabeled', 0)
+                    total_count = sm_response.get('LabelCounters', {}).get('TotalLabeled', 0)
+                    
+                    # Calculate progress
+                    progress_percent = 0
+                    if job.get('image_count', 0) > 0:
+                        progress_percent = int((labeled_count / job['image_count']) * 100)
+                    
+                    update_expr = 'SET #status = :status, updated_at = :updated, labeled_objects = :labeled, progress_percent = :progress'
+                    expr_values = {
+                        ':status': status,
+                        ':updated': timestamp,
+                        ':labeled': labeled_count,
+                        ':progress': progress_percent
+                    }
+                    expr_names = {'#status': 'status'}
+                    
+                    if status == 'Completed':
+                        update_expr += ', completed_at = :completed'
+                        expr_values[':completed'] = timestamp
+                        
+                        # Get the actual output manifest URI from Ground Truth
+                        if 'LabelingJobOutput' in sm_response and 'OutputDatasetS3Uri' in sm_response['LabelingJobOutput']:
+                            output_manifest_uri = sm_response['LabelingJobOutput']['OutputDatasetS3Uri']
+                            update_expr += ', output_manifest_s3_uri = :output_manifest'
+                            expr_values[':output_manifest'] = output_manifest_uri
+                            logger.info(f"Captured output manifest URI: {output_manifest_uri}")
+                    elif status == 'Failed':
+                        failure_reason = sm_response.get('FailureReason', 'Unknown')
+                        update_expr += ', failure_reason = :reason'
+                        expr_values[':reason'] = failure_reason
+                    
+                    labeling_jobs_table.update_item(
+                        Key={'job_id': job_id},
+                        UpdateExpression=update_expr,
+                        ExpressionAttributeValues=expr_values,
+                        ExpressionAttributeNames=expr_names
+                    )
+                    
+                    # Update job dict for response
+                    job['status'] = status
+                    job['updated_at'] = timestamp
+                    job['labeled_objects'] = labeled_count
+                    job['progress_percent'] = progress_percent
+                    if status == 'Completed':
+                        job['completed_at'] = timestamp
+                    elif status == 'Failed':
+                        job['failure_reason'] = sm_response.get('FailureReason', 'Unknown')
+                
+            except Exception as e:
+                logger.error(f"Error syncing labeling status: {str(e)}")
+                # Continue with cached status from DynamoDB
         
         return create_response(200, {'job': job})
         
@@ -714,3 +830,334 @@ def list_workteams(event):
         
     except Exception as e:
         return handle_error(e, 'Failed to list workteams')
+
+
+def transform_manifest(event):
+    """
+    Transform Ground Truth manifest to DDA-compatible format.
+    
+    Ground Truth creates manifests with job-specific attribute names like:
+    - "my-labeling-job" (label value)
+    - "my-labeling-job-metadata" (metadata)
+    
+    DDA model requires standardized names:
+    - "anomaly-label" (label value)
+    - "anomaly-label-metadata" (metadata)
+    
+    Request Body:
+        - usecase_id: Required. UseCase for S3 access
+        - source_manifest_uri: Required. S3 URI of Ground Truth output manifest
+        - output_manifest_uri: Optional. S3 URI for transformed manifest (defaults to same location with -dda suffix)
+        - task_type: Optional. "classification" or "segmentation" (default: "classification")
+    
+    Returns:
+        - transformed_manifest_uri: S3 URI of the DDA-compatible manifest
+        - stats: Statistics about the transformation
+    """
+    try:
+        body = json.loads(event.get('body', '{}'))
+        
+        # Validate required fields
+        if not body.get('usecase_id'):
+            return create_response(400, {'error': 'usecase_id is required'})
+        if not body.get('source_manifest_uri'):
+            return create_response(400, {'error': 'source_manifest_uri is required'})
+        
+        usecase_id = body['usecase_id']
+        source_manifest_uri = body['source_manifest_uri']
+        output_manifest_uri = body.get('output_manifest_uri')
+        task_type = body.get('task_type', 'classification')
+        
+        # Parse S3 URI
+        if not source_manifest_uri.startswith('s3://'):
+            return create_response(400, {'error': 'source_manifest_uri must be an S3 URI (s3://bucket/key)'})
+        
+        source_parts = source_manifest_uri.replace('s3://', '').split('/', 1)
+        if len(source_parts) != 2:
+            return create_response(400, {'error': 'Invalid S3 URI format'})
+        
+        source_bucket = source_parts[0]
+        source_key = source_parts[1]
+        
+        # Get use case details
+        usecase = get_usecase(usecase_id)
+        
+        # Assume UseCase Account role for S3 access
+        credentials = assume_usecase_role(
+            usecase['cross_account_role_arn'],
+            usecase['external_id'],
+            'transform-manifest'
+        )
+        
+        # Create S3 client with assumed credentials
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken']
+        )
+        
+        # Download source manifest
+        logger.info(f"Downloading manifest from {source_manifest_uri}")
+        try:
+            response = s3.get_object(Bucket=source_bucket, Key=source_key)
+            manifest_content = response['Body'].read().decode('utf-8')
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchKey':
+                return create_response(404, {'error': 'Source manifest not found'})
+            raise
+        
+        # Parse manifest (JSONL format - one JSON object per line)
+        manifest_lines = manifest_content.strip().split('\n')
+        if not manifest_lines:
+            return create_response(400, {'error': 'Source manifest is empty'})
+        
+        # Detect Ground Truth attribute names from first line
+        first_entry = json.loads(manifest_lines[0])
+        detected_attrs = detect_ground_truth_attributes(first_entry, task_type)
+        
+        if not detected_attrs:
+            return create_response(400, {
+                'error': 'Could not detect Ground Truth attribute names in manifest. '
+                         'Make sure this is a valid Ground Truth output manifest.'
+            })
+        
+        logger.info(f"Detected Ground Truth attributes: {detected_attrs}")
+        
+        # Transform manifest
+        transformed_lines = []
+        stats = {
+            'total_entries': len(manifest_lines),
+            'transformed': 0,
+            'skipped': 0,
+            'errors': []
+        }
+        
+        for i, line in enumerate(manifest_lines):
+            try:
+                entry = json.loads(line)
+                transformed_entry = transform_manifest_entry(entry, detected_attrs, task_type)
+                transformed_lines.append(json.dumps(transformed_entry))
+                stats['transformed'] += 1
+            except Exception as e:
+                logger.warning(f"Error transforming line {i+1}: {str(e)}")
+                stats['skipped'] += 1
+                stats['errors'].append(f"Line {i+1}: {str(e)}")
+        
+        if stats['transformed'] == 0:
+            return create_response(400, {
+                'error': 'No entries could be transformed',
+                'stats': stats
+            })
+        
+        # Generate output manifest content
+        transformed_content = '\n'.join(transformed_lines)
+        
+        # Determine output location
+        if not output_manifest_uri:
+            # Default: same location with -dda suffix
+            base_key = source_key.rsplit('.', 1)[0]
+            output_key = f"{base_key}-dda.manifest"
+            output_bucket = source_bucket
+            output_manifest_uri = f"s3://{output_bucket}/{output_key}"
+        else:
+            # Parse provided output URI
+            output_parts = output_manifest_uri.replace('s3://', '').split('/', 1)
+            if len(output_parts) != 2:
+                return create_response(400, {'error': 'Invalid output_manifest_uri format'})
+            output_bucket = output_parts[0]
+            output_key = output_parts[1]
+        
+        # Upload transformed manifest
+        logger.info(f"Uploading transformed manifest to {output_manifest_uri}")
+        s3.put_object(
+            Bucket=output_bucket,
+            Key=output_key,
+            Body=transformed_content,
+            ContentType='application/x-ndjson'
+        )
+        
+        # Update labeling job record if this transformation is for a labeling job
+        # Check if source manifest matches a labeling job's output manifest pattern
+        try:
+            # Query labeling jobs to find matching job
+            labeling_jobs_response = labeling_jobs_table.query(
+                IndexName='usecase-jobs-index',
+                KeyConditionExpression='usecase_id = :usecase_id',
+                ExpressionAttributeValues={':usecase_id': usecase_id}
+            )
+            
+            for job in labeling_jobs_response.get('Items', []):
+                job_output_uri = job.get('output_s3_uri', '')
+                # Check if source manifest is from this job's output
+                if job_output_uri and source_manifest_uri.startswith(job_output_uri):
+                    # Update job record with transformed manifest info
+                    timestamp = int(datetime.utcnow().timestamp())
+                    labeling_jobs_table.update_item(
+                        Key={'job_id': job['job_id']},
+                        UpdateExpression='SET transformed_manifest_s3_uri = :transformed_uri, is_transformed = :is_transformed, transformed_at = :transformed_at',
+                        ExpressionAttributeValues={
+                            ':transformed_uri': output_manifest_uri,
+                            ':is_transformed': True,
+                            ':transformed_at': timestamp
+                        }
+                    )
+                    logger.info(f"Updated labeling job {job['job_id']} with transformed manifest URI")
+                    break
+        except Exception as e:
+            logger.warning(f"Could not update labeling job record: {str(e)}")
+            # Continue anyway - transformation succeeded
+        
+        # Generate sample entry for user reference
+        sample_entry = json.loads(transformed_lines[0]) if transformed_lines else None
+        
+        return create_response(200, {
+            'message': 'Manifest transformed successfully',
+            'transformed_manifest_uri': output_manifest_uri,
+            'stats': stats,
+            'detected_attributes': detected_attrs,
+            'dda_attributes': {
+                'label': 'anomaly-label',
+                'metadata': 'anomaly-label-metadata'
+            },
+            'sample_entry': sample_entry
+        })
+        
+    except Exception as e:
+        logger.error(f"Error transforming manifest: {str(e)}")
+        return handle_error(e, 'Failed to transform manifest')
+
+
+def detect_ground_truth_attributes(entry: Dict, task_type: str) -> Dict[str, str]:
+    """
+    Detect Ground Truth attribute names from a manifest entry.
+    
+    For classification:
+        Returns: label_attr, metadata_attr
+    
+    For segmentation:
+        Returns: label_attr, metadata_attr, mask_ref_attr, mask_ref_metadata_attr
+    """
+    # Skip known DDA attributes
+    skip_attrs = {
+        'source-ref', 
+        'anomaly-label', 
+        'anomaly-label-metadata',
+        'anomaly-mask-ref',
+        'anomaly-mask-ref-metadata'
+    }
+    
+    # Find metadata attribute (ends with -metadata)
+    metadata_attr = None
+    for key in entry.keys():
+        if key.endswith('-metadata') and key not in skip_attrs:
+            metadata_attr = key
+            break
+    
+    if not metadata_attr:
+        return None
+    
+    # Derive label attribute (remove -metadata suffix)
+    label_attr = metadata_attr.replace('-metadata', '')
+    
+    # Verify label attribute exists
+    if label_attr not in entry:
+        return None
+    
+    result = {
+        'label_attr': label_attr,
+        'metadata_attr': metadata_attr
+    }
+    
+    # For segmentation, also find mask reference attributes
+    if task_type == 'segmentation':
+        # Look for -ref and -ref-metadata attributes
+        mask_ref_attr = None
+        mask_ref_metadata_attr = None
+        
+        for key in entry.keys():
+            if key.endswith('-ref-metadata') and key not in skip_attrs:
+                mask_ref_metadata_attr = key
+                mask_ref_attr = key.replace('-metadata', '')
+                break
+            elif key.endswith('-ref') and key not in skip_attrs and not key.endswith('-ref-metadata'):
+                # Found a -ref attribute, derive metadata
+                mask_ref_attr = key
+                mask_ref_metadata_attr = f"{key}-metadata"
+        
+        # Verify mask attributes exist
+        if mask_ref_attr and mask_ref_attr in entry:
+            result['mask_ref_attr'] = mask_ref_attr
+            if mask_ref_metadata_attr and mask_ref_metadata_attr in entry:
+                result['mask_ref_metadata_attr'] = mask_ref_metadata_attr
+    
+    return result
+
+
+def transform_manifest_entry(entry: Dict, detected_attrs: Dict, task_type: str) -> Dict:
+    """
+    Transform a single manifest entry to DDA format.
+    
+    For classification:
+        Renames: label_attr -> 'anomaly-label', metadata_attr -> 'anomaly-label-metadata'
+    
+    For segmentation:
+        Renames: label_attr -> 'anomaly-label', metadata_attr -> 'anomaly-label-metadata'
+                 mask_ref_attr -> 'anomaly-mask-ref', mask_ref_metadata_attr -> 'anomaly-mask-ref-metadata'
+    
+    Also updates the 'job-name' field inside metadata to match 'anomaly-label'
+    """
+    transformed = {}
+    
+    # Copy source-ref (always present)
+    if 'source-ref' in entry:
+        transformed['source-ref'] = entry['source-ref']
+    
+    # Transform label attribute
+    label_attr = detected_attrs['label_attr']
+    if label_attr in entry:
+        transformed['anomaly-label'] = entry[label_attr]
+    
+    # Transform metadata attribute
+    metadata_attr = detected_attrs['metadata_attr']
+    if metadata_attr in entry:
+        metadata = entry[metadata_attr].copy() if isinstance(entry[metadata_attr], dict) else entry[metadata_attr]
+        
+        # Update job-name inside metadata to match the new attribute name
+        if isinstance(metadata, dict) and 'job-name' in metadata:
+            metadata['job-name'] = 'anomaly-label'
+        
+        transformed['anomaly-label-metadata'] = metadata
+    
+    # For segmentation, transform mask attributes
+    if task_type == 'segmentation':
+        # Transform mask reference
+        mask_ref_attr = detected_attrs.get('mask_ref_attr')
+        if mask_ref_attr and mask_ref_attr in entry:
+            transformed['anomaly-mask-ref'] = entry[mask_ref_attr]
+        
+        # Transform mask reference metadata
+        mask_ref_metadata_attr = detected_attrs.get('mask_ref_metadata_attr')
+        if mask_ref_metadata_attr and mask_ref_metadata_attr in entry:
+            mask_metadata = entry[mask_ref_metadata_attr].copy() if isinstance(entry[mask_ref_metadata_attr], dict) else entry[mask_ref_metadata_attr]
+            
+            # Update job-name in mask metadata if present
+            if isinstance(mask_metadata, dict) and 'job-name' in mask_metadata:
+                mask_metadata['job-name'] = 'anomaly-mask-ref'
+            
+            transformed['anomaly-mask-ref-metadata'] = mask_metadata
+    
+    # Copy any other attributes (like confidence scores, etc.)
+    skip_attrs = {
+        'source-ref', 
+        label_attr, 
+        metadata_attr,
+        detected_attrs.get('mask_ref_attr'),
+        detected_attrs.get('mask_ref_metadata_attr')
+    }
+    
+    for key, value in entry.items():
+        if key not in skip_attrs and key not in transformed:
+            transformed[key] = value
+    
+    return transformed
