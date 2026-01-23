@@ -118,13 +118,15 @@ export class DataAccountStack extends cdk.Stack {
     // ===========================================
     // Allows SageMaker in UseCase Accounts to read training data
     
-    // Use account-level principals - any role from these accounts can assume
-    // The accounts themselves are trusted, not specific roles
-    const allAccountIds = [...usecaseAccountIds, portalAccountId];
+    // Use account-level principals - Portal Account only initially
+    // UseCase Accounts will be added dynamically by the portal during onboarding
+    const allAccountIds = usecaseAccountIds.length > 0 
+      ? [...usecaseAccountIds, portalAccountId]
+      : [portalAccountId];
 
     this.sagemakerAccessRole = new iam.Role(this, 'DDASageMakerDataAccessRole', {
       roleName: 'DDASageMakerDataAccessRole',
-      description: 'Role for SageMaker in UseCase Accounts to read training data',
+      description: 'Role for SageMaker in UseCase Accounts to read training data. UseCase access configured by portal.',
       assumedBy: new iam.CompositePrincipal(
         ...allAccountIds.map(accountId => new iam.AccountPrincipal(accountId))
       ),
@@ -171,8 +173,11 @@ export class DataAccountStack extends cdk.Stack {
     // ===========================================
     // Add bucket policies to existing buckets to allow UseCase Account SageMaker roles
     // to read training data directly (without assuming a role)
+    // 
+    // NOTE: This is optional. The portal will automatically configure bucket policies
+    // when each UseCase is onboarded. Only use this if you want to pre-configure.
     
-    if (dataBucketNames && dataBucketNames.length > 0) {
+    if (dataBucketNames && dataBucketNames.length > 0 && usecaseAccountIds.length > 0) {
       // Build list of SageMaker execution role ARNs from UseCase Accounts
       const sagemakerRoleArns = usecaseAccountIds.map(
         accountId => `arn:aws:iam::${accountId}:role/DDASageMakerExecutionRole`
@@ -188,16 +193,19 @@ export class DataAccountStack extends cdk.Stack {
           bucket: bucket,
         });
 
-        // Allow UseCase Account SageMaker roles to read from this bucket
+        // Allow UseCase Account SageMaker roles to read/write from this bucket
+        // Write access is needed for Ground Truth labeling output
         bucketPolicy.document.addStatements(
           new iam.PolicyStatement({
-            sid: 'AllowUseCaseSageMakerRead',
+            sid: 'AllowUseCaseSageMakerReadWrite',
             effect: iam.Effect.ALLOW,
             principals: sagemakerRoleArns.map(arn => new iam.ArnPrincipal(arn)),
             actions: [
               's3:GetObject',
               's3:GetObjectVersion',
               's3:GetObjectTagging',
+              's3:PutObject',
+              's3:PutObjectTagging',
             ],
             resources: [`arn:aws:s3:::${bucketName}/*`],
           }),
@@ -263,8 +271,8 @@ export class DataAccountStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'UseCaseAccountIds', {
-      value: usecaseAccountIds.join(','),
-      description: 'UseCase Account IDs that can assume the SageMaker role',
+      value: usecaseAccountIds.length > 0 ? usecaseAccountIds.join(',') : '(configured automatically by portal)',
+      description: 'UseCase Account IDs - configured automatically during UseCase onboarding',
     });
 
     // Always output external ID info (required for production)

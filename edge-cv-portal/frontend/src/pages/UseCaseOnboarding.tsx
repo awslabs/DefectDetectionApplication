@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Wizard,
@@ -13,8 +13,26 @@ import {
   Button,
   ColumnLayout,
   StatusIndicator,
+  Select,
+  SelectProps,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+
+interface DataAccount {
+  data_account_id: string;
+  name: string;
+  description?: string;
+  role_arn: string;
+  external_id: string;
+  region: string;
+  status: string;
+  created_at: number;
+  created_by: string;
+  connection_test?: {
+    status: string;
+    message: string;
+  };
+}
 
 interface OnboardingState {
   // Step 1: Basic Info
@@ -65,6 +83,11 @@ export default function UseCaseOnboarding() {
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // Data Accounts dropdown
+  const [dataAccounts, setDataAccounts] = useState<DataAccount[]>([]);
+  const [selectedDataAccount, setSelectedDataAccount] = useState<SelectProps.Option | null>(null);
+  const [loadingDataAccounts, setLoadingDataAccounts] = useState(false);
 
   const [state, setState] = useState<OnboardingState>({
     useCaseName: '',
@@ -99,6 +122,38 @@ export default function UseCaseOnboarding() {
 
   const updateState = (updates: Partial<OnboardingState>) => {
     setState((prev) => ({ ...prev, ...updates }));
+  };
+
+  // Load registered Data Accounts
+  useEffect(() => {
+    const loadDataAccounts = async () => {
+      setLoadingDataAccounts(true);
+      try {
+        const response = await apiService.listDataAccounts();
+        setDataAccounts(response.data_accounts || []);
+      } catch (err) {
+        console.error('Failed to load Data Accounts:', err);
+        // Non-critical error - user can still enter manually
+      } finally {
+        setLoadingDataAccounts(false);
+      }
+    };
+    loadDataAccounts();
+  }, []);
+
+  // Handle Data Account selection from dropdown
+  const handleDataAccountSelect = (option: SelectProps.Option | null) => {
+    setSelectedDataAccount(option);
+    if (option && option.value) {
+      const account = dataAccounts.find(da => da.data_account_id === option.value);
+      if (account) {
+        updateState({
+          dataAccountId: account.data_account_id,
+          dataAccountRoleArn: account.role_arn,
+          dataAccountExternalId: account.external_id,
+        });
+      }
+    }
   };
 
   const handleVerifyRole = async () => {
@@ -526,6 +581,37 @@ aws s3api put-bucket-versioning \\
                       Deploy the Data Account role first: <code>./deploy-account-role.sh</code> → option 2
                     </Alert>
 
+                    {/* Option 1: Select from registered Data Accounts */}
+                    {dataAccounts.length > 0 && (
+                      <>
+                        <FormField
+                          label="Select Registered Data Account"
+                          description="Choose from Data Accounts registered in Settings"
+                          stretch
+                        >
+                          <Select
+                            selectedOption={selectedDataAccount}
+                            onChange={({ detail }) => handleDataAccountSelect(detail.selectedOption)}
+                            options={dataAccounts.map(da => ({
+                              label: da.name,
+                              value: da.data_account_id,
+                              description: `${da.data_account_id} (${da.region})`,
+                              tags: [da.data_account_id],
+                            }))}
+                            placeholder="Select a Data Account"
+                            empty="No Data Accounts registered"
+                            loadingText="Loading Data Accounts..."
+                            statusType={loadingDataAccounts ? 'loading' : 'finished'}
+                          />
+                        </FormField>
+
+                        <Box textAlign="center" color="text-body-secondary">
+                          <Box variant="small">or enter manually below</Box>
+                        </Box>
+                      </>
+                    )}
+
+                    {/* Option 2: Manual entry or upload config file */}
                     <FormField
                       label="Upload Configuration File"
                       description="Upload data-account-config.txt to auto-fill"
@@ -553,6 +639,8 @@ aws s3api put-bucket-versioning \\
                                 dataAccountRoleArn: config['Portal Access Role ARN'] || '',
                                 dataAccountExternalId: config['External ID'] || '',
                               });
+                              // Clear dropdown selection when uploading file
+                              setSelectedDataAccount(null);
                             };
                             reader.readAsText(file);
                           }
@@ -570,7 +658,10 @@ aws s3api put-bucket-versioning \\
                     <FormField label="Data Account ID" stretch>
                       <Input
                         value={state.dataAccountId}
-                        onChange={({ detail }) => updateState({ dataAccountId: detail.value })}
+                        onChange={({ detail }) => {
+                          updateState({ dataAccountId: detail.value });
+                          setSelectedDataAccount(null); // Clear dropdown when manually editing
+                        }}
                         placeholder="987654321098"
                       />
                     </FormField>
@@ -578,7 +669,10 @@ aws s3api put-bucket-versioning \\
                     <FormField label="Data Account Role ARN" stretch>
                       <Input
                         value={state.dataAccountRoleArn}
-                        onChange={({ detail }) => updateState({ dataAccountRoleArn: detail.value })}
+                        onChange={({ detail }) => {
+                          updateState({ dataAccountRoleArn: detail.value });
+                          setSelectedDataAccount(null);
+                        }}
                         placeholder="arn:aws:iam::987654321098:role/DDAPortalDataAccessRole"
                       />
                     </FormField>
@@ -586,7 +680,10 @@ aws s3api put-bucket-versioning \\
                     <FormField label="External ID" stretch>
                       <Input
                         value={state.dataAccountExternalId}
-                        onChange={({ detail }) => updateState({ dataAccountExternalId: detail.value })}
+                        onChange={({ detail }) => {
+                          updateState({ dataAccountExternalId: detail.value });
+                          setSelectedDataAccount(null);
+                        }}
                         placeholder="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
                         type="password"
                       />
@@ -595,7 +692,10 @@ aws s3api put-bucket-versioning \\
                     <FormField label="Data Bucket Name" description="Bucket containing your training data" stretch>
                       <Input
                         value={state.dataS3Bucket}
-                        onChange={({ detail }) => updateState({ dataS3Bucket: detail.value })}
+                        onChange={({ detail }) => {
+                          updateState({ dataS3Bucket: detail.value });
+                          setSelectedDataAccount(null);
+                        }}
                         placeholder="my-data-lake-bucket"
                       />
                     </FormField>

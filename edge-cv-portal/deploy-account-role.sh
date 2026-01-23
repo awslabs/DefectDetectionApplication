@@ -101,20 +101,38 @@ if [ "$ROLE_TYPE" = "1" ]; then
             printf "${YELLOW}WARNING: Using new External ID. You will need to update the UseCase in the portal!${NC}\n"
         fi
     fi
+    
+    # Ask for additional bucket (optional - dda-* pattern is always included)
+    echo ""
+    printf "${BLUE}Additional S3 bucket for model artifacts (optional)${NC}\n"
+    echo "The policy automatically includes access to buckets matching 'dda-*' and '*-dda-*' patterns."
+    echo "If your bucket doesn't match these patterns, enter it here."
+    read -p "Additional bucket name [press Enter to skip]: " MODEL_ARTIFACTS_BUCKET
+    
     echo ""
     printf "${YELLOW}Deploying UseCase Account Role...${NC}\n"
-    printf "  Portal Account: ${GREEN}$PORTAL_ACCOUNT_ID${NC}\n"
-    printf "  Target Account: ${GREEN}$CURRENT_ACCOUNT${NC}\n"
-    printf "  External ID:    ${GREEN}$EXTERNAL_ID${NC}\n"
+    printf "  Portal Account:         ${GREEN}$PORTAL_ACCOUNT_ID${NC}\n"
+    printf "  Target Account:         ${GREEN}$CURRENT_ACCOUNT${NC}\n"
+    printf "  External ID:            ${GREEN}$EXTERNAL_ID${NC}\n"
+    if [ -n "$MODEL_ARTIFACTS_BUCKET" ]; then
+        printf "  Model Artifacts Access: ${GREEN}dda-* and *-dda-* + $MODEL_ARTIFACTS_BUCKET${NC}\n"
+    else
+        printf "  Model Artifacts Access: ${GREEN}dda-* and *-dda-* buckets${NC}\n"
+    fi
     echo ""
     
     read -p "Press Enter to continue..."
     
     cd infrastructure
-    cdk deploy -a "npx ts-node bin/usecase-account-app.ts" \
-        -c portalAccountId=$PORTAL_ACCOUNT_ID \
-        -c externalId=$EXTERNAL_ID \
-        --require-approval never
+    
+    # Build CDK command
+    CDK_CMD="cdk deploy -a \"npx ts-node bin/usecase-account-app.ts\" -c portalAccountId=$PORTAL_ACCOUNT_ID -c externalId=$EXTERNAL_ID"
+    if [ -n "$MODEL_ARTIFACTS_BUCKET" ]; then
+        CDK_CMD="$CDK_CMD -c modelArtifactsBucket=$MODEL_ARTIFACTS_BUCKET"
+    fi
+    CDK_CMD="$CDK_CMD --require-approval never"
+    
+    eval $CDK_CMD
     cd ..
     
     # Get outputs
@@ -142,6 +160,11 @@ if [ "$ROLE_TYPE" = "1" ]; then
     
     # Save config with account ID in filename for multi-account support
     CONFIG_FILE="usecase-account-${CURRENT_ACCOUNT}-config.txt"
+    if [ -n "$MODEL_ARTIFACTS_BUCKET" ]; then
+        BUCKET_ACCESS="dda-* and *-dda-* + $MODEL_ARTIFACTS_BUCKET"
+    else
+        BUCKET_ACCESS="dda-* and *-dda-* (automatic)"
+    fi
     cat > "$CONFIG_FILE" << EOF
 UseCase Account Configuration
 =============================
@@ -150,6 +173,7 @@ Portal Account ID: $PORTAL_ACCOUNT_ID
 External ID: $EXTERNAL_ID
 Role ARN: $ROLE_ARN
 SageMaker Execution Role ARN: $SAGEMAKER_ROLE_ARN
+Model Artifacts Access: $BUCKET_ACCESS
 Deployment Date: $(date)
 EOF
     printf "Configuration saved to: ${GREEN}$CONFIG_FILE${NC}\n"
@@ -185,22 +209,13 @@ else
     fi
     
     echo ""
-    printf "${BLUE}Enter UseCase Account ID(s)${NC}\n"
-    echo "(Accounts where SageMaker training will run)"
-    echo "(For multiple accounts, separate with commas: 111111111111,222222222222)"
-    read -p "UseCase Account ID(s): " USECASE_ACCOUNT_IDS
-    
-    if [ -z "$USECASE_ACCOUNT_IDS" ]; then
-        printf "${RED}Error: At least one UseCase Account ID is required${NC}\n"
-        exit 1
-    fi
-    
-    echo ""
     printf "${YELLOW}Deploying Data Account Roles...${NC}\n"
     printf "  Portal Account:   ${GREEN}$PORTAL_ACCOUNT_ID${NC}\n"
-    printf "  UseCase Accounts: ${GREEN}$USECASE_ACCOUNT_IDS${NC}\n"
     printf "  Data Account:     ${GREEN}$CURRENT_ACCOUNT${NC}\n"
     printf "  External ID:      ${GREEN}$EXTERNAL_ID${NC}\n"
+    echo ""
+    printf "${BLUE}NOTE: Bucket policies will be configured automatically by the portal${NC}\n"
+    printf "${BLUE}      when you onboard each UseCase. No manual configuration needed.${NC}\n"
     echo ""
     
     read -p "Press Enter to continue..."
@@ -208,7 +223,6 @@ else
     cd infrastructure
     cdk deploy -a "npx ts-node bin/data-account-app.ts" \
         -c portalAccountId=$PORTAL_ACCOUNT_ID \
-        -c usecaseAccountIds=$USECASE_ACCOUNT_IDS \
         -c externalId=$EXTERNAL_ID \
         --require-approval never
     cd ..
@@ -243,13 +257,40 @@ Data Account Configuration
 ==========================
 Data Account ID: $CURRENT_ACCOUNT
 Portal Account ID: $PORTAL_ACCOUNT_ID
-UseCase Account IDs: $USECASE_ACCOUNT_IDS
 External ID: $EXTERNAL_ID
 Portal Access Role ARN: $PORTAL_ROLE_ARN
 SageMaker Access Role ARN: $SAGEMAKER_ROLE_ARN
 Deployment Date: $(date)
+
+NOTE: Bucket policies will be automatically configured by the portal
+      when you onboard each UseCase. No manual bucket configuration needed.
 EOF
     printf "Configuration saved to: ${GREEN}$CONFIG_FILE${NC}\n"
+    
+    # Prompt to register in portal for dropdown feature
+    echo ""
+    printf "${BLUE}========================================${NC}\n"
+    printf "${BLUE}Enable Dropdown Feature (Recommended)${NC}\n"
+    printf "${BLUE}========================================${NC}\n"
+    echo ""
+    echo "To use the dropdown feature in UseCase onboarding:"
+    echo ""
+    printf "  1. Log in to portal as ${GREEN}PortalAdmin${NC}\n"
+    printf "  2. Go to ${GREEN}Settings → Data Accounts${NC}\n"
+    printf "  3. Click ${GREEN}'Add Data Account'${NC}\n"
+    printf "  4. Upload ${GREEN}$CONFIG_FILE${NC}\n"
+    printf "  5. Fill in:\n"
+    printf "     - Name: ${GREEN}Production Data Account${NC}\n"
+    printf "     - Default Bucket: ${GREEN}your-bucket-name${NC}\n"
+    printf "     - Region: ${GREEN}us-east-1${NC}\n"
+    printf "  6. Click ${GREEN}'Register'${NC}\n"
+    echo ""
+    printf "Then when creating UseCases:\n"
+    printf "  → Select 'Separate Data Account'\n"
+    printf "  → Choose from dropdown\n"
+    printf "  → All fields auto-filled!\n"
+    echo ""
+    printf "${YELLOW}Skip this step if you prefer manual entry${NC}\n"
 fi
 
 echo ""

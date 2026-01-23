@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useState, useEffect } from 'react';
+import { useQuery, useQueries } from '@tanstack/react-query';
 import {
   Container,
   Header,
@@ -33,11 +33,37 @@ export default function Dashboard() {
     queryFn: () => apiService.listUseCases(),
   });
 
-  // Fetch devices for selected use case
+  // Auto-select first use case for non-PortalAdmin users, or when there's only one
+  useEffect(() => {
+    const usecases = useCasesData?.usecases;
+    if (usecases && usecases.length > 0 && !selectedUseCase) {
+      // Auto-select if user is not PortalAdmin OR if there's only one use case
+      if (user?.role !== 'PortalAdmin' || usecases.length === 1) {
+        setSelectedUseCase({
+          label: usecases[0].name,
+          value: usecases[0].usecase_id,
+          description: `Account: ${usecases[0].account_id}`,
+        });
+      }
+    }
+  }, [useCasesData, selectedUseCase, user?.role]);
+
+  // Fetch devices for selected use case (single use case mode)
   const { data: devicesData } = useQuery({
     queryKey: ['devices', selectedUseCase?.value],
     queryFn: () => apiService.listDevices(selectedUseCase?.value as string),
     enabled: !!selectedUseCase,
+  });
+
+  // Fetch devices for ALL use cases (for aggregate counts when PortalAdmin and no selection)
+  const allUseCaseIds = useCasesData?.usecases?.map((uc: any) => uc.usecase_id) || [];
+  const deviceQueries = useQueries({
+    queries: allUseCaseIds.map((usecaseId: string) => ({
+      queryKey: ['devices-aggregate', usecaseId],
+      queryFn: () => apiService.listDevices(usecaseId),
+      enabled: user?.role === 'PortalAdmin' && !selectedUseCase && allUseCaseIds.length > 0,
+      staleTime: 60000, // Cache for 1 minute to avoid too many API calls
+    })),
   });
 
   // Fetch training jobs for selected use case
@@ -63,8 +89,28 @@ export default function Dashboard() {
 
   // Calculate metrics
   const useCasesCount = useCasesData?.count || 0;
-  const devicesCount = devicesData?.count || 0;
-  const onlineDevices = devicesData?.devices?.filter((d: any) => d.status === 'online').length || 0;
+  
+  // Calculate device counts - either from selected use case or aggregate
+  let devicesCount = 0;
+  let onlineDevices = 0;
+  
+  if (selectedUseCase) {
+    // Single use case selected
+    devicesCount = devicesData?.count || 0;
+    onlineDevices = devicesData?.devices?.filter((d: any) => 
+      d.status?.toLowerCase() === 'healthy' || d.status?.toLowerCase() === 'online'
+    ).length || 0;
+  } else if (user?.role === 'PortalAdmin' && deviceQueries.length > 0) {
+    // Aggregate across all use cases for PortalAdmin
+    deviceQueries.forEach((query) => {
+      if (query.data) {
+        devicesCount += query.data.count || 0;
+        onlineDevices += query.data.devices?.filter((d: any) => 
+          d.status?.toLowerCase() === 'healthy' || d.status?.toLowerCase() === 'online'
+        ).length || 0;
+      }
+    });
+  }
   
   // Count active training jobs (InProgress, Pending)
   const activeTrainingJobs = trainingData?.jobs?.filter((job: any) => 
@@ -132,23 +178,31 @@ export default function Dashboard() {
         Dashboard
       </Header>
 
-      {/* Use Case Selector */}
-      {user?.role === 'PortalAdmin' && (
+      {/* Use Case Selector - show for PortalAdmin with multiple use cases */}
+      {user?.role === 'PortalAdmin' && useCasesCount > 1 && (
         <Container>
           <SpaceBetween size="s">
             <Box variant="awsui-key-label">
               Select Use Case
-              {user.role === 'PortalAdmin' && (
-                <Box variant="small" color="text-status-info" display="inline" margin={{ left: 'xs' }}>
-                  (Super User - Access to all use cases)
-                </Box>
-              )}
+              <Box variant="small" color="text-status-info" display="inline" margin={{ left: 'xs' }}>
+                (Portal Admin - Access to all use cases)
+              </Box>
             </Box>
             <Select
               selectedOption={selectedUseCase}
-              onChange={({ detail }) => setSelectedUseCase(detail.selectedOption)}
-              options={useCaseOptions}
-              placeholder="Select a use case to view details"
+              onChange={({ detail }) => {
+                // If "All Use Cases" selected (empty value), set to null
+                if (detail.selectedOption.value === '') {
+                  setSelectedUseCase(null);
+                } else {
+                  setSelectedUseCase(detail.selectedOption);
+                }
+              }}
+              options={[
+                { label: 'All Use Cases (Aggregate)', value: '' },
+                ...useCaseOptions
+              ]}
+              placeholder="Select a use case or view aggregate"
               loadingText="Loading use cases..."
               statusType={useCasesLoading ? 'loading' : 'finished'}
               empty="No use cases available"

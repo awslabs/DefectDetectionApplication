@@ -2,7 +2,17 @@ import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
+
+/**
+ * Stack version - increment when making changes
+ * Follow semver: MAJOR.MINOR.PATCH
+ * - MAJOR: Breaking changes (role renames, permission removals)
+ * - MINOR: New features (new permissions, new resources)
+ * - PATCH: Bug fixes
+ */
+const STACK_VERSION = '1.3.0';
 
 export interface UseCaseAccountStackProps extends cdk.StackProps {
   /**
@@ -18,12 +28,6 @@ export interface UseCaseAccountStackProps extends cdk.StackProps {
   externalId?: string;
 
   /**
-   * S3 bucket prefix pattern for data access.
-   * Default: '*-dda-*'
-   */
-  s3BucketPrefix?: string;
-
-  /**
    * Enable cross-account EventBridge forwarding for SageMaker events.
    * When enabled, SageMaker training/compilation job state changes are forwarded
    * to the Portal Account's default event bus.
@@ -37,6 +41,28 @@ export interface UseCaseAccountStackProps extends cdk.StackProps {
    * Format: dda-component-{region}-{portalAccountId}
    */
   componentBucketName?: string;
+
+  /**
+   * S3 bucket name for model artifacts in this UseCase Account.
+   * This is the bucket where trained models and Greengrass component packages are stored.
+   * Greengrass devices need access to download model components from this bucket.
+   * The policy ALWAYS includes dda-* and *-dda-* patterns, plus this specific bucket if provided.
+   */
+  modelArtifactsBucket?: string;
+
+  /**
+   * AWS Account ID of the Data Account (if using separate data storage).
+   * When provided, the SageMaker execution role will be granted permissions
+   * to access S3 buckets in the Data Account for cross-account labeling and training.
+   */
+  dataAccountId?: string;
+
+  /**
+   * List of S3 bucket names in the Data Account that SageMaker should access.
+   * Required when dataAccountId is provided.
+   * Example: ['dda-cookie-bucket', 'dda-training-data']
+   */
+  dataAccountBuckets?: string[];
 }
 
 /**
@@ -56,24 +82,46 @@ export class UseCaseAccountStack extends cdk.Stack {
   public readonly roleArn: string;
   public readonly groundTruthRole: iam.Role;
   public readonly greengrassDevicePolicy: iam.ManagedPolicy;
+  public readonly inferenceResultsBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props: UseCaseAccountStackProps) {
     super(scope, id, props);
 
     const portalAccountId = props.portalAccountId || cdk.Stack.of(this).account;
     const externalId = props.externalId;
-    const s3BucketPrefix = props.s3BucketPrefix || '*-dda-*';
     const region = cdk.Stack.of(this).region;
+    const dataAccountId = props.dataAccountId;
+    const dataAccountBuckets = props.dataAccountBuckets || [];
     
     // Component bucket name - defaults to Portal Account's GDK bucket
     const componentBucketName = props.componentBucketName || `dda-component-${region}-${portalAccountId}`;
+    
+    // Model artifacts bucket - optional specific bucket
+    const modelArtifactsBucket = props.modelArtifactsBucket;
 
-    // Create a managed policy for Greengrass devices to access Portal component artifacts
+    // Build S3 resources list for model artifacts access
+    // Always include dda-* and *-dda-* patterns, plus specific bucket if provided
+    const modelArtifactResources = [
+      'arn:aws:s3:::dda-*',
+      'arn:aws:s3:::dda-*/*',
+      'arn:aws:s3:::*-dda-*',
+      'arn:aws:s3:::*-dda-*/*',
+    ];
+    
+    // Add specific bucket if provided (in case it doesn't match the patterns)
+    if (modelArtifactsBucket) {
+      modelArtifactResources.push(`arn:aws:s3:::${modelArtifactsBucket}`);
+      modelArtifactResources.push(`arn:aws:s3:::${modelArtifactsBucket}/*`);
+    }
+
+    // Create a managed policy for Greengrass devices to access component artifacts
     // This policy should be attached to GreengrassV2TokenExchangeRole during device provisioning
+    // Uses pattern-based access to cover all DDA buckets without needing to specify each one
     this.greengrassDevicePolicy = new iam.ManagedPolicy(this, 'DDAGreengrassDevicePolicy', {
       managedPolicyName: 'DDAPortalComponentAccessPolicy',
-      description: 'Allows Greengrass devices to download DDA component artifacts from Portal Account S3 bucket',
+      description: 'Allows Greengrass devices to download DDA component artifacts from Portal and UseCase S3 buckets',
       statements: [
+        // Access to Portal Account's component bucket (for DDA LocalServer)
         new iam.PolicyStatement({
           sid: 'AllowPortalComponentBucketAccess',
           effect: iam.Effect.ALLOW,
@@ -83,8 +131,62 @@ export class UseCaseAccountStack extends cdk.Stack {
             `arn:aws:s3:::${componentBucketName}/*`,
           ],
         }),
+        // Access to DDA buckets (model artifacts, assets, etc.)
+        // Covers: dda-assset-bucket, dda-data-bucket, my-dda-bucket, etc.
+        // Plus any specific bucket provided via modelArtifactsBucket prop
+        new iam.PolicyStatement({
+          sid: 'AllowDDABucketPatternAccess',
+          effect: iam.Effect.ALLOW,
+          actions: ['s3:GetObject', 's3:GetBucketLocation', 's3:HeadObject'],
+          resources: modelArtifactResources,
+        }),
       ],
     });
+
+    // Create S3 bucket for inference results
+    // This bucket stores images and metadata uploaded from edge devices
+    this.inferenceResultsBucket = new s3.Bucket(this, 'InferenceResultsBucket', {
+      bucketName: `dda-inference-results-${this.account}`,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      versioned: false,
+      lifecycleRules: [
+        {
+          id: 'DeleteOldInferenceResults',
+          enabled: true,
+          expiration: cdk.Duration.days(90), // Keep inference results for 90 days
+        },
+        {
+          id: 'TransitionToIA',
+          enabled: true,
+          transitions: [
+            {
+              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+              transitionAfter: cdk.Duration.days(30), // Move to IA after 30 days
+            },
+          ],
+        },
+      ],
+      removalPolicy: cdk.RemovalPolicy.RETAIN, // Don't delete bucket on stack deletion
+    });
+
+    // Add inference results upload permissions to Greengrass device policy
+    this.greengrassDevicePolicy.addStatements(
+      new iam.PolicyStatement({
+        sid: 'AllowInferenceResultsUpload',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          's3:PutObject',
+          's3:PutObjectTagging',
+          's3:GetObject',
+          's3:GetBucketLocation',
+        ],
+        resources: [
+          this.inferenceResultsBucket.bucketArn,
+          `${this.inferenceResultsBucket.bucketArn}/*`,
+        ],
+      })
+    );
 
     // Create SageMaker Execution Role
     // This role is used by SageMaker for training, compilation, and Ground Truth labeling jobs
@@ -170,6 +272,60 @@ export class UseCaseAccountStack extends cdk.Stack {
         resources: ['*'],
       })
     );
+
+    // Cross-Account S3 Access for Data Account
+    // This enables Ground Truth labeling jobs and SageMaker training to read data
+    // from a separate Data Account's S3 buckets
+    if (dataAccountId && dataAccountBuckets.length > 0) {
+      // Build resource ARNs for Data Account buckets
+      const dataAccountBucketArns: string[] = [];
+      const dataAccountObjectArns: string[] = [];
+      
+      for (const bucketName of dataAccountBuckets) {
+        dataAccountBucketArns.push(`arn:aws:s3:::${bucketName}`);
+        dataAccountObjectArns.push(`arn:aws:s3:::${bucketName}/*`);
+      }
+
+      // Read access to Data Account buckets for training data and images
+      this.groundTruthRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'CrossAccountDataBucketRead',
+          effect: iam.Effect.ALLOW,
+          actions: [
+            's3:GetObject',
+            's3:GetObjectVersion',
+            's3:GetObjectTagging',
+            's3:ListBucket',
+            's3:GetBucketLocation',
+          ],
+          resources: [...dataAccountBucketArns, ...dataAccountObjectArns],
+        })
+      );
+
+      // Write access to Data Account buckets for labeling output
+      // Ground Truth needs to write annotation results back to S3
+      this.groundTruthRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'CrossAccountDataBucketWrite',
+          effect: iam.Effect.ALLOW,
+          actions: [
+            's3:PutObject',
+            's3:PutObjectTagging',
+          ],
+          resources: dataAccountObjectArns,
+        })
+      );
+
+      new cdk.CfnOutput(this, 'DataAccountId', {
+        value: dataAccountId,
+        description: 'Data Account ID for cross-account S3 access',
+      });
+
+      new cdk.CfnOutput(this, 'DataAccountBuckets', {
+        value: dataAccountBuckets.join(','),
+        description: 'Data Account S3 buckets accessible by SageMaker',
+      });
+    }
 
     // Create the cross-account (or same-account) role
     this.role = new iam.Role(this, 'DDAPortalAccessRole', {
@@ -337,6 +493,39 @@ export class UseCaseAccountStack extends cdk.Stack {
         resources: [
           `arn:aws:logs:*:${this.account}:log-group:/aws/sagemaker/*`,
           `arn:aws:logs:*:${this.account}:log-group:/aws/lambda/*`,
+        ],
+      })
+    );
+
+    // CloudWatch Logs for Greengrass components
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchLogsGreengrass',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'logs:DescribeLogGroups',
+          'logs:DescribeLogStreams',
+          'logs:GetLogEvents',
+          'logs:FilterLogEvents',
+        ],
+        resources: ['*'], // DescribeLogGroups requires wildcard resource
+      })
+    );
+
+    // Inference Results S3 Access
+    // Allow portal to read inference results uploaded by devices
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'InferenceResultsAccess',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          's3:GetObject',
+          's3:ListBucket',
+          's3:GetBucketLocation',
+        ],
+        resources: [
+          `arn:aws:s3:::dda-inference-results-${this.account}`,
+          `arn:aws:s3:::dda-inference-results-${this.account}/*`,
         ],
       })
     );
@@ -589,6 +778,32 @@ export class UseCaseAccountStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ComponentBucketName', {
       value: componentBucketName,
       description: 'Portal Account S3 bucket containing shared component artifacts',
+    });
+
+    new cdk.CfnOutput(this, 'ModelArtifactsBucketAccess', {
+      value: modelArtifactsBucket 
+        ? `${modelArtifactsBucket} + dda-* and *-dda-* patterns`
+        : 'dda-* and *-dda-* patterns',
+      description: 'S3 buckets Greengrass devices can access for model artifacts',
+    });
+
+    new cdk.CfnOutput(this, 'InferenceResultsBucketName', {
+      value: this.inferenceResultsBucket.bucketName,
+      description: 'S3 bucket for storing inference results from edge devices',
+      exportName: 'DDAInferenceResultsBucketName',
+    });
+
+    new cdk.CfnOutput(this, 'InferenceResultsBucketArn', {
+      value: this.inferenceResultsBucket.bucketArn,
+      description: 'ARN of the inference results S3 bucket',
+      exportName: 'DDAInferenceResultsBucketArn',
+    });
+
+    // Stack version for upgrade tracking
+    new cdk.CfnOutput(this, 'StackVersion', {
+      value: STACK_VERSION,
+      description: 'Version of the UseCase Account stack',
+      exportName: 'DDAUseCaseStackVersion',
     });
   }
 }

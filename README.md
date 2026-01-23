@@ -415,45 +415,69 @@ DDA consists of several key components:
 
 #### Step 1: Set up Build Environment
 
+The build server architecture must match your target edge device architecture.
+
 1. **Launch EC2 build instance**:
+
+   **Option A: Use the automated launch script (Recommended)**
    
-   **The EC2 build instance must match the target edge device architecture:**
-   
-   **If your edge device is ARM64 JetPack 4.6 (Jetson Xavier, L4T r32.x):**
+   For ARM64 edge devices (Jetson Xavier, Graviton, ARM64 systems):
    ```bash
-   # Launch Ubuntu 18.04 ARM64 (e.g., a1.2xlarge or c6g.2xlarge)
-   # Storage: 512GB, Security: SSH (port 22)
-   # Attach IAM role: dda-build-role
+   # Minimal - creates new security group
+   ./launch-arm64-build-server.sh --key-name your-key-name
+   
+   # Enterprise - use existing security group and subnet
+   ./launch-arm64-build-server.sh \
+     --key-name your-key-name \
+     --security-group-id sg-xxxxxxxx \
+     --subnet-id subnet-xxxxxxxx \
+     --iam-profile dda-build-role
+   
+   # Dry run to preview
+   ./launch-arm64-build-server.sh --key-name your-key-name --dry-run
    ```
    
-   **If your edge device is ARM64 JetPack 5 (Jetson Orin, L4T r35.x):**
-   ```bash
-   # Launch Ubuntu 20.04 ARM64 (e.g., a1.2xlarge or c6g.2xlarge)
-   # Storage: 512GB, Security: SSH (port 22)
-   # Attach IAM role: dda-build-role
-   ```
+   Script options:
+   | Option | Default | Description |
+   |--------|---------|-------------|
+   | `--key-name` | (required) | SSH key pair name |
+   | `--instance-type` | m6g.4xlarge | EC2 instance type |
+   | `--security-group-id` | (creates new) | Existing security group |
+   | `--subnet-id` | (default VPC) | Subnet for the instance |
+   | `--iam-profile` | dda-build-role | IAM instance profile |
+   | `--volume-size` | 100 | Root volume size (GB) |
+   | `--region` | us-east-1 | AWS region |
+   | `--ami-id` | (auto-detect) | Ubuntu 18.04 ARM64 AMI |
+
+   **Option B: Manual launch via AWS Console**
    
-   **If your edge device is x86_64 CPU (Intel/AMD systems):**
-   ```bash
-   # Launch Ubuntu 20.04 x86_64 (e.g., c5.2xlarge or g4dn.2xlarge)
-   # Storage: 512GB, Security: SSH (port 22)
-   # Attach IAM role: dda-build-role
-   ```
+   For ARM64 edge devices:
+   - Instance type: `m6g.4xlarge` (or similar Graviton)
+   - AMI: Ubuntu Pro 18.04 LTS ARM64
+   - Storage: 100GB+ gp3
+   - IAM role: `dda-build-role`
+   - Security: SSH (port 22)
+   
+   For x86_64 edge devices:
+   - Instance type: `c5.4xlarge` (or similar)
+   - AMI: Ubuntu 20.04 LTS x86_64
+   - Storage: 100GB+ gp3
+   - IAM role: `dda-build-role`
+   - Security: SSH (port 22)
 
 2. **Connect and setup**:
    
-   **Option A: SSH (Traditional)**
    ```bash
    ssh -i "your-key.pem" ubuntu@<build-server-ip>
    ```
    
-   **Setup DDA:**
+   **Setup DDA build environment:**
    ```bash
    # Clone repository
    git clone https://github.com/aws-samples/defect-detection-application.git
    cd DefectDetectionApplication
    
-   # Run setup script
+   # Run setup script (installs Docker, Python 3.9, GDK, AWS CLI)
    sudo ./setup-build-server.sh
    ```
 
@@ -631,6 +655,51 @@ defect-detection-application/
 
 ## Deployment
 
+### Inference Results Upload to S3
+
+The DDA includes an optional InferenceUploader component that automatically uploads inference results to S3 for centralized storage and analysis.
+
+#### Building the InferenceUploader Component
+
+**From your local machine (no build server needed - pure Python):**
+
+```bash
+cd DefectDetectionApplication
+./build-inference-uploader.sh
+```
+
+This publishes `aws.edgeml.dda.InferenceUploader` to your AWS account.
+
+#### Deploying InferenceUploader
+
+The component is automatically provisioned to usecase accounts via the Edge CV Portal. To deploy to devices:
+
+```bash
+aws greengrassv2 create-deployment \
+  --target-arn "arn:aws:iot:us-east-1:$(aws sts get-caller-identity --query Account --output text):thing/<thing-name>" \
+  --components '{
+    "aws.greengrass.Nucleus": {"componentVersion": "2.15.0"},
+    "aws.edgeml.dda.LocalServer": {"componentVersion": "1.0.0"},
+    "aws.edgeml.dda.InferenceUploader": {
+      "componentVersion": "1.0.0",
+      "configurationUpdate": {
+        "merge": "{\"s3Bucket\":\"dda-inference-results-YOUR-ACCOUNT-ID\",\"s3Prefix\":\"usecase-id/device-id\",\"uploadIntervalSeconds\":300}"
+      }
+    },
+    "<your-model-name>": {"componentVersion": "1.0.0"}
+  }' \
+  --deployment-name "DDA-Full-Deployment" \
+  --region us-east-1
+```
+
+**What it does:**
+- Monitors `/aws_dda/inference-results/` for new images and metadata
+- Uploads to S3 every 5 minutes (configurable)
+- Organizes by date: `s3://bucket/prefix/model-id/YYYY/MM/DD/`
+- Cleans up local files after 7 days (configurable)
+
+**See [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) for detailed configuration options.**
+
 ### Production Considerations
 
 - **Security**: Configure proper IAM roles and security groups
@@ -656,15 +725,29 @@ sudo chmod 666 /var/run/docker.sock
 **Component deployment fails**:
 ```bash
 # Check Greengrass logs
-sudo tail -f /greengrass/v2/logs/greengrass.log
+sudo tail -f /aws_dda/greengrass/v2/logs/greengrass.log
 
-# Check component logs
-sudo tail -f /greengrass/v2/logs/aws.edgeml.dda.LocalServer.*.log
+# Check DDA LocalServer component logs
+sudo tail -f /aws_dda/greengrass/v2/logs/aws.edgeml.dda.LocalServer.*.log
 
-# Check component logs
-sudo tail -f /greengrass/v2/logs/<mode-name>.log
+# Check model component logs
+sudo tail -f /aws_dda/greengrass/v2/logs/<model-name>.log
 ```
 
+**Triton server not initialized (NoneType error)**:
+```bash
+# If you see: AttributeError: 'NoneType' object has no attribute 'get_model_status'
+# This means Triton failed to initialize. Common causes:
+
+# 1. Model component deployed AFTER LocalServer started (timing issue)
+#    Solution: Restart the backend container after model deployment
+sudo docker restart awsedgemlddalocalserverarm64-backend_generic-1
+
+# 2. Model repo doesn't exist or is empty
+sudo ls -la /aws_dda/dda_triton/triton_model_repo/
+
+# 3. Model has syntax errors - test inside container (see Model loading section below)
+```
 
 **S3 access denied**:
 - Verify IAM permissions for Greengrass service role
@@ -678,8 +761,16 @@ ssh -i "key.pem" -L 3000:localhost:3000 -L 5000:localhost:5000 user@device-ip
 
 **Model loading**:
 ```bash
-# Test Triton server directly to verify model loading. 
+# Test Triton server directly to verify model loading.
+# Triton runs inside the backend Docker container, so exec into it first:
 
+# Find the backend container name
+sudo docker ps | grep backend
+
+# Exec into the backend container
+sudo docker exec -it awsedgemlddalocalserverarm64-backend_generic-1 bash
+
+# Inside the container, test Triton server
 cd /opt/tritonserver/bin
 ./tritonserver --model-repository /aws_dda/dda_triton/triton_model_repo/
 
@@ -691,6 +782,9 @@ cd /opt/tritonserver/bin
 # | marshal_model-bd-dda-classification-arm64 | 1       | READY  |
 # | model-bd-dda-classification-arm64         | 1       | READY  |
 # +-------------------------------------------+---------+--------+
+
+# Exit the container when done
+exit
 ```
 
 **Database errors**:

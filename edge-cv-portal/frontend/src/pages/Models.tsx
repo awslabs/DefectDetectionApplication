@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Table,
@@ -11,6 +11,8 @@ import {
   Select,
   SelectProps,
   Button,
+  Spinner,
+  Alert,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 
@@ -20,75 +22,29 @@ interface Model {
   name: string;
   version: string;
   stage: 'candidate' | 'staging' | 'production';
+  source: string;
   training_job_id: string;
+  model_type: string;
   metrics: Record<string, number>;
+  artifact_s3?: string;
+  component_arns: Record<string, string>;
   deployed_devices: string[];
   created_by: string;
   created_at: number;
-  marketplace_arn?: string;
-  requires_subscription?: boolean;
+  description?: string;
+  compilation_status?: string;
 }
-
-// Mock data
-const mockModels: Model[] = [
-  {
-    model_id: 'marketplace-cv-defect-detection',
-    usecase_id: 'marketplace',
-    name: 'AWS Marketplace CV Defect Detection',
-    version: 'Latest',
-    stage: 'production',
-    training_job_id: 'marketplace-algorithm',
-    metrics: { accuracy: 0.0, precision: 0.0, recall: 0.0, f1_score: 0.0 },
-    deployed_devices: [],
-    created_by: 'AWS Marketplace',
-    created_at: Date.now() - 365 * 24 * 60 * 60 * 1000,
-    marketplace_arn: 'arn:aws:sagemaker:us-east-1:865070037744:algorithm/computer-vision-defect-detection',
-    requires_subscription: true,
-  },
-  {
-    model_id: 'model-001',
-    usecase_id: 'usecase-manufacturing-001',
-    name: 'Defect Detection v1',
-    version: '1.0.0',
-    stage: 'production',
-    training_job_id: 'training-job-001',
-    metrics: { accuracy: 0.95, precision: 0.93, recall: 0.94, f1_score: 0.935 },
-    deployed_devices: ['device-001', 'device-002', 'device-003'],
-    created_by: 'user@example.com',
-    created_at: Date.now() - 7 * 24 * 60 * 60 * 1000,
-  },
-  {
-    model_id: 'model-002',
-    usecase_id: 'usecase-manufacturing-001',
-    name: 'Defect Detection v2',
-    version: '2.0.0',
-    stage: 'staging',
-    training_job_id: 'training-job-002',
-    metrics: { accuracy: 0.97, precision: 0.96, recall: 0.95, f1_score: 0.955 },
-    deployed_devices: ['device-004'],
-    created_by: 'user@example.com',
-    created_at: Date.now() - 2 * 24 * 60 * 60 * 1000,
-  },
-  {
-    model_id: 'model-003',
-    usecase_id: 'usecase-manufacturing-002',
-    name: 'Scratch Detection',
-    version: '1.0.0',
-    stage: 'candidate',
-    training_job_id: 'training-job-003',
-    metrics: { accuracy: 0.92, precision: 0.91, recall: 0.90, f1_score: 0.905 },
-    deployed_devices: [],
-    created_by: 'scientist@example.com',
-    created_at: Date.now() - 1 * 24 * 60 * 60 * 1000,
-  },
-];
 
 export default function Models() {
   const navigate = useNavigate();
   const [filteringText, setFilteringText] = useState('');
   const [stageFilter, setStageFilter] = useState<SelectProps.Option | null>(null);
+  const [sourceFilter, setSourceFilter] = useState<SelectProps.Option | null>(null);
   const [useCases, setUseCases] = useState<any[]>([]);
   const [selectedUseCase, setSelectedUseCase] = useState<SelectProps.Option | null>(null);
+  const [models, setModels] = useState<Model[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Load use cases on mount
   useEffect(() => {
@@ -104,12 +60,40 @@ export default function Models() {
             value: useCaseList[0].usecase_id,
           });
         }
-      } catch (error) {
-        console.error('Failed to load use cases:', error);
+      } catch (err) {
+        console.error('Failed to load use cases:', err);
+        setError('Failed to load use cases');
       }
     };
     loadUseCases();
   }, []);
+
+  // Load models when use case changes
+  const loadModels = useCallback(async () => {
+    if (!selectedUseCase?.value) return;
+    
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const response = await apiService.listModels({
+        usecase_id: selectedUseCase.value,
+        ...(stageFilter?.value && { stage: stageFilter.value as 'candidate' | 'staging' | 'production' }),
+        ...(sourceFilter?.value && { source: sourceFilter.value as 'trained' | 'imported' | 'marketplace' }),
+      });
+      setModels(response.models || []);
+    } catch (err: any) {
+      console.error('Failed to load models:', err);
+      setError(err.message || 'Failed to load models');
+      setModels([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedUseCase, stageFilter, sourceFilter]);
+
+  useEffect(() => {
+    loadModels();
+  }, [loadModels]);
 
   const getStageBadge = (stage: string) => {
     switch (stage) {
@@ -124,22 +108,34 @@ export default function Models() {
     }
   };
 
+  const getSourceBadge = (source: string) => {
+    switch (source) {
+      case 'trained':
+        return <Badge color="green">Trained</Badge>;
+      case 'imported':
+        return <Badge color="blue">Imported</Badge>;
+      case 'marketplace':
+        return <Badge color="grey">Marketplace</Badge>;
+      default:
+        return <Badge>{source}</Badge>;
+    }
+  };
+
   const formatTimestamp = (timestamp: number) => {
+    if (!timestamp) return 'N/A';
     const date = new Date(timestamp);
     return date.toLocaleDateString();
   };
 
-  // Filter models
-  const filteredModels = mockModels.filter((model) => {
+  // Filter models by text
+  const filteredModels = models.filter((model) => {
     const matchesText =
       !filteringText ||
       model.name.toLowerCase().includes(filteringText.toLowerCase()) ||
       model.version.toLowerCase().includes(filteringText.toLowerCase()) ||
       model.model_id.toLowerCase().includes(filteringText.toLowerCase());
 
-    const matchesStage = !stageFilter || model.stage === stageFilter.value;
-
-    return matchesText && matchesStage;
+    return matchesText;
   });
 
   const stageOptions: SelectProps.Option[] = [
@@ -149,8 +145,20 @@ export default function Models() {
     { label: 'Candidate', value: 'candidate' },
   ];
 
+  const sourceOptions: SelectProps.Option[] = [
+    { label: 'All Sources', value: '' },
+    { label: 'Trained', value: 'trained' },
+    { label: 'Imported', value: 'imported' },
+  ];
+
   return (
     <SpaceBetween size="l">
+      {error && (
+        <Alert type="error" dismissible onDismiss={() => setError(null)}>
+          {error}
+        </Alert>
+      )}
+      
       <Table
         header={
           <Header
@@ -174,6 +182,9 @@ export default function Models() {
             counter={`(${filteredModels.length})`}
             actions={
               <SpaceBetween direction="horizontal" size="xs">
+                <Button iconName="refresh" onClick={loadModels} disabled={loading}>
+                  Refresh
+                </Button>
                 <Button 
                   onClick={() => navigate('/models/smart-import')}
                   disabled={!selectedUseCase}
@@ -192,18 +203,15 @@ export default function Models() {
             Model Registry
           </Header>
         }
+        loading={loading}
+        loadingText="Loading models..."
         items={filteredModels}
         columnDefinitions={[
           {
             id: 'name',
             header: 'Model Name',
             cell: (item) => (
-              <SpaceBetween direction="horizontal" size="xs">
-                <Link onFollow={() => navigate(`/models/${item.model_id}`)}>{item.name}</Link>
-                {item.requires_subscription && (
-                  <Badge color="blue">Requires Subscription</Badge>
-                )}
-              </SpaceBetween>
+              <Link onFollow={() => navigate(`/models/${item.model_id}`)}>{item.name}</Link>
             ),
             sortingField: 'name',
           },
@@ -220,15 +228,32 @@ export default function Models() {
             sortingField: 'stage',
           },
           {
-            id: 'accuracy',
-            header: 'Accuracy',
-            cell: (item) =>
-              item.metrics.accuracy > 0 ? `${(item.metrics.accuracy * 100).toFixed(1)}%` : 'N/A',
+            id: 'source',
+            header: 'Source',
+            cell: (item) => getSourceBadge(item.source),
+            sortingField: 'source',
+          },
+          {
+            id: 'model_type',
+            header: 'Type',
+            cell: (item) => item.model_type || 'N/A',
+          },
+          {
+            id: 'compilation',
+            header: 'Compilation',
+            cell: (item) => {
+              const status = item.compilation_status;
+              if (!status) return <Badge color="grey">Not Started</Badge>;
+              if (status === 'Completed') return <Badge color="green">Compiled</Badge>;
+              if (status === 'InProgress') return <Badge color="blue">In Progress</Badge>;
+              if (status === 'Failed') return <Badge color="red">Failed</Badge>;
+              return <Badge>{status}</Badge>;
+            },
           },
           {
             id: 'deployed_devices',
-            header: 'Deployed Devices',
-            cell: (item) => item.deployed_devices.length,
+            header: 'Deployed',
+            cell: (item) => item.deployed_devices?.length || 0,
           },
           {
             id: 'created_by',
@@ -257,15 +282,30 @@ export default function Models() {
               placeholder="Filter by stage"
               selectedAriaLabel="Selected"
             />
+            <Select
+              selectedOption={sourceFilter}
+              onChange={({ detail }) => setSourceFilter(detail.selectedOption)}
+              options={sourceOptions}
+              placeholder="Filter by source"
+              selectedAriaLabel="Selected"
+            />
           </SpaceBetween>
         }
         sortingDisabled={false}
         empty={
           <Box textAlign="center" color="inherit">
-            <b>No models</b>
-            <Box padding={{ bottom: 's' }} variant="p" color="inherit">
-              No models have been trained yet.
-            </Box>
+            {loading ? (
+              <Spinner />
+            ) : (
+              <>
+                <b>No models</b>
+                <Box padding={{ bottom: 's' }} variant="p" color="inherit">
+                  {selectedUseCase 
+                    ? 'No models have been trained or imported yet. Start by training a model or importing one.'
+                    : 'Select a use case to view models.'}
+                </Box>
+              </>
+            )}
           </Box>
         }
         variant="full-page"

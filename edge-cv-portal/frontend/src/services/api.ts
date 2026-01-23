@@ -285,6 +285,64 @@ class ApiService {
     return this.request<{ device: Device }>(`/devices/${id}?usecase_id=${usecaseId}`);
   }
 
+  // Device Logs endpoints
+  async getDeviceLogGroups(deviceId: string, usecaseId: string): Promise<{
+    device_id: string;
+    log_groups: Array<{
+      log_group_name: string;
+      component_type: 'system' | 'user';
+      component_name: string;
+      creation_time?: number;
+      stored_bytes: number;
+      retention_days?: number;
+    }>;
+    count: number;
+  }> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request(`/devices/${deviceId}/logs?usecase_id=${usecaseId}`);
+  }
+
+  async getDeviceLogs(
+    deviceId: string,
+    componentName: string,
+    usecaseId: string,
+    params?: {
+      start_time?: number;
+      end_time?: number;
+      limit?: number;
+      next_token?: string;
+      filter_pattern?: string;
+    }
+  ): Promise<{
+    device_id: string;
+    component_name: string;
+    log_group_name: string;
+    logs: Array<{
+      timestamp: number;
+      message: string;
+      log_stream_name: string;
+      ingestion_time?: number;
+    }>;
+    count: number;
+    start_time: number;
+    end_time: number;
+    next_token?: string;
+  }> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    const queryParams = new URLSearchParams({ usecase_id: usecaseId });
+    if (params?.start_time) queryParams.set('start_time', params.start_time.toString());
+    if (params?.end_time) queryParams.set('end_time', params.end_time.toString());
+    if (params?.limit) queryParams.set('limit', params.limit.toString());
+    if (params?.next_token) queryParams.set('next_token', params.next_token);
+    if (params?.filter_pattern) queryParams.set('filter_pattern', params.filter_pattern);
+    
+    return this.request(`/devices/${deviceId}/logs/${encodeURIComponent(componentName)}?${queryParams}`);
+  }
+
   // Training endpoints
   async listTrainingJobs(usecaseId?: string): Promise<{ jobs: any[]; count: number }> {
     const query = usecaseId ? `?usecase_id=${usecaseId}` : '';
@@ -393,8 +451,39 @@ class ApiService {
     return this.request(`/labeling/${jobId}/manifest`);
   }
 
+  async transformManifest(data: {
+    usecase_id: string;
+    source_manifest_uri: string;
+    output_manifest_uri?: string;
+    task_type?: 'classification' | 'segmentation';
+  }): Promise<{
+    message: string;
+    transformed_manifest_uri: string;
+    stats: {
+      total_entries: number;
+      transformed: number;
+      skipped: number;
+      errors: string[];
+    };
+    detected_attributes: {
+      label_attr: string;
+      metadata_attr: string;
+    };
+    dda_attributes: {
+      label: string;
+      metadata: string;
+    };
+    sample_entry: any;
+  }> {
+    return this.request('/labeling/transform-manifest', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
   async createTrainingJob(data: {
     usecase_id: string;
+    model_source?: string;
     model_name: string;
     model_version: string;
     model_type: string;
@@ -1049,6 +1138,107 @@ class ApiService {
     return this.request('/models/format-spec');
   }
 
+  // Model Registry endpoints
+  async listModels(params: {
+    usecase_id: string;
+    stage?: 'candidate' | 'staging' | 'production';
+    source?: 'trained' | 'imported' | 'marketplace';
+  }): Promise<{
+    models: Array<{
+      model_id: string;
+      usecase_id: string;
+      name: string;
+      version: string;
+      stage: 'candidate' | 'staging' | 'production';
+      source: string;
+      training_job_id: string;
+      model_type: string;
+      metrics: Record<string, number>;
+      artifact_s3?: string;
+      component_arns: Record<string, string>;
+      deployed_devices: string[];
+      created_by: string;
+      created_at: number;
+      updated_at: number;
+      description?: string;
+      compilation_status?: string;
+      packaging_status?: string;
+    }>;
+    count: number;
+    usecase_id: string;
+  }> {
+    const queryParams = new URLSearchParams({
+      usecase_id: params.usecase_id,
+      ...(params.stage && { stage: params.stage }),
+      ...(params.source && { source: params.source }),
+    });
+    return this.request(`/models?${queryParams}`);
+  }
+
+  async getModel(modelId: string): Promise<{
+    model: {
+      model_id: string;
+      usecase_id: string;
+      name: string;
+      version: string;
+      stage: 'candidate' | 'staging' | 'production';
+      source: string;
+      training_job_id: string;
+      training_job_name?: string;
+      model_type: string;
+      description?: string;
+      metrics: Record<string, number>;
+      artifact_s3?: string;
+      component_arns: Record<string, string>;
+      deployed_devices: string[];
+      created_by: string;
+      created_at: number;
+      updated_at: number;
+      completed_at?: number;
+      promoted_at?: number;
+      promoted_by?: string;
+      compilation_status?: string;
+      compilation_jobs?: Array<{
+        target: string;
+        status: string;
+        compiled_model_s3?: string;
+      }>;
+      packaging_status?: string;
+      packaged_components?: Array<{
+        target: string;
+        status: string;
+        component_package_s3?: string;
+      }>;
+      validation_result?: Record<string, unknown>;
+      hyperparameters?: Record<string, unknown>;
+      instance_type?: string;
+      dataset_manifest_s3?: string;
+    };
+  }> {
+    return this.request(`/models/${modelId}`);
+  }
+
+  async updateModelStage(modelId: string, stage: 'candidate' | 'staging' | 'production'): Promise<{
+    model_id: string;
+    previous_stage: string;
+    stage: string;
+    message: string;
+  }> {
+    return this.request(`/models/${modelId}/stage`, {
+      method: 'PUT',
+      body: JSON.stringify({ stage }),
+    });
+  }
+
+  async deleteModel(modelId: string): Promise<{
+    model_id: string;
+    message: string;
+  }> {
+    return this.request(`/models/${modelId}`, {
+      method: 'DELETE',
+    });
+  }
+
   async validateModel(data: {
     usecase_id: string;
     model_s3_uri: string;
@@ -1185,6 +1375,145 @@ class ApiService {
     return this.request('/models/convert', {
       method: 'POST',
       body: JSON.stringify(data),
+    });
+  }
+
+  // Audit Logs endpoints
+  async getAuditLogs(params?: {
+    usecase_id?: string;
+    action?: string;
+    user_id?: string;
+    start_time?: number;
+    end_time?: number;
+    limit?: number;
+    next_token?: string;
+  }): Promise<{
+    logs: Array<{
+      event_id: string;
+      timestamp: number;
+      user_id: string;
+      usecase_id?: string;
+      action: string;
+      resource_type: string;
+      resource_id: string;
+      result: string;
+      details?: Record<string, any>;
+    }>;
+    count: number;
+    scanned_count: number;
+    next_token?: string;
+    available_actions: string[];
+    is_admin?: boolean;
+  }> {
+    const queryParams = new URLSearchParams();
+    if (params?.usecase_id) queryParams.set('usecase_id', params.usecase_id);
+    if (params?.action) queryParams.set('action', params.action);
+    if (params?.user_id) queryParams.set('user_id', params.user_id);
+    if (params?.start_time) queryParams.set('start_time', params.start_time.toString());
+    if (params?.end_time) queryParams.set('end_time', params.end_time.toString());
+    if (params?.limit) queryParams.set('limit', params.limit.toString());
+    if (params?.next_token) queryParams.set('next_token', params.next_token);
+    
+    const query = queryParams.toString() ? `?${queryParams}` : '';
+    return this.request(`/audit-logs${query}`);
+  }
+
+  // Data Accounts endpoints
+  async listDataAccounts(): Promise<{
+    data_accounts: Array<{
+      data_account_id: string;
+      name: string;
+      description?: string;
+      role_arn: string;
+      external_id: string;
+      region: string;
+      status: string;
+      created_at: number;
+      created_by: string;
+      updated_at: number;
+      connection_test?: {
+        status: string;
+        message: string;
+      };
+      last_tested_at?: number;
+    }>;
+    count: number;
+  }> {
+    return this.request('/data-accounts');
+  }
+
+  async getDataAccount(accountId: string): Promise<{
+    data_account: {
+      data_account_id: string;
+      name: string;
+      description?: string;
+      role_arn: string;
+      external_id: string;
+      region: string;
+      status: string;
+      created_at: number;
+      created_by: string;
+      updated_at: number;
+      connection_test?: {
+        status: string;
+        message: string;
+      };
+      last_tested_at?: number;
+    };
+  }> {
+    return this.request(`/data-accounts/${accountId}`);
+  }
+
+  async createDataAccount(data: {
+    data_account_id: string;
+    name: string;
+    description?: string;
+    role_arn: string;
+    external_id: string;
+    region: string;
+  }): Promise<{
+    data_account_id: string;
+    message: string;
+  }> {
+    return this.request('/data-accounts', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateDataAccount(accountId: string, data: {
+    name?: string;
+    description?: string;
+    role_arn?: string;
+    external_id?: string;
+    region?: string;
+  }): Promise<{
+    data_account_id: string;
+    message: string;
+  }> {
+    return this.request(`/data-accounts/${accountId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteDataAccount(accountId: string): Promise<{
+    message: string;
+  }> {
+    return this.request(`/data-accounts/${accountId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async testDataAccountConnection(accountId: string): Promise<{
+    result: {
+      status: string;
+      message: string;
+      error?: string;
+    };
+  }> {
+    return this.request(`/data-accounts/${accountId}/test`, {
+      method: 'POST',
     });
   }
 }

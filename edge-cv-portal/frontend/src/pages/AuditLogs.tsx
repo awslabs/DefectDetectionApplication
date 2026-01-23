@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Container,
   Header,
@@ -12,152 +12,192 @@ import {
   Select,
   SelectProps,
   Input,
+  Button,
+  Alert,
 } from '@cloudscape-design/components';
+import { useAuth } from '../contexts/AuthContext';
+import apiService from '../services/api';
 
 interface AuditLogEntry {
   event_id: string;
   timestamp: number;
   user_id: string;
-  usecase_id: string;
+  usecase_id?: string;
   action: string;
   resource_type: string;
   resource_id: string;
-  result: 'success' | 'failure';
-  details: Record<string, any>;
-  ip_address: string;
-  is_super_user: boolean;
+  result: string;
+  details?: Record<string, any>;
+}
+
+interface UseCase {
+  usecase_id: string;
+  name: string;
 }
 
 export default function AuditLogs() {
+  const { user } = useAuth();
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<DateRangePickerProps.Value | null>(null);
   const [selectedAction, setSelectedAction] = useState<SelectProps.Option | null>(null);
-  const [selectedUser, setSelectedUser] = useState<SelectProps.Option | null>(null);
+  const [selectedUsecase, setSelectedUsecase] = useState<SelectProps.Option | null>(null);
   const [searchText, setSearchText] = useState('');
+  const [availableActions, setAvailableActions] = useState<string[]>([]);
+  const [usecases, setUsecases] = useState<UseCase[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [nextToken, setNextToken] = useState<string | undefined>();
+  const [totalCount, setTotalCount] = useState(0);
 
+  const isPortalAdmin = user?.role === 'PortalAdmin';
+
+  // Load usecases for filter dropdown
   useEffect(() => {
-    loadLogs();
-  }, [dateRange, selectedAction, selectedUser, searchText]);
+    const loadUsecases = async () => {
+      try {
+        const response = await apiService.listUseCases();
+        setUsecases(response.usecases || []);
+      } catch (err) {
+        console.error('Failed to load usecases:', err);
+      }
+    };
+    loadUsecases();
+  }, []);
 
-  const loadLogs = async () => {
+  const loadLogs = useCallback(async (resetPage = false) => {
     setLoading(true);
+    setError(null);
+    
     try {
-      // Mock data for now
-      const mockLogs: AuditLogEntry[] = [
-        {
-          event_id: 'evt-001',
-          timestamp: Date.now() - 3600000,
-          user_id: 'user@example.com',
-          usecase_id: 'usecase-001',
-          action: 'create_training_job',
-          resource_type: 'training_job',
-          resource_id: 'training-001',
-          result: 'success',
-          details: { model_name: 'DefectDetectionModel', instance_type: 'ml.p3.2xlarge' },
-          ip_address: '192.168.1.100',
-          is_super_user: false,
-        },
-        {
-          event_id: 'evt-002',
-          timestamp: Date.now() - 7200000,
-          user_id: 'admin@example.com',
-          usecase_id: 'usecase-001',
-          action: 'create_deployment',
-          resource_type: 'deployment',
-          resource_id: 'deploy-001',
-          result: 'success',
-          details: { component_arn: 'arn:aws:greengrass:...', target_devices: 3 },
-          ip_address: '192.168.1.101',
-          is_super_user: true,
-        },
-        {
-          event_id: 'evt-003',
-          timestamp: Date.now() - 10800000,
-          user_id: 'user@example.com',
-          usecase_id: 'usecase-001',
-          action: 'delete_model',
-          resource_type: 'model',
-          resource_id: 'model-005',
-          result: 'failure',
-          details: { error: 'Model is currently deployed' },
-          ip_address: '192.168.1.100',
-          is_super_user: false,
-        },
-        {
-          event_id: 'evt-004',
-          timestamp: Date.now() - 14400000,
-          user_id: 'admin@example.com',
-          usecase_id: 'usecase-002',
-          action: 'create_usecase',
-          resource_type: 'usecase',
-          resource_id: 'usecase-002',
-          result: 'success',
-          details: { name: 'Production Line 2', account_id: '123456789012' },
-          ip_address: '192.168.1.101',
-          is_super_user: true,
-        },
-        {
-          event_id: 'evt-005',
-          timestamp: Date.now() - 18000000,
-          user_id: 'user@example.com',
-          usecase_id: 'usecase-001',
-          action: 'create_labeling_job',
-          resource_type: 'labeling_job',
-          resource_id: 'label-001',
-          result: 'success',
-          details: { task_type: 'ObjectDetection', images_count: 1000 },
-          ip_address: '192.168.1.100',
-          is_super_user: false,
-        },
-      ];
-      setLogs(mockLogs);
-    } catch (error) {
-      console.error('Failed to load audit logs:', error);
+      const params: {
+        usecase_id?: string;
+        action?: string;
+        start_time?: number;
+        end_time?: number;
+        limit?: number;
+        next_token?: string;
+      } = { limit: 50 };
+
+      if (selectedUsecase?.value) {
+        params.usecase_id = selectedUsecase.value;
+      }
+
+      if (selectedAction?.value) {
+        params.action = selectedAction.value;
+      }
+
+      if (dateRange) {
+        if (dateRange.type === 'relative') {
+          const now = Date.now();
+          const amount = dateRange.amount || 1;
+          const unit = dateRange.unit || 'day';
+          let msOffset = 0;
+          
+          switch (unit) {
+            case 'hour': msOffset = amount * 60 * 60 * 1000; break;
+            case 'day': msOffset = amount * 24 * 60 * 60 * 1000; break;
+            case 'week': msOffset = amount * 7 * 24 * 60 * 60 * 1000; break;
+            case 'month': msOffset = amount * 30 * 24 * 60 * 60 * 1000; break;
+          }
+          
+          params.start_time = now - msOffset;
+          params.end_time = now;
+        } else if (dateRange.type === 'absolute' && dateRange.startDate && dateRange.endDate) {
+          params.start_time = new Date(dateRange.startDate).getTime();
+          params.end_time = new Date(dateRange.endDate).getTime();
+        }
+      }
+
+      if (!resetPage && nextToken) {
+        params.next_token = nextToken;
+      }
+
+      const response = await apiService.getAuditLogs(params);
+      
+      setLogs(response.logs || []);
+      setTotalCount(response.count || 0);
+      setAvailableActions(response.available_actions || []);
+      setIsAdmin(response.is_admin || false);
+      setNextToken(response.next_token);
+    } catch (err: any) {
+      console.error('Failed to load audit logs:', err);
+      setError(err.message || 'Failed to load audit logs');
+      setLogs([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [dateRange, selectedAction, selectedUsecase, nextToken]);
+
+  useEffect(() => {
+    loadLogs(true);
+  }, [dateRange, selectedAction, selectedUsecase]);
 
   const actionOptions: SelectProps.Option[] = [
     { label: 'All Actions', value: '' },
-    { label: 'Create Training Job', value: 'create_training_job' },
-    { label: 'Create Deployment', value: 'create_deployment' },
-    { label: 'Create Use Case', value: 'create_usecase' },
-    { label: 'Delete Model', value: 'delete_model' },
-    { label: 'Create Labeling Job', value: 'create_labeling_job' },
+    ...availableActions.map(action => ({
+      label: formatAction(action),
+      value: action,
+    })),
   ];
 
-  const userOptions: SelectProps.Option[] = [
-    { label: 'All Users', value: '' },
-    { label: 'user@example.com', value: 'user@example.com' },
-    { label: 'admin@example.com', value: 'admin@example.com' },
+  const usecaseOptions: SelectProps.Option[] = [
+    { label: 'All Use Cases', value: '' },
+    ...usecases.map(uc => ({
+      label: uc.name,
+      value: uc.usecase_id,
+    })),
   ];
 
-  const getResultBadge = (result: 'success' | 'failure') => {
-    return result === 'success' ? (
-      <Badge color="green">Success</Badge>
-    ) : (
-      <Badge color="red">Failure</Badge>
+  const getResultBadge = (result: string) => {
+    switch (result) {
+      case 'success': return <Badge color="green">Success</Badge>;
+      case 'failure':
+      case 'failed': return <Badge color="red">Failure</Badge>;
+      case 'denied': return <Badge color="red">Denied</Badge>;
+      default: return <Badge>{result}</Badge>;
+    }
+  };
+
+  const filteredLogs = searchText
+    ? logs.filter(log => 
+        log.resource_id?.toLowerCase().includes(searchText.toLowerCase()) ||
+        log.user_id?.toLowerCase().includes(searchText.toLowerCase())
+      )
+    : logs;
+
+  if (!isPortalAdmin && user?.role !== 'UseCaseAdmin') {
+    return (
+      <Container header={<Header variant="h1">Audit Logs</Header>}>
+        <Alert type="warning">
+          You don't have permission to view audit logs. This feature is available to Use Case Admins and Portal Admins.
+        </Alert>
+      </Container>
     );
-  };
-
-  const formatAction = (action: string) => {
-    return action
-      .split('_')
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(' ');
-  };
+  }
 
   return (
     <Container
       header={
-        <Header variant="h1" description="View and filter audit logs for all portal actions">
+        <Header 
+          variant="h1" 
+          description={isAdmin 
+            ? "View audit logs for all portal actions across all use cases" 
+            : "View audit logs for your assigned use cases"
+          }
+          actions={<Button onClick={() => loadLogs(true)} iconName="refresh">Refresh</Button>}
+        >
           Audit Logs
         </Header>
       }
     >
       <SpaceBetween size="l">
+        {error && (
+          <Alert type="error" dismissible onDismiss={() => setError(null)}>
+            {error}
+          </Alert>
+        )}
+
         <SpaceBetween direction="horizontal" size="m">
           <FormField label="Date Range">
             <DateRangePicker
@@ -181,10 +221,7 @@ export default function AuditLogs() {
                 customRelativeRangeOptionLabel: 'Custom range',
                 customRelativeRangeOptionDescription: 'Set a custom range in the past',
                 customRelativeRangeUnitLabel: 'Unit of time',
-                formatRelativeRange: (e) => {
-                  const unit = e.unit === 'hour' ? 'hour' : 'day';
-                  return `Last ${e.amount} ${unit}${e.amount > 1 ? 's' : ''}`;
-                },
+                formatRelativeRange: (e) => `Last ${e.amount} ${e.unit}${e.amount > 1 ? 's' : ''}`,
                 formatUnit: (unit, value) => (value === 1 ? unit : `${unit}s`),
                 dateTimeConstraintText: 'Range must be between 6 and 30 days.',
                 relativeModeTitle: 'Relative range',
@@ -201,6 +238,15 @@ export default function AuditLogs() {
             />
           </FormField>
 
+          <FormField label="Use Case">
+            <Select
+              selectedOption={selectedUsecase}
+              onChange={({ detail }) => setSelectedUsecase(detail.selectedOption)}
+              options={usecaseOptions}
+              placeholder="All use cases"
+            />
+          </FormField>
+
           <FormField label="Action">
             <Select
               selectedOption={selectedAction}
@@ -210,20 +256,11 @@ export default function AuditLogs() {
             />
           </FormField>
 
-          <FormField label="User">
-            <Select
-              selectedOption={selectedUser}
-              onChange={({ detail }) => setSelectedUser(detail.selectedOption)}
-              options={userOptions}
-              placeholder="All users"
-            />
-          </FormField>
-
           <FormField label="Search">
             <Input
               value={searchText}
               onChange={({ detail }) => setSearchText(detail.value)}
-              placeholder="Search resource ID..."
+              placeholder="Search user or resource..."
             />
           </FormField>
         </SpaceBetween>
@@ -235,23 +272,31 @@ export default function AuditLogs() {
               header: 'Timestamp',
               cell: item => new Date(item.timestamp).toLocaleString(),
               sortingField: 'timestamp',
+              width: 180,
             },
             {
               id: 'user',
               header: 'User',
-              cell: item => (
-                <SpaceBetween direction="horizontal" size="xs">
-                  <Box>{item.user_id}</Box>
-                  {item.is_super_user && (
-                    <Badge color="blue">Super User</Badge>
-                  )}
-                </SpaceBetween>
-              ),
+              cell: item => item.user_id,
+              width: 200,
+            },
+            {
+              id: 'usecase',
+              header: 'Use Case',
+              cell: item => {
+                if (!item.usecase_id || item.usecase_id === 'global') {
+                  return <Box color="text-status-inactive">Global</Box>;
+                }
+                const usecase = usecases.find(uc => uc.usecase_id === item.usecase_id);
+                return usecase?.name || item.usecase_id;
+              },
+              width: 150,
             },
             {
               id: 'action',
               header: 'Action',
               cell: item => formatAction(item.action),
+              width: 180,
             },
             {
               id: 'resource',
@@ -259,37 +304,72 @@ export default function AuditLogs() {
               cell: item => (
                 <Box>
                   <Box fontWeight="bold">{item.resource_type}</Box>
-                  <Box fontSize="body-s" color="text-body-secondary">
-                    {item.resource_id}
-                  </Box>
+                  <Box fontSize="body-s" color="text-body-secondary">{item.resource_id}</Box>
                 </Box>
               ),
+              width: 200,
             },
             {
               id: 'result',
               header: 'Result',
               cell: item => getResultBadge(item.result),
+              width: 100,
             },
             {
-              id: 'ip',
-              header: 'IP Address',
-              cell: item => item.ip_address,
+              id: 'details',
+              header: 'Details',
+              cell: item => {
+                if (!item.details || Object.keys(item.details).length === 0) return '-';
+                const keys = Object.keys(item.details).slice(0, 2);
+                return (
+                  <Box fontSize="body-s">
+                    {keys.map(key => (
+                      <div key={key}>
+                        {key}: {String(item.details![key]).substring(0, 30)}
+                        {String(item.details![key]).length > 30 ? '...' : ''}
+                      </div>
+                    ))}
+                    {Object.keys(item.details).length > 2 && (
+                      <Box color="text-status-inactive">+{Object.keys(item.details).length - 2} more</Box>
+                    )}
+                  </Box>
+                );
+              },
             },
           ]}
-          items={logs}
+          items={filteredLogs}
           loading={loading}
           loadingText="Loading audit logs"
           sortingDisabled={false}
+          variant="container"
+          stickyHeader
           empty={
             <Box textAlign="center" color="inherit">
               <b>No audit logs</b>
               <Box padding={{ bottom: 's' }} variant="p" color="inherit">
-                No audit logs found matching the current filters.
+                {error ? 'Failed to load audit logs. Please try again.' : 'No audit logs found matching the current filters.'}
               </Box>
             </Box>
           }
+          footer={
+            nextToken && (
+              <Box textAlign="center" padding="s">
+                <Button onClick={() => loadLogs(false)}>Load More</Button>
+              </Box>
+            )
+          }
         />
+
+        {totalCount > 0 && (
+          <Box textAlign="center" color="text-body-secondary">
+            Showing {filteredLogs.length} of {totalCount} logs
+          </Box>
+        )}
       </SpaceBetween>
     </Container>
   );
+}
+
+function formatAction(action: string): string {
+  return action.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
 }

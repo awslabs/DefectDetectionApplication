@@ -8,14 +8,17 @@ import {
   StatusIndicator,
   ProgressBar,
   Button,
+  ButtonDropdown,
   Tabs,
   KeyValuePairs,
   Alert,
   Link,
+  Modal,
 } from '@cloudscape-design/components';
 import { useParams, useNavigate } from 'react-router-dom';
 import { LabelingJob } from '../types';
 import { apiService } from '../services/api';
+import ManifestTransformer from '../components/ManifestTransformer';
 
 export default function LabelingDetail() {
   const { jobId } = useParams<{ jobId: string }>();
@@ -23,6 +26,7 @@ export default function LabelingDetail() {
   const [job, setJob] = useState<LabelingJob | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTabId, setActiveTabId] = useState('overview');
+  const [showTransformModal, setShowTransformModal] = useState(false);
 
   useEffect(() => {
     loadJob();
@@ -117,32 +121,62 @@ export default function LabelingDetail() {
   }
 
   return (
-    <SpaceBetween size="l">
-      <Container
-        header={
-          <Header
-            variant="h1"
-            actions={
-              <SpaceBetween direction="horizontal" size="xs">
-                <Button onClick={() => navigate('/labeling')}>
-                  Back to List
-                </Button>
-                {job.status === 'completed' && (
-                  <>
-                    <Button onClick={handleDownloadManifest}>
-                      Download Manifest
-                    </Button>
-                    <Button variant="primary" onClick={handleDownloadOutput}>
-                      Download Labeled Data
-                    </Button>
-                  </>
-                )}
-              </SpaceBetween>
-            }
-          >
-            {job.name}
-          </Header>
-        }
+    <>
+      <SpaceBetween size="l">
+        <Container
+          header={
+            <Header
+              variant="h1"
+              actions={
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button onClick={() => navigate('/labeling')}>
+                    Back to List
+                  </Button>
+                  {job.status === 'completed' && (
+                    <>
+                      <ButtonDropdown
+                        items={[
+                          {
+                            id: 'transform',
+                            text: 'Transform Manifest',
+                            description: 'Convert to DDA-compatible format',
+                          },
+                          {
+                            id: 'download-manifest',
+                            text: 'Download Manifest',
+                          },
+                          {
+                            id: 'view-s3',
+                            text: 'View in S3',
+                            external: true,
+                          },
+                        ]}
+                        onItemClick={({ detail }) => {
+                          if (detail.id === 'transform') {
+                            setShowTransformModal(true);
+                          } else if (detail.id === 'download-manifest') {
+                            handleDownloadManifest();
+                          } else if (detail.id === 'view-s3') {
+                            window.open(
+                              `https://s3.console.aws.amazon.com/s3/buckets/${job.output_s3.replace('s3://', '').split('/')[0]}`,
+                              '_blank'
+                            );
+                          }
+                        }}
+                      >
+                        Actions
+                      </ButtonDropdown>
+                      <Button variant="primary" onClick={handleDownloadOutput}>
+                        Download Labeled Data
+                      </Button>
+                    </>
+                  )}
+                </SpaceBetween>
+              }
+            >
+              {job.name}
+            </Header>
+          }
       >
         <ColumnLayout columns={4} variant="text-grid">
           <div>
@@ -320,5 +354,22 @@ export default function LabelingDetail() {
         />
       </Container>
     </SpaceBetween>
+
+    <Modal
+      visible={showTransformModal}
+      onDismiss={() => setShowTransformModal(false)}
+      header="Transform Manifest"
+      size="large"
+      footer={
+        <Box float="right">
+          <Button variant="link" onClick={() => setShowTransformModal(false)}>
+            Close
+          </Button>
+        </Box>
+      }
+    >
+      <ManifestTransformer usecaseId={job.usecase_id} preSelectedJobId={job.job_id} />
+    </Modal>
+  </>
   );
 }

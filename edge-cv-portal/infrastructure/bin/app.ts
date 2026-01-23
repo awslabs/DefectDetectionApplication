@@ -49,6 +49,7 @@ const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   settingsTable: storageStack.settingsTable,
   componentsTable: storageStack.componentsTable,
   sharedComponentsTable: storageStack.sharedComponentsTable,
+  dataAccountsTable: storageStack.dataAccountsTable,
   portalArtifactsBucket: storageStack.portalArtifactsBucket,
   cloudFrontDomain,
 });

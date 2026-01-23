@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Container,
   Header,
@@ -11,7 +11,11 @@ import {
   KeyValuePairs,
   Table,
   Alert,
-  Badge,
+  Toggle,
+  ProgressBar,
+  Link,
+  BreadcrumbGroup,
+  Icon,
 } from '@cloudscape-design/components';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
@@ -67,8 +71,29 @@ export default function DeploymentDetail() {
   const [activeTabId, setActiveTabId] = useState('overview');
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(false);
 
   const usecaseId = searchParams.get('usecase_id');
+
+  const loadDeployment = useCallback(async () => {
+    if (!deploymentId || !usecaseId) return;
+    
+    try {
+      const response = await apiService.getDeployment(deploymentId, usecaseId);
+      setDeployment(response.deployment);
+      setError(null);
+      
+      // Auto-disable refresh when deployment is complete
+      if (response.deployment.deployment_status !== 'ACTIVE') {
+        setAutoRefresh(false);
+      }
+    } catch (err: any) {
+      console.error('Failed to load deployment:', err);
+      setError(err.message || 'Failed to load deployment');
+    } finally {
+      setLoading(false);
+    }
+  }, [deploymentId, usecaseId]);
 
   useEffect(() => {
     if (deploymentId && usecaseId) {
@@ -77,23 +102,20 @@ export default function DeploymentDetail() {
       setError('Use case ID is required');
       setLoading(false);
     }
-  }, [deploymentId, usecaseId]);
+  }, [deploymentId, usecaseId, loadDeployment]);
 
-  const loadDeployment = async () => {
-    if (!deploymentId || !usecaseId) return;
-    
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await apiService.getDeployment(deploymentId, usecaseId);
-      setDeployment(response.deployment);
-    } catch (err: any) {
-      console.error('Failed to load deployment:', err);
-      setError(err.message || 'Failed to load deployment');
-    } finally {
-      setLoading(false);
+  // Auto-refresh for active deployments
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    if (autoRefresh && deployment?.deployment_status === 'ACTIVE') {
+      interval = setInterval(() => {
+        loadDeployment();
+      }, 5000); // Refresh every 5 seconds
     }
-  };
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [autoRefresh, deployment?.deployment_status, loadDeployment]);
 
   const handleCancel = async () => {
     if (!deploymentId || !usecaseId) return;
@@ -134,10 +156,37 @@ export default function DeploymentDetail() {
     return parts[parts.length - 1] || targetArn;
   };
 
+  const getTargetType = (targetArn: string) => {
+    if (!targetArn) return 'unknown';
+    if (targetArn.includes(':thinggroup/')) return 'group';
+    if (targetArn.includes(':thing/')) return 'device';
+    return 'unknown';
+  };
+
   const formatTimestamp = (timestamp?: string) => {
     if (!timestamp) return '-';
     return new Date(timestamp).toLocaleString();
   };
+
+  // Calculate deployment progress
+  const getDeploymentProgress = () => {
+    if (!deployment?.effective_deployments?.length) return null;
+    
+    const total = deployment.effective_deployments.length;
+    const succeeded = deployment.effective_deployments.filter(
+      d => d.deployment_status === 'SUCCEEDED'
+    ).length;
+    const failed = deployment.effective_deployments.filter(
+      d => ['FAILED', 'REJECTED', 'TIMED_OUT'].includes(d.deployment_status)
+    ).length;
+    const inProgress = deployment.effective_deployments.filter(
+      d => ['IN_PROGRESS', 'QUEUED'].includes(d.deployment_status)
+    ).length;
+    
+    return { total, succeeded, failed, inProgress };
+  };
+
+  const progress = getDeploymentProgress();
 
   if (loading) {
     return (
@@ -170,18 +219,44 @@ export default function DeploymentDetail() {
   return (
     <>
       <SpaceBetween size="l">
+        {/* Breadcrumb */}
+        <BreadcrumbGroup
+          items={[
+            { text: 'Deployments', href: `/deployments?usecase_id=${usecaseId}` },
+            { text: deployment.deployment_name || deployment.deployment_id.substring(0, 12), href: '#' },
+          ]}
+          onFollow={(e) => {
+            e.preventDefault();
+            if (e.detail.href !== '#') {
+              navigate(e.detail.href);
+            }
+          }}
+        />
+
         <Container
           header={
             <Header
               variant="h1"
               actions={
                 <SpaceBetween direction="horizontal" size="xs">
-                  <Button onClick={() => navigate(`/deployments?usecase_id=${usecaseId}`)}>
-                    Back to List
-                  </Button>
-                  <Button iconName="refresh" onClick={loadDeployment}>
+                  {deployment.deployment_status === 'ACTIVE' && (
+                    <Toggle
+                      checked={autoRefresh}
+                      onChange={({ detail }) => setAutoRefresh(detail.checked)}
+                    >
+                      Auto-refresh
+                    </Toggle>
+                  )}
+                  <Button iconName="refresh" onClick={loadDeployment} loading={loading}>
                     Refresh
                   </Button>
+                  {deployment.deployment_status === 'FAILED' && (
+                    <Button
+                      onClick={() => navigate(`/deployments/create?usecase_id=${usecaseId}&retry=${deploymentId}`)}
+                    >
+                      Retry Deployment
+                    </Button>
+                  )}
                   {deployment.deployment_status === 'ACTIVE' && (
                     <Button onClick={() => setShowCancelModal(true)}>
                       Cancel Deployment
@@ -194,24 +269,58 @@ export default function DeploymentDetail() {
             </Header>
           }
         >
-          <ColumnLayout columns={4} variant="text-grid">
-            <div>
-              <Box variant="awsui-key-label">Status</Box>
-              <div>{getStatusIndicator(deployment.deployment_status)}</div>
-            </div>
-            <div>
-              <Box variant="awsui-key-label">Target</Box>
-              <div>{getTargetName(deployment.target_arn)}</div>
-            </div>
-            <div>
-              <Box variant="awsui-key-label">Components</Box>
-              <div>{deployment.components?.length || 0}</div>
-            </div>
-            <div>
-              <Box variant="awsui-key-label">Latest for Target</Box>
-              <div>{deployment.is_latest_for_target ? 'Yes' : 'No'}</div>
-            </div>
-          </ColumnLayout>
+          <SpaceBetween size="m">
+            <ColumnLayout columns={4} variant="text-grid">
+              <div>
+                <Box variant="awsui-key-label">Status</Box>
+                <div>{getStatusIndicator(deployment.deployment_status)}</div>
+              </div>
+              <div>
+                <Box variant="awsui-key-label">Target</Box>
+                <SpaceBetween direction="horizontal" size="xxs">
+                  <Icon name={getTargetType(deployment.target_arn) === 'group' ? 'group' : 'status-positive'} />
+                  {getTargetType(deployment.target_arn) === 'device' ? (
+                    <Link onFollow={() => navigate(`/devices/${getTargetName(deployment.target_arn)}?usecase_id=${usecaseId}`)}>
+                      {getTargetName(deployment.target_arn)}
+                    </Link>
+                  ) : (
+                    <span>{getTargetName(deployment.target_arn)}</span>
+                  )}
+                </SpaceBetween>
+              </div>
+              <div>
+                <Box variant="awsui-key-label">Components</Box>
+                <div>{deployment.components?.length || 0}</div>
+              </div>
+              <div>
+                <Box variant="awsui-key-label">Latest for Target</Box>
+                <div>{deployment.is_latest_for_target ? 
+                  <StatusIndicator type="success">Yes</StatusIndicator> : 
+                  <Box color="text-body-secondary">No</Box>
+                }</div>
+              </div>
+            </ColumnLayout>
+
+            {/* Progress bar for multi-device deployments */}
+            {progress && progress.total > 1 && (
+              <Box>
+                <Box variant="awsui-key-label" margin={{ bottom: 'xxs' }}>
+                  Deployment Progress ({progress.succeeded + progress.failed}/{progress.total} devices)
+                </Box>
+                <ProgressBar
+                  value={((progress.succeeded + progress.failed) / progress.total) * 100}
+                  status={progress.failed > 0 ? 'error' : progress.inProgress > 0 ? 'in-progress' : 'success'}
+                  additionalInfo={
+                    <SpaceBetween direction="horizontal" size="s">
+                      <span style={{ color: 'green' }}>✓ {progress.succeeded} succeeded</span>
+                      {progress.failed > 0 && <span style={{ color: 'red' }}>✗ {progress.failed} failed</span>}
+                      {progress.inProgress > 0 && <span style={{ color: 'blue' }}>⋯ {progress.inProgress} in progress</span>}
+                    </SpaceBetween>
+                  }
+                />
+              </Box>
+            )}
+          </SpaceBetween>
         </Container>
 
         <Container>
@@ -259,17 +368,6 @@ export default function DeploymentDetail() {
                         { label: 'Created', value: formatTimestamp(deployment.creation_timestamp) },
                       ]}
                     />
-
-                    {deployment.tags && Object.keys(deployment.tags).length > 0 && (
-                      <>
-                        <Box variant="h3">Tags</Box>
-                        <SpaceBetween direction="horizontal" size="xs">
-                          {Object.entries(deployment.tags).map(([key, value]) => (
-                            <Badge key={key} color="blue">{key}: {value}</Badge>
-                          ))}
-                        </SpaceBetween>
-                      </>
-                    )}
                   </SpaceBetween>
                 ),
               },
@@ -284,7 +382,11 @@ export default function DeploymentDetail() {
                           {
                             id: 'device',
                             header: 'Device',
-                            cell: (item) => item.core_device,
+                            cell: (item) => (
+                              <Link onFollow={() => navigate(`/devices/${item.core_device}?usecase_id=${usecaseId}`)}>
+                                {item.core_device}
+                              </Link>
+                            ),
                           },
                           {
                             id: 'status',
@@ -322,6 +424,18 @@ export default function DeploymentDetail() {
                             id: 'modified',
                             header: 'Last Updated',
                             cell: (item) => formatTimestamp(item.modified_timestamp),
+                          },
+                          {
+                            id: 'actions',
+                            header: 'Actions',
+                            cell: (item) => (
+                              <Button
+                                variant="inline-link"
+                                onClick={() => navigate(`/devices/${item.core_device}?usecase_id=${usecaseId}`)}
+                              >
+                                View Logs
+                              </Button>
+                            ),
                           },
                         ]}
                         items={deployment.effective_deployments}

@@ -194,6 +194,30 @@ if [ -z "$SECURITY_GROUP" ]; then
             --cidr 0.0.0.0/0 \
             --region "$REGION"
         
+        # Allow DDA Frontend (React UI on port 3000)
+        aws ec2 authorize-security-group-ingress \
+            --group-id "$SECURITY_GROUP" \
+            --protocol tcp \
+            --port 3000 \
+            --cidr 0.0.0.0/0 \
+            --region "$REGION"
+        
+        # Allow DDA Frontend HTTPS (port 3443)
+        aws ec2 authorize-security-group-ingress \
+            --group-id "$SECURITY_GROUP" \
+            --protocol tcp \
+            --port 3443 \
+            --cidr 0.0.0.0/0 \
+            --region "$REGION"
+        
+        # Allow DDA Backend API (Flask on port 5000)
+        aws ec2 authorize-security-group-ingress \
+            --group-id "$SECURITY_GROUP" \
+            --protocol tcp \
+            --port 5000 \
+            --cidr 0.0.0.0/0 \
+            --region "$REGION"
+        
         # Allow HTTPS outbound (for Greengrass)
         aws ec2 authorize-security-group-egress \
             --group-id "$SECURITY_GROUP" \

@@ -1,398 +1,482 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Container,
   Header,
   Tabs,
-  SpaceBetween,
-  Box,
-  Button,
   Table,
+  Button,
   Modal,
+  Form,
   FormField,
   Input,
-  Select,
-  SelectProps,
+  Textarea,
+  SpaceBetween,
   Alert,
+  Badge,
+  Box,
+  StatusIndicator,
 } from '@cloudscape-design/components';
-import ConfirmationModal from '../components/ConfirmationModal';
+import { apiService } from '../services/api';
 
-interface CompilationTarget {
-  id: string;
+interface DataAccount {
+  data_account_id: string;
   name: string;
-  platform: string;
-  arch: string;
-  compiler: string;
-  compiler_options: Record<string, string>;
+  description?: string;
+  role_arn: string;
+  external_id: string;
+  region: string;
+  status: string;
+  created_at: number;
+  created_by: string;
+  connection_test?: {
+    status: string;
+    message: string;
+  };
 }
 
 export default function Settings() {
-  const [activeTabId, setActiveTabId] = useState('compilation');
-  const [targets, setTargets] = useState<CompilationTarget[]>([
-    {
-      id: '1',
-      name: 'Jetson Nano',
-      platform: 'jetson',
-      arch: 'aarch64',
-      compiler: 'neo',
-      compiler_options: { target_platform: 'jetson_nano' },
-    },
-    {
-      id: '2',
-      name: 'x86 CPU',
-      platform: 'x86',
-      arch: 'x86_64',
-      compiler: 'neo',
-      compiler_options: { target_platform: 'ml_c5' },
-    },
-    {
-      id: '3',
-      name: 'ARM64 CPU',
-      platform: 'arm',
-      arch: 'aarch64',
-      compiler: 'neo',
-      compiler_options: { target_platform: 'ml_m6g' },
-    },
-  ]);
-  const [selectedItems, setSelectedItems] = useState<CompilationTarget[]>([]);
+  const [activeTab, setActiveTab] = useState('data-accounts');
+  const [dataAccounts, setDataAccounts] = useState<DataAccount[]>([]);
+  const [loading, setLoading] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
-  const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [editingTarget, setEditingTarget] = useState<CompilationTarget | null>(null);
-  
+  const [selectedAccount, setSelectedAccount] = useState<DataAccount | null>(null);
+  const [testingConnection, setTestingConnection] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
   // Form state
-  const [targetName, setTargetName] = useState('');
-  const [platform, setPlatform] = useState<SelectProps.Option | null>(null);
-  const [arch, setArch] = useState<SelectProps.Option | null>(null);
-  const [targetPlatform, setTargetPlatform] = useState('');
-  const [saving, setSaving] = useState(false);
+  const [formData, setFormData] = useState({
+    data_account_id: '',
+    name: '',
+    description: '',
+    role_arn: '',
+    external_id: '',
+    region: 'us-east-1',
+  });
 
-  const platformOptions: SelectProps.Option[] = [
-    { label: 'Jetson', value: 'jetson' },
-    { label: 'x86', value: 'x86' },
-    { label: 'ARM', value: 'arm' },
-  ];
+  useEffect(() => {
+    loadDataAccounts();
+  }, []);
 
-  const archOptions: SelectProps.Option[] = [
-    { label: 'x86_64', value: 'x86_64' },
-    { label: 'aarch64', value: 'aarch64' },
-  ];
-
-  const handleAdd = () => {
-    setTargetName('');
-    setPlatform(null);
-    setArch(null);
-    setTargetPlatform('');
-    setShowAddModal(true);
-  };
-
-  const handleEdit = () => {
-    if (selectedItems.length > 0) {
-      const target = selectedItems[0];
-      setEditingTarget(target);
-      setTargetName(target.name);
-      setPlatform(platformOptions.find(p => p.value === target.platform) || null);
-      setArch(archOptions.find(a => a.value === target.arch) || null);
-      setTargetPlatform(target.compiler_options.target_platform);
-      setShowEditModal(true);
+  const loadDataAccounts = async () => {
+    setLoading(true);
+    try {
+      const response = await apiService.listDataAccounts();
+      setDataAccounts(response.data_accounts || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to load Data Accounts');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleDelete = () => {
-    setShowDeleteModal(true);
-  };
-
-  const handleSaveAdd = async () => {
-    setSaving(true);
+  const handleAdd = async () => {
+    setError('');
+    setLoading(true);
     try {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      const newTarget: CompilationTarget = {
-        id: String(targets.length + 1),
-        name: targetName,
-        platform: platform?.value || '',
-        arch: arch?.value || '',
-        compiler: 'neo',
-        compiler_options: { target_platform: targetPlatform },
-      };
-      setTargets([...targets, newTarget]);
+      await apiService.createDataAccount(formData);
+      setSuccess('Data Account registered successfully');
       setShowAddModal(false);
-    } catch (error) {
-      console.error('Failed to add target:', error);
+      resetForm();
+      loadDataAccounts();
+    } catch (err: any) {
+      setError(err.message || 'Failed to register Data Account');
     } finally {
-      setSaving(false);
+      setLoading(false);
     }
   };
 
-  const handleSaveEdit = async () => {
-    setSaving(true);
+  const handleEdit = async () => {
+    if (!selectedAccount) return;
+    
+    setError('');
+    setLoading(true);
     try {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      setTargets(targets.map(t => 
-        t.id === editingTarget?.id
-          ? {
-              ...t,
-              name: targetName,
-              platform: platform?.value || '',
-              arch: arch?.value || '',
-              compiler_options: { target_platform: targetPlatform },
-            }
-          : t
-      ));
+      await apiService.updateDataAccount(selectedAccount.data_account_id, formData);
+      setSuccess('Data Account updated successfully');
       setShowEditModal(false);
-      setSelectedItems([]);
-    } catch (error) {
-      console.error('Failed to update target:', error);
+      setSelectedAccount(null);
+      resetForm();
+      loadDataAccounts();
+    } catch (err: any) {
+      setError(err.message || 'Failed to update Data Account');
     } finally {
-      setSaving(false);
+      setLoading(false);
     }
   };
 
-  const handleConfirmDelete = async () => {
-    setSaving(true);
+  const handleDelete = async (accountId: string) => {
+    if (!confirm('Are you sure you want to delete this Data Account?')) return;
+    
+    setError('');
+    setLoading(true);
     try {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      const idsToDelete = selectedItems.map(item => item.id);
-      setTargets(targets.filter(t => !idsToDelete.includes(t.id)));
-      setShowDeleteModal(false);
-      setSelectedItems([]);
-    } catch (error) {
-      console.error('Failed to delete targets:', error);
+      await apiService.deleteDataAccount(accountId);
+      setSuccess('Data Account deleted successfully');
+      loadDataAccounts();
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete Data Account');
     } finally {
-      setSaving(false);
+      setLoading(false);
     }
   };
 
-  return (
-    <>
-      <Container
+  const handleTestConnection = async (accountId: string) => {
+    setTestingConnection(accountId);
+    setError('');
+    try {
+      const response = await apiService.testDataAccountConnection(accountId);
+      if (response.result.status === 'success') {
+        setSuccess('Connection test successful');
+      } else {
+        setError(`Connection test failed: ${response.result.error}`);
+      }
+      loadDataAccounts();
+    } catch (err: any) {
+      setError(err.message || 'Failed to test connection');
+    } finally {
+      setTestingConnection(null);
+    }
+  };
+
+  const openEditModal = (account: DataAccount) => {
+    setSelectedAccount(account);
+    setFormData({
+      data_account_id: account.data_account_id,
+      name: account.name,
+      description: account.description || '',
+      role_arn: account.role_arn,
+      external_id: account.external_id,
+      region: account.region,
+    });
+    setShowEditModal(true);
+  };
+
+  const resetForm = () => {
+    setFormData({
+      data_account_id: '',
+      name: '',
+      description: '',
+      role_arn: '',
+      external_id: '',
+      region: 'us-east-1',
+    });
+  };
+
+  const DataAccountsTab = () => (
+    <SpaceBetween size="l">
+      {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+      {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
+
+      <Table
+        items={dataAccounts}
+        loading={loading}
+        loadingText="Loading Data Accounts..."
         header={
-          <Header variant="h1" description="Configure portal settings">
-            Settings
+          <Header
+            variant="h2"
+            actions={
+              <Button variant="primary" onClick={() => setShowAddModal(true)}>
+                Add Data Account
+              </Button>
+            }
+          >
+            Data Accounts
           </Header>
         }
-      >
+        columnDefinitions={[
+          {
+            id: 'name',
+            header: 'Name',
+            cell: item => (
+              <SpaceBetween direction="vertical" size="xxs">
+                <Box fontWeight="bold">{item.name}</Box>
+                <Box color="text-body-secondary" fontSize="body-s">{item.description}</Box>
+              </SpaceBetween>
+            ),
+          },
+          {
+            id: 'account',
+            header: 'Account ID',
+            cell: item => item.data_account_id,
+          },
+          {
+            id: 'region',
+            header: 'Region',
+            cell: item => item.region,
+          },
+          {
+            id: 'status',
+            header: 'Status',
+            cell: item => {
+              const test = item.connection_test;
+              if (!test) {
+                return <Badge color="grey">Not tested</Badge>;
+              }
+              return test.status === 'success' ? (
+                <StatusIndicator type="success">Connected</StatusIndicator>
+              ) : (
+                <StatusIndicator type="error">Failed</StatusIndicator>
+              );
+            },
+          },
+          {
+            id: 'actions',
+            header: 'Actions',
+            cell: item => (
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button
+                  variant="icon"
+                  iconName="status-positive"
+                  onClick={() => handleTestConnection(item.data_account_id)}
+                  loading={testingConnection === item.data_account_id}
+                  ariaLabel="Test connection"
+                />
+                <Button
+                  variant="icon"
+                  iconName="edit"
+                  onClick={() => openEditModal(item)}
+                  ariaLabel="Edit"
+                />
+                <Button
+                  variant="icon"
+                  iconName="remove"
+                  onClick={() => handleDelete(item.data_account_id)}
+                  ariaLabel="Delete"
+                />
+              </SpaceBetween>
+            ),
+          },
+        ]}
+        empty={
+          <Box textAlign="center" color="inherit">
+            <Box padding={{ bottom: 's' }} variant="p" color="inherit">
+              No Data Accounts registered
+            </Box>
+            <Button onClick={() => setShowAddModal(true)}>Add Data Account</Button>
+          </Box>
+        }
+      />
+    </SpaceBetween>
+  );
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        const lines = content.split('\n');
+        const config: Record<string, string> = {};
+        
+        lines.forEach(line => {
+          const match = line.match(/^([^:]+):\s*(.+)$/);
+          if (match) {
+            config[match[1].trim()] = match[2].trim();
+          }
+        });
+        
+        // Auto-fill form from config file
+        setFormData({
+          data_account_id: config['Data Account ID'] || formData.data_account_id,
+          name: formData.name || 'Production Data Account', // Keep user's name if already entered
+          description: formData.description || 'Centralized training data storage',
+          role_arn: config['Portal Access Role ARN'] || formData.role_arn,
+          external_id: config['External ID'] || formData.external_id,
+          region: formData.region || 'us-east-1',
+        });
+        
+        setSuccess('Configuration file loaded successfully');
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const DataAccountForm = () => (
+    <Form>
+      <SpaceBetween size="m">
+        {!selectedAccount && (
+          <FormField
+            label="Upload Configuration File"
+            description="Upload data-account-config.txt to auto-fill fields"
+            stretch
+          >
+            <input
+              type="file"
+              accept=".txt"
+              onChange={handleFileUpload}
+              style={{
+                padding: '8px',
+                border: '1px dashed #aab7b8',
+                borderRadius: '4px',
+                width: '100%',
+                cursor: 'pointer',
+              }}
+            />
+          </FormField>
+        )}
+
+        {!selectedAccount && (
+          <Box textAlign="center" color="text-body-secondary">
+            <Box variant="small">or enter manually below</Box>
+          </Box>
+        )}
+
+        <FormField label="Account ID" constraintText="AWS Account ID">
+          <Input
+            value={formData.data_account_id}
+            onChange={({ detail }) => setFormData({ ...formData, data_account_id: detail.value })}
+            placeholder="123456789012"
+            disabled={!!selectedAccount}
+          />
+        </FormField>
+
+        <FormField label="Name" constraintText="Friendly name for this Data Account">
+          <Input
+            value={formData.name}
+            onChange={({ detail }) => setFormData({ ...formData, name: detail.value })}
+            placeholder="Production Data Account"
+          />
+        </FormField>
+
+        <FormField label="Description" constraintText="Optional description">
+          <Textarea
+            value={formData.description}
+            onChange={({ detail }) => setFormData({ ...formData, description: detail.value })}
+            placeholder="Centralized data storage for production usecases"
+            rows={2}
+          />
+        </FormField>
+
+        <FormField label="Role ARN" constraintText="IAM role ARN in the Data Account">
+          <Input
+            value={formData.role_arn}
+            onChange={({ detail }) => setFormData({ ...formData, role_arn: detail.value })}
+            placeholder="arn:aws:iam::123456789012:role/DDAPortalAccessRole"
+          />
+        </FormField>
+
+        <FormField label="External ID" constraintText="External ID for role assumption">
+          <Input
+            value={formData.external_id}
+            onChange={({ detail }) => setFormData({ ...formData, external_id: detail.value })}
+            placeholder="7B1EA7C8-A279-4F44-9732-E1C912F01272"
+            type="password"
+          />
+        </FormField>
+
+        <FormField label="Region">
+          <Input
+            value={formData.region}
+            onChange={({ detail }) => setFormData({ ...formData, region: detail.value })}
+            placeholder="us-east-1"
+          />
+        </FormField>
+      </SpaceBetween>
+    </Form>
+  );
+
+  return (
+    <Container>
+      <SpaceBetween size="l">
+        <Header variant="h1">Portal Settings</Header>
+
         <Tabs
-          activeTabId={activeTabId}
-          onChange={({ detail }) => setActiveTabId(detail.activeTabId)}
+          activeTabId={activeTab}
+          onChange={({ detail }) => setActiveTab(detail.activeTabId)}
           tabs={[
             {
-              id: 'compilation',
-              label: 'Compilation Targets',
-              content: (
-                <SpaceBetween size="l">
-                  <Alert type="info">
-                    Compilation targets define the hardware platforms that models can be compiled for.
-                    These targets are used during the model compilation step.
-                  </Alert>
-
-                  <Table
-                    columnDefinitions={[
-                      {
-                        id: 'name',
-                        header: 'Name',
-                        cell: item => item.name,
-                      },
-                      {
-                        id: 'platform',
-                        header: 'Platform',
-                        cell: item => item.platform,
-                      },
-                      {
-                        id: 'arch',
-                        header: 'Architecture',
-                        cell: item => item.arch,
-                      },
-                      {
-                        id: 'target_platform',
-                        header: 'Target Platform',
-                        cell: item => item.compiler_options.target_platform,
-                      },
-                    ]}
-                    items={targets}
-                    selectionType="single"
-                    selectedItems={selectedItems}
-                    onSelectionChange={({ detail }) => setSelectedItems(detail.selectedItems)}
-                    header={
-                      <Header
-                        actions={
-                          <SpaceBetween direction="horizontal" size="xs">
-                            <Button onClick={handleAdd}>Add Target</Button>
-                            <Button onClick={handleEdit} disabled={selectedItems.length === 0}>
-                              Edit
-                            </Button>
-                            <Button onClick={handleDelete} disabled={selectedItems.length === 0}>
-                              Delete
-                            </Button>
-                          </SpaceBetween>
-                        }
-                      >
-                        Compilation Targets
-                      </Header>
-                    }
-                    empty={
-                      <Box textAlign="center" color="inherit">
-                        <b>No compilation targets</b>
-                        <Box padding={{ bottom: 's' }} variant="p" color="inherit">
-                          No compilation targets configured.
-                        </Box>
-                        <Button onClick={handleAdd}>Add Target</Button>
-                      </Box>
-                    }
-                  />
-                </SpaceBetween>
-              ),
+              id: 'data-accounts',
+              label: 'Data Accounts',
+              content: <DataAccountsTab />,
             },
             {
               id: 'general',
               label: 'General',
               content: (
-                <SpaceBetween size="l">
+                <Box padding="l">
                   <Alert type="info">
-                    General portal settings will be available here in a future update.
+                    General settings coming soon
                   </Alert>
-                  <Box>
-                    <Box variant="h3">Portal Information</Box>
-                    <Box>Version: 1.0.0</Box>
-                    <Box>Environment: Development</Box>
-                  </Box>
-                </SpaceBetween>
+                </Box>
               ),
             },
           ]}
         />
-      </Container>
 
-      {/* Add Target Modal */}
-      <Modal
-        visible={showAddModal}
-        onDismiss={() => setShowAddModal(false)}
-        header="Add Compilation Target"
-        footer={
-          <Box float="right">
-            <SpaceBetween direction="horizontal" size="xs">
-              <Button variant="link" onClick={() => setShowAddModal(false)}>
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                onClick={handleSaveAdd}
-                loading={saving}
-                disabled={!targetName || !platform || !arch || !targetPlatform}
-              >
-                Add Target
-              </Button>
-            </SpaceBetween>
-          </Box>
-        }
-      >
-        <SpaceBetween size="m">
-          <FormField label="Target Name" constraintText="Required">
-            <Input
-              value={targetName}
-              onChange={({ detail }) => setTargetName(detail.value)}
-              placeholder="e.g., Jetson Xavier"
-            />
-          </FormField>
+        {/* Add Data Account Modal */}
+        <Modal
+          visible={showAddModal}
+          onDismiss={() => {
+            setShowAddModal(false);
+            resetForm();
+          }}
+          header="Add Data Account"
+          footer={
+            <Box float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button
+                  variant="link"
+                  onClick={() => {
+                    setShowAddModal(false);
+                    resetForm();
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  onClick={handleAdd}
+                  loading={loading}
+                  disabled={
+                    !formData.data_account_id ||
+                    !formData.name ||
+                    !formData.role_arn ||
+                    !formData.external_id
+                  }
+                >
+                  Register
+                </Button>
+              </SpaceBetween>
+            </Box>
+          }
+        >
+          <DataAccountForm />
+        </Modal>
 
-          <FormField label="Platform" constraintText="Required">
-            <Select
-              selectedOption={platform}
-              onChange={({ detail }) => setPlatform(detail.selectedOption)}
-              options={platformOptions}
-              placeholder="Select platform"
-            />
-          </FormField>
-
-          <FormField label="Architecture" constraintText="Required">
-            <Select
-              selectedOption={arch}
-              onChange={({ detail }) => setArch(detail.selectedOption)}
-              options={archOptions}
-              placeholder="Select architecture"
-            />
-          </FormField>
-
-          <FormField label="SageMaker Neo Target Platform" constraintText="Required">
-            <Input
-              value={targetPlatform}
-              onChange={({ detail }) => setTargetPlatform(detail.value)}
-              placeholder="e.g., jetson_nano, ml_c5"
-            />
-          </FormField>
-        </SpaceBetween>
-      </Modal>
-
-      {/* Edit Target Modal */}
-      <Modal
-        visible={showEditModal}
-        onDismiss={() => setShowEditModal(false)}
-        header="Edit Compilation Target"
-        footer={
-          <Box float="right">
-            <SpaceBetween direction="horizontal" size="xs">
-              <Button variant="link" onClick={() => setShowEditModal(false)}>
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                onClick={handleSaveEdit}
-                loading={saving}
-                disabled={!targetName || !platform || !arch || !targetPlatform}
-              >
-                Save Changes
-              </Button>
-            </SpaceBetween>
-          </Box>
-        }
-      >
-        <SpaceBetween size="m">
-          <FormField label="Target Name" constraintText="Required">
-            <Input
-              value={targetName}
-              onChange={({ detail }) => setTargetName(detail.value)}
-            />
-          </FormField>
-
-          <FormField label="Platform" constraintText="Required">
-            <Select
-              selectedOption={platform}
-              onChange={({ detail }) => setPlatform(detail.selectedOption)}
-              options={platformOptions}
-            />
-          </FormField>
-
-          <FormField label="Architecture" constraintText="Required">
-            <Select
-              selectedOption={arch}
-              onChange={({ detail }) => setArch(detail.selectedOption)}
-              options={archOptions}
-            />
-          </FormField>
-
-          <FormField label="SageMaker Neo Target Platform" constraintText="Required">
-            <Input
-              value={targetPlatform}
-              onChange={({ detail }) => setTargetPlatform(detail.value)}
-            />
-          </FormField>
-        </SpaceBetween>
-      </Modal>
-
-      {/* Delete Confirmation Modal */}
-      <ConfirmationModal
-        visible={showDeleteModal}
-        title="Delete Compilation Target"
-        message="This action cannot be undone. Models will no longer be able to compile for this target."
-        confirmButtonText="Delete"
-        variant="danger"
-        loading={saving}
-        onConfirm={handleConfirmDelete}
-        onCancel={() => setShowDeleteModal(false)}
-      >
-        <Box>
-          Are you sure you want to delete{' '}
-          <strong>{selectedItems.map((item) => item.name).join(', ')}</strong>?
-        </Box>
-      </ConfirmationModal>
-    </>
+        {/* Edit Data Account Modal */}
+        <Modal
+          visible={showEditModal}
+          onDismiss={() => {
+            setShowEditModal(false);
+            setSelectedAccount(null);
+            resetForm();
+          }}
+          header="Edit Data Account"
+          footer={
+            <Box float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button
+                  variant="link"
+                  onClick={() => {
+                    setShowEditModal(false);
+                    setSelectedAccount(null);
+                    resetForm();
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button variant="primary" onClick={handleEdit} loading={loading}>
+                  Save Changes
+                </Button>
+              </SpaceBetween>
+            </Box>
+          }
+        >
+          <DataAccountForm />
+        </Modal>
+      </SpaceBetween>
+    </Container>
   );
 }

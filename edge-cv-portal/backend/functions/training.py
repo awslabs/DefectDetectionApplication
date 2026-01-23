@@ -75,6 +75,158 @@ def get_usecase_details(usecase_id: str) -> Dict:
         raise
 
 
+def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: str) -> Dict:
+    """
+    Validate that manifest has required attributes for AWS Marketplace DDA model.
+    
+    Required attributes:
+    - source-ref: Image S3 URI
+    - anomaly-label: Label value (0 or 1)
+    - anomaly-label-metadata: Label metadata
+    
+    For segmentation, also requires:
+    - anomaly-mask-ref: Mask image S3 URI
+    - anomaly-mask-ref-metadata: Mask metadata
+    
+    Returns:
+        dict with 'valid' (bool), 'message' (str), 'errors' (list)
+    """
+    try:
+        # Parse S3 URI
+        if not manifest_uri.startswith('s3://'):
+            return {
+                'valid': False,
+                'errors': ['Manifest URI must be an S3 URI (s3://bucket/key)'],
+                'message': 'Invalid manifest URI format'
+            }
+        
+        parts = manifest_uri.replace('s3://', '').split('/', 1)
+        if len(parts) != 2:
+            return {
+                'valid': False,
+                'errors': ['Invalid S3 URI format'],
+                'message': 'Could not parse manifest URI'
+            }
+        
+        bucket = parts[0]
+        key = parts[1]
+        
+        # Assume role to access manifest
+        credentials = assume_usecase_role(
+            usecase['cross_account_role_arn'],
+            usecase['external_id'],
+            'validate-manifest'
+        )
+        
+        # Create S3 client with assumed credentials
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken']
+        )
+        
+        # Download and parse first few lines of manifest
+        try:
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            # Read first 10KB to check format (should be enough for several entries)
+            content = response['Body'].read(10240).decode('utf-8')
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchKey':
+                return {
+                    'valid': False,
+                    'errors': [f'Manifest file not found: {manifest_uri}'],
+                    'message': 'Manifest file does not exist'
+                }
+            raise
+        
+        # Parse first line to check attributes
+        lines = content.strip().split('\n')
+        if not lines:
+            return {
+                'valid': False,
+                'errors': ['Manifest file is empty'],
+                'message': 'Empty manifest'
+            }
+        
+        # Check first entry
+        try:
+            first_entry = json.loads(lines[0])
+        except json.JSONDecodeError:
+            return {
+                'valid': False,
+                'errors': ['Manifest is not valid JSON Lines format'],
+                'message': 'Invalid manifest format'
+            }
+        
+        # Required attributes for all models
+        required_attrs = ['source-ref', 'anomaly-label', 'anomaly-label-metadata']
+        
+        # Additional requirements for segmentation
+        if model_type in ['segmentation', 'segmentation-robust']:
+            required_attrs.extend(['anomaly-mask-ref', 'anomaly-mask-ref-metadata'])
+        
+        # Check for required attributes
+        missing_attrs = []
+        for attr in required_attrs:
+            if attr not in first_entry:
+                missing_attrs.append(attr)
+        
+        if missing_attrs:
+            # Check if it's a Ground Truth manifest that needs transformation
+            has_gt_pattern = any(key.endswith('-metadata') and key != 'anomaly-label-metadata' 
+                                for key in first_entry.keys())
+            
+            error_msg = f"Missing required attributes: {', '.join(missing_attrs)}"
+            if has_gt_pattern:
+                error_msg += ". This appears to be a Ground Truth manifest that needs transformation."
+            
+            return {
+                'valid': False,
+                'errors': [error_msg],
+                'message': 'Manifest missing required DDA attributes',
+                'detected_attributes': list(first_entry.keys())
+            }
+        
+        # Validate attribute types
+        if not isinstance(first_entry.get('source-ref'), str):
+            return {
+                'valid': False,
+                'errors': ['source-ref must be a string (S3 URI)'],
+                'message': 'Invalid attribute type'
+            }
+        
+        if not isinstance(first_entry.get('anomaly-label'), (int, float)):
+            return {
+                'valid': False,
+                'errors': ['anomaly-label must be a number (0 or 1)'],
+                'message': 'Invalid label type'
+            }
+        
+        if not isinstance(first_entry.get('anomaly-label-metadata'), dict):
+            return {
+                'valid': False,
+                'errors': ['anomaly-label-metadata must be an object'],
+                'message': 'Invalid metadata type'
+            }
+        
+        # All validations passed
+        return {
+            'valid': True,
+            'message': f'Manifest is valid for {model_type} training',
+            'errors': [],
+            'sample_entry': first_entry
+        }
+        
+    except Exception as e:
+        logger.error(f"Error validating manifest: {str(e)}")
+        return {
+            'valid': False,
+            'errors': [f'Validation error: {str(e)}'],
+            'message': 'Failed to validate manifest'
+        }
+
+
 def create_training_job(event: Dict, context: Any) -> Dict:
     """
     Create a new SageMaker training job
@@ -109,6 +261,7 @@ def create_training_job(event: Dict, context: Any) -> Dict:
             return create_response(400, {'error': error})
         
         usecase_id = body['usecase_id']
+        model_source = body.get('model_source', 'marketplace')  # Default to marketplace
         model_name = body['model_name'].strip()
         model_version = body['model_version'].strip()
         model_type = body['model_type']
@@ -134,6 +287,22 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         
         # Get use case details
         usecase = get_usecase_details(usecase_id)
+        
+        # Validate manifest format for marketplace model
+        if model_source == 'marketplace':
+            logger.info("Validating manifest format for marketplace model")
+            validation_result = validate_marketplace_manifest(
+                dataset_manifest_s3,
+                usecase,
+                model_type
+            )
+            if not validation_result['valid']:
+                return create_response(400, {
+                    'error': 'Manifest validation failed',
+                    'details': validation_result['errors'],
+                    'suggestion': 'Use the Manifest Transformer tool to convert your Ground Truth manifest to DDA-compatible format'
+                })
+            logger.info(f"Manifest validation passed: {validation_result['message']}")
         
         # Log data account configuration for debugging
         data_account_id = usecase.get('data_account_id')
@@ -480,7 +649,12 @@ def get_training_job(event: Dict, context: Any) -> Dict:
                     if status == 'Completed':
                         update_expr += ', artifact_s3 = :artifact, completed_at = :completed'
                         expr_values[':artifact'] = sm_response['ModelArtifacts']['S3ModelArtifacts']
-                        expr_values[':completed'] = timestamp
+                        # Use actual TrainingEndTime from SageMaker, not current time
+                        training_end_time = sm_response.get('TrainingEndTime')
+                        if training_end_time:
+                            expr_values[':completed'] = int(training_end_time.timestamp() * 1000)
+                        else:
+                            expr_values[':completed'] = timestamp
                     elif status == 'Failed':
                         update_expr += ', failure_reason = :reason'
                         expr_values[':reason'] = sm_response.get('FailureReason', 'Unknown')
@@ -497,7 +671,12 @@ def get_training_job(event: Dict, context: Any) -> Dict:
                     job['progress'] = progress
                     if status == 'Completed':
                         job['artifact_s3'] = sm_response['ModelArtifacts']['S3ModelArtifacts']
-                        job['completed_at'] = timestamp
+                        # Use actual TrainingEndTime from SageMaker
+                        training_end_time = sm_response.get('TrainingEndTime')
+                        if training_end_time:
+                            job['completed_at'] = int(training_end_time.timestamp() * 1000)
+                        else:
+                            job['completed_at'] = timestamp
                     elif status == 'Failed':
                         job['failure_reason'] = sm_response.get('FailureReason', 'Unknown')
                 
