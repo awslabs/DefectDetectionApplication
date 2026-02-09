@@ -198,27 +198,38 @@ if [ "$DRY_RUN" = true ]; then
     exit 0
 fi
 
-# Build the run-instances command
+# Build the run-instances command with proper JSON formatting
+echo "Launching instance..."
+
+# Build command with optional IAM profile
 RUN_CMD="aws ec2 run-instances \
     --region $REGION \
     --image-id $AMI_ID \
     --instance-type $INSTANCE_TYPE \
     --key-name $KEY_NAME \
     --security-group-ids $SECURITY_GROUP_ID \
-    --iam-instance-profile Name=$IAM_PROFILE \
-    --block-device-mappings DeviceName=/dev/sda1,Ebs={VolumeSize=$VOLUME_SIZE,VolumeType=gp3,DeleteOnTermination=true} \
-    --metadata-options HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled \
-    --tag-specifications ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME}] \
-    --ebs-optimized \
-    --query 'Instances[0].InstanceId' \
-    --output text"
+    --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=$VOLUME_SIZE,VolumeType=gp3,DeleteOnTermination=true}' \
+    --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \
+    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME}]' \
+    --ebs-optimized"
+
+# Add IAM profile if specified and exists
+if [ -n "$IAM_PROFILE" ]; then
+    # Check if IAM profile exists
+    if aws iam get-instance-profile --instance-profile-name "$IAM_PROFILE" &>/dev/null; then
+        RUN_CMD="$RUN_CMD --iam-instance-profile Name=$IAM_PROFILE"
+    else
+        echo "Warning: IAM instance profile '$IAM_PROFILE' not found. Launching without it."
+    fi
+fi
 
 # Add subnet if specified
 if [ -n "$SUBNET_ID" ]; then
     RUN_CMD="$RUN_CMD --subnet-id $SUBNET_ID"
 fi
 
-echo "Launching instance..."
+RUN_CMD="$RUN_CMD --query 'Instances[0].InstanceId' --output text"
+
 INSTANCE_ID=$(eval $RUN_CMD)
 
 echo "Instance launched: $INSTANCE_ID"
@@ -245,7 +256,7 @@ echo "Connect with:"
 echo "  ssh -i ~/.ssh/${KEY_NAME}.pem ubuntu@$PUBLIC_IP"
 echo ""
 echo "After connecting, set up the build environment:"
-echo "  git clone <your-repo>"
+echo "  git clone https://github.com/awslabs/DefectDetectionApplication"
 echo "  cd DefectDetectionApplication"
 echo "  ./setup-build-server.sh"
 echo ""

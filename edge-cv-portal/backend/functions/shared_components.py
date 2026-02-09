@@ -760,6 +760,18 @@ def provision_components(event: Dict, user: Dict) -> Dict:
                         user_id=user_id
                     )
                     
+                    # Update the usecase to mark shared components as provisioned
+                    usecases_table = dynamodb.Table(USECASES_TABLE)
+                    usecases_table.update_item(
+                        Key={'usecase_id': usecase_id},
+                        UpdateExpression='SET shared_components_provisioned = :provisioned, shared_components = :components',
+                        ExpressionAttributeValues={
+                            ':provisioned': True,
+                            ':components': {'components': results}
+                        }
+                    )
+                    logger.info(f"Updated usecase {usecase_id} to mark shared components as provisioned")
+                    
                     # Log audit event
                     log_audit_event(
                         user_id=user_id,
@@ -778,6 +790,21 @@ def provision_components(event: Dict, user: Dict) -> Dict:
                     
                 except Exception as e:
                     logger.error(f"Error in async provisioning for usecase {usecase_id}: {str(e)}", exc_info=True)
+                    
+                    # Update the usecase to mark provisioning as failed
+                    try:
+                        usecases_table = dynamodb.Table(USECASES_TABLE)
+                        usecases_table.update_item(
+                            Key={'usecase_id': usecase_id},
+                            UpdateExpression='SET shared_components_provisioned = :provisioned, shared_components = :error',
+                            ExpressionAttributeValues={
+                                ':provisioned': False,
+                                ':error': {'status': 'failed', 'error': str(e)}
+                            }
+                        )
+                    except Exception as update_err:
+                        logger.error(f"Failed to update usecase with provisioning error: {str(update_err)}")
+                    
                     # Log failed audit event
                     log_audit_event(
                         user_id=user_id,

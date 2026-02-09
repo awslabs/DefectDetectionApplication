@@ -98,6 +98,329 @@ cd edge-cv-portal
 4. Fill in Account ID, Role ARN, and External ID from step 4
 5. Click "Create"
 
+## Building Greengrass Components (ARM64)
+
+To build and publish custom Greengrass components for ARM64 edge devices, you need an ARM64 build server. This section covers both automated and manual setup options.
+
+### Prerequisites
+
+Before launching a build server, you must create the required IAM role:
+
+```bash
+./create-build-server-iam-role.sh
+```
+
+This creates:
+- IAM role: `dda-build-role`
+- Instance profile: `dda-build-role`
+- Permissions for Greengrass, IoT, S3, CloudWatch, and ECR
+
+### Option 1: Automated Setup (Recommended)
+
+The fastest way to get a build server running:
+
+```bash
+# Step 1: Create IAM role (one-time setup)
+./create-build-server-iam-role.sh
+
+# Step 2: Launch the EC2 instance
+./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME
+
+# Step 3: Connect and setup
+ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@<PUBLIC_IP>
+git clone <your-repo>
+cd DefectDetectionApplication
+./setup-build-server.sh
+
+# Step 4: Build components
+./gdk-component-build-and-publish.sh
+```
+
+### Option 2: Manual Setup
+
+If you prefer to set up the IAM role and EC2 instance manually:
+
+#### Step 1: Create IAM Role
+
+Create a role with the following trust policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "ec2.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+Attach these policies:
+
+1. **AWS Managed Policy**: `AmazonSSMManagedInstanceCore`
+
+2. **Inline Policy** (create new):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "GreengrassPermissions",
+      "Effect": "Allow",
+      "Action": ["greengrass:*"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IoTPermissions",
+      "Effect": "Allow",
+      "Action": ["iot:*"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3Permissions",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:GetBucketLocation",
+        "s3:PutBucketVersioning",
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket",
+        "s3:DeleteObject",
+        "s3:GetBucketVersioning",
+        "s3:ListBucketVersions"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2Permissions",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeImages",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeKeyPairs",
+        "ec2:DescribeTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchLogsPermissions",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "arn:aws:logs:*:*:*"
+    },
+    {
+      "Sid": "CloudWatchMetricsPermissions",
+      "Effect": "Allow",
+      "Action": ["cloudwatch:PutMetricData"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECRPermissions",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+#### Step 2: Create Instance Profile
+
+```bash
+# Create instance profile
+aws iam create-instance-profile --instance-profile-name dda-build-role
+
+# Add role to profile
+aws iam add-role-to-instance-profile \
+  --instance-profile-name dda-build-role \
+  --role-name dda-build-role
+```
+
+#### Step 3: Launch EC2 Instance
+
+```bash
+# Find latest Ubuntu 18.04 ARM64 AMI
+AMI_ID=$(aws ec2 describe-images \
+  --owners 099720109477 \
+  --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-arm64-server-*" \
+            "Name=state,Values=available" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+  --output text)
+
+# Create security group
+SG_ID=$(aws ec2 create-security-group \
+  --group-name dda-build-sg \
+  --description "Security group for DDA build server" \
+  --query 'GroupId' \
+  --output text)
+
+# Allow SSH
+aws ec2 authorize-security-group-ingress \
+  --group-id $SG_ID \
+  --protocol tcp \
+  --port 22 \
+  --cidr 0.0.0.0/0
+
+# Launch instance
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID \
+  --instance-type m6g.4xlarge \
+  --key-name YOUR_KEY_NAME \
+  --security-group-ids $SG_ID \
+  --iam-instance-profile Name=dda-build-role \
+  --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=100,VolumeType=gp3,DeleteOnTermination=true}' \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=dda-arm64-build-server}]' \
+  --query 'Instances[0].InstanceId' \
+  --output text)
+
+# Wait for instance to be running
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+
+# Get public IP
+PUBLIC_IP=$(aws ec2 describe-instances \
+  --instance-ids $INSTANCE_ID \
+  --query 'Reservations[0].Instances[0].PublicIpAddress' \
+  --output text)
+
+echo "Instance launched: $INSTANCE_ID"
+echo "Public IP: $PUBLIC_IP"
+```
+
+#### Step 4: Connect and Setup
+
+```bash
+# Connect to instance
+ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@$PUBLIC_IP
+
+# Clone repository
+git clone <your-repo>
+cd DefectDetectionApplication
+
+# Run setup script
+./setup-build-server.sh
+
+# Build components
+./gdk-component-build-and-publish.sh
+```
+
+### Build Server Specifications
+
+| Aspect | Details |
+|--------|---------|
+| **Instance Type** | m6g.4xlarge (ARM64) |
+| **AMI** | Ubuntu 18.04 ARM64 |
+| **Volume Size** | 100 GB (gp3) |
+| **Region** | us-east-1 (configurable) |
+| **IAM Role** | dda-build-role |
+| **SSH Access** | Port 22 (restrict in production) |
+
+### Cleanup
+
+To terminate the build server when done:
+
+```bash
+# Using instance ID
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID
+
+# Or using tag
+aws ec2 terminate-instances \
+  --filters "Name=tag:Name,Values=dda-arm64-build-server"
+```
+
+## Launching Edge Devices
+
+To deploy DDA to edge devices with AWS Greengrass, you need to launch EC2 instances configured as edge devices. This section covers both automated and manual setup options.
+
+### Prerequisites
+
+Before launching an edge device, you must create the required IAM role:
+
+```bash
+./station_install/create-edge-device-iam-role.sh
+```
+
+This creates:
+- IAM role: `dda-edge-device-role`
+- Instance profile: `dda-edge-device-role`
+- Permissions for Greengrass, IoT, S3, CloudWatch, and ECR
+
+### Automated Setup (Recommended)
+
+The fastest way to launch an edge device:
+
+```bash
+# Step 1: Create IAM role (one-time setup)
+./station_install/create-edge-device-iam-role.sh
+
+# Step 2: Launch the EC2 instance
+./station_install/launch-edge-device.sh \
+  --thing-name dda-edge-1 \
+  --key-name YOUR_KEY_NAME
+
+# Step 3: Connect and setup
+ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@<PUBLIC_IP>
+cd /tmp
+git clone <your-repo> dda
+cd dda/station_install
+sudo ./setup_station.sh us-east-1 dda-edge-1
+
+# Step 4: Device appears in portal
+# After setup completes, the device will appear in the DDA Portal
+```
+
+### Launch Options
+
+```bash
+# ARM64 device (default)
+./station_install/launch-edge-device.sh \
+  --thing-name dda-arm64-edge-1 \
+  --key-name YOUR_KEY_NAME
+
+# x86_64 device
+./station_install/launch-edge-device.sh \
+  --thing-name dda-x86-edge-1 \
+  --key-name YOUR_KEY_NAME \
+  --arch x86_64
+
+# Custom instance type and volume size
+./station_install/launch-edge-device.sh \
+  --thing-name dda-edge-1 \
+  --key-name YOUR_KEY_NAME \
+  --instance-type m6g.2xlarge \
+  --volume-size 50
+```
+
+### Cleanup
+
+To terminate an edge device:
+
+```bash
+# Using instance ID
+aws ec2 terminate-instances --instance-ids $INSTANCE_ID
+
+# Or using tag
+aws ec2 terminate-instances \
+  --filters "Name=tag:Name,Values=dda-edge-1"
+```
+
 ## Architecture
 
 ```
@@ -213,6 +536,8 @@ See [edge-cv-portal/README.md](edge-cv-portal/README.md) for complete deployment
 | [edge-cv-portal/ADMIN_GUIDE.md](edge-cv-portal/ADMIN_GUIDE.md) | Portal administration guide |
 | [edge-cv-portal/TUTORIAL_MULTI_ACCOUNT_WORKFLOW.md](edge-cv-portal/TUTORIAL_MULTI_ACCOUNT_WORKFLOW.md) | End-to-end tutorial |
 | [edge-cv-portal/TUTORIAL_SEGMENTATION_MULTI_ACCOUNT.md](edge-cv-portal/TUTORIAL_SEGMENTATION_MULTI_ACCOUNT.md) | Segmentation training guide |
+| [BUILD_SERVER_SETUP_GUIDE.md](BUILD_SERVER_SETUP_GUIDE.md) | ARM64 build server setup (automated & manual) |
+| [EDGE_DEVICE_SETUP_GUIDE.md](EDGE_DEVICE_SETUP_GUIDE.md) | Edge device setup with Greengrass (automated & manual) |
 | [DDA_END_TO_END_ARCHITECTURE.md](DDA_END_TO_END_ARCHITECTURE.md) | Complete system architecture |
 | [README_MANUAL_DEPLOYMENT.md](README_MANUAL_DEPLOYMENT.md) | Manual deployment without Portal |
 
