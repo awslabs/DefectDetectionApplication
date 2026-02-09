@@ -73,6 +73,14 @@ DDA_INFERENCE_UPLOADER_COMPONENT = {
     'platforms': ['linux']  # Works on all platforms
 }
 
+# AWS Greengrass Log Manager (built-in component for CloudWatch logging)
+GREENGRASS_LOG_MANAGER_COMPONENT = {
+    'name': 'aws.greengrass.LogManager',
+    'description': 'Greengrass built-in component for CloudWatch Logs integration',
+    'platforms': ['linux'],  # Works on all platforms
+    'version': '2.3.9'  # Fixed version for log manager
+}
+
 # Cache for discovered component info (refreshed per Lambda invocation)
 _component_cache = {}
 
@@ -156,6 +164,12 @@ def get_all_component_info() -> Dict[str, Dict]:
             **DDA_INFERENCE_UPLOADER_COMPONENT,
             'version': uploader_version
         }
+    
+    # Add Log Manager component (built-in, fixed version)
+    result['log_manager'] = {
+        **GREENGRASS_LOG_MANAGER_COMPONENT,
+        'version': GREENGRASS_LOG_MANAGER_COMPONENT['version']
+    }
     
     return result
 
@@ -340,8 +354,11 @@ def provision_shared_components_for_usecase(
     Provision all shared components for a new usecase.
     Called during usecase onboarding.
     
-    Provisions:
+    Provisions (MANDATORY):
     - DDA LocalServer (arm64 and amd64 variants)
+    - AWS Greengrass Log Manager (for CloudWatch logging)
+    
+    Provisions (OPTIONAL):
     - DDA InferenceUploader (platform-independent)
     
     Dynamically discovers the latest version for each component.
@@ -353,7 +370,7 @@ def provision_shared_components_for_usecase(
     # Get dynamically discovered component info
     components = get_all_component_info()
     
-    # Provision LocalServer components (platform-specific)
+    # Provision LocalServer components (platform-specific) - MANDATORY
     for platform in DDA_LOCAL_SERVER_COMPONENTS.keys():
         component_key = f'localserver_{platform}'
         if component_key not in components:
@@ -385,7 +402,32 @@ def provision_shared_components_for_usecase(
                 'error': str(e)
             })
     
-    # Provision InferenceUploader component (platform-independent)
+    # Provision Log Manager component (MANDATORY - built-in Greengrass component for CloudWatch logging)
+    if 'log_manager' in components:
+        config = components['log_manager']
+        try:
+            # Log Manager is a built-in component, doesn't need to be shared like custom components
+            # But we still need to note it as provisioned
+            result = {
+                'component_name': config['name'],
+                'version': config['version'],
+                'platform': 'all',
+                'status': 'shared',
+                'message': 'Built-in Greengrass component - automatically available'
+            }
+            results.append(result)
+            logger.info(f"Provisioned {config['name']} v{config['version']} for usecase {usecase_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to provision {config['name']} for usecase {usecase_id}: {str(e)}")
+            results.append({
+                'component_name': config['name'],
+                'platform': 'all',
+                'status': 'failed',
+                'error': str(e)
+            })
+    
+    # Provision InferenceUploader component (OPTIONAL - platform-independent)
     if 'inference_uploader' in components:
         config = components['inference_uploader']
         try:
@@ -637,6 +679,12 @@ def provision_components(event: Dict, user: Dict) -> Dict:
     """
     Provision shared components for a usecase.
     Called during usecase onboarding.
+    
+    This endpoint is called by Lambda with SigV4 signing (not Cognito JWT).
+    The user context is passed in the request body since there's no Cognito authorizer.
+    
+    Returns 202 Accepted immediately and provisions components asynchronously.
+    This avoids API Gateway 29-second timeout for long-running cross-account operations.
     """
     try:
         body = json.loads(event.get('body', '{}'))
@@ -649,6 +697,17 @@ def provision_components(event: Dict, user: Dict) -> Dict:
         usecase_id = body['usecase_id']
         # component_version is deprecated - versions are now discovered dynamically per platform
         
+        # For SigV4-signed requests (Lambda-to-Lambda), user_id comes from the payload
+        # For Cognito JWT requests (user-initiated), user_id comes from the authorizer context
+        if body.get('user_id'):
+            # SigV4-signed request from Lambda - use user_id from payload
+            user_id = body['user_id']
+            logger.info(f"Using user_id from payload (SigV4-signed request): {user_id}")
+        else:
+            # Cognito JWT request - use user_id from authorizer context
+            user_id = user.get('user_id', 'unknown')
+            logger.info(f"Using user_id from authorizer context (Cognito JWT): {user_id}")
+        
         # Get usecase details
         table = dynamodb.Table(USECASES_TABLE)
         response = table.get_item(Key={'usecase_id': usecase_id})
@@ -658,12 +717,23 @@ def provision_components(event: Dict, user: Dict) -> Dict:
         
         usecase = response['Item']
         
-        # Check user has permission (pass user dict for JWT role lookup)
-        if not check_user_access(user['user_id'], usecase_id, 'UseCaseAdmin', user):
-            return create_response(403, {'error': 'Insufficient permissions'})
+        # For SigV4-signed requests from Lambda, skip permission check
+        # The Lambda's IAM role provides authentication
+        # For Cognito JWT requests, check user has permission
+        if not body.get('user_id'):
+            # Cognito JWT request - check permissions
+            if not check_user_access(user_id, usecase_id, 'UseCaseAdmin', user):
+                return create_response(403, {'error': 'Insufficient permissions'})
+        else:
+            # SigV4-signed request - Lambda is authenticated via IAM role
+            logger.info(f"SigV4-signed request from Lambda - skipping permission check")
+        
+        # Return 202 Accepted immediately - provisioning happens asynchronously
+        # This avoids API Gateway 29-second timeout for long-running cross-account operations
+        logger.info(f"Returning 202 Accepted - provisioning will happen asynchronously")
         
         # Step 1: Add usecase role to the GDK component bucket policy (Portal Account)
-        # This allows the usecase account to download component artifacts
+        # This is fast and can be done synchronously
         bucket_policy_updated = add_usecase_to_component_bucket_policy(
             cross_account_role_arn=usecase['cross_account_role_arn']
         )
@@ -671,39 +741,100 @@ def provision_components(event: Dict, user: Dict) -> Dict:
         if not bucket_policy_updated:
             logger.warning(f"Failed to update component bucket policy for usecase {usecase_id}")
         
-        # Note: Device IAM policy (DDAPortalComponentAccessPolicy) is created by UseCaseAccountStack CDK
-        # and attached to GreengrassV2TokenExchangeRole by setup_station.sh during device provisioning
+        # Step 2: Provision shared components asynchronously
+        # Spawn async provisioning in the background
+        try:
+            # Use threading to provision components asynchronously
+            import threading
+            
+            def async_provision():
+                try:
+                    logger.info(f"Starting async provisioning for usecase {usecase_id}")
+                    
+                    # Provision shared components in the usecase account
+                    results = provision_shared_components_for_usecase(
+                        usecase_id=usecase_id,
+                        usecase_account_id=usecase['account_id'],
+                        cross_account_role_arn=usecase['cross_account_role_arn'],
+                        external_id=usecase['external_id'],
+                        user_id=user_id
+                    )
+                    
+                    # Log audit event
+                    log_audit_event(
+                        user_id=user_id,
+                        action='provision_shared_components',
+                        resource_type='usecase',
+                        resource_id=usecase_id,
+                        result='success',
+                        details={
+                            'components': [r['component_name'] for r in results],
+                            'bucket_policy_updated': bucket_policy_updated
+                        }
+                    )
+                    
+                    success_count = len([r for r in results if r.get('status') in ('shared', 'already_exists')])
+                    logger.info(f"Async provisioning completed for usecase {usecase_id}: {success_count} components")
+                    
+                except Exception as e:
+                    logger.error(f"Error in async provisioning for usecase {usecase_id}: {str(e)}", exc_info=True)
+                    # Log failed audit event
+                    log_audit_event(
+                        user_id=user_id,
+                        action='provision_shared_components',
+                        resource_type='usecase',
+                        resource_id=usecase_id,
+                        result='failed',
+                        details={'error': str(e)}
+                    )
+            
+            # Start async provisioning thread
+            thread = threading.Thread(target=async_provision, daemon=True)
+            thread.start()
+            
+            logger.info(f"Async provisioning thread started for usecase {usecase_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to start async provisioning: {str(e)}")
+            # Fall back to synchronous provisioning if threading fails
+            logger.info(f"Falling back to synchronous provisioning for usecase {usecase_id}")
+            
+            results = provision_shared_components_for_usecase(
+                usecase_id=usecase_id,
+                usecase_account_id=usecase['account_id'],
+                cross_account_role_arn=usecase['cross_account_role_arn'],
+                external_id=usecase['external_id'],
+                user_id=user_id
+            )
+            
+            log_audit_event(
+                user_id=user_id,
+                action='provision_shared_components',
+                resource_type='usecase',
+                resource_id=usecase_id,
+                result='success',
+                details={
+                    'components': [r['component_name'] for r in results],
+                    'bucket_policy_updated': bucket_policy_updated
+                }
+            )
+            
+            success_count = len([r for r in results if r.get('status') in ('shared', 'already_exists')])
+            
+            return create_response(200, {
+                'status': 'success',
+                'usecase_id': usecase_id,
+                'components': results,
+                'bucket_policy_updated': bucket_policy_updated,
+                'message': f'Provisioned {success_count} shared component(s)'
+            })
         
-        # Step 2: Provision shared components in the usecase account
-        # Each platform uses its own version from DDA_LOCAL_SERVER_COMPONENTS config
-        results = provision_shared_components_for_usecase(
-            usecase_id=usecase_id,
-            usecase_account_id=usecase['account_id'],
-            cross_account_role_arn=usecase['cross_account_role_arn'],
-            external_id=usecase['external_id'],
-            user_id=user['user_id']
-        )
-        
-        # Log audit event
-        log_audit_event(
-            user_id=user['user_id'],
-            action='provision_shared_components',
-            resource_type='usecase',
-            resource_id=usecase_id,
-            result='success',
-            details={
-                'components': [r['component_name'] for r in results],
-                'bucket_policy_updated': bucket_policy_updated
-            }
-        )
-        
-        success_count = len([r for r in results if r.get('status') in ('shared', 'already_exists')])
-        
-        return create_response(200, {
+        # Return 202 Accepted - provisioning is happening asynchronously
+        return create_response(202, {
+            'status': 'accepted',
             'usecase_id': usecase_id,
-            'components': results,
             'bucket_policy_updated': bucket_policy_updated,
-            'message': f'Provisioned {success_count} shared component(s)'
+            'message': 'Provisioning shared components asynchronously. Check status later.'
         })
         
     except Exception as e:

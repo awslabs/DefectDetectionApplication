@@ -213,29 +213,122 @@ class InferenceUploader:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
                 time.sleep(60)
 
-def main():
-    config_path = os.environ.get('GG_CONFIG_FILE', '/tmp/config.json')
+def validate_config(config: Dict) -> Tuple[bool, str]:
+    """Validate configuration parameters"""
+    try:
+        # Validate upload interval
+        upload_interval = config.get('uploadIntervalSeconds', 10)
+        if not isinstance(upload_interval, (int, float)) or upload_interval <= 0:
+            return False, "uploadIntervalSeconds must be a positive number"
+        
+        # Validate batch size
+        batch_size = config.get('batchSize', 100)
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            return False, "batchSize must be a positive integer"
+        
+        # Validate retention days
+        retention_days = config.get('localRetentionDays', 7)
+        if not isinstance(retention_days, int) or retention_days < 0:
+            return False, "localRetentionDays must be a non-negative integer"
+        
+        # Validate S3 bucket
+        s3_bucket = config.get('s3Bucket', '')
+        if not s3_bucket:
+            return False, "s3Bucket is required"
+        
+        # Validate AWS region
+        aws_region = config.get('awsRegion', 'us-east-1')
+        if not isinstance(aws_region, str) or not aws_region:
+            return False, "awsRegion must be a non-empty string"
+        
+        return True, "Configuration is valid"
+    except Exception as e:
+        return False, f"Configuration validation error: {str(e)}"
+
+
+def load_configuration() -> Dict:
+    """Load configuration from multiple sources with proper precedence"""
     
+    # 1. Start with recipe defaults (from recipe.yaml)
     config = {
         'inferenceResultsPath': '/aws_dda/inference-results',
-        'uploadIntervalSeconds': 300,
+        'uploadIntervalSeconds': 10,  # From recipe.yaml
         'batchSize': 100,
         'localRetentionDays': 7,
         'uploadImages': True,
         'uploadMetadata': True,
-        's3Bucket': os.environ.get('S3_BUCKET', ''),
-        's3Prefix': os.environ.get('S3_PREFIX', ''),
-        'awsRegion': os.environ.get('AWS_REGION', 'us-east-1')
+        's3Bucket': '',
+        's3Prefix': '',
+        'awsRegion': 'us-east-1'
     }
     
+    # 2. Try to load from Greengrass config file (if it exists)
+    config_path = os.environ.get('GG_CONFIG_FILE', '/tmp/config.json')
     if os.path.exists(config_path):
         try:
             with open(config_path, 'r') as f:
                 gg_config = json.load(f)
                 config.update(gg_config)
+                logger.info(f"Loaded configuration from {config_path}")
         except Exception as e:
-            logger.warning(f"Could not load Greengrass config: {e}")
+            logger.warning(f"Could not load Greengrass config from {config_path}: {e}")
     
+    # 3. Override with environment variables (highest priority)
+    env_overrides = {
+        'INFERENCE_RESULTS_PATH': 'inferenceResultsPath',
+        'UPLOAD_INTERVAL_SECONDS': 'uploadIntervalSeconds',
+        'BATCH_SIZE': 'batchSize',
+        'LOCAL_RETENTION_DAYS': 'localRetentionDays',
+        'UPLOAD_IMAGES': 'uploadImages',
+        'UPLOAD_METADATA': 'uploadMetadata',
+        'S3_BUCKET': 's3Bucket',
+        'S3_PREFIX': 's3Prefix',
+        'AWS_REGION': 'awsRegion'
+    }
+    
+    for env_var, config_key in env_overrides.items():
+        if env_var in os.environ:
+            value = os.environ[env_var]
+            
+            try:
+                # Type conversion based on expected type
+                if config_key in ['uploadIntervalSeconds', 'batchSize', 'localRetentionDays']:
+                    config[config_key] = int(value)
+                elif config_key in ['uploadImages', 'uploadMetadata']:
+                    config[config_key] = value.lower() in ('true', '1', 'yes')
+                else:
+                    config[config_key] = value
+                
+                logger.info(f"Overriding {config_key} from environment variable {env_var}={value}")
+            except ValueError as e:
+                logger.error(f"Invalid value for {env_var}: {value} - {str(e)}")
+    
+    return config
+
+
+def main():
+    """Entry point"""
+    # Load configuration from multiple sources
+    config = load_configuration()
+    
+    # Validate configuration
+    is_valid, validation_msg = validate_config(config)
+    if not is_valid:
+        logger.error(f"Configuration validation failed: {validation_msg}")
+        sys.exit(1)
+    
+    logger.info("Configuration loaded successfully:")
+    logger.info(f"  Inference Path: {config['inferenceResultsPath']}")
+    logger.info(f"  Upload Interval: {config['uploadIntervalSeconds']}s")
+    logger.info(f"  Batch Size: {config['batchSize']}")
+    logger.info(f"  Retention: {config['localRetentionDays']} days")
+    logger.info(f"  S3 Bucket: {config['s3Bucket']}")
+    logger.info(f"  S3 Prefix: {config['s3Prefix']}")
+    logger.info(f"  AWS Region: {config['awsRegion']}")
+    logger.info(f"  Upload Images: {config['uploadImages']}")
+    logger.info(f"  Upload Metadata: {config['uploadMetadata']}")
+    
+    # Create and run uploader
     uploader = InferenceUploader(config)
     uploader.run()
 

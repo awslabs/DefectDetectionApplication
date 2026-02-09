@@ -188,6 +188,13 @@ export default function ComponentDetail() {
                   Refresh
                 </Button>
                 <Button
+                  variant="normal"
+                  iconName="settings"
+                  onClick={() => navigate(`/components/configure?component_name=${encodeURIComponent(component.component_name)}&usecase_id=${currentUseCaseId}`)}
+                >
+                  Configure
+                </Button>
+                <Button
                   variant="primary"
                   iconName="share"
                   onClick={() => setShowDeployModal(true)}

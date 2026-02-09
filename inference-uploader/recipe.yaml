@@ -6,7 +6,7 @@ ComponentDescription: 'Uploads inference results (images and metadata) from edge
 ComponentPublisher: 'DDA Portal'
 ComponentConfiguration:
   DefaultConfiguration:
-    uploadIntervalSeconds: 300
+    uploadIntervalSeconds: 10  # Upload every 10 seconds (for testing/debugging)
     batchSize: 100
     localRetentionDays: 7
     uploadImages: true

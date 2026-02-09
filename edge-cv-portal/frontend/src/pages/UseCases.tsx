@@ -107,9 +107,27 @@ export default function UseCases() {
 
   const provisionMutation = useMutation({
     mutationFn: (usecaseId: string) => apiService.provisionSharedComponents(usecaseId),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['usecases'] });
+    onSuccess: (data, usecaseId) => {
+      // Update only the specific usecase in cache instead of invalidating all
+      queryClient.setQueryData(['usecases'], (oldData: any) => {
+        if (!oldData) return oldData;
+        return {
+          ...oldData,
+          usecases: oldData.usecases.map((uc: UseCase) =>
+            uc.usecase_id === usecaseId
+              ? {
+                  ...uc,
+                  shared_components_provisioned: true,
+                  shared_components: data.components,
+                }
+              : uc
+          ),
+        };
+      });
+      
+      // Invalidate status since it might have changed
       queryClient.invalidateQueries({ queryKey: ['shared-components-status'] });
+      
       const successCount = data.components.filter(c => c.status === 'shared').length;
       const failedCount = data.components.filter(c => c.status === 'failed').length;
       if (failedCount > 0) {
@@ -355,6 +373,25 @@ export default function UseCases() {
             id: 'cost_center',
             header: 'Cost Center',
             cell: (item: UseCase) => item.cost_center || '-',
+          },
+          {
+            id: 'shared_components',
+            header: 'Shared Components',
+            cell: (item: UseCase) => {
+              if (!item.shared_components_provisioned) {
+                return <StatusIndicator type="pending">Not provisioned</StatusIndicator>;
+              }
+              if (!item.shared_components || !Array.isArray(item.shared_components.components)) {
+                return <StatusIndicator type="warning">Unknown status</StatusIndicator>;
+              }
+              const components = item.shared_components.components;
+              const successCount = components.filter(c => c.status === 'shared').length;
+              const failedCount = components.filter(c => c.status === 'failed').length;
+              if (failedCount > 0) {
+                return <StatusIndicator type="error">{successCount} OK, {failedCount} failed</StatusIndicator>;
+              }
+              return <StatusIndicator type="success">{successCount} provisioned</StatusIndicator>;
+            },
           },
           {
             id: 'created_at',

@@ -82,7 +82,7 @@ export class ComputeStack extends cdk.Stack {
       // Grant S3 permissions for portal artifacts bucket
       props.portalArtifactsBucket.grantReadWrite(role);
 
-      // Grant SageMaker, Greengrass, CloudWatch Logs, and STS permissions
+      // Grant SageMaker, Greengrass, CloudWatch Logs, STS, and API Gateway permissions
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
@@ -106,6 +106,7 @@ export class ComputeStack extends cdk.Stack {
           'logs:DescribeLogStreams',
           'logs:FilterLogEvents',
           'sts:AssumeRole',
+          'execute-api:Invoke',
         ],
         resources: ['*'],
       }));
@@ -816,6 +817,12 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
         ],
       },
     });
+
+    // Update UseCases handler with Portal API URL for shared components provisioning
+    // This must be done after API is created but before routes are added
+    useCasesHandler.addEnvironment('PORTAL_API_URL', cdk.Fn.sub('https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/v1', {
+      ApiId: this.api.restApiId,
+    }));
 
     // Cognito Authorizer
     const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'CognitoAuthorizer', {
@@ -1547,6 +1554,41 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       }
     );
 
+    // Component Configuration endpoints
+    const componentConfigurationHandler = new lambda.Function(this, 'ComponentConfigurationHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'component_configuration.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('ComponentConfiguration'),
+      environment: lambdaEnvironment,
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    const componentConfigurationIntegration = new apigateway.LambdaIntegration(componentConfigurationHandler);
+
+    // GET /components/schema - Get component configuration schema
+    const schemaResource = componentsResource.addResource('schema');
+    schemaResource.addMethod(
+      'GET',
+      componentConfigurationIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // POST /components/configure - Configure component and create deployment
+    const configureResource = componentsResource.addResource('configure');
+    configureResource.addMethod(
+      'POST',
+      componentConfigurationIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
     // Shared Components endpoints for dda-LocalServer provisioning
     const sharedComponentsResource = this.api.root.addResource('shared-components');
     sharedComponentsResource.addMethod(
@@ -1570,14 +1612,13 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     );
 
     // Provision shared components to usecase
+    // NOTE: This endpoint is called by Lambda with SigV4 signing (not Cognito JWT)
+    // So we don't apply the Cognito authorizer here. The Lambda's IAM role provides authentication.
     const provisionSharedResource = sharedComponentsResource.addResource('provision');
     provisionSharedResource.addMethod(
       'POST',
-      sharedComponentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
+      sharedComponentsIntegration
+      // No authorizer - Lambda uses SigV4 signing with IAM role
     );
 
     // Get shared components update status (Portal Admin)
@@ -1682,6 +1723,12 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     );
 
     this.apiUrl = this.api.url;
+
+    // Update UseCases handler with Portal API URL for shared components provisioning
+    // Done after API is fully created and all routes are added
+    useCasesHandler.addEnvironment('PORTAL_API_URL', cdk.Fn.sub('https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/v1', {
+      ApiId: this.api.restApiId,
+    }));
 
     // Outputs
     new cdk.CfnOutput(this, 'ApiUrl', {

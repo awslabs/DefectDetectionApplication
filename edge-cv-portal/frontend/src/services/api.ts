@@ -1516,6 +1516,47 @@ class ApiService {
       method: 'POST',
     });
   }
+
+  // Component Configuration endpoints
+  async getComponentConfigurationSchema(componentName: string): Promise<{
+    component_name: string;
+    displayName: string;
+    description: string;
+    parameters: Record<string, {
+      name: string;
+      type: 'string' | 'number' | 'boolean' | 'select';
+      default: any;
+      description: string;
+      required: boolean;
+      validation?: { min?: number; max?: number };
+      options?: Array<{ label: string; value: any }>;
+      envVar?: string;
+    }>;
+  }> {
+    const queryParams = new URLSearchParams({ component_name: componentName });
+    return this.request(`/components/schema?${queryParams}`);
+  }
+
+  async configureComponent(data: {
+    component_name: string;
+    usecase_id: string;
+    configuration: Record<string, any>;
+    target_devices: string[];
+    deployment_name?: string;
+  }): Promise<{
+    status: string;
+    deployment_id: string;
+    component_name: string;
+    configuration: Record<string, any>;
+    environment_variables: Record<string, string>;
+    target_devices: string[];
+    message: string;
+  }> {
+    return this.request('/components/configure', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
 }
 
 export const apiService = new ApiService();
