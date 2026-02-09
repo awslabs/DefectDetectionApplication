@@ -291,6 +291,7 @@ class RBACManager:
                 Permission.UPDATE_DEVICE_CONFIG,
                 # Add UseCaseAdmin-specific permissions
                 Permission.UPDATE_USECASES,
+                Permission.DELETE_USECASES,
                 Permission.MANAGE_USECASE_USERS,
                 Permission.VIEW_AUDIT_LOGS,
             },

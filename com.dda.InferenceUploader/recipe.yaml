@@ -7,7 +7,7 @@ ComponentPublisher: 'DDA Portal'
 ComponentConfiguration:
   DefaultConfiguration:
     # Upload configuration
-    uploadIntervalSeconds: 300  # Upload every 5 minutes
+    uploadIntervalSeconds: 10  # Upload every 10 seconds (for testing/debugging)
     batchSize: 100  # Max files per batch
     localRetentionDays: 7  # Keep local files for 7 days
     uploadImages: true  # Upload .jpg files

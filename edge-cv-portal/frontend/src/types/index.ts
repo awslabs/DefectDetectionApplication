@@ -34,6 +34,20 @@ export interface UseCase {
   data_account_external_id?: string;
   data_s3_bucket?: string;
   data_s3_prefix?: string;
+  // Shared components provisioning
+  shared_components_provisioned?: boolean;
+  shared_components?: {
+    components: Array<{
+      component_name: string;
+      version?: string;
+      platform?: string;
+      status: 'shared' | 'failed' | 'already_exists';
+      error?: string;
+      message?: string;
+    }>;
+    status?: string;
+    message?: string;
+  };
 }
 
 export interface Device {

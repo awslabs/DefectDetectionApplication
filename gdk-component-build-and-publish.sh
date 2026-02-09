@@ -1,115 +1,17 @@
 #!/bin/bash
+
+# Build and publish Greengrass components using GDK
+# This script builds components and publishes them to the Greengrass component repository
+
 set -e
 
-# Get architecture and determine recipe file
-ARCH=$(uname -m)
-case $ARCH in
-    x86_64)
-        RECIPE_FILE="recipe-amd64.yaml"
-        COMPONENT_NAME="aws.edgeml.dda.LocalServer.amd64"
-        ;;
-    aarch64)
-        RECIPE_FILE="recipe-arm64.yaml"
-        COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64"
-        ;;
-    *)
-        echo "Unsupported architecture: $ARCH"
-        exit 1
-        ;;
-esac
+echo "Building and publishing Greengrass components..."
 
-echo "Building component for architecture: $ARCH"
-echo "Component name: $COMPONENT_NAME"
-echo "Using recipe: $RECIPE_FILE"
+# Build LocalServer components for different architectures
+for arch in arm64 amd64; do
+    echo "Building LocalServer for $arch..."
+    gdk component build --architecture $arch
+    gdk component publish --architecture $arch
+done
 
-# Get account and region info
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-REGION=$(aws configure get region || echo "us-east-1")
-BUCKET_NAME="dda-component-${REGION}-${ACCOUNT_ID}"
-
-echo "Using S3 bucket: $BUCKET_NAME"
-
-# Use architecture-specific recipe
-cp $RECIPE_FILE recipe.yaml
-
-# Create gdk-config.json with architecture-specific component name
-cat > gdk-config.json << EOF
-{
-  "component": {
-    "${COMPONENT_NAME}": {
-      "author": "Amazon",
-      "version": "NEXT_PATCH",
-      "build": {
-        "build_system": "custom",
-        "custom_build_command": [
-          "bash",
-          "build-custom.sh",
-          "${COMPONENT_NAME}",
-          "NEXT_PATCH"
-        ]
-      },
-      "publish": {
-        "bucket": "dda-component",
-        "region": "${REGION}"
-      }
-    }
-  },
-  "gdk_version": "1.0.0"
-}
-EOF
-
-# Clean GDK cache and build directories
-rm -rf greengrass-build/
-rm -rf .gdk/
-
-# Build and publish component
-echo "Building component..."
-gdk component build
-
-echo "Publishing component..."
-gdk component publish
-
-# Get the component ARN and tag it for portal visibility
-echo "Tagging component for DDA Portal visibility..."
-
-# Get the latest version of the component
-LATEST_VERSION=$(aws greengrassv2 list-component-versions \
-  --arn "arn:aws:greengrass:${REGION}:${ACCOUNT_ID}:components:${COMPONENT_NAME}" \
-  --query 'componentVersions[0].componentVersion' \
-  --output text 2>/dev/null || echo "")
-
-if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "None" ]; then
-  COMPONENT_ARN="arn:aws:greengrass:${REGION}:${ACCOUNT_ID}:components:${COMPONENT_NAME}:versions:${LATEST_VERSION}"
-  
-  echo "Tagging component: $COMPONENT_ARN"
-  aws greengrassv2 tag-resource \
-    --resource-arn "$COMPONENT_ARN" \
-    --tags "dda-portal:managed=true" \
-           "dda-portal:component-type=local-server" \
-           "dda-portal:architecture=${ARCH}"
-  
-  echo "Component tagged successfully!"
-  echo ""
-  echo "=== Component Details ==="
-  echo "Component Name: $COMPONENT_NAME"
-  echo "Version: $LATEST_VERSION"
-  echo "Bucket: $BUCKET_NAME"
-  echo "Artifact Path: ${COMPONENT_NAME}/${LATEST_VERSION}/${COMPONENT_NAME}-${ARCH}.zip"
-  echo ""
-  echo "=== Next Steps ==="
-  echo "1. Update DDA_LOCAL_SERVER_VERSION in compute-stack.ts to: $LATEST_VERSION"
-  echo "2. Deploy: cd edge-cv-portal/infrastructure && npm run build && cdk deploy EdgeCVPortalComputeStack"
-  echo "3. Use 'Update All Usecases' button in portal to push to all usecase accounts"
-  echo ""
-  echo "NOTE: Cross-account bucket policy is automatically managed during usecase onboarding."
-  echo "      New usecase accounts are added to the bucket policy when shared components are provisioned."
-  echo ""
-  echo "=== Optional: Build InferenceUploader Component ==="
-  echo "To enable automatic upload of inference results to S3:"
-  echo "  ./build-inference-uploader.sh"
-  echo ""
-else
-  echo "Warning: Could not determine component version for tagging"
-fi
-
-echo "Component ${COMPONENT_NAME} built and published successfully!"
+echo "Components published successfully!"

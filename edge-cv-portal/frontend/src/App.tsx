@@ -26,6 +26,7 @@ import DeploymentDetail from './pages/DeploymentDetail';
 import CreateDeployment from './pages/CreateDeployment';
 import Components from './pages/Components';
 import ComponentDetail from './pages/ComponentDetail';
+import ComponentConfiguration from './pages/ComponentConfiguration';
 import Settings from './pages/Settings';
 import AuditLogs from './pages/AuditLogs';
 import Login from './pages/Login';
@@ -82,6 +83,7 @@ function App() {
               <Route path="deployments/:deploymentId" element={<DeploymentDetail />} />
               <Route path="components" element={<Components />} />
               <Route path="components/:arn" element={<ComponentDetail />} />
+              <Route path="components/configure" element={<ComponentConfiguration />} />
               <Route path="settings" element={<Settings />} />
               <Route path="audit" element={<AuditLogs />} />
             </Route>

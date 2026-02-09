@@ -1,17 +1,29 @@
 #!/bin/bash
-# Build script for shared Lambda layer
-# Installs Python dependencies into the layer for Linux (Lambda runtime)
+
+# Build shared Lambda layer
+# Packages shared utilities and dependencies for Lambda functions
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_DIR="$SCRIPT_DIR/python"
+LAYER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_DIR="$LAYER_DIR/build"
+PYTHON_DIR="$BUILD_DIR/python"
 
-echo "Installing dependencies into $PYTHON_DIR for Linux (Lambda runtime)..."
+echo "Building shared Lambda layer..."
 
-# Install PyYAML for Linux platform (manylinux)
-pip install PyYAML -t "$PYTHON_DIR" --upgrade --no-cache-dir --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.11
+# Create build directory
+mkdir -p "$PYTHON_DIR"
 
-echo "Dependencies installed successfully!"
-echo "Contents of $PYTHON_DIR:"
-ls -la "$PYTHON_DIR"
+# Copy shared utilities
+cp "$LAYER_DIR/python"/*.py "$PYTHON_DIR/" 2>/dev/null || true
+
+# Install dependencies
+if [ -f "$LAYER_DIR/requirements.txt" ]; then
+    pip install -r "$LAYER_DIR/requirements.txt" -t "$PYTHON_DIR/" --upgrade
+fi
+
+# Create zip file
+cd "$BUILD_DIR"
+zip -r ../layer.zip . > /dev/null
+
+echo "Layer built successfully: $LAYER_DIR/layer.zip"

@@ -376,6 +376,15 @@ export default function Components() {
                   <SpaceBetween direction="horizontal" size="xs">
                     <Button
                       variant="normal"
+                      iconName="settings"
+                      onClick={() => {
+                        navigate(`/components/configure?component_name=${encodeURIComponent(item.component_name)}&usecase_id=${selectedUseCase?.value || ''}`);
+                      }}
+                    >
+                      Configure
+                    </Button>
+                    <Button
+                      variant="normal"
                       iconName="share"
                       onClick={() => {
                         setComponentToDeploy(item);

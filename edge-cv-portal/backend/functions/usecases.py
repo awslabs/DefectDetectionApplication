@@ -7,6 +7,7 @@ import os
 from datetime import datetime
 import uuid
 import boto3
+import requests
 from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
@@ -15,20 +16,134 @@ from shared_utils import (
     validate_usecase_access
 )
 
-# Import shared components provisioning
-try:
-    from shared_components import provision_shared_components_for_usecase
-except ImportError:
-    # Fallback if shared_components module not available
-    def provision_shared_components_for_usecase(*args, **kwargs):
-        return {'status': 'skipped', 'reason': 'shared_components module not available'}
-
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource('dynamodb')
 sts = boto3.client('sts')
 USECASES_TABLE = os.environ.get('USECASES_TABLE')
+
+
+def provision_shared_components_via_api(
+    usecase_id: str,
+    usecase_account_id: str,
+    cross_account_role_arn: str,
+    external_id: str,
+    user_id: str,
+    auth_token: str = None
+) -> dict:
+    """
+    Call the SharedComponentsHandler Lambda via API Gateway to provision shared components.
+    
+    This avoids the need to import the shared_components module, which may not be available
+    in the Lambda layer. Instead, we call the provisioning API endpoint which routes to
+    the SharedComponentsHandler Lambda function.
+    
+    For internal Lambda-to-Lambda calls, we use AWS SigV4 signing with the Lambda's IAM role
+    instead of JWT tokens. This allows the call to pass through the Cognito authorizer.
+    
+    Args:
+        usecase_id: UUID of the usecase
+        usecase_account_id: AWS Account ID of the usecase
+        cross_account_role_arn: IAM role ARN for cross-account access
+        external_id: External ID for role assumption
+        user_id: User ID making the request
+        auth_token: Optional auth token for API call (not used for internal calls)
+    
+    Returns:
+        dict with provisioning results
+    """
+    try:
+        from botocore.auth import SigV4Auth
+        from botocore.awsrequest import AWSRequest
+        
+        # Get the Portal API URL from environment
+        portal_api_url = os.environ.get('PORTAL_API_URL')
+        logger.info(f"provision_shared_components_via_api called for usecase {usecase_id}")
+        logger.info(f"PORTAL_API_URL from environment: {portal_api_url}")
+        
+        if not portal_api_url:
+            logger.warning("PORTAL_API_URL not configured, skipping shared components provisioning")
+            return {'status': 'skipped', 'reason': 'PORTAL_API_URL not configured'}
+        
+        # Prepare the provisioning request
+        provision_url = f"{portal_api_url}/shared-components/provision"
+        
+        payload = {
+            'usecase_id': usecase_id,
+            'user_id': user_id,  # Pass user context for authorization in SharedComponentsHandler
+            'account_id': usecase_account_id
+        }
+        
+        logger.info(f"Calling provisioning API: {provision_url} for usecase {usecase_id}")
+        logger.info(f"Provisioning payload: {payload}")
+        
+        # Prepare request body
+        body = json.dumps(payload)
+        
+        # Create an AWS request for SigV4 signing
+        # This allows the Lambda's IAM role to authenticate with API Gateway
+        request = AWSRequest(
+            method='POST',
+            url=provision_url,
+            data=body,
+            headers={'Content-Type': 'application/json'}
+        )
+        
+        # Get credentials and sign the request
+        credentials = boto3.Session().get_credentials()
+        region = os.environ.get('AWS_REGION', 'us-east-1')
+        logger.info(f"Signing request with region: {region}")
+        
+        SigV4Auth(credentials, 'execute-api', region).add_auth(request)
+        
+        # Log the signed headers for debugging
+        logger.info(f"Request headers after signing: Authorization header present: {'Authorization' in request.headers}")
+        
+        # Make the signed request
+        response = requests.post(
+            provision_url,
+            headers=dict(request.headers),
+            data=request.body,
+            timeout=120  # 2 minutes timeout for provisioning
+        )
+        
+        logger.info(f"Provisioning API response status: {response.status_code}")
+        
+        # Check response status
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"Provisioning API returned success: {result}")
+            return result
+        elif response.status_code == 202:
+            # Accepted - provisioning is async
+            result = response.json()
+            logger.info(f"Provisioning API accepted request (async): {result}")
+            return result
+        else:
+            error_msg = f"Provisioning API returned status {response.status_code}"
+            try:
+                error_detail = response.json()
+                logger.error(f"{error_msg}: {error_detail}")
+                return {'status': 'failed', 'error': error_detail}
+            except:
+                logger.error(f"{error_msg}: {response.text}")
+                return {'status': 'failed', 'error': error_msg}
+    
+    except requests.exceptions.Timeout:
+        error_msg = "Provisioning API call timed out"
+        logger.error(error_msg)
+        return {'status': 'failed', 'error': error_msg}
+    
+    except requests.exceptions.ConnectionError as e:
+        error_msg = f"Failed to connect to provisioning API: {str(e)}"
+        logger.error(error_msg)
+        return {'status': 'failed', 'error': error_msg}
+    
+    except Exception as e:
+        error_msg = f"Unexpected error calling provisioning API: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return {'status': 'failed', 'error': error_msg}
 
 
 def assume_role(role_arn: str, external_id: str, session_name: str) -> dict:
@@ -105,6 +220,48 @@ def update_data_bucket_policy_for_sagemaker(
             response = s3_data.get_bucket_policy(Bucket=data_bucket_name)
             existing_policy = json.loads(response['Policy'])
             logger.info(f"Found existing bucket policy with {len(existing_policy.get('Statement', []))} statements")
+            
+            # Validate and sanitize existing statements
+            # Remove any statements with invalid principals that would cause MalformedPolicy error
+            valid_statements = []
+            for stmt in existing_policy.get('Statement', []):
+                try:
+                    # Check if Principal is valid
+                    principal = stmt.get('Principal')
+                    if principal:
+                        # Principal can be a string "*" or a dict with "AWS", "Service", etc.
+                        if isinstance(principal, str):
+                            # Valid: "*"
+                            valid_statements.append(stmt)
+                        elif isinstance(principal, dict):
+                            # Check if it has valid keys
+                            valid_keys = {'AWS', 'Service', 'Federated', 'CanonicalUser'}
+                            if any(key in principal for key in valid_keys):
+                                # Validate AWS principals are ARNs or account IDs
+                                aws_principals = principal.get('AWS', [])
+                                if isinstance(aws_principals, str):
+                                    aws_principals = [aws_principals]
+                                
+                                # Filter out invalid principals
+                                valid_aws = [p for p in aws_principals if p and (p.startswith('arn:') or p.isdigit())]
+                                if valid_aws:
+                                    principal['AWS'] = valid_aws
+                                    valid_statements.append(stmt)
+                                else:
+                                    logger.warning(f"Skipping statement with invalid AWS principals: {aws_principals}")
+                            else:
+                                logger.warning(f"Skipping statement with invalid principal keys: {principal.keys()}")
+                        else:
+                            logger.warning(f"Skipping statement with invalid principal type: {type(principal)}")
+                    else:
+                        # No principal, skip
+                        logger.warning(f"Skipping statement without principal: {stmt.get('Sid')}")
+                except Exception as e:
+                    logger.warning(f"Error validating statement {stmt.get('Sid')}: {str(e)}")
+            
+            existing_policy['Statement'] = valid_statements
+            logger.info(f"After validation: {len(valid_statements)} valid statements")
+            
         except ClientError as e:
             if e.response['Error']['Code'] == 'NoSuchBucketPolicy':
                 logger.info(f"No existing bucket policy for {data_bucket_name}, creating new one")
@@ -580,16 +737,29 @@ def handler(event, context):
 def list_usecases(user):
     """List all use cases accessible to the user"""
     try:
+        # Validate user object
+        if not user:
+            logger.error("User object is None")
+            return create_response(401, {'error': 'Unauthorized - no user'})
+        
+        if 'user_id' not in user:
+            logger.error(f"User object missing user_id: {user}")
+            return create_response(401, {'error': 'Unauthorized - invalid user'})
+        
         table = dynamodb.Table(USECASES_TABLE)
         user_id = user['user_id']
+        
+        logger.info(f"Listing usecases for user: {user_id}")
         
         # Get accessible use cases using RBAC manager (role from IDP)
         accessible_usecases = rbac_manager.get_accessible_usecases(user_id, user)
         
         if rbac_manager.is_portal_admin(user_id, user):
             # Super user gets all use cases
+            logger.info(f"User {user_id} is portal admin, scanning all usecases")
             response = table.scan()
             usecases = response.get('Items', [])
+            logger.info(f"Found {len(usecases)} usecases in table")
             
             log_audit_event(
                 user_id, 'list_usecases', 'usecase', 'all',
@@ -597,6 +767,7 @@ def list_usecases(user):
             )
         else:
             # Regular users get only their assigned use cases
+            logger.info(f"User {user_id} is regular user, getting assigned usecases")
             usecases = []
             for usecase_id in accessible_usecases:
                 try:
@@ -608,6 +779,8 @@ def list_usecases(user):
                         usecases.append(usecase)
                 except Exception as e:
                     logger.warning(f"Error getting use case {usecase_id}: {str(e)}")
+            
+            logger.info(f"Found {len(usecases)} assigned usecases for user {user_id}")
             
             log_audit_event(
                 user_id, 'list_usecases', 'usecase', 'assigned',
@@ -621,11 +794,11 @@ def list_usecases(user):
         })
         
     except Exception as e:
-        logger.error(f"Error listing use cases: {str(e)}")
+        logger.error(f"Error listing use cases: {str(e)}", exc_info=True)
         log_audit_event(
-            user['user_id'], 'list_usecases', 'usecase', 'all', 'failure'
+            user['user_id'] if user else 'unknown', 'list_usecases', 'usecase', 'all', 'failure'
         )
-        return create_response(500, {'error': 'Failed to list use cases'})
+        return create_response(500, {'error': f'Failed to list use cases: {str(e)}'})
 
 
 def create_usecase(event, user):
@@ -823,37 +996,56 @@ def create_usecase(event, user):
         
         # Provision shared components (dda-LocalServer) to the usecase account
         # This creates read-only copies of portal-managed components
+        # We call the provisioning API endpoint instead of importing the module
         shared_components_result = None
         provision_shared = body.get('provision_shared_components', True)
         
+        logger.info(f"Checking if shared components should be provisioned: provision_shared={provision_shared}")
+        
         if provision_shared:
+            logger.info(f"Starting shared components provisioning for usecase {usecase_id}")
             try:
-                shared_components_result = provision_shared_components_for_usecase(
+                # Extract auth token from event headers if available
+                # Note: We don't pass auth token for internal API calls - the provisioning endpoint
+                # will use the Lambda's IAM role for authorization instead
+                
+                shared_components_result = provision_shared_components_via_api(
                     usecase_id=usecase_id,
                     usecase_account_id=body['account_id'],
                     cross_account_role_arn=body['cross_account_role_arn'],
                     external_id=item['external_id'],
-                    user_id=user['user_id']
+                    user_id=user['user_id'],
+                    auth_token=None  # Don't pass auth token for internal calls
                 )
                 
-                # Update usecase with provisioning status
-                table.update_item(
-                    Key={'usecase_id': usecase_id},
-                    UpdateExpression='SET shared_components_provisioned = :provisioned, shared_components = :components',
-                    ExpressionAttributeValues={
-                        ':provisioned': True,
-                        ':components': shared_components_result
-                    }
-                )
-                item['shared_components_provisioned'] = True
-                item['shared_components'] = shared_components_result
-                
-                logger.info(f"Provisioned shared components for usecase {usecase_id}")
+                # Check if provisioning was successful
+                if shared_components_result.get('status') in ['success', 'completed']:
+                    logger.info(f"Provisioning succeeded with status: {shared_components_result.get('status')}")
+                    # Update usecase with provisioning status
+                    table.update_item(
+                        Key={'usecase_id': usecase_id},
+                        UpdateExpression='SET shared_components_provisioned = :provisioned, shared_components = :components',
+                        ExpressionAttributeValues={
+                            ':provisioned': True,
+                            ':components': shared_components_result
+                        }
+                    )
+                    item['shared_components_provisioned'] = True
+                    item['shared_components'] = shared_components_result
+                    
+                    logger.info(f"Provisioned shared components for usecase {usecase_id}: {shared_components_result}")
+                else:
+                    # Provisioning failed or was skipped, but don't fail usecase creation
+                    logger.warning(f"Shared components provisioning returned status: {shared_components_result.get('status')}, full result: {shared_components_result}")
+                    item['shared_components_provisioned'] = False
+                    item['shared_components'] = shared_components_result
                 
             except Exception as e:
-                logger.warning(f"Failed to provision shared components for usecase {usecase_id}: {str(e)}")
+                logger.warning(f"Failed to provision shared components for usecase {usecase_id}: {str(e)}", exc_info=True)
                 # Don't fail usecase creation if shared component provisioning fails
                 shared_components_result = {'error': str(e), 'status': 'failed'}
+                item['shared_components_provisioned'] = False
+                item['shared_components'] = shared_components_result
         
         # Configure cross-account EventBridge permissions
         # This allows the UseCase Account to send SageMaker events to the Portal Account

@@ -90,30 +90,186 @@ Portal Account          UseCase Account         Data Account (Optional)
 └──────────────┘       └──────────────┘        └──────────────┘
 ```
 
-## Quick Deploy
+## Prerequisites
+
+- AWS CLI configured
+- Node.js 18+, Python 3.11+
+- AWS CDK: `npm install -g aws-cdk`
+- [AWS Marketplace subscription](https://aws.amazon.com/marketplace/pp/prodview-j72hhmlt6avp6) (in UseCase Account)
+
+### AWS Account Setup (Portal Account)
+
+Before deploying the Portal, configure CloudWatch Logs for API Gateway:
 
 ```bash
-# 1. Deploy Portal (in Portal Account)
-cd infrastructure && cdk deploy --all
+# 1. Create IAM role for API Gateway CloudWatch Logs
+aws iam create-role \
+  --role-name APIGatewayCloudWatchLogsRole \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "apigateway.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }'
 
-# 2. (Optional) Enable automatic CORS configuration
-# After first deployment, get your CloudFront domain and redeploy:
-cdk deploy --all -c cloudFrontDomain=YOUR_CLOUDFRONT_DOMAIN.cloudfront.net
+# 2. Attach CloudWatch Logs policy
+aws iam attach-role-policy \
+  --role-name APIGatewayCloudWatchLogsRole \
+  --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
 
-# 3. Deploy UseCase Role (in UseCase Account)
-./deploy-account-role.sh  # Select option 1
+# 3. Get the role ARN
+ROLE_ARN=$(aws iam get-role --role-name APIGatewayCloudWatchLogsRole --query 'Role.Arn' --output text)
 
-# 4. (Optional) Deploy Data Account Role (if using separate Data Account)
-./deploy-account-role.sh  # Select option 2
-# Then register in portal: Settings → Data Accounts → Add Data Account
+# 4. Set in API Gateway account settings
+aws apigateway update-account \
+  --patch-operations op=replace,path=/cloudwatchRoleArn,value=$ROLE_ARN \
+  --region us-east-1
 
-# 5. Create UseCase in portal with Role ARN + External ID
-#    The following are automatically configured during onboarding:
-#    - Bucket policy (for SageMaker cross-account access)
-#    - CORS (for browser uploads)
-#    - Bucket tagging (dda-portal:managed=true)
-#    - Data Account dropdown selection (if registered)
+# 5. Verify (should show cloudwatchRoleArn in output)
+aws apigateway get-account --region us-east-1
 ```
+
+**Note**: This is a one-time setup per AWS account. If the role already exists, skip to step 4.
+
+## Deployment
+
+### Step 1: Deploy Portal Infrastructure (Portal Account)
+
+**Prerequisites:**
+- AWS CDK installed: `npm install -g aws-cdk`
+- Node.js 14+ installed
+- AWS credentials configured for Portal Account
+
+**Bootstrap CDK (first time only):**
+
+```bash
+cd edge-cv-portal/infrastructure
+cdk bootstrap
+```
+
+**Deploy Portal Infrastructure:**
+
+```bash
+cd edge-cv-portal/infrastructure
+cdk deploy --all
+```
+
+This deploys:
+- Frontend (React UI via CloudFront + S3)
+- Backend APIs (Lambda + API Gateway)
+- Authentication (Cognito)
+- Database (DynamoDB)
+- Storage (S3 buckets)
+- Event processing (EventBridge)
+
+### Step 2: Build and Deploy Frontend
+
+The frontend React app must be built and uploaded to S3:
+
+```bash
+cd edge-cv-portal
+./deploy-frontend.sh
+```
+
+This script:
+- Installs dependencies
+- Builds the production bundle
+- Syncs to S3
+- Invalidates CloudFront cache
+- Configures CORS for cross-account access
+
+**Output:** Portal URL will be displayed (e.g., `https://d1r8hupkjbsjb1.cloudfront.net`)
+
+**Note**: Without this step, you'll see S3 "NoSuchKey" errors when accessing the CloudFront URL.
+
+### Step 3: Post-Deployment Setup
+
+After deployment completes:
+
+1. **Access Portal**: Open the CloudFront URL in your browser
+2. **Create Admin User**: Follow [ADMIN_GUIDE.md - Create Admin User](ADMIN_GUIDE.md#create-admin-user) to create your first admin account
+3. **Onboard UseCase Accounts**: Use the Portal UI to add UseCase accounts and configure cross-account access
+
+### Step 4: Deploy UseCase Account Role (UseCase Account)
+
+**Bootstrap CDK in UseCase Account (first time only):**
+
+```bash
+cdk bootstrap aws://YOUR_USECASE_ACCOUNT_ID/us-east-1
+```
+
+**Deploy UseCase Role:**
+
+```bash
+cd edge-cv-portal
+./deploy-account-role.sh  # Select option 1
+```
+
+This creates:
+- IAM role for Portal to assume
+- SageMaker execution role for training/compilation
+- S3 access policies for model artifacts
+- Greengrass device policies
+
+**Output**: The script saves configuration to `usecase-account-YOUR_ACCOUNT_ID-config.txt` with:
+- Role ARN
+- SageMaker Execution Role ARN
+- External ID
+- Account ID
+
+Use these values when creating the UseCase in the Portal.
+
+### Step 5: (Optional) Deploy Data Account Role (Data Account)
+
+If using a separate Data Account for training data:
+
+**Bootstrap CDK in Data Account (first time only):**
+
+```bash
+cdk bootstrap aws://YOUR_DATA_ACCOUNT_ID/us-east-1
+```
+
+**Deploy Data Account Role:**
+
+```bash
+cd edge-cv-portal
+./deploy-account-role.sh  # Select option 2
+```
+
+This creates:
+- Portal access role
+- SageMaker access role
+- S3 bucket policies (auto-configured by Portal)
+
+**Register in Portal** (optional but recommended for dropdown feature):
+1. Log in as PortalAdmin
+2. Go to Settings → Data Accounts
+3. Click "Add Data Account"
+4. Upload the generated config file
+5. Fill in bucket details and click "Register"
+
+Then when creating UseCases, you can select from a dropdown instead of manual entry.
+
+### Step 6: Create UseCase in Portal
+
+1. Log in to Portal as PortalAdmin
+2. Go to Settings → UseCases
+3. Click "Add UseCase"
+4. Fill in:
+   - UseCase Name
+   - Account ID (from config file)
+   - Role ARN (from config file)
+   - External ID (from config file)
+   - (Optional) Data Account (if registered)
+5. Click "Create"
+
+The Portal automatically configures:
+- S3 bucket policies for SageMaker cross-account access
+- CORS for browser uploads
+- Bucket tagging for management
+- EventBridge forwarding for job status updates
 
 ## Configuration Options
 
@@ -170,7 +326,7 @@ cd ..
 ssh -i "your-key.pem" ubuntu@<build-server-ip>
 
 # Clone and setup
-git clone <repo-url>
+git clone https://github.com/awslabs/DefectDetectionApplication.git
 cd DefectDetectionApplication
 ./setup-build-server.sh
 
@@ -200,16 +356,10 @@ edge-cv-portal/
 │   └── components/
 │       └── ManifestTransformer.tsx # Transformation UI
 ├── deploy-account-role.sh  # UseCase/Data account setup
+├── deploy-frontend.sh      # Frontend build and deployment
 ├── sync-labeling-status.sh # Manual status sync utility
-└── ADMIN_GUIDE.md     # Full documentation
+└── ADMIN_GUIDE.md          # Full documentation
 ```
-
-## Prerequisites
-
-- AWS CLI configured
-- Node.js 18+, Python 3.11+
-- AWS CDK: `npm install -g aws-cdk`
-- [AWS Marketplace subscription](https://aws.amazon.com/marketplace/pp/prodview-j72hhmlt6avp6) (in UseCase Account)
 
 ## Tutorials
 
@@ -221,6 +371,39 @@ edge-cv-portal/
 - [Data Accounts Management](DATA_ACCOUNTS_DEPLOYMENT.md) - Centralized credential management
 - [Manifest Transformation](MANIFEST_VALIDATION_FEATURE.md) - Ground Truth to DDA format
 - [Inference Uploader](INFERENCE_UPLOADER_CONFIG.md) - Configurable S3 sync
+
+## Troubleshooting
+
+### CDK Bootstrap Error
+
+If you see: `SSM parameter /cdk-bootstrap/hnb659fds/version not found`
+
+**Solution**: Bootstrap the account first:
+```bash
+cdk bootstrap aws://YOUR_ACCOUNT_ID/YOUR_REGION
+```
+
+### CloudWatch Logs Error
+
+If you see: `CloudWatch Logs role ARN must be set in account settings`
+
+**Solution**: Follow the AWS Account Setup section above to create and configure the CloudWatch Logs role.
+
+### Role ARN Not Populated
+
+If the config file has empty Role ARN and SageMaker Role ARN fields:
+
+1. Verify CDK deployment succeeded: `aws cloudformation list-stacks --query 'StackSummaries[?StackName==`DDAPortalUseCaseAccountStack`]'`
+2. Check stack outputs: `aws cloudformation describe-stacks --stack-name DDAPortalUseCaseAccountStack --query 'Stacks[0].Outputs'`
+3. Re-run the deploy script: `./deploy-account-role.sh`
+
+### Frontend Not Accessible
+
+If you see S3 "NoSuchKey" errors:
+
+1. Verify frontend was deployed: `aws s3 ls s3://dda-portal-frontend-YOUR_ACCOUNT_ID/`
+2. Re-run frontend deployment: `./deploy-frontend.sh`
+3. Wait for CloudFront cache invalidation (up to 5 minutes)
 
 ## Support
 

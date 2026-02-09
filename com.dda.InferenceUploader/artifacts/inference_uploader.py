@@ -256,42 +256,85 @@ class InferenceUploader:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
                 time.sleep(60)  # Wait a minute before retrying
 
-def main():
-    """Entry point"""
-    # Greengrass provides configuration via IPC
-    # For simplicity, we'll use environment variables and a config file fallback
+def validate_config(config: Dict) -> Tuple[bool, str]:
+    """Validate configuration parameters"""
+    try:
+        # Validate upload interval
+        upload_interval = config.get('uploadIntervalSeconds', 10)
+        if not isinstance(upload_interval, (int, float)) or upload_interval <= 0:
+            return False, "uploadIntervalSeconds must be a positive number"
+        
+        # Validate batch size
+        batch_size = config.get('batchSize', 100)
+        if not isinstance(batch_size, int) or batch_size <= 0:
+            return False, "batchSize must be a positive integer"
+        
+        # Validate retention days
+        retention_days = config.get('localRetentionDays', 7)
+        if not isinstance(retention_days, int) or retention_days < 0:
+            return False, "localRetentionDays must be a non-negative integer"
+        
+        # Validate S3 bucket
+        s3_bucket = config.get('s3Bucket', '')
+        if not s3_bucket:
+            return False, "s3Bucket is required"
+        
+        # Validate AWS region
+        aws_region = config.get('awsRegion', 'us-east-1')
+        if not isinstance(aws_region, str) or not aws_region:
+            return False, "awsRegion must be a non-empty string"
+        
+        return True, "Configuration is valid"
+    except Exception as e:
+        return False, f"Configuration validation error: {str(e)}"
+
+
+def load_configuration() -> Dict:
+    """Load configuration from multiple sources with proper precedence"""
     
-    # Default configuration
+    # 1. Start with recipe defaults (from recipe.yaml)
     config = {
         'inferenceResultsPath': os.environ.get('INFERENCE_RESULTS_PATH', '/aws_dda/inference-results'),
-        'uploadIntervalSeconds': int(os.environ.get('UPLOAD_INTERVAL_SECONDS', '300')),
+        'uploadIntervalSeconds': int(os.environ.get('UPLOAD_INTERVAL_SECONDS', '10')),  # From recipe.yaml
         'batchSize': int(os.environ.get('BATCH_SIZE', '100')),
         'localRetentionDays': int(os.environ.get('LOCAL_RETENTION_DAYS', '7')),
-        'uploadImages': os.environ.get('UPLOAD_IMAGES', 'true').lower() == 'true',
-        'uploadMetadata': os.environ.get('UPLOAD_METADATA', 'true').lower() == 'true',
+        'uploadImages': os.environ.get('UPLOAD_IMAGES', 'true').lower() in ('true', '1', 'yes'),
+        'uploadMetadata': os.environ.get('UPLOAD_METADATA', 'true').lower() in ('true', '1', 'yes'),
         's3Bucket': os.environ.get('S3_BUCKET', ''),
         's3Prefix': os.environ.get('S3_PREFIX', ''),
         'awsRegion': os.environ.get('AWS_REGION', 'us-east-1')
     }
     
-    # Try to load from Greengrass configuration file
-    # Greengrass writes component configuration to a JSON file
-    config_file = os.environ.get('AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT')
-    if config_file:
-        # In a real Greengrass environment, we'd use IPC to get configuration
-        # For now, we'll use environment variables
-        logger.info("Running in Greengrass environment")
+    logger.info("Configuration loaded from environment variables and defaults")
+    return config
+
+
+def main():
+    """Entry point"""
+    # Load configuration from environment variables and defaults
+    config = load_configuration()
+    
+    # Validate configuration
+    is_valid, validation_msg = validate_config(config)
+    if not is_valid:
+        logger.error(f"Configuration validation failed: {validation_msg}")
+        sys.exit(1)
+    
+    logger.info("Configuration loaded successfully:")
+    logger.info(f"  Inference Path: {config['inferenceResultsPath']}")
+    logger.info(f"  Upload Interval: {config['uploadIntervalSeconds']}s")
+    logger.info(f"  Batch Size: {config['batchSize']}")
+    logger.info(f"  Retention: {config['localRetentionDays']} days")
+    logger.info(f"  S3 Bucket: {config['s3Bucket']}")
+    logger.info(f"  S3 Prefix: {config['s3Prefix']}")
+    logger.info(f"  AWS Region: {config['awsRegion']}")
+    logger.info(f"  Upload Images: {config['uploadImages']}")
+    logger.info(f"  Upload Metadata: {config['uploadMetadata']}")
     
     # Validate required configuration
     if not config['s3Bucket']:
         logger.error("S3_BUCKET environment variable is required")
         sys.exit(1)
-    
-    logger.info(f"Starting InferenceUploader with configuration:")
-    logger.info(f"  S3 Bucket: {config['s3Bucket']}")
-    logger.info(f"  S3 Prefix: {config['s3Prefix']}")
-    logger.info(f"  Upload Interval: {config['uploadIntervalSeconds']}s")
-    logger.info(f"  Inference Path: {config['inferenceResultsPath']}")
     
     # Create and run uploader
     uploader = InferenceUploader(config)
