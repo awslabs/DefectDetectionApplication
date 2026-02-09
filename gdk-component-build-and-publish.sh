@@ -6,8 +6,11 @@
 set -e
 
 VERBOSE="${VERBOSE:-0}"
-LOG_FILE="/tmp/gdk-build-$(date +%s).log"
+LOG_FILE="${LOG_FILE:-/tmp/gdk-build-$(date +%s).log}"
 ERRORS=()
+
+# Export LOG_FILE so build-custom.sh can use it
+export LOG_FILE
 
 # Helper function to run commands with logging
 run_cmd() {
