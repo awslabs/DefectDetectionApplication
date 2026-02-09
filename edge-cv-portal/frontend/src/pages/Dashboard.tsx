@@ -29,7 +29,7 @@ export default function Dashboard() {
 
   // Fetch use cases
   const { data: useCasesData, isLoading: useCasesLoading } = useQuery({
-    queryKey: ['usecases'],
+    queryKey: ['usecases', user?.user_id],
     queryFn: () => apiService.listUseCases(),
   });
 

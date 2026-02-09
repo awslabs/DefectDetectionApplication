@@ -22,6 +22,7 @@ KEY_NAME=""
 SECURITY_GROUP=""
 SUBNET_ID=""
 GITHUB_REPO=""
+IAM_PROFILE="dda-edge-device-role"  # Default IAM instance profile
 
 # AMI IDs (Ubuntu)
 AMI_ARM64_US_EAST_1="ami-0c13dec58913b948c"  # Ubuntu 18.04 ARM64
@@ -47,6 +48,7 @@ usage() {
     echo "  -u, --subnet SUBNET       Subnet ID (uses default VPC if not specified)"
     echo "  -t, --instance-type TYPE  Override instance type"
     echo "  -v, --volume-size SIZE    EBS volume size in GB (default: 30)"
+    echo "  -i, --iam-profile PROFILE IAM instance profile name (default: dda-edge-device-role)"
     echo "  -g, --github-repo URL     GitHub repo URL for setup files"
     echo "  -h, --help                Show this help message"
     echo ""
@@ -109,6 +111,10 @@ while [[ $# -gt 0 ]]; do
             EBS_VOLUME_SIZE="$2"
             shift 2
             ;;
+        -i|--iam-profile)
+            IAM_PROFILE="$2"
+            shift 2
+            ;;
         -g|--github-repo)
             GITHUB_REPO="$2"
             shift 2
@@ -156,6 +162,7 @@ log_info "  Instance Type: $INSTANCE_TYPE"
 log_info "  AMI: $AMI_ID"
 log_info "  Key Pair: $KEY_NAME"
 log_info "  EBS Volume: ${EBS_VOLUME_SIZE}GB ($EBS_VOLUME_TYPE)"
+log_info "  IAM Profile: $IAM_PROFILE"
 
 # Check AWS CLI is configured
 if ! aws sts get-caller-identity &>/dev/null; then
@@ -165,6 +172,23 @@ fi
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 log_info "AWS Account: $ACCOUNT_ID"
+
+# Validate IAM instance profile exists
+log_info "Validating IAM instance profile: $IAM_PROFILE"
+if ! aws iam get-instance-profile --instance-profile-name "$IAM_PROFILE" &>/dev/null; then
+    log_error ""
+    log_error "ERROR: IAM Instance Profile Not Found"
+    log_error "The IAM instance profile '$IAM_PROFILE' does not exist."
+    log_error ""
+    log_error "Please create it first by running:"
+    log_error "  ./create-edge-device-iam-role.sh"
+    log_error ""
+    log_error "Then retry launching the edge device:"
+    log_error "  ./launch-edge-device.sh --thing-name $THING_NAME --key-name $KEY_NAME"
+    log_error ""
+    exit 1
+fi
+log_info "IAM instance profile validated: $IAM_PROFILE"
 
 # Create or use security group
 if [ -z "$SECURITY_GROUP" ]; then
@@ -298,17 +322,28 @@ fi
 
 log_info "Launching EC2 instance..."
 
-# Launch instance
+# Launch instance with IAM profile
 INSTANCE_ID=$(aws ec2 run-instances \
     --image-id "$AMI_ID" \
     --instance-type "$INSTANCE_TYPE" \
     --key-name "$KEY_NAME" \
     --security-group-ids "$SECURITY_GROUP" \
+    --iam-instance-profile Name="$IAM_PROFILE" \
     --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=$EBS_VOLUME_SIZE,VolumeType=$EBS_VOLUME_TYPE,DeleteOnTermination=true}" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$THING_NAME},{Key=dda-portal:managed,Value=true},{Key=Architecture,Value=$ARCHITECTURE}]" \
+    --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \
     --region "$REGION" \
     --query 'Instances[0].InstanceId' \
     --output text)
+
+if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+    log_error "Failed to launch EC2 instance"
+    exit 1
+fi
+
+if [ -n "$SUBNET_ID" ]; then
+    log_warn "Note: Subnet ID was specified but instance was launched in default VPC. To use a specific subnet, modify the launch command."
+fi
 
 log_info "Instance launched: $INSTANCE_ID"
 log_info "Waiting for instance to be running..."

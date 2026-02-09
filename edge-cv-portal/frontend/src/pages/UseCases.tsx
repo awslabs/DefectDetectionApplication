@@ -58,14 +58,16 @@ export default function UseCases() {
   const [successMessage, setSuccessMessage] = useState('');
 
   const { data, isLoading } = useQuery({
-    queryKey: ['usecases'],
+    queryKey: ['usecases', user?.user_id],
     queryFn: () => apiService.listUseCases(),
+    staleTime: 10000, // Consider data stale after 10 seconds
+    refetchInterval: 15000, // Auto-refresh every 15 seconds to catch async provisioning updates
   });
 
   const createMutation = useMutation({
     mutationFn: (data: Partial<UseCase>) => apiService.createUseCase(data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['usecases'] });
+      queryClient.invalidateQueries({ queryKey: ['usecases', user?.user_id] });
       setShowCreateModal(false);
       resetForm();
       setSuccessMessage('Use case created successfully');
@@ -80,7 +82,7 @@ export default function UseCases() {
     mutationFn: ({ id, data }: { id: string; data: Partial<UseCase> }) =>
       apiService.updateUseCase(id, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['usecases'] });
+      queryClient.invalidateQueries({ queryKey: ['usecases', user?.user_id] });
       setShowEditModal(false);
       resetForm();
       setSuccessMessage('Use case updated successfully');
@@ -94,7 +96,7 @@ export default function UseCases() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => apiService.deleteUseCase(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['usecases'] });
+      queryClient.invalidateQueries({ queryKey: ['usecases', user?.user_id] });
       setShowDeleteModal(false);
       setSelectedUseCase(null);
       setSuccessMessage('Use case deleted successfully');
@@ -109,7 +111,7 @@ export default function UseCases() {
     mutationFn: (usecaseId: string) => apiService.provisionSharedComponents(usecaseId),
     onSuccess: (data, usecaseId) => {
       // Update only the specific usecase in cache instead of invalidating all
-      queryClient.setQueryData(['usecases'], (oldData: any) => {
+      queryClient.setQueryData(['usecases', user?.user_id], (oldData: any) => {
         if (!oldData) return oldData;
         return {
           ...oldData,
@@ -126,7 +128,7 @@ export default function UseCases() {
       });
       
       // Invalidate status since it might have changed
-      queryClient.invalidateQueries({ queryKey: ['shared-components-status'] });
+      queryClient.invalidateQueries({ queryKey: ['shared-components-status', user?.user_id] });
       
       const successCount = data.components.filter(c => c.status === 'shared').length;
       const failedCount = data.components.filter(c => c.status === 'failed').length;
@@ -145,7 +147,7 @@ export default function UseCases() {
 
   // Query for shared components status (Portal Admin only)
   const { data: statusData, isLoading: statusLoading } = useQuery({
-    queryKey: ['shared-components-status'],
+    queryKey: ['shared-components-status', user?.user_id],
     queryFn: () => apiService.getSharedComponentsStatus(),
     enabled: user?.role === 'PortalAdmin',
   });
@@ -154,8 +156,8 @@ export default function UseCases() {
   const updateAllMutation = useMutation({
     mutationFn: () => apiService.updateAllSharedComponents(),
     onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['shared-components-status'] });
-      queryClient.invalidateQueries({ queryKey: ['usecases'] });
+      queryClient.invalidateQueries({ queryKey: ['shared-components-status', user?.user_id] });
+      queryClient.invalidateQueries({ queryKey: ['usecases', user?.user_id] });
       if (data.failed_count > 0) {
         setError(`Updated ${data.success_count} usecase(s), ${data.failed_count} failed. Check console for details.`);
         console.log('Update results:', data.results);
@@ -378,6 +380,11 @@ export default function UseCases() {
             id: 'shared_components',
             header: 'Shared Components',
             cell: (item: UseCase) => {
+              // Check if provisioning is in progress
+              if (item.shared_components?.status === 'provisioning') {
+                return <StatusIndicator type="loading">Provisioning...</StatusIndicator>;
+              }
+              
               if (!item.shared_components_provisioned) {
                 return <StatusIndicator type="pending">Not provisioned</StatusIndicator>;
               }

@@ -1018,22 +1018,32 @@ def create_usecase(event, user):
                     auth_token=None  # Don't pass auth token for internal calls
                 )
                 
-                # Check if provisioning was successful
-                if shared_components_result.get('status') in ['success', 'completed']:
-                    logger.info(f"Provisioning succeeded with status: {shared_components_result.get('status')}")
-                    # Update usecase with provisioning status
-                    table.update_item(
-                        Key={'usecase_id': usecase_id},
-                        UpdateExpression='SET shared_components_provisioned = :provisioned, shared_components = :components',
-                        ExpressionAttributeValues={
-                            ':provisioned': True,
-                            ':components': shared_components_result
-                        }
-                    )
-                    item['shared_components_provisioned'] = True
-                    item['shared_components'] = shared_components_result
+                # Check if provisioning was accepted (202) or completed (200)
+                # 202 means async provisioning started - the database will be updated by the background thread
+                # 200 means provisioning completed synchronously (fallback case)
+                if shared_components_result.get('status') in ['accepted', 'success', 'completed']:
+                    logger.info(f"Provisioning accepted/completed with status: {shared_components_result.get('status')}")
                     
-                    logger.info(f"Provisioned shared components for usecase {usecase_id}: {shared_components_result}")
+                    # For async provisioning (202 Accepted), don't update the database here
+                    # The background thread will update it when provisioning completes
+                    # For now, leave shared_components_provisioned as False
+                    if shared_components_result.get('status') == 'accepted':
+                        logger.info(f"Async provisioning started for usecase {usecase_id} - will be updated by background thread")
+                        item['shared_components_provisioned'] = False
+                        item['shared_components'] = {'status': 'provisioning', 'message': 'Provisioning in progress'}
+                    else:
+                        # Synchronous completion (fallback case)
+                        table.update_item(
+                            Key={'usecase_id': usecase_id},
+                            UpdateExpression='SET shared_components_provisioned = :provisioned, shared_components = :components',
+                            ExpressionAttributeValues={
+                                ':provisioned': True,
+                                ':components': shared_components_result
+                            }
+                        )
+                        item['shared_components_provisioned'] = True
+                        item['shared_components'] = shared_components_result
+                        logger.info(f"Provisioned shared components for usecase {usecase_id}: {shared_components_result}")
                 else:
                     # Provisioning failed or was skipped, but don't fail usecase creation
                     logger.warning(f"Shared components provisioning returned status: {shared_components_result.get('status')}, full result: {shared_components_result}")
