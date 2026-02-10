@@ -12,6 +12,26 @@ ERRORS=()
 # Export LOG_FILE so build-custom.sh can use it
 export LOG_FILE
 
+# Spinner animation frames
+SPINNER=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+
+# Helper function to show progress with task name
+show_progress() {
+    local task="$1"
+    local pid=$2
+    local i=0
+    
+    while kill -0 $pid 2>/dev/null; do
+        printf "\r  ${SPINNER[$((i % ${#SPINNER[@]}))]]} $task"
+        ((i++))
+        sleep 0.1
+    done
+    wait $pid
+    local exit_code=$?
+    printf "\r  ✓ $task\n"
+    return $exit_code
+}
+
 # Helper function to run commands with logging
 run_cmd() {
     local cmd="$@"
@@ -126,20 +146,44 @@ echo ""
 
 # Build and publish component using gdk-config.json
 echo "▶ Building component..."
-if run_cmd "gdk component build"; then
-    echo "✓ Build successful"
+if [ "$VERBOSE" = "1" ]; then
+    # In verbose mode, show all output
+    if run_cmd "gdk component build"; then
+        echo "✓ Build successful"
+    else
+        echo "✗ Build failed"
+        ERRORS+=("Failed to build component")
+    fi
 else
-    echo "✗ Build failed"
-    ERRORS+=("Failed to build component")
+    # In normal mode, show animated spinner with task name
+    (gdk component build >> "$LOG_FILE" 2>&1) &
+    if show_progress "Building Docker images..." $!; then
+        echo "✓ Build successful"
+    else
+        echo "✗ Build failed"
+        ERRORS+=("Failed to build component")
+    fi
 fi
 
 echo ""
 echo "▶ Publishing component..."
-if run_cmd "gdk component publish"; then
-    echo "✓ Publish successful"
+if [ "$VERBOSE" = "1" ]; then
+    # In verbose mode, show all output
+    if run_cmd "gdk component publish"; then
+        echo "✓ Publish successful"
+    else
+        echo "✗ Publish failed"
+        ERRORS+=("Failed to publish component")
+    fi
 else
-    echo "✗ Publish failed"
-    ERRORS+=("Failed to publish component")
+    # In normal mode, show animated spinner with task name
+    (gdk component publish >> "$LOG_FILE" 2>&1) &
+    if show_progress "Uploading to AWS..." $!; then
+        echo "✓ Publish successful"
+    else
+        echo "✗ Publish failed"
+        ERRORS+=("Failed to publish component")
+    fi
 fi
 echo ""
 

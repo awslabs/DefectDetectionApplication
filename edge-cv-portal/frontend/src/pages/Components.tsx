@@ -20,6 +20,7 @@ import {
 import { apiService } from '../services/api';
 import { Component, UseCase } from '../types';
 import { useAuth } from '../contexts/AuthContext';
+import { useUsecase } from '../contexts/UsecaseContext';
 import ConfirmationModal from '../components/ConfirmationModal';
 
 // Portal-managed component prefix - these should not be deleted by non-admin users
@@ -29,6 +30,7 @@ export default function Components() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
+  const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   
   const [components, setComponents] = useState<Component[]>([]);
   const [loading, setLoading] = useState(true);
@@ -69,6 +71,18 @@ export default function Components() {
         const useCaseList = response.usecases || [];
         setUseCases(useCaseList);
         
+        // Use saved selection from context, or check URL, or auto-select first
+        if (selectedUsecaseId) {
+          const saved = useCaseList.find(uc => uc.usecase_id === selectedUsecaseId);
+          if (saved) {
+            setSelectedUseCase({
+              label: saved.name,
+              value: saved.usecase_id,
+            });
+            return;
+          }
+        }
+        
         // Check for pre-selected use case from URL
         const urlUseCaseId = searchParams.get('usecase_id');
         if (urlUseCaseId) {
@@ -78,16 +92,18 @@ export default function Components() {
               label: preSelectedUseCase.name,
               value: preSelectedUseCase.usecase_id,
             });
+            setSelectedUsecaseId(preSelectedUseCase.usecase_id);
             return;
           }
         }
         
-        // Auto-select first use case if available and no URL selection
+        // Auto-select first use case if available
         if (useCaseList.length > 0) {
           setSelectedUseCase({
             label: useCaseList[0].name,
             value: useCaseList[0].usecase_id,
           });
+          setSelectedUsecaseId(useCaseList[0].usecase_id);
         }
       } catch (error) {
         console.error('Failed to load use cases:', error);
@@ -95,7 +111,7 @@ export default function Components() {
       }
     };
     loadUseCases();
-  }, [searchParams]);
+  }, [selectedUsecaseId, setSelectedUsecaseId, searchParams]);
 
   // Load components when use case changes
   useEffect(() => {
@@ -240,7 +256,10 @@ export default function Components() {
                 <Box variant="span">Use Case:</Box>
                 <Select
                   selectedOption={selectedUseCase}
-                  onChange={({ detail }) => setSelectedUseCase(detail.selectedOption)}
+                  onChange={({ detail }) => {
+                    setSelectedUseCase(detail.selectedOption);
+                    setSelectedUsecaseId(detail.selectedOption?.value || null);
+                  }}
                   options={useCases.map((uc) => ({
                     label: uc.name,
                     value: uc.usecase_id,
@@ -449,9 +468,17 @@ export default function Components() {
                   selectedItems.length > 0 ? (
                     <SpaceBetween direction="horizontal" size="xs">
                       <Button
+                        variant="primary"
                         onClick={() => {
-                          // Bulk deploy action
-                          console.log('Bulk deploy:', selectedItems);
+                          if (selectedItems.length === 1) {
+                            // Single component - deploy directly
+                            setComponentToDeploy(selectedItems[0]);
+                            setShowDeployModal(true);
+                          } else {
+                            // Multiple components - navigate to create deployment with all selected
+                            const componentArns = selectedItems.map(c => c.arn).join(',');
+                            navigate(`/deployments/create?component_arns=${encodeURIComponent(componentArns)}&usecase_id=${selectedUseCase?.value || ''}`);
+                          }
                         }}
                       >
                         Deploy Selected ({selectedItems.length})

@@ -18,10 +18,12 @@ import {
   Tiles,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import { useUsecase } from '../contexts/UsecaseContext';
 
 export default function CreateTraining() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   const cloneFrom = location.state?.cloneFrom;
   
   const [useCaseId, setUseCaseId] = useState<SelectProps.Option | null>(null);
@@ -125,23 +127,34 @@ export default function CreateTraining() {
         }));
         setUseCases(options);
         
-        // If cloning, set the use case from cloneFrom, otherwise use first option
+        // If cloning, set the use case from cloneFrom, otherwise use saved selection or first option
         if (cloneFrom?.usecase_id) {
           const clonedUseCase = options.find(opt => opt.value === cloneFrom.usecase_id);
           if (clonedUseCase) {
             setUseCaseId(clonedUseCase);
+            setSelectedUsecaseId(clonedUseCase.value);
           } else if (options.length > 0) {
             setUseCaseId(options[0]);
+            setSelectedUsecaseId(options[0].value);
+          }
+        } else if (selectedUsecaseId) {
+          const saved = options.find(opt => opt.value === selectedUsecaseId);
+          if (saved) {
+            setUseCaseId(saved);
+          } else if (options.length > 0) {
+            setUseCaseId(options[0]);
+            setSelectedUsecaseId(options[0].value);
           }
         } else if (options.length > 0) {
           setUseCaseId(options[0]);
+          setSelectedUsecaseId(options[0].value);
         }
       } catch (err) {
         console.error('Failed to fetch use cases:', err);
       }
     };
     fetchUseCases();
-  }, [cloneFrom]);
+  }, [cloneFrom, selectedUsecaseId, setSelectedUsecaseId]);
 
   // Fetch labeling jobs and pre-labeled datasets when use case changes AND dataset source requires it
   useEffect(() => {

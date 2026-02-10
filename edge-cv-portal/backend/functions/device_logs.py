@@ -13,6 +13,13 @@ from shared_utils import (
     check_user_access, is_super_user, assume_cross_account_role, get_usecase
 )
 
+# Import the analyzer function
+try:
+    from device_logs_analyzer import analyze_device_logs
+except ImportError:
+    # Fallback if analyzer is not available
+    analyze_device_logs = None
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -23,6 +30,7 @@ def handler(event, context):
     
     GET /api/v1/devices/{id}/logs                    - List available log groups for device
     GET /api/v1/devices/{id}/logs/{component}        - Get logs for specific component
+    POST /api/v1/devices/{id}/logs/analyze           - Analyze device logs with AI
     """
     try:
         http_method = event.get('httpMethod')
@@ -39,7 +47,7 @@ def handler(event, context):
                 'headers': {
                     'Access-Control-Allow-Origin': '*',
                     'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token',
-                    'Access-Control-Allow-Methods': 'GET,OPTIONS',
+                    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
                     'Access-Control-Max-Age': '86400'
                 },
                 'body': ''
@@ -51,6 +59,13 @@ def handler(event, context):
         
         if not device_id:
             return create_response(400, {'error': 'Device ID is required'})
+        
+        # Route to analyzer for POST requests to /analyze
+        if http_method == 'POST' and path.endswith('/analyze'):
+            if analyze_device_logs:
+                return analyze_device_logs(device_id, user, query_parameters)
+            else:
+                return create_response(503, {'error': 'Log analyzer not available'})
         
         if http_method == 'GET':
             if component_name:

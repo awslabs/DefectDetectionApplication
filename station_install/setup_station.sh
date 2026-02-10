@@ -579,19 +579,6 @@ run_cmd "cp ${dda_greengrass_root_folder}/thingCert.crt ${dda_greengrass_root_fo
 run_cmd "cp ${dda_greengrass_root_folder}/privKey.key ${dda_greengrass_root_folder}/private.pem.key" || add_warning "Failed to copy private key"
 run_cmd "cp ${dda_greengrass_root_folder}/rootCA.pem ${dda_greengrass_root_folder}/AmazonRootCA1.pem" || add_warning "Failed to copy root CA"
 
-echo "▶ Setting up DDA Portal Component Access Policy..."
-DDA_POLICY_ARN="arn:aws:iam::$(aws sts get-caller-identity --query 'Account' --output text 2>/dev/null):policy/DDAPortalComponentAccessPolicy"
-if aws iam get-policy --policy-arn "$DDA_POLICY_ARN" 2>/dev/null; then
-    if run_cmd "aws iam attach-role-policy --role-name GreengrassV2TokenExchangeRole --policy-arn $DDA_POLICY_ARN"; then
-        echo "✓ DDAPortalComponentAccessPolicy attached"
-    else
-        add_warning "Could not attach DDAPortalComponentAccessPolicy. Attach manually if needed."
-    fi
-else
-    add_warning "DDAPortalComponentAccessPolicy not found. Deploy UseCaseAccountStack first."
-fi
-echo ""
-
 echo "▶ Tagging Greengrass Core Device..."
 aws_account_id=$(aws sts get-caller-identity --query 'Account' --output text 2>/dev/null || echo "")
 if [ -n "$aws_account_id" ]; then
@@ -625,3 +612,246 @@ do
 done
 
 echo "✓ Directory permissions configured"
+echo ""
+
+echo "▶ Setting up CloudWatch Logs diagnostics..."
+# Create a diagnostic script for troubleshooting CloudWatch logging
+DIAG_SCRIPT="${dda_root_folder}/check-cloudwatch-logging.sh"
+cat > "$DIAG_SCRIPT" << 'DIAG_EOF'
+#!/bin/bash
+# CloudWatch Logging Diagnostics Script
+# Run this to check if device can upload logs to CloudWatch
+
+set -e
+
+AWS_REGION="${1:-us-east-1}"
+DEVICE_NAME="${2:-}"
+
+echo "🔍 CloudWatch Logging Diagnostics"
+echo "=================================="
+echo "Region: $AWS_REGION"
+echo ""
+
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+check_mark() {
+    echo -e "${GREEN}✅${NC} $1"
+}
+
+cross_mark() {
+    echo -e "${RED}❌${NC} $1"
+}
+
+warning() {
+    echo -e "${YELLOW}⚠️${NC} $1"
+}
+
+# Test 1: LogManager running
+echo "Test 1: LogManager Component Status"
+echo "-----------------------------------"
+if ps aux | grep -i logmanager | grep -v grep > /dev/null; then
+    check_mark "LogManager is running"
+else
+    cross_mark "LogManager is not running"
+    warning "Check deployment includes aws.greengrass.LogManager component"
+fi
+echo ""
+
+# Test 2: Local logs exist
+echo "Test 2: Local Log Files"
+echo "----------------------"
+LOCAL_LOGS=$(ls -la /aws_dda/greengrass/v2/logs/*.log 2>/dev/null | wc -l)
+if [ "$LOCAL_LOGS" -gt 0 ]; then
+    check_mark "Local log files exist ($LOCAL_LOGS files)"
+    ls -lh /aws_dda/greengrass/v2/logs/*.log | head -5
+else
+    cross_mark "No local log files found"
+fi
+echo ""
+
+# Test 3: LogManager configuration
+echo "Test 3: LogManager Configuration"
+echo "--------------------------------"
+if grep -A 50 'aws.greengrass.LogManager' /aws_dda/greengrass/v2/config/effectiveConfig.yaml | grep -q 'uploadToCloudWatch.*true'; then
+    check_mark "uploadToCloudWatch is enabled"
+else
+    cross_mark "uploadToCloudWatch is not enabled or not found"
+    warning "Check LogManager configuration in deployment"
+fi
+echo ""
+
+# Test 4: Network connectivity to CloudWatch
+echo "Test 4: Network Connectivity to CloudWatch"
+echo "------------------------------------------"
+CURL_RESULT=$(curl -s -o /dev/null -w '%{http_code}' https://logs.$AWS_REGION.amazonaws.com 2>/dev/null || echo "000")
+if [ "$CURL_RESULT" != "000" ]; then
+    check_mark "Network connectivity to CloudWatch: HTTP $CURL_RESULT"
+else
+    cross_mark "Cannot reach CloudWatch endpoint (https://logs.$AWS_REGION.amazonaws.com)"
+    warning "Check device security group allows outbound HTTPS (port 443)"
+fi
+echo ""
+
+# Test 5: DNS resolution
+echo "Test 5: DNS Resolution"
+echo "---------------------"
+if nslookup logs.$AWS_REGION.amazonaws.com 8.8.8.8 2>&1 | grep -q 'Address'; then
+    check_mark "DNS resolution working for logs.$AWS_REGION.amazonaws.com"
+else
+    cross_mark "DNS resolution failed for logs.$AWS_REGION.amazonaws.com"
+fi
+echo ""
+
+# Test 6: LogManager upload activity
+echo "Test 6: LogManager Upload Activity"
+echo "---------------------------------"
+if tail -100 /aws_dda/greengrass/v2/logs/aws.greengrass.LogManager.log 2>/dev/null | grep -i 'upload\|cloudwatch' > /dev/null; then
+    check_mark "LogManager upload activity detected"
+    tail -100 /aws_dda/greengrass/v2/logs/aws.greengrass.LogManager.log 2>/dev/null | grep -i 'upload\|cloudwatch' | tail -3
+else
+    warning "No recent upload activity in LogManager logs"
+    warning "This could mean: (1) LogManager hasn't run yet, or (2) No logs to upload"
+fi
+echo ""
+
+# Test 7: LogManager errors
+echo "Test 7: LogManager Error Check"
+echo "-----------------------------"
+if tail -200 /aws_dda/greengrass/v2/logs/aws.greengrass.LogManager.log 2>/dev/null | grep -i 'error\|failed\|exception' > /dev/null; then
+    cross_mark "Errors found in LogManager logs:"
+    tail -200 /aws_dda/greengrass/v2/logs/aws.greengrass.LogManager.log 2>/dev/null | grep -i 'error\|failed\|exception' | tail -3
+else
+    check_mark "No errors in LogManager logs"
+fi
+echo ""
+
+# Summary
+echo "=================================="
+echo "Diagnostic Summary"
+echo "=================================="
+echo ""
+echo "If all tests pass:"
+echo "  1. Wait 5 minutes for LogManager to upload logs"
+echo "  2. Check CloudWatch Logs in AWS console"
+echo "  3. Log groups should appear at: /aws/greengrass/GreengrassSystemComponent/$AWS_REGION/DEVICE_NAME"
+echo ""
+echo "If tests fail:"
+echo "  1. Check device security group allows outbound HTTPS"
+echo "  2. Verify device role has CloudWatch Logs permissions"
+echo "  3. Check LogManager is included in deployment"
+echo "  4. Review LogManager logs for specific errors"
+echo ""
+DIAG_EOF
+
+chmod +x "$DIAG_SCRIPT"
+echo "✓ Diagnostic script created at: $DIAG_SCRIPT"
+echo "  Run: $DIAG_SCRIPT [region] to check CloudWatch logging"
+echo ""
+
+echo "=========================================="
+echo "▶ Updating GreengrassV2TokenExchangeRole"
+echo "=========================================="
+echo ""
+
+# Get AWS account ID for policy ARNs
+aws_account_id=$(aws sts get-caller-identity --query 'Account' --output text 2>/dev/null || echo "")
+if [ -z "$aws_account_id" ]; then
+    add_warning "Could not get AWS account ID - skipping role policy updates"
+else
+    echo "AWS Account ID: $aws_account_id"
+    echo ""
+    
+    # 1. Attach DDA Portal Component Access Policy (managed policy)
+    echo "1. Attaching DDA Portal Component Access Policy..."
+    DDA_POLICY_ARN="arn:aws:iam::${aws_account_id}:policy/DDAPortalComponentAccessPolicy"
+    if aws iam get-policy --policy-arn "$DDA_POLICY_ARN" 2>/dev/null; then
+        if run_cmd "aws iam attach-role-policy --role-name GreengrassV2TokenExchangeRole --policy-arn $DDA_POLICY_ARN"; then
+            echo "   ✓ DDAPortalComponentAccessPolicy attached"
+        else
+            add_warning "Could not attach DDAPortalComponentAccessPolicy. Attach manually if needed."
+        fi
+    else
+        add_warning "DDAPortalComponentAccessPolicy not found. Deploy UseCaseAccountStack first."
+    fi
+    echo ""
+    
+    # 2. Add S3 component access policy (inline policy)
+    echo "2. Adding S3 component access policy..."
+    if run_cmd "aws iam put-role-policy \
+      --role-name GreengrassV2TokenExchangeRole \
+      --policy-name GreengrassComponentS3Access \
+      --policy-document '{
+        \"Version\": \"2012-10-17\",
+        \"Statement\": [
+          {
+            \"Effect\": \"Allow\",
+            \"Action\": [
+              \"s3:GetObject\",
+              \"s3:GetObjectVersion\"
+            ],
+            \"Resource\": [
+              \"arn:aws:s3:::dda-component-*/*\",
+              \"arn:aws:s3:::dda-component-us-east-1-*/*\"
+            ]
+          }
+        ]
+      }'"; then
+        echo "   ✓ S3 component access policy attached"
+    else
+        add_warning "Could not attach S3 component access policy. Device may not be able to download components."
+    fi
+    echo ""
+    
+    # 3. Add CloudWatch Logs policy (inline policy)
+    echo "3. Adding CloudWatch Logs policy..."
+    if run_cmd "aws iam put-role-policy \
+      --role-name GreengrassV2TokenExchangeRole \
+      --policy-name CloudWatchLogsPolicy \
+      --policy-document '{
+        \"Version\": \"2012-10-17\",
+        \"Statement\": [
+          {
+            \"Effect\": \"Allow\",
+            \"Action\": [
+              \"logs:CreateLogGroup\",
+              \"logs:CreateLogStream\",
+              \"logs:PutLogEvents\",
+              \"logs:DescribeLogStreams\"
+            ],
+            \"Resource\": \"arn:aws:logs:*:*:log-group:/aws/greengrass/*\"
+          }
+        ]
+      }'"; then
+        echo "   ✓ CloudWatch Logs policy attached"
+    else
+        add_warning "Could not attach CloudWatch Logs policy. Device may not be able to upload logs to CloudWatch."
+    fi
+    echo ""
+    
+    # 4. Verify all policies are attached
+    echo "4. Verifying role policies..."
+    ATTACHED_POLICIES=$(aws iam list-attached-role-policies --role-name GreengrassV2TokenExchangeRole --query 'AttachedPolicies[].PolicyName' --output text 2>/dev/null)
+    INLINE_POLICIES=$(aws iam list-role-policies --role-name GreengrassV2TokenExchangeRole --query 'PolicyNames' --output text 2>/dev/null)
+    
+    echo "   Attached managed policies:"
+    if [ -n "$ATTACHED_POLICIES" ]; then
+        echo "$ATTACHED_POLICIES" | tr ' ' '\n' | sed 's/^/     - /'
+    else
+        echo "     (none)"
+    fi
+    
+    echo "   Inline policies:"
+    if [ -n "$INLINE_POLICIES" ]; then
+        echo "$INLINE_POLICIES" | tr ' ' '\n' | sed 's/^/     - /'
+    else
+        echo "     (none)"
+    fi
+    echo ""
+    
+    echo "✓ GreengrassV2TokenExchangeRole updated successfully"
+fi
+echo ""

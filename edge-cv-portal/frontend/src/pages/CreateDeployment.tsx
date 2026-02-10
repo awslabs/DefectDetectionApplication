@@ -24,6 +24,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import { UseCase } from '../types';
+import { useUsecase } from '../contexts/UsecaseContext';
 
 interface ComponentSelection {
   component_name: string;
@@ -152,6 +153,7 @@ const isCompatibleWithDevice = (component: ComponentInfo, deviceArch: string): b
 export default function CreateDeployment() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   
   // Use case selection
   const [useCases, setUseCases] = useState<UseCase[]>([]);
@@ -185,6 +187,7 @@ export default function CreateDeployment() {
   const [loading, setLoading] = useState(true);
 
   const preSelectedComponentArn = searchParams.get('component_arn');
+  const preSelectedComponentArns = searchParams.get('component_arns');
   const urlUseCaseId = searchParams.get('usecase_id');
 
   // Compute selected device architectures
@@ -321,14 +324,28 @@ export default function CreateDeployment() {
       const useCaseList = response.usecases || [];
       setUseCases(useCaseList);
       
+      // Use saved selection from context, or check URL, or auto-select first
+      if (selectedUsecaseId) {
+        const saved = useCaseList.find((uc: UseCase) => uc.usecase_id === selectedUsecaseId);
+        if (saved) {
+          setSelectedUseCase({ label: saved.name, value: saved.usecase_id });
+          return;
+        }
+      }
+      
       // Pre-select from URL or first use case
       if (urlUseCaseId) {
         const preSelected = useCaseList.find((uc: UseCase) => uc.usecase_id === urlUseCaseId);
         if (preSelected) {
           setSelectedUseCase({ label: preSelected.name, value: preSelected.usecase_id });
+          setSelectedUsecaseId(preSelected.usecase_id);
+          return;
         }
-      } else if (useCaseList.length > 0) {
+      }
+      
+      if (useCaseList.length > 0) {
         setSelectedUseCase({ label: useCaseList[0].name, value: useCaseList[0].usecase_id });
+        setSelectedUsecaseId(useCaseList[0].usecase_id);
       }
     } catch (err) {
       console.error('Failed to load use cases:', err);
@@ -381,8 +398,32 @@ export default function CreateDeployment() {
         status: device.status || 'UNKNOWN'
       })));
 
-      // Pre-select component if provided in URL
-      if (preSelectedComponentArn && privateResponse.components.length > 0) {
+      // Pre-select component(s) if provided in URL
+      if (preSelectedComponentArns) {
+        // Multiple components from bulk deploy
+        const arns = preSelectedComponentArns.split(',');
+        const allComponents = [...privateResponse.components, ...(publicResponse.components || [])];
+        const preSelectedComps = allComponents.filter((c: any) => arns.includes(c.arn));
+        
+        const selectedComps = preSelectedComps.map((comp: any) => {
+          const displayName = getComponentDisplayName(comp.component_name, comp.model_name);
+          const version = comp.latest_version?.componentVersion || 'latest';
+          return {
+            component_name: comp.component_name,
+            component_version: version,
+            arn: comp.arn,
+            scope: comp.scope || 'PRIVATE',
+            displayName,
+            category: getComponentCategory(comp.component_name, comp.model_name, comp.scope),
+            model_name: comp.model_name
+          };
+        });
+        
+        if (selectedComps.length > 0) {
+          setSelectedComponents(selectedComps);
+        }
+      } else if (preSelectedComponentArn && privateResponse.components.length > 0) {
+        // Single component from individual deploy
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const preSelected: any = privateResponse.components.find((c: any) => c.arn === preSelectedComponentArn);
         if (preSelected) {
@@ -528,6 +569,13 @@ export default function CreateDeployment() {
           <SpaceBetween size="l">
             {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
             
+            {/* CloudWatch Logging Info */}
+            <Alert type="info" header="CloudWatch Logging">
+              To view component logs in the portal, ensure the <strong>aws.greengrass.LogManager</strong> component is included in your deployment. 
+              After deployment, log groups will be created automatically when components generate output. 
+              See <a href="https://docs.aws.amazon.com/greengrass/latest/developerguide/log-manager-component.html" target="_blank" rel="noopener noreferrer">LogManager documentation</a> for configuration details.
+            </Alert>
+            
             {successInfo && (
               <Alert
                 type="success"
@@ -558,7 +606,10 @@ export default function CreateDeployment() {
             <FormField label="Use Case" description="Select the use case for this deployment">
               <Select
                 selectedOption={selectedUseCase}
-                onChange={({ detail }) => setSelectedUseCase(detail.selectedOption)}
+                onChange={({ detail }) => {
+                  setSelectedUseCase(detail.selectedOption);
+                  setSelectedUsecaseId(detail.selectedOption?.value || null);
+                }}
                 options={useCases.map(uc => ({ label: uc.name, value: uc.usecase_id }))}
                 placeholder="Select use case"
               />

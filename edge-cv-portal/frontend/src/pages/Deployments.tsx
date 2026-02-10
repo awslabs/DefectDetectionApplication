@@ -19,6 +19,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import { UseCase } from '../types';
+import { useUsecase } from '../contexts/UsecaseContext';
 
 interface DeploymentItem {
   deployment_id: string;
@@ -36,6 +37,7 @@ const PAGE_SIZE = 10;
 export default function Deployments() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   const [deployments, setDeployments] = useState<DeploymentItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,7 +60,19 @@ export default function Deployments() {
         const useCaseList = response.usecases || [];
         setUseCases(useCaseList);
         
-        // Check for URL parameter first
+        // Use saved selection from context, or check URL, or auto-select first
+        if (selectedUsecaseId) {
+          const saved = useCaseList.find((uc: UseCase) => uc.usecase_id === selectedUsecaseId);
+          if (saved) {
+            setSelectedUseCase({
+              label: saved.name,
+              value: saved.usecase_id,
+            });
+            return;
+          }
+        }
+        
+        // Check for URL parameter
         const urlUseCaseId = searchParams.get('usecase_id');
         if (urlUseCaseId) {
           const preSelectedUseCase = useCaseList.find((uc: UseCase) => uc.usecase_id === urlUseCaseId);
@@ -67,6 +81,7 @@ export default function Deployments() {
               label: preSelectedUseCase.name,
               value: preSelectedUseCase.usecase_id,
             });
+            setSelectedUsecaseId(preSelectedUseCase.usecase_id);
             return;
           }
         }
@@ -77,13 +92,14 @@ export default function Deployments() {
             label: useCaseList[0].name,
             value: useCaseList[0].usecase_id,
           });
+          setSelectedUsecaseId(useCaseList[0].usecase_id);
         }
       } catch (err) {
         console.error('Failed to load use cases:', err);
       }
     };
     loadUseCases();
-  }, [searchParams]);
+  }, [selectedUsecaseId, setSelectedUsecaseId, searchParams]);
 
   // Load deployments when use case changes
   useEffect(() => {
@@ -224,7 +240,10 @@ export default function Deployments() {
               <SpaceBetween direction="horizontal" size="xs">
                 <Select
                   selectedOption={selectedUseCase}
-                  onChange={({ detail }) => setSelectedUseCase(detail.selectedOption)}
+                  onChange={({ detail }) => {
+                    setSelectedUseCase(detail.selectedOption);
+                    setSelectedUsecaseId(detail.selectedOption?.value || null);
+                  }}
                   placeholder="Select use case"
                   options={useCases.map((uc) => ({
                     label: uc.name,

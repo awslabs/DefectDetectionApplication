@@ -15,6 +15,7 @@ import {
   Alert,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import { useUsecase } from '../contexts/UsecaseContext';
 
 interface Model {
   model_id: string;
@@ -37,6 +38,7 @@ interface Model {
 
 export default function Models() {
   const navigate = useNavigate();
+  const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   const [filteringText, setFilteringText] = useState('');
   const [stageFilter, setStageFilter] = useState<SelectProps.Option | null>(null);
   const [sourceFilter, setSourceFilter] = useState<SelectProps.Option | null>(null);
@@ -53,12 +55,26 @@ export default function Models() {
         const response = await apiService.listUseCases();
         const useCaseList = response.usecases || [];
         setUseCases(useCaseList);
+        
+        // Use saved selection from context, or auto-select first
+        if (selectedUsecaseId) {
+          const saved = useCaseList.find(uc => uc.usecase_id === selectedUsecaseId);
+          if (saved) {
+            setSelectedUseCase({
+              label: saved.name,
+              value: saved.usecase_id,
+            });
+            return;
+          }
+        }
+        
         // Auto-select first use case if available
         if (useCaseList.length > 0) {
           setSelectedUseCase({
             label: useCaseList[0].name,
             value: useCaseList[0].usecase_id,
           });
+          setSelectedUsecaseId(useCaseList[0].usecase_id);
         }
       } catch (err) {
         console.error('Failed to load use cases:', err);
@@ -66,7 +82,7 @@ export default function Models() {
       }
     };
     loadUseCases();
-  }, []);
+  }, [selectedUsecaseId, setSelectedUsecaseId]);
 
   // Load models when use case changes
   const loadModels = useCallback(async () => {
@@ -168,7 +184,10 @@ export default function Models() {
                 <Box variant="span">Use Case:</Box>
                 <Select
                   selectedOption={selectedUseCase}
-                  onChange={({ detail }) => setSelectedUseCase(detail.selectedOption)}
+                  onChange={({ detail }) => {
+                    setSelectedUseCase(detail.selectedOption);
+                    setSelectedUsecaseId(detail.selectedOption?.value || null);
+                  }}
                   options={useCases.map((uc) => ({
                     label: uc.name,
                     value: uc.usecase_id,

@@ -127,41 +127,42 @@ if [ -d edgemlsdk ] && [ -f edgemlsdk/build.sh ]; then
     cd edgemlsdk/
     if run_cmd "./build.sh -p $(uname -m) -u $IMAGE_VER 3.9"; then
         echo "  ✓ edgemlsdk built successfully"
+        
+        # Extract dependencies from edgemlsdk image
+        echo "  ▶ Extracting edgemlsdk dependencies..."
+        mkdir -p backend/edgemlsdk
+        cp -r edgemlsdk backend/edgemlsdk
+        
+        if id=$(docker create edgemlsdk 2>/dev/null); then
+            echo "  ▶ Copying .deb files from edgemlsdk image..."
+            docker cp $id:/debs/PanoramaSDK.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy PanoramaSDK.deb")
+            docker cp $id:/debs/aws-c-iot.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy aws-c-iot.deb")
+            docker cp $id:/debs/aws-crt-cpp.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy aws-crt-cpp.deb")
+            docker cp $id:/debs/aws-iot-device-sdk-cpp-v2.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy aws-iot-device-sdk-cpp-v2.deb")
+            docker cp $id:/debs/aws-sdk-cpp.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy aws-sdk-cpp.deb")
+            docker cp $id:/debs/libgstreamer-plugins-base1.0-dev.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy libgstreamer-plugins-base1.0-dev.deb")
+            docker cp $id:/debs/libgstreamer1.0-dev.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy libgstreamer1.0-dev.deb")
+            docker cp $id:/debs/libgstreamer1.0.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy libgstreamer1.0.deb")
+            docker cp $id:/debs/liborc-0.4-0.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy liborc-0.4-0.deb")
+            docker cp $id:/debs/libstdc++6.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy libstdc++6.deb")
+            docker cp $id:/debs/openssl.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy openssl.deb")
+            docker cp $id:/debs/panorama.whl $(pwd)/backend/edgemlsdk/panorama-1.0-py3-none-any.whl 2>/dev/null || WARNINGS+=("Could not copy panorama.whl")
+            docker cp $id:/debs/triton-core.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy triton-core.deb")
+            docker cp $id:/debs/triton-python-backend.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy triton-python-backend.deb")
+            docker cp $id:/tars/triton_installation_files.tar.gz $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy triton_installation_files.tar.gz")
+            docker rm -v $id > /dev/null 2>&1
+            echo "  ✓ Dependencies extracted"
+        else
+            WARNINGS+=("Could not create container from edgemlsdk image")
+        fi
     else
-        ERRORS+=("Failed to build edgemlsdk")
-        exit 1
+        WARNINGS+=("Failed to build edgemlsdk - backend build will continue without EdgeML SDK support")
+        mkdir -p backend/edgemlsdk
     fi
     cd ..
-    
-    # Extract dependencies from edgemlsdk image
-    echo "  ▶ Extracting edgemlsdk dependencies..."
-    mkdir -p backend/edgemlsdk
-    cp -r edgemlsdk backend/edgemlsdk
-    
-    if id=$(docker create edgemlsdk 2>/dev/null); then
-        echo "  ▶ Copying .deb files from edgemlsdk image..."
-        docker cp $id:/debs/PanoramaSDK.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy PanoramaSDK.deb")
-        docker cp $id:/debs/aws-c-iot.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy aws-c-iot.deb")
-        docker cp $id:/debs/aws-crt-cpp.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy aws-crt-cpp.deb")
-        docker cp $id:/debs/aws-iot-device-sdk-cpp-v2.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy aws-iot-device-sdk-cpp-v2.deb")
-        docker cp $id:/debs/aws-sdk-cpp.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy aws-sdk-cpp.deb")
-        docker cp $id:/debs/libgstreamer-plugins-base1.0-dev.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy libgstreamer-plugins-base1.0-dev.deb")
-        docker cp $id:/debs/libgstreamer1.0-dev.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy libgstreamer1.0-dev.deb")
-        docker cp $id:/debs/libgstreamer1.0.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy libgstreamer1.0.deb")
-        docker cp $id:/debs/liborc-0.4-0.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy liborc-0.4-0.deb")
-        docker cp $id:/debs/libstdc++6.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy libstdc++6.deb")
-        docker cp $id:/debs/openssl.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy openssl.deb")
-        docker cp $id:/debs/panorama.whl $(pwd)/backend/edgemlsdk/panorama-1.0-py3-none-any.whl 2>/dev/null || WARNINGS+=("Could not copy panorama.whl")
-        docker cp $id:/debs/triton-core.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy triton-core.deb")
-        docker cp $id:/debs/triton-python-backend.deb $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy triton-python-backend.deb")
-        docker cp $id:/tars/triton_installation_files.tar.gz $(pwd)/backend/edgemlsdk/ 2>/dev/null || WARNINGS+=("Could not copy triton_installation_files.tar.gz")
-        docker rm -v $id > /dev/null 2>&1
-        echo "  ✓ Dependencies extracted"
-    else
-        WARNINGS+=("Could not create container from edgemlsdk image")
-    fi
 else
     WARNINGS+=("edgemlsdk directory or build.sh not found, skipping edgemlsdk build")
+    mkdir -p src/backend/edgemlsdk
 fi
 echo ""
 

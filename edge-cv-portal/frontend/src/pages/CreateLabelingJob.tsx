@@ -15,6 +15,7 @@ import {
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { S3Dataset } from '../types';
 import { apiService } from '../services/api';
+import { useUsecase } from '../contexts/UsecaseContext';
 
 interface LocationState {
   dataset?: S3Dataset;
@@ -24,6 +25,7 @@ export default function CreateLabelingJob() {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
+  const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   const useCaseIdFromUrl = searchParams.get('usecase_id');
   const preselectedDataset = (location.state as LocationState)?.dataset;
 
@@ -61,6 +63,17 @@ export default function CreateLabelingJob() {
           if (useCaseFromUrl) {
             console.log('Auto-selecting use case from URL:', useCaseFromUrl);
             setSelectedUseCase(useCaseFromUrl);
+            setSelectedUsecaseId(useCaseFromUrl.usecase_id);
+            return;
+          }
+        }
+        
+        // Use saved selection from context
+        if (selectedUsecaseId && data.usecases) {
+          const saved = data.usecases.find((uc: any) => uc.usecase_id === selectedUsecaseId);
+          if (saved) {
+            console.log('Auto-selecting use case from context:', saved);
+            setSelectedUseCase(saved);
             return;
           }
         }
@@ -69,6 +82,7 @@ export default function CreateLabelingJob() {
         if (data.usecases && data.usecases.length > 0) {
           console.log('Auto-selecting first use case:', data.usecases[0]);
           setSelectedUseCase(data.usecases[0]);
+          setSelectedUsecaseId(data.usecases[0].usecase_id);
         }
       } catch (err) {
         console.error('Failed to load use cases:', err);
@@ -76,7 +90,7 @@ export default function CreateLabelingJob() {
       }
     };
     loadUseCases();
-  }, [useCaseIdFromUrl]);
+  }, [useCaseIdFromUrl, selectedUsecaseId, setSelectedUsecaseId]);
 
   // Load workteams when use case changes
   useEffect(() => {

@@ -21,6 +21,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { Device, InstalledComponent, DeviceDeployment } from '../types';
+import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
 
 interface LogGroup {
   log_group_name: string;
@@ -444,12 +445,26 @@ export default function DeviceDetail() {
                     {
                       id: 'deploymentId',
                       header: 'Deployment ID',
-                      cell: (item: DeviceDeployment) => item.deploymentId,
+                      cell: (item: DeviceDeployment) => (
+                        <Button
+                          variant="link"
+                          onClick={() => navigate(`/deployments/${item.deploymentId}?usecase_id=${usecaseId}`)}
+                        >
+                          {item.deploymentId}
+                        </Button>
+                      ),
                     },
                     {
                       id: 'deploymentName',
                       header: 'Name',
-                      cell: (item: DeviceDeployment) => item.deploymentName || '-',
+                      cell: (item: DeviceDeployment) => (
+                        <Button
+                          variant="link"
+                          onClick={() => navigate(`/deployments/${item.deploymentId}?usecase_id=${usecaseId}`)}
+                        >
+                          {item.deploymentName || '-'}
+                        </Button>
+                      ),
                     },
                     {
                       id: 'status',
@@ -486,6 +501,26 @@ export default function DeviceDetail() {
             label: 'Logs',
             content: (
               <SpaceBetween size="l">
+                {/* Info Alert if no logs available */}
+                {logGroups.length > 0 && logGroups.every(lg => lg.has_logs === false) && (
+                  <Alert type="info" dismissible>
+                    <SpaceBetween size="xs">
+                      <Box variant="strong">No logs available yet</Box>
+                      <Box>
+                        Components have been detected on this device, but CloudWatch logs haven't been created yet. This typically happens when:
+                      </Box>
+                      <ul style={{ margin: '8px 0', paddingLeft: '20px' }}>
+                        <li>CloudWatch logging is not enabled in the deployment</li>
+                        <li>Components haven't generated any output yet</li>
+                        <li>Log groups are still being created (wait a few moments and refresh)</li>
+                      </ul>
+                      <Box>
+                        <strong>To enable logging:</strong> Ensure the LogManager component is configured in your deployment to send logs to CloudWatch.
+                      </Box>
+                    </SpaceBetween>
+                  </Alert>
+                )}
+
                 {/* Log Controls */}
                 <Container
                   header={
@@ -537,6 +572,11 @@ export default function DeviceDetail() {
                           placeholder="Select a component"
                           empty={logGroups.length === 0 ? 'No log groups found. CloudWatch logging may not be configured on this device.' : undefined}
                         />
+                        {logGroups.length > 0 && logGroups.every(lg => lg.has_logs === false) && (
+                          <Box variant="small" color="text-body-secondary" margin={{ top: 'xs' }}>
+                            ℹ️ Components detected but no logs yet. Logs appear after components generate output. Check that CloudWatch logging is enabled in your deployment.
+                          </Box>
+                        )}
                       </div>
                       <div>
                         <Box variant="awsui-key-label">Time Range</Box>
@@ -687,6 +727,13 @@ export default function DeviceDetail() {
                   </Container>
                 )}
               </SpaceBetween>
+            ),
+          },
+          {
+            id: 'diagnostics',
+            label: 'AI Diagnostics',
+            content: (
+              <LogsDiagnosticsTab deviceId={device.device_id} usecaseId={usecaseId || ''} />
             ),
           },
         ]}

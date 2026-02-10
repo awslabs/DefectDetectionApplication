@@ -15,6 +15,7 @@ import {
   Alert,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import { useUsecase } from '../contexts/UsecaseContext';
 
 interface TrainingJob {
   training_id: string;
@@ -33,6 +34,7 @@ interface TrainingJob {
 
 export default function Training() {
   const navigate = useNavigate();
+  const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   const [filteringText, setFilteringText] = useState('');
   const [statusFilter, setStatusFilter] = useState<SelectProps.Option | null>(null);
   const [trainingJobs, setTrainingJobs] = useState<TrainingJob[]>([]);
@@ -48,7 +50,20 @@ export default function Training() {
         const response = await apiService.listUseCases();
         const useCaseList = response.usecases || [];
         setUseCases(useCaseList);
-        // Auto-select first use case if available
+        
+        // Use saved selection from context, or auto-select first
+        if (selectedUsecaseId) {
+          const saved = useCaseList.find(uc => uc.usecase_id === selectedUsecaseId);
+          if (saved) {
+            setSelectedUseCase({
+              label: saved.name,
+              value: saved.usecase_id,
+            });
+            return;
+          }
+        }
+        
+        // Fall back to first use case
         if (useCaseList.length > 0) {
           setSelectedUseCase({
             label: useCaseList[0].name,
@@ -60,7 +75,7 @@ export default function Training() {
       }
     };
     loadUseCases();
-  }, []);
+  }, [selectedUsecaseId, setSelectedUsecaseId]);
 
   // Fetch training jobs when use case changes
   useEffect(() => {
@@ -198,7 +213,10 @@ export default function Training() {
                 <Box variant="span">Use Case:</Box>
                 <Select
                   selectedOption={selectedUseCase}
-                  onChange={({ detail }) => setSelectedUseCase(detail.selectedOption)}
+                  onChange={({ detail }) => {
+                    setSelectedUseCase(detail.selectedOption);
+                    setSelectedUsecaseId(detail.selectedOption?.value || null);
+                  }}
                   options={useCases.map((uc) => ({
                     label: uc.name,
                     value: uc.usecase_id,

@@ -601,6 +601,140 @@ def tag_bucket_for_portal(
         }
 
 
+def update_component_bucket_policy_for_greengrass(
+    component_bucket_name: str,
+    device_account_id: str
+) -> dict:
+    """
+    Update the component bucket policy to allow devices in a usecase account to download components.
+    
+    This is called during usecase onboarding. The component bucket is in the Portal Account,
+    and we need to allow the Greengrass device role from the usecase account to access it.
+    
+    Args:
+        component_bucket_name: S3 bucket name in Portal Account (e.g., dda-component-us-east-1-164152369890)
+        device_account_id: AWS Account ID where devices will run (the usecase account)
+    
+    Returns:
+        dict with status and details
+    """
+    try:
+        logger.info(f"Updating component bucket policy for {component_bucket_name} to allow device account {device_account_id}")
+        
+        # Create S3 client in Portal Account (we're already in Portal Account context)
+        s3_component = boto3.client('s3')
+        
+        # Get existing bucket policy (if any)
+        existing_policy = None
+        try:
+            response = s3_component.get_bucket_policy(Bucket=component_bucket_name)
+            existing_policy = json.loads(response['Policy'])
+            logger.info(f"Found existing bucket policy with {len(existing_policy.get('Statement', []))} statements")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchBucketPolicy':
+                logger.info(f"No existing bucket policy for {component_bucket_name}, creating new one")
+                existing_policy = {
+                    'Version': '2012-10-17',
+                    'Statement': []
+                }
+            else:
+                raise
+        
+        # Define the Greengrass device access statements
+        greengrass_read_sid = f"AllowGreengrassDeviceRead-{device_account_id}"
+        greengrass_list_sid = f"AllowGreengrassDeviceList-{device_account_id}"
+        
+        # Check if statements already exist for this device account
+        existing_sids = {stmt.get('Sid') for stmt in existing_policy.get('Statement', [])}
+        
+        statements_to_add = []
+        
+        if greengrass_read_sid not in existing_sids:
+            statements_to_add.append({
+                'Sid': greengrass_read_sid,
+                'Effect': 'Allow',
+                'Principal': {
+                    'AWS': f'arn:aws:iam::{device_account_id}:role/GreengrassV2TokenExchangeRole'
+                },
+                'Action': [
+                    's3:GetObject',
+                    's3:GetObjectVersion'
+                ],
+                'Resource': f'arn:aws:s3:::{component_bucket_name}/*'
+            })
+        
+        if greengrass_list_sid not in existing_sids:
+            statements_to_add.append({
+                'Sid': greengrass_list_sid,
+                'Effect': 'Allow',
+                'Principal': {
+                    'AWS': f'arn:aws:iam::{device_account_id}:role/GreengrassV2TokenExchangeRole'
+                },
+                'Action': [
+                    's3:ListBucket',
+                    's3:GetBucketLocation'
+                ],
+                'Resource': f'arn:aws:s3:::{component_bucket_name}'
+            })
+        
+        if not statements_to_add:
+            logger.info(f"Bucket policy already has Greengrass access for device account {device_account_id}")
+            return {
+                'status': 'already_configured',
+                'bucket': component_bucket_name,
+                'device_account_id': device_account_id
+            }
+        
+        # Add new statements to policy
+        existing_policy['Statement'].extend(statements_to_add)
+        
+        # Put updated bucket policy
+        s3_component.put_bucket_policy(
+            Bucket=component_bucket_name,
+            Policy=json.dumps(existing_policy)
+        )
+        
+        logger.info(f"Successfully updated component bucket policy for {component_bucket_name}")
+        
+        return {
+            'status': 'success',
+            'bucket': component_bucket_name,
+            'device_account_id': device_account_id,
+            'statements_added': len(statements_to_add)
+        }
+        
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        error_message = e.response['Error']['Message']
+        logger.error(f"Failed to update component bucket policy: {error_code} - {error_message}")
+        
+        if error_code == 'AccessDenied':
+            return {
+                'status': 'failed',
+                'error': 'Access denied. Portal account needs s3:GetBucketPolicy and s3:PutBucketPolicy permissions.',
+                'bucket': component_bucket_name
+            }
+        elif error_code == 'NoSuchBucket':
+            return {
+                'status': 'failed',
+                'error': f"Bucket '{component_bucket_name}' does not exist in Portal Account.",
+                'bucket': component_bucket_name
+            }
+        else:
+            return {
+                'status': 'failed',
+                'error': f"{error_code}: {error_message}",
+                'bucket': component_bucket_name
+            }
+    except Exception as e:
+        logger.error(f"Unexpected error updating component bucket policy: {str(e)}")
+        return {
+            'status': 'failed',
+            'error': str(e),
+            'bucket': component_bucket_name
+        }
+
+
 def configure_eventbridge_permission(usecase_account_id: str) -> dict:
     """
     Configure EventBridge permission to allow UseCase Account to send events to Portal Account.
@@ -993,6 +1127,37 @@ def create_usecase(event, user):
             except Exception as e:
                 logger.warning(f"Failed to tag bucket for usecase {usecase_id}: {str(e)}")
                 data_bucket_tag_result = {'status': 'failed', 'error': str(e)}
+        
+        # Update component bucket policy to allow Greengrass devices to download components
+        # Component bucket is in Portal Account, devices are in UseCase Account
+        component_bucket_policy_result = None
+        component_bucket_name = os.environ.get('COMPONENT_BUCKET', 'dda-component-us-east-1-164152369890')
+        
+        logger.info(f"Updating component bucket policy for devices in usecase account {body['account_id']}")
+        
+        try:
+            component_bucket_policy_result = update_component_bucket_policy_for_greengrass(
+                component_bucket_name=component_bucket_name,
+                device_account_id=body['account_id']  # Devices will be in the usecase account
+            )
+            
+            # Update usecase with component bucket policy status
+            table.update_item(
+                Key={'usecase_id': usecase_id},
+                UpdateExpression='SET component_bucket_policy_configured = :configured, component_bucket_policy_result = :result',
+                ExpressionAttributeValues={
+                    ':configured': component_bucket_policy_result.get('status') in ['success', 'already_configured'],
+                    ':result': component_bucket_policy_result
+                }
+            )
+            item['component_bucket_policy_configured'] = component_bucket_policy_result.get('status') in ['success', 'already_configured']
+            item['component_bucket_policy_result'] = component_bucket_policy_result
+            
+            logger.info(f"Component bucket policy update result: {component_bucket_policy_result.get('status')}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to update component bucket policy for usecase {usecase_id}: {str(e)}")
+            component_bucket_policy_result = {'status': 'failed', 'error': str(e)}
         
         # Provision shared components (dda-LocalServer) to the usecase account
         # This creates read-only copies of portal-managed components
