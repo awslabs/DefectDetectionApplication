@@ -566,10 +566,12 @@ else
         file_size=$(du -h "greengrass-${greengrass_version}.zip" | cut -f1)
         echo "Downloaded: $file_size"
         
-        echo "Extracting Greengrass (this may take a minute)..."
-        if ! run_cmd "unzip -q greengrass-${greengrass_version}.zip -d GreengrassInstaller"; then
-            add_error "Failed to extract Greengrass"
-        else
+        echo "Extracting Greengrass (this may take 2-3 minutes on ARM64)..."
+        echo "Please wait, this is a large file..."
+        
+        # Use timeout to prevent hanging, but give it plenty of time
+        if timeout 300 unzip -q "greengrass-${greengrass_version}.zip" -d GreengrassInstaller >> "$LOG_FILE" 2>&1; then
+            echo "✓ Extraction completed"
             run_cmd "rm greengrass-${greengrass_version}.zip" || add_warning "Failed to clean up Greengrass zip"
             
             if ! run_cmd "java -jar ./GreengrassInstaller/lib/Greengrass.jar --version"; then
@@ -577,6 +579,9 @@ else
             else
                 echo "✓ Greengrass Core downloaded and extracted"
             fi
+        else
+            add_error "Greengrass extraction timed out or failed (took longer than 5 minutes)"
+            echo "Try running manually: unzip greengrass-${greengrass_version}.zip -d GreengrassInstaller"
         fi
     fi
 fi
