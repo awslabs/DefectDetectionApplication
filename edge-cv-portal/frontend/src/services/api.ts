@@ -343,6 +343,44 @@ class ApiService {
     return this.request(`/devices/${deviceId}/logs/${encodeURIComponent(componentName)}?${queryParams}`);
   }
 
+  async analyzeLogs(
+    deviceId: string,
+    usecaseId: string,
+    params?: {
+      hours?: number;
+    }
+  ): Promise<{
+    analysis: {
+      device_id: string;
+      analysis_timestamp: string;
+      issues_detected: number;
+      critical_count: number;
+      high_count: number;
+      medium_count: number;
+      low_count: number;
+      issues: Array<{
+        issue_id: string;
+        title: string;
+        severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+        likely_causes: string[];
+        recommended_actions: string[];
+        prevention_tips: string[];
+      }>;
+      next_steps: string[];
+    };
+  }> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    const queryParams = new URLSearchParams({ usecase_id: usecaseId });
+    if (params?.hours) queryParams.set('hours', params.hours.toString());
+    
+    return this.request(
+      `/devices/${deviceId}/logs/analyze?${queryParams}`,
+      { method: 'POST' }
+    );
+  }
+
   // Training endpoints
   async listTrainingJobs(usecaseId?: string): Promise<{ jobs: any[]; count: number }> {
     const query = usecaseId ? `?usecase_id=${usecaseId}` : '';

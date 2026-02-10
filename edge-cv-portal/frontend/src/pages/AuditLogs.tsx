@@ -16,6 +16,7 @@ import {
   Alert,
 } from '@cloudscape-design/components';
 import { useAuth } from '../contexts/AuthContext';
+import { useUsecase } from '../contexts/UsecaseContext';
 import apiService from '../services/api';
 
 interface AuditLogEntry {
@@ -37,6 +38,7 @@ interface UseCase {
 
 export default function AuditLogs() {
   const { user } = useAuth();
+  const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -57,13 +59,25 @@ export default function AuditLogs() {
     const loadUsecases = async () => {
       try {
         const response = await apiService.listUseCases();
-        setUsecases(response.usecases || []);
+        const usecaseList = response.usecases || [];
+        setUsecases(usecaseList);
+        
+        // Use saved selection from context if available
+        if (selectedUsecaseId) {
+          const saved = usecaseList.find(uc => uc.usecase_id === selectedUsecaseId);
+          if (saved) {
+            setSelectedUsecase({
+              label: saved.name,
+              value: saved.usecase_id,
+            });
+          }
+        }
       } catch (err) {
         console.error('Failed to load usecases:', err);
       }
     };
     loadUsecases();
-  }, []);
+  }, [selectedUsecaseId]);
 
   const loadLogs = useCallback(async (resetPage = false) => {
     setLoading(true);
@@ -241,7 +255,10 @@ export default function AuditLogs() {
           <FormField label="Use Case">
             <Select
               selectedOption={selectedUsecase}
-              onChange={({ detail }) => setSelectedUsecase(detail.selectedOption)}
+              onChange={({ detail }) => {
+                setSelectedUsecase(detail.selectedOption);
+                setSelectedUsecaseId(detail.selectedOption?.value || null);
+              }}
               options={usecaseOptions}
               placeholder="All use cases"
             />

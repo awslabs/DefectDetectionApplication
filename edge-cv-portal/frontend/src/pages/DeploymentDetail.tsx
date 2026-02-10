@@ -20,6 +20,7 @@ import {
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import ConfirmationModal from '../components/ConfirmationModal';
+import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
 
 interface EffectiveDeployment {
   core_device: string;
@@ -502,6 +503,30 @@ export default function DeploymentDetail() {
                       </Box>
                     )}
                   </Box>
+                ),
+              },
+              {
+                id: 'diagnostics',
+                label: 'AI Diagnostics',
+                content: (
+                  <SpaceBetween size="l">
+                    <Alert type="info">
+                      Device logs are analyzed at the device level. Select a device from the Device Status tab to view its logs, or use the diagnostics below to analyze logs for all devices in this deployment.
+                    </Alert>
+                    {deployment.effective_deployments && deployment.effective_deployments.length > 0 ? (
+                      <SpaceBetween size="l">
+                        {deployment.effective_deployments.map((device) => (
+                          <Container key={device.core_device} header={<Header variant="h3">Device: {device.core_device}</Header>}>
+                            <LogsDiagnosticsTab deviceId={device.core_device} usecaseId={usecaseId || ''} />
+                          </Container>
+                        ))}
+                      </SpaceBetween>
+                    ) : (
+                      <Box textAlign="center" color="inherit" padding="l">
+                        No devices in this deployment yet. Device diagnostics will appear once devices are targeted.
+                      </Box>
+                    )}
+                  </SpaceBetween>
                 ),
               },
             ]}

@@ -136,9 +136,79 @@ cd DefectDetectionApplication
 ./gdk-component-build-and-publish.sh
 ```
 
+### Build Server Setup Script
+
+The `setup-build-server.sh` script automates all dependencies:
+
+```bash
+./setup-build-server.sh
+```
+
+**What it installs:**
+- Docker (with daemon startup and permissions)
+- Python 3.9 (from source on Ubuntu 18.04, PPA on others)
+- AWS CLI and AWS CDK
+- AWS Greengrass Development Kit (GDK)
+- Node.js and npm
+
+**Features:**
+- Comprehensive error handling (errors vs warnings)
+- Full logging with timestamps to `/tmp/setup-build-*.log`
+- VERBOSE mode for debugging: `VERBOSE=1 ./setup-build-server.sh`
+- Clear error summary and next steps
+
+### Building Components
+
+Once the build server is set up, build and publish components:
+
+```bash
+./gdk-component-build-and-publish.sh
+```
+
+**What it does:**
+- Detects system architecture (x86_64 or aarch64)
+- Selects appropriate recipe file (recipe-amd64.yaml or recipe-arm64.yaml)
+- Generates dynamic GDK configuration
+- Builds Docker images (backend and frontend)
+- Creates component archive
+- Publishes to AWS Greengrass component repository
+
+**Features:**
+- Animated progress indicators showing current task
+- Full logging with timestamps
+- VERBOSE mode for debugging: `VERBOSE=1 ./gdk-component-build-and-publish.sh`
+- Clear error summary and component name in success message
+
+**Example output:**
+```
+Building and publishing Greengrass components...
+Log file: /tmp/gdk-build-1770652049.log
+
+▶ Detecting system architecture...
+✓ Architecture: aarch64 (arm64)
+  Component name: aws.edgeml.dda.LocalServer.arm64
+  Recipe file: recipe-arm64.yaml
+
+▶ Building component...
+  ⠋ Building Docker images...
+  ✓ Building Docker images...
+
+▶ Publishing component...
+  ⠋ Uploading to AWS...
+  ✓ Uploading to AWS...
+
+✅ Component aws.edgeml.dda.LocalServer.arm64 built and published successfully!
+```
+
+**Debugging:**
+If the build fails, check the log file shown in the output. For more details, run with VERBOSE mode:
+```bash
+VERBOSE=1 ./gdk-component-build-and-publish.sh
+```
+
 ### Option 2: Manual Setup
 
-If you prefer to set up the IAM role and EC2 instance manually:
+If you prefer to set up the IAM role and EC2 instance manually, follow these steps. Otherwise, use the automated setup above.
 
 #### Step 1: Create IAM Role
 
@@ -536,10 +606,10 @@ See [edge-cv-portal/README.md](edge-cv-portal/README.md) for complete deployment
 | [edge-cv-portal/ADMIN_GUIDE.md](edge-cv-portal/ADMIN_GUIDE.md) | Portal administration guide |
 | [edge-cv-portal/TUTORIAL_MULTI_ACCOUNT_WORKFLOW.md](edge-cv-portal/TUTORIAL_MULTI_ACCOUNT_WORKFLOW.md) | End-to-end tutorial |
 | [edge-cv-portal/TUTORIAL_SEGMENTATION_MULTI_ACCOUNT.md](edge-cv-portal/TUTORIAL_SEGMENTATION_MULTI_ACCOUNT.md) | Segmentation training guide |
-| [BUILD_SERVER_SETUP_GUIDE.md](BUILD_SERVER_SETUP_GUIDE.md) | ARM64 build server setup (automated & manual) |
-| [EDGE_DEVICE_SETUP_GUIDE.md](EDGE_DEVICE_SETUP_GUIDE.md) | Edge device setup with Greengrass (automated & manual) |
 | [DDA_END_TO_END_ARCHITECTURE.md](DDA_END_TO_END_ARCHITECTURE.md) | Complete system architecture |
 | [README_MANUAL_DEPLOYMENT.md](README_MANUAL_DEPLOYMENT.md) | Manual deployment without Portal |
+| [BUILD_SYSTEM_FINAL_STATUS.md](BUILD_SYSTEM_FINAL_STATUS.md) | Build system improvements and status |
+| [ANIMATED_PROGRESS_INDICATOR.md](ANIMATED_PROGRESS_INDICATOR.md) | Progress indicator implementation details |
 
 ## Troubleshooting
 

@@ -2,6 +2,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import '@cloudscape-design/global-styles/index.css';
 import { AuthProvider } from './contexts/AuthContext';
+import { UsecaseProvider } from './contexts/UsecaseContext';
 import Dashboard from './pages/Dashboard';
 import UseCases from './pages/UseCases';
 import UseCaseOnboarding from './pages/UseCaseOnboarding';
@@ -47,48 +48,50 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <Router>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route
-              path="/"
-              element={
-                <ProtectedRoute>
-                  <Layout />
-                </ProtectedRoute>
-              }
-            >
-              <Route index element={<Navigate to="/dashboard" replace />} />
-              <Route path="dashboard" element={<Dashboard />} />
-              <Route path="usecases" element={<UseCases />} />
-              <Route path="usecases/onboard" element={<UseCaseOnboarding />} />
-              <Route path="labeling" element={<Labeling />} />
-              <Route path="labeling/datasets" element={<DatasetBrowser />} />
-              <Route path="data" element={<DataManagement />} />
-              <Route path="labeling/pre-labeled" element={<PreLabeledDatasets />} />
-              <Route path="labeling/transform-manifest" element={<TransformManifest />} />
-              <Route path="labeling/create" element={<CreateLabelingJob />} />
-              <Route path="labeling/:jobId" element={<LabelingDetail />} />
-              <Route path="devices" element={<Devices />} />
-              <Route path="devices/:deviceId" element={<DeviceDetail />} />
-              <Route path="models" element={<Models />} />
-              <Route path="models/import" element={<ImportModel />} />
-              <Route path="models/smart-import" element={<SmartImport />} />
-              <Route path="models/:modelId" element={<ModelDetail />} />
-              <Route path="training" element={<Training />} />
-              <Route path="training/create" element={<CreateTraining />} />
-              <Route path="training/:trainingId" element={<TrainingDetail />} />
-              <Route path="deployments" element={<Deployments />} />
-              <Route path="deployments/create" element={<CreateDeployment />} />
-              <Route path="deployments/:deploymentId" element={<DeploymentDetail />} />
-              <Route path="components" element={<Components />} />
-              <Route path="components/:arn" element={<ComponentDetail />} />
-              <Route path="components/configure" element={<ComponentConfiguration />} />
-              <Route path="settings" element={<Settings />} />
-              <Route path="audit" element={<AuditLogs />} />
-            </Route>
-          </Routes>
-        </Router>
+        <UsecaseProvider>
+          <Router>
+            <Routes>
+              <Route path="/login" element={<Login />} />
+              <Route
+                path="/"
+                element={
+                  <ProtectedRoute>
+                    <Layout />
+                  </ProtectedRoute>
+                }
+              >
+                <Route index element={<Navigate to="/dashboard" replace />} />
+                <Route path="dashboard" element={<Dashboard />} />
+                <Route path="usecases" element={<UseCases />} />
+                <Route path="usecases/onboard" element={<UseCaseOnboarding />} />
+                <Route path="labeling" element={<Labeling />} />
+                <Route path="labeling/datasets" element={<DatasetBrowser />} />
+                <Route path="data" element={<DataManagement />} />
+                <Route path="labeling/pre-labeled" element={<PreLabeledDatasets />} />
+                <Route path="labeling/transform-manifest" element={<TransformManifest />} />
+                <Route path="labeling/create" element={<CreateLabelingJob />} />
+                <Route path="labeling/:jobId" element={<LabelingDetail />} />
+                <Route path="devices" element={<Devices />} />
+                <Route path="devices/:deviceId" element={<DeviceDetail />} />
+                <Route path="models" element={<Models />} />
+                <Route path="models/import" element={<ImportModel />} />
+                <Route path="models/smart-import" element={<SmartImport />} />
+                <Route path="models/:modelId" element={<ModelDetail />} />
+                <Route path="training" element={<Training />} />
+                <Route path="training/create" element={<CreateTraining />} />
+                <Route path="training/:trainingId" element={<TrainingDetail />} />
+                <Route path="deployments" element={<Deployments />} />
+                <Route path="deployments/create" element={<CreateDeployment />} />
+                <Route path="deployments/:deploymentId" element={<DeploymentDetail />} />
+                <Route path="components" element={<Components />} />
+                <Route path="components/:arn" element={<ComponentDetail />} />
+                <Route path="components/configure" element={<ComponentConfiguration />} />
+                <Route path="settings" element={<Settings />} />
+                <Route path="audit" element={<AuditLogs />} />
+              </Route>
+            </Routes>
+          </Router>
+        </UsecaseProvider>
       </AuthProvider>
     </QueryClientProvider>
   );
