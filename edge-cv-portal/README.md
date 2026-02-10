@@ -254,6 +254,23 @@ Then when creating UseCases, you can select from a dropdown instead of manual en
 
 ### Step 6: Create UseCase in Portal
 
+**For Single Account Setup (Recommended for Getting Started):**
+
+1. Log in to Portal as PortalAdmin
+2. Go to Settings → UseCases
+3. Click "Add UseCase"
+4. Fill in:
+   - **UseCase Name**: Your usecase name
+   - **Account ID**: Your AWS Account ID
+   - **Role ARN**: `arn:aws:iam::YOUR_ACCOUNT_ID:root`
+   - **External ID**: (leave empty)
+   - **SageMaker Role ARN**: (optional - leave empty, Portal will use `DDASageMakerExecutionRole` automatically)
+5. Click "Create"
+
+**For Multi-Account Setup (Cross-Account UseCase):**
+
+If using a separate UseCase account, use the values from the config file generated in Step 4:
+
 1. Log in to Portal as PortalAdmin
 2. Go to Settings → UseCases
 3. Click "Add UseCase"
@@ -404,6 +421,40 @@ If you see S3 "NoSuchKey" errors:
 1. Verify frontend was deployed: `aws s3 ls s3://dda-portal-frontend-YOUR_ACCOUNT_ID/`
 2. Re-run frontend deployment: `./deploy-frontend.sh`
 3. Wait for CloudFront cache invalidation (up to 5 minutes)
+
+### Failed to List Buckets
+
+If you see "Failed to list buckets" error in Data Management:
+
+**Possible Causes:**
+
+1. **No buckets tagged with `dda-portal:managed=true`**
+   - Buckets must be tagged to appear in the Portal
+   - Tag your bucket:
+   ```bash
+   aws s3api put-bucket-tagging \
+     --bucket your-bucket-name \
+     --tagging 'TagSet=[{Key=dda-portal:managed,Value=true}]'
+   ```
+
+2. **Missing IAM permissions**
+   - The UseCase role needs `resourcegroupstaggingapi:GetResources` permission
+   - Verify the role policy includes Resource Groups Tagging API permissions
+
+3. **Cross-account role issue** (if using separate Data Account)
+   - Verify `data_account_role_arn` is set in the UseCase
+   - Verify `data_account_external_id` is set
+   - Test role assumption:
+   ```bash
+   aws sts assume-role \
+     --role-arn arn:aws:iam::DATA_ACCOUNT_ID:role/DDAPortalAccessRole \
+     --role-session-name test \
+     --external-id YOUR_EXTERNAL_ID
+   ```
+
+4. **Check CloudWatch Logs**
+   - Look for errors in `/aws/lambda/EdgeCVPortal*` logs
+   - Search for "Failed to list buckets" or "AWS error listing buckets"
 
 ## Support
 

@@ -186,14 +186,17 @@ def list_buckets(event: Dict) -> Dict:
         # Get usecase details
         usecase = get_usecase(usecase_id)
         
-        # Log which account we're querying for debugging
+        # Determine which account we're querying
+        # Priority: data_account_id (if separate data account) → account_id (usecase account)
         data_role_arn = usecase.get('data_account_role_arn')
         if data_role_arn:
-            target_account = data_role_arn.split(':')[4]
+            # Separate data account is configured
+            target_account = usecase.get('data_account_id', data_role_arn.split(':')[4])
             logger.info(f"Querying Data Account {target_account} using data_account_role_arn")
         else:
-            target_account = usecase.get('cross_account_role_arn', '').split(':')[4] if usecase.get('cross_account_role_arn') else 'unknown'
-            logger.info(f"No data_account_role_arn configured, falling back to UseCase Account {target_account}")
+            # No separate data account - use the usecase account
+            target_account = usecase.get('account_id', 'unknown')
+            logger.info(f"No data_account_role_arn configured, using UseCase Account {target_account}")
         
         # Get credentials and create resource tagging client
         credentials = get_data_account_credentials(usecase)
