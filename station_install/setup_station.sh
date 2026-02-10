@@ -63,10 +63,17 @@ check_version() {
     return 1
 }
 
+SETUP_STARTED=0
+
 # Trap errors and show summary
 trap 'show_summary' EXIT
 
 show_summary() {
+    # Only show summary if setup actually started
+    if [ $SETUP_STARTED -eq 0 ]; then
+        return
+    fi
+    
     echo ""
     echo "=========================================="
     if [ ${#ERRORS[@]} -eq 0 ] && [ ${#WARNINGS[@]} -eq 0 ]; then
@@ -331,6 +338,8 @@ if [ $# -eq 0 ]; then
     echo "Example: $0 us-east-1 dda_thing_1"
     exit 1
 fi
+
+SETUP_STARTED=1
 
 aws_region="$1"
 thing_name="$2"
