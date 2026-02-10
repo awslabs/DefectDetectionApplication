@@ -49,16 +49,61 @@ cdk bootstrap
 cdk deploy --all
 ```
 
-### 2. Build and Deploy Frontend
+### 2. Configure Frontend with Deployment Values
+
+After CDK deployment completes, update `config.json` with your actual deployment values:
 
 ```bash
 cd edge-cv-portal
+
+# Get the API Gateway URL from CDK outputs
+API_URL=$(aws cloudformation describe-stacks \
+  --stack-name EdgeCVPortalComputeStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' \
+  --output text)
+
+# Get Cognito User Pool details from CDK outputs
+USER_POOL_ID=$(aws cloudformation describe-stacks \
+  --stack-name EdgeCVPortalAuthStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' \
+  --output text)
+
+USER_POOL_CLIENT_ID=$(aws cloudformation describe-stacks \
+  --stack-name EdgeCVPortalAuthStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' \
+  --output text)
+
+# Update config.json with your values
+cat > frontend/public/config.json << EOF
+{
+  "apiUrl": "$API_URL",
+  "userPoolId": "$USER_POOL_ID",
+  "userPoolClientId": "$USER_POOL_CLIENT_ID",
+  "region": "us-east-1",
+  "branding": {
+    "applicationName": "Defect Detection Application Portal",
+    "companyName": "Amazon Web Services",
+    "logoUrl": "/logo.png",
+    "faviconUrl": "/favicon.ico",
+    "primaryColor": "#0073bb",
+    "supportEmail": "support@yourcompany.com",
+    "documentationUrl": "https://docs.yourcompany.com"
+  }
+}
+EOF
+
+echo "✓ config.json updated with deployment values"
+```
+
+### 3. Build and Deploy Frontend
+
+```bash
 ./deploy-frontend.sh
 ```
 
 **Output**: Portal URL (e.g., `https://d1r8hupkjbsjb1.cloudfront.net`)
 
-### 3. Create Admin User
+### 4. Create Admin User
 
 ```bash
 # Get User Pool ID from deployment outputs
@@ -79,7 +124,7 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-### 4. Deploy UseCase Account Role (UseCase Account)
+### 5. Deploy UseCase Account Role (UseCase Account)
 
 ```bash
 # Bootstrap CDK in UseCase Account
@@ -90,7 +135,7 @@ cd edge-cv-portal
 ./deploy-account-role.sh  # Select option 1
 ```
 
-### 5. Create UseCase in Portal
+### 6. Create UseCase in Portal
 
 1. Log in to Portal as admin
 2. Go to Settings → UseCases
@@ -381,7 +426,7 @@ echo "Public IP: $PUBLIC_IP"
 ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@$PUBLIC_IP
 
 # Clone repository
-git clone <your-repo>
+git clone https://github.com/awslabs/DefectDetectionApplication.git
 cd DefectDetectionApplication
 
 # Run setup script
@@ -421,38 +466,26 @@ To deploy DDA to edge devices with AWS Greengrass, you need to launch EC2 instan
 
 ### Prerequisites
 
-Before launching an edge device, you must create the required IAM role:
-
-```bash
-./station_install/create-edge-device-iam-role.sh
-```
-
-This creates:
-- IAM role: `dda-edge-device-role`
-- Instance profile: `dda-edge-device-role`
-- Permissions for Greengrass, IoT, S3, CloudWatch, and ECR
 
 ### Automated Setup (Recommended)
 
 The fastest way to launch an edge device:
 
 ```bash
-# Step 1: Create IAM role (one-time setup)
-./station_install/create-edge-device-iam-role.sh
-
-# Step 2: Launch the EC2 instance
+# Step 1: Launch the EC2 instance
 ./station_install/launch-edge-device.sh \
   --thing-name dda-edge-1 \
-  --key-name YOUR_KEY_NAME
+  --key-name YOUR_KEY_NAME \
+  --cidr auto
 
-# Step 3: Connect and setup
+# Step 2: Connect and setup
 ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@<PUBLIC_IP>
 cd /tmp
-git clone <your-repo> dda
+git clone https://github.com/awslabs/DefectDetectionApplication.git dda
 cd dda/station_install
 sudo ./setup_station.sh us-east-1 dda-edge-1
 
-# Step 4: Device appears in portal
+# Step 3: Device appears in portal
 # After setup completes, the device will appear in the DDA Portal
 ```
 

@@ -23,6 +23,7 @@ SECURITY_GROUP=""
 SUBNET_ID=""
 GITHUB_REPO=""
 IAM_PROFILE="dda-edge-device-role"  # Default IAM instance profile
+SSH_CIDR=""  # SSH CIDR must be explicitly specified (no default open access)
 
 # AMI IDs (Ubuntu)
 AMI_ARM64_US_EAST_1="ami-0c13dec58913b948c"  # Ubuntu 18.04 ARM64
@@ -40,6 +41,9 @@ usage() {
     echo "Required Options:"
     echo "  -n, --thing-name NAME     IoT Thing name for the device (e.g., dda-edge-1)"
     echo "  -k, --key-name NAME       EC2 key pair name for SSH access"
+    echo "  -c, --cidr CIDR           CIDR block for all access (SSH, 3000, 5000, 3443) (REQUIRED)"
+    echo "                            Use 'auto' to auto-detect your current IP"
+    echo "                            Or specify CIDR (e.g., 10.0.0.0/8, 203.0.113.0/24)"
     echo ""
     echo "Optional Options:"
     echo "  -a, --arch ARCH           Architecture: arm64 (default) or x86_64"
@@ -48,19 +52,22 @@ usage() {
     echo "  -u, --subnet SUBNET       Subnet ID (uses default VPC if not specified)"
     echo "  -t, --instance-type TYPE  Override instance type"
     echo "  -v, --volume-size SIZE    EBS volume size in GB (default: 30)"
-    echo "  -i, --iam-profile PROFILE IAM instance profile name (default: dda-edge-device-role)"
+    echo "  -i, --iam-profile PROFILE IAM instance profile name (optional, for EC2-based Greengrass)"
     echo "  -g, --github-repo URL     GitHub repo URL for setup files"
     echo "  -h, --help                Show this help message"
     echo ""
     echo "Examples:"
-    echo "  # Launch ARM64 device"
-    echo "  $0 -n dda-arm64-edge-1 -k my-key-pair"
+    echo "  # Launch with auto-detected current IP (all ports restricted)"
+    echo "  $0 -n dda-edge-1 -k my-key-pair -c auto"
+    echo ""
+    echo "  # Launch with specific CIDR"
+    echo "  $0 -n dda-edge-1 -k my-key-pair -c 203.0.113.0/24"
+    echo ""
+    echo "  # Launch with specific IP"
+    echo "  $0 -n dda-edge-1 -k my-key-pair -c 203.0.113.45/32"
     echo ""
     echo "  # Launch x86_64 device"
-    echo "  $0 -n dda-x86-edge-1 -k my-key-pair -a x86_64"
-    echo ""
-    echo "  # Launch with specific security group and subnet"
-    echo "  $0 -n dda-edge-1 -k my-key -s sg-12345 -u subnet-67890"
+    echo "  $0 -n dda-x86-edge-1 -k my-key-pair -c auto -a x86_64"
     exit 1
 }
 
@@ -115,6 +122,10 @@ while [[ $# -gt 0 ]]; do
             IAM_PROFILE="$2"
             shift 2
             ;;
+        -c|--cidr)
+            SSH_CIDR="$2"
+            shift 2
+            ;;
         -g|--github-repo)
             GITHUB_REPO="$2"
             shift 2
@@ -140,6 +151,38 @@ if [ -z "$KEY_NAME" ]; then
     usage
 fi
 
+if [ -z "$SSH_CIDR" ]; then
+    log_error "SSH CIDR is required (-c or --cidr)"
+    log_error ""
+    log_error "Access must be explicitly restricted for security."
+    log_error "Use one of:"
+    log_error "  -c auto                    # Auto-detect your current IP"
+    log_error "  -c 203.0.113.0/24          # Specify a CIDR block"
+    log_error "  -c 203.0.113.45/32         # Specify a single IP"
+    usage
+fi
+
+# Handle CIDR configuration
+if [ "$SSH_CIDR" == "auto" ]; then
+    # Try to get current IP
+    CURRENT_IP=$(curl -s https://checkip.amazonaws.com 2>/dev/null || echo "")
+    if [ -n "$CURRENT_IP" ]; then
+        SSH_CIDR="${CURRENT_IP}/32"
+        log_info "Auto-detected current IP for all access: $SSH_CIDR"
+    else
+        log_error "Could not auto-detect current IP"
+        log_error "Specify CIDR manually with -c option"
+        exit 1
+    fi
+fi
+
+# Validate CIDR format (basic validation)
+if ! [[ "$SSH_CIDR" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+    log_error "Invalid CIDR format: $SSH_CIDR"
+    log_error "Expected format: 10.0.0.0/8 or 203.0.113.0/24"
+    exit 1
+fi
+
 # Set architecture-specific values
 if [ "$ARCHITECTURE" == "arm64" ]; then
     AMI_ID="$AMI_ARM64_US_EAST_1"
@@ -161,6 +204,7 @@ log_info "  Architecture: $ARCHITECTURE"
 log_info "  Instance Type: $INSTANCE_TYPE"
 log_info "  AMI: $AMI_ID"
 log_info "  Key Pair: $KEY_NAME"
+log_info "  Access CIDR (all ports): $SSH_CIDR"
 log_info "  EBS Volume: ${EBS_VOLUME_SIZE}GB ($EBS_VOLUME_TYPE)"
 log_info "  IAM Profile: $IAM_PROFILE"
 
@@ -173,22 +217,19 @@ fi
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 log_info "AWS Account: $ACCOUNT_ID"
 
-# Validate IAM instance profile exists
-log_info "Validating IAM instance profile: $IAM_PROFILE"
-if ! aws iam get-instance-profile --instance-profile-name "$IAM_PROFILE" &>/dev/null; then
-    log_error ""
-    log_error "ERROR: IAM Instance Profile Not Found"
-    log_error "The IAM instance profile '$IAM_PROFILE' does not exist."
-    log_error ""
-    log_error "Please create it first by running:"
-    log_error "  ./create-edge-device-iam-role.sh"
-    log_error ""
-    log_error "Then retry launching the edge device:"
-    log_error "  ./launch-edge-device.sh --thing-name $THING_NAME --key-name $KEY_NAME"
-    log_error ""
-    exit 1
+# Validate IAM instance profile if specified
+if [ -n "$IAM_PROFILE" ]; then
+    log_info "Validating IAM instance profile: $IAM_PROFILE"
+    if ! aws iam get-instance-profile --instance-profile-name "$IAM_PROFILE" &>/dev/null; then
+        log_error "WARNING: IAM instance profile '$IAM_PROFILE' not found"
+        log_error "Device will launch without IAM role (suitable for non-EC2 edge devices)"
+        IAM_PROFILE=""
+    else
+        log_info "IAM instance profile validated: $IAM_PROFILE"
+    fi
+else
+    log_info "No IAM profile specified - device will launch without AWS IAM role"
 fi
-log_info "IAM instance profile validated: $IAM_PROFILE"
 
 # Create or use security group
 if [ -z "$SECURITY_GROUP" ]; then
@@ -210,12 +251,12 @@ if [ -z "$SECURITY_GROUP" ]; then
             --query 'GroupId' \
             --output text)
         
-        # Allow SSH
+        # Allow SSH with restricted CIDR
         aws ec2 authorize-security-group-ingress \
             --group-id "$SECURITY_GROUP" \
             --protocol tcp \
             --port 22 \
-            --cidr 0.0.0.0/0 \
+            --cidr "$SSH_CIDR" \
             --region "$REGION"
         
         # Allow DDA Frontend (React UI on port 3000)
@@ -223,7 +264,7 @@ if [ -z "$SECURITY_GROUP" ]; then
             --group-id "$SECURITY_GROUP" \
             --protocol tcp \
             --port 3000 \
-            --cidr 0.0.0.0/0 \
+            --cidr "$SSH_CIDR" \
             --region "$REGION"
         
         # Allow DDA Frontend HTTPS (port 3443)
@@ -231,7 +272,7 @@ if [ -z "$SECURITY_GROUP" ]; then
             --group-id "$SECURITY_GROUP" \
             --protocol tcp \
             --port 3443 \
-            --cidr 0.0.0.0/0 \
+            --cidr "$SSH_CIDR" \
             --region "$REGION"
         
         # Allow DDA Backend API (Flask on port 5000)
@@ -239,7 +280,7 @@ if [ -z "$SECURITY_GROUP" ]; then
             --group-id "$SECURITY_GROUP" \
             --protocol tcp \
             --port 5000 \
-            --cidr 0.0.0.0/0 \
+            --cidr "$SSH_CIDR" \
             --region "$REGION"
         
         # Allow HTTPS outbound (for Greengrass)
@@ -280,6 +321,10 @@ cd /tmp/dda-setup
 # Option 1: If using GitHub
 if [ -n "$GITHUB_REPO" ]; then
     git clone "$GITHUB_REPO" repo
+    cp -r repo/station_install/* .
+else
+    # Default to official repo
+    git clone https://github.com/awslabs/DefectDetectionApplication repo
     cp -r repo/station_install/* .
 fi
 
@@ -322,19 +367,25 @@ fi
 
 log_info "Launching EC2 instance..."
 
-# Launch instance with IAM profile
-INSTANCE_ID=$(aws ec2 run-instances \
-    --image-id "$AMI_ID" \
-    --instance-type "$INSTANCE_TYPE" \
-    --key-name "$KEY_NAME" \
-    --security-group-ids "$SECURITY_GROUP" \
-    --iam-instance-profile Name="$IAM_PROFILE" \
-    --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=$EBS_VOLUME_SIZE,VolumeType=$EBS_VOLUME_TYPE,DeleteOnTermination=true}" \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$THING_NAME},{Key=dda-portal:managed,Value=true},{Key=Architecture,Value=$ARCHITECTURE}]" \
+# Build launch command with optional IAM profile
+RUN_CMD="aws ec2 run-instances \
+    --image-id \"$AMI_ID\" \
+    --instance-type \"$INSTANCE_TYPE\" \
+    --key-name \"$KEY_NAME\" \
+    --security-group-ids \"$SECURITY_GROUP\" \
+    --block-device-mappings \"DeviceName=/dev/sda1,Ebs={VolumeSize=$EBS_VOLUME_SIZE,VolumeType=$EBS_VOLUME_TYPE,DeleteOnTermination=true}\" \
+    --tag-specifications \"ResourceType=instance,Tags=[{Key=Name,Value=$THING_NAME},{Key=dda-portal:managed,Value=true},{Key=Architecture,Value=$ARCHITECTURE}]\" \
     --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \
-    --region "$REGION" \
+    --region \"$REGION\" \
     --query 'Instances[0].InstanceId' \
-    --output text)
+    --output text"
+
+# Add IAM profile if specified
+if [ -n "$IAM_PROFILE" ]; then
+    RUN_CMD="$RUN_CMD --iam-instance-profile Name=\"$IAM_PROFILE\""
+fi
+
+INSTANCE_ID=$(eval $RUN_CMD)
 
 if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
     log_error "Failed to launch EC2 instance"
@@ -368,9 +419,14 @@ echo "Instance ID:    $INSTANCE_ID"
 echo "Public IP:      $PUBLIC_IP"
 echo "Thing Name:     $THING_NAME"
 echo "Architecture:   $ARCHITECTURE"
+echo "Access CIDR:    $SSH_CIDR"
 echo ""
 echo "SSH Command:"
 echo "  ssh -i ~/.ssh/${KEY_NAME}.pem ubuntu@${PUBLIC_IP}"
+echo ""
+echo "Access URLs:"
+echo "  Frontend:  https://${PUBLIC_IP}:3443"
+echo "  API:       http://${PUBLIC_IP}:5000"
 echo ""
 echo "Next Steps:"
 echo "  1. Wait 2-3 minutes for instance to initialize"
