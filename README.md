@@ -124,10 +124,14 @@ aws cognito-idp admin-set-user-password \
   --permanent
 ```
 
-### 5. Deploy UseCase Account Role (UseCase Account)
+### 5. Deploy UseCase Account Role (UseCase Account - Only if Different from Portal)
+
+**Skip this step if you're using the same AWS account for both Portal and UseCase.**
+
+If using a separate UseCase account, deploy the cross-account role:
 
 ```bash
-# Bootstrap CDK in UseCase Account
+# Bootstrap CDK in UseCase Account (first time only)
 cdk bootstrap aws://YOUR_USECASE_ACCOUNT_ID/us-east-1
 
 # Deploy role
@@ -140,8 +144,13 @@ cd edge-cv-portal
 1. Log in to Portal as admin
 2. Go to Settings → UseCases
 3. Click "Add UseCase"
-4. Fill in Account ID, Role ARN, and External ID from step 4
-5. Click "Create"
+4. If using same account:
+   - Account ID: Your AWS Account ID
+   - Role ARN: `arn:aws:iam::YOUR_ACCOUNT_ID:root`
+   - External ID: (leave empty)
+5. If using separate account:
+   - Fill in Account ID, Role ARN, and External ID from step 5
+6. Click "Create"
 
 ## Building Greengrass Components (ARM64)
 
