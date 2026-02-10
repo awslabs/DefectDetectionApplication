@@ -145,28 +145,47 @@ check_prerequisites() {
 check_mandatory_deps() {
     echo ""
     echo "▶ Checking mandatory dependencies..."
-    local missing=0
+    
+    # Update package manager first
+    if ! run_cmd "apt-get update"; then
+        add_warning "Failed to update package manager"
+    fi
     
     # Java
     if ! check_command java; then
-        add_error "Java is required but not installed"
-        missing=$((missing + 1))
+        echo "Installing Java..."
+        if ! run_cmd "apt-get install -y default-jdk"; then
+            add_error "Failed to install Java"
+            return 1
+        else
+            echo "✓ Java installed"
+        fi
     else
         echo "✓ Java found"
     fi
     
     # curl
     if ! check_command curl; then
-        add_error "curl is required but not installed"
-        missing=$((missing + 1))
+        echo "Installing curl..."
+        if ! run_cmd "apt-get install -y curl"; then
+            add_error "Failed to install curl"
+            return 1
+        else
+            echo "✓ curl installed"
+        fi
     else
         echo "✓ curl found"
     fi
     
     # unzip
     if ! check_command unzip; then
-        add_error "unzip is required but not installed"
-        missing=$((missing + 1))
+        echo "Installing unzip..."
+        if ! run_cmd "apt-get install -y unzip"; then
+            add_error "Failed to install unzip"
+            return 1
+        else
+            echo "✓ unzip installed"
+        fi
     else
         echo "✓ unzip found"
     fi
@@ -184,8 +203,6 @@ check_mandatory_deps() {
     else
         echo "✓ Python 3.9 found"
     fi
-    
-    return $missing
 }
 
 echo "=========================================="
@@ -423,29 +440,17 @@ run_cmd "chown -R dda_admin_user ${dda_inference_result_dir}" || add_warning "Fa
 echo "✓ DDA directories configured"
 echo ""
 
-echo "▶ Installing system packages..."
+echo "▶ Installing additional system packages..."
 
 if ! run_cmd "apt-get update"; then
     add_warning "Failed to update package manager"
 fi
 
-if ! run_cmd "apt-get install curl ca-certificates gnupg lsb-release unzip zip -y"; then
-    add_error "Failed to install required system packages"
+if ! run_cmd "apt-get install ca-certificates gnupg lsb-release zip -y"; then
+    add_warning "Failed to install additional system packages"
 fi
 
-echo "✓ System packages installed"
-echo ""
-
-echo "▶ Installing Java..."
-if ! run_cmd "apt-get install default-jdk -y"; then
-    add_error "Failed to install Java"
-else
-    if run_cmd "java -version"; then
-        echo "✓ Java installed successfully"
-    else
-        add_warning "Java installed but version check failed"
-    fi
-fi
+echo "✓ Additional system packages installed"
 echo ""
 
 echo "▶ Installing AWS CLI..."
