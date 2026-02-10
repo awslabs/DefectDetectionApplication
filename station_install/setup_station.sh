@@ -555,34 +555,17 @@ fi
 echo ""
 
 echo "▶ Installing Greengrass Core..."
-echo "Downloading Greengrass ${greengrass_version}..."
-if ! run_cmd "curl -s -L https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-${greengrass_version}.zip -o greengrass-${greengrass_version}.zip"; then
+if ! run_cmd "curl -s 'https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-${greengrass_version}.zip' > 'greengrass-${greengrass_version}.zip'"; then
     add_error "Failed to download Greengrass"
+elif ! run_cmd "unzip greengrass-${greengrass_version}.zip -d GreengrassInstaller"; then
+    add_error "Failed to extract Greengrass"
 else
-    # Check if file was downloaded
-    if [ ! -f "greengrass-${greengrass_version}.zip" ]; then
-        add_error "Greengrass zip file not found after download"
+    run_cmd "rm greengrass-${greengrass_version}.zip" || add_warning "Failed to clean up Greengrass zip"
+    
+    if ! run_cmd "java -jar ./GreengrassInstaller/lib/Greengrass.jar --version"; then
+        add_warning "Failed to verify Greengrass installation"
     else
-        file_size=$(du -h "greengrass-${greengrass_version}.zip" | cut -f1)
-        echo "Downloaded: $file_size"
-        
-        echo "Extracting Greengrass (this may take 2-3 minutes on ARM64)..."
-        echo "Please wait, this is a large file..."
-        
-        # Use timeout to prevent hanging, but give it plenty of time
-        if timeout 300 unzip -q "greengrass-${greengrass_version}.zip" -d GreengrassInstaller >> "$LOG_FILE" 2>&1; then
-            echo "✓ Extraction completed"
-            run_cmd "rm greengrass-${greengrass_version}.zip" || add_warning "Failed to clean up Greengrass zip"
-            
-            if ! run_cmd "java -jar ./GreengrassInstaller/lib/Greengrass.jar --version"; then
-                add_warning "Failed to verify Greengrass installation"
-            else
-                echo "✓ Greengrass Core downloaded and extracted"
-            fi
-        else
-            add_error "Greengrass extraction timed out or failed (took longer than 5 minutes)"
-            echo "Try running manually: unzip greengrass-${greengrass_version}.zip -d GreengrassInstaller"
-        fi
+        echo "✓ Greengrass Core downloaded and extracted"
     fi
 fi
 echo ""
