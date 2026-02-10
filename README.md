@@ -365,7 +365,7 @@ DDA consists of several key components:
 
 2. **Build and publish**:
    ```bash
-  ./gdk-component-build-and-publish.sh >logfile.log 2>&1 &
+   ./gdk-component-build-and-publish.sh >logfile.log 2>&1 &
    ```
 
 #### Step 3: Set up Edge Device
