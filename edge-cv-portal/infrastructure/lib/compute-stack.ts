@@ -102,6 +102,15 @@ export class ComputeStack extends cdk.Stack {
           'greengrass:GetComponent',
           'greengrass:ListComponents',
           'greengrass:ListComponentVersions',
+          'greengrass:ListCoreDevices',
+          'greengrass:GetCoreDevice',
+          'greengrass:ListInstalledComponents',
+          'greengrass:ListTagsForResource',
+          'greengrass:ListDeployments',
+          'greengrass:GetDeployment',
+          'greengrass:CreateDeployment',
+          'greengrass:CancelDeployment',
+          'iot:DescribeThing',
           'logs:GetLogEvents',
           'logs:DescribeLogStreams',
           'logs:FilterLogEvents',
@@ -133,8 +142,19 @@ export class ComputeStack extends cdk.Stack {
           's3:GetObject',
           's3:PutObject',
           's3:ListBucket',
+          's3:GetBucketLocation',
+          's3:GetBucketTagging',
         ],
         resources: ['*'], // Restricted by assumed role in UseCase Account
+      }));
+
+      // Grant Resource Groups Tagging API permissions for finding tagged buckets
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'tag:GetResources',
+        ],
+        resources: ['*'],
       }));
 
       return role;

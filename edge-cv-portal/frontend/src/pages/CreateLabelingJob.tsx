@@ -133,18 +133,64 @@ export default function CreateLabelingJob() {
     { label: 'Vendor', value: 'vendor' },
   ];
 
+  const validateStep = (stepIndex: number): boolean => {
+    switch (stepIndex) {
+      case 0: // Job Configuration
+        if (!jobName.trim()) {
+          setError('Job Name is required');
+          return false;
+        }
+        if (!selectedUseCase) {
+          setError('Use Case is required');
+          return false;
+        }
+        return true;
+      case 1: // Dataset Selection
+        if (!datasetPrefix.trim()) {
+          setError('S3 Dataset Prefix is required');
+          return false;
+        }
+        return true;
+      case 2: // Task Configuration
+        if (!taskType) {
+          setError('Task Type is required');
+          return false;
+        }
+        const categories = labelCategories.split(',').map(c => c.trim()).filter(c => c);
+        if (categories.length === 0) {
+          setError('Please provide at least one label category');
+          return false;
+        }
+        return true;
+      case 3: // Workforce Configuration
+        if (!workforceType) {
+          setError('Workforce Type is required');
+          return false;
+        }
+        if (workforceType.value === 'private' && !selectedWorkteam) {
+          setError('Workteam is required for private workforce');
+          return false;
+        }
+        return true;
+      default:
+        return true;
+    }
+  };
+
   const handleSubmit = async () => {
     setCreating(true);
     setError('');
     try {
+      // Validate all steps before submission
+      for (let i = 0; i < 4; i++) {
+        if (!validateStep(i)) {
+          setCreating(false);
+          return;
+        }
+      }
+
       // Parse label categories
       const categories = labelCategories.split(',').map(c => c.trim()).filter(c => c);
-      
-      if (categories.length === 0) {
-        setError('Please provide at least one label category');
-        setCreating(false);
-        return;
-      }
       
       if (!selectedUseCase) {
         setError('Please select a use case');
@@ -153,13 +199,21 @@ export default function CreateLabelingJob() {
       }
 
       // Build workforce ARN from selected workteam
-      if (!selectedWorkteam) {
-        setError('Please select a workteam');
+      if (workforceType?.value === 'private' && !selectedWorkteam) {
+        setError('Please select a workteam for private workforce');
         setCreating(false);
         return;
       }
       
-      const workforceArn = `arn:aws:sagemaker:us-east-1:${selectedUseCase.account_id}:workteam/private-crowd/${selectedWorkteam.value}`;
+      const workforceArn = workforceType?.value === 'private' && selectedWorkteam
+        ? `arn:aws:sagemaker:us-east-1:${selectedUseCase.account_id}:workteam/private-crowd/${selectedWorkteam.value}`
+        : '';
+      
+      if (!workforceArn) {
+        setError('Invalid workforce configuration');
+        setCreating(false);
+        return;
+      }
       
       await apiService.createLabelingJob({
         usecase_id: selectedUseCase.usecase_id,
@@ -203,7 +257,17 @@ export default function CreateLabelingJob() {
           submitButton: 'Create Job',
           optional: 'optional',
         }}
-        onNavigate={({ detail }) => setActiveStepIndex(detail.requestedStepIndex)}
+        onNavigate={({ detail }) => {
+          // Validate current step before allowing navigation
+          if (detail.requestedStepIndex > activeStepIndex) {
+            // Moving forward - validate current step
+            if (!validateStep(activeStepIndex)) {
+              return; // Don't navigate if validation fails
+            }
+          }
+          setActiveStepIndex(detail.requestedStepIndex);
+          setError(''); // Clear error when navigating
+        }}
         onCancel={() => navigate('/labeling')}
         onSubmit={handleSubmit}
         activeStepIndex={activeStepIndex}

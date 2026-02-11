@@ -11,7 +11,8 @@ import boto3
 from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, is_super_user, assume_cross_account_role, get_usecase
+    check_user_access, is_super_user, assume_cross_account_role, get_usecase,
+    create_boto3_client
 )
 
 logger = logging.getLogger()
@@ -103,13 +104,7 @@ def list_deployments(user, query_params):
         
         region = os.environ.get('AWS_REGION', 'us-east-1')
         
-        greengrass_client = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
         
         deployments = []
         next_token = None
@@ -183,13 +178,7 @@ def get_deployment(deployment_id, user, query_params):
         
         region = os.environ.get('AWS_REGION', 'us-east-1')
         
-        greengrass_client = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
         
         # Get deployment details
         response = greengrass_client.get_deployment(deploymentId=deployment_id)
@@ -364,13 +353,7 @@ def create_deployment(body, user):
         region = os.environ.get('AWS_REGION', 'us-east-1')
         account_id = usecase.get('account_id', '')
         
-        greengrass_client = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
         
         # Build components map for deployment
         components_map = {}
@@ -604,13 +587,7 @@ def cancel_deployment(deployment_id, user, query_params):
         
         region = os.environ.get('AWS_REGION', 'us-east-1')
         
-        greengrass_client = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
         
         # Cancel deployment
         greengrass_client.cancel_deployment(deploymentId=deployment_id)

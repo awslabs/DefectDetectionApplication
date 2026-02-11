@@ -432,17 +432,55 @@ def create_labeling_job(event):
                     return create_response(400, {'error': user_friendly_message})
             elif 'length greater than' in error_message.lower():
                 return create_response(400, {'error': error_message.replace('Member', 'Field')})
+            elif 'WorkteamArn' in error_message or 'workteam' in error_message.lower():
+                return create_response(400, {
+                    'error': 'Invalid workteam. Please ensure the workteam exists in SageMaker Ground Truth and is properly configured.'
+                })
+            elif 'ManifestS3Uri' in error_message or 'manifest' in error_message.lower():
+                return create_response(400, {
+                    'error': 'Failed to access the manifest file. Please ensure the S3 bucket and prefix are correct and contain images.'
+                })
+            elif 'UiTemplateS3Uri' in error_message or 'template' in error_message.lower():
+                return create_response(400, {
+                    'error': 'Failed to create the labeling UI template. Please try again or contact support.'
+                })
             else:
                 return create_response(400, {'error': f"Validation error: {error_message}"})
-        elif 'AccessDenied' in error_code:
-            return create_response(403, {'error': 'Access denied. Please check your permissions for this use case.'})
+        elif 'AccessDenied' in error_code or 'AccessDeniedException' in error_code:
+            return create_response(403, {
+                'error': 'Access denied. Please check that your SageMaker execution role has permissions to create labeling jobs and access the S3 buckets.'
+            })
         elif 'ResourceLimitExceeded' in error_code:
             return create_response(429, {'error': 'Resource limit exceeded. Please try again later or contact support.'})
+        elif 'EntityAlreadyExists' in error_code or 'already exists' in error_message.lower():
+            return create_response(400, {
+                'error': 'A labeling job with this name already exists. Please use a different job name.'
+            })
+        elif 'NoSuchEntity' in error_code or 'not found' in error_message.lower():
+            return create_response(400, {
+                'error': 'The specified workteam or resource was not found. Please verify the workteam exists in SageMaker Ground Truth.'
+            })
         else:
             return create_response(500, {'error': f"Failed to create labeling job: {error_message}"})
     except Exception as e:
-        logger.error(f"Unexpected error creating labeling job: {str(e)}")
-        return create_response(500, {'error': 'Internal server error'})
+        logger.error(f"Unexpected error creating labeling job: {str(e)}", exc_info=True)
+        error_str = str(e)
+        
+        # Provide helpful error messages for common issues
+        if 'No images found' in error_str:
+            return create_response(400, {
+                'error': 'No images found in the specified S3 prefix. Please check that the prefix contains image files (jpg, png, bmp, tiff).'
+            })
+        elif 'workteam' in error_str.lower():
+            return create_response(400, {
+                'error': 'Workteam error. Please ensure the workteam is properly configured in SageMaker Ground Truth.'
+            })
+        elif 'bucket' in error_str.lower() or 's3' in error_str.lower():
+            return create_response(400, {
+                'error': 'S3 bucket error. Please check that the bucket exists and you have permission to access it.'
+            })
+        else:
+            return create_response(500, {'error': f'Internal server error: {error_str}'})
 
 
 def get_labeling_job(job_id: str):
@@ -823,12 +861,15 @@ def list_workteams(event):
                     'member_count': len(workteam.get('MemberDefinitions', []))
                 })
         
+        logger.info(f"Found {len(workteams)} workteams for usecase {usecase_id}")
+        
         return create_response(200, {
             'workteams': workteams,
             'count': len(workteams)
         })
         
     except Exception as e:
+        logger.error(f"Error listing workteams: {str(e)}", exc_info=True)
         return handle_error(e, 'Failed to list workteams')
 
 

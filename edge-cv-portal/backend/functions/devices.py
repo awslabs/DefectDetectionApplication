@@ -9,7 +9,8 @@ import boto3
 from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, is_super_user, assume_cross_account_role, get_usecase
+    check_user_access, is_super_user, assume_cross_account_role, get_usecase,
+    create_boto3_client
 )
 
 logger = logging.getLogger()
@@ -94,21 +95,8 @@ def list_devices(user, query_params):
         region = os.environ.get('AWS_REGION', 'us-east-1')
         
         # Create clients with assumed role
-        greengrass_client = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
-        
-        iot_client = boto3.client(
-            'iot',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
+        iot_client = create_boto3_client('iot', credentials, region)
         
         devices = []
         next_token = None
@@ -243,21 +231,8 @@ def get_device(device_id, user, query_params):
         account_id = usecase.get('account_id', '')
         
         # Create clients with assumed role
-        iot_client = boto3.client(
-            'iot',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
-        
-        greengrass_client = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        iot_client = create_boto3_client('iot', credentials, region)
+        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
         
         # Get thing details
         thing_arn = f"arn:aws:iot:{region}:{account_id}:thing/{device_id}"

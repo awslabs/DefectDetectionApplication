@@ -89,7 +89,7 @@ def list_users(event):
                 })
             
             # Check if user has admin access to this usecase
-            user_role = rbac_manager.get_user_role(current_user['user_id'], usecase_id)
+            user_role = rbac_manager.get_user_role(current_user['user_id'], usecase_id, current_user)
             if user_role not in [Role.USECASE_ADMIN, Role.PORTAL_ADMIN]:
                 return create_response(403, {
                     'error': 'Access denied',
@@ -165,7 +165,7 @@ def assign_user_role(event):
             return create_response(400, {'error': f'Invalid role: {role_str}'})
         
         # Check if current user can assign this role
-        current_user_role = rbac_manager.get_user_role(current_user['user_id'], usecase_id)
+        current_user_role = rbac_manager.get_user_role(current_user['user_id'], usecase_id, current_user)
         
         # Only PortalAdmin can assign PortalAdmin role
         if role == Role.PORTAL_ADMIN and current_user_role != Role.PORTAL_ADMIN:
@@ -217,8 +217,8 @@ def remove_user_role(event):
             return create_response(400, {'error': 'user_id and usecase_id are required'})
         
         # Check if current user can remove this role
-        current_user_role = rbac_manager.get_user_role(current_user['user_id'], usecase_id)
-        target_user_role = rbac_manager.get_user_role(user_id, usecase_id)
+        current_user_role = rbac_manager.get_user_role(current_user['user_id'], usecase_id, current_user)
+        target_user_role = rbac_manager.get_user_role(user_id, usecase_id, current_user)
         
         # Only PortalAdmin can remove PortalAdmin role
         if target_user_role == Role.PORTAL_ADMIN and current_user_role != Role.PORTAL_ADMIN:
@@ -267,7 +267,7 @@ def get_user_permissions(event):
             return create_response(403, {'error': 'Cannot view other user permissions'})
         
         # Get user role and permissions
-        user_role = rbac_manager.get_user_role(target_user_id, usecase_id)
+        user_role = rbac_manager.get_user_role(target_user_id, usecase_id, current_user)
         user_permissions = rbac_manager.get_user_permissions(target_user_id, usecase_id)
         
         return create_response(200, {
@@ -307,7 +307,7 @@ def get_my_usecases(event):
                 response = usecases_table.get_item(Key={'usecase_id': usecase_id})
                 if 'Item' in response:
                     usecase = response['Item']
-                    user_role = rbac_manager.get_user_role(user_id, usecase_id)
+                    user_role = rbac_manager.get_user_role(user_id, usecase_id, current_user)
                     
                     usecase_details.append({
                         'usecase_id': usecase_id,
@@ -324,7 +324,7 @@ def get_my_usecases(event):
         return create_response(200, {
             'usecases': usecase_details,
             'total_count': len(usecase_details),
-            'is_super_user': rbac_manager.is_portal_admin(user_id)
+            'is_super_user': rbac_manager.is_portal_admin(user_id, current_user)
         })
         
     except Exception as e:

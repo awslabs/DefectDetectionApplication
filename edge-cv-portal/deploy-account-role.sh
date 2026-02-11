@@ -9,11 +9,28 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Check AWS CLI is available
+if ! command -v aws &> /dev/null; then
+    echo -e "${RED}✗ AWS CLI is not installed or not in PATH${NC}"
+    echo "Please install AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    exit 1
+fi
+
+# Check AWS credentials are configured
+if ! aws sts get-caller-identity &> /dev/null; then
+    echo -e "${RED}✗ AWS credentials are not configured${NC}"
+    echo "Please configure AWS credentials using: aws configure"
+    exit 1
+fi
 
 echo "=========================================="
 echo "DDA Portal - Account Role Deployment"
 echo "=========================================="
+echo ""
+echo -e "${BLUE}ℹ Current AWS Account: $(aws sts get-caller-identity --query 'Account' --output text)${NC}"
 echo ""
 
 # Show menu if no arguments provided
@@ -64,14 +81,27 @@ if [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
     read -p "Enter Portal Account ID: " PORTAL_ACCOUNT_ID
     
     if [ -z "$PORTAL_ACCOUNT_ID" ]; then
-        echo -e "${RED}Portal Account ID is required${NC}"
+        echo -e "${RED}✗ Portal Account ID is required${NC}"
         exit 1
     fi
     
     # Validate account ID format
     if ! [[ "$PORTAL_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
-        echo -e "${RED}Invalid account ID format (must be 12 digits)${NC}"
+        echo -e "${RED}✗ Invalid account ID format (must be 12 digits)${NC}"
         exit 1
+    fi
+    
+    # Check if Portal Account is different from current account
+    CURRENT_ACCOUNT=$(aws sts get-caller-identity --query 'Account' --output text)
+    if [ "$PORTAL_ACCOUNT_ID" = "$CURRENT_ACCOUNT" ]; then
+        echo -e "${YELLOW}⚠ Warning: Portal Account ID is the same as current account${NC}"
+        echo "This is a single-account setup. You don't need to deploy a cross-account role."
+        echo "In the Portal, use: arn:aws:iam::$CURRENT_ACCOUNT:root as the Role ARN"
+        read -p "Continue anyway? (y/n): " CONTINUE
+        if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
+            echo "Cancelled."
+            exit 0
+        fi
     fi
     
     echo ""
@@ -102,26 +132,46 @@ EOF
         --assume-role-policy-document "$TRUST_POLICY" 2>/dev/null; then
         echo -e "${GREEN}✓${NC} Created DDAPortalUseCaseRole"
     else
-        echo -e "${YELLOW}⚠${NC} DDAPortalUseCaseRole already exists"
+        ROLE_EXISTS=$(aws iam get-role --role-name DDAPortalUseCaseRole 2>/dev/null || echo "")
+        if [ -n "$ROLE_EXISTS" ]; then
+            echo -e "${YELLOW}⚠${NC} DDAPortalUseCaseRole already exists"
+            echo "Updating trust policy..."
+            aws iam update-assume-role-policy-document \
+                --role-name DDAPortalUseCaseRole \
+                --policy-document "$TRUST_POLICY" 2>/dev/null || true
+            echo -e "${GREEN}✓${NC} Trust policy updated"
+        else
+            echo -e "${RED}✗ Failed to create role. Check IAM permissions.${NC}"
+            exit 1
+        fi
     fi
     
     # Attach policies for UseCase Account
     echo "Attaching policies..."
     
-    aws iam attach-role-policy \
+    if aws iam attach-role-policy \
         --role-name DDAPortalUseCaseRole \
-        --policy-arn arn:aws:iam::aws:policy/AmazonSageMakerFullAccess 2>/dev/null || true
-    echo -e "${GREEN}✓${NC} SageMaker policy attached"
+        --policy-arn arn:aws:iam::aws:policy/AmazonSageMakerFullAccess 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} SageMaker policy attached"
+    else
+        echo -e "${YELLOW}⚠${NC} Could not attach SageMaker policy (may already be attached)"
+    fi
     
-    aws iam attach-role-policy \
+    if aws iam attach-role-policy \
         --role-name DDAPortalUseCaseRole \
-        --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess 2>/dev/null || true
-    echo -e "${GREEN}✓${NC} S3 policy attached"
+        --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} S3 policy attached"
+    else
+        echo -e "${YELLOW}⚠${NC} Could not attach S3 policy (may already be attached)"
+    fi
     
-    aws iam attach-role-policy \
+    if aws iam attach-role-policy \
         --role-name DDAPortalUseCaseRole \
-        --policy-arn arn:aws:iam::aws:policy/AWSGreengrassFullAccess 2>/dev/null || true
-    echo -e "${GREEN}✓${NC} Greengrass policy attached"
+        --policy-arn arn:aws:iam::aws:policy/AWSGreengrassFullAccess 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Greengrass policy attached"
+    else
+        echo -e "${YELLOW}⚠${NC} Could not attach Greengrass policy (may already be attached)"
+    fi
     
     # Get role ARN and external ID
     ROLE_ARN=$(aws iam get-role --role-name DDAPortalUseCaseRole --query 'Role.Arn' --output text)
@@ -179,14 +229,27 @@ elif [ "$DEPLOYMENT_TYPE" = "data" ]; then
     read -p "Enter Portal Account ID: " PORTAL_ACCOUNT_ID
     
     if [ -z "$PORTAL_ACCOUNT_ID" ]; then
-        echo -e "${RED}Portal Account ID is required${NC}"
+        echo -e "${RED}✗ Portal Account ID is required${NC}"
         exit 1
     fi
     
     # Validate account ID format
     if ! [[ "$PORTAL_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
-        echo -e "${RED}Invalid account ID format (must be 12 digits)${NC}"
+        echo -e "${RED}✗ Invalid account ID format (must be 12 digits)${NC}"
         exit 1
+    fi
+    
+    # Check if Portal Account is different from current account
+    CURRENT_ACCOUNT=$(aws sts get-caller-identity --query 'Account' --output text)
+    if [ "$PORTAL_ACCOUNT_ID" = "$CURRENT_ACCOUNT" ]; then
+        echo -e "${YELLOW}⚠ Warning: Portal Account ID is the same as current account${NC}"
+        echo "This is a single-account setup. You don't need to deploy a cross-account role."
+        echo "In the Portal, use the same account for both UseCase and Data Account."
+        read -p "Continue anyway? (y/n): " CONTINUE
+        if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
+            echo "Cancelled."
+            exit 0
+        fi
     fi
     
     echo ""
@@ -217,21 +280,38 @@ EOF
         --assume-role-policy-document "$TRUST_POLICY" 2>/dev/null; then
         echo -e "${GREEN}✓${NC} Created DDAPortalDataAccessRole"
     else
-        echo -e "${YELLOW}⚠${NC} DDAPortalDataAccessRole already exists"
+        ROLE_EXISTS=$(aws iam get-role --role-name DDAPortalDataAccessRole 2>/dev/null || echo "")
+        if [ -n "$ROLE_EXISTS" ]; then
+            echo -e "${YELLOW}⚠${NC} DDAPortalDataAccessRole already exists"
+            echo "Updating trust policy..."
+            aws iam update-assume-role-policy-document \
+                --role-name DDAPortalDataAccessRole \
+                --policy-document "$TRUST_POLICY" 2>/dev/null || true
+            echo -e "${GREEN}✓${NC} Trust policy updated"
+        else
+            echo -e "${RED}✗ Failed to create role. Check IAM permissions.${NC}"
+            exit 1
+        fi
     fi
     
     # Attach policies for Data Account
     echo "Attaching policies..."
     
-    aws iam attach-role-policy \
+    if aws iam attach-role-policy \
         --role-name DDAPortalDataAccessRole \
-        --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess 2>/dev/null || true
-    echo -e "${GREEN}✓${NC} S3 policy attached"
+        --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} S3 policy attached"
+    else
+        echo -e "${YELLOW}⚠${NC} Could not attach S3 policy (may already be attached)"
+    fi
     
-    aws iam attach-role-policy \
+    if aws iam attach-role-policy \
         --role-name DDAPortalDataAccessRole \
-        --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess 2>/dev/null || true
-    echo -e "${GREEN}✓${NC} CloudWatch Logs policy attached"
+        --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} CloudWatch Logs policy attached"
+    else
+        echo -e "${YELLOW}⚠${NC} Could not attach CloudWatch Logs policy (may already be attached)"
+    fi
     
     # Get role ARN and external ID
     ROLE_ARN=$(aws iam get-role --role-name DDAPortalDataAccessRole --query 'Role.Arn' --output text)

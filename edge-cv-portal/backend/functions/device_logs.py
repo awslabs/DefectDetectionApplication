@@ -10,7 +10,8 @@ import boto3
 from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, is_super_user, assume_cross_account_role, get_usecase
+    check_user_access, is_super_user, assume_cross_account_role, get_usecase,
+    create_boto3_client
 )
 
 # Import the analyzer function
@@ -117,22 +118,10 @@ def list_log_groups(device_id, user, query_params):
         region = os.environ.get('AWS_REGION', 'us-east-1')
         
         # Create CloudWatch Logs client with assumed role
-        logs_client = boto3.client(
-            'logs',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        logs_client = create_boto3_client('logs', credentials, region)
         
         # Create Greengrass client to get installed components
-        greengrass_client = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
         
         log_groups = []
         existing_log_group_names = set()
@@ -280,13 +269,7 @@ def get_component_logs(device_id, component_name, user, query_params):
         region = os.environ.get('AWS_REGION', 'us-east-1')
         
         # Create CloudWatch Logs client with assumed role
-        logs_client = boto3.client(
-            'logs',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        logs_client = create_boto3_client('logs', credentials, region)
         
         # Parse query parameters
         now = int(datetime.utcnow().timestamp() * 1000)
