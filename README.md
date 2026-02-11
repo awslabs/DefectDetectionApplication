@@ -611,6 +611,7 @@ See [edge-cv-portal/README.md](edge-cv-portal/README.md) for complete deployment
 | **Compilation** | Compile models for edge (x86-64, ARM64) |
 | **Components** | Manage Greengrass components |
 | **Deployments** | Deploy models to edge devices with optional Inference Uploader |
+| **Inference Uploader** | Automatically upload inference results (images & metadata) from edge devices to S3 |
 | **Devices** | Monitor IoT Greengrass devices |
 | **Settings** | Portal configuration and Data Accounts management |
 
@@ -639,6 +640,109 @@ See [edge-cv-portal/README.md](edge-cv-portal/README.md) for complete deployment
    ↓ Create deployment to device/group
    ↓ Optional: Enable Inference Uploader for S3 sync
 ```
+
+## Inference Results Upload (Optional)
+
+The **Inference Uploader** component enables edge devices to automatically upload inference results to S3 for centralized storage, analysis, and monitoring.
+
+### What is Inference Uploader?
+
+The Inference Uploader is an optional Greengrass component that:
+- Monitors inference results on edge devices (`/aws_dda/inference-results/`)
+- Automatically uploads images (.jpg, .png) and metadata (.jsonl) to S3
+- Organizes results by usecase, device, and model
+- Manages local file retention and cleanup
+- Provides CloudWatch logging for monitoring
+
+### Automatic Provisioning
+
+The Inference Uploader component is **automatically provisioned** to all usecase accounts during onboarding:
+
+1. **New Usecases**: Component is automatically shared when you create a usecase in the portal
+2. **Existing Usecases**: Component is available for deployment (use "Update All Usecases" button to refresh)
+
+### Deployment
+
+To enable Inference Uploader on a device:
+
+1. Go to **Deployments** → **Create Deployment**
+2. Select your device/group
+3. Add components:
+   - `aws.edgeml.dda.LocalServer.{arch}` (required)
+   - `aws.edgeml.dda.InferenceUploader` (optional)
+   - Your model component
+4. Configure Inference Uploader:
+   ```json
+   {
+     "s3Bucket": "dda-inference-results-{account-id}",
+     "s3Prefix": "{usecase-id}/{device-id}",
+     "uploadIntervalSeconds": 300,
+     "batchSize": 100,
+     "localRetentionDays": 7,
+     "uploadImages": true,
+     "uploadMetadata": true
+   }
+   ```
+5. Deploy
+
+### Edge Device IAM Permissions
+
+Edge devices need IAM permissions to access S3, CloudWatch Logs, and cross-account resources. Use the policy in `station_install/edge-device-iam-policy.json`:
+
+**What the policy grants:**
+- **S3 Access**: Download Greengrass components and upload inference results
+- **CloudWatch Logs**: Send component logs to CloudWatch
+- **Cross-Account Access**: Assume roles in other AWS accounts (for multi-account setups)
+- **IoT Core**: Connect and publish device telemetry
+- **Greengrass**: Get deployment status and connectivity info
+
+**Cross-Account Support:**
+The policy includes `sts:AssumeRole` permission for `dda-cross-account-role`, which enables:
+- Devices in UseCase Account to access S3 buckets in Data Account
+- Devices to upload inference results to cross-account S3 buckets
+- Multi-account deployments where components and data are in different accounts
+
+**How to apply:**
+1. Create an IAM user or role for edge device credentials
+2. Attach the policy from `station_install/edge-device-iam-policy.json`
+3. Generate access keys for the device
+4. Configure device with these credentials during setup
+
+**Example:**
+```bash
+# Create IAM user for edge devices
+aws iam create-user --user-name dda-edge-device
+
+# Attach policy
+aws iam put-user-policy \
+  --user-name dda-edge-device \
+  --policy-name DDAEdgeDevicePolicy \
+  --policy-document file://station_install/edge-device-iam-policy.json
+
+# Generate access keys
+aws iam create-access-key --user-name dda-edge-device
+```
+
+### S3 Structure
+
+Results are organized as:
+```
+s3://dda-inference-results-{account}/
+  └─ {usecase-id}/
+     └─ {device-id}/
+        └─ {model-id}/
+           └─ YYYY/MM/DD/
+              ├─ {event-id}.jpg
+              └─ {event-id}.jsonl
+```
+
+### Monitoring
+
+- **Component Logs**: CloudWatch Logs at `/aws/greengrass/UserComponent/{region}/{device-name}/aws.edgeml.dda.InferenceUploader`
+- **Upload Status**: Check S3 bucket for uploaded files
+- **Device Logs**: SSH to device and check `/aws_dda/greengrass/v2/logs/aws.edgeml.dda.InferenceUploader.log`
+
+For detailed setup and troubleshooting, see [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md).
 
 ## Documentation
 
