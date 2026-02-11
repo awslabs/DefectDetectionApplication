@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
 # Build and publish Greengrass components using GDK
 # This script builds components and publishes them to the Greengrass component repository
@@ -61,10 +62,24 @@ rm -rf .gdk/
 
 # Build and publish component
 echo "Building component..."
-gdk component build
+BUILD_LOG="/tmp/gdk-build-$(date +%s).log"
+echo "Build log: $BUILD_LOG"
+if gdk component build > "$BUILD_LOG" 2>&1; then
+    echo "✓ Component built successfully"
+else
+    echo "✗ Component build failed. See log for details:"
+    tail -50 "$BUILD_LOG"
+    exit 1
+fi
 
 echo "Publishing component..."
-gdk component publish
+if gdk component publish > "$BUILD_LOG" 2>&1; then
+    echo "✓ Component published successfully"
+else
+    echo "✗ Component publish failed. See log for details:"
+    tail -50 "$BUILD_LOG"
+    exit 1
+fi
 
 echo ""
 echo "Component ${COMPONENT_NAME} built and published successfully!"
@@ -110,10 +125,15 @@ read -p "Build and publish InferenceUploader component now? (y/n): " BUILD_INFER
 if [ "$BUILD_INFERENCE_UPLOADER" = "y" ] || [ "$BUILD_INFERENCE_UPLOADER" = "Y" ]; then
     echo ""
     echo "Building InferenceUploader component..."
-    if bash build-inference-uploader.sh; then
+    INFERENCE_LOG="/tmp/inference-uploader-build-$(date +%s).log"
+    echo "Build log: $INFERENCE_LOG"
+    if bash build-inference-uploader.sh > "$INFERENCE_LOG" 2>&1; then
         echo "✅ InferenceUploader component built and published successfully!"
     else
-        echo "⚠ Warning: InferenceUploader build failed (you can run ./build-inference-uploader.sh later)"
+        echo "✗ InferenceUploader build failed. See log for details:"
+        tail -50 "$INFERENCE_LOG"
+        echo ""
+        echo "You can run ./build-inference-uploader.sh later to retry"
     fi
 else
     echo ""

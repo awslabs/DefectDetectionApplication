@@ -1,4 +1,6 @@
 #!/bin/bash
+set -e
+set -o pipefail
 # Copyright 2025 Amazon Web Services, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
