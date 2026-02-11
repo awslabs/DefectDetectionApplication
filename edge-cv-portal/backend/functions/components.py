@@ -13,7 +13,8 @@ from shared_utils import (
     assume_cross_account_role,
     cors_headers,
     handle_error,
-    check_user_access
+    check_user_access,
+    create_boto3_client
 )
 
 def lambda_handler(event, context):
@@ -164,14 +165,8 @@ def list_public_components(credentials: Dict, region: str, query_params: Dict) -
     These are AWS-provided components like aws.greengrass.Nucleus, aws.greengrass.Cli, etc.
     """
     try:
-        # Create Greengrass client with assumed role
-        greengrass = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        # Create Greengrass client with assumed role (or default credentials for single-account)
+        greengrass = create_boto3_client('greengrassv2', credentials, region)
         
         components = []
         next_token = None
@@ -238,17 +233,13 @@ def list_private_components(credentials: Dict, region: str, query_params: Dict) 
     Only returns the latest version of each component.
     """
     try:
-        # Create Resource Groups Tagging API client with assumed role
-        tagging_client = boto3.client(
-            'resourcegroupstaggingapi',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        # Create Resource Groups Tagging API client with assumed role (or default credentials for single-account)
+        tagging_client = create_boto3_client('resourcegroupstaggingapi', credentials, region)
         
         pagination_token = ''
         tagged_resources = []
+        
+        print(f"[DEBUG] Listing private components with credentials: is_default={credentials.get('is_default_credentials')}")
         
         while True:
             tag_params = {
@@ -268,11 +259,15 @@ def list_private_components(credentials: Dict, region: str, query_params: Dict) 
             
             tag_response = tagging_client.get_resources(**tag_params)
             
+            print(f"[DEBUG] Tag response: {len(tag_response.get('ResourceTagMappingList', []))} resources found")
+            
             # Filter to only Greengrass components by ARN pattern
             for resource in tag_response.get('ResourceTagMappingList', []):
                 arn = resource.get('ResourceARN', '')
+                print(f"[DEBUG] Checking resource: {arn}")
                 if ':greengrass:' in arn and ':components:' in arn:
                     tagged_resources.append(resource)
+                    print(f"[DEBUG] Added Greengrass component: {arn}")
             
             pagination_token = tag_response.get('PaginationToken', '')
             if not pagination_token:
@@ -313,13 +308,7 @@ def list_private_components(credentials: Dict, region: str, query_params: Dict) 
         
         # Build component list from deduplicated map
         # Create Greengrass client to fetch component details
-        greengrass = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=region
-        )
+        greengrass = create_boto3_client('greengrassv2', credentials, region)
         
         components = []
         for component_name, comp_data in component_map.items():
@@ -425,15 +414,10 @@ def get_component_details(user_info: Dict, component_arn: str, query_params: Dic
         external_id = use_case['external_id']
         
         credentials = assume_cross_account_role(cross_account_role_arn, external_id)
+        region = os.environ.get('AWS_REGION', 'us-east-1')
         
         # Create Greengrass client with assumed role
-        greengrass = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=os.environ.get('AWS_REGION', 'us-east-1')
-        )
+        greengrass = create_boto3_client('greengrassv2', credentials, region)
         
         # Get component details
         component_details = greengrass.describe_component(arn=component_arn)
@@ -583,15 +567,10 @@ def delete_component(user_info: Dict, component_arn: str, query_params: Dict, he
         external_id = use_case['external_id']
         
         credentials = assume_cross_account_role(cross_account_role_arn, external_id)
+        region = os.environ.get('AWS_REGION', 'us-east-1')
         
         # Create Greengrass client with assumed role
-        greengrass = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=os.environ.get('AWS_REGION', 'us-east-1')
-        )
+        greengrass = create_boto3_client('greengrassv2', credentials, region)
         
         # Delete component (this will delete all versions)
         try:

@@ -30,7 +30,8 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields, assume_cross_account_role
+    check_user_access, validate_required_fields, assume_cross_account_role,
+    create_boto3_client
 )
 
 logger = logging.getLogger()
@@ -271,15 +272,10 @@ def share_component_to_usecase(
         
         # Assume cross-account role
         credentials = assume_cross_account_role(cross_account_role_arn, external_id)
+        region = os.environ.get('AWS_REGION', 'us-east-1')
         
         # Create Greengrass client for usecase account
-        greengrass_usecase = boto3.client(
-            'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken'],
-            region_name=os.environ.get('AWS_REGION', 'us-east-1')
-        )
+        greengrass_usecase = create_boto3_client('greengrassv2', credentials, region)
         
         component_arn = f"arn:aws:greengrass:{AWS_REGION}:{usecase_account_id}:components:{component_name}:versions:{component_version}"
         

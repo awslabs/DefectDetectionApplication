@@ -679,12 +679,32 @@ def get_usecase(usecase_id: str) -> Dict:
 def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
     """Assume cross-account role for UseCase Account access
     
+    For single-account setups (where role_arn is the root ARN), returns current credentials
+    instead of attempting to assume the root role (which is not possible).
+    
     Args:
         role_arn: ARN of the role to assume
         external_id: External ID for role assumption (can be None if role doesn't require it)
         session_name: Name for the assumed role session
+    
+    Returns:
+        Credentials dict with AccessKeyId, SecretAccessKey, SessionToken
     """
     try:
+        # Check if this is a single-account setup (role_arn is root ARN)
+        # Root ARN format: arn:aws:iam::ACCOUNT_ID:root
+        if role_arn and role_arn.endswith(':root'):
+            logger.info(f"Single-account setup detected (root ARN). Using Lambda execution role credentials")
+            # For single-account, return a special marker that tells boto3 to use default credentials
+            # We return empty credentials dict which signals to use the default chain
+            return {
+                'AccessKeyId': None,
+                'SecretAccessKey': None,
+                'SessionToken': None,
+                'is_default_credentials': True
+            }
+        
+        # Multi-account setup - assume the role
         sts_client = boto3.client('sts')
         
         # Build assume role parameters
@@ -701,10 +721,10 @@ def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> D
         response = sts_client.assume_role(**assume_params)
         return response['Credentials']
     except ClientError as e:
-        logger.error(f"Error assuming role: {str(e)}")
+        logger.error(f"Error assuming role {role_arn}: {str(e)}")
         raise
     except Exception as e:
-        logger.error(f"Error assuming role: {str(e)}")
+        logger.error(f"Error assuming role {role_arn}: {str(e)}")
         raise
 
 
@@ -715,6 +735,44 @@ def assume_cross_account_role(role_arn: str, external_id: str, session_name: str
     if not session_name:
         session_name = f"portal-session-{int(datetime.utcnow().timestamp())}"
     return assume_usecase_role(role_arn, external_id, session_name)
+
+
+def create_boto3_client(service_name: str, credentials: Dict, region: str = None) -> Any:
+    """
+    Create a boto3 client with the given credentials.
+    
+    Handles the special case where credentials indicate default credentials should be used
+    (for single-account setups where role_arn is root ARN).
+    
+    Args:
+        service_name: AWS service name (e.g., 's3', 'sagemaker', 'iot')
+        credentials: Credentials dict from assume_usecase_role
+        region: AWS region (optional)
+    
+    Returns:
+        boto3 client for the specified service
+    """
+    # Check if this is the special marker for default credentials
+    if credentials.get('is_default_credentials'):
+        # Use default credentials (Lambda execution role)
+        if region:
+            return boto3.client(service_name, region_name=region)
+        else:
+            return boto3.client(service_name)
+    
+    # Use the provided credentials
+    client_params = {
+        'aws_access_key_id': credentials['AccessKeyId'],
+        'aws_secret_access_key': credentials['SecretAccessKey'],
+    }
+    
+    if credentials.get('SessionToken'):
+        client_params['aws_session_token'] = credentials['SessionToken']
+    
+    if region:
+        client_params['region_name'] = region
+    
+    return boto3.client(service_name, **client_params)
 
 
 def cors_headers() -> Dict[str, str]:

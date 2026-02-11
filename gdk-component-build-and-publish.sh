@@ -189,4 +189,55 @@ echo ""
 
 if [ ${#ERRORS[@]} -eq 0 ]; then
     echo "✅ Component ${COMPONENT_NAME} built and published successfully!"
+    
+    # Tag the published component with dda-portal:managed=true
+    echo ""
+    echo "▶ Tagging component..."
+    
+    # Get the component ARN from the published component
+    # We need to query Greengrass to get the ARN of the published component
+    COMPONENT_ARN=$(aws greengrassv2 list-components \
+        --scope PRIVATE \
+        --region us-east-1 \
+        --query "components[?componentName=='${COMPONENT_NAME}'].arn | [0]" \
+        --output text 2>/dev/null)
+    
+    if [ -n "$COMPONENT_ARN" ] && [ "$COMPONENT_ARN" != "None" ]; then
+        echo "Found component ARN: $COMPONENT_ARN"
+        
+        # Tag the component
+        if aws greengrassv2 tag-resource \
+            --resource-arn "$COMPONENT_ARN" \
+            --tags "dda-portal:managed=true" \
+            --region us-east-1 2>/dev/null; then
+            echo "✓ Component tagged successfully"
+        else
+            echo "⚠ Warning: Could not tag component (this is non-critical)"
+        fi
+    else
+        echo "⚠ Warning: Could not find component ARN for tagging (this is non-critical)"
+    fi
+    
+    # Ask if user wants to build InferenceUploader component
+    echo ""
+    echo "▶ Optional: Build InferenceUploader component?"
+    echo ""
+    echo "The InferenceUploader component enables edge devices to automatically"
+    echo "upload inference results (images and metadata) to S3 for centralized storage."
+    echo ""
+    read -p "Build and publish InferenceUploader component now? (y/n): " BUILD_INFERENCE_UPLOADER
+    
+    if [ "$BUILD_INFERENCE_UPLOADER" = "y" ] || [ "$BUILD_INFERENCE_UPLOADER" = "Y" ]; then
+        echo ""
+        echo "Building InferenceUploader component..."
+        if bash build-inference-uploader.sh; then
+            echo "✅ InferenceUploader component built and published successfully!"
+        else
+            echo "⚠ Warning: InferenceUploader build failed (you can run ./build-inference-uploader.sh later)"
+        fi
+    else
+        echo ""
+        echo "ℹ You can build the InferenceUploader component later by running:"
+        echo "  ./build-inference-uploader.sh"
+    fi
 fi

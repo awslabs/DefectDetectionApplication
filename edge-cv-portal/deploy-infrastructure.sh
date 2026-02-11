@@ -5,8 +5,13 @@
 
 set -e
 
+# Get AWS account ID
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+AWS_REGION=$(aws configure get region || echo "us-east-1")
+
 echo "🚀 Starting Edge CV Portal Infrastructure Deployment..."
-echo "🔧 Fixed shared_utils.py syntax errors and forcing Lambda layer update..."
+echo "📍 AWS Account: $AWS_ACCOUNT_ID | Region: $AWS_REGION"
+echo ""
 
 # Change to infrastructure directory
 cd infrastructure

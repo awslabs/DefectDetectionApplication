@@ -204,18 +204,22 @@ export default function UseCaseOnboarding() {
         cost_center: state.costCenter,
       };
 
-      // Always include Data Account configuration
-      // If same as UseCase Account, use UseCase Account values
+      // Data Account configuration
+      // For single-account setups: don't set data_account_role_arn (signals same account)
+      // For multi-account setups: set all data account fields
       if (state.dataAccountSameAsUseCase) {
+        // Single-account setup: data is in the same account as the usecase
+        // Don't set data_account_role_arn - this signals to backend that it's same account
         useCaseData.data_account_id = state.accountId;
-        useCaseData.data_account_role_arn = state.roleArn;
-        useCaseData.data_account_external_id = state.externalId;
+        // data_account_role_arn is intentionally NOT set for single-account
+        // data_account_external_id is intentionally NOT set for single-account
         useCaseData.data_s3_bucket = state.s3Bucket;
         useCaseData.data_s3_prefix = state.s3Prefix;
         // When same account, s3_bucket is always the same
         useCaseData.s3_bucket = state.s3Bucket;
         useCaseData.s3_prefix = state.s3Prefix;
       } else {
+        // Multi-account setup: data is in a separate account
         useCaseData.data_account_id = state.dataAccountId;
         useCaseData.data_account_role_arn = state.dataAccountRoleArn;
         useCaseData.data_account_external_id = state.dataAccountExternalId;
@@ -837,7 +841,7 @@ aws s3api put-bucket-versioning \\
                       <Box>{state.useCaseName}</Box>
                     </div>
                     <div>
-                      <Box variant="awsui-key-label">AWS Account ID</Box>
+                      <Box variant="awsui-key-label">UseCase Account ID</Box>
                       <Box>{state.accountId}</Box>
                     </div>
                     <div>
@@ -862,6 +866,22 @@ aws s3api put-bucket-versioning \\
                     </div>
                   </SpaceBetween>
                 </ColumnLayout>
+
+                {/* Data Account Configuration */}
+                <Box margin={{ top: 'l' }}>
+                  <Box variant="h3" margin={{ bottom: 's' }}>Data Account Configuration</Box>
+                  {state.dataAccountSameAsUseCase ? (
+                    <Box>
+                      <Box variant="awsui-key-label">Data Account ID</Box>
+                      <Box>{state.accountId} (same as UseCase Account)</Box>
+                    </Box>
+                  ) : (
+                    <Box>
+                      <Box variant="awsui-key-label">Data Account ID</Box>
+                      <Box>{state.dataAccountId}</Box>
+                    </Box>
+                  )}
+                </Box>
 
                 {/* Storage Configuration Summary */}
                 <Box margin={{ top: 'l' }}>

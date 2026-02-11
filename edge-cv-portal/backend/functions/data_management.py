@@ -35,26 +35,26 @@ USECASES_TABLE = os.environ.get('USECASES_TABLE')
 def get_data_account_credentials(usecase: Dict) -> Optional[Dict]:
     """
     Get credentials for the data account.
-    If data_account_role_arn is set, assume that role with the required external ID.
-    Otherwise, use the regular usecase account role.
+    For single-account setups: Returns None (use default Lambda credentials)
+    For multi-account setups: Assumes the data_account_role_arn
     """
     # Check if separate data account is configured
     data_role_arn = usecase.get('data_account_role_arn')
     
-    if data_role_arn:
-        # Use separate data account role - external ID is required for production
-        external_id = usecase.get('data_account_external_id')
-        if not external_id:
-            raise ValueError(
-                "data_account_external_id is required when using a separate Data Account. "
-                "Please update the UseCase configuration with the external ID."
-            )
-        session_name = f"data-mgmt-{int(datetime.utcnow().timestamp())}"[:64]
-    else:
-        # Use regular usecase account role (this one requires external_id)
-        data_role_arn = usecase['cross_account_role_arn']
-        external_id = usecase['external_id']
-        session_name = f"data-mgmt-{int(datetime.utcnow().timestamp())}"[:64]
+    if not data_role_arn:
+        # Single-account setup - use default Lambda credentials
+        logger.info(f"Single-account setup detected. Using Lambda execution role credentials")
+        return None
+    
+    # Separate data account - assume the data account role
+    external_id = usecase.get('data_account_external_id')
+    if not external_id:
+        raise ValueError(
+            "data_account_external_id is required when using a separate Data Account. "
+            "Please update the UseCase configuration with the external ID."
+        )
+    
+    session_name = f"data-mgmt-{int(datetime.utcnow().timestamp())}"[:64]
     
     try:
         # Build assume role params
@@ -81,14 +81,18 @@ def get_data_bucket(usecase: Dict) -> str:
     return usecase.get('data_s3_bucket') or usecase.get('s3_bucket')
 
 
-def create_s3_client(credentials: Dict) -> boto3.client:
-    """Create S3 client with assumed credentials."""
-    return boto3.client(
-        's3',
-        aws_access_key_id=credentials['AccessKeyId'],
-        aws_secret_access_key=credentials['SecretAccessKey'],
-        aws_session_token=credentials['SessionToken']
-    )
+def create_s3_client(credentials: Dict = None) -> boto3.client:
+    """Create S3 client with assumed credentials or default credentials."""
+    if credentials:
+        return boto3.client(
+            's3',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken']
+        )
+    else:
+        # Use default credentials (single-account setup)
+        return boto3.client('s3')
 
 
 def is_valid_bucket_name(name: str) -> bool:
@@ -202,14 +206,19 @@ def list_buckets(event: Dict) -> Dict:
         credentials = get_data_account_credentials(usecase)
         
         # Use Resource Groups Tagging API to find tagged buckets
-        tagging_client = boto3.client(
-            'resourcegroupstaggingapi',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
-        
-        s3 = create_s3_client(credentials)
+        if credentials:
+            # Multi-account setup - use assumed role credentials
+            tagging_client = boto3.client(
+                'resourcegroupstaggingapi',
+                aws_access_key_id=credentials['AccessKeyId'],
+                aws_secret_access_key=credentials['SecretAccessKey'],
+                aws_session_token=credentials['SessionToken']
+            )
+            s3 = create_s3_client(credentials)
+        else:
+            # Single-account setup - use Lambda execution role credentials
+            tagging_client = boto3.client('resourcegroupstaggingapi')
+            s3 = boto3.client('s3')
         
         # Find buckets with dda-portal:managed tag
         buckets = []

@@ -989,12 +989,20 @@ def create_usecase(event, user):
                 })
         
         # Add optional Data Account fields if provided
+        # For single-account setups (data_account_id == account_id), don't store role/external_id
+        is_single_account = body.get('data_account_id') == body['account_id']
+        
         if body.get('data_account_id'):
             item['data_account_id'] = body['data_account_id']
-        if body.get('data_account_role_arn'):
+        
+        # Only store data_account_role_arn for multi-account setups
+        if body.get('data_account_role_arn') and not is_single_account:
             item['data_account_role_arn'] = body['data_account_role_arn']
-        if body.get('data_account_external_id'):
+        
+        # Only store data_account_external_id for multi-account setups
+        if body.get('data_account_external_id') and not is_single_account:
             item['data_account_external_id'] = body['data_account_external_id']
+        
         if body.get('data_s3_bucket'):
             item['data_s3_bucket'] = body['data_s3_bucket']
         if body.get('data_s3_prefix'):
