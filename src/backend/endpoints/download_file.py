@@ -81,7 +81,24 @@ def get_snapshotfile(
     token: str = None
 ):
     validate_token_in_query_param(token)
-    file_path = os.path.join(DDA_SYSTEM_FOLDER, fileName)
+    
+    # Sanitize filename to prevent path traversal
+    safe_filename = os.path.basename(fileName)
+    if safe_filename != fileName or '..' in fileName:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid filename"
+        )
+    
+    file_path = os.path.join(DDA_SYSTEM_FOLDER, safe_filename)
+    
+    # Ensure the resolved path is within the allowed directory
+    if not os.path.abspath(file_path).startswith(os.path.abspath(DDA_SYSTEM_FOLDER)):
+        raise HTTPException(
+            status_code=400,
+            detail="Access denied"
+        )
+    
     if os.path.exists(file_path):
         return FileResponse(file_path)
 
@@ -103,7 +120,18 @@ def load_input_image_from_worflow_by_capture_id(workflowId: str, captureId: str,
         capture_details = inference_result_accessor.get_inference_result(db, captureId)
         if capture_details is None:
             logger.info("Getting image from jsonl file")
-            jsonl_file = f"/aws_dda/inference-results/{workflowId}/{captureId}.jsonl"
+            # Sanitize path components to prevent directory traversal
+            safe_workflow_id = os.path.basename(workflowId)
+            safe_capture_id = os.path.basename(captureId)
+            if (safe_workflow_id != workflowId or safe_capture_id != captureId or 
+                '..' in workflowId or '..' in captureId or 
+                os.path.sep in safe_workflow_id or os.path.sep in safe_capture_id):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid workflow or capture ID"
+                )
+            
+            jsonl_file = f"/aws_dda/inference-results/{safe_workflow_id}/{safe_capture_id}.jsonl"
             try:
                 with open(jsonl_file, 'r') as f:
                     json_str = f.read()
@@ -184,12 +212,30 @@ def get_inference_result_data_for_retraining(
     # First, POST to /workflows/{workflow_id}/results/export, which writes out the data to a file on disk
     # Then, GET from /workflows/{workflow_id}/results/export (here), which loads the data from said file on disk
     if captureIdPath:
-        if not os.path.exists(captureIdPath):
+        # Sanitize path to prevent directory traversal
+        safe_path = os.path.basename(captureIdPath)
+        if safe_path != captureIdPath or '..' in captureIdPath or os.path.sep in safe_path:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid file path"
+            )
+        
+        # Construct full path within allowed directory
+        full_path = os.path.join(DDA_SYSTEM_FOLDER, safe_path)
+        
+        # Ensure resolved path stays within DDA_SYSTEM_FOLDER
+        if not os.path.abspath(full_path).startswith(os.path.abspath(DDA_SYSTEM_FOLDER)):
+            raise HTTPException(
+                status_code=400,
+                detail="Access denied"
+            )
+        
+        if not os.path.exists(full_path):
             raise HTTPException(
                 status_code=HTTP_404_NOT_FOUND,
-                detail=f"The server can't get the capture id file. Error: 'The path {captureIdPath} couldn't be found'. Check the path and try again.",
+                detail="File not found",
             )
-        with open(captureIdPath) as json_file:
+        with open(full_path) as json_file:
             inference_result_data_list = json.load(json_file)
     else:
         # Regular case, query the data ourselves
