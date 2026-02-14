@@ -93,7 +93,7 @@ echo "▶ Updating package manager..."
 run_cmd "sudo apt-get update" || true
 
 echo "▶ Installing system dependencies..."
-run_cmd "sudo apt-get install -y python3 python3-pip nodejs npm docker.io git curl" || add_warning "Some system packages failed to install"
+run_cmd "sudo apt-get install -y python3 python3-pip nodejs npm docker.io docker-compose git curl" || add_warning "Some system packages failed to install"
 
 echo "▶ Starting Docker daemon..."
 if run_cmd "sudo systemctl start docker"; then
@@ -187,9 +187,9 @@ else
     echo "✓ AWS CLI already installed"
 fi
 
-echo "▶ Installing AWS CDK..."
+echo "▶ Installing AWS CDK (optional for build server)..."
 if ! command -v cdk >/dev/null 2>&1; then
-    run_cmd "sudo npm install -g aws-cdk" || add_error "Failed to install AWS CDK"
+    run_cmd "sudo npm install -g aws-cdk" || add_warning "Failed to install AWS CDK (optional - not required for component builds)"
 else
     echo "✓ AWS CDK already installed"
 fi
@@ -199,6 +199,14 @@ if ! command -v gdk >/dev/null 2>&1; then
     run_cmd "sudo python3 -m pip install git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git@v1.6.2" || add_warning "Failed to install GDK CLI from GitHub"
 else
     echo "✓ GDK CLI already installed"
+fi
+
+echo "▶ Building edgemlsdk Docker image..."
+if [ -d "src/edgemlsdk" ]; then
+    run_cmd "docker build -t edgemlsdk:latest src/edgemlsdk/" || add_warning "Failed to build edgemlsdk Docker image"
+    echo "✓ edgemlsdk Docker image built"
+else
+    add_warning "src/edgemlsdk directory not found - skipping Docker image build"
 fi
 
 echo ""

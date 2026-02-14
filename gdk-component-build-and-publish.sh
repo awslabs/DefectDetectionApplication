@@ -5,6 +5,19 @@ set -o pipefail
 # Build and publish Greengrass components using GDK
 # This script builds components and publishes them to the Greengrass component repository
 
+# Step tracking
+STEP=0
+TOTAL_STEPS=7
+START_TIME=$(date +%s)
+
+print_step() {
+    STEP=$((STEP + 1))
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "[$STEP/$TOTAL_STEPS] $1"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
 # Get architecture and determine recipe file
 ARCH=$(uname -m)
 case $ARCH in
@@ -22,10 +35,10 @@ case $ARCH in
         ;;
 esac
 
-echo "Building component for architecture: $ARCH"
+print_step "Detecting architecture and preparing configuration"
+echo "Architecture: $ARCH"
 echo "Component name: $COMPONENT_NAME"
-echo "Using recipe: $RECIPE_FILE"
-echo ""
+echo "Recipe file: $RECIPE_FILE"
 
 # Use architecture-specific recipe
 cp $RECIPE_FILE recipe.yaml
@@ -64,20 +77,46 @@ rm -rf .gdk/
 echo "Building component..."
 BUILD_LOG="/tmp/gdk-build-$(date +%s).log"
 echo "Build log: $BUILD_LOG"
-if gdk component build > "$BUILD_LOG" 2>&1; then
+echo ""
+
+# Run build with real-time output and log capture
+if gdk component build 2>&1 | tee "$BUILD_LOG"; then
+    echo ""
     echo "✓ Component built successfully"
 else
-    echo "✗ Component build failed. See log for details:"
+    BUILD_EXIT_CODE=${PIPESTATUS[0]}
+    echo ""
+    echo "✗ Component build failed (exit code: $BUILD_EXIT_CODE)"
+    echo ""
+    echo "Last 50 lines of build log:"
+    echo "---"
     tail -50 "$BUILD_LOG"
+    echo "---"
+    echo ""
+    echo "Full log saved to: $BUILD_LOG"
     exit 1
 fi
 
+echo ""
 echo "Publishing component..."
-if gdk component publish > "$BUILD_LOG" 2>&1; then
+PUBLISH_LOG="/tmp/gdk-publish-$(date +%s).log"
+echo "Publish log: $PUBLISH_LOG"
+echo ""
+
+if gdk component publish 2>&1 | tee "$PUBLISH_LOG"; then
+    echo ""
     echo "✓ Component published successfully"
 else
-    echo "✗ Component publish failed. See log for details:"
-    tail -50 "$BUILD_LOG"
+    PUBLISH_EXIT_CODE=${PIPESTATUS[0]}
+    echo ""
+    echo "✗ Component publish failed (exit code: $PUBLISH_EXIT_CODE)"
+    echo ""
+    echo "Last 50 lines of publish log:"
+    echo "---"
+    tail -50 "$PUBLISH_LOG"
+    echo "---"
+    echo ""
+    echo "Full log saved to: $PUBLISH_LOG"
     exit 1
 fi
 
@@ -127,11 +166,22 @@ if [ "$BUILD_INFERENCE_UPLOADER" = "y" ] || [ "$BUILD_INFERENCE_UPLOADER" = "Y" 
     echo "Building InferenceUploader component..."
     INFERENCE_LOG="/tmp/inference-uploader-build-$(date +%s).log"
     echo "Build log: $INFERENCE_LOG"
-    if bash build-inference-uploader.sh > "$INFERENCE_LOG" 2>&1; then
+    echo ""
+    
+    if bash build-inference-uploader.sh 2>&1 | tee "$INFERENCE_LOG"; then
+        echo ""
         echo "✅ InferenceUploader component built and published successfully!"
     else
-        echo "✗ InferenceUploader build failed. See log for details:"
+        INFERENCE_EXIT_CODE=${PIPESTATUS[0]}
+        echo ""
+        echo "✗ InferenceUploader build failed (exit code: $INFERENCE_EXIT_CODE)"
+        echo ""
+        echo "Last 50 lines of build log:"
+        echo "---"
         tail -50 "$INFERENCE_LOG"
+        echo "---"
+        echo ""
+        echo "Full log saved to: $INFERENCE_LOG"
         echo ""
         echo "You can run ./build-inference-uploader.sh later to retry"
     fi
