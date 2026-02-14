@@ -943,8 +943,19 @@ def create_usecase(event, user):
         
         body = json.loads(event.get('body', '{}'))
         
-        # Validate required fields
-        required_fields = ['name', 'account_id', 's3_bucket', 'cross_account_role_arn', 'sagemaker_execution_role_arn']
+        # For single-account setup: only name and s3_bucket are required
+        # For multi-account setup: account_id, cross_account_role_arn, sagemaker_execution_role_arn are required
+        
+        # Check if this is single-account or multi-account setup
+        is_single_account = not body.get('account_id')  # If no account_id provided, assume single-account
+        
+        if is_single_account:
+            # Single-account setup: only name and s3_bucket required
+            required_fields = ['name', 's3_bucket']
+        else:
+            # Multi-account setup: all fields required
+            required_fields = ['name', 'account_id', 's3_bucket', 'cross_account_role_arn', 'sagemaker_execution_role_arn']
+        
         validation_error = validate_required_fields(body, required_fields)
         if validation_error:
             return create_response(400, {'error': validation_error})
@@ -953,14 +964,29 @@ def create_usecase(event, user):
         usecase_id = str(uuid.uuid4())
         timestamp = int(datetime.utcnow().timestamp() * 1000)
         
+        # For single-account setup, auto-detect account ID from STS
+        if is_single_account:
+            try:
+                sts_client = boto3.client('sts')
+                account_id = sts_client.get_caller_identity()['Account']
+                # Use default SageMaker role ARN
+                sagemaker_role_arn = f'arn:aws:iam::{account_id}:role/SageMakerExecutionRole'
+                cross_account_role_arn = f'arn:aws:iam::{account_id}:root'
+            except Exception as e:
+                logger.error(f"Failed to auto-detect account ID: {str(e)}")
+                return create_response(500, {'error': 'Failed to auto-detect AWS account ID'})
+        else:
+            account_id = body['account_id']
+            sagemaker_role_arn = body['sagemaker_execution_role_arn']
+            cross_account_role_arn = body['cross_account_role_arn']
+        
         item = {
             'usecase_id': usecase_id,
             'name': body['name'],
-            'account_id': body['account_id'],
+            'account_id': account_id,
             's3_bucket': body['s3_bucket'],
-            's3_prefix': body.get('s3_prefix', ''),
-            'cross_account_role_arn': body['cross_account_role_arn'],
-            'sagemaker_execution_role_arn': body['sagemaker_execution_role_arn'],
+            'cross_account_role_arn': cross_account_role_arn,
+            'sagemaker_execution_role_arn': sagemaker_role_arn,
             'external_id': body.get('external_id', str(uuid.uuid4())),
             'owner': body.get('owner', user['email']),
             'cost_center': body.get('cost_center', ''),
@@ -968,11 +994,12 @@ def create_usecase(event, user):
             'created_at': timestamp,
             'updated_at': timestamp,
             'tags': body.get('tags', {}),
-            'shared_components_provisioned': False
+            'shared_components_provisioned': False,
+            'setup_type': 'single-account' if is_single_account else 'multi-account'
         }
         
         # Validate Data Account configuration - external_id is required for security
-        if body.get('data_account_id') and body.get('data_account_id') != body['account_id']:
+        if body.get('data_account_id') and body.get('data_account_id') != account_id:
             # Separate Data Account is being configured - require all fields
             if not body.get('data_account_role_arn'):
                 return create_response(400, {
@@ -990,13 +1017,13 @@ def create_usecase(event, user):
         
         # Add optional Data Account fields if provided
         # For single-account setups (data_account_id == account_id), don't store role/external_id
-        is_single_account = body.get('data_account_id') == body['account_id']
+        is_data_account_separate = body.get('data_account_id') and body.get('data_account_id') != account_id
         
         if body.get('data_account_id'):
             item['data_account_id'] = body['data_account_id']
         
         # Only store data_account_role_arn for multi-account setups
-        if body.get('data_account_role_arn') and not is_single_account:
+        if body.get('data_account_role_arn') and is_data_account_separate:
             item['data_account_role_arn'] = body['data_account_role_arn']
         
         # Only store data_account_external_id for multi-account setups
@@ -1005,8 +1032,6 @@ def create_usecase(event, user):
         
         if body.get('data_s3_bucket'):
             item['data_s3_bucket'] = body['data_s3_bucket']
-        if body.get('data_s3_prefix'):
-            item['data_s3_prefix'] = body['data_s3_prefix']
         
         table.put_item(Item=item)
         
@@ -1032,7 +1057,7 @@ def create_usecase(event, user):
         if (body.get('data_account_id') and 
             body.get('data_account_role_arn') and 
             body.get('data_s3_bucket') and
-            body.get('data_account_id') != body['account_id']):
+            body.get('data_account_id') != account_id):
             
             logger.info(f"Separate Data Account detected, updating bucket policy for SageMaker access")
             
@@ -1041,8 +1066,8 @@ def create_usecase(event, user):
                     data_account_role_arn=body['data_account_role_arn'],
                     data_account_external_id=body['data_account_external_id'],  # Required for production
                     data_bucket_name=body['data_s3_bucket'],
-                    usecase_account_id=body['account_id'],
-                    sagemaker_role_arn=body['sagemaker_execution_role_arn']
+                    usecase_account_id=account_id,
+                    sagemaker_role_arn=sagemaker_role_arn
                 )
                 
                 # Update usecase with bucket policy status
@@ -1070,7 +1095,7 @@ def create_usecase(event, user):
         if (body.get('data_account_id') and 
             body.get('data_account_role_arn') and 
             body.get('data_s3_bucket') and
-            body.get('data_account_id') != body['account_id'] and
+            body.get('data_account_id') != account_id and
             cloudfront_domain):
             
             logger.info(f"Configuring CORS for Data Account bucket")
@@ -1106,7 +1131,7 @@ def create_usecase(event, user):
         if (body.get('data_account_id') and 
             body.get('data_account_role_arn') and 
             body.get('data_s3_bucket') and
-            body.get('data_account_id') != body['account_id']):
+            body.get('data_account_id') != account_id):
             
             logger.info(f"Tagging Data Account bucket for portal discovery")
             
@@ -1141,12 +1166,12 @@ def create_usecase(event, user):
         component_bucket_policy_result = None
         component_bucket_name = os.environ.get('COMPONENT_BUCKET', 'dda-component-us-east-1-164152369890')
         
-        logger.info(f"Updating component bucket policy for devices in usecase account {body['account_id']}")
+        logger.info(f"Updating component bucket policy for devices in usecase account {account_id}")
         
         try:
             component_bucket_policy_result = update_component_bucket_policy_for_greengrass(
                 component_bucket_name=component_bucket_name,
-                device_account_id=body['account_id']  # Devices will be in the usecase account
+                device_account_id=account_id  # Devices will be in the usecase account
             )
             
             # Update usecase with component bucket policy status
@@ -1184,8 +1209,8 @@ def create_usecase(event, user):
                 
                 shared_components_result = provision_shared_components_via_api(
                     usecase_id=usecase_id,
-                    usecase_account_id=body['account_id'],
-                    cross_account_role_arn=body['cross_account_role_arn'],
+                    usecase_account_id=account_id,
+                    cross_account_role_arn=cross_account_role_arn,
                     external_id=item['external_id'],
                     user_id=user['user_id'],
                     auth_token=None  # Don't pass auth token for internal calls
@@ -1234,7 +1259,7 @@ def create_usecase(event, user):
         # This allows the UseCase Account to send SageMaker events to the Portal Account
         eventbridge_result = None
         try:
-            eventbridge_result = configure_eventbridge_permission(body['account_id'])
+            eventbridge_result = configure_eventbridge_permission(account_id)
             
             # Update usecase with EventBridge status
             table.update_item(
@@ -1336,11 +1361,11 @@ def update_usecase(usecase_id, event, user):
         expr_values = {':updated_at': int(datetime.utcnow().timestamp() * 1000)}
         
         updatable_fields = [
-            'name', 's3_bucket', 's3_prefix', 'owner', 'cost_center', 'default_device_group',
+            'name', 's3_bucket', 'owner', 'cost_center', 'default_device_group',
             'cross_account_role_arn', 'account_id',
             # Data Account fields
             'data_account_id', 'data_account_role_arn', 'data_account_external_id',
-            'data_s3_bucket', 'data_s3_prefix'
+            'data_s3_bucket'
         ]
         for field in updatable_fields:
             if field in body:

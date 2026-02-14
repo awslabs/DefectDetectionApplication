@@ -84,14 +84,6 @@ COMPONENT_SCHEMAS = {
                 'required': True,
                 'envVar': 'S3_BUCKET'
             },
-            's3Prefix': {
-                'name': 'S3 Prefix',
-                'type': 'string',
-                'default': '',
-                'description': 'S3 prefix for uploads',
-                'required': False,
-                'envVar': 'S3_PREFIX'
-            },
             'awsRegion': {
                 'name': 'AWS Region',
                 'type': 'select',

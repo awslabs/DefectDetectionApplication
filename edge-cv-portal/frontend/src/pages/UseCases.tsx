@@ -22,60 +22,65 @@ import { UseCase } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import TeamManagement from '../components/TeamManagement';
 
-interface FormData {
+interface FormDataType {
   name: string;
   account_id: string;
   s3_bucket: string;
-  s3_prefix?: string;
+  s3_prefix: string;
   cross_account_role_arn: string;
-  cost_center?: string;
-  // Data Account fields
-  data_account_id?: string;
-  data_account_role_arn?: string;
-  data_account_external_id?: string;
-  data_s3_bucket?: string;
-  data_s3_prefix?: string;
+  cost_center: string;
+  data_account_id: string;
+  data_account_role_arn: string;
+  data_account_external_id: string;
+  data_s3_bucket: string;
+  data_s3_prefix: string;
 }
 
 export default function UseCases() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user } = useAuth();
-  const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [selectedUseCase, setSelectedUseCase] = useState<UseCase | null>(null);
   const [showTeamModal, setShowTeamModal] = useState(false);
-  const [formData, setFormData] = useState<FormData>({
+  const [error, setError] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
+  const [formData, setFormData] = useState<FormDataType>({
     name: '',
     account_id: '',
     s3_bucket: '',
     s3_prefix: '',
     cross_account_role_arn: '',
     cost_center: '',
+    data_account_id: '',
+    data_account_role_arn: '',
+    data_account_external_id: '',
+    data_s3_bucket: '',
+    data_s3_prefix: '',
   });
-  const [error, setError] = useState('');
-  const [successMessage, setSuccessMessage] = useState('');
+
+  const resetForm = () => {
+    setFormData({
+      name: '',
+      account_id: '',
+      s3_bucket: '',
+      s3_prefix: '',
+      cross_account_role_arn: '',
+      cost_center: '',
+      data_account_id: '',
+      data_account_role_arn: '',
+      data_account_external_id: '',
+      data_s3_bucket: '',
+      data_s3_prefix: '',
+    });
+  };
 
   const { data, isLoading } = useQuery({
     queryKey: ['usecases', user?.user_id],
     queryFn: () => apiService.listUseCases(),
     staleTime: 10000, // Consider data stale after 10 seconds
     refetchInterval: 15000, // Auto-refresh every 15 seconds to catch async provisioning updates
-  });
-
-  const createMutation = useMutation({
-    mutationFn: (data: Partial<UseCase>) => apiService.createUseCase(data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['usecases', user?.user_id] });
-      setShowCreateModal(false);
-      resetForm();
-      setSuccessMessage('Use case created successfully');
-      setTimeout(() => setSuccessMessage(''), 5000);
-    },
-    onError: (err: Error) => {
-      setError(err.message);
-    },
   });
 
   const updateMutation = useMutation({
@@ -170,32 +175,6 @@ export default function UseCases() {
       setError(`Failed to update shared components: ${err.message}`);
     },
   });
-
-  const resetForm = () => {
-    setFormData({
-      name: '',
-      account_id: '',
-      s3_bucket: '',
-      s3_prefix: '',
-      cross_account_role_arn: '',
-      cost_center: '',
-      data_account_id: '',
-      data_account_role_arn: '',
-      data_account_external_id: '',
-      data_s3_bucket: '',
-      data_s3_prefix: '',
-    });
-    setError('');
-    setSelectedUseCase(null);
-  };
-
-  const handleCreate = () => {
-    if (!formData.name || !formData.account_id || !formData.s3_bucket || !formData.cross_account_role_arn) {
-      setError('Name, Account ID, S3 Bucket, and Role ARN are required');
-      return;
-    }
-    createMutation.mutate(formData);
-  };
 
   const handleEdit = (useCase: UseCase) => {
     setSelectedUseCase(useCase);
@@ -325,17 +304,12 @@ export default function UseCases() {
             description="Manage computer vision use cases across AWS accounts"
             actions={
               user ? (
-                <SpaceBetween direction="horizontal" size="xs">
-                  <Button onClick={() => setShowCreateModal(true)}>
-                    Quick Create
-                  </Button>
-                  <Button 
-                    variant="primary" 
-                    onClick={() => window.location.href = '/usecases/onboard'}
-                  >
-                    Onboard New Use Case
-                  </Button>
-                </SpaceBetween>
+                <Button 
+                  variant="primary" 
+                  onClick={() => window.location.href = '/usecases/onboard'}
+                >
+                  Onboard New Use Case
+                </Button>
               ) : null
             }
           >
@@ -450,112 +424,6 @@ export default function UseCases() {
           </Box>
         }
       />
-
-      {/* Create Modal */}
-      <Modal
-        visible={showCreateModal}
-        onDismiss={() => {
-          setShowCreateModal(false);
-          resetForm();
-        }}
-        header="Create Use Case"
-        footer={
-          <Box float="right">
-            <SpaceBetween direction="horizontal" size="xs">
-              <Button
-                variant="link"
-                onClick={() => {
-                  setShowCreateModal(false);
-                  resetForm();
-                }}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                onClick={handleCreate}
-                loading={createMutation.isPending}
-              >
-                Create
-              </Button>
-            </SpaceBetween>
-          </Box>
-        }
-      >
-        <SpaceBetween size="m">
-          {error && <Alert type="error">{error}</Alert>}
-
-          <FormField label="Name" description="A descriptive name for this use case" stretch>
-            <Input
-              value={formData.name}
-              onChange={({ detail }) => setFormData({ ...formData, name: detail.value })}
-              placeholder="e.g., Manufacturing Line 1"
-            />
-          </FormField>
-
-          <FormField
-            label="AWS Account ID"
-            description="The AWS account where resources are located"
-            stretch
-          >
-            <Input
-              value={formData.account_id}
-              onChange={({ detail }) => setFormData({ ...formData, account_id: detail.value })}
-              placeholder="123456789012"
-            />
-          </FormField>
-
-          <FormField
-            label="S3 Bucket"
-            description="S3 bucket for storing datasets and artifacts"
-            stretch
-          >
-            <Input
-              value={formData.s3_bucket}
-              onChange={({ detail }) => setFormData({ ...formData, s3_bucket: detail.value })}
-              placeholder="my-usecase-bucket"
-            />
-          </FormField>
-
-          <FormField
-            label="S3 Prefix (Optional)"
-            description="S3 prefix for organizing data within the bucket"
-            stretch
-          >
-            <Input
-              value={formData.s3_prefix || ''}
-              onChange={({ detail }) => setFormData({ ...formData, s3_prefix: detail.value })}
-              placeholder="datasets/"
-            />
-          </FormField>
-
-          <FormField
-            label="Cross-Account Role ARN"
-            description="IAM role ARN that the portal will assume"
-            stretch
-          >
-            <Input
-              value={formData.cross_account_role_arn}
-              onChange={({ detail }) =>
-                setFormData({ ...formData, cross_account_role_arn: detail.value })
-              }
-              placeholder="arn:aws:iam::123456789012:role/PortalAccessRole"
-            />
-          </FormField>
-
-          <FormField
-            label="Cost Center (Optional)"
-            description="Cost center for tracking expenses"
-            stretch
-          >
-            <Input
-              value={formData.cost_center || ''}
-              onChange={({ detail }) => setFormData({ ...formData, cost_center: detail.value })}
-              placeholder="CC-12345"
-            />
-          </FormField>
-        </SpaceBetween>
-      </Modal>
 
       {/* Edit Modal */}
       <Modal

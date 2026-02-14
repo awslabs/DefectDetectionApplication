@@ -103,7 +103,6 @@ def handler(event, context):
             'ChannelName': 'training',
             'DataSource': {
                 'S3DataSource': {
-                    'S3DataType': 'S3Prefix',
                     'S3Uri': training_config['dataset_s3_uri'],
                     'S3DataDistributionType': 'FullyReplicated'
                 }
