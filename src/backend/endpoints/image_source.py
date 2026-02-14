@@ -104,7 +104,7 @@ class GetPreviewImageResponse(BaseModel):
 def get_frame(image_source_dict, image_source_config_override=None):
     # Uses AravisSDK to fetch the frame from the camera
     # Only works with GenICam cameras
-    if image_source_dict.get('type') in [ImageSourceType.ICAM, ImageSourceType.FOLDER]:
+    if image_source_dict.get('type') in [ImageSourceType.ICAM, ImageSourceType.NVIDIA_CSI, ImageSourceType.FOLDER]:
         raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"The server cannot get frame for {image_source_dict.get('type')} using AravisSDK method.",
@@ -128,7 +128,7 @@ def preview_image(imageSourceId, request: GetPreviewImageRequest = GetPreviewIma
             folder_path, file_name = utils.split_file_name_and_path(image_path)
             return GetPreviewImageResponse(imageFileName=file_name)
 
-        elif image_source_dict.get('type') == ImageSourceType.CAMERA or image_source_dict.get('type') == ImageSourceType.ICAM:
+        elif image_source_dict.get('type') == ImageSourceType.CAMERA or image_source_dict.get('type') == ImageSourceType.ICAM or image_source_dict.get('type') == ImageSourceType.NVIDIA_CSI:
             image_source_config_override = {}
             image_source_dict = utils.convert_sqlalchemy_object_to_dict(image_source)
             if request and request.imageSourceConfiguration:
@@ -143,7 +143,7 @@ def preview_image(imageSourceId, request: GetPreviewImageRequest = GetPreviewIma
                     )
                 image_source_config_override = img_src_cfg
             ## DD-18130: Add support for smart cameras
-            if image_source_dict.get('type') == ImageSourceType.ICAM:
+            if image_source_dict.get('type') == ImageSourceType.ICAM or image_source_dict.get('type') == ImageSourceType.NVIDIA_CSI:
                 return gst_pipeline_executor.execute_image_source_pipeline(
                     ImageSource(**image_source_dict), 
                     image_source_config_override=image_source_config_override, 
@@ -187,7 +187,7 @@ def capture(
             frame_data=get_frame(image_source_dict)
         )
         return r
-    elif image_source_dict.get("type") == ImageSourceType.ICAM:
+    elif image_source_dict.get("type") == ImageSourceType.ICAM or image_source_dict.get("type") == ImageSourceType.NVIDIA_CSI:
         r = gst_pipeline_executor.execute_image_source_pipeline(
             ImageSource(**image_source_dict), is_preview=False, file_prefix=capture.filePrefix
         )
@@ -225,7 +225,7 @@ def delete_captured_images(filePath: str = Query(..., pattern=CAPTURED_IMAGE_FIL
 
 
 class AddImageSourceRequest(BaseModel):
-    type: Optional[Literal["Camera", "Folder", "ICam"]] = None
+    type: Optional[Literal["Camera", "Folder", "ICam", "NvidiaCSI"]] = None
     name: Optional[str] = None
     description: Optional[str] = None
     cameraId: Optional[str] = None

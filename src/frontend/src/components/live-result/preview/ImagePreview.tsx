@@ -32,7 +32,7 @@ import { Workflow } from "components/workflow/types";
 import ImagePlaceholder from "components/common/ImagePlaceholder";
 import useCameraConnection from "components/hook/useCameraConnection";
 import { CameraDisconnectedContent } from "components/common/ImagePlaceholder/PresetPlaceholderContents";
-import { isArvisCameraImageSource, isICamImageSource } from "components/utils";
+import { isArvisCameraImageSource, isICamImageSource, isNvidiaCSIImageSource } from "components/utils";
 
 export default function ImagePreview({
   imageSource,
@@ -58,7 +58,7 @@ export default function ImagePreview({
     recheckStatusFn: () => queryClient.invalidateQueries()
   })
 
-  const enablePreviewQuery = imageSource.cameraStatus?.status === CameraStatus.Connected || isICamImageSource(imageSource.type);
+  const enablePreviewQuery = imageSource.cameraStatus?.status === CameraStatus.Connected || isICamImageSource(imageSource.type) || isNvidiaCSIImageSource(imageSource.type);
 
   useQuery({
     queryKey: ["liveImagePreview", imageSource.imageSourceId],

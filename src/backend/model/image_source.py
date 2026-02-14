@@ -43,6 +43,7 @@ class ImageSourceType(ExtendedEnum):
     CAMERA = "Camera"
     FOLDER = "Folder"
     ICAM = "ICam"
+    NVIDIA_CSI = "NvidiaCSI"
 
 
 class ImageSource:

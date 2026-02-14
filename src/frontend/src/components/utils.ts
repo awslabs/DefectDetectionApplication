@@ -151,3 +151,7 @@ export function isArvisCameraImageSource(imageSourceType: string): boolean {
 export function isICamImageSource(imageSourceType: string): boolean {
   return imageSourceType === ImageSourceType.ICam;
 }
+
+export function isNvidiaCSIImageSource(imageSourceType: string): boolean {
+  return imageSourceType === ImageSourceType.NvidiaCSI;
+}

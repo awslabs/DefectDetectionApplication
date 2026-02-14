@@ -61,6 +61,25 @@ export const schema = yup.object({
         `Description is too long. A description can have a maximum of ${DESCRIPTION_MAX} characters.`,
       ),
   }),
+  nvidiaCSIName: yup.string().when("type", {
+    is: ImageSourceType.NvidiaCSI,
+    then: (schema) =>
+      schema
+        .required("An image source name is required.")
+        .matches(NAME_REGEX, "Image source name contains invalid characters.")
+        .max(
+          NAME_MAX,
+          `Image source name is too long. An image source name can have a maximum of ${NAME_MAX} characters.`,
+        ),
+  }),
+  nvidiaCSIDescription: yup.string().when("type", {
+    is: ImageSourceType.NvidiaCSI,
+    then: (schema) =>
+      schema.max(
+        DESCRIPTION_MAX,
+        `Description is too long. A description can have a maximum of ${DESCRIPTION_MAX} characters.`,
+      ),
+  }),
   // TODO: Maybe we need some regex on this
   path: yup.string().when("type", {
     is: ImageSourceType.Folder,
