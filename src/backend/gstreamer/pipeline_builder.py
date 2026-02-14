@@ -87,6 +87,31 @@ class GstPipelineBuilder:
             ]))
         logger.debug("building pipeline for icam")
 
+    def _add_nvidia_csi_image_source(self, image_source_config, override_processing_pipeline: str = None):
+        logger.debug("setup pipeline for nvidia csi image_source="+str(image_source_config))
+        # default sensor_id for nvidia CSI camera
+        sensor_id = image_source_config.get("device", "0")
+        deviceName = image_source_config.get("deviceName", "nvarguscamerasrc")
+
+        self.pipeline_config.add_plugin(PluginDefinition("nvarguscamerasrc", [
+            PluginArg("sensor_id", sensor_id),
+            PluginArg("num-buffers", 1)]))
+        logger.debug("in _add_nvidia_csi_image_source override_processing_pipeline="+str(override_processing_pipeline))
+        logger.debug("in _add_nvidia_csi_image_source image src processingPipeline="+str(image_source_config.get("processingPipeline")))
+        if override_processing_pipeline or image_source_config.get("processingPipeline"):
+           self.pipeline_config.add_plugin(override_processing_pipeline or image_source_config.get("processingPipeline"))
+        else:
+           self.pipeline_config.add_plugin(PluginDefinition("nvvidconv", []))
+        crop_config = image_source_config.get("imageCrop")
+        if crop_config:
+            self.pipeline_config.add_plugin(PluginDefinition("videocrop", [
+                PluginArg("top", crop_config.get("top")),
+                PluginArg("bottom", crop_config.get("bottom")),
+                PluginArg("left", crop_config.get("left")),
+                PluginArg("right", crop_config.get("right"))
+            ]))
+        logger.debug("building pipeline for nvidia csi")
+
     def _add_file_image_source(self, file_path):
         self.pipeline_config.add_plugin(PluginDefinition("filesrc",
                                                             [PluginArg("blocksize", -1),
@@ -246,6 +271,13 @@ class GstPipelineBuilder:
             if not isinstance(image_source_config, dict):
                 image_source_config = utils.convert_sqlalchemy_object_to_dict(image_source_config)
             self._add_icam_image_source(image_source_config, override_processing_pipeline)
+
+        elif source_type == ImageSourceType.NVIDIA_CSI:
+            image_source_config = self.image_source.get("imageSourceConfiguration", None)
+            logger.debug("nvidia csi image_source_config="+str(image_source_config))
+            if not isinstance(image_source_config, dict):
+                image_source_config = utils.convert_sqlalchemy_object_to_dict(image_source_config)
+            self._add_nvidia_csi_image_source(image_source_config, override_processing_pipeline)
 
         elif source_type == ImageSourceType.FOLDER:
             if override_folder_source_file:

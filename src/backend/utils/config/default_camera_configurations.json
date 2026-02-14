@@ -66,6 +66,13 @@
 			"processingPipeline" : "capsfilter caps=video/x-raw,format=RGB ! videoconvert"
 		}
 	},
+	"Nvidia CSI" : {
+		"default" : {
+			"processingPipeline" : "nvvidconv ! capsfilter caps=video/x-raw,format=RGB ! videoconvert",
+			"device": "0",
+			"deviceName": "nvarguscamerasrc"
+		}
+	},
     "default" : {
 		"default" : {
 			"processingPipeline": "capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"

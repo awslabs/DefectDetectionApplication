@@ -77,6 +77,16 @@ class ImageSourceAccessor:
                 imageCapturePath = constants.IMAGE_CAPTURE_DIR + "/" + image_source_id
                 data["imageCapturePath"] = imageCapturePath
                 self.__create_folder(imageCapturePath)
+            elif data.get("type") == ImageSourceType.NVIDIA_CSI.value:
+                img_src_cfg_id = self.__create_image_source_configuration(
+                    data.get("imageSourceConfiguration"),
+                    None,
+                    db
+                )
+                data["imageSourceConfigId"] = img_src_cfg_id
+                imageCapturePath = constants.IMAGE_CAPTURE_DIR + "/" + image_source_id
+                data["imageCapturePath"] = imageCapturePath
+                self.__create_folder(imageCapturePath)
             result = self.schema.load(data)
             image_source_dao.create_image_source(db, self.schema.dump(result))
             logger.info("Stored image source with id:" + str(image_source_id))
@@ -226,8 +236,15 @@ class ImageSourceAccessor:
         return config_id
 
     def __get_default_image_source_configuration(self, cameraId):
+        # For Nvidia CSI cameras, use default Nvidia CSI config
         if cameraId is None:
-            raise ValidationError("CameraId is required")
+            return {
+                "gain": 1,
+                "exposure": 500,
+                "processingPipeline": self.default_camera_config.get("Nvidia CSI").get("default").get("processingPipeline"),
+                "device": self.default_camera_config.get("Nvidia CSI").get("default").get("device"),
+                "deviceName": self.default_camera_config.get("Nvidia CSI").get("default").get("deviceName")
+            }
 
         # Fetch make and model of camera by CameraID
         camera = aravis_functions.getCamera(cameraId)
@@ -251,7 +268,7 @@ class ImageSourceAccessor:
         return new_image_sources
 
     def update_image_source_with_camera_status(self, image_source_dict):
-        if image_source_dict.get('type') == ImageSourceType.FOLDER:
+        if image_source_dict.get('type') == ImageSourceType.FOLDER or image_source_dict.get('type') == ImageSourceType.NVIDIA_CSI or image_source_dict.get('type') == ImageSourceType.ICAM:
             image_source_dict["cameraStatus"] = None
         else:
             camera_id = image_source_dict.get('cameraId', None)

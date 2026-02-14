@@ -20,6 +20,7 @@ export enum ImageSourceType {
   Camera = "Camera",
   Folder = "Folder",
   ICam = "ICam",
+  NvidiaCSI = "NvidiaCSI",
 }
 
 export interface Camera {
