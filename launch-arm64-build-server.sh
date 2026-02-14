@@ -101,6 +101,142 @@ echo "DDA ARM64 Build Server Launcher"
 echo "=============================================="
 echo ""
 
+# Create IAM role and instance profile if they don't exist
+echo "Setting up IAM role and instance profile..."
+
+# Create IAM role
+if ! aws iam get-role --role-name "$IAM_PROFILE" &>/dev/null; then
+    echo "Creating IAM role: $IAM_PROFILE"
+    aws iam create-role \
+        --role-name "$IAM_PROFILE" \
+        --assume-role-policy-document '{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Service": "ec2.amazonaws.com"},
+                "Action": "sts:AssumeRole"
+            }]
+        }'
+    
+    # Attach AWS managed policy for SSM access
+    aws iam attach-role-policy \
+        --role-name "$IAM_PROFILE" \
+        --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+    
+    # Attach inline policy for build permissions
+    aws iam put-role-policy \
+        --role-name "$IAM_PROFILE" \
+        --policy-name DDABuildPolicy \
+        --policy-document '{
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "GreengrassPermissions",
+                    "Effect": "Allow",
+                    "Action": ["greengrass:*"],
+                    "Resource": "*"
+                },
+                {
+                    "Sid": "IoTPermissions",
+                    "Effect": "Allow",
+                    "Action": ["iot:*"],
+                    "Resource": "*"
+                },
+                {
+                    "Sid": "S3Permissions",
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3:CreateBucket",
+                        "s3:GetBucketLocation",
+                        "s3:PutBucketVersioning",
+                        "s3:GetObject",
+                        "s3:PutObject",
+                        "s3:ListBucket",
+                        "s3:DeleteObject",
+                        "s3:GetBucketVersioning",
+                        "s3:ListBucketVersions"
+                    ],
+                    "Resource": "*"
+                },
+                {
+                    "Sid": "EC2Permissions",
+                    "Effect": "Allow",
+                    "Action": [
+                        "ec2:DescribeInstances",
+                        "ec2:DescribeImages",
+                        "ec2:DescribeSecurityGroups",
+                        "ec2:DescribeSubnets",
+                        "ec2:DescribeVpcs",
+                        "ec2:DescribeKeyPairs",
+                        "ec2:DescribeTags"
+                    ],
+                    "Resource": "*"
+                },
+                {
+                    "Sid": "CloudWatchLogsPermissions",
+                    "Effect": "Allow",
+                    "Action": [
+                        "logs:CreateLogGroup",
+                        "logs:CreateLogStream",
+                        "logs:PutLogEvents",
+                        "logs:DescribeLogStreams"
+                    ],
+                    "Resource": "arn:aws:logs:*:*:*"
+                },
+                {
+                    "Sid": "CloudWatchMetricsPermissions",
+                    "Effect": "Allow",
+                    "Action": ["cloudwatch:PutMetricData"],
+                    "Resource": "*"
+                },
+                {
+                    "Sid": "ECRPermissions",
+                    "Effect": "Allow",
+                    "Action": [
+                        "ecr:GetAuthorizationToken",
+                        "ecr:BatchGetImage",
+                        "ecr:GetDownloadUrlForLayer"
+                    ],
+                    "Resource": "*"
+                }
+            ]
+        }'
+    
+    echo "IAM role created: $IAM_PROFILE"
+else
+    echo "IAM role already exists: $IAM_PROFILE"
+fi
+
+# Create instance profile
+if ! aws iam get-instance-profile --instance-profile-name "$IAM_PROFILE" &>/dev/null; then
+    echo "Creating instance profile: $IAM_PROFILE"
+    aws iam create-instance-profile --instance-profile-name "$IAM_PROFILE"
+    
+    # Add role to instance profile
+    aws iam add-role-to-instance-profile \
+        --instance-profile-name "$IAM_PROFILE" \
+        --role-name "$IAM_PROFILE"
+    
+    # Wait for instance profile to be ready (with retry logic)
+    echo "Waiting for instance profile to propagate..."
+    for i in {1..30}; do
+        if aws iam get-instance-profile --instance-profile-name "$IAM_PROFILE" &>/dev/null; then
+            echo "Instance profile ready"
+            break
+        fi
+        if [ $i -eq 30 ]; then
+            echo "Warning: Instance profile may not be fully propagated yet, continuing anyway..."
+        fi
+        sleep 1
+    done
+    
+    echo "Instance profile created: $IAM_PROFILE"
+else
+    echo "Instance profile already exists: $IAM_PROFILE"
+fi
+
+echo ""
+
 # Find Ubuntu Pro 18.04 ARM64 AMI if not specified
 if [ -z "$AMI_ID" ]; then
     echo "Finding latest Ubuntu Pro 18.04 ARM64 AMI..."
@@ -215,12 +351,7 @@ RUN_CMD="aws ec2 run-instances \
 
 # Add IAM profile if specified and exists
 if [ -n "$IAM_PROFILE" ]; then
-    # Check if IAM profile exists
-    if aws iam get-instance-profile --instance-profile-name "$IAM_PROFILE" &>/dev/null; then
-        RUN_CMD="$RUN_CMD --iam-instance-profile Name=$IAM_PROFILE"
-    else
-        echo "Warning: IAM instance profile '$IAM_PROFILE' not found. Launching without it."
-    fi
+    RUN_CMD="$RUN_CMD --iam-instance-profile Name=$IAM_PROFILE"
 fi
 
 # Add subnet if specified
