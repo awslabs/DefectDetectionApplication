@@ -78,7 +78,6 @@ def get_data_bucket_and_credentials(usecase):
             'data-access'
         )
         bucket = usecase.get('data_s3_bucket') or usecase.get('s3_bucket')
-        prefix = usecase.get('data_s3_prefix') or usecase.get('s3_prefix', '')
     else:
         # Use UseCase Account (this one requires external_id)
         credentials = assume_usecase_role(
@@ -87,9 +86,8 @@ def get_data_bucket_and_credentials(usecase):
             'data-access'
         )
         bucket = usecase['s3_bucket']
-        prefix = usecase.get('s3_prefix', '')
     
-    return bucket, prefix, credentials
+    return bucket, None, credentials
 
 
 def list_datasets(event):

@@ -201,13 +201,5 @@ else
     echo "✓ GDK CLI already installed"
 fi
 
-echo "▶ Building edgemlsdk Docker image..."
-if [ -d "src/edgemlsdk" ]; then
-    run_cmd "docker build -t edgemlsdk:latest src/edgemlsdk/" || add_warning "Failed to build edgemlsdk Docker image"
-    echo "✓ edgemlsdk Docker image built"
-else
-    add_warning "src/edgemlsdk directory not found - skipping Docker image build"
-fi
-
 echo ""
 echo "✓ Build server setup complete!"

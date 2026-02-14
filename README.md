@@ -200,11 +200,69 @@ cd edge-cv-portal
 - You should see the DDA Portal login page
 - Login with the Cognito credentials you created
 
+#### 2.1 Frontend Configuration (config.json)
+
+The frontend requires a configuration file at `edge-cv-portal/frontend/public/config.json` that contains your Cognito and API Gateway details.
+
+**Configuration Required:**
+
+You need to update the configuration file with your Cognito and API Gateway values:
+
+1. Get the required values from CDK outputs:
+   ```bash
+   # Get Cognito User Pool ID
+   aws cognito-idp list-user-pools --max-results 10 --region us-east-1 \
+     --query 'UserPools[?Name==`dda-portal-users`].Id' --output text
+   
+   # Get Cognito Client ID
+   aws cognito-idp list-user-pool-clients \
+     --user-pool-id <USER_POOL_ID> \
+     --region us-east-1 \
+     --query 'UserPoolClients[0].ClientId' --output text
+   
+   # Get API Gateway endpoint
+   aws apigateway get-rest-apis --region us-east-1 \
+     --query 'items[?name==`DDAPortalAPI`].id' --output text
+   ```
+
+2. Edit `edge-cv-portal/frontend/public/config.json`:
+   ```json
+   {
+     "apiUrl": "https://<API_GATEWAY_ID>.execute-api.us-east-1.amazonaws.com/prod",
+     "userPoolId": "us-east-1_<USER_POOL_ID>",
+     "userPoolClientId": "<CLIENT_ID>",
+     "region": "us-east-1"
+   }
+   ```
+
+3. Redeploy the frontend:
+   ```bash
+   cd edge-cv-portal
+   ./deploy-frontend.sh
+   ```
+
+**Configuration Fields:**
+- `apiUrl` - API Gateway endpoint (without trailing slash)
+- `userPoolId` - Cognito user pool ID
+- `userPoolClientId` - Cognito app client ID
+- `region` - AWS region (default: us-east-1)
+
 ### Step 3: Post-Deployment Setup
 
 After deploying the portal infrastructure and frontend, complete these setup tasks:
 
-#### 3.1 Create Portal Admin User
+#### 3.1 Shared Components
+
+When you deploy the portal infrastructure, the following Greengrass components are automatically provisioned and shared with UseCase accounts:
+
+- **LocalServer** - Core DDA inference component that runs on edge devices
+- **InferenceUploader** - Optional component for uploading inference results to S3
+
+These shared components are available in the UseCase account's Greengrass component repository and can be deployed to edge devices without additional setup. They are automatically shared when you create a UseCase in the portal.
+
+**Important**: The UseCase creation step also provisions the `DDAPortalComponentAccessPolicy` that edge devices require. Without this policy, devices will fail with "DDAPortalComponentAccessPolicy not found" error during provisioning.
+
+#### 3.2 Create Portal Admin User
 
 Create the initial admin user in Cognito:
 
@@ -228,9 +286,16 @@ aws cognito-idp admin-set-user-password \
   --password YourSecurePassword123! \
   --permanent \
   --region $REGION
+
+# Set custom:role attribute (required for API access)
+aws cognito-idp admin-update-user-attributes \
+  --user-pool-id $USER_POOL_ID \
+  --username admin \
+  --user-attributes Name=custom:role,Value=PortalAdmin \
+  --region $REGION
 ```
 
-#### 3.2 Verify Portal Access
+#### 3.3 Verify Portal Access
 
 1. Open the portal URL in your browser
 2. Login with admin credentials
@@ -245,7 +310,7 @@ Before building the DDA application, you need to set up a UseCase account and cr
 
 For multi-account setups, deploy the UseCase account role to enable cross-account access from the Portal account.
 
-**For Single-Account Setup**: Skip this step and use `arn:aws:iam::YOUR_ACCOUNT_ID:root` as the Role ARN when creating a UseCase.
+**For Single-Account Setup**: Skip this step. The portal will auto-detect your AWS account and use default roles.
 
 **For Multi-Account Setup**:
 
@@ -267,16 +332,18 @@ cd edge-cv-portal
 
 1. Go to **UseCases** page in the portal
 2. Click **Create UseCase**
-3. Fill in the form:
+3. Select your setup type:
+   - **Single-Account Setup**: Everything runs in one AWS account. The portal will auto-detect your account ID and use default roles.
+   - **Multi-Account Setup**: Portal runs in one account, data and training in separate accounts. You'll need to provide role ARNs.
+4. Fill in the form:
    - **UseCase Name**: Name for your use case (e.g., "Cookie Defect Detection")
    - **Description**: Brief description
-   - **Role ARN**: 
-     - Single-account: `arn:aws:iam::YOUR_ACCOUNT_ID:root`
-     - Multi-account: Role ARN from Step 4.1
-   - **Data Account Role ARN** (optional):
-     - If using separate Data account: Role ARN from Step 6
-     - Otherwise: Leave blank
-4. Click **Create**
+   - **S3 Bucket**: S3 bucket for storing training datasets, models, and labeling results
+   - **S3 Prefix** (optional): Folder path within the bucket to organize your data (e.g., `datasets/`)
+   - For **Multi-Account Setup** only:
+     - **Role ARN**: Role ARN from Step 4.1
+     - **Data Account Role ARN** (optional): If using separate Data account, provide the role ARN from Step 6
+5. Click **Create**
 
 **What this does:**
 - Creates a new UseCase in the portal
@@ -284,17 +351,6 @@ cd edge-cv-portal
 - Creates `DDAPortalComponentAccessPolicy` (required by edge devices)
 - Sets up S3 buckets for training data and models
 - Enables the UseCase for training and deployment workflows
-- Automatically shares portal components (LocalServer, InferenceUploader) with the UseCase account
-
-**Shared Components:**
-
-When you create a UseCase, the portal automatically shares essential Greengrass components with the UseCase account:
-- **LocalServer** - Core DDA inference component
-- **InferenceUploader** - Optional component for uploading inference results to S3
-
-These shared components are available in the UseCase account's Greengrass component repository and can be deployed to edge devices without additional setup.
-
-**Important**: The UseCase creation step provisions the `DDAPortalComponentAccessPolicy` that edge devices require. Without this, devices will fail with "DDAPortalComponentAccessPolicy not found" error during provisioning.
 
 ### Step 5: Build DDA Application (Build Server)
 
@@ -302,47 +358,65 @@ The DDA application is the core Greengrass component that runs inference on edge
 
 #### 5.1 Prerequisites
 
-Before launching a build server, you must create the required IAM role:
+The build server requires:
+- EC2 instance (Ubuntu 20.04 or later, t3.large or larger recommended)
+- AWS CLI configured with credentials
+- Docker installed
+- Git installed
+
+The IAM role and permissions are automatically created by the build script when you run `gdk-component-build-and-publish.sh`.
+
+#### 5.2 Build and Publish DDA Application
+
+The fastest way to get a build server running and build the DDA application:
 
 ```bash
-./create-build-server-iam-role.sh
-```
-
-This creates:
-- IAM role: `dda-build-role`
-- Instance profile: `dda-build-role`
-- Permissions for Greengrass, IoT, S3, CloudWatch, and ECR
-
-#### 5.2 Automated Setup (Recommended)
-
-The fastest way to get a build server running:
-
-```bash
-# Step 1: Create IAM role (one-time setup)
-./create-build-server-iam-role.sh
-
-# Step 2: Launch the EC2 instance
+# Step 1: Launch the EC2 instance
 ./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME
 
-# Step 3: Connect and setup
+# Step 2: Connect and setup
 ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@<PUBLIC_IP>
 git clone https://github.com/awslabs/DefectDetectionApplication.git
 cd DefectDetectionApplication
 ./setup-build-server.sh
 
-# Step 4: Build components
+# Step 3: Build and publish components
 ./gdk-component-build-and-publish.sh
 ```
 
-#### 5.3 Build and Publish DDA Application
+**Launch script options:**
+- `--key-name KEY` (required) - SSH key pair name
+- `--subnet-id SUBNET` - Subnet ID for VPC selection (default: uses default VPC)
+- `--security-group-id SG` - Security group ID (default: creates new one)
+- `--instance-type TYPE` - EC2 instance type (default: m6g.4xlarge)
+- `--volume-size SIZE` - Root volume size in GB (default: 100)
+- `--region REGION` - AWS region (default: us-east-1)
+- `--iam-profile PROFILE` - IAM instance profile name (default: dda-build-role)
 
-Once the build server is set up, build and publish the DDA application:
-
+**Example with custom VPC:**
 ```bash
-./gdk-component-build-and-publish.sh
+./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME --subnet-id subnet-12345678
 ```
 
-**What it does:**
+**Example with pre-created IAM role:**
+If your IAM role was created outside the script (e.g., by your infrastructure team):
+```bash
+./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME --iam-profile my-existing-build-role
+```
+
+**Required IAM permissions:**
+If creating the IAM role manually, ensure it has these permissions:
+- Greengrass: `greengrass:*`
+- IoT: `iot:*`
+- S3: `s3:*` (or scoped to specific buckets)
+- EC2: `ec2:Describe*`
+- CloudWatch Logs: `logs:*`
+- CloudWatch Metrics: `cloudwatch:PutMetricData`
+- ECR: `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`
+
+**What the build script does:**
+- Creates the required IAM role (`dda-build-role`) if it doesn't exist
+- Sets up instance profile with permissions for Greengrass, IoT, S3, CloudWatch, and ECR
 - Detects system architecture (x86_64 or aarch64)
 - Selects appropriate recipe file (recipe-amd64.yaml or recipe-arm64.yaml)
 - Generates dynamic GDK configuration
@@ -385,7 +459,7 @@ VERBOSE=1 ./gdk-component-build-and-publish.sh
 
 > **Notice**: After the component is successfully built and published, stop the EC2 build server instance to avoid incurring unnecessary costs. You can restart it later if you need to rebuild components for a different architecture or make updates.
 
-#### 5.4 Manual Setup (Optional)
+#### 5.3 Manual Setup (Optional)
 
 If you prefer to set up the IAM role and EC2 instance manually, follow these steps. Otherwise, use the automated setup above.
 
@@ -697,14 +771,6 @@ sudo ./setup_station.sh us-east-1 dda-edge-device-1
 - Registers device with AWS IoT Core
 - Device appears in DDA Portal after setup completes
 
-**Next Steps:**
-Once the edge device is set up and appears in the portal:
-1. Go to **Devices** page in portal
-2. Verify device is online
-3. Deploy the DDA application (see section below)
-4. Create deployments to push models and components to the device
-5. Monitor inference results in real-time
-
 ## Deploy DDA Application to Edge Device
 
 > **Alert**: The DDA application (LocalServer component) must be deployed to edge devices before any other components or models can be deployed. This is a prerequisite for all subsequent deployments.
@@ -988,6 +1054,18 @@ The portal includes a **Pre-Labeled Datasets** feature that allows you to:
 
 The AWS Open Cookie Dataset is a publicly available dataset for defect detection that you can use with DDA:
 
+#### Understanding S3 Bucket and S3 Prefix
+
+Before creating your use case, you need to understand how DDA uses S3 storage:
+
+- **S3 Bucket**: The root container in Amazon S3 where all your data will be stored. This includes training datasets, labeled data, trained models, and inference results. The bucket name must be globally unique across AWS.
+  - Example: `dda-cookie-dataset`
+
+- **S3 Prefix**: An optional folder path within the bucket to organize your data. Think of it like a folder structure. If you don't specify a prefix, data is stored at the bucket root.
+  - Example: `datasets/` stores data in a "datasets" folder
+  - Example: `project-1/training-data/` creates nested folders
+  - Useful for organizing multiple use cases or projects within a single bucket
+
 **Step 1: Clone the AWS Lookout for Vision repository**
 ```bash
 git clone https://github.com/aws-samples/amazon-lookout-for-vision.git
@@ -999,6 +1077,12 @@ cd amazon-lookout-for-vision
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET_NAME="dda-cookie-dataset-${ACCOUNT_ID}"
 aws s3 mb s3://${BUCKET_NAME}
+
+# Tag bucket as managed by DDA Portal
+aws s3api put-bucket-tagging \
+  --bucket ${BUCKET_NAME} \
+  --tagging 'TagSet=[{Key=ManagedBy,Value=DDAPortal}]' \
+  --region us-east-1
 ```
 
 **Step 3: Upload cookie dataset to S3**
@@ -1058,6 +1142,12 @@ cd amazon-lookout-for-vision
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET_NAME="dda-alien-dataset-${ACCOUNT_ID}"
 aws s3 mb s3://${BUCKET_NAME}
+
+# Tag bucket as managed by DDA Portal
+aws s3api put-bucket-tagging \
+  --bucket ${BUCKET_NAME} \
+  --tagging 'TagSet=[{Key=ManagedBy,Value=DDAPortal}]' \
+  --region us-east-1
 ```
 
 **Step 3: Upload alien dataset to S3**

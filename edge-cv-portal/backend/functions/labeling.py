@@ -238,7 +238,6 @@ def create_labeling_job(event):
                 'labeling-data-access'
             )
             input_bucket = usecase.get('data_s3_bucket') or usecase.get('s3_bucket')
-            input_prefix = usecase.get('data_s3_prefix', '')
             
             # S3 client for reading input data from Data Account
             s3_data = boto3.client(
@@ -252,7 +251,6 @@ def create_labeling_job(event):
             # Data Account is same as UseCase Account - use same credentials
             print(f"Data Account is same as UseCase Account {usecase_account_id}")
             input_bucket = usecase.get('data_s3_bucket') or usecase['s3_bucket']
-            input_prefix = usecase.get('data_s3_prefix', usecase.get('s3_prefix', ''))
             s3_for_input = s3
         
         # Output bucket - must be in UseCase Account for SageMaker outputs

@@ -450,19 +450,11 @@ def create_deployment(body, user):
             # Build S3 configuration for InferenceUploader
             s3_bucket = usecase.get('inference_uploader_s3_bucket') or f"dda-inference-results-{account_id}"
             
-            # Determine S3 prefix based on target
-            if target_thing_group:
-                s3_prefix = f"{usecase_id}/{target_thing_group}"
-            else:
-                device_id = target_devices[0] if target_devices else 'unknown'
-                s3_prefix = f"{usecase_id}/{device_id}"
-            
             # Get configurable upload interval (default 5 minutes, can be immediate, hourly, etc.)
             upload_interval = usecase.get('inference_uploader_interval_seconds', 300)  # Default 5 minutes
             
             inference_uploader_config = {
                 's3Bucket': s3_bucket,
-                's3Prefix': s3_prefix,
                 'uploadIntervalSeconds': upload_interval,
                 'batchSize': usecase.get('inference_uploader_batch_size', 100),
                 'localRetentionDays': usecase.get('inference_uploader_retention_days', 7),
@@ -483,7 +475,7 @@ def create_deployment(body, user):
                 'component_version': '1.0.0',
                 'reason': f'Automatic upload of inference results to S3 (interval: {upload_interval}s)'
             })
-            logger.info(f"Auto-included aws.edgeml.dda.InferenceUploader with S3 bucket {s3_bucket}, prefix {s3_prefix}, interval {upload_interval}s")
+            logger.info(f"Auto-included aws.edgeml.dda.InferenceUploader with S3 bucket {s3_bucket}, interval {upload_interval}s")
         elif not enable_inference_uploader:
             logger.info("InferenceUploader not included - disabled in UseCase configuration")
         

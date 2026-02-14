@@ -693,8 +693,7 @@ def configure_data_account(event: Dict) -> Dict:
             'data_account_id',
             'data_account_role_arn', 
             'data_account_external_id',
-            'data_s3_bucket',
-            'data_s3_prefix'
+            'data_s3_bucket'
         ]
         
         for field in data_fields:

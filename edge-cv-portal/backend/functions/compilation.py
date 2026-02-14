@@ -283,8 +283,7 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
         
         # Create S3 path builder for consistent path generation
         path_builder = create_s3_path_builder(
-            bucket=usecase['s3_bucket'],
-            prefix=usecase.get('s3_prefix', '')
+            bucket=usecase['s3_bucket']
         )
         
         # Start compilation jobs for each target

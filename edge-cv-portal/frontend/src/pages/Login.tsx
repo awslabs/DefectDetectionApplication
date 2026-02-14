@@ -91,12 +91,6 @@ export default function Login() {
           >
             Sign In
           </Button>
-
-          <Alert type="info">
-            <strong>Test Credentials:</strong><br />
-            Username: testadmin<br />
-            Password: TestAdmin123!
-          </Alert>
         </SpaceBetween>
       </Container>
     </div>
