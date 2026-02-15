@@ -102,7 +102,8 @@ class GstPipelineExecutor:
                 .add_image_source(image_source) \
                 .build(is_preview, file_prefix, workflow_output_path)
 
-        logger.info("Created pipeline {}".format(pipeline_definition))
+        logger.info(f"Created pipeline {pipeline_definition}")
+        logger.warning(f"NVIDIA CSI PIPELINE DEBUG: {pipeline_definition}")
         
         return pipeline_definition, capture_location
 
