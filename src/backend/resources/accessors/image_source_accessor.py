@@ -236,7 +236,7 @@ class ImageSourceAccessor:
         return config_id
 
     def __get_default_image_source_configuration(self, cameraId):
-        # For Nvidia CSI cameras, use default Nvidia CSI config
+        # For Nvidia CSI cameras, use default Nvidia CSI config with v4l2src
         if cameraId is None:
             return {
                 "gain": 1,

@@ -68,11 +68,6 @@
 	},
 	"Nvidia CSI" : {
 		"default" : {
-			"processingPipeline" : "video/x-raw(memory:NVMM) ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert",
-			"device": "0",
-			"deviceName": "nvarguscamerasrc"
-		},
-		"v4l2-fallback" : {
 			"processingPipeline" : "videoconvert",
 			"device": "/dev/video0",
 			"deviceName": "v4l2src"
