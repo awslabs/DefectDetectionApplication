@@ -93,10 +93,29 @@ echo "▶ Updating package manager..."
 run_cmd "sudo apt-get update" || true
 
 echo "▶ Installing system dependencies..."
-run_cmd "sudo apt-get install -y python3 python3-pip nodejs npm docker.io docker-compose git curl" || add_warning "Some system packages failed to install"
+run_cmd "sudo apt-get install -y python3 python3-pip nodejs npm git curl snapd" || add_warning "Some system packages failed to install"
+
+echo "▶ Removing old Docker packages from apt..."
+run_cmd "sudo apt-get remove -y docker.io docker-compose" || true
+
+echo "▶ Installing Docker via snap..."
+if ! command -v docker >/dev/null 2>&1; then
+    run_cmd "sudo snap install docker" || add_error "Failed to install Docker via snap"
+    echo "✓ Docker installed via snap"
+else
+    echo "✓ Docker already installed"
+fi
+
+echo "▶ Installing docker-compose via snap..."
+if ! command -v docker-compose >/dev/null 2>&1; then
+    run_cmd "sudo snap install docker-compose" || add_error "Failed to install docker-compose via snap"
+    echo "✓ docker-compose installed via snap"
+else
+    echo "✓ docker-compose already installed"
+fi
 
 echo "▶ Starting Docker daemon..."
-if run_cmd "sudo systemctl start docker"; then
+if run_cmd "sudo systemctl start snap.docker.dockerd.service"; then
     echo "✓ Docker daemon started"
 else
     add_error "Failed to start Docker daemon"
