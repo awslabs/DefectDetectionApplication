@@ -89,22 +89,18 @@ class GstPipelineBuilder:
 
     def _add_nvidia_csi_image_source(self, image_source_config, override_processing_pipeline: str = None):
         logger.debug("setup pipeline for nvidia csi image_source="+str(image_source_config))
-        # default sensor_id for nvidia CSI camera
-        sensor_id = image_source_config.get("device", "0")
-        deviceName = image_source_config.get("deviceName", "nvarguscamerasrc")
+        # Use device path for v4l2src (default /dev/video0 for CSI camera)
+        device = image_source_config.get("device", "/dev/video0")
+        deviceName = image_source_config.get("deviceName", "v4l2src")
 
-        self.pipeline_config.add_plugin(PluginDefinition("nvarguscamerasrc", [
-            PluginArg("sensor_id", sensor_id),
+        self.pipeline_config.add_plugin(PluginDefinition("v4l2src", [
+            PluginArg("device", device),
             PluginArg("num-buffers", 1)]))
         logger.debug("in _add_nvidia_csi_image_source override_processing_pipeline="+str(override_processing_pipeline))
         logger.debug("in _add_nvidia_csi_image_source image src processingPipeline="+str(image_source_config.get("processingPipeline")))
         if override_processing_pipeline or image_source_config.get("processingPipeline"):
            self.pipeline_config.add_plugin(override_processing_pipeline or image_source_config.get("processingPipeline"))
         else:
-           # nvvidconv requires explicit output format specification
-           self.pipeline_config.add_plugin(PluginDefinition("nvvidconv", []))
-           self.pipeline_config.add_plugin(PluginDefinition("capsfilter caps=video/x-raw(memory:NVMM),format=I420"))
-           self.pipeline_config.add_plugin(PluginDefinition("nvvidconv", []))
            self.pipeline_config.add_plugin(PluginDefinition("videoconvert", []))
         crop_config = image_source_config.get("imageCrop")
         if crop_config:
