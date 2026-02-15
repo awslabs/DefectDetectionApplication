@@ -68,7 +68,7 @@
 	},
 	"Nvidia CSI" : {
 		"default" : {
-			"processingPipeline" : "nvvidconv ! capsfilter caps=video/x-raw,format=RGB ! videoconvert",
+			"processingPipeline" : "nvvidconv ! capsfilter caps=video/x-raw(memory:NVMM),format=I420 ! nvvidconv",
 			"device": "0",
 			"deviceName": "nvarguscamerasrc"
 		}
