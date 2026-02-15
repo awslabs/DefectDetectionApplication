@@ -78,6 +78,11 @@ class GstPipelineManager:
         # https://gstreamer.freedesktop.org/documentation/tutorials/basic/debugging-tools.html?gi-language=c
         os.environ["GST_DEBUG"] = "4"  # Logs all informational messages.
         os.environ["GST_DEBUG_NO_COLOR"] = "1"  # No colors, https://stackoverflow.com/a/56551269
+        
+        # Set DISPLAY for Argus camera daemon (nvarguscamerasrc)
+        if "DISPLAY" not in os.environ:
+            os.environ["DISPLAY"] = ":0"
+        
         pipeline = None
         loop = None
         def on_message(bus, message):
