@@ -93,7 +93,7 @@ echo "▶ Updating package manager..."
 run_cmd "sudo apt-get update" || true
 
 echo "▶ Installing system dependencies..."
-run_cmd "sudo apt-get install -y python3 python3-pip nodejs npm git curl snapd" || add_warning "Some system packages failed to install"
+run_cmd "sudo apt-get install -y python3 python3-pip nodejs npm git curl snapd zip" || add_warning "Some system packages failed to install"
 
 echo "▶ Removing old Docker packages from apt..."
 run_cmd "sudo apt-get remove -y docker.io docker-compose" || true
