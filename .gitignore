@@ -16,3 +16,4 @@ __pycache__/
 datasets/**/*.manifest
 datasets/**/*_class.manifest
 datasets/**/*_segmentation.manifest
+.vscode/**
