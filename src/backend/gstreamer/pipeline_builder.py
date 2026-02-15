@@ -101,7 +101,11 @@ class GstPipelineBuilder:
         if override_processing_pipeline or image_source_config.get("processingPipeline"):
            self.pipeline_config.add_plugin(override_processing_pipeline or image_source_config.get("processingPipeline"))
         else:
+           # nvvidconv requires explicit output format specification
            self.pipeline_config.add_plugin(PluginDefinition("nvvidconv", []))
+           self.pipeline_config.add_plugin(PluginDefinition("capsfilter caps=video/x-raw(memory:NVMM),format=I420"))
+           self.pipeline_config.add_plugin(PluginDefinition("nvvidconv", []))
+           self.pipeline_config.add_plugin(PluginDefinition("videoconvert", []))
         crop_config = image_source_config.get("imageCrop")
         if crop_config:
             self.pipeline_config.add_plugin(PluginDefinition("videocrop", [
