@@ -88,10 +88,12 @@ class GstPipelineBuilder:
         logger.debug("building pipeline for icam")
 
     def _add_nvidia_csi_image_source(self, image_source_config, override_processing_pipeline: str = None):
-        logger.debug("setup pipeline for nvidia csi image_source="+str(image_source_config))
+        logger.warning(f"NVIDIA CSI SOURCE CONFIG DEBUG: device={image_source_config.get('device')}, deviceName={image_source_config.get('deviceName')}, pipeline={image_source_config.get('processingPipeline')}")
         # Use device path for v4l2src (default /dev/video0 for CSI camera)
         device = image_source_config.get("device", "/dev/video0")
         deviceName = image_source_config.get("deviceName", "v4l2src")
+        
+        logger.warning(f"NVIDIA CSI USING: device={device}, deviceName={deviceName}")
 
         self.pipeline_config.add_plugin(PluginDefinition("v4l2src", [
             PluginArg("device", device),
