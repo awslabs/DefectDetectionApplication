@@ -355,10 +355,14 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
             
             logger.info(f"Starting compilation job: {compilation_job_name} for target: {target}")
             
+            # Get SageMaker execution role ARN
+            sagemaker_role_arn = f"arn:aws:iam::{usecase['account_id']}:role/DDASageMakerExecutionRole"
+            logger.info(f"Using SageMaker role: {sagemaker_role_arn}")
+            
             # Create compilation job (without tags to avoid permission issues)
             compilation_response = sagemaker_usecase.create_compilation_job(
                 CompilationJobName=compilation_job_name,
-                RoleArn=usecase['sagemaker_execution_role_arn'],
+                RoleArn=sagemaker_role_arn,
                 InputConfig={
                     'S3Uri': repackaged_model_s3,
                     'DataInputConfig': data_input_config,

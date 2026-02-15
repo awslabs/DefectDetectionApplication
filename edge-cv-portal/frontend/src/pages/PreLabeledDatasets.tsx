@@ -18,6 +18,7 @@ import {
 } from '@cloudscape-design/components';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
+import S3Browser from '../components/S3Browser';
 
 interface PreLabeledDataset {
   dataset_id: string;
@@ -59,11 +60,8 @@ export default function PreLabeledDatasets() {
   const [validation, setValidation] = useState<ManifestValidation | null>(null);
   const [useCases, setUseCases] = useState<any[]>([]);
   const [selectedUseCase, setSelectedUseCase] = useState<any>(null);
-  const [showS3Browser, setShowS3Browser] = useState(false);
-  const [s3Files, setS3Files] = useState<any[]>([]);
-  const [loadingS3, setLoadingS3] = useState(false);
-  const [currentPrefix, setCurrentPrefix] = useState('');
   const [showHelpPanel, setShowHelpPanel] = useState(false);
+  const [showBrowseModal, setShowBrowseModal] = useState(false);
   
   const [formData, setFormData] = useState({
     name: '',
@@ -216,71 +214,8 @@ export default function PreLabeledDatasets() {
     }
   };
 
-  const browseS3 = async (prefix: string = '') => {
-    if (!selectedUseCase) {
-      setError('No use case selected');
-      return;
-    }
-
-    try {
-      setLoadingS3(true);
-      const data = await apiService.listDatasets({
-        usecase_id: selectedUseCase.usecase_id,
-        prefix: prefix,
-        max_depth: 1,
-      });
-
-      // List files in the current prefix
-      const files: any[] = [];
-      
-      // Add parent directory option if not at root
-      if (prefix) {
-        const parentPrefix = prefix.split('/').slice(0, -2).join('/');
-        files.push({
-          type: 'parent',
-          name: '..',
-          prefix: parentPrefix ? parentPrefix + '/' : '',
-        });
-      }
-
-      // Add subdirectories
-      data.datasets.forEach((dataset: any) => {
-        if (dataset.has_subdirectories) {
-          files.push({
-            type: 'folder',
-            name: dataset.prefix.split('/').slice(-2)[0],
-            prefix: dataset.prefix,
-          });
-        }
-      });
-
-      // Fetch actual files from S3 using the datasets endpoint
-      // For now, we'll show a simplified view
-      // In production, you'd want a dedicated S3 file listing endpoint
-      
-      setS3Files(files);
-      setCurrentPrefix(prefix);
-      setShowS3Browser(true);
-    } catch (err) {
-      console.error('Error browsing S3:', err);
-      setError('Failed to browse S3 bucket');
-    } finally {
-      setLoadingS3(false);
-    }
-  };
-
-  const selectS3File = (file: any) => {
-    if (file.type === 'parent') {
-      browseS3(file.prefix);
-    } else if (file.type === 'folder') {
-      browseS3(file.prefix);
-    } else {
-      // File selected
-      const bucket = selectedUseCase?.s3_bucket || '';
-      const s3Uri = `s3://${bucket}/${file.key}`;
-      setFormData({ ...formData, manifest_s3_uri: s3Uri });
-      setShowS3Browser(false);
-    }
+  const selectManifestFromBrowser = (s3Uri: string) => {
+    setFormData({ ...formData, manifest_s3_uri: s3Uri });
   };
 
   return (
@@ -466,19 +401,18 @@ export default function PreLabeledDatasets() {
 
               <FormField
                 label="Manifest S3 URI"
-                description="S3 path to your manifest file (e.g., s3://bucket/path/manifest.jsonl)"
-                stretch
+                description="S3 path to your manifest file (e.g., s3://bucket/path/manifest.manifest)"
               >
                 <SpaceBetween direction="horizontal" size="xs">
                   <Input
                     value={formData.manifest_s3_uri}
                     onChange={({ detail }) => setFormData({ ...formData, manifest_s3_uri: detail.value })}
-                    placeholder="s3://your-bucket/path/manifest.jsonl"
+                    placeholder="s3://your-bucket/path/manifest.manifest"
                   />
-                  <Button
-                    onClick={() => browseS3()}
+                  <Button 
+                    onClick={() => setShowBrowseModal(true)} 
                     disabled={!selectedUseCase}
-                    iconName="folder-open"
+                    variant="normal"
                   >
                     Browse S3
                   </Button>
@@ -486,15 +420,15 @@ export default function PreLabeledDatasets() {
               </FormField>
 
               {validation && (
-                <Alert
-                  type={validation.valid ? 'success' : 'error'}
-                  header={validation.valid ? 'Manifest Valid' : 'Validation Failed'}
-                >
-                  <SpaceBetween size="s">
+                <SpaceBetween size="s">
+                  <Alert
+                    type={validation.valid ? 'success' : 'error'}
+                    header={validation.valid ? '✓ Manifest Valid' : '✗ Validation Failed'}
+                  >
                     {validation.valid ? (
                       <Box>
                         <strong>Dataset Statistics:</strong>
-                        <ul>
+                        <ul style={{ marginTop: '8px', marginBottom: 0 }}>
                           <li>Total Images: {validation.stats.total_images}</li>
                           <li>Task Type: {validation.stats.task_type}</li>
                           <li>Labels: {Object.entries(validation.stats.label_distribution).map(([label, count]) => `${label} (${count})`).join(', ')}</li>
@@ -502,100 +436,56 @@ export default function PreLabeledDatasets() {
                       </Box>
                     ) : (
                       <Box>
-                        <strong>Errors:</strong>
-                        <ul>
+                        <strong style={{ color: '#d13212' }}>Issues Found:</strong>
+                        <ul style={{ marginTop: '8px', marginBottom: 0, color: '#d13212' }}>
                           {validation.errors.map((error, index) => (
-                            <li key={index}>{error}</li>
+                            <li key={index} style={{ marginBottom: '4px' }}>
+                              {error}
+                            </li>
                           ))}
                         </ul>
                       </Box>
                     )}
-                    
-                    {validation.warnings.length > 0 && (
+                  </Alert>
+
+                  {validation.warnings.length > 0 && (
+                    <Alert type="warning" header="⚠ Warnings">
                       <Box>
-                        <strong>Warnings:</strong>
-                        <ul>
+                        <ul style={{ marginTop: 0, marginBottom: 0 }}>
                           {validation.warnings.map((warning, index) => (
-                            <li key={index}>{warning}</li>
+                            <li key={index} style={{ marginBottom: '4px' }}>
+                              {warning}
+                            </li>
                           ))}
                         </ul>
                       </Box>
-                    )}
-                  </SpaceBetween>
-                </Alert>
+                    </Alert>
+                  )}
+
+                  {!validation.valid && (
+                    <Alert type="info" header="How to Fix">
+                      <Box>
+                        <p style={{ marginTop: 0 }}>
+                          Your manifest file has issues that need to be resolved before creating a dataset:
+                        </p>
+                        <ul style={{ marginBottom: 0 }}>
+                          <li>
+                            <strong>Missing label columns:</strong> Ensure your manifest has a label column (e.g., "cookie-classification") and its corresponding metadata column (e.g., "cookie-classification-metadata")
+                          </li>
+                          <li>
+                            <strong>Malformed S3 URIs:</strong> Check that S3 paths don't have duplicate "s3://" prefixes or double slashes. Example: "s3://bucket/path/image.jpg" (not "s3://s3://bucket//path//image.jpg")
+                          </li>
+                          <li>
+                            <strong>Invalid JSON:</strong> Ensure each line in the manifest is valid JSON
+                          </li>
+                        </ul>
+                      </Box>
+                    </Alert>
+                  )}
+                </SpaceBetween>
               )}
             </SpaceBetween>
           </Form>
-        </Modal>
-
-        <Modal
-          visible={showS3Browser}
-          onDismiss={() => setShowS3Browser(false)}
-          header="Browse S3 Bucket"
-          size="large"
-          footer={
-            <Box float="right">
-              <Button onClick={() => setShowS3Browser(false)}>Close</Button>
-            </Box>
-          }
-        >
-          <SpaceBetween size="l">
-            <Alert type="info">
-              Browse your S3 bucket to find the manifest file. Look for files ending in .jsonl or .manifest
-            </Alert>
-
-            {currentPrefix && (
-              <Box>
-                <strong>Current Path:</strong> {currentPrefix || '/'}
-              </Box>
-            )}
-
-            <Table
-              columnDefinitions={[
-                {
-                  id: 'icon',
-                  header: '',
-                  cell: (item: any) => (
-                    item.type === 'folder' || item.type === 'parent' ? '📁' : '📄'
-                  ),
-                  width: 50,
-                },
-                {
-                  id: 'name',
-                  header: 'Name',
-                  cell: (item: any) => item.name,
-                },
-                {
-                  id: 'actions',
-                  header: 'Actions',
-                  cell: (item: any) => (
-                    <Button
-                      variant="link"
-                      onClick={() => selectS3File(item)}
-                    >
-                      {item.type === 'folder' || item.type === 'parent' ? 'Open' : 'Select'}
-                    </Button>
-                  ),
-                },
-              ]}
-              items={s3Files}
-              loading={loadingS3}
-              empty={
-                <Box textAlign="center" color="inherit">
-                  <b>No files or folders</b>
-                  <Box variant="p" color="inherit">
-                    This directory is empty or you may need to navigate to a different location.
-                  </Box>
-                </Box>
-              }
-            />
-
-            <Alert type="warning">
-              <strong>Note:</strong> The S3 browser currently shows directories only. 
-              You can manually enter the full S3 URI for your manifest file in the format: 
-              s3://bucket-name/path/to/manifest.jsonl
-            </Alert>
-          </SpaceBetween>
         </Modal>
 
         <Modal
@@ -677,6 +567,16 @@ export default function PreLabeledDatasets() {
             </Alert>
           </SpaceBetween>
         </Modal>
+
+        <S3Browser
+          visible={showBrowseModal}
+          onDismiss={() => setShowBrowseModal(false)}
+          usecaseId={selectedUseCase?.usecase_id || ''}
+          onSelectFile={selectManifestFromBrowser}
+          fileFilter={(item) => item.type === 'manifest'}
+          title="Select Manifest File"
+          selectButtonText="Select"
+        />
       </SpaceBetween>
     </ContentLayout>
   );

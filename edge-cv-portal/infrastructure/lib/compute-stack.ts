@@ -97,6 +97,7 @@ export class ComputeStack extends cdk.Stack {
           'sagemaker:ListLabelingJobs',
           'sagemaker:StopLabelingJob',
           'sagemaker:ListWorkteams',
+          'sagemaker:AddTags',
           'greengrass:CreateComponentVersion',
           'greengrass:DescribeComponent',
           'greengrass:GetComponent',
@@ -118,6 +119,18 @@ export class ComputeStack extends cdk.Stack {
           'execute-api:Invoke',
         ],
         resources: ['*'],
+      }));
+
+      // Grant IAM PassRole permission for SageMaker execution role
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['iam:PassRole'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            'iam:PassedToService': 'sagemaker.amazonaws.com',
+          },
+        },
       }));
 
       // Grant Cognito permissions for auth functions

@@ -969,8 +969,10 @@ def create_usecase(event, user):
             try:
                 sts_client = boto3.client('sts')
                 account_id = sts_client.get_caller_identity()['Account']
-                # Use default SageMaker role ARN
-                sagemaker_role_arn = f'arn:aws:iam::{account_id}:role/SageMakerExecutionRole'
+                
+                # Use DDASageMakerExecutionRole for single-account setup
+                # This role must be pre-created using: ./deploy-account-role.sh single-account
+                sagemaker_role_arn = f'arn:aws:iam::{account_id}:role/DDASageMakerExecutionRole'
                 cross_account_role_arn = f'arn:aws:iam::{account_id}:root'
             except Exception as e:
                 logger.error(f"Failed to auto-detect account ID: {str(e)}")

@@ -111,20 +111,39 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
         bucket = parts[0]
         key = parts[1]
         
-        # Assume role to access manifest
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            'validate-manifest'
+        # In single-account setup, use Lambda's own credentials
+        # In multi-account setup, assume the usecase role
+        usecase_account_id = usecase.get('account_id')
+        cross_account_role_arn = usecase.get('cross_account_role_arn')
+        
+        # Check if this is a cross-account scenario
+        # Single-account setup has cross_account_role_arn = 'arn:aws:iam::ACCOUNT_ID:root'
+        # Multi-account setup has cross_account_role_arn = 'arn:aws:iam::ACCOUNT_ID:role/ROLE_NAME'
+        is_cross_account = (
+            cross_account_role_arn and 
+            usecase_account_id and 
+            ':role/' in cross_account_role_arn  # Valid role ARN format (not root)
         )
         
-        # Create S3 client with assumed credentials
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+        if is_cross_account:
+            # Multi-account: assume role to access manifest
+            logger.info(f"Cross-account access: assuming role {cross_account_role_arn}")
+            credentials = assume_usecase_role(
+                cross_account_role_arn,
+                usecase.get('external_id'),
+                'validate-manifest'
+            )
+            
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=credentials['AccessKeyId'],
+                aws_secret_access_key=credentials['SecretAccessKey'],
+                aws_session_token=credentials['SessionToken']
+            )
+        else:
+            # Single-account: use Lambda's own credentials
+            logger.info("Single-account setup: using Lambda's own credentials")
+            s3_client = boto3.client('s3')
         
         # Download and parse first few lines of manifest
         try:
@@ -152,12 +171,16 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
         # Check first entry
         try:
             first_entry = json.loads(lines[0])
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse first line of manifest: {str(e)}")
+            logger.error(f"First line content: {lines[0][:200]}")
             return {
                 'valid': False,
                 'errors': ['Manifest is not valid JSON Lines format'],
                 'message': 'Invalid manifest format'
             }
+        
+        logger.info(f"First manifest entry keys: {list(first_entry.keys())}")
         
         # Required attributes for all models
         required_attrs = ['source-ref', 'anomaly-label', 'anomaly-label-metadata']
@@ -177,6 +200,10 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
             has_gt_pattern = any(key.endswith('-metadata') and key != 'anomaly-label-metadata' 
                                 for key in first_entry.keys())
             
+            logger.error(f"Missing required attributes: {missing_attrs}")
+            logger.error(f"Available attributes: {list(first_entry.keys())}")
+            logger.error(f"Detected Ground Truth pattern: {has_gt_pattern}")
+            
             error_msg = f"Missing required attributes: {', '.join(missing_attrs)}"
             if has_gt_pattern:
                 error_msg += ". This appears to be a Ground Truth manifest that needs transformation."
@@ -185,7 +212,8 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
                 'valid': False,
                 'errors': [error_msg],
                 'message': 'Manifest missing required DDA attributes',
-                'detected_attributes': list(first_entry.keys())
+                'detected_attributes': list(first_entry.keys()),
+                'required_attributes': required_attrs
             }
         
         # Validate attribute types
@@ -297,10 +325,17 @@ def create_training_job(event: Dict, context: Any) -> Dict:
                 model_type
             )
             if not validation_result['valid']:
+                logger.error(f"Manifest validation failed: {validation_result['errors']}")
+                logger.error(f"Manifest URI: {dataset_manifest_s3}")
+                logger.error(f"Detected attributes: {validation_result.get('detected_attributes', [])}")
+                logger.error(f"Required attributes: {validation_result.get('required_attributes', [])}")
+                
                 return create_response(400, {
                     'error': 'Manifest validation failed',
                     'details': validation_result['errors'],
-                    'suggestion': 'Use the Manifest Transformer tool to convert your Ground Truth manifest to DDA-compatible format'
+                    'detected_attributes': validation_result.get('detected_attributes', []),
+                    'required_attributes': validation_result.get('required_attributes', []),
+                    'suggestion': 'Ensure your manifest is in DDA format with anomaly-label, anomaly-label-metadata, and source-ref fields. Use the Manifest Transformer tool to convert Ground Truth manifests.'
                 })
             logger.info(f"Manifest validation passed: {validation_result['message']}")
         
@@ -312,20 +347,35 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         else:
             logger.info(f"Training data is in UseCase Account: {usecase['account_id']}")
         
-        # Assume cross-account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            f"training-{user_id}-{int(datetime.utcnow().timestamp())}"
+        # Check if this is a cross-account scenario
+        # Single-account setup has cross_account_role_arn = 'arn:aws:iam::ACCOUNT_ID:root'
+        # Multi-account setup has cross_account_role_arn = 'arn:aws:iam::ACCOUNT_ID:role/ROLE_NAME'
+        cross_account_role_arn = usecase.get('cross_account_role_arn')
+        is_cross_account = (
+            cross_account_role_arn and 
+            usecase.get('account_id') and 
+            ':role/' in cross_account_role_arn  # Valid role ARN format (not root)
         )
         
-        # Create SageMaker client with assumed role
-        sagemaker_usecase = boto3.client(
-            'sagemaker',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+        # Create SageMaker client
+        if is_cross_account:
+            # Multi-account: assume role to access manifest
+            logger.info(f"Cross-account access: assuming role {cross_account_role_arn}")
+            credentials = assume_usecase_role(
+                cross_account_role_arn,
+                usecase.get('external_id'),
+                f"training-{user_id}-{int(datetime.utcnow().timestamp())}"
+            )
+            sagemaker_usecase = boto3.client(
+                'sagemaker',
+                aws_access_key_id=credentials['AccessKeyId'],
+                aws_secret_access_key=credentials['SecretAccessKey'],
+                aws_session_token=credentials['SessionToken']
+            )
+        else:
+            # Single-account: use Lambda's own credentials
+            logger.info("Single-account setup: using Lambda's own credentials")
+            sagemaker_usecase = sagemaker
         
         # Generate unique training job name
         # SageMaker job names can only contain alphanumeric and hyphens
@@ -379,6 +429,10 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         training_output_path = path_builder.get_training_output_uri(training_job_name)
         logger.info(f"Training output will be stored at: {training_output_path}")
         
+        # Get SageMaker execution role ARN
+        sagemaker_role_arn = f"arn:aws:iam::{usecase['account_id']}:role/DDASageMakerExecutionRole"
+        logger.info(f"Using SageMaker role: {sagemaker_role_arn}")
+        
         # Create training job
         logger.info(f"Creating training job: {training_job_name} with algorithm: {MARKETPLACE_ALGORITHM_ARN}")
         
@@ -390,7 +444,7 @@ def create_training_job(event: Dict, context: Any) -> Dict:
                 'TrainingInputMode': 'File',
                 'EnableSageMakerMetricsTimeSeries': False
             },
-            RoleArn=usecase['sagemaker_execution_role_arn'],
+            RoleArn=sagemaker_role_arn,
             InputDataConfig=[
                 {
                     'ChannelName': 'training',
@@ -604,18 +658,29 @@ def get_training_job(event: Dict, context: Any) -> Dict:
         if job.get('training_job_name'):
             try:
                 usecase = get_usecase_details(job['usecase_id'])
-                credentials = assume_usecase_role(
-                    usecase['cross_account_role_arn'],
-                    usecase['external_id'],
-                    f"training-status-{user_id[:10]}-{int(datetime.utcnow().timestamp())}"[:64]
+                
+                # Check if this is a cross-account scenario
+                cross_account_role_arn = usecase.get('cross_account_role_arn')
+                is_cross_account = (
+                    cross_account_role_arn and 
+                    usecase.get('account_id') and 
+                    ':role/' in cross_account_role_arn
                 )
                 
-                sagemaker_usecase = boto3.client(
-                    'sagemaker',
-                    aws_access_key_id=credentials['AccessKeyId'],
-                    aws_secret_access_key=credentials['SecretAccessKey'],
-                    aws_session_token=credentials['SessionToken']
-                )
+                if is_cross_account:
+                    credentials = assume_usecase_role(
+                        cross_account_role_arn,
+                        usecase.get('external_id'),
+                        f"training-status-{user_id[:10]}-{int(datetime.utcnow().timestamp())}"[:64]
+                    )
+                    sagemaker_usecase = boto3.client(
+                        'sagemaker',
+                        aws_access_key_id=credentials['AccessKeyId'],
+                        aws_secret_access_key=credentials['SecretAccessKey'],
+                        aws_session_token=credentials['SessionToken']
+                    )
+                else:
+                    sagemaker_usecase = sagemaker
                 
                 sm_response = sagemaker_usecase.describe_training_job(
                     TrainingJobName=job['training_job_name']
@@ -727,20 +792,28 @@ def get_training_logs(event: Dict, context: Any) -> Dict:
         # Get use case details for cross-account access
         usecase = get_usecase_details(job['usecase_id'])
         
-        # Assume cross-account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            f"training-logs-{user_id}-{int(datetime.utcnow().timestamp())}"
+        # Check if this is a cross-account scenario
+        cross_account_role_arn = usecase.get('cross_account_role_arn')
+        is_cross_account = (
+            cross_account_role_arn and 
+            usecase.get('account_id') and 
+            ':role/' in cross_account_role_arn
         )
         
-        # Create CloudWatch Logs client with assumed role
-        logs_client = boto3.client(
-            'logs',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+        if is_cross_account:
+            credentials = assume_usecase_role(
+                cross_account_role_arn,
+                usecase.get('external_id'),
+                f"training-logs-{user_id}-{int(datetime.utcnow().timestamp())}"
+            )
+            logs_client = boto3.client(
+                'logs',
+                aws_access_key_id=credentials['AccessKeyId'],
+                aws_secret_access_key=credentials['SecretAccessKey'],
+                aws_session_token=credentials['SessionToken']
+            )
+        else:
+            logs_client = boto3.client('logs')
         
         # CloudWatch log group for SageMaker training jobs
         log_group = '/aws/sagemaker/TrainingJobs'
@@ -863,20 +936,28 @@ def download_training_logs(event: Dict, context: Any) -> Dict:
         # Get use case details for cross-account access
         usecase = get_usecase_details(job['usecase_id'])
         
-        # Assume cross-account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            f"training-logs-download-{user_id}-{int(datetime.utcnow().timestamp())}"
+        # Check if this is a cross-account scenario
+        cross_account_role_arn = usecase.get('cross_account_role_arn')
+        is_cross_account = (
+            cross_account_role_arn and 
+            usecase.get('account_id') and 
+            ':role/' in cross_account_role_arn
         )
         
-        # Create CloudWatch Logs client with assumed role
-        logs_client = boto3.client(
-            'logs',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+        if is_cross_account:
+            credentials = assume_usecase_role(
+                cross_account_role_arn,
+                usecase.get('external_id'),
+                f"training-logs-download-{user_id}-{int(datetime.utcnow().timestamp())}"
+            )
+            logs_client = boto3.client(
+                'logs',
+                aws_access_key_id=credentials['AccessKeyId'],
+                aws_secret_access_key=credentials['SecretAccessKey'],
+                aws_session_token=credentials['SessionToken']
+            )
+        else:
+            logs_client = boto3.client('logs')
         
         # CloudWatch log group for SageMaker training jobs
         log_group = '/aws/sagemaker/TrainingJobs'

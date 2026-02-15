@@ -10,12 +10,12 @@ import {
   Input,
   Select,
   SelectProps,
-  Textarea,
   Alert,
   Checkbox,
   ColumnLayout,
   Box,
   Tiles,
+  Modal,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
@@ -39,8 +39,7 @@ export default function CreateTraining() {
     label: 'Classification',
     value: 'classification',
   });
-  const [datasetSource, setDatasetSource] = useState<string>('manual'); // 'manual', 'ground-truth', 'pre-labeled'
-  const [datasetManifest, setDatasetManifest] = useState('');
+  const [datasetSource, setDatasetSource] = useState<string>('ground-truth'); // 'ground-truth', 'pre-labeled'
   const [selectedLabelingJob, setSelectedLabelingJob] = useState<SelectProps.Option | null>(null);
   const [selectedPreLabeledDataset, setSelectedPreLabeledDataset] = useState<SelectProps.Option | null>(null);
   const [labelingJobs, setLabelingJobs] = useState<SelectProps.Option[]>([]);
@@ -58,6 +57,12 @@ export default function CreateTraining() {
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [manifestFormat, setManifestFormat] = useState<'dda' | 'ground-truth' | 'unknown' | null>(null);
+  const [checkingManifestFormat, setCheckingManifestFormat] = useState(false);
+  const [showTransformModal, setShowTransformModal] = useState(false);
+  const [transforming, setTransforming] = useState(false);
+  const [transformError, setTransformError] = useState<string | null>(null);
+  const [transformedManifestUri, setTransformedManifestUri] = useState<string | null>(null);
 
   // Define options before they're used in useEffect
   const modelTypeOptions: SelectProps.Option[] = [
@@ -97,12 +102,6 @@ export default function CreateTraining() {
         if (typeOption) {
           setModelType(typeOption);
         }
-      }
-      
-      // Set dataset manifest
-      if (cloneFrom.dataset_manifest_s3) {
-        setDatasetManifest(cloneFrom.dataset_manifest_s3);
-        setDatasetSource('manual');
       }
       
       // Set instance type
@@ -161,7 +160,7 @@ export default function CreateTraining() {
     if (!useCaseId?.value) return;
     
     // Only fetch if user has selected a dataset source that needs this data
-    const needsLabelingJobs = datasetSource === 'labeling';
+    const needsLabelingJobs = datasetSource === 'ground-truth';
     const needsPreLabeled = datasetSource === 'pre-labeled';
     
     if (!needsLabelingJobs && !needsPreLabeled) return;
@@ -202,16 +201,113 @@ export default function CreateTraining() {
     fetchDatasets();
   }, [useCaseId, datasetSource]);
 
+  const handleLabelingJobSelect = async (option: SelectProps.Option | null) => {
+    setSelectedLabelingJob(option);
+    setManifestFormat(null);
+    setTransformedManifestUri(null);
+    
+    if (option?.value) {
+      await checkManifestFormat(option.value as string);
+    }
+  };
+
+  const handlePreLabeledDatasetSelect = async (option: SelectProps.Option | null) => {
+    setSelectedPreLabeledDataset(option);
+    setManifestFormat(null);
+    setTransformedManifestUri(null);
+    
+    if (option?.value) {
+      await checkManifestFormat(option.value as string);
+    }
+  };
+
+  const checkManifestFormat = async (manifestUri: string) => {
+    if (!useCaseId?.value) return;
+    
+    try {
+      setCheckingManifestFormat(true);
+      const validation = await apiService.validateManifest({
+        usecase_id: useCaseId.value as string,
+        manifest_s3_uri: manifestUri,
+      });
+      
+      console.log('Manifest validation result:', validation);
+      
+      // Check if manifest has Ground Truth format attributes
+      const sampleEntry = validation.stats.sample_entries?.[0];
+      console.log('Sample entry:', sampleEntry);
+      
+      if (sampleEntry) {
+        // Look for Ground Truth specific attributes (ends with -metadata but not anomaly-label-metadata)
+        const hasGroundTruthAttrs = Object.keys(sampleEntry).some(
+          key => key.endsWith('-metadata') && 
+                  key !== 'anomaly-label-metadata' && 
+                  key !== 'anomaly-mask-ref-metadata'
+        );
+        
+        console.log('Has Ground Truth attributes:', hasGroundTruthAttrs);
+        console.log('Sample entry keys:', Object.keys(sampleEntry));
+        
+        if (hasGroundTruthAttrs) {
+          setManifestFormat('ground-truth');
+        } else if (sampleEntry['anomaly-label'] !== undefined) {
+          setManifestFormat('dda');
+        } else {
+          setManifestFormat('unknown');
+        }
+      } else {
+        console.log('No sample entries found in validation response');
+        setManifestFormat('unknown');
+      }
+    } catch (err) {
+      console.error('Failed to check manifest format:', err);
+      setManifestFormat('unknown');
+    } finally {
+      setCheckingManifestFormat(false);
+    }
+  };
+
+  const handleTransformManifest = async () => {
+    const manifestUri = getManifestUri();
+    if (!useCaseId?.value || !manifestUri) return;
+    
+    try {
+      setTransforming(true);
+      setTransformError(null);
+      
+      const result = await apiService.transformManifest({
+        usecase_id: useCaseId.value as string,
+        source_manifest_uri: manifestUri,
+        task_type: (modelType.value as string)?.includes('segmentation') ? 'segmentation' : 'classification',
+      });
+      
+      setTransformedManifestUri(result.transformed_manifest_uri);
+      setManifestFormat('dda');
+      setShowTransformModal(false);
+    } catch (err) {
+      setTransformError(err instanceof Error ? err.message : 'Failed to transform manifest');
+    } finally {
+      setTransforming(false);
+    }
+  };
+
   const handleSubmit = async () => {
     if (!useCaseId) {
       setError('Please select a use case');
       return;
     }
 
+    // Check if manifest is in Ground Truth format and not transformed
+    if (manifestFormat === 'ground-truth' && !transformedManifestUri) {
+      setError('Manifest is in Ground Truth format and must be transformed before training. Click "Transform Manifest Now" to proceed.');
+      return;
+    }
+
     // Get the manifest URI based on selected source
+    // Use transformed manifest if available, otherwise use original
     let manifestUri = '';
-    if (datasetSource === 'manual') {
-      manifestUri = datasetManifest;
+    if (transformedManifestUri) {
+      manifestUri = transformedManifestUri;
     } else if (datasetSource === 'ground-truth' && selectedLabelingJob) {
       manifestUri = selectedLabelingJob.value as string;
     } else if (datasetSource === 'pre-labeled' && selectedPreLabeledDataset) {
@@ -219,7 +315,7 @@ export default function CreateTraining() {
     }
 
     if (!manifestUri) {
-      setError('Please select or enter a dataset manifest');
+      setError('Please select a dataset');
       return;
     }
 
@@ -247,7 +343,14 @@ export default function CreateTraining() {
       navigate('/training');
     } catch (err) {
       console.error('Failed to create training job:', err);
-      setError(err instanceof Error ? err.message : 'Failed to create training job');
+      const errorMessage = err instanceof Error ? err.message : 'Failed to create training job';
+      
+      // Check if error is about manifest validation
+      if (errorMessage.includes('Manifest validation failed')) {
+        setError(`Manifest validation failed. The manifest is not in DDA format. Please transform the manifest using the "Transform Manifest Now" button and try again.`);
+      } else {
+        setError(errorMessage);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -255,23 +358,30 @@ export default function CreateTraining() {
 
   // Check if form is valid based on selected dataset source
   const getManifestUri = () => {
-    if (datasetSource === 'manual') return datasetManifest;
     if (datasetSource === 'ground-truth') return selectedLabelingJob?.value;
     if (datasetSource === 'pre-labeled') return selectedPreLabeledDataset?.value;
     return '';
   };
 
+  // Get validation errors
+  const getValidationErrors = () => {
+    const errors: string[] = [];
+    if (!useCaseId) errors.push('Use Case is required');
+    if (!modelName) errors.push('Model Name is required');
+    if (modelName && !/^[a-zA-Z0-9-]+$/.test(modelName)) errors.push('Model Name can only contain letters, numbers, and hyphens');
+    if (!modelVersion) errors.push('Model Version is required');
+    if (!getManifestUri()) errors.push('Dataset selection is required');
+    if (!modelType) errors.push('Model Type is required');
+    if (!instanceType) errors.push('Instance Type is required');
+    if (manifestFormat === 'ground-truth' && !transformedManifestUri) errors.push('Manifest must be transformed from Ground Truth format');
+    return errors;
+  };
+
+  const validationErrors = getValidationErrors();
+  const isFormValid = validationErrors.length === 0;
+
   // Get the selected usecase object
   const selectedUseCase = useCaseData.find(uc => uc.usecase_id === useCaseId?.value);
-
-  const isFormValid = 
-    useCaseId && 
-    modelName && 
-    /^[a-zA-Z0-9-]+$/.test(modelName) &&
-    modelVersion &&
-    getManifestUri() && 
-    modelType && 
-    instanceType;
 
   return (
     <Form
@@ -280,7 +390,12 @@ export default function CreateTraining() {
           <Button variant="link" onClick={() => navigate('/training')} disabled={submitting}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={handleSubmit} disabled={!isFormValid || submitting} loading={submitting}>
+          <Button 
+            variant="primary" 
+            onClick={handleSubmit} 
+            disabled={!isFormValid || submitting} 
+            loading={submitting}
+          >
             Start Training
           </Button>
         </SpaceBetween>
@@ -292,6 +407,17 @@ export default function CreateTraining() {
             {error && (
               <Alert type="error" dismissible onDismiss={() => setError(null)}>
                 {error}
+              </Alert>
+            )}
+
+            {validationErrors.length > 0 && (
+              <Alert type="warning">
+                <Box variant="h4">Complete the form to start training</Box>
+                <ul style={{ marginLeft: '20px', marginTop: '8px' }}>
+                  {validationErrors.map((err, idx) => (
+                    <li key={idx}>{err}</li>
+                  ))}
+                </ul>
               </Alert>
             )}
 
@@ -338,7 +464,7 @@ export default function CreateTraining() {
                 </ul>
                 <Box variant="p">
                   If your Ground Truth manifest uses different names (e.g., <code>my-job</code>, <code>my-job-metadata</code>),
-                  use the <strong>Manifest Transformer</strong> tool in the Labeling page before training.
+                  the system will automatically detect this and offer to transform it when you select your dataset.
                 </Box>
               </Alert>
             )}
@@ -363,7 +489,7 @@ export default function CreateTraining() {
               errorText={
                 modelName && !/^[a-zA-Z0-9-]+$/.test(modelName)
                   ? 'Model name can only contain letters, numbers, and hyphens'
-                  : undefined
+                  : !modelName ? 'Model Name is required' : undefined
               }
               stretch
             >
@@ -371,7 +497,7 @@ export default function CreateTraining() {
                 value={modelName}
                 onChange={({ detail }) => setModelName(detail.value)}
                 placeholder="e.g., defect-detector-line1"
-                invalid={modelName ? !/^[a-zA-Z0-9-]+$/.test(modelName) : false}
+                invalid={modelName ? !/^[a-zA-Z0-9-]+$/.test(modelName) : !modelName}
               />
             </FormField>
 
@@ -424,11 +550,6 @@ export default function CreateTraining() {
                     label: 'Pre-Labeled Dataset',
                     description: 'Use existing labeled data',
                   },
-                  {
-                    value: 'manual',
-                    label: 'Manual S3 URI',
-                    description: 'Enter manifest location directly',
-                  },
                 ]}
               />
             </FormField>
@@ -441,11 +562,12 @@ export default function CreateTraining() {
               >
                 <Select
                   selectedOption={selectedLabelingJob}
-                  onChange={({ detail }) => setSelectedLabelingJob(detail.selectedOption)}
+                  onChange={({ detail }) => handleLabelingJobSelect(detail.selectedOption)}
                   options={labelingJobs}
                   placeholder={labelingJobs.length > 0 ? 'Select a labeling job' : 'No completed labeling jobs found'}
                   empty="No completed labeling jobs available"
                   selectedAriaLabel="Selected"
+                  disabled={checkingManifestFormat}
                 />
               </FormField>
             )}
@@ -458,35 +580,48 @@ export default function CreateTraining() {
               >
                 <Select
                   selectedOption={selectedPreLabeledDataset}
-                  onChange={({ detail }) => setSelectedPreLabeledDataset(detail.selectedOption)}
+                  onChange={({ detail }) => handlePreLabeledDatasetSelect(detail.selectedOption)}
                   options={preLabeledDatasets}
                   placeholder={preLabeledDatasets.length > 0 ? 'Select a dataset' : 'No pre-labeled datasets found'}
                   empty="No pre-labeled datasets available"
                   selectedAriaLabel="Selected"
+                  disabled={checkingManifestFormat}
                 />
                 {preLabeledDatasets.length === 0 && (
                   <Box variant="small" color="text-status-inactive" margin={{ top: 'xs' }}>
-                    <Button variant="link" onClick={() => navigate('/labeling/pre-labeled')}>
-                      Add a pre-labeled dataset
+                    No datasets available.{' '}
+                    <Button variant="link" onClick={() => navigate('/labeling')}>
+                      Add a pre-labeled dataset first
                     </Button>
                   </Box>
                 )}
               </FormField>
             )}
 
-            {datasetSource === 'manual' && (
-              <FormField
-                label="Dataset Manifest S3 URI"
-                description="S3 path to your manifest file"
-                stretch
-              >
-                <Textarea
-                  value={datasetManifest}
-                  onChange={({ detail }) => setDatasetManifest(detail.value)}
-                  placeholder="s3://your-bucket/manifests/train.manifest"
-                  rows={2}
-                />
-              </FormField>
+            {manifestFormat === 'ground-truth' && (
+              <Alert type="warning" dismissible onDismiss={() => setManifestFormat(null)}>
+                <Box variant="h4">Ground Truth Format Detected</Box>
+                <Box variant="p">
+                  This manifest uses Ground Truth attribute names (e.g., <code>my-job</code>, <code>my-job-metadata</code>).
+                  The AWS Marketplace model requires DDA format (<code>anomaly-label</code>, <code>anomaly-label-metadata</code>).
+                </Box>
+                <Box variant="p">
+                  <Button variant="primary" onClick={() => setShowTransformModal(true)} loading={transforming}>
+                    Transform Manifest Now
+                  </Button>
+                </Box>
+              </Alert>
+            )}
+
+            {manifestFormat === 'dda' && (
+              <Alert type="success" dismissible onDismiss={() => setManifestFormat(null)}>
+                ✓ Manifest is in DDA format and ready for training
+                {transformedManifestUri && (
+                  <Box variant="small" color="text-status-success" margin={{ top: 'xs' }}>
+                    Using transformed manifest: {transformedManifestUri}
+                  </Box>
+                )}
+              </Alert>
             )}
           </SpaceBetween>
         </Container>
@@ -596,7 +731,6 @@ export default function CreateTraining() {
                 <Box>
                   {datasetSource === 'ground-truth' && 'Ground Truth Job'}
                   {datasetSource === 'pre-labeled' && 'Pre-Labeled Dataset'}
-                  {datasetSource === 'manual' && 'Manual S3 URI'}
                 </Box>
               </Box>
               <Box>
@@ -610,7 +744,6 @@ export default function CreateTraining() {
                 <Box fontSize="body-s">
                   {datasetSource === 'ground-truth' && (selectedLabelingJob?.label || 'Not selected')}
                   {datasetSource === 'pre-labeled' && (selectedPreLabeledDataset?.label || 'Not selected')}
-                  {datasetSource === 'manual' && (datasetManifest || 'Not specified')}
                 </Box>
               </Box>
               <Box>
@@ -641,6 +774,49 @@ export default function CreateTraining() {
           </ColumnLayout>
         </Container>
       </SpaceBetween>
+
+      <Modal
+        onDismiss={() => setShowTransformModal(false)}
+        visible={showTransformModal}
+        footer={
+          <Box float="right">
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button variant="link" onClick={() => setShowTransformModal(false)} disabled={transforming}>
+                Cancel
+              </Button>
+              <Button variant="primary" onClick={handleTransformManifest} loading={transforming}>
+                Transform Manifest
+              </Button>
+            </SpaceBetween>
+          </Box>
+        }
+        header="Transform Ground Truth Manifest"
+      >
+        <SpaceBetween size="m">
+          {transformError && (
+            <Alert type="error" dismissible onDismiss={() => setTransformError(null)}>
+              {transformError}
+            </Alert>
+          )}
+          <Box variant="p">
+            This manifest is in Ground Truth format. It will be transformed to DDA format required by the AWS Marketplace model.
+          </Box>
+          <Box variant="p">
+            <strong>What happens:</strong>
+          </Box>
+          <ul style={{ marginLeft: '20px' }}>
+            <li>Ground Truth attribute names will be renamed to DDA standard names</li>
+            <li>A new transformed manifest will be created in your S3 bucket (original remains unchanged)</li>
+            <li>Training will use the transformed manifest</li>
+          </ul>
+          <Box variant="p">
+            <strong>Original manifest:</strong> {getManifestUri()}
+          </Box>
+          <Box variant="p">
+            <strong>Transformed manifest:</strong> {getManifestUri()?.replace('.manifest', '-dda.manifest')}
+          </Box>
+        </SpaceBetween>
+      </Modal>
     </Form>
   );
 }
