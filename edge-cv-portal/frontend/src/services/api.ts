@@ -440,6 +440,7 @@ class ApiService {
     instructions?: string;
     num_workers_per_object?: number;
     task_time_limit?: number;
+    mask_prefix?: string;
   }): Promise<{
     job_id: string;
     sagemaker_job_name: string;
@@ -746,6 +747,34 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  async browseS3Bucket(usecaseId: string, prefix: string = ''): Promise<{
+    bucket: string;
+    current_prefix: string;
+    breadcrumbs: Array<{ name: string; prefix: string }>;
+    folders: Array<{
+      name: string;
+      prefix: string;
+      type: 'folder';
+    }>;
+    files: Array<{
+      name: string;
+      key: string;
+      size: number;
+      size_mb: number;
+      last_modified: string;
+      type: 'file' | 'manifest' | 'image';
+      s3_uri: string;
+    }>;
+    folder_count: number;
+    file_count: number;
+  }> {
+    const queryParams = new URLSearchParams({
+      usecase_id: usecaseId,
+      prefix: prefix,
+    });
+    return this.request(`/datasets/pre-labeled/browse?${queryParams}`);
   }
 
   // Component endpoints

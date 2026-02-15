@@ -13,8 +13,8 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
   - [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account)
   - [Step 2: Build and Deploy Frontend](#step-2-build-and-deploy-frontend)
   - [Step 3: Post-Deployment Setup](#step-3-post-deployment-setup)
-  - [Step 4: Deploy UseCase Account and Create UseCase](#step-4-deploy-usecase-account-and-create-usecase)
-  - [Step 5: Build DDA Application](#step-5-build-dda-application-build-server)
+  - [Step 4: Build DDA Application](#step-4-build-dda-application-build-server)
+  - [Step 5: Deploy UseCase Account and Create UseCase](#step-5-deploy-usecase-account-and-create-usecase)
   - [Step 6: Setting Up Edge Servers](#step-6-setting-up-edge-servers)
 - [Features](#features)
 - [ML Workflow](#ml-workflow)
@@ -45,64 +45,36 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 
 ### Architecture Overview
 
-DDA supports both single-account and multi-account architectures to fit different organizational needs.
+DDA supports both single-account and multi-account architectures:
 
-#### Single-Account Architecture (Recommended for Getting Started)
+**Single-Account** (Recommended for Getting Started)
+- All components in one AWS account
+- Simplest setup and management
+- Use `arn:aws:iam::YOUR_ACCOUNT_ID:root` as Role ARN when creating UseCase
 
-All components run in a single AWS account. Simplest to set up and manage:
-
-```
-Single AWS Account
-┌────────────────────────────────────────┐
-│ Portal + UseCase + Data (Optional)     │
-│                                        │
-│ ┌──────────────┐  ┌──────────────┐   │
-│ │ Portal       │  │ SageMaker    │   │
-│ │ - CloudFront │  │ - Training   │   │
-│ │ - API Gateway│  │ - Compilation│   │
-│ │ - Cognito    │  │ - Greengrass │   │
-│ │ - DynamoDB   │  │ - S3 Buckets │   │
-│ └──────────────┘  └──────────────┘   │
-└────────────────────────────────────────┘
-```
-
-**Setup**: Use `arn:aws:iam::YOUR_ACCOUNT_ID:root` as Role ARN when creating UseCase
-
-#### Multi-Account Architecture (Recommended for Production)
-
-Separates Portal, UseCase, and Data accounts for better security and governance:
-
-```
-Portal Account          UseCase Account         Data Account (Optional)
-┌──────────────┐       ┌──────────────┐        ┌──────────────┐
-│ CloudFront   │       │ SageMaker    │        │ S3 Buckets   │
-│ API Gateway  │──────▶│ Greengrass   │◀──────▶│ (Training    │
-│ Cognito      │ STS   │ IoT Core     │        │  Data)       │
-│ DynamoDB     │       │ S3 Buckets   │        │              │
-└──────────────┘       └──────────────┘        └──────────────┘
-```
-
-**Setup**: Run `deploy-account-role.sh` in UseCase and Data accounts to create cross-account roles
+**Multi-Account** (Recommended for Production)
+- Separates Portal, UseCase, and Data accounts
+- Better security and governance
+- Requires cross-account IAM roles (created by `deploy-account-role.sh`)
 
 #### Architecture Components
 
 **Portal Account** - Central management hub
-- Hosts the DDA Portal web interface
-- Manages users, authentication, and RBAC
-- Orchestrates training and compilation jobs
-- Stores portal configuration and audit logs
+- DDA Portal web interface
+- User authentication and RBAC
+- Training and compilation job orchestration
+- Portal configuration and audit logs
 
 **UseCase Account** - ML workflow execution
-- Runs SageMaker training jobs
-- Compiles models for edge deployment
-- Manages Greengrass components
-- Stores trained models and compiled artifacts
+- SageMaker training jobs
+- Model compilation for edge deployment
+- Greengrass component management
+- Trained models and compiled artifacts
 - Can be the same as Portal Account for single-account setups
 
 **Data Account** (Optional) - Centralized data storage
-- Stores training datasets
-- Stores inference results from edge devices
-- Separate from UseCase Account for data governance
+- Training datasets
+- Inference results from edge devices
 - Optional - data can be stored in UseCase Account instead
 
 ### Prerequisites
@@ -182,24 +154,6 @@ Save these values for the next steps.
 
 Build and deploy the React frontend to CloudFront:
 
-```bash
-cd edge-cv-portal
-
-# Build the frontend
-./deploy-frontend.sh
-```
-
-**What this does:**
-- Builds React application with production optimizations
-- Uploads built files to S3 bucket
-- Invalidates CloudFront cache
-- Frontend becomes accessible at the CloudFront URL from Step 1
-
-**Verification:**
-- Open the CloudFront URL in your browser
-- You should see the DDA Portal login page
-- Login with the Cognito credentials you created
-
 #### 2.1 Frontend Configuration (config.json)
 
 The frontend requires a configuration file at `edge-cv-portal/frontend/public/config.json` that contains your Cognito and API Gateway details.
@@ -235,17 +189,33 @@ You need to update the configuration file with your Cognito and API Gateway valu
    }
    ```
 
-3. Redeploy the frontend:
-   ```bash
-   cd edge-cv-portal
-   ./deploy-frontend.sh
-   ```
-
 **Configuration Fields:**
 - `apiUrl` - API Gateway endpoint (without trailing slash)
 - `userPoolId` - Cognito user pool ID
 - `userPoolClientId` - Cognito app client ID
 - `region` - AWS region (default: us-east-1)
+
+#### 2.2 Build and Deploy Frontend
+
+Now build and deploy the React frontend to CloudFront:
+
+```bash
+cd edge-cv-portal
+
+# Build the frontend
+./deploy-frontend.sh
+```
+
+**What this does:**
+- Builds React application with production optimizations
+- Uploads built files to S3 bucket
+- Invalidates CloudFront cache
+- Frontend becomes accessible at the CloudFront URL from Step 1
+
+**Verification:**
+- Open the CloudFront URL in your browser
+- You should see the DDA Portal login page
+- Login with the Cognito credentials you created
 
 ### Step 3: Post-Deployment Setup
 
@@ -302,61 +272,11 @@ aws cognito-idp admin-update-user-attributes \
 3. Navigate to **Settings** to verify configuration
 4. Check that you can access the main dashboard
 
-### Step 4: Deploy UseCase Account and Create UseCase
-
-Before building the DDA application, you need to set up a UseCase account and create a UseCase in the portal. A UseCase represents a specific defect detection application instance. This step is critical because edge devices need the `DDAPortalComponentAccessPolicy` that gets created when the UseCase account stack is deployed.
-
-#### 4.1 Deploy UseCase Account Role (Multi-Account Only)
-
-For multi-account setups, deploy the UseCase account role to enable cross-account access from the Portal account.
-
-**For Single-Account Setup**: Skip this step. The portal will auto-detect your AWS account and use default roles.
-
-**For Multi-Account Setup**:
-
-In the **UseCase Account**, run:
-
-```bash
-cd edge-cv-portal
-./deploy-account-role.sh
-```
-
-**What this does:**
-- Creates `DDAPortalAccessRole` in the UseCase account
-- Grants permissions for SageMaker, Greengrass, IoT Core, and S3
-- Outputs the role ARN for use in the portal
-
-**Save the Role ARN** - You'll need this when creating a UseCase in the portal.
-
-#### 4.2 Create UseCase in Portal
-
-1. Go to **UseCases** page in the portal
-2. Click **Create UseCase**
-3. Select your setup type:
-   - **Single-Account Setup**: Everything runs in one AWS account. The portal will auto-detect your account ID and use default roles.
-   - **Multi-Account Setup**: Portal runs in one account, data and training in separate accounts. You'll need to provide role ARNs.
-4. Fill in the form:
-   - **UseCase Name**: Name for your use case (e.g., "Cookie Defect Detection")
-   - **Description**: Brief description
-   - **S3 Bucket**: S3 bucket for storing training datasets, models, and labeling results
-   - **S3 Prefix** (optional): Folder path within the bucket to organize your data (e.g., `datasets/`)
-   - For **Multi-Account Setup** only:
-     - **Role ARN**: Role ARN from Step 4.1
-     - **Data Account Role ARN** (optional): If using separate Data account, provide the role ARN from Step 6
-5. Click **Create**
-
-**What this does:**
-- Creates a new UseCase in the portal
-- Provisions Greengrass components for the UseCase
-- Creates `DDAPortalComponentAccessPolicy` (required by edge devices)
-- Sets up S3 buckets for training data and models
-- Enables the UseCase for training and deployment workflows
-
-### Step 5: Build DDA Application (Build Server)
+### Step 4: Build DDA Application (Build Server)
 
 The DDA application is the core Greengrass component that runs inference on edge devices. Before deploying to devices, you must build and publish this component for your target architecture (ARM64 or x86-64).
 
-#### 5.1 Prerequisites
+#### 4.1 Prerequisites
 
 The build server requires:
 - EC2 instance (Ubuntu 20.04 or later, t3.large or larger recommended)
@@ -366,7 +286,7 @@ The build server requires:
 
 The IAM role and permissions are automatically created by the build script when you run `gdk-component-build-and-publish.sh`.
 
-#### 5.2 Build and Publish DDA Application
+#### 4.2 Build and Publish DDA Application
 
 The fastest way to get a build server running and build the DDA application:
 
@@ -459,11 +379,14 @@ VERBOSE=1 ./gdk-component-build-and-publish.sh
 
 > **Notice**: After the component is successfully built and published, stop the EC2 build server instance to avoid incurring unnecessary costs. You can restart it later if you need to rebuild components for a different architecture or make updates.
 
-#### 5.3 Manual Setup (Optional)
+#### 4.3 Manual Setup (Optional)
+
+<details>
+<summary><strong>Click to expand manual setup instructions</strong></summary>
 
 If you prefer to set up the IAM role and EC2 instance manually, follow these steps. Otherwise, use the automated setup above.
 
-##### 5.4.1 Create IAM Role
+##### 4.4.1 Create IAM Role
 
 Create a role with the following trust policy:
 
@@ -565,7 +488,7 @@ Attach these policies:
 }
 ```
 
-##### 5.4.2 Create Instance Profile
+##### 4.4.2 Create Instance Profile
 
 ```bash
 # Create instance profile
@@ -577,7 +500,7 @@ aws iam add-role-to-instance-profile \
   --role-name dda-build-role
 ```
 
-##### 5.4.3 Launch EC2 Instance
+##### 4.4.3 Launch EC2 Instance
 
 ```bash
 # Find latest Ubuntu 18.04 ARM64 AMI
@@ -627,7 +550,7 @@ echo "Instance launched: $INSTANCE_ID"
 echo "Public IP: $PUBLIC_IP"
 ```
 
-##### 5.4.4 Connect and Setup
+##### 4.4.4 Connect and Setup
 
 ```bash
 # Connect to instance
@@ -644,7 +567,9 @@ cd DefectDetectionApplication
 ./gdk-component-build-and-publish.sh
 ```
 
-#### 5.5 Build Server Specifications
+</details>
+
+#### 4.5 Build Server Specifications
 
 | Aspect | Details |
 |--------|---------|
@@ -655,22 +580,57 @@ cd DefectDetectionApplication
 | **IAM Role** | dda-build-role |
 | **SSH Access** | Port 22 (restrict in production) |
 
+### Step 5: Create UseCase
+
+A UseCase represents a specific defect detection application instance. Before deploying to edge devices, you need to create a UseCase in the portal.
+
+#### 5.1 Set Up IAM Roles (if needed)
+
+For multi-account setups, you need to create cross-account IAM roles. Run the deployment script:
+
+```bash
+cd edge-cv-portal
+./deploy-account-role.sh
+```
+
+The script presents an interactive menu:
+- **Option 1**: Single-account setup (creates `DDASageMakerExecutionRole`)
+- **Option 2**: Multi-account setup (creates `DDAPortalAccessRole` in UseCase account)
+
+For multi-account setups, save the Role ARN output - you'll need it in the next step.
+
+> **Note**: Single-account setups can skip this step. The portal auto-detects your account and uses default roles.
+
+#### 5.2 Create UseCase in Portal
+
+1. Go to **UseCases** → **Create UseCase**
+2. Fill in the form:
+   - **UseCase Name**: Name for your use case (e.g., "Cookie Defect Detection")
+   - **Description**: Brief description
+   - **S3 Bucket**: S3 bucket for training datasets, models, and results
+   - **Role ARN** (multi-account only): Role ARN from Step 5.1
+   - **Data Account Role ARN** (optional): For separate data storage account
+3. Click **Create**
+
+**What this does:**
+- Creates UseCase in the portal
+- Provisions Greengrass components
+- Creates `DDAPortalComponentAccessPolicy` (required by edge devices)
+- Sets up S3 buckets for training data and models
+
 ### Step 6: Setting Up Edge Servers
 
-After building the DDA application, you need to set up edge servers to run the application. Edge servers are devices configured with AWS IoT Greengrass to run the DDA application and inference workloads.
+After building the DDA application, set up edge servers to run the application. Edge servers are devices configured with AWS IoT Greengrass to run the DDA application and inference workloads.
 
 **Prerequisites:**
-- DDA application built and published (from Step 5.3)
+- DDA application built and published (from Step 4)
 - AWS IoT Greengrass v2 installed on edge device
 - Device credentials configured
-
-**Account Selection:**
-- **Single-Account Setup**: Launch edge servers in the same account as the portal
-- **Multi-Account Setup**: Launch edge servers in the **UseCase Account** (the account where you deployed the UseCase Account Role in Step 4.1)
+- For multi-account setups: edge servers should be in the UseCase account
 
 **Testing with EC2 Instances (Development/Testing Only)**
 
-For testing and development, you can launch EC2 instances as edge devices:
+For testing and development, launch EC2 instances as edge devices:
 
 ```bash
 # Launch an edge device
@@ -858,7 +818,290 @@ For quick testing and prototyping, you can register pre-labeled datasets without
 
 See [Optional Datasets](#optional-datasets-before-model-training) section below for Cookie and Alien dataset setup examples.
 
+## Labeling Features
+
+The DDA Portal provides comprehensive Ground Truth labeling capabilities for creating training datasets. You can create labeling jobs for classification and segmentation tasks, with automatic manifest generation and transformation.
+
+### Labeling Job Types
+
+The portal supports three labeling task types:
+
+| Task Type | Use Case | Output |
+|-----------|----------|--------|
+| **Image Classification** | Binary or multi-class defect detection | Class labels (0, 1, 2, ...) |
+| **Semantic Segmentation** | Pixel-level defect localization | Segmentation masks with color-coded regions |
+
+### Creating a Labeling Job
+
+**Step 1: Prepare and Upload Images**
+
+Upload images to S3 in your UseCase account. The S3 structure is flexible - organize however makes sense for your data:
+
+```bash
+# Create S3 bucket for images
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET="dda-labeling-images-${ACCOUNT_ID}"
+aws s3 mb s3://${BUCKET}
+
+# Upload images to your preferred folder structure
+# Examples:
+aws s3 sync ./my-images/ s3://${BUCKET}/images/
+# or
+aws s3 sync ./my-images/ s3://${BUCKET}/project-1/training-images/
+# or
+aws s3 sync ./my-images/ s3://${BUCKET}/cookies/dataset-files/training-images/
+```
+
+**Step 2: Create Labeling Job in Portal**
+
+1. Go to **Labeling** → **Create Labeling Job**
+2. Fill in job details:
+   - **Job Name**: Name for your labeling job (e.g., "Cookie Defects Q1")
+   - **S3 URI**: S3 prefix pointing to your image folder
+     - This should be the folder containing your image files (not parent directories)
+     - Examples: `s3://bucket/images/`, `s3://bucket/project-1/training-images/`, `s3://bucket/cookies/dataset-files/training-images/`
+     - The portal will list all images in this prefix
+   - **Task Type**: Select Classification or Segmentation
+   - **Label Categories**: Comma-separated list of classes (e.g., "normal, cracked, dented")
+   - **Workforce**: Select Private (your team) or Public (Amazon Mechanical Turk)
+   - **Instructions**: Detailed labeling instructions for workers
+3. Click **Create**
+
+**What Happens:**
+- Portal lists all images in the S3 prefix
+- Automatically generates Ground Truth manifest (JSONL format)
+- Creates Ground Truth labeling job
+- Workers can start labeling immediately
+
+> **Important**: Creating a labeling job in the DDA Portal only creates an entry in AWS SageMaker Ground Truth. You must complete the actual labeling work through the **Ground Truth UI** (not the DDA Portal). Workers will label images in Ground Truth, and once labeling is complete, the manifest will be available for training in the DDA Portal.
+
+**S3 URI Tips:**
+
+- **Point to the image folder**: The S3 URI should be the folder containing your actual image files
+- **Avoid parent directories**: Don't point to a parent folder that contains multiple subfolders
+- **Use trailing slash**: Include the trailing `/` in your S3 URI (e.g., `s3://bucket/images/`)
+- **Flat or nested**: Your images can be directly in the folder or in subfolders - the portal will find them recursively
+
+### Segmentation with Masks
+
+For semantic segmentation tasks, you can provide pre-drawn masks to guide workers or use them as reference:
+
+**Creating Segmentation Job with Masks:**
+
+1. Go to **Labeling** → **Create Labeling Job**
+2. Select **Semantic Segmentation** as task type
+3. Set **Dataset Prefix**: S3 prefix containing your training images
+4. Set **Mask Prefix**: S3 prefix containing your mask images (optional)
+   - Masks should be in a separate folder from images
+   - Filenames must match image filenames (e.g., `image-1.jpg` → `image-1.png`)
+5. Configure label categories and workforce
+6. Click **Create**
+
+**Mask Format:**
+
+Masks are PNG files with pixel colors representing classes:
+- `#23A436` (green) - Defect/anomaly region
+- `#FFFFFF` (white) - Background/normal region
+- Filenames must match image filenames (e.g., `image-1.jpg` → `image-1.png`)
+
+**Example Mask Creation (Python):**
+
+```python
+from PIL import Image
+import numpy as np
+
+# Create mask image (same size as original image)
+width, height = 640, 480
+mask = Image.new('RGB', (width, height), color='white')  # White background
+
+# Draw defect region in green
+pixels = mask.load()
+for x in range(100, 200):
+    for y in range(150, 250):
+        pixels[x, y] = (35, 164, 54)  # Green (#23A436)
+
+# Save mask
+mask.save('image-1.png')
+```
+
+### Monitoring Labeling Progress
+
+1. Go to **Labeling** → **Labeling Jobs**
+2. Select your job to see:
+   - **Status**: InProgress, Completed, Failed, Stopped
+   - **Progress**: Percentage of images labeled
+   - **Labeled Count**: Number of images completed
+   - **Created By**: User who created the job
+   - **Created At**: Job creation timestamp
+
+**Status Meanings:**
+- **InProgress**: Workers are actively labeling
+- **Completed**: All images labeled and consolidated
+- **Failed**: Job encountered an error
+- **Stopped**: Job was manually stopped
+
+### Manifest Transformation
+
+Ground Truth creates manifests with job-specific attribute names that need to be transformed to DDA-compatible format before training. The portal automatically detects and transforms these manifests during the training job creation process.
+
+**Why Transform?**
+
+Ground Truth creates manifests with job-specific attribute names (e.g., `my-labeling-job`, `my-labeling-job-metadata`). The DDA model expects standardized names (`anomaly-label`, `anomaly-label-metadata`). The transformer automatically converts these.
+
+**Automatic Transformation in Training Workflow:**
+
+1. Go to **Training** → **Create Training Job**
+2. Select your labeling job or pre-labeled dataset
+3. If the manifest is in Ground Truth format, a warning alert appears
+4. Click **Transform Manifest Now** button
+5. Portal converts to DDA format automatically
+6. Transformed manifest is used for training
+7. Transformed manifest is saved to S3 with `-dda` suffix
+
+**What Gets Transformed:**
+
+**Classification Input (Ground Truth):**
+```json
+{
+  "source-ref": "s3://bucket/image.jpg",
+  "my-job": 1,
+  "my-job-metadata": {"class-name": "defect"}
+}
+```
+
+**Classification Output (DDA):**
+```json
+{
+  "source-ref": "s3://bucket/image.jpg",
+  "anomaly-label": 1,
+  "anomaly-label-metadata": {"class-name": "defect"}
+}
+```
+
+**Segmentation Input (Ground Truth):**
+```json
+{
+  "source-ref": "s3://bucket/image.jpg",
+  "my-job": 1,
+  "my-job-metadata": {"class-name": "defect"},
+  "my-job-ref": "s3://bucket/masks/image.png",
+  "my-job-ref-metadata": {"class-name": "defect"}
+}
+```
+
+**Segmentation Output (DDA):**
+```json
+{
+  "source-ref": "s3://bucket/image.jpg",
+  "anomaly-label": 1,
+  "anomaly-label-metadata": {"class-name": "defect"},
+  "anomaly-mask-ref": "s3://bucket/masks/image.png",
+  "anomaly-mask-ref-metadata": {"class-name": "defect"}
+}
+```
+
+### Using Labeled Data for Training
+
+After transformation, use the labeled data to train models:
+
+1. Go to **Training** → **Create Training Job**
+2. Select **Ground Truth Labeling Job** as source
+3. Choose your transformed labeling job
+4. Configure training parameters
+5. Click **Start Training**
+
+### Labeling Best Practices
+
+**Image Quality:**
+- Use consistent lighting and camera angles
+- Ensure images are clear and in focus
+- Include diverse examples of defects
+- Aim for 50-100 images per defect type minimum
+
+**Label Consistency:**
+- Provide clear, detailed labeling instructions
+- Use consistent terminology
+- Include example images in instructions
+- Consider using multiple workers per image for consensus
+
+**Defect Coverage:**
+- Include normal/good examples (important for model accuracy)
+- Capture various defect types and severities
+- Include edge cases and borderline examples
+- Aim for balanced dataset (similar counts per class)
+
+**Segmentation Masks:**
+- Draw masks precisely around defect boundaries
+- Use consistent color coding across all masks
+- Include masks for all defect images
+- For normal images, use white background only
+
+### Troubleshooting Labeling
+
+**Issue: "No images found in the specified prefix"**
+- Verify S3 prefix is correct
+- Check that images are in S3 (not local)
+- Ensure image format is supported (.jpg, .png, .bmp, .tiff)
+- Verify IAM permissions allow S3 access
+
+**Issue: "The UI template located at s3://sagemaker-{region}-{account}/ground-truth-labeling-templates/... can't be accessed"**
+
+This error occurs when the `DDASageMakerExecutionRole` doesn't have permission to access AWS's Ground Truth templates. The role needs a trust policy that allows AWS's SageMaker account to assume it.
+
+**Solution:**
+1. Re-run the deployment script to update the role with the correct trust policy:
+   ```bash
+   cd edge-cv-portal
+   ./deploy-account-role.sh
+   ```
+2. Select **Option 1** (Single Account) when prompted
+3. The script will:
+   - Detect your AWS region
+   - Add the correct SageMaker account ID for your region to the trust policy
+   - Update the `DDASageMakerExecutionRole` with the new trust policy
+4. Try creating the labeling job again
+
+**Why this happens:**
+- Ground Truth templates are stored in AWS-managed S3 buckets in each region
+- Each region has a different AWS SageMaker account ID that owns these templates
+- The role must trust that account to access the templates
+- If the role was created before this fix, it won't have the correct trust policy
+
+**Supported regions and their SageMaker account IDs:**
+- us-east-1: 432418664414
+- us-west-2: 246618743249
+- eu-west-1: 685385470294
+- eu-central-1: 492215442770
+- ap-northeast-1: 501404014126
+- ap-southeast-1: 114774131450
+- ap-southeast-2: 783357319266
+
+**Issue: "Labeling job creation failed"**
+- Check that workteam exists in SageMaker Ground Truth
+- Verify workforce ARN is correct
+- Ensure S3 bucket has proper permissions
+- Check CloudWatch Logs for detailed error
+
+**Issue: "Manifest transformation failed"**
+- Verify labeling job is completed
+- Check that manifest file exists in S3
+- Ensure manifest is valid JSONL format
+- Try transforming again (may be temporary issue)
+
+**Issue: "Cannot train with labeled data"**
+- Verify manifest was transformed (not original Ground Truth manifest)
+- Check that transformed manifest URI is correct
+- Ensure all images referenced in manifest exist in S3
+- Verify label values are numeric (0, 1, 2, etc.)
+
 ## ML Workflow
+
+The DDA Portal supports two paths for training models:
+
+**Path A: Ground Truth Labeling** (Recommended for production) - Create custom labeled datasets using Amazon SageMaker Ground Truth
+**Path B: Pre-Labeled Datasets** (Quick start for testing) - Use existing labeled data without creating labeling jobs
+
+### Path A: Ground Truth Labeling Workflow
 
 The standard workflow for training a defect detection model using Amazon SageMaker Ground Truth labeling and Amazon SageMaker:
 
@@ -873,12 +1116,14 @@ The standard workflow for training a defect detection model using Amazon SageMak
    - Monitor progress in portal
    - Status auto-syncs to "Completed" when done
 
-3. **Transform Manifest** ⚠️ **Required before training**
-   - Go to **Labeling** → Select completed job
-   - Click "Transform Manifest" button
-   - Converts Ground Truth manifest to DDA-compatible format
-   - Supports both classification and segmentation tasks
-   - Creates DDA-compatible manifest automatically
+3. **Create Training Job** ⚠️ **Manifest transformation happens here**
+   - Go to **Training** → **Create Training Job**
+   - Select your completed labeling job
+   - Portal automatically detects manifest format
+   - If Ground Truth format is detected, a warning alert appears
+   - Click "Transform Manifest Now" button to convert to DDA format
+   - Configure training parameters (model type, instance type, runtime)
+   - Click "Start Training"
 
    **Why Transform is Required:**
    Ground Truth creates manifests with job-specific attribute names that the DDA model cannot recognize. The transformation step converts these to standardized DDA format required for training.
@@ -892,11 +1137,10 @@ The standard workflow for training a defect detection model using Amazon SageMak
    - Preserves all image references and metadata
    - Stores transformed manifest in S3 for training
 
-4. **Create Training Job**
-   - Go to **Training** → **Create Training Job**
-   - Select transformed Ground Truth job
-   - Configure training parameters
-   - Click "Start Training"
+4. **Monitor Training**
+   - Go to **Training** → Select your training job
+   - Monitor progress and logs
+   - Wait for training to complete
 
 5. **Compile Model**
    - Go to **Models** → Select trained model
@@ -908,10 +1152,11 @@ The standard workflow for training a defect detection model using Amazon SageMak
    - Go to **Deployments** → **Create Deployment**
    - Select device or device group
    - Add compiled model component
+   - Monitor deployment status
    - Optionally enable Inference Uploader for S3 sync
    - Deploy
 
-### Quick Start with Pre-Labeled Datasets (Demo/Dev Only)
+### Path B: Pre-Labeled Datasets (Quick Start)
 
 To skip the labeling phase for testing and development, you can use pre-labeled datasets:
 
@@ -941,7 +1186,7 @@ To skip the labeling phase for testing and development, you can use pre-labeled 
    - Optionally enable Inference Uploader for S3 sync
    - Deploy
 
-**Note**: Pre-labeled datasets are useful for quick testing and demos. For production models, use the full Ground Truth labeling workflow above to create custom labeled data specific to your manufacturing environment.
+**Note**: Pre-labeled datasets are useful for quick testing, prototyping, and demos. For production models, use **Path A: Ground Truth Labeling** to create custom labeled data specific to your manufacturing environment.
 
 ## Manifest Transformation
 
@@ -1011,13 +1256,221 @@ Suggestion: Use the Manifest Transformer tool to convert your Ground Truth manif
 
 ### Using the Transformer
 
-1. Go to **Labeling** → Select completed job
-2. Click **Actions** → **Transform Manifest**
-3. Modal opens with transformation options
-4. Select task type (Classification or Segmentation)
-5. Click **Transform**
-6. Transformed manifest is saved to S3
-7. Use transformed manifest URI in training job
+The manifest transformation happens automatically during the training job creation process:
+
+1. Go to **Training** → **Create Training Job**
+2. Select your labeling job or pre-labeled dataset
+3. If the manifest is in Ground Truth format, a warning alert appears
+4. Click **Transform Manifest Now** button
+5. Portal converts to DDA format automatically
+6. Transformed manifest is saved to S3 with `-dda` suffix
+7. Transformed manifest is automatically used for training
+
+## Training
+
+The DDA Portal provides a streamlined training workflow for creating SageMaker training jobs with your labeled data. The training interface validates manifests, detects format issues, and provides helpful guidance throughout the process.
+
+### Creating a Training Job
+
+**Step 1: Navigate to Training**
+
+1. Go to **Training** → **Create Training Job**
+2. You'll see a form with required fields and helpful validation hints
+
+**Step 2: Select Use Case**
+
+- Choose the use case where your training data is stored
+- The use case determines which S3 bucket and resources are used
+
+**Step 3: Configure Model**
+
+- **Model Name**: Name for your trained model (e.g., "defect-detector-line1")
+  - Can only contain letters, numbers, and hyphens
+  - Used to identify the model in deployments
+- **Model Version**: Version number for tracking (e.g., "1.0.0")
+  - For tracking only, not used in training job name
+- **Model Type**: Choose between:
+  - **Classification**: Binary or multi-class defect detection
+  - **Classification (Robust)**: Enhanced classification model
+  - **Segmentation**: Pixel-level defect localization
+  - **Segmentation (Robust)**: Enhanced segmentation model
+
+**Step 4: Select Dataset Source**
+
+Choose how to provide your training data:
+
+**Option A: Ground Truth Labeling Job**
+- Use output from a completed labeling job
+- Portal automatically detects manifest format
+- If Ground Truth format is detected, you can transform it on-demand
+- Supports both classification and segmentation tasks
+
+**Option B: Pre-Labeled Dataset**
+- Use existing labeled data registered in the portal
+- No transformation needed (must already be in DDA format)
+- Useful for quick testing or using public datasets
+
+### Manifest Format Detection and Transformation
+
+The portal automatically detects your manifest format and helps you fix issues before training:
+
+**Automatic Detection:**
+- When you select a dataset, the portal checks the manifest format
+- Detects Ground Truth format (job-specific attribute names)
+- Detects DDA format (standardized attribute names)
+
+**Ground Truth Format Detected:**
+If your manifest uses Ground Truth format (e.g., `my-job`, `my-job-metadata`):
+1. A warning alert appears
+2. Click **Transform Manifest Now** button
+3. Portal converts to DDA format automatically
+4. Transformed manifest is used for training
+
+**Why Transform?**
+- Ground Truth creates manifests with job-specific attribute names
+- AWS Marketplace model requires standardized DDA attribute names
+- Transformation renames attributes automatically:
+  - `{job-name}` → `anomaly-label`
+  - `{job-name}-metadata` → `anomaly-label-metadata`
+  - For segmentation: `{job-name}-ref` → `anomaly-mask-ref`
+
+**DDA Format Ready:**
+If your manifest is already in DDA format:
+- Green success alert appears
+- No transformation needed
+- Ready to proceed with training
+
+### Form Validation
+
+The portal validates your form before allowing training to start:
+
+**Required Fields:**
+- Use Case
+- Model Name
+- Model Version
+- Dataset selection (Ground Truth job or Pre-Labeled dataset)
+- Model Type
+- Instance Type
+
+**Validation Hints:**
+- Missing required fields are listed in a warning alert at the top
+- Each field shows inline error messages if invalid
+- "Start Training" button is disabled until all fields are valid
+- Helpful error messages guide you to fix issues
+
+**Model Name Validation:**
+- Can only contain letters, numbers, and hyphens
+- Inline error appears if invalid characters are used
+- Example valid names: `defect-detector`, `model-v1`, `line1-classifier`
+
+### Compute Configuration
+
+**Instance Type:**
+- **ml.g4dn.2xlarge** (GPU - Recommended): Fastest training, higher cost
+- **ml.p3.2xlarge** (GPU - High Performance): Very fast training, highest cost
+- **ml.m5.xlarge** (CPU - Budget): Slower training, lowest cost
+
+**Max Runtime:**
+- Maximum training time in seconds
+- Default: 3600 seconds (1 hour) for classification
+- Default: 7200 seconds (2 hours) for segmentation
+- Typical training takes 2-4 hours depending on dataset size
+- If training fails with "MaxRuntimeExceeded", increase this value
+- Recommended: 14400-21600 seconds (4-6 hours) for production datasets
+
+### Post-Training Options
+
+**Auto-Compile:**
+- Enable to automatically compile model after training completes
+- Compilation optimizes model for edge deployment
+
+**Compilation Targets:**
+- **x86_64 CPU**: Intel/AMD processors
+- **ARM64**: Standard ARM processors
+- **Jetson Xavier**: ARM64 with NVIDIA GPU
+
+Select which platforms you want to deploy to. Compiled models are automatically packaged as Greengrass components.
+
+### Training Summary
+
+Before submitting, review the summary showing:
+- Model name and version
+- Model type
+- Instance type
+- Dataset source and selection
+- Training and output buckets
+- Compilation targets (if enabled)
+
+### Starting Training
+
+1. Verify all required fields are filled
+2. Review the summary
+3. Click **Start Training**
+4. Portal creates SageMaker training job
+5. Redirects to Training page to monitor progress
+
+### Monitoring Training
+
+1. Go to **Training** page
+2. Select your training job
+3. View status and progress:
+   - **InProgress**: Training is running
+   - **Completed**: Training finished successfully
+   - **Failed**: Training encountered an error
+   - **Stopped**: Training was manually stopped
+
+### Training Best Practices
+
+**Dataset Size:**
+- Minimum: 50-100 images per class
+- Recommended: 200-500 images per class
+- Larger datasets generally produce better models
+
+**Class Balance:**
+- Try to have similar number of images per class
+- Imbalanced datasets can bias the model
+- Include normal/good examples (important for accuracy)
+
+**Image Quality:**
+- Use consistent lighting and camera angles
+- Ensure images are clear and in focus
+- Include diverse examples of defects
+- Capture various defect types and severities
+
+**Training Time:**
+- Classification: 1-2 hours typical
+- Segmentation: 2-4 hours typical
+- Larger datasets take longer
+- GPU instances are significantly faster than CPU
+
+**Cost Estimation:**
+- ml.g4dn.2xlarge: ~$0.35/hour
+- ml.p3.2xlarge: ~$3.06/hour
+- ml.m5.xlarge: ~$0.096/hour
+- Typical training cost: $1-10 depending on instance and duration
+
+### Troubleshooting Training
+
+**Issue: "Start Training" button is greyed out**
+- Check the warning alert for missing required fields
+- Ensure all fields are filled correctly
+- Verify dataset selection is valid
+
+**Issue: "Manifest validation failed"**
+- Check that manifest is in DDA format
+- If Ground Truth format, use Transform Manifest button
+- Verify all images referenced in manifest exist in S3
+- Ensure label values are numeric (0, 1, 2, etc.)
+
+**Issue: Training job fails with "MaxRuntimeExceeded"**
+- Increase Max Runtime value
+- Try a faster instance type (GPU instead of CPU)
+- Reduce dataset size for testing
+
+**Issue: Training job fails with permission errors**
+- Verify IAM role has S3 access to training data bucket
+- Check that role has SageMaker permissions
+- Verify bucket is tagged with `dda-portal:managed=true`
 
 ## Optional Datasets (Before Model Training)
 
@@ -1049,6 +1502,89 @@ The portal includes a **Pre-Labeled Datasets** feature that allows you to:
    - Select "Pre-Labeled Dataset" instead of Ground Truth job
    - Choose dataset from dropdown
    - Start training immediately (no labeling required)
+
+### Registering a Pre-Labeled Dataset
+
+**Step 1: Prepare Your Dataset**
+
+Organize your dataset in S3 with a manifest file in JSONL format:
+
+```
+s3://your-bucket/
+├── images/
+│   ├── normal-1.jpg
+│   ├── normal-2.jpg
+│   ├── defect-1.jpg
+│   └── defect-2.jpg
+└── manifest.jsonl
+```
+
+**Step 2: Create Manifest File**
+
+The manifest file must be in JSONL format (one JSON object per line). Each line represents one image with its label:
+
+**For Classification:**
+```json
+{"source-ref": "s3://your-bucket/images/normal-1.jpg", "class": "normal"}
+{"source-ref": "s3://your-bucket/images/normal-2.jpg", "class": "normal"}
+{"source-ref": "s3://your-bucket/images/defect-1.jpg", "class": "defect"}
+{"source-ref": "s3://your-bucket/images/defect-2.jpg", "class": "defect"}
+```
+
+**For Segmentation:**
+```json
+{"source-ref": "s3://your-bucket/images/image-1.jpg", "anomaly-mask-ref": "s3://your-bucket/masks/image-1.png"}
+{"source-ref": "s3://your-bucket/images/image-2.jpg", "anomaly-mask-ref": "s3://your-bucket/masks/image-2.png"}
+```
+
+**Step 3: Upload to S3**
+
+```bash
+# Upload images
+aws s3 sync ./images/ s3://your-bucket/images/
+
+# Upload manifest
+aws s3 cp manifest.jsonl s3://your-bucket/manifest.jsonl
+```
+
+**Step 4: Register Dataset in Portal**
+
+1. Go to **Data Management** → **Pre-Labeled Datasets**
+2. Click **Register Dataset**
+3. Fill in the form:
+   - **Dataset Name**: Name for your dataset (e.g., "Cookie Defects Q1")
+   - **Manifest S3 URI**: Full S3 path to manifest file (e.g., `s3://your-bucket/manifest.jsonl`)
+   - **Task Type**: Select Classification or Segmentation
+   - **Description**: Optional description of the dataset
+4. Click **Register**
+
+**Step 5: Use Dataset for Training**
+
+1. Go to **Training** → **Create Training Job**
+2. Select **Pre-Labeled Dataset** as the data source
+3. Choose your registered dataset from the dropdown
+4. Configure training parameters
+5. Click **Create Training Job**
+
+### Pre-Labeled Dataset Format Requirements
+
+**Manifest File (JSONL):**
+- One JSON object per line
+- Each line represents one image
+- Required fields:
+  - `source-ref`: Full S3 URI to the image
+  - `class`: Label for classification tasks
+  - `anomaly-mask-ref`: S3 URI to mask for segmentation tasks
+
+**Image Files:**
+- Supported formats: JPG, PNG, BMP, TIFF
+- Recommended size: 1024x1024 or larger
+- Organized in S3 with clear folder structure
+
+**Manifest Location:**
+- Must be in S3 bucket accessible by your UseCase account
+- Can be in same bucket as images or separate bucket
+- Recommended: `s3://bucket/manifest.jsonl` at root level
 
 ### AWS Open Cookie Dataset
 
@@ -1231,6 +1767,9 @@ Pre-labeled datasets must follow this structure:
 
 ## Inference Results Upload (Optional)
 
+<details>
+<summary><strong>Click to expand Inference Uploader setup</strong></summary>
+
 The **Inference Uploader** component enables edge devices to automatically upload inference results to S3 for centralized storage, analysis, and monitoring.
 
 ### What is Inference Uploader?
@@ -1294,6 +1833,8 @@ s3://dda-inference-results-{account}/
 - **Device Logs**: SSH to device and check `/aws_dda/greengrass/v2/logs/aws.edgeml.dda.InferenceUploader.log`
 
 For detailed setup and troubleshooting, see [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md).
+
+</details>
 
 ## Documentation
 

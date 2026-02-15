@@ -37,16 +37,20 @@ echo ""
 if [ $# -eq 0 ]; then
     echo "Select deployment type:"
     echo ""
-    echo "1) UseCase Account (for training/compilation in separate account)"
-    echo "2) Data Account (for data storage in separate account)"
+    echo "1) Single Account (for single-account setup in this account)"
+    echo "2) UseCase Account (for training/compilation in separate account)"
+    echo "3) Data Account (for data storage in separate account)"
     echo ""
-    read -p "Enter option (1 or 2): " OPTION
+    read -p "Enter option (1, 2, or 3): " OPTION
     
     case $OPTION in
         1)
-            DEPLOYMENT_TYPE="usecase"
+            DEPLOYMENT_TYPE="single-account"
             ;;
         2)
+            DEPLOYMENT_TYPE="usecase"
+            ;;
+        3)
             DEPLOYMENT_TYPE="data"
             ;;
         *)
@@ -57,8 +61,8 @@ if [ $# -eq 0 ]; then
 else
     # Support legacy command line arguments
     DEPLOYMENT_TYPE=${1:-}
-    if [ "$DEPLOYMENT_TYPE" != "usecase" ] && [ "$DEPLOYMENT_TYPE" != "data" ]; then
-        echo "Usage: $0 [usecase|data]"
+    if [ "$DEPLOYMENT_TYPE" != "single-account" ] && [ "$DEPLOYMENT_TYPE" != "usecase" ] && [ "$DEPLOYMENT_TYPE" != "data" ]; then
+        echo "Usage: $0 [single-account|usecase|data]"
         echo "Or run without arguments for interactive menu"
         exit 1
     fi
@@ -68,7 +72,300 @@ echo ""
 echo "Deployment Type: $DEPLOYMENT_TYPE"
 echo ""
 
-if [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
+if [ "$DEPLOYMENT_TYPE" = "single-account" ]; then
+    echo "=========================================="
+    echo "Single-Account Setup - SageMaker Role"
+    echo "=========================================="
+    echo ""
+    echo "This creates the DDASageMakerExecutionRole in your current account."
+    echo "This role is used by SageMaker for training, compilation, and labeling jobs."
+    echo ""
+    
+    CURRENT_ACCOUNT=$(aws sts get-caller-identity --query 'Account' --output text)
+    echo "Creating role in account: $CURRENT_ACCOUNT"
+    echo ""
+    
+    # Create trust policy for SageMaker
+    # Get current region and map to SageMaker account ID
+    CURRENT_REGION=$(aws configure get region || echo "us-east-1")
+    
+    # Map regions to SageMaker account IDs
+    case $CURRENT_REGION in
+        us-east-1)
+            SAGEMAKER_ACCOUNT="432418664414"
+            ;;
+        us-west-2)
+            SAGEMAKER_ACCOUNT="246618743249"
+            ;;
+        eu-west-1)
+            SAGEMAKER_ACCOUNT="685385470294"
+            ;;
+        eu-central-1)
+            SAGEMAKER_ACCOUNT="492215442770"
+            ;;
+        ap-northeast-1)
+            SAGEMAKER_ACCOUNT="501404014126"
+            ;;
+        ap-southeast-1)
+            SAGEMAKER_ACCOUNT="114774131450"
+            ;;
+        ap-southeast-2)
+            SAGEMAKER_ACCOUNT="783357319266"
+            ;;
+        *)
+            # Default to us-east-1 if region not found
+            SAGEMAKER_ACCOUNT="432418664414"
+            echo -e "${YELLOW}⚠ Region $CURRENT_REGION not explicitly mapped, using us-east-1 SageMaker account${NC}"
+            ;;
+    esac
+    
+    TRUST_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "sagemaker.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::$SAGEMAKER_ACCOUNT:root"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+)
+    
+    # Create role
+    if aws iam create-role \
+        --role-name DDASageMakerExecutionRole \
+        --assume-role-policy-document "$TRUST_POLICY" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Created DDASageMakerExecutionRole"
+    else
+        ROLE_EXISTS=$(aws iam get-role --role-name DDASageMakerExecutionRole 2>/dev/null || echo "")
+        if [ -n "$ROLE_EXISTS" ]; then
+            echo -e "${YELLOW}⚠${NC} DDASageMakerExecutionRole already exists"
+            echo "Updating trust policy with region-aware SageMaker account..."
+            # Create a temporary file for the policy document
+            TEMP_POLICY=$(mktemp)
+            cat > "$TEMP_POLICY" <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "sagemaker.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::$SAGEMAKER_ACCOUNT:root"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+            if aws iam update-assume-role-policy \
+                --role-name DDASageMakerExecutionRole \
+                --policy-document file://"$TEMP_POLICY"; then
+                echo -e "${GREEN}✓${NC} Trust policy updated"
+            else
+                echo -e "${RED}✗ Failed to update trust policy${NC}"
+            fi
+            rm -f "$TEMP_POLICY"
+        else
+            echo -e "${RED}✗ Failed to create role. Check IAM permissions.${NC}"
+            exit 1
+        fi
+    fi
+    
+    # Attach inline policies
+    echo "Attaching policies..."
+    
+    # S3 Policy
+    S3_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketCors",
+        "s3:PutBucketCors"
+      ],
+      "Resource": [
+        "arn:aws:s3:::*",
+        "arn:aws:s3:::*/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::sagemaker-*",
+        "arn:aws:s3:::sagemaker-*/*"
+      ]
+    }
+  ]
+}
+EOF
+)
+    
+    aws iam put-role-policy \
+        --role-name DDASageMakerExecutionRole \
+        --policy-name S3Access \
+        --policy-document "$S3_POLICY" 2>/dev/null && echo -e "${GREEN}✓${NC} S3 policy attached" || echo -e "${YELLOW}⚠${NC} Could not attach S3 policy"
+    
+    # CloudWatch Logs Policy
+    LOGS_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricData",
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+)
+    
+    aws iam put-role-policy \
+        --role-name DDASageMakerExecutionRole \
+        --policy-name CloudWatchLogs \
+        --policy-document "$LOGS_POLICY" 2>/dev/null && echo -e "${GREEN}✓${NC} CloudWatch Logs policy attached" || echo -e "${YELLOW}⚠${NC} Could not attach CloudWatch Logs policy"
+    
+    # SageMaker Policy
+    SAGEMAKER_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sagemaker:CreateTrainingJob",
+        "sagemaker:DescribeTrainingJob",
+        "sagemaker:StopTrainingJob",
+        "sagemaker:ListTrainingJobs",
+        "sagemaker:CreateCompilationJob",
+        "sagemaker:DescribeCompilationJob",
+        "sagemaker:StopCompilationJob",
+        "sagemaker:ListCompilationJobs",
+        "sagemaker:CreateLabelingJob",
+        "sagemaker:DescribeLabelingJob",
+        "sagemaker:ListLabelingJobs",
+        "sagemaker:CreateModel",
+        "sagemaker:DescribeModel",
+        "sagemaker:DeleteModel",
+        "sagemaker:ListModels"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole",
+        "iam:GetRole"
+      ],
+      "Resource": "arn:aws:iam::*:role/DDASageMakerExecutionRole"
+    }
+  ]
+}
+EOF
+)
+    
+    aws iam put-role-policy \
+        --role-name DDASageMakerExecutionRole \
+        --policy-name SageMakerAccess \
+        --policy-document "$SAGEMAKER_POLICY" 2>/dev/null && echo -e "${GREEN}✓${NC} SageMaker policy attached" || echo -e "${YELLOW}⚠${NC} Could not attach SageMaker policy"
+    
+    # PassRole Policy - allows role to be passed to SageMaker service
+    PASS_ROLE_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::$CURRENT_ACCOUNT:role/DDASageMakerExecutionRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "sagemaker.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
+EOF
+)
+    
+    aws iam put-role-policy \
+        --role-name DDASageMakerExecutionRole \
+        --policy-name SageMakerPassRole \
+        --policy-document "$PASS_ROLE_POLICY" 2>/dev/null && echo -e "${GREEN}✓${NC} PassRole policy attached" || echo -e "${YELLOW}⚠${NC} Could not attach PassRole policy"
+    
+    # ECR Policy
+    ECR_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+)
+    
+    aws iam put-role-policy \
+        --role-name DDASageMakerExecutionRole \
+        --policy-name ECRAccess \
+        --policy-document "$ECR_POLICY" 2>/dev/null && echo -e "${GREEN}✓${NC} ECR policy attached" || echo -e "${YELLOW}⚠${NC} Could not attach ECR policy"
+    
+    echo ""
+    echo -e "${GREEN}=========================================="
+    echo "Single-Account Role Created Successfully!"
+    echo "==========================================${NC}"
+    echo ""
+    echo "The DDASageMakerExecutionRole is now ready for use."
+    echo "You can now create UseCases in the Portal."
+    echo ""
+
+elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
     echo "=========================================="
     echo "UseCase Account Role Setup"
     echo "=========================================="
@@ -109,7 +406,41 @@ if [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
     echo "Portal Account: $PORTAL_ACCOUNT_ID"
     echo ""
     
+    # Get current region and map to SageMaker account ID
+    CURRENT_REGION=$(aws configure get region || echo "us-east-1")
+    
+    # Map regions to SageMaker account IDs
+    case $CURRENT_REGION in
+        us-east-1)
+            SAGEMAKER_ACCOUNT="432418664414"
+            ;;
+        us-west-2)
+            SAGEMAKER_ACCOUNT="246618743249"
+            ;;
+        eu-west-1)
+            SAGEMAKER_ACCOUNT="685385470294"
+            ;;
+        eu-central-1)
+            SAGEMAKER_ACCOUNT="492215442770"
+            ;;
+        ap-northeast-1)
+            SAGEMAKER_ACCOUNT="501404014126"
+            ;;
+        ap-southeast-1)
+            SAGEMAKER_ACCOUNT="114774131450"
+            ;;
+        ap-southeast-2)
+            SAGEMAKER_ACCOUNT="783357319266"
+            ;;
+        *)
+            # Default to us-east-1 if region not found
+            SAGEMAKER_ACCOUNT="432418664414"
+            echo -e "${YELLOW}⚠ Region $CURRENT_REGION not explicitly mapped, using us-east-1 SageMaker account${NC}"
+            ;;
+    esac
+    
     # Create trust policy for UseCase Account
+    # Allows both Portal Account and SageMaker service to assume the role
     TRUST_POLICY=$(cat <<EOF
 {
   "Version": "2012-10-17",
@@ -118,6 +449,20 @@ if [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
       "Effect": "Allow",
       "Principal": {
         "AWS": "arn:aws:iam::$PORTAL_ACCOUNT_ID:root"
+      },
+      "Action": "sts:AssumeRole"
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "sagemaker.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::$SAGEMAKER_ACCOUNT:root"
       },
       "Action": "sts:AssumeRole"
     }
@@ -135,11 +480,45 @@ EOF
         ROLE_EXISTS=$(aws iam get-role --role-name DDAPortalUseCaseRole 2>/dev/null || echo "")
         if [ -n "$ROLE_EXISTS" ]; then
             echo -e "${YELLOW}⚠${NC} DDAPortalUseCaseRole already exists"
-            echo "Updating trust policy..."
-            aws iam update-assume-role-policy-document \
+            echo "Updating trust policy with region-aware SageMaker account..."
+            # Create a temporary file for the policy document
+            TEMP_POLICY=$(mktemp)
+            cat > "$TEMP_POLICY" <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::$PORTAL_ACCOUNT_ID:root"
+      },
+      "Action": "sts:AssumeRole"
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "sagemaker.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::$SAGEMAKER_ACCOUNT:root"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+            if aws iam update-assume-role-policy \
                 --role-name DDAPortalUseCaseRole \
-                --policy-document "$TRUST_POLICY" 2>/dev/null || true
-            echo -e "${GREEN}✓${NC} Trust policy updated"
+                --policy-document file://"$TEMP_POLICY"; then
+                echo -e "${GREEN}✓${NC} Trust policy updated"
+            else
+                echo -e "${RED}✗ Failed to update trust policy${NC}"
+            fi
+            rm -f "$TEMP_POLICY"
         else
             echo -e "${RED}✗ Failed to create role. Check IAM permissions.${NC}"
             exit 1

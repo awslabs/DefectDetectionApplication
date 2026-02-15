@@ -105,25 +105,12 @@ def list_labeling_jobs(event):
         
         # Add output_manifest_s3_uri for completed jobs
         for job in jobs:
-            if job.get('status') == 'Completed' and job.get('output_s3_uri'):
-                # Ground Truth creates output in: {output_s3_uri}/{sagemaker_job_name}/manifests/output/output.manifest
-                sagemaker_job_name = job.get('sagemaker_job_name', '')
-                output_s3_uri = job['output_s3_uri']
-                if not output_s3_uri.endswith('/'):
-                    output_s3_uri += '/'
-                
-                # Construct the actual manifest path with SageMaker job name
-                if sagemaker_job_name:
-                    source_manifest_uri = f"{output_s3_uri}{sagemaker_job_name}/manifests/output/output.manifest"
-                else:
-                    # Fallback to old path if sagemaker_job_name is missing
-                    source_manifest_uri = f"{output_s3_uri}manifests/output/output.manifest"
-                
-                # Prefer transformed manifest if available
-                if job.get('is_transformed') and job.get('transformed_manifest_s3_uri'):
-                    job['output_manifest_s3_uri'] = job['transformed_manifest_s3_uri']
-                else:
-                    job['output_manifest_s3_uri'] = source_manifest_uri
+            if job.get('status') == 'Completed':
+                # Use the manifest URI captured from SageMaker's response
+                # If not available, use transformed manifest if available
+                if not job.get('output_manifest_s3_uri'):
+                    if job.get('is_transformed') and job.get('transformed_manifest_s3_uri'):
+                        job['output_manifest_s3_uri'] = job['transformed_manifest_s3_uri']
         
         # Sort by created_at descending
         jobs.sort(key=lambda x: x.get('created_at', 0), reverse=True)
@@ -144,13 +131,14 @@ def create_labeling_job(event):
     Request Body:
         - usecase_id: Required
         - job_name: Required
-        - dataset_prefix: Required. S3 prefix containing images
+        - dataset_prefix: Required. S3 prefix containing images to label
         - task_type: Required. ObjectDetection, Classification, or Segmentation
         - label_categories: Required. List of label names
         - workforce_arn: Required. WorkTeam ARN
         - instructions: Optional. Labeling instructions
         - num_workers_per_object: Optional. Default 1
         - task_time_limit: Optional. Default 600 seconds
+        - mask_prefix: Optional. S3 prefix containing segmentation masks (for Segmentation task type)
     """
     try:
         body = json.loads(event.get('body', '{}'))
@@ -162,19 +150,6 @@ def create_labeling_job(event):
             if not body.get(field):
                 return create_response(400, {'error': f'{field} is required'})
         
-        # Validate label category order for anomaly detection
-        # First category should be "normal" (index 0), anomalies should be index 1+
-        label_categories = body['label_categories']
-        if label_categories and len(label_categories) > 0:
-            first_label = label_categories[0].lower()
-            # Check if first label looks like an anomaly/defect
-            anomaly_keywords = ['defect', 'anomaly', 'scratch', 'dent', 'crack', 'damage', 'fault', 'error']
-            if any(keyword in first_label for keyword in anomaly_keywords):
-                logger.warning(f"Label order may be incorrect. First label '{label_categories[0]}' appears to be an anomaly type. "
-                             f"For DDA models, the first label (index 0) should be 'normal' or 'good', and anomalies should be index 1+.")
-                # Return a warning but allow the job to proceed
-                # Users may have valid reasons for this order
-        
         usecase_id = body['usecase_id']
         job_name = body['job_name']
         dataset_prefix = body['dataset_prefix']
@@ -184,25 +159,19 @@ def create_labeling_job(event):
         instructions = body.get('instructions', '')
         num_workers = body.get('num_workers_per_object', 1)
         task_time_limit = body.get('task_time_limit', 600)
+        mask_prefix = body.get('mask_prefix')  # Optional for segmentation
         
         # Get use case details
         usecase = get_usecase(usecase_id)
         
-        # Assume UseCase Account role for SageMaker and output
+        # Assume UseCase Account role for SageMaker
         credentials = assume_usecase_role(
             usecase['cross_account_role_arn'],
             usecase['external_id'],
             'create-labeling-job'
         )
         
-        # Create clients with UseCase Account credentials
-        s3 = boto3.client(
-            's3',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
-        
+        # Create SageMaker client with UseCase Account credentials
         sagemaker = boto3.client(
             'sagemaker',
             aws_access_key_id=credentials['AccessKeyId'],
@@ -210,13 +179,19 @@ def create_labeling_job(event):
             aws_session_token=credentials['SessionToken']
         )
         
+        # Create S3 client for verification and manifest upload
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=credentials['AccessKeyId'],
+            aws_secret_access_key=credentials['SecretAccessKey'],
+            aws_session_token=credentials['SessionToken']
+        )
+        
         # Determine input data source (Data Account or UseCase Account)
-        # Input images come from Data Account if configured and different from UseCase Account
         data_role_arn = usecase.get('data_account_role_arn')
         data_account_id = usecase.get('data_account_id')
         usecase_account_id = usecase.get('account_id')
         
-        # Check if Data Account is different from UseCase Account
         is_separate_data_account = (
             data_role_arn and 
             data_account_id and 
@@ -224,13 +199,11 @@ def create_labeling_job(event):
         )
         
         if is_separate_data_account:
-            # Use separate Data Account for input data - external ID is required for production
-            print(f"Using separate Data Account {data_account_id} for input data")
+            logger.info(f"Using separate Data Account {data_account_id} for input data")
             data_external_id = usecase.get('data_account_external_id')
             if not data_external_id:
                 return create_response(400, {
-                    'error': 'data_account_external_id is required when using a separate Data Account. '
-                             'Please update the UseCase configuration with the external ID.'
+                    'error': 'data_account_external_id is required when using a separate Data Account.'
                 })
             data_credentials = assume_usecase_role(
                 data_role_arn,
@@ -239,7 +212,6 @@ def create_labeling_job(event):
             )
             input_bucket = usecase.get('data_s3_bucket') or usecase.get('s3_bucket')
             
-            # S3 client for reading input data from Data Account
             s3_data = boto3.client(
                 's3',
                 aws_access_key_id=data_credentials['AccessKeyId'],
@@ -248,56 +220,72 @@ def create_labeling_job(event):
             )
             s3_for_input = s3_data
         else:
-            # Data Account is same as UseCase Account - use same credentials
-            print(f"Data Account is same as UseCase Account {usecase_account_id}")
+            logger.info(f"Data Account is same as UseCase Account {usecase_account_id}")
             input_bucket = usecase.get('data_s3_bucket') or usecase['s3_bucket']
             s3_for_input = s3
         
         # Output bucket - must be in UseCase Account for SageMaker outputs
         output_bucket = usecase.get('s3_bucket')
-        
         if not output_bucket:
             return create_response(400, {
-                'error': 's3_bucket is required for SageMaker outputs. Please configure an S3 bucket in the UseCase Account for storing labeling job outputs, manifests, and models.'
+                'error': 's3_bucket is required for SageMaker outputs.'
             })
         
         # Generate unique job ID
-        # SageMaker labeling job names must be 63 characters or less
         job_id = f"labeling-{uuid.uuid4().hex[:8]}"
         safe_job_name = job_name.replace('.', '-').replace('_', '-').replace(' ', '-')
         sagemaker_job_name = f"dda-{safe_job_name}-{uuid.uuid4().hex[:8]}"
         
         # Validate labeling job name length (SageMaker limit is 63 characters)
         if len(sagemaker_job_name) > 63:
-            # Truncate job name to fit within limit
-            max_job_name_length = 63 - len("dda-") - len(uuid.uuid4().hex[:8]) - 1  # -1 for the hyphen
+            max_job_name_length = 63 - len("dda-") - len(uuid.uuid4().hex[:8]) - 1
             if max_job_name_length < 1:
                 return create_response(400, {
                     'error': f"Job name '{job_name}' is too long. Please use a shorter job name (maximum 40 characters recommended)."
                 })
-            
             truncated_job_name = safe_job_name[:max_job_name_length]
             sagemaker_job_name = f"dda-{truncated_job_name}-{uuid.uuid4().hex[:8]}"
-            logger.warning(f"Job name truncated from '{safe_job_name}' to '{truncated_job_name}' to fit SageMaker limits")
         
-        logger.info(f"Generated labeling job name: {sagemaker_job_name} (length: {len(sagemaker_job_name)})")
+        logger.info(f"Generated labeling job name: {sagemaker_job_name}")
         
-        # Step 1: List images from S3 (from Data Account if configured)
-        print(f"Listing images from s3://{input_bucket}/{dataset_prefix}")
+        # Step 1: List images from S3
+        logger.info(f"Listing images from s3://{input_bucket}/{dataset_prefix}")
         images = list_images_from_s3(s3_for_input, input_bucket, dataset_prefix)
         
         if not images:
             return create_response(400, {'error': 'No images found in the specified prefix'})
         
-        print(f"Found {len(images)} images")
+        logger.info(f"Found {len(images)} images")
         
-        # Step 2: Generate manifest file
-        # Manifest references the input bucket (Data Account if configured)
+        # Step 2: For segmentation, discover masks if mask_prefix provided
+        mask_map = {}
+        if task_type == 'Segmentation' and mask_prefix:
+            logger.info(f"Discovering masks in s3://{input_bucket}/{mask_prefix}")
+            try:
+                paginator = s3_for_input.get_paginator('list_objects_v2')
+                pages = paginator.paginate(Bucket=input_bucket, Prefix=mask_prefix)
+                
+                mask_extensions = {'.png', '.jpg', '.jpeg'}
+                for page in pages:
+                    for obj in page.get('Contents', []):
+                        mask_key = obj['Key']
+                        mask_name = os.path.basename(mask_key)
+                        mask_stem = os.path.splitext(mask_name)[0]
+                        ext = os.path.splitext(mask_key)[1].lower()
+                        
+                        if ext in mask_extensions:
+                            mask_map[mask_stem] = mask_key
+                
+                logger.info(f"Found {len(mask_map)} masks")
+            except Exception as e:
+                logger.warning(f"Error discovering masks: {str(e)}")
+        
+        # Step 3: Generate manifest file
         manifest_key = f"manifests/{job_id}.manifest"
-        manifest_content = generate_manifest(images, input_bucket)
+        manifest_content = generate_manifest_with_masks(images, input_bucket, task_type, mask_map)
         
-        # Step 3: Upload manifest to UseCase Account S3 (where SageMaker runs)
-        print(f"Uploading manifest to s3://{output_bucket}/{manifest_key}")
+        # Step 4: Upload manifest to UseCase Account S3
+        logger.info(f"Uploading manifest to s3://{output_bucket}/{manifest_key}")
         s3.put_object(
             Bucket=output_bucket,
             Key=manifest_key,
@@ -306,42 +294,24 @@ def create_labeling_job(event):
         )
         
         manifest_s3_uri = f"s3://{output_bucket}/{manifest_key}"
-        output_s3_uri = f"s3://{output_bucket}/labeled/{job_id}/"
+        # Note: SageMaker Ground Truth appends the LabelingJobName to the S3OutputPath
+        # So we set the base path, and SageMaker will create: {output_s3_uri}{sagemaker_job_name}/manifests/output/output.manifest
+        output_s3_uri = f"s3://{output_bucket}/labeled/"
         
-        # Step 4: Get Ground Truth execution role ARN
-        # This role should exist in the UseCase Account
-        # Always use DDASageMakerExecutionRole (don't trust old usecase records)
+        # Step 5: Get Ground Truth execution role ARN
         ground_truth_role_arn = f"arn:aws:iam::{usecase['account_id']}:role/DDASageMakerExecutionRole"
-        print(f"Using Ground Truth role: {ground_truth_role_arn}")
+        logger.info(f"Using Ground Truth role: {ground_truth_role_arn}")
         
-        # Step 5: Create UI template in S3 (UseCase Account)
-        ui_template_content = create_ui_template(task_type, label_categories)
-        ui_template_key = f"ui-templates/{job_id}-template.liquid"
+        # Step 6: Create Ground Truth labeling job
+        logger.info(f"Creating Ground Truth job: {sagemaker_job_name}")
         
-        s3.put_object(
-            Bucket=output_bucket,
-            Key=ui_template_key,
-            Body=ui_template_content,
-            ContentType='text/html'
-        )
-        
-        ui_template_s3_uri = f"s3://{output_bucket}/{ui_template_key}"
-        
-        # Step 6: Create label category config
-        label_category_config = create_label_category_config(label_categories)
-        label_config_key = f"manifests/{job_id}-label-categories.json"
-        
-        s3.put_object(
-            Bucket=output_bucket,
-            Key=label_config_key,
-            Body=json.dumps(label_category_config),
-            ContentType='application/json'
-        )
-        
-        label_config_s3_uri = f"s3://{output_bucket}/{label_config_key}"
-        
-        # Step 7: Create Ground Truth labeling job
-        print(f"Creating Ground Truth job: {sagemaker_job_name}")
+        # Map task types to SageMaker built-in algorithm ARNs
+        region = os.environ.get('AWS_REGION', 'us-east-1')
+        task_type_arn_mapping = {
+            'Classification': f'arn:aws:sagemaker:{region}:aws:labeling-job-algorithm/image-classification',
+            'ObjectDetection': f'arn:aws:sagemaker:{region}:aws:labeling-job-algorithm/bounding-box',
+            'Segmentation': f'arn:aws:sagemaker:{region}:aws:labeling-job-algorithm/semantic-segmentation'
+        }
         
         labeling_job_params = {
             'LabelingJobName': sagemaker_job_name,
@@ -357,21 +327,15 @@ def create_labeling_job(event):
                 'S3OutputPath': output_s3_uri
             },
             'RoleArn': ground_truth_role_arn,
-            'LabelCategoryConfigS3Uri': label_config_s3_uri,
             'HumanTaskConfig': {
                 'WorkteamArn': workforce_arn,
-                'UiConfig': {
-                    'UiTemplateS3Uri': ui_template_s3_uri
-                },
-                'PreHumanTaskLambdaArn': get_pre_human_task_lambda_arn(task_type),
                 'TaskTitle': job_name,
                 'TaskDescription': instructions or f"Label images for {job_name}",
                 'NumberOfHumanWorkersPerDataObject': num_workers,
                 'TaskTimeLimitInSeconds': task_time_limit,
                 'TaskAvailabilityLifetimeInSeconds': 864000,  # 10 days
-                'TaskKeywords': get_task_keywords(task_type),
-                'AnnotationConsolidationConfig': {
-                    'AnnotationConsolidationLambdaArn': get_annotation_consolidation_lambda_arn(task_type)
+                'UiConfig': {
+                    'UiTemplateS3Uri': f's3://sagemaker-{region}-{usecase["account_id"]}/ground-truth-labeling-templates/default.html'
                 }
             },
             'Tags': [
@@ -380,9 +344,16 @@ def create_labeling_job(event):
             ]
         }
         
+        # Only add LabelingJobAlgorithmsConfig for built-in task types (not custom)
+        if task_type in task_type_arn_mapping:
+            algorithm_arn = task_type_arn_mapping[task_type]
+            labeling_job_params['LabelingJobAlgorithmsConfig'] = {
+                'LabelingJobAlgorithmSpecificationArn': algorithm_arn
+            }
+        
         sagemaker.create_labeling_job(**labeling_job_params)
         
-        # Step 8: Store job metadata in DynamoDB
+        # Step 7: Store job metadata in DynamoDB
         now = int(datetime.utcnow().timestamp())
         job_item = {
             'job_id': job_id,
@@ -595,8 +566,12 @@ def get_manifest(job_id: str):
                 'status': job['status']
             })
         
-        # Generate presigned URL for manifest download
-        output_manifest_uri = f"{job['output_s3_uri']}manifests/output/output.manifest"
+        # Use the manifest URI captured from SageMaker's response
+        output_manifest_uri = job.get('output_manifest_s3_uri')
+        if not output_manifest_uri:
+            return create_response(400, {
+                'error': 'Output manifest URI not available. Job may still be processing.'
+            })
         
         return create_response(200, {
             'manifest_uri': output_manifest_uri,
@@ -638,6 +613,55 @@ def generate_manifest(image_keys: List[str], bucket: str) -> str:
         manifest_lines.append(json.dumps({
             'source-ref': f"s3://{bucket}/{key}"
         }))
+    
+    return '\n'.join(manifest_lines)
+
+
+def generate_manifest_with_masks(image_keys: List[str], bucket: str, task_type: str, mask_map: Dict[str, str]) -> str:
+    """
+    Generate Ground Truth manifest file in JSONL format.
+    Supports both classification and segmentation tasks.
+    
+    For classification: Only includes source-ref
+    For segmentation: Includes source-ref and mask references if masks are found
+    
+    Args:
+        image_keys: List of S3 keys for images
+        bucket: S3 bucket name
+        task_type: Task type (Classification, ObjectDetection, or Segmentation)
+        mask_map: Dict mapping image stem to mask S3 key (for segmentation)
+    
+    Returns:
+        JSONL manifest content as string
+    """
+    manifest_lines = []
+    
+    for key in image_keys:
+        # Extract image filename without extension
+        image_name = os.path.basename(key)
+        image_stem = os.path.splitext(image_name)[0]
+        
+        entry = {
+            'source-ref': f"s3://{bucket}/{key}"
+        }
+        
+        # For segmentation, add mask reference if available
+        if task_type == 'Segmentation' and image_stem in mask_map:
+            mask_key = mask_map[image_stem]
+            entry['anomaly-mask-ref'] = f"s3://{bucket}/{mask_key}"
+            entry['anomaly-mask-ref-metadata'] = {
+                'internal-color-map': {
+                    '0': {
+                        'class-name': 'defect',
+                        'hex-color': '#23A436'
+                    }
+                },
+                'job-name': 'labeling-job/object-mask-ref',
+                'human-annotated': 'yes',
+                'type': 'groundtruth/semantic-segmentation'
+            }
+        
+        manifest_lines.append(json.dumps(entry))
     
     return '\n'.join(manifest_lines)
 
@@ -772,6 +796,22 @@ def get_ui_template_arn(task_type: str) -> str:
     }
     
     return templates.get(task_type, templates['ObjectDetection'])
+
+
+def get_ui_template_s3_uri(task_type: str):
+    """Get UI template S3 URI for task type.
+    
+    Returns None to use Ground Truth's built-in default templates.
+    This avoids cross-account S3 access issues with AWS-managed templates.
+    
+    Ground Truth has built-in support for:
+    - Image Classification (ImageMultiClass)
+    - Bounding Box (BoundingBox)
+    - Semantic Segmentation (SemanticSegmentation)
+    
+    These built-in templates don't require custom S3 URIs or cross-account access.
+    """
+    return None
 
 
 def get_pre_human_task_lambda_arn(task_type: str) -> str:
@@ -1110,19 +1150,25 @@ def detect_ground_truth_attributes(entry: Dict, task_type: str) -> Dict[str, str
     
     # For segmentation, also find mask reference attributes
     if task_type == 'segmentation':
-        # Look for -ref and -ref-metadata attributes
+        # Look for -ref and -ref-metadata attributes (including job-specific names like cookie-segmentation-ref)
         mask_ref_attr = None
         mask_ref_metadata_attr = None
         
+        # First, look for any -ref-metadata attribute (highest priority)
         for key in entry.keys():
             if key.endswith('-ref-metadata') and key not in skip_attrs:
                 mask_ref_metadata_attr = key
                 mask_ref_attr = key.replace('-metadata', '')
                 break
-            elif key.endswith('-ref') and key not in skip_attrs and not key.endswith('-ref-metadata'):
-                # Found a -ref attribute, derive metadata
-                mask_ref_attr = key
-                mask_ref_metadata_attr = f"{key}-metadata"
+        
+        # If not found, look for any -ref attribute
+        if not mask_ref_attr:
+            for key in entry.keys():
+                if key.endswith('-ref') and key not in skip_attrs and not key.endswith('-ref-metadata'):
+                    # Found a -ref attribute, derive metadata
+                    mask_ref_attr = key
+                    mask_ref_metadata_attr = f"{key}-metadata"
+                    break
         
         # Verify mask attributes exist
         if mask_ref_attr and mask_ref_attr in entry:
@@ -1148,9 +1194,19 @@ def transform_manifest_entry(entry: Dict, detected_attrs: Dict, task_type: str) 
     """
     transformed = {}
     
-    # Copy source-ref (always present)
+    # Copy and normalize source-ref (always present)
     if 'source-ref' in entry:
-        transformed['source-ref'] = entry['source-ref']
+        source_ref = entry['source-ref']
+        # Normalize S3 URI: remove duplicate s3:// prefixes and double slashes
+        source_ref = source_ref.replace('s3://s3://', 's3://')  # Fix duplicate s3:// prefix
+        source_ref = source_ref.replace('//', '/')  # Fix double slashes
+        source_ref = 's3://' + source_ref.lstrip('s3:/').lstrip('/')  # Ensure proper s3:// prefix
+        
+        # Fix incorrect path: cookies/training-images/ -> cookies/dataset-files/training-images/
+        source_ref = source_ref.replace('/cookies/training-images/', '/cookies/dataset-files/training-images/')
+        source_ref = source_ref.replace('/cookies/mask-images/', '/cookies/dataset-files/mask-images/')
+        
+        transformed['source-ref'] = source_ref
     
     # Transform label attribute
     label_attr = detected_attrs['label_attr']
@@ -1173,7 +1229,16 @@ def transform_manifest_entry(entry: Dict, detected_attrs: Dict, task_type: str) 
         # Transform mask reference
         mask_ref_attr = detected_attrs.get('mask_ref_attr')
         if mask_ref_attr and mask_ref_attr in entry:
-            transformed['anomaly-mask-ref'] = entry[mask_ref_attr]
+            mask_ref = entry[mask_ref_attr]
+            # Normalize mask S3 URI
+            mask_ref = mask_ref.replace('s3://s3://', 's3://')
+            mask_ref = mask_ref.replace('//', '/')
+            mask_ref = 's3://' + mask_ref.lstrip('s3:/').lstrip('/')
+            
+            # Fix incorrect path: cookies/mask-images/ -> cookies/dataset-files/mask-images/
+            mask_ref = mask_ref.replace('/cookies/mask-images/', '/cookies/dataset-files/mask-images/')
+            
+            transformed['anomaly-mask-ref'] = mask_ref
         
         # Transform mask reference metadata
         mask_ref_metadata_attr = detected_attrs.get('mask_ref_metadata_attr')

@@ -35,15 +35,21 @@ def setup_logging():
     )
 
 
-def upload_folder_to_s3(local_path, s3_path):
+def upload_folder_to_s3(dataset_dir, s3_path):
     """
-    Uploads a local folder to S3.
+    Uploads dataset files to S3.
+    
+    Only uploads:
+    - dataset-files/ (images, masks, manifests)
+    - test-images/ (test images)
+    
+    Skips: .py, .md, and other non-dataset files
     
     Args:
-        local_path: Local folder path
+        dataset_dir: Dataset directory containing dataset-files and test-images
         s3_path: S3 destination path
     """
-    logger.info("Uploading folder %s to %s", local_path, s3_path)
+    logger.info("Uploading dataset files to %s", s3_path)
 
     try:
         # Use default AWS credentials
@@ -65,32 +71,42 @@ def upload_folder_to_s3(local_path, s3_path):
                 raise FileNotFoundError(f"S3 bucket not found: {bucket_name}")
             raise
 
-        # Upload all files
+        # Folders to upload
+        folders_to_upload = ['dataset-files', 'test-images']
         uploaded_count = 0
-        local_path = Path(local_path)
+        dataset_dir = Path(dataset_dir)
         
-        for root, dirs, files in os.walk(local_path):
-            for file in files:
-                # Skip hidden files
-                if file.startswith("."):
-                    logger.debug("Skipping hidden file: %s", file)
-                    continue
+        for folder_name in folders_to_upload:
+            folder_path = dataset_dir / folder_name
+            
+            if not folder_path.exists():
+                logger.warning("Folder not found: %s", folder_path)
+                continue
+            
+            logger.info("Uploading folder: %s", folder_path)
+            
+            for root, dirs, files in os.walk(folder_path):
+                for file in files:
+                    # Skip hidden files
+                    if file.startswith("."):
+                        logger.debug("Skipping hidden file: %s", file)
+                        continue
 
-                full_local_path = Path(root) / file
-                relative_path = full_local_path.relative_to(local_path)
-                s3_key = s3_prefix + str(relative_path).replace("\\", "/")
+                    full_local_path = Path(root) / file
+                    relative_path = full_local_path.relative_to(dataset_dir)
+                    s3_key = s3_prefix + str(relative_path).replace("\\", "/")
 
-                try:
-                    s3_client.upload_file(
-                        str(full_local_path),
-                        bucket_name,
-                        s3_key
-                    )
-                    logger.info("Uploaded: s3://%s/%s", bucket_name, s3_key)
-                    uploaded_count += 1
-                except ClientError as e:
-                    logger.error("Failed to upload %s: %s", file, e)
-                    raise
+                    try:
+                        s3_client.upload_file(
+                            str(full_local_path),
+                            bucket_name,
+                            s3_key
+                        )
+                        logger.info("Uploaded: s3://%s/%s", bucket_name, s3_key)
+                        uploaded_count += 1
+                    except ClientError as e:
+                        logger.error("Failed to upload %s: %s", file, e)
+                        raise
 
         logger.info("Successfully uploaded %d files to S3", uploaded_count)
         return uploaded_count

@@ -11,11 +11,13 @@ import {
   Box,
   Alert,
   Textarea,
+  Button,
 } from '@cloudscape-design/components';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { S3Dataset } from '../types';
 import { apiService } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
+import S3Browser from '../components/S3Browser';
 
 interface LocationState {
   dataset?: S3Dataset;
@@ -34,7 +36,8 @@ export default function CreateLabelingJob() {
   const [selectedUseCase, setSelectedUseCase] = useState<any>(null);
   const [jobName, setJobName] = useState('');
   const [description, setDescription] = useState('');
-  const [datasetPrefix, setDatasetPrefix] = useState(preselectedDataset?.prefix || '');
+  const [datasetS3Uri, setDatasetS3Uri] = useState(preselectedDataset?.prefix || '');
+  const [maskPrefix, setMaskPrefix] = useState('');
   const [taskType, setTaskType] = useState<SelectProps.Option | null>(null);
   const [workforceType, setWorkforceType] = useState<SelectProps.Option | null>({
     label: 'Private',
@@ -47,6 +50,7 @@ export default function CreateLabelingJob() {
   const [loadingWorkteams, setLoadingWorkteams] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+  const [showBrowseModal, setShowBrowseModal] = useState(false);
 
   // Load use cases on mount
   useEffect(() => {
@@ -122,7 +126,6 @@ export default function CreateLabelingJob() {
   }, [selectedUseCase]);
 
   const taskTypeOptions = [
-    { label: 'Object Detection', value: 'ObjectDetection' },
     { label: 'Image Classification', value: 'Classification' },
     { label: 'Semantic Segmentation', value: 'Segmentation' },
   ];
@@ -146,8 +149,12 @@ export default function CreateLabelingJob() {
         }
         return true;
       case 1: // Dataset Selection
-        if (!datasetPrefix.trim()) {
-          setError('S3 Dataset Prefix is required');
+        if (!datasetS3Uri.trim()) {
+          setError('S3 URI is required');
+          return false;
+        }
+        if (!datasetS3Uri.startsWith('s3://')) {
+          setError('S3 URI must start with s3://');
           return false;
         }
         return true;
@@ -175,6 +182,11 @@ export default function CreateLabelingJob() {
       default:
         return true;
     }
+  };
+
+  const selectDatasetFromBrowser = (s3Uri: string) => {
+    setDatasetS3Uri(s3Uri);
+    setShowBrowseModal(false);
   };
 
   const handleSubmit = async () => {
@@ -215,16 +227,35 @@ export default function CreateLabelingJob() {
         return;
       }
       
+      // Validate S3 URI format
+      if (!datasetS3Uri.match(/^s3:\/\/[^/]+\/.+$/)) {
+        setError('Invalid S3 URI format. Expected: s3://bucket/prefix');
+        setCreating(false);
+        return;
+      }
+
+      // Extract prefix from S3 URI (everything after bucket name)
+      const prefixMatch = datasetS3Uri.match(/^s3:\/\/[^/]+\/(.+)$/);
+      const prefix = prefixMatch ? prefixMatch[1] : '';
+
+      // Extract mask prefix if provided
+      let maskPrefixValue: string | undefined;
+      if (maskPrefix.trim()) {
+        const maskPrefixMatch = maskPrefix.match(/^s3:\/\/[^/]+\/(.+)$/);
+        maskPrefixValue = maskPrefixMatch ? maskPrefixMatch[1] : maskPrefix;
+      }
+
       await apiService.createLabelingJob({
         usecase_id: selectedUseCase.usecase_id,
         job_name: jobName,
-        dataset_prefix: datasetPrefix,
+        dataset_prefix: prefix,
         task_type: taskType?.value as string,
         label_categories: categories,
         workforce_arn: workforceArn,
         instructions: instructions || undefined,
         num_workers_per_object: 1,
         task_time_limit: 600,
+        mask_prefix: maskPrefixValue,
       });
 
       navigate('/labeling');
@@ -354,15 +385,21 @@ export default function CreateLabelingJob() {
             content: (
               <SpaceBetween size="l">
                 <FormField
-                  label="S3 Dataset Prefix"
-                  description="The S3 prefix containing images to label"
+                  label="S3 URI"
+                  description="The S3 location containing images to label"
                   constraintText="Required"
+                  errorText={datasetS3Uri && !datasetS3Uri.startsWith('s3://') ? 'Must start with s3://' : ''}
                 >
-                  <Input
-                    value={datasetPrefix}
-                    onChange={({ detail }) => setDatasetPrefix(detail.value)}
-                    placeholder="e.g., raw-images/production-line-1/"
-                  />
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <Input
+                      value={datasetS3Uri}
+                      onChange={({ detail }) => setDatasetS3Uri(detail.value)}
+                      placeholder="e.g., s3://my-bucket/raw-images/production-line-1/"
+                    />
+                    <Button onClick={() => setShowBrowseModal(true)} disabled={!selectedUseCase}>
+                      Browse S3
+                    </Button>
+                  </SpaceBetween>
                 </FormField>
 
                 {preselectedDataset && (
@@ -370,13 +407,6 @@ export default function CreateLabelingJob() {
                     Dataset preselected: {preselectedDataset.image_count.toLocaleString()} images
                   </Alert>
                 )}
-
-                <FormField
-                  label="S3 Bucket"
-                  description="The S3 bucket containing the dataset"
-                >
-                  <Input value={selectedUseCase?.data_s3_bucket || selectedUseCase?.s3_bucket || ''} disabled />
-                </FormField>
               </SpaceBetween>
             ),
           },
@@ -397,6 +427,19 @@ export default function CreateLabelingJob() {
                     placeholder="Select task type"
                   />
                 </FormField>
+
+                {taskType?.value === 'Segmentation' && (
+                  <FormField
+                    label="Mask Prefix (Optional)"
+                    description="S3 location containing segmentation masks for this task"
+                  >
+                    <Input
+                      value={maskPrefix}
+                      onChange={({ detail }) => setMaskPrefix(detail.value)}
+                      placeholder="e.g., s3://my-bucket/masks/production-line-1/"
+                    />
+                  </FormField>
+                )}
 
                 <FormField
                   label="Label Categories"
@@ -520,7 +563,7 @@ export default function CreateLabelingJob() {
                 <Box variant="h3">Dataset</Box>
                 <Box>
                   <Box variant="awsui-key-label">Source Images</Box>
-                  <Box>s3://{selectedUseCase?.data_s3_bucket || selectedUseCase?.s3_bucket || 'bucket'}/{datasetPrefix}</Box>
+                  <Box>{datasetS3Uri}</Box>
                 </Box>
                 <Box>
                   <Box variant="awsui-key-label">Labeling Output</Box>
@@ -554,7 +597,7 @@ export default function CreateLabelingJob() {
                   </Box>
                 )}
 
-                {(!jobName || !datasetPrefix || !taskType || !labelCategories) && (
+                {(!jobName || !datasetS3Uri || !taskType || !labelCategories) && (
                   <Alert type="warning">
                     Please complete all required fields before creating the job.
                   </Alert>
@@ -564,6 +607,17 @@ export default function CreateLabelingJob() {
             isOptional: false,
           },
         ]}
+      />
+
+      {/* S3 Browser Modal for dataset selection */}
+      <S3Browser
+        visible={showBrowseModal}
+        onDismiss={() => setShowBrowseModal(false)}
+        usecaseId={selectedUseCase?.usecase_id || ''}
+        onSelectFile={selectDatasetFromBrowser}
+        fileFilter={(item) => item.type === 'folder'}
+        title="Select Dataset Folder"
+        selectButtonText="Select Folder"
       />
     </Container>
   );

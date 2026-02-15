@@ -288,7 +288,7 @@ def list_buckets(event: Dict) -> Dict:
             'current_data_bucket': current_bucket,
             'target_account': target_account,
             'has_data_account_role': bool(data_role_arn),
-            'message': f"Querying account {target_account}. Only showing buckets tagged with dda-portal:managed=true"
+            'message': f"Showing {len(buckets)} bucket(s). To add more buckets, tag them with dda-portal:managed=true in AWS Console."
         })
         
     except ClientError as e:
@@ -483,6 +483,53 @@ def create_folder(event: Dict) -> Dict:
 
 
 
+def ensure_bucket_cors(s3_client: boto3.client, bucket: str) -> None:
+    """
+    Ensure S3 bucket has CORS configuration for browser-based uploads.
+    This allows the frontend to make PUT requests directly to S3.
+    """
+    try:
+        # Check if CORS is already configured
+        try:
+            existing_cors = s3_client.get_bucket_cors(Bucket=bucket)
+            logger.info(f"Bucket {bucket} already has CORS configured: {existing_cors}")
+            return
+        except ClientError as e:
+            if e.response['Error']['Code'] != 'NoSuchCORSConfiguration':
+                logger.warning(f"Error checking existing CORS: {str(e)}")
+                raise
+        
+        # Configure CORS for browser-based uploads
+        # Allow all origins and methods needed for presigned URL uploads
+        cors_config = {
+            'CORSRules': [
+                {
+                    'AllowedMethods': ['GET', 'PUT', 'POST', 'DELETE', 'HEAD'],
+                    'AllowedOrigins': ['*'],
+                    'AllowedHeaders': ['*'],
+                    'ExposeHeaders': ['ETag', 'x-amz-version-id', 'x-amz-request-id'],
+                    'MaxAgeSeconds': 3000
+                }
+            ]
+        }
+        
+        s3_client.put_bucket_cors(Bucket=bucket, CORSConfiguration=cors_config)
+        logger.info(f"CORS configuration applied to bucket {bucket}")
+        
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+        error_msg = e.response.get('Error', {}).get('Message', str(e))
+        
+        if 'AccessDenied' in error_code or 'Forbidden' in error_code:
+            logger.warning(f"Insufficient permissions to configure CORS for bucket {bucket}. "
+                          f"Please ensure the Lambda execution role has s3:PutBucketCors permission. "
+                          f"Error: {error_msg}")
+        else:
+            logger.warning(f"Could not configure CORS for bucket {bucket}: {error_code} - {error_msg}")
+    except Exception as e:
+        logger.warning(f"Unexpected error configuring CORS: {str(e)}")
+
+
 def get_upload_url(event: Dict) -> Dict:
     """
     Get a presigned URL for uploading a file.
@@ -524,6 +571,9 @@ def get_upload_url(event: Dict) -> Dict:
         # Get credentials and create S3 client
         credentials = get_data_account_credentials(usecase)
         s3 = create_s3_client(credentials)
+        
+        # Ensure bucket has CORS configured for browser uploads
+        ensure_bucket_cors(s3, bucket)
         
         # Generate presigned URL for PUT
         upload_url = s3.generate_presigned_url(
@@ -601,6 +651,9 @@ def get_batch_upload_urls(event: Dict) -> Dict:
         # Get credentials and create S3 client
         credentials = get_data_account_credentials(usecase)
         s3 = create_s3_client(credentials)
+        
+        # Ensure bucket has CORS configured for browser uploads
+        ensure_bucket_cors(s3, bucket)
         
         # Generate presigned URLs for each file
         uploads = []
