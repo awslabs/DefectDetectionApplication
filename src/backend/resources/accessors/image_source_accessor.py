@@ -238,13 +238,15 @@ class ImageSourceAccessor:
     def __get_default_image_source_configuration(self, cameraId):
         # For Nvidia CSI cameras, use default Nvidia CSI config with v4l2src
         if cameraId is None:
-            return {
+            nvidia_csi_config = {
                 "gain": 1,
                 "exposure": 500,
                 "processingPipeline": self.default_camera_config.get("Nvidia CSI").get("default").get("processingPipeline"),
                 "device": self.default_camera_config.get("Nvidia CSI").get("default").get("device"),
                 "deviceName": self.default_camera_config.get("Nvidia CSI").get("default").get("deviceName")
             }
+            logger.warning(f"NVIDIA CSI CONFIG DEBUG: {nvidia_csi_config}")
+            return nvidia_csi_config
 
         # Fetch make and model of camera by CameraID
         camera = aravis_functions.getCamera(cameraId)
