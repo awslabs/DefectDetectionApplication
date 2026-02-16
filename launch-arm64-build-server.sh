@@ -133,7 +133,22 @@ if ! aws iam get-role --role-name "$IAM_PROFILE" &>/dev/null; then
                 {
                     "Sid": "GreengrassPermissions",
                     "Effect": "Allow",
-                    "Action": ["greengrass:*"],
+                    "Action": [
+                        "greengrass:CreateComponentVersion",
+                        "greengrass:DescribeComponent",
+                        "greengrass:GetComponent",
+                        "greengrass:ListComponents",
+                        "greengrass:ListComponentVersions",
+                        "greengrass:ListCoreDevices",
+                        "greengrass:GetCoreDevice",
+                        "greengrass:ListInstalledComponents",
+                        "greengrass:ListTagsForResource",
+                        "greengrass:TagResource",
+                        "greengrass:ListDeployments",
+                        "greengrass:GetDeployment",
+                        "greengrass:CreateDeployment",
+                        "greengrass:CancelDeployment"
+                    ],
                     "Resource": "*"
                 },
                 {
@@ -154,7 +169,14 @@ if ! aws iam get-role --role-name "$IAM_PROFILE" &>/dev/null; then
                         "s3:ListBucket",
                         "s3:DeleteObject",
                         "s3:GetBucketVersioning",
-                        "s3:ListBucketVersions"
+                        "s3:ListBucketVersions",
+                        "s3:GetBucketPolicy",
+                        "s3:PutBucketPolicy",
+                        "s3:GetBucketAcl",
+                        "s3:PutBucketAcl",
+                        "s3:GetBucketTagging",
+                        "s3:PutBucketTagging",
+                        "s3:ListAllMyBuckets"
                     ],
                     "Resource": "*"
                 },
