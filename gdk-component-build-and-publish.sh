@@ -7,7 +7,7 @@ set -o pipefail
 
 # Step tracking
 STEP=0
-TOTAL_STEPS=7
+TOTAL_STEPS=8
 START_TIME=$(date +%s)
 
 print_step() {
@@ -43,6 +43,7 @@ echo "Recipe file: $RECIPE_FILE"
 # Use architecture-specific recipe
 cp $RECIPE_FILE recipe.yaml
 
+print_step "Creating GDK configuration"
 # Create gdk-config.json with architecture-specific component name
 cat > gdk-config.json << EOF
 {
@@ -68,13 +69,16 @@ cat > gdk-config.json << EOF
   "gdk_version": "1.0.0"
 }
 EOF
+echo "✓ GDK configuration created"
 
+print_step "Cleaning build directories"
 # Clean GDK cache and build directories
 rm -rf greengrass-build/
 rm -rf .gdk/
+echo "✓ Build directories cleaned"
 
+print_step "Building LocalServer component"
 # Build and publish component
-echo "Building component..."
 BUILD_LOG="/tmp/gdk-build-$(date +%s).log"
 echo "Build log: $BUILD_LOG"
 echo ""
@@ -97,8 +101,7 @@ else
     exit 1
 fi
 
-echo ""
-echo "Publishing component..."
+print_step "Publishing LocalServer component"
 PUBLISH_LOG="/tmp/gdk-publish-$(date +%s).log"
 echo "Publish log: $PUBLISH_LOG"
 echo ""
@@ -120,12 +123,8 @@ else
     exit 1
 fi
 
-echo ""
-echo "Component ${COMPONENT_NAME} built and published successfully!"
-echo ""
-
+print_step "Tagging component for portal discovery"
 # Tag the published component with dda-portal:managed=true
-echo "Tagging component for portal discovery..."
 
 REGION=$(aws configure get region || echo "us-east-1")
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -151,10 +150,8 @@ else
     echo "⚠ Warning: Could not find component ARN for tagging (this is non-critical)"
 fi
 
-echo ""
-
+print_step "Optional: Build InferenceUploader component"
 # Ask if user wants to build InferenceUploader component
-echo "Optional: Build InferenceUploader component?"
 echo ""
 echo "The InferenceUploader component enables edge devices to automatically"
 echo "upload inference results (images and metadata) to S3 for centralized storage."
@@ -163,7 +160,6 @@ read -p "Build and publish InferenceUploader component now? (y/n): " BUILD_INFER
 
 if [ "$BUILD_INFERENCE_UPLOADER" = "y" ] || [ "$BUILD_INFERENCE_UPLOADER" = "Y" ]; then
     echo ""
-    echo "Building InferenceUploader component..."
     INFERENCE_LOG="/tmp/inference-uploader-build-$(date +%s).log"
     echo "Build log: $INFERENCE_LOG"
     echo ""
@@ -190,3 +186,10 @@ else
     echo "ℹ You can build the InferenceUploader component later by running:"
     echo "  ./build-inference-uploader.sh"
 fi
+
+print_step "Build and publish complete"
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
+echo "✅ All components built and published successfully!"
+echo "Total time: ${ELAPSED}s"
+echo ""
