@@ -20,6 +20,11 @@ from shared_utils import (
     check_user_access, validate_required_fields, create_s3_path_builder,
     is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
 )
+from manifest_transformer import (
+    detect_ground_truth_attributes,
+    transform_manifest_entry,
+    transform_manifest_lines
+)
 
 # Configure logging
 logger = logging.getLogger()
@@ -175,17 +180,33 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
             logger.error(f"Available attributes: {list(first_entry.keys())}")
             logger.error(f"Detected Ground Truth pattern: {has_gt_pattern}")
             
-            error_msg = f"Missing required attributes: {', '.join(missing_attrs)}"
+            # Detect custom field names if Ground Truth pattern found
+            detected_attrs = None
             if has_gt_pattern:
-                error_msg += ". This appears to be a Ground Truth manifest that needs transformation."
+                detected_attrs = detect_ground_truth_attributes(first_entry, model_type)
             
-            return {
-                'valid': False,
-                'errors': [error_msg],
-                'message': 'Manifest missing required DDA attributes',
-                'detected_attributes': list(first_entry.keys()),
-                'required_attributes': required_attrs
-            }
+            if has_gt_pattern and detected_attrs:
+                # Ground Truth manifest with custom field names - needs transformation
+                return {
+                    'valid': False,
+                    'errors': ['Manifest is in Ground Truth format and requires transformation'],
+                    'message': 'Manifest transformation required',
+                    'detected_attributes': list(first_entry.keys()),
+                    'detected_field_mapping': detected_attrs,
+                    'required_attributes': required_attrs,
+                    'transformation_needed': True,
+                    'suggestion': 'Use the Data Management > Transform Manifest tool to convert this Ground Truth manifest to DDA format, then retry training job creation.'
+                }
+            else:
+                # Missing attributes but not a Ground Truth manifest
+                error_msg = f"Missing required attributes: {', '.join(missing_attrs)}"
+                return {
+                    'valid': False,
+                    'errors': [error_msg],
+                    'message': 'Manifest missing required DDA attributes',
+                    'detected_attributes': list(first_entry.keys()),
+                    'required_attributes': required_attrs
+                }
         
         # Validate attribute types
         if not isinstance(first_entry.get('source-ref'), str):
@@ -1004,6 +1025,7 @@ def download_training_logs(event: Dict, context: Any) -> Dict:
 
 def handler(event: Dict, context: Any) -> Dict:
     """Main Lambda handler - routes to appropriate function"""
+    # Updated: 2026-02-16 - Fixed routing order for transform-manifest endpoint
     try:
         http_method = event.get('httpMethod')
         path = event.get('path', '')
@@ -1026,7 +1048,10 @@ def handler(event: Dict, context: Any) -> Dict:
         
         # Route to appropriate handler
         # Note: path includes stage (/v1/training), resource is the pattern (/training)
-        if http_method == 'POST' and '/training' in path and '{id}' not in resource:
+        # Check more specific paths first before general ones
+        if http_method == 'POST' and '/transform-manifest' in path:
+            return transform_manifest(event, context)
+        elif http_method == 'POST' and '/training' in path and '{id}' not in resource:
             return create_training_job(event, context)
         elif http_method == 'GET' and '/training' in path and '{id}' not in resource:
             return list_training_jobs(event, context)
@@ -1042,3 +1067,176 @@ def handler(event: Dict, context: Any) -> Dict:
     except Exception as e:
         logger.error(f"Handler error: {str(e)}")
         return create_response(500, {'error': 'Internal server error'})
+
+def transform_manifest(event: Dict, context: Any) -> Dict:
+    """
+    Transform Ground Truth manifest to DDA-compatible format.
+    POST /api/v1/training/transform-manifest
+    
+    Ground Truth creates manifests with job-specific attribute names like:
+    - "cookie-classification" (label value)
+    - "cookie-classification-metadata" (metadata)
+    
+    DDA model requires standardized names:
+    - "anomaly-label" (label value)
+    - "anomaly-label-metadata" (metadata)
+    
+    Request Body:
+        - usecase_id: Required. UseCase for S3 access
+        - source_manifest_uri: Required. S3 URI of Ground Truth output manifest
+        - output_manifest_uri: Optional. S3 URI for transformed manifest (defaults to same location with -dda suffix)
+        - task_type: Optional. "classification" or "segmentation" (default: "classification")
+    
+    Returns:
+        - transformed_manifest_uri: S3 URI of the DDA-compatible manifest
+        - stats: Statistics about the transformation
+        - detected_field_mapping: Detected Ground Truth field names
+    """
+    try:
+        user = get_user_from_event(event)
+        user_id = user['user_id']
+        
+        # Parse request body
+        body = json.loads(event.get('body', '{}'))
+        
+        # Validate required fields
+        required_fields = ['usecase_id', 'source_manifest_uri']
+        error = validate_required_fields(body, required_fields)
+        if error:
+            return create_response(400, {'error': error})
+        
+        usecase_id = body['usecase_id']
+        source_manifest_uri = body['source_manifest_uri']
+        output_manifest_uri = body.get('output_manifest_uri')
+        task_type = body.get('task_type', 'classification')
+        
+        # Check access (DataScientist role required)
+        if not check_user_access(user_id, usecase_id, 'DataScientist'):
+            return create_response(403, {'error': 'Insufficient permissions'})
+        
+        # Parse S3 URI
+        if not source_manifest_uri.startswith('s3://'):
+            return create_response(400, {'error': 'source_manifest_uri must be an S3 URI (s3://bucket/key)'})
+        
+        source_parts = source_manifest_uri.replace('s3://', '').split('/', 1)
+        if len(source_parts) != 2:
+            return create_response(400, {'error': 'Invalid S3 URI format'})
+        
+        source_bucket = source_parts[0]
+        source_key = source_parts[1]
+        
+        # Get use case details
+        usecase = get_usecase(usecase_id)
+        
+        # Create S3 client (handles both single-account and multi-account scenarios)
+        s3_usecase = get_usecase_client(
+            's3',
+            usecase,
+            session_name=f"transform-manifest-{user_id}-{int(datetime.utcnow().timestamp())}"
+        )
+        
+        # Download source manifest
+        logger.info(f"Downloading manifest from {source_manifest_uri}")
+        try:
+            response = s3_usecase.get_object(Bucket=source_bucket, Key=source_key)
+            manifest_content = response['Body'].read().decode('utf-8')
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchKey':
+                return create_response(404, {'error': 'Source manifest not found'})
+            raise
+        
+        # Parse manifest (JSONL format - one JSON object per line)
+        manifest_lines = manifest_content.strip().split('\n')
+        if not manifest_lines:
+            return create_response(400, {'error': 'Source manifest is empty'})
+        
+        # Transform manifest using shared utility
+        logger.info(f"Transforming manifest with {len(manifest_lines)} entries from {source_manifest_uri}")
+        result = transform_manifest_lines(manifest_lines, task_type)
+        
+        if not result['transformed_lines']:
+            logger.error(f"Manifest transformation failed for {source_manifest_uri}. Errors: {result['errors']}")
+            logger.error(f"Transformation stats: {result['stats']}")
+            logger.error(f"Detected attributes: {result.get('detected_attrs', {})}")
+            return create_response(400, {
+                'error': 'Could not transform manifest',
+                'details': result['errors'],
+                'message': result.get('message', 'Transformation failed'),
+                'source_manifest': source_manifest_uri,
+                'stats': result['stats']
+            })
+        
+        logger.info(f"Transformation complete: {result['stats']['transformed']} entries transformed, {result['stats']['skipped']} skipped")
+        logger.info(f"Detected attributes: {result.get('detected_attrs', {})}")
+        
+        # Generate output manifest content
+        transformed_content = '\n'.join(result['transformed_lines'])
+        
+        # Determine output location
+        if not output_manifest_uri:
+            # Default: same location with -dda suffix
+            base_key = source_key.rsplit('.', 1)[0]
+            output_key = f"{base_key}-dda.manifest"
+            output_bucket = source_bucket
+            output_manifest_uri = f"s3://{output_bucket}/{output_key}"
+        else:
+            # Parse provided output URI
+            output_parts = output_manifest_uri.replace('s3://', '').split('/', 1)
+            if len(output_parts) != 2:
+                return create_response(400, {'error': 'Invalid output_manifest_uri format'})
+            output_bucket = output_parts[0]
+            output_key = output_parts[1]
+        
+        # Upload transformed manifest
+        logger.info(f"Uploading transformed manifest to {output_manifest_uri}")
+        s3_usecase.put_object(
+            Bucket=output_bucket,
+            Key=output_key,
+            Body=transformed_content,
+            ContentType='application/x-ndjson'
+        )
+        
+        # Log audit event
+        log_audit_event(
+            user_id=user_id,
+            action='transform_manifest',
+            resource_type='manifest',
+            resource_id=source_key.split('/')[-1],
+            result='success',
+            details={
+                'source_manifest': source_manifest_uri,
+                'transformed_manifest': output_manifest_uri,
+                'entries_transformed': result['stats']['transformed'],
+                'task_type': task_type
+            }
+        )
+        
+        # Generate sample entry for user reference
+        sample_entry = json.loads(result['transformed_lines'][0]) if result['transformed_lines'] else None
+        
+        return create_response(200, {
+            'message': 'Manifest transformed successfully',
+            'transformed_manifest_uri': output_manifest_uri,
+            'stats': result['stats'],
+            'detected_field_mapping': result.get('detected_attrs', {}),
+            'dda_attributes': {
+                'label': 'anomaly-label',
+                'metadata': 'anomaly-label-metadata',
+                'mask_ref': 'anomaly-mask-ref' if task_type in ['segmentation', 'segmentation-robust'] else None,
+                'mask_ref_metadata': 'anomaly-mask-ref-metadata' if task_type in ['segmentation', 'segmentation-robust'] else None
+            },
+            'sample_entry': sample_entry,
+            'next_steps': [
+                f'1. Use the transformed manifest URI in your training job: {output_manifest_uri}',
+                '2. Create a new training job with this manifest',
+                '3. Monitor the training job for completion'
+            ]
+        })
+        
+    except ClientError as e:
+        logger.error(f"AWS error transforming manifest: {str(e)}")
+        return create_response(500, {'error': f"Failed to transform manifest: {str(e)}"})
+    except Exception as e:
+        logger.error(f"Error transforming manifest: {str(e)}")
+        return create_response(500, {'error': 'Failed to transform manifest'})
+

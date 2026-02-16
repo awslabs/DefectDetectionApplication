@@ -7,7 +7,14 @@ Generate manifest files for Cookie Dataset
 
 Supports both classification and segmentation tasks in Ground Truth or DDA format.
 
+IMPORTANT: For segmentation manifests, normal images require a background_mask.png file.
+Run create_background_mask.py first to generate this file, then upload it to S3.
+
 Usage:
+    # Create background mask for normal images (run once)
+    python3 create_background_mask.py
+    aws s3 cp dataset-files/mask-images/background_mask.png s3://bucket/cookies/dataset-files/mask-images/
+
     # Classification manifest in Ground Truth format (default - for testing transformation)
     python3 generate_manifest.py s3://bucket/cookies/ --task classification
 
@@ -81,33 +88,19 @@ def generate_classification_manifest(bucket_name, output_file="train_class.manif
         # Build S3 URI with normalized bucket name
         s3_image_uri = f"s3://{bucket_only}/{base_path}/training-images/{img_file.name}"
         
-        # Build manifest entry based on format type
-        if format_type == "ground-truth":
-            # Ground Truth format with job-specific attribute names
-            entry = {
-                "source-ref": s3_image_uri,
-                "cookie-classification": label_value,
-                "cookie-classification-metadata": {
-                    "job-name": "cookie-classification",
-                    "class-name": class_label,
-                    "human-annotated": "yes",
-                    "creation-date": datetime.utcnow().isoformat() + "Z",
-                    "type": "groundtruth/image-classification"
-                }
+        # Build manifest entry - use DDA format (standardized names)
+        # This is ready for training without transformation
+        entry = {
+            "source-ref": s3_image_uri,
+            "anomaly-label": label_value,
+            "anomaly-label-metadata": {
+                "job-name": "anomaly-label",
+                "class-name": class_label,
+                "human-annotated": "yes",
+                "creation-date": datetime.utcnow().isoformat() + "Z",
+                "type": "groundtruth/image-classification"
             }
-        else:  # dda format
-            # DDA format with standardized attribute names
-            entry = {
-                "source-ref": s3_image_uri,
-                "anomaly-label": label_value,
-                "anomaly-label-metadata": {
-                    "job-name": "anomaly-label",
-                    "class-name": class_label,
-                    "human-annotated": "yes",
-                    "creation-date": datetime.utcnow().isoformat() + "Z",
-                    "type": "groundtruth/image-classification"
-                }
-            }
+        }
         
         manifest_lines.append(json.dumps(entry))
     
@@ -178,16 +171,43 @@ def generate_segmentation_manifest(bucket_name, output_file="train_segmentation.
         mask_file = img_file.stem + ".png"
         mask_path = mask_dir / mask_file
         
-        # For normal images without masks, use dummy mask
+        # For normal images without masks, create a background-only mask reference
         if not mask_path.exists():
             if class_label == "normal":
-                logger.debug("Using dummy mask for normal image %s", img_file.name)
-                s3_mask_uri = f"s3://{bucket_only}/{base_path}/mask-images/dummy_anomaly_mask.png"
+                logger.debug("Using background-only mask for normal image %s", img_file.name)
+                # Use a generic background mask name that should exist in S3
+                s3_mask_uri = f"s3://{bucket_only}/{base_path}/mask-images/background_mask.png"
             else:
                 logger.warning("Mask not found for anomaly image %s, skipping", img_file.name)
                 continue
         else:
             s3_mask_uri = f"s3://{bucket_only}/{base_path}/mask-images/{mask_file}"
+        
+        # Build color map following AWS Ground Truth standard
+        # CRITICAL: Class 0 is ALWAYS BACKGROUND
+        if label_value == 0:
+            # Normal image: only class 0 (BACKGROUND)
+            color_map = {
+                "0": {
+                    "class-name": "BACKGROUND",
+                    "hex-color": "#ffffff",
+                    "confidence": 0.5
+                }
+            }
+        else:
+            # Anomaly image: class 0 (BACKGROUND) + class 1 (DEFECT)
+            color_map = {
+                "0": {
+                    "class-name": "BACKGROUND",
+                    "hex-color": "#ffffff",
+                    "confidence": 0.5
+                },
+                "1": {
+                    "class-name": "DEFECT",
+                    "hex-color": "#23A436",
+                    "confidence": 0.5
+                }
+            }
         
         # Build manifest entry based on format type
         if format_type == "ground-truth":
@@ -204,12 +224,7 @@ def generate_segmentation_manifest(bucket_name, output_file="train_segmentation.
                 },
                 "cookie-segmentation-ref": s3_mask_uri,
                 "cookie-segmentation-ref-metadata": {
-                    "internal-color-map": {
-                        "0": {
-                            "class-name": "cracked" if class_label == "anomaly" else "BACKGROUND",
-                            "hex-color": "#23A436" if class_label == "anomaly" else "#ffffff"
-                        }
-                    },
+                    "internal-color-map": color_map,
                     "job-name": "cookie-segmentation-ref",
                     "human-annotated": "yes",
                     "creation-date": datetime.utcnow().isoformat() + "Z",
@@ -230,12 +245,7 @@ def generate_segmentation_manifest(bucket_name, output_file="train_segmentation.
                 },
                 "anomaly-mask-ref": s3_mask_uri,
                 "anomaly-mask-ref-metadata": {
-                    "internal-color-map": {
-                        "0": {
-                            "class-name": "cracked" if class_label == "anomaly" else "BACKGROUND",
-                            "hex-color": "#23A436" if class_label == "anomaly" else "#ffffff"
-                        }
-                    },
+                    "internal-color-map": color_map,
                     "job-name": "anomaly-mask-ref",
                     "human-annotated": "yes",
                     "creation-date": datetime.utcnow().isoformat() + "Z",
@@ -263,17 +273,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Classification in Ground Truth format (default - for testing transformation in portal)
-  python3 generate_manifest.py s3://my-bucket/cookies/ --task classification
+  # Classification (images only)
+  python3 generate_manifest.py s3://my-bucket/cookies/
 
-  # Segmentation in Ground Truth format (default - for testing transformation in portal)
+  # Segmentation (images with masks)
   python3 generate_manifest.py s3://my-bucket/cookies/ --task segmentation
 
-  # Both tasks in Ground Truth format (default)
+  # Both tasks
   python3 generate_manifest.py s3://my-bucket/cookies/ --task both
-
-  # Generate DDA format (ready for training without transformation)
-  python3 generate_manifest.py s3://my-bucket/cookies/ --task both --format dda
         """
     )
     parser.add_argument(
@@ -290,7 +297,7 @@ Examples:
         "--format",
         choices=["ground-truth", "dda"],
         default="ground-truth",
-        help="Manifest format: 'ground-truth' (default) for Ground Truth format with job-specific names (for testing transformation in portal), 'dda' for DDA format with standardized names (ready for training)"
+        help="Manifest format: 'ground-truth' (default) for Ground Truth format with custom field names (for testing transformation in portal), 'dda' for DDA format with standardized names (ready for training)"
     )
 
     args = parser.parse_args()

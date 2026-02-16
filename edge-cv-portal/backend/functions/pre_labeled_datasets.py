@@ -11,6 +11,7 @@ import sys
 # Import shared utilities
 sys.path.append('/opt/python')
 from shared_utils import get_usecase, assume_usecase_role, create_response as shared_create_response, handle_error
+from s3_browse_utils import browse_s3_bucket as browse_s3_bucket_util, filter_manifest_files
 
 # Initialize AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -310,7 +311,7 @@ def validate_manifest_file(bucket: str, key: str) -> Dict[str, Any]:
                         
                         # Try to access the mask file
                         s3.head_object(Bucket=mask_bucket, Key=mask_key)
-                        logger.info(f"Verified segmentation mask file accessible: {sample_mask_uri}")
+                        print(f"Verified segmentation mask file accessible: {sample_mask_uri}")
                     except s3.exceptions.NoSuchKey:
                         errors.append(f"Segmentation mask file not found: {sample_mask_uri}")
                     except Exception as e:
@@ -353,15 +354,27 @@ def analyze_manifest_entries(entries: List[Dict]) -> Dict[str, Any]:
     # Analyze first few entries to determine structure
     for entry in entries[:10]:
         for key in entry.keys():
-            if key.endswith('-label') and not key.endswith('-metadata'):
+            # Skip metadata and source fields
+            if key.endswith('-metadata') or key == 'source-ref':
+                continue
+            
+            # Detect task type based on field naming patterns
+            if key.endswith('-label'):
+                # Classification: ends with -label (e.g., anomaly-label, cookie-classification)
                 label_fields.add(key)
                 task_type = 'classification'
             elif key.endswith('-bounding-box'):
+                # Object Detection: ends with -bounding-box
                 label_fields.add(key)
                 task_type = 'detection'
-            elif key.endswith('-mask-ref'):
+            elif key.endswith('-mask-ref') or key.endswith('-ref'):
+                # Segmentation: ends with -mask-ref or -ref (e.g., anomaly-mask-ref, cookie-segmentation-ref)
                 label_fields.add(key)
                 task_type = 'segmentation'
+            elif key.endswith('-classification'):
+                # Classification variant: ends with -classification (e.g., cookie-classification)
+                label_fields.add(key)
+                task_type = 'classification'
     
     # Count label distribution for classification tasks
     if task_type == 'classification' and label_fields:
@@ -438,144 +451,18 @@ def browse_s3_bucket(event):
         if not usecase_id:
             return create_response(400, {'error': 'usecase_id is required'})
         
-        # Get use case details
-        usecase = get_usecase(usecase_id)
-        
-        # Determine which bucket to browse
-        # Try data_s3_bucket first (for separate data account), then fall back to s3_bucket
-        bucket = usecase.get('data_s3_bucket') or usecase.get('s3_bucket')
-        
-        if not bucket:
-            return create_response(400, {'error': 'No S3 bucket configured for this use case'})
-        
-        # Determine if we need to assume a role for cross-account access
-        data_account_id = usecase.get('data_account_id')
-        usecase_account_id = usecase.get('account_id')
-        is_separate_data_account = (
-            data_account_id and 
-            data_account_id != usecase_account_id
+        # Use shared browse utility with manifest file filter
+        result = browse_s3_bucket_util(
+            usecase_id=usecase_id,
+            prefix=prefix,
+            delimiter=delimiter,
+            file_filter=filter_manifest_files
         )
         
-        if is_separate_data_account:
-            # Use data account credentials
-            data_role_arn = usecase.get('data_account_role_arn')
-            data_external_id = usecase.get('data_account_external_id')
-            
-            if not data_role_arn or not data_external_id:
-                return create_response(400, {
-                    'error': 'Data account role not configured for cross-account access'
-                })
-            
-            credentials = assume_usecase_role(
-                data_role_arn,
-                data_external_id,
-                'browse-s3-bucket'
-            )
-            
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=credentials['AccessKeyId'],
-                aws_secret_access_key=credentials['SecretAccessKey'],
-                aws_session_token=credentials['SessionToken']
-            )
-        else:
-            # Use usecase account credentials
-            credentials = assume_usecase_role(
-                usecase['cross_account_role_arn'],
-                usecase['external_id'],
-                'browse-s3-bucket'
-            )
-            
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=credentials['AccessKeyId'],
-                aws_secret_access_key=credentials['SecretAccessKey'],
-                aws_session_token=credentials['SessionToken']
-            )
+        return create_response(200, result)
         
-        # List objects in bucket
-        folders = []
-        files = []
-        
-        try:
-            paginator = s3_client.get_paginator('list_objects_v2')
-            pages = paginator.paginate(
-                Bucket=bucket,
-                Prefix=prefix,
-                Delimiter=delimiter
-            )
-            
-            # Collect common prefixes (folders)
-            for page in pages:
-                for common_prefix in page.get('CommonPrefixes', []):
-                    folder_name = common_prefix['Prefix'].rstrip('/').split('/')[-1]
-                    folders.append({
-                        'name': folder_name,
-                        'prefix': common_prefix['Prefix'],
-                        'type': 'folder'
-                    })
-                
-                # Collect files
-                for obj in page.get('Contents', []):
-                    key = obj['Key']
-                    # Skip if it's the prefix itself
-                    if key == prefix:
-                        continue
-                    
-                    file_name = key.split('/')[-1]
-                    file_size = obj['Size']
-                    last_modified = obj['LastModified'].isoformat() if 'LastModified' in obj else None
-                    
-                    # Determine file type
-                    file_type = 'file'
-                    if file_name.endswith('.manifest'):
-                        file_type = 'manifest'
-                    elif file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')):
-                        file_type = 'image'
-                    
-                    files.append({
-                        'name': file_name,
-                        'key': key,
-                        'size': file_size,
-                        'size_mb': round(file_size / (1024 * 1024), 2),
-                        'last_modified': last_modified,
-                        'type': file_type,
-                        's3_uri': f's3://{bucket}/{key}'
-                    })
-        
-        except Exception as e:
-            print(f"Error listing S3 objects: {str(e)}")
-            return create_response(500, {
-                'error': f'Failed to browse S3 bucket: {str(e)}'
-            })
-        
-        # Sort folders and files by name
-        folders.sort(key=lambda x: x['name'].lower())
-        files.sort(key=lambda x: x['name'].lower())
-        
-        # Generate breadcrumb navigation
-        breadcrumbs = []
-        if prefix:
-            breadcrumbs.append({'name': 'root', 'prefix': ''})
-            parts = prefix.rstrip('/').split('/')
-            current = ''
-            for part in parts:
-                if part:
-                    current += part + '/'
-                    breadcrumbs.append({'name': part, 'prefix': current})
-        else:
-            breadcrumbs.append({'name': 'root', 'prefix': ''})
-        
-        return create_response(200, {
-            'bucket': bucket,
-            'current_prefix': prefix,
-            'breadcrumbs': breadcrumbs,
-            'folders': folders,
-            'files': files,
-            'folder_count': len(folders),
-            'file_count': len(files)
-        })
-        
+    except ValueError as e:
+        return create_response(400, {'error': str(e)})
     except Exception as e:
         print(f"Error browsing S3 bucket: {str(e)}")
         import traceback

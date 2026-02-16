@@ -16,11 +16,13 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
   - [Step 4: Build DDA Application](#step-4-build-dda-application-build-server)
   - [Step 5: Deploy UseCase Account and Create UseCase](#step-5-deploy-usecase-account-and-create-usecase)
   - [Step 6: Setting Up Edge Servers](#step-6-setting-up-edge-servers)
-- [Features](#features)
+- [Deploy DDA Application to Edge Device](#deploy-dda-application-to-edge-device)
+- [Deployments](#deployments)
+- [Devices](#devices)
+- [Using the Portal](#using-the-portal)
 - [ML Workflow](#ml-workflow)
 - [Optional Datasets](#optional-datasets-before-model-training)
 - [Inference Results Upload](#inference-results-upload-optional)
-- [Launching Edge Devices](#launching-edge-devices)
 - [Documentation](#documentation)
 - [Troubleshooting](#troubleshooting)
 - [Project Structure](#project-structure)
@@ -762,7 +764,211 @@ After your edge device is set up and appears in the portal, you need to deploy t
 
 Once the DDA application is deployed, you can proceed with deploying trained models and other components to the device.
 
-## Portal Features
+## Deployments
+
+The Deployments feature allows you to manage Greengrass deployments to edge devices. Deployments follow a two-step process:
+
+### Deployment Workflow
+
+**Step 1: Deploy DDA LocalServer Component (Infrastructure)**
+
+The DDA LocalServer component is the core inference runtime that must be deployed first. This is a prerequisite for all other deployments.
+
+1. Go to **Deployments** → **Create Deployment**
+2. Select your edge device or device group
+3. Click **Add Component**
+4. Search for `aws.edgeml.dda.LocalServer.<arch>` (where `<arch>` is your device architecture: `arm64` or `x86_64`)
+5. Click **Deploy**
+6. Wait for deployment to complete (status will show "Succeeded")
+
+**What Gets Deployed:**
+- AWS IoT Greengrass LocalServer component
+- DDA inference runtime environment
+- Camera and inference pipeline configuration
+- Model serving infrastructure
+
+**Verify Deployment:**
+1. Go to **Devices** page
+2. Select your device
+3. Check **Components** tab to verify LocalServer is deployed and running
+4. Check **Logs** tab for any errors
+
+**Step 2: Deploy Trained ML Models**
+
+After LocalServer is running, you can deploy trained and compiled models to the device.
+
+1. Go to **Deployments** → **Create Deployment**
+2. Select your edge device or device group
+3. Click **Add Component**
+4. Search for your compiled model component (e.g., `model-cookie-seg-2-arm64-cpu`)
+5. Optionally enable **Inference Uploader** to automatically upload inference results to S3
+6. Click **Deploy**
+7. Wait for deployment to complete
+
+**What Gets Deployed:**
+- Your trained and compiled ML model
+- Model configuration and metadata
+- Optional: Inference Uploader component for S3 sync
+
+**Important Notes:**
+- LocalServer must be deployed first (Step 1)
+- Models can only be deployed after LocalServer is running
+- You can deploy multiple models to the same device
+- Each deployment creates a new Greengrass job
+- Components not included in a deployment will be removed from the device
+
+### Deployment Options
+
+**Target Selection:**
+- **Specific Devices**: Deploy to individual devices (recommended for testing)
+- **Thing Groups**: Deploy to all devices in an IoT thing group (recommended for production)
+
+**Auto-Included Components:**
+The portal automatically includes these components in every deployment:
+- **aws.greengrass.Nucleus** - Greengrass runtime (required)
+- **aws.greengrass.LogManager** - CloudWatch logging (optional but recommended)
+
+**Inference Uploader** (Optional):
+Enable to automatically upload inference results from edge devices to S3:
+- Uploads images and metadata from inference runs
+- Configurable upload interval (default: 5 minutes)
+- Useful for monitoring model performance and collecting feedback data
+
+### Monitoring Deployments
+
+1. Go to **Deployments** page
+2. Select a deployment to see:
+   - **Status**: InProgress, Succeeded, Failed, Cancelled
+   - **Target**: Device or thing group being deployed to
+   - **Components**: List of components in the deployment
+   - **Effective Deployments**: Per-device status and error details
+
+**Deployment Status:**
+- **InProgress**: Deployment is being sent to device
+- **Succeeded**: Deployment completed successfully
+- **Failed**: Deployment encountered an error (check device logs)
+- **Cancelled**: Deployment was manually cancelled
+
+### Troubleshooting Deployments
+
+**Issue: "Deployment failed with COMPONENT_VERSION_REQUIREMENTS_NOT_MET"**
+- Verify the component exists in your account
+- Check that the component version is valid
+- Ensure the device architecture matches the component (arm64 vs x86_64)
+
+**Issue: "Device not found"**
+- Verify device is registered in IoT Core
+- Check device is online and connected to Greengrass
+- Ensure device has proper IAM permissions
+
+**Issue: "Deployment stuck in InProgress"**
+- Check device connectivity
+- Review device logs for errors
+- Try cancelling and redeploying
+
+## Devices
+
+The Devices feature allows you to monitor and manage edge devices running the DDA application.
+
+### Device Management
+
+**Viewing Devices:**
+
+1. Go to **Devices** page
+2. See all registered edge devices with:
+   - **Device ID**: Name of the device
+   - **Status**: Online, Offline, or Unknown
+   - **Platform**: Operating system (Linux, etc.)
+   - **Architecture**: Device CPU architecture (arm64, x86_64)
+   - **Last Seen**: Last connection timestamp
+
+**Device Details:**
+
+1. Click on a device to see:
+   - **Overview**: Device information and status
+   - **Components**: Installed Greengrass components and versions
+   - **Deployments**: Active and past deployments
+   - **Logs**: CloudWatch logs from device components
+   - **Diagnostics**: Device health and connectivity information
+
+### Component Management
+
+**Viewing Installed Components:**
+
+1. Go to **Devices** → Select device
+2. Click **Components** tab
+3. See all installed components with:
+   - **Component Name**: Name of the component
+   - **Version**: Installed version
+   - **Status**: Running, Stopped, or Error
+   - **Last Updated**: When component was last updated
+
+**Component Versions:**
+- Components are versioned (e.g., `1.0.0`, `2.1.3`)
+- Latest version is automatically used if not specified
+- You can deploy specific versions if needed
+
+### Device Logs
+
+**Accessing Device Logs:**
+
+1. Go to **Devices** → Select device
+2. Click **Logs** tab
+3. View logs from:
+   - **System Logs**: Greengrass runtime logs
+   - **Component Logs**: Individual component logs (LocalServer, models, etc.)
+   - **Inference Logs**: Model inference output and errors
+
+**Log Filtering:**
+- Filter by component name
+- Filter by log level (INFO, WARNING, ERROR)
+- Search for specific text
+- View logs from specific time ranges
+
+**CloudWatch Integration:**
+- Logs are automatically sent to CloudWatch Logs
+- Log group: `/aws/greengrass/devices/{device-id}`
+- Retention: Configurable (default: 7 days)
+
+### Device Diagnostics
+
+**Health Checks:**
+
+1. Go to **Devices** → Select device
+2. Click **Diagnostics** tab
+3. See device health status:
+   - **Connectivity**: Device connection to AWS IoT Core
+   - **Greengrass Status**: Greengrass runtime health
+   - **Component Health**: Status of all installed components
+   - **Storage**: Available disk space
+   - **Memory**: Available RAM
+
+**Troubleshooting:**
+- Check connectivity status if device is offline
+- Review component health for errors
+- Check storage/memory if device is running slowly
+- Review logs for detailed error messages
+
+### Device Provisioning
+
+**Prerequisites for New Devices:**
+
+Before a device can appear in the portal:
+1. Device must have AWS IoT Greengrass v2 installed
+2. Device must be registered in AWS IoT Core
+3. Device must have valid IAM credentials
+4. Device must be able to connect to AWS IoT Core
+
+**Setting Up a New Device:**
+
+See [Step 6: Setting Up Edge Servers](#step-6-setting-up-edge-servers) for detailed instructions on provisioning new devices.
+
+**Device Registration:**
+- Devices automatically appear in the portal after setup completes
+- Device name is used as the device ID
+- Device must be online to appear in the portal
+
+
 
 Once you've completed the deployment steps above and logged into the DDA Portal, you'll have access to the following features for managing your defect detection workflows:
 
@@ -1586,147 +1792,23 @@ aws s3 cp manifest.jsonl s3://your-bucket/manifest.jsonl
 - Can be in same bucket as images or separate bucket
 - Recommended: `s3://bucket/manifest.jsonl` at root level
 
-### AWS Open Cookie Dataset
+### Sample Datasets
 
-The AWS Open Cookie Dataset is a publicly available dataset for defect detection that you can use with DDA:
+For detailed instructions on setting up and using sample datasets (Cookie and Alien), see the [Sample Datasets Guide](./datasets/README.md).
 
-#### Understanding S3 Bucket and S3 Prefix
+The guide covers:
+- **Cookie Dataset** - Pre-labeled dataset with normal and defective cookie images
+- **Alien Dataset** - Pre-labeled dataset with toy alien figurines for testing anomaly detection
+- **Dataset Upload** - How to upload datasets to S3
+- **Manifest Generation** - Creating manifest files for training
+- **Portal Registration** - Registering datasets in the DDA Portal
+- **Training with Datasets** - Using datasets to train models
 
-Before creating your use case, you need to understand how DDA uses S3 storage:
-
-- **S3 Bucket**: The root container in Amazon S3 where all your data will be stored. This includes training datasets, labeled data, trained models, and inference results. The bucket name must be globally unique across AWS.
-  - Example: `dda-cookie-dataset`
-
-- **S3 Prefix**: An optional folder path within the bucket to organize your data. Think of it like a folder structure. If you don't specify a prefix, data is stored at the bucket root.
-  - Example: `datasets/` stores data in a "datasets" folder
-  - Example: `project-1/training-data/` creates nested folders
-  - Useful for organizing multiple use cases or projects within a single bucket
-
-**Step 1: Clone the AWS Lookout for Vision repository**
-```bash
-git clone https://github.com/aws-samples/amazon-lookout-for-vision.git
-cd amazon-lookout-for-vision
-```
-
-**Step 2: Create S3 bucket for dataset**
-```bash
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-BUCKET_NAME="dda-cookie-dataset-${ACCOUNT_ID}"
-aws s3 mb s3://${BUCKET_NAME}
-
-# Tag bucket as managed by DDA Portal
-aws s3api put-bucket-tagging \
-  --bucket ${BUCKET_NAME} \
-  --tagging 'TagSet=[{Key=ManagedBy,Value=DDAPortal}]' \
-  --region us-east-1
-```
-
-**Step 3: Upload cookie dataset to S3**
-```bash
-# Navigate to the datasets directory in the cloned repo
-cd datasets/cookies
-
-# Upload to S3
-aws s3 sync . s3://${BUCKET_NAME}/cookies/
-```
-
-**Step 4: Create manifest file**
-
-Create a manifest file (`manifest.jsonl`) in S3 with entries for each image:
-
-```bash
-# Example manifest format (one line per image)
-{"source-ref": "s3://dda-cookie-dataset-ACCOUNT_ID/cookies/normal/image1.jpg", "class": "normal"}
-{"source-ref": "s3://dda-cookie-dataset-ACCOUNT_ID/cookies/defect/image2.jpg", "class": "defect"}
-```
-
-Upload manifest to S3:
-```bash
-aws s3 cp manifest.jsonl s3://${BUCKET_NAME}/manifest.jsonl
-```
-
-**Step 5: Register in Portal**
-
-1. Go to **Data Management** → **Pre-Labeled Datasets**
-2. Click **Register Dataset**
-3. Fill in:
-   - **Dataset Name**: "Cookie Defect Detection"
-   - **S3 Manifest URI**: `s3://dda-cookie-dataset-ACCOUNT_ID/manifest.jsonl`
-   - **Description**: "AWS Open Cookie Dataset for defect detection"
-4. Click **Register**
-
-**Step 6: Train Model with Cookie Dataset**
-
-1. Go to **Training** → **Create Training Job**
-2. Select **Pre-Labeled Dataset** as source
-3. Choose "Cookie Defect Detection" from dropdown
-4. Configure training parameters
-5. Click **Start Training**
-
-### AWS Alien Dataset
-
-The AWS Alien Dataset is another publicly available dataset for defect detection featuring toy alien figurines with various defects. This dataset is useful for testing anomaly detection and localization capabilities:
-
-**Step 1: Clone the AWS Lookout for Vision repository**
-```bash
-git clone https://github.com/aws-samples/amazon-lookout-for-vision.git
-cd amazon-lookout-for-vision
-```
-
-**Step 2: Create S3 bucket for dataset**
-```bash
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-BUCKET_NAME="dda-alien-dataset-${ACCOUNT_ID}"
-aws s3 mb s3://${BUCKET_NAME}
-
-# Tag bucket as managed by DDA Portal
-aws s3api put-bucket-tagging \
-  --bucket ${BUCKET_NAME} \
-  --tagging 'TagSet=[{Key=ManagedBy,Value=DDAPortal}]' \
-  --region us-east-1
-```
-
-**Step 3: Upload alien dataset to S3**
-```bash
-# Navigate to the datasets directory in the cloned repo
-cd datasets/aliens
-
-# Upload to S3
-aws s3 sync . s3://${BUCKET_NAME}/aliens/
-```
-
-**Step 4: Create manifest file**
-
-Create a manifest file (`manifest.jsonl`) in S3 with entries for each image:
-
-```bash
-# Example manifest format (one line per image)
-{"source-ref": "s3://dda-alien-dataset-ACCOUNT_ID/aliens/normal/alien1.jpg", "class": "normal"}
-{"source-ref": "s3://dda-alien-dataset-ACCOUNT_ID/aliens/defect/alien2.jpg", "class": "defect"}
-```
-
-Upload manifest to S3:
-```bash
-aws s3 cp manifest.jsonl s3://${BUCKET_NAME}/manifest.jsonl
-```
-
-**Step 5: Register in Portal**
-
-1. Go to **Data Management** → **Pre-Labeled Datasets**
-2. Click **Register Dataset**
-3. Fill in:
-   - **Dataset Name**: "Alien Defect Detection"
-   - **S3 Manifest URI**: `s3://dda-alien-dataset-ACCOUNT_ID/manifest.jsonl`
-   - **Description**: "AWS Alien Dataset for anomaly detection and localization"
-4. Click **Register**
-
-**Step 6: Train Model with Alien Dataset**
-
-1. Go to **Training** → **Create Training Job**
-2. Select **Pre-Labeled Dataset** as source
-3. Choose "Alien Defect Detection" from dropdown
-4. Configure training parameters
-5. Click **Start Training**
+For quick start, follow the instructions in [datasets/README.md](./datasets/README.md) to:
+1. Upload dataset images to S3
+2. Generate manifest files
+3. Register datasets in the portal
+4. Train models using the datasets
 
 ### Dataset Format Requirements
 

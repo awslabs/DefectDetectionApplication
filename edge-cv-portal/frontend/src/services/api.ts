@@ -514,7 +514,7 @@ class ApiService {
     };
     sample_entry: any;
   }> {
-    return this.request('/labeling/transform-manifest', {
+    return this.request('/training/transform-manifest', {
       method: 'POST',
       body: JSON.stringify(data),
     });

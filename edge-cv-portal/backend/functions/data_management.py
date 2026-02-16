@@ -154,6 +154,8 @@ def handler(event: Dict, context: Any) -> Dict:
             return get_upload_url(event)
         elif '/batch-upload-urls' in path and http_method == 'POST':
             return get_batch_upload_urls(event)
+        elif '/transform-manifest' in path and http_method == 'POST':
+            return transform_manifest(event)
         elif '/configure' in path and http_method == 'POST':
             return configure_data_account(event)
         

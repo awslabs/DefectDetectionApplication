@@ -24,6 +24,7 @@ interface OnboardingState {
   useCaseName: string;
   description: string;
   costCenter: string;
+  region: string;  // AWS region where devices are located
 
   // Step 3: AWS Account Setup
   accountId: string;
@@ -65,6 +66,7 @@ export default function UseCaseOnboarding() {
     useCaseName: '',
     description: '',
     costCenter: '',
+    region: 'us-east-1',  // Default region
     accountId: '',
     roleArn: '',
     sagemakerExecutionRoleArn: '',
@@ -109,6 +111,7 @@ export default function UseCaseOnboarding() {
       const useCaseData: Record<string, unknown> = {
         name: state.useCaseName,
         cost_center: state.costCenter,
+        region: state.region,  // Include region
       };
 
       // For single-account setup: only name and s3_bucket required
@@ -273,6 +276,18 @@ export default function UseCaseOnboarding() {
                     value={state.costCenter}
                     onChange={({ detail }) => updateState({ costCenter: detail.value })}
                     placeholder="e.g., DEPT-001"
+                  />
+                </FormField>
+
+                <FormField
+                  label="AWS Region"
+                  description="AWS region where your edge devices and resources are located"
+                  stretch
+                >
+                  <Input
+                    value={state.region}
+                    onChange={({ detail }) => updateState({ region: detail.value })}
+                    placeholder="e.g., us-east-1, us-east-2, us-west-2"
                   />
                 </FormField>
 

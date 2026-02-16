@@ -157,10 +157,11 @@ def generate_segmentation_manifest(bucket_name, output_file="train_segmentation.
                     "internal-color-map": {
                         "0": {
                             "class-name": "BACKGROUND",
-                            "hex-color": "#ffffff"
+                            "hex-color": "#ffffff",
+                            "confidence": 0.5
                         }
                     },
-                    "job-name": "labeling-job/dummy-mask",
+                    "job-name": "anomaly-mask-ref",
                     "human-annotated": "yes",
                     "creation-date": datetime.utcnow().isoformat() + "Z",
                     "type": "groundtruth/semantic-segmentation"
@@ -206,11 +207,17 @@ def generate_segmentation_manifest(bucket_name, output_file="train_segmentation.
                 "anomaly-mask-ref-metadata": {
                     "internal-color-map": {
                         "0": {
-                            "class-name": "defect",
-                            "hex-color": "#FF0000"
+                            "class-name": "BACKGROUND",
+                            "hex-color": "#ffffff",
+                            "confidence": 0.5
+                        },
+                        "1": {
+                            "class-name": "DEFECT",
+                            "hex-color": "#FF0000",
+                            "confidence": 0.5
                         }
                     },
-                    "job-name": "labeling-job/object-mask-ref",
+                    "job-name": "anomaly-mask-ref",
                     "human-annotated": "yes",
                     "creation-date": datetime.utcnow().isoformat() + "Z",
                     "type": "groundtruth/semantic-segmentation"
