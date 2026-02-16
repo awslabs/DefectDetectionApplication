@@ -562,7 +562,7 @@ echo ""
 echo "▶ Installing Greengrass Core..."
 if ! run_cmd "curl -s 'https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-${greengrass_version}.zip' > 'greengrass-${greengrass_version}.zip'"; then
     add_error "Failed to download Greengrass"
-elif ! run_cmd "unzip greengrass-${greengrass_version}.zip -d GreengrassInstaller"; then
+elif ! run_cmd "unzip -o greengrass-${greengrass_version}.zip -d GreengrassInstaller"; then
     add_error "Failed to extract Greengrass"
 else
     run_cmd "rm greengrass-${greengrass_version}.zip" || add_warning "Failed to clean up Greengrass zip"
