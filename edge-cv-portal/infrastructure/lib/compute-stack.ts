@@ -1241,17 +1241,6 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       }
     );
 
-    // Labeling transform-manifest endpoint
-    const transformManifestResource = labelingResource.addResource('transform-manifest');
-    transformManifestResource.addMethod(
-      'POST',
-      labelingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
     // Labeling workteams endpoint
     const labelingWorkteamsResource = labelingResource.addResource('workteams');
     labelingWorkteamsResource.addMethod(
@@ -1353,6 +1342,17 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       }
     );
     trainingResource.addMethod(
+      'POST',
+      trainingIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // Training transform-manifest endpoint
+    const trainingTransformManifestResource = trainingResource.addResource('transform-manifest');
+    trainingTransformManifestResource.addMethod(
       'POST',
       trainingIntegration,
       {

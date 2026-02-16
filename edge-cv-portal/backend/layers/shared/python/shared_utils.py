@@ -33,6 +33,26 @@ SETTINGS_TABLE = os.environ.get('SETTINGS_TABLE')
 COMPONENTS_TABLE = os.environ.get('COMPONENTS_TABLE')
 
 
+def get_usecase_region(usecase: Dict) -> str:
+    """
+    Get AWS region from use case configuration.
+    
+    Priority:
+    1. Use case 'region' field (from DynamoDB)
+    2. Lambda environment variable AWS_REGION
+    3. Default to us-east-1
+    
+    Args:
+        usecase: Use case dict from DynamoDB
+    
+    Returns:
+        AWS region string (e.g., 'us-east-1', 'us-east-2')
+    """
+    region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
+    logger.info(f"Using region {region} for use case {usecase.get('usecase_id', 'unknown')}")
+    return region
+
+
 def decimal_default(obj):
     """JSON serializer for objects not serializable by default json code"""
     if isinstance(obj, Decimal):

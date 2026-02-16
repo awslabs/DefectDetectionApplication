@@ -227,6 +227,35 @@ For segmentation tasks, masks are PNG files with pixel colors representing diffe
   - `#FFFFFF` (white) - Background/normal region
 - **Color Map** - Defined in manifest metadata for Ground Truth interpretation
 
+#### Background Mask for Normal Images
+
+**IMPORTANT**: For segmentation training, normal images need a background-only mask so the model learns what "no defect" looks like.
+
+**Setup Steps**:
+
+1. **Create background mask** (run once):
+   ```bash
+   cd datasets/cookie-dataset
+   python3 create_background_mask.py
+   ```
+   This creates `dataset-files/mask-images/background_mask.png` - a single mask file used by all normal images.
+
+2. **Upload to S3**:
+   ```bash
+   aws s3 cp dataset-files/mask-images/background_mask.png \
+     s3://${BUCKET}/cookies/dataset-files/mask-images/
+   ```
+
+3. **Generate manifest** (will reference background_mask.png for normal images):
+   ```bash
+   python3 generate_manifest.py s3://${BUCKET}/cookies/ --task segmentation
+   ```
+
+**Why This Is Needed**:
+- **Anomaly images**: Have real defect masks (teaches WHERE defects are)
+- **Normal images**: Need background-only masks (teaches what "no defect" looks like)
+- Without normal images, the model won't learn to distinguish defective from non-defective areas
+
 **Example Manifest Entry with Mask**:
 ```json
 {
@@ -242,11 +271,15 @@ For segmentation tasks, masks are PNG files with pixel colors representing diffe
   "anomaly-mask-ref-metadata": {
     "internal-color-map": {
       "0": {
-        "class-name": "cracked",
+        "class-name": "BACKGROUND",
+        "hex-color": "#ffffff"
+      },
+      "1": {
+        "class-name": "DEFECT",
         "hex-color": "#23A436"
       }
     },
-    "job-name": "labeling-job/object-mask-ref",
+    "job-name": "anomaly-mask-ref",
     "human-annotated": "yes",
     "type": "groundtruth/semantic-segmentation"
   }

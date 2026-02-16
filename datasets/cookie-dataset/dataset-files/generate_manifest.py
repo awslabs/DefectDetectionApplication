@@ -67,14 +67,35 @@ def generate_manifest(bucket_name, output_file="train.manifest"):
         # Add mask reference if it exists
         if os.path.exists(mask_path):
             s3_mask_uri = f"s3://{bucket_name}/{base_path}/mask-images/{mask_file}"
-            entry["anomaly-mask-ref-metadata"] = {
-                "internal-color-map": {
+            
+            # Build color map following GT standard:
+            # Class 0 is ALWAYS BACKGROUND
+            # For normal images: only class 0
+            # For anomaly images: class 0 (BACKGROUND) + class 1 (DEFECT)
+            if anomaly_label == 0:
+                # Normal image: only background
+                color_map = {
                     "0": {
-                        "class-name": "cracked",
+                        "class-name": "BACKGROUND",
+                        "hex-color": "#ffffff"
+                    }
+                }
+            else:
+                # Anomaly image: background + defect
+                color_map = {
+                    "0": {
+                        "class-name": "BACKGROUND",
+                        "hex-color": "#ffffff"
+                    },
+                    "1": {
+                        "class-name": "DEFECT",
                         "hex-color": "#23A436"
                     }
-                },
-                "job-name": "labeling-job/object-mask-ref",
+                }
+            
+            entry["anomaly-mask-ref-metadata"] = {
+                "internal-color-map": color_map,
+                "job-name": "labeling-job/anomaly-mask-ref",
                 "human-annotated": "yes",
                 "type": "groundtruth/semantic-segmentation"
             }

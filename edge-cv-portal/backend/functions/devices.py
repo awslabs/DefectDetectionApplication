@@ -92,7 +92,9 @@ def list_devices(user, query_params):
             usecase['external_id']
         )
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        # Get region from use case, fallback to environment variable, then us-east-1
+        region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
+        logger.info(f"Using region {region} for use case {usecase_id}")
         
         # Create clients with assumed role
         greengrass_client = create_boto3_client('greengrassv2', credentials, region)
@@ -227,7 +229,9 @@ def get_device(device_id, user, query_params):
             usecase['external_id']
         )
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        # Get region from use case, fallback to environment variable, then us-east-1
+        region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
+        logger.info(f"Using region {region} for device {device_id}")
         account_id = usecase.get('account_id', '')
         
         # Create clients with assumed role
