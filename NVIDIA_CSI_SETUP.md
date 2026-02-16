@@ -36,9 +36,21 @@ ls -lh /aws_dda/nvidia-csi-capture/
 
 - A systemd service runs on the host (outside Docker)
 - It continuously captures from nvarguscamerasrc at 3264x2464 @ 21fps
+- The service reads gain and exposure settings from `/aws_dda/nvidia-csi-capture/config.json`
+- When you adjust gain/exposure in the UI, the application updates this config file
+- The host service picks up the changes and applies them to the next capture
 - Images are saved to `/aws_dda/nvidia-csi-capture/latest.jpg`
 - The Docker container reads this file when capturing/previewing
 - The file is atomically updated to prevent reading partial images
+
+## Adjusting Camera Settings
+
+Gain and exposure can be adjusted in the DDA web UI:
+
+1. Navigate to your Nvidia CSI image source
+2. Click "Edit image settings"
+3. Adjust gain (1.0 - 10.625) and exposure (13000 - 683709000 nanoseconds)
+4. The host service will apply the new settings within ~100ms
 
 ## Troubleshooting
 
