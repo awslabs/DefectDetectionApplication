@@ -11,16 +11,22 @@ CAPTURE_SCRIPT="nvidia_csi_capture.sh"
 
 echo "Installing Nvidia CSI camera capture service..."
 
+# Install jq if not present (needed for reading config)
+if ! command -v jq &> /dev/null; then
+    echo "Installing jq..."
+    apt-get update -qq && apt-get install -y -qq jq
+fi
+
 # Copy capture script to system location
-sudo mkdir -p /aws_dda/system
-sudo cp "$SCRIPT_DIR/$CAPTURE_SCRIPT" /aws_dda/system/
-sudo chmod +x /aws_dda/system/$CAPTURE_SCRIPT
+mkdir -p /aws_dda/system
+cp "$SCRIPT_DIR/$CAPTURE_SCRIPT" /aws_dda/system/
+chmod +x /aws_dda/system/$CAPTURE_SCRIPT
 
 # Install systemd service
-sudo cp "$SCRIPT_DIR/$SERVICE_FILE" /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable $SERVICE_FILE
-sudo systemctl start $SERVICE_FILE
+cp "$SCRIPT_DIR/$SERVICE_FILE" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable $SERVICE_FILE
+systemctl restart $SERVICE_FILE
 
 echo "Service installed and started"
 echo "Check status with: sudo systemctl status nvidia-csi-capture"
