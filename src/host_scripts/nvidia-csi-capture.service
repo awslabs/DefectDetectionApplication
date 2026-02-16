@@ -1,0 +1,13 @@
+[Unit]
+Description=Nvidia CSI Camera Continuous Capture Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /aws_dda/system/nvidia_csi_capture.sh
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
