@@ -127,6 +127,7 @@ export class ComputeStack extends cdk.Stack {
           'iot:CancelJob',
           'logs:GetLogEvents',
           'logs:DescribeLogStreams',
+          'logs:DescribeLogGroups',
           'logs:FilterLogEvents',
           'sts:AssumeRole',
           'execute-api:Invoke',

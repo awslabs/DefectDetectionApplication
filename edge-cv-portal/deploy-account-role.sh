@@ -356,13 +356,89 @@ EOF
         --policy-name ECRAccess \
         --policy-document "$ECR_POLICY" 2>/dev/null && echo -e "${GREEN}✓${NC} ECR policy attached" || echo -e "${YELLOW}⚠${NC} Could not attach ECR policy"
     
+    # Create managed policy for Greengrass devices to access component artifacts
+    echo ""
+    echo "Creating managed policy for Greengrass devices..."
+    
+    GREENGRASS_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowPortalComponentBucketAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::dda-component-*",
+        "arn:aws:s3:::dda-component-*/*"
+      ]
+    },
+    {
+      "Sid": "AllowDDABucketPatternAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetBucketLocation",
+        "s3:HeadObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::dda-*",
+        "arn:aws:s3:::dda-*/*",
+        "arn:aws:s3:::*-dda-*",
+        "arn:aws:s3:::*-dda-*/*"
+      ]
+    },
+    {
+      "Sid": "AllowInferenceResultsUpload",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectTagging",
+        "s3:GetObject",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::dda-inference-results-*",
+        "arn:aws:s3:::dda-inference-results-*/*"
+      ]
+    }
+  ]
+}
+EOF
+)
+    
+    if aws iam create-policy \
+        --policy-name DDAPortalComponentAccessPolicy \
+        --policy-document "$GREENGRASS_POLICY" 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Created DDAPortalComponentAccessPolicy managed policy"
+    else
+        POLICY_EXISTS=$(aws iam get-policy --policy-arn "arn:aws:iam::$(aws sts get-caller-identity --query 'Account' --output text):policy/DDAPortalComponentAccessPolicy" 2>/dev/null || echo "")
+        if [ -n "$POLICY_EXISTS" ]; then
+            echo -e "${YELLOW}⚠${NC} DDAPortalComponentAccessPolicy already exists"
+        else
+            echo -e "${RED}✗ Failed to create managed policy. Check IAM permissions.${NC}"
+        fi
+    fi
+    
     echo ""
     echo -e "${GREEN}=========================================="
     echo "Single-Account Role Created Successfully!"
     echo "==========================================${NC}"
     echo ""
-    echo "The DDASageMakerExecutionRole is now ready for use."
-    echo "You can now create UseCases in the Portal."
+    echo "The following have been created:"
+    echo "  • DDASageMakerExecutionRole - for SageMaker training/compilation/labeling"
+    echo "  • DDAPortalComponentAccessPolicy - for Greengrass device access to model artifacts"
+    echo ""
+    echo "Next steps:"
+    echo "1. Attach the managed policy to your Greengrass device role:"
+    echo "   aws iam attach-role-policy \\"
+    echo "     --role-name GreengrassV2TokenExchangeRole \\"
+    echo "     --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query 'Account' --output text):policy/DDAPortalComponentAccessPolicy"
+    echo ""
+    echo "2. You can now create UseCases in the Portal."
     echo ""
 
 elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
