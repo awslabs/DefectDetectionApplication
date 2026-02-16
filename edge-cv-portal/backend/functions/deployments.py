@@ -11,8 +11,8 @@ import boto3
 from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, is_super_user, assume_cross_account_role, get_usecase,
-    create_boto3_client
+    check_user_access, is_super_user, get_usecase,
+    get_usecase_client
 )
 
 logger = logging.getLogger()
@@ -96,15 +96,15 @@ def list_deployments(user, query_params):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        # Assume cross-account role
-        credentials = assume_cross_account_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id']
-        )
-        
         region = os.environ.get('AWS_REGION', 'us-east-1')
         
-        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
+        # Create Greengrass client (handles both single-account and cross-account)
+        greengrass_client = get_usecase_client(
+            'greengrassv2',
+            usecase,
+            session_name=f"gg-list-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+            region=region
+        )
         
         deployments = []
         next_token = None
@@ -170,15 +170,15 @@ def get_deployment(deployment_id, user, query_params):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        # Assume cross-account role
-        credentials = assume_cross_account_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id']
-        )
-        
         region = os.environ.get('AWS_REGION', 'us-east-1')
         
-        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
+        # Create Greengrass client (handles both single-account and cross-account)
+        greengrass_client = get_usecase_client(
+            'greengrassv2',
+            usecase,
+            session_name=f"gg-get-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+            region=region
+        )
         
         # Get deployment details
         response = greengrass_client.get_deployment(deploymentId=deployment_id)
@@ -344,16 +344,16 @@ def create_deployment(body, user):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        # Assume cross-account role
-        credentials = assume_cross_account_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id']
-        )
-        
         region = os.environ.get('AWS_REGION', 'us-east-1')
         account_id = usecase.get('account_id', '')
         
-        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
+        # Create Greengrass client (handles both single-account and cross-account)
+        greengrass_client = get_usecase_client(
+            'greengrassv2',
+            usecase,
+            session_name=f"gg-create-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+            region=region
+        )
         
         # Build components map for deployment
         components_map = {}
@@ -363,12 +363,15 @@ def create_deployment(body, user):
             comp_name = comp.get('component_name')
             comp_version = comp.get('component_version')
             if comp_name:
-                components_map[comp_name] = {
-                    'componentVersion': comp_version if comp_version else None
-                }
-                # Remove None values
-                if components_map[comp_name]['componentVersion'] is None:
-                    del components_map[comp_name]['componentVersion']
+                # Only include componentVersion if it's a valid version string
+                # Skip 0.0.0, 'unknown', 'latest', or empty versions - let Greengrass use the latest
+                if comp_version and comp_version not in ['0.0.0', 'unknown', 'latest', '']:
+                    components_map[comp_name] = {
+                        'componentVersion': comp_version
+                    }
+                else:
+                    # No version specified - Greengrass will use the latest version
+                    components_map[comp_name] = {}
                 
                 # Check if this component requires Nucleus to be included
                 for dda_comp in DDA_COMPONENTS_REQUIRING_NUCLEUS:
@@ -480,13 +483,79 @@ def create_deployment(body, user):
             logger.info("InferenceUploader not included - disabled in UseCase configuration")
         
         # Determine target ARN
+        # Greengrass deployments must target thing groups, not individual things
+        iot_client = get_usecase_client(
+            'iot',
+            usecase,
+            session_name=f"iot-deploy-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+            region=region
+        )
+        
         if target_thing_group:
             target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{target_thing_group}"
+        elif target_devices:
+            # For single device deployment, create a thing group and add the device to it
+            # Greengrass requires deployments to target thing groups
+            thing_group_name = f"{target_devices[0]}-group"
+            target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{thing_group_name}"
+            
+            try:
+                # Create thing group if it doesn't exist
+                logger.info(f"Creating thing group {thing_group_name} for device {target_devices[0]}")
+                iot_client.create_thing_group(
+                    thingGroupName=thing_group_name,
+                    thingGroupProperties={
+                        'attributePayload': {
+                            'attributes': {
+                                'dda-portal:managed': 'true',
+                                'dda-portal:usecase-id': usecase_id,
+                                'dda-portal:created-by': user['user_id']
+                            }
+                        }
+                    }
+                )
+                logger.info(f"Created thing group {thing_group_name}")
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                if error_code == 'ResourceAlreadyExistsException':
+                    logger.info(f"Thing group {thing_group_name} already exists")
+                else:
+                    logger.error(f"Error creating thing group {thing_group_name}: {error_code} - {str(e)}")
+                    return create_response(500, {'error': f'Failed to create thing group: {str(e)}'})
+            except Exception as e:
+                logger.error(f"Unexpected error creating thing group {thing_group_name}: {str(e)}")
+                return create_response(500, {'error': f'Failed to create thing group: {str(e)}'})
+            
+            # Verify thing group exists before proceeding
+            try:
+                logger.info(f"Verifying thing group {thing_group_name} exists")
+                iot_client.describe_thing_group(thingGroupName=thing_group_name)
+                logger.info(f"Verified thing group {thing_group_name} exists")
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                logger.error(f"Thing group {thing_group_name} does not exist or cannot be accessed: {error_code} - {str(e)}")
+                return create_response(500, {'error': f'Thing group verification failed: {str(e)}'})
+            
+            # Add device to thing group
+            try:
+                logger.info(f"Adding device {target_devices[0]} to thing group {thing_group_name}")
+                iot_client.add_thing_to_thing_group(
+                    thingGroupName=thing_group_name,
+                    thingName=target_devices[0]
+                )
+                logger.info(f"Added device {target_devices[0]} to thing group {thing_group_name}")
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                if error_code == 'ResourceAlreadyExistsException':
+                    logger.info(f"Device {target_devices[0]} already in thing group {thing_group_name}")
+                else:
+                    logger.error(f"Error adding device to thing group: {error_code} - {str(e)}")
+                    return create_response(500, {'error': f'Failed to add device to thing group: {str(e)}'})
+            except Exception as e:
+                logger.error(f"Unexpected error adding device to thing group: {str(e)}")
+                return create_response(500, {'error': f'Failed to add device to thing group: {str(e)}'})
         else:
-            # For single device deployment, target the thing directly
-            # Note: Greengrass deployments typically target thing groups
-            # For single device, we'll create deployment targeting the device's thing
-            target_arn = f"arn:aws:iot:{region}:{account_id}:thing/{target_devices[0]}"
+            return create_response(400, {'error': 'No target devices or thing group specified'})
         
         # Generate deployment name if not provided
         if not deployment_name:
@@ -571,15 +640,15 @@ def cancel_deployment(deployment_id, user, query_params):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        # Assume cross-account role
-        credentials = assume_cross_account_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id']
-        )
-        
         region = os.environ.get('AWS_REGION', 'us-east-1')
         
-        greengrass_client = create_boto3_client('greengrassv2', credentials, region)
+        # Create Greengrass client (handles both single-account and cross-account)
+        greengrass_client = get_usecase_client(
+            'greengrassv2',
+            usecase,
+            session_name=f"gg-cancel-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+            region=region
+        )
         
         # Cancel deployment
         greengrass_client.cancel_deployment(deploymentId=deployment_id)

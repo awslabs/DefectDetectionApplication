@@ -29,7 +29,8 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields
+    check_user_access, validate_required_fields,
+    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
 )
 
 # Configure logging
@@ -44,21 +45,6 @@ s3 = boto3.client('s3')
 # Environment variables
 TRAINING_JOBS_TABLE = os.environ.get('TRAINING_JOBS_TABLE')
 USECASES_TABLE = os.environ.get('USECASES_TABLE')
-
-
-def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
-    """Assume cross-account role for UseCase Account access"""
-    try:
-        response = sts.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=session_name,
-            ExternalId=external_id,
-            DurationSeconds=3600
-        )
-        return response['Credentials']
-    except ClientError as e:
-        logger.error(f"Error assuming role {role_arn}: {str(e)}")
-        raise
 
 
 def get_training_job_details(training_id: str) -> Dict:
@@ -76,26 +62,18 @@ def get_training_job_details(training_id: str) -> Dict:
         raise
 
 
-def get_usecase_details(usecase_id: str) -> Dict:
-    """Get use case details from DynamoDB"""
-    try:
-        table = dynamodb.Table(USECASES_TABLE)
-        response = table.get_item(Key={'usecase_id': usecase_id})
-        
-        if 'Item' not in response:
-            raise ValueError(f"Use case {usecase_id} not found")
-        
-        return response['Item']
-    except Exception as e:
-        logger.error(f"Error getting use case details: {str(e)}")
-        raise
-
-
-def create_dda_manifest(trained_model_s3: str, model_type: str, credentials: Dict) -> Tuple[Dict, str]:
+def create_dda_manifest(trained_model_s3: str, model_type: str, s3_client) -> Tuple[Dict, str]:
     """
     Phase 1: Model Artifact Preparation
     Download trained model, extract config and manifest, create DDA-compatible manifest
-    Returns: (dda_manifest_dict, model_filename)
+    
+    Args:
+        trained_model_s3: S3 URI of the trained model
+        model_type: Type of model (classification, segmentation, etc.)
+        s3_client: boto3 S3 client (already configured with appropriate credentials)
+    
+    Returns:
+        (dda_manifest_dict, model_filename)
     """
     temp_dir = None
     try:
@@ -104,13 +82,8 @@ def create_dda_manifest(trained_model_s3: str, model_type: str, credentials: Dic
         bucket = parsed.netloc
         key = parsed.path.lstrip('/')
         
-        # Create S3 client with assumed role credentials
-        s3_usecase = boto3.client(
-            's3',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+        # Use the provided S3 client
+        s3_usecase = s3_client
         
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="dda_manifest_")
@@ -203,11 +176,21 @@ def create_dda_manifest(trained_model_s3: str, model_type: str, credentials: Dic
 
 
 def package_component(training_id: str, target: str, compiled_model_s3: str, 
-                     dda_manifest: Dict, credentials: Dict, usecase: Dict) -> str:
+                     dda_manifest: Dict, s3_client, usecase: Dict) -> str:
     """
     Phase 2: Directory Structure Setup
     Download compiled model, organize directory structure, package as ZIP, upload to S3
-    Returns: S3 URI of packaged component
+    
+    Args:
+        training_id: Training job ID
+        target: Compilation target (e.g., 'jetson-xavier')
+        compiled_model_s3: S3 URI of the compiled model
+        dda_manifest: DDA-compatible manifest dict
+        s3_client: boto3 S3 client (already configured with appropriate credentials)
+        usecase: Use case details dict
+    
+    Returns:
+        S3 URI of packaged component
     """
     temp_dir = None
     try:
@@ -216,13 +199,8 @@ def package_component(training_id: str, target: str, compiled_model_s3: str,
         bucket = parsed.netloc
         key = parsed.path.lstrip('/')
         
-        # Create S3 client with assumed role credentials
-        s3_usecase = boto3.client(
-            's3',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+        # Use the provided S3 client
+        s3_usecase = s3_client
         
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix=f"dda_package_{target}_")
@@ -343,14 +321,13 @@ def package_components(event: Dict, context: Any) -> Dict:
                 })
         
         # Get use case details
-        usecase = get_usecase_details(usecase_id)
+        usecase = get_usecase(usecase_id)
         
-        # Assume cross-account role (session name max 64 chars)
-        session_name = f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            session_name
+        # Create S3 client (handles both single-account and multi-account scenarios)
+        s3_usecase = get_usecase_client(
+            's3',
+            usecase,
+            session_name=f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
         )
         
         # Phase 1: Create DDA manifest (once for all targets)
@@ -362,7 +339,7 @@ def package_components(event: Dict, context: Any) -> Dict:
         dda_manifest, model_filename = create_dda_manifest(
             trained_model_s3,
             training_job.get('model_type', 'unknown'),
-            credentials
+            s3_usecase
         )
         
         # Phase 2: Package each compiled model
@@ -384,7 +361,7 @@ def package_components(event: Dict, context: Any) -> Dict:
                     target,
                     compiled_model_s3,
                     dda_manifest,
-                    credentials,
+                    s3_usecase,
                     usecase
                 )
                 

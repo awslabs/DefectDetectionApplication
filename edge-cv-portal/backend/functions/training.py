@@ -17,7 +17,8 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields, create_s3_path_builder
+    check_user_access, validate_required_fields, create_s3_path_builder,
+    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
 )
 
 # Configure logging
@@ -43,36 +44,6 @@ MARKETPLACE_ALGORITHM_ARN = os.environ.get(
 )
 
 logger.info(f"Using marketplace algorithm ARN: {MARKETPLACE_ALGORITHM_ARN}")
-
-
-def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
-    """Assume cross-account role for UseCase Account access"""
-    try:
-        response = sts.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=session_name,
-            ExternalId=external_id,
-            DurationSeconds=3600
-        )
-        return response['Credentials']
-    except ClientError as e:
-        logger.error(f"Error assuming role {role_arn}: {str(e)}")
-        raise
-
-
-def get_usecase_details(usecase_id: str) -> Dict:
-    """Get use case details from DynamoDB"""
-    try:
-        table = dynamodb.Table(USECASES_TABLE)
-        response = table.get_item(Key={'usecase_id': usecase_id})
-        
-        if 'Item' not in response:
-            raise ValueError(f"Use case {usecase_id} not found")
-        
-        return response['Item']
-    except Exception as e:
-        logger.error(f"Error getting use case details: {str(e)}")
-        raise
 
 
 def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: str) -> Dict:
@@ -314,7 +285,7 @@ def create_training_job(event: Dict, context: Any) -> Dict:
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Get use case details
-        usecase = get_usecase_details(usecase_id)
+        usecase = get_usecase(usecase_id)
         
         # Validate manifest format for marketplace model
         if model_source == 'marketplace':
@@ -347,35 +318,12 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         else:
             logger.info(f"Training data is in UseCase Account: {usecase['account_id']}")
         
-        # Check if this is a cross-account scenario
-        # Single-account setup has cross_account_role_arn = 'arn:aws:iam::ACCOUNT_ID:root'
-        # Multi-account setup has cross_account_role_arn = 'arn:aws:iam::ACCOUNT_ID:role/ROLE_NAME'
-        cross_account_role_arn = usecase.get('cross_account_role_arn')
-        is_cross_account = (
-            cross_account_role_arn and 
-            usecase.get('account_id') and 
-            ':role/' in cross_account_role_arn  # Valid role ARN format (not root)
+        # Create SageMaker client (handles both single-account and multi-account scenarios)
+        sagemaker_usecase = get_usecase_client(
+            'sagemaker',
+            usecase,
+            session_name=f"training-{user_id}-{int(datetime.utcnow().timestamp())}"
         )
-        
-        # Create SageMaker client
-        if is_cross_account:
-            # Multi-account: assume role to access manifest
-            logger.info(f"Cross-account access: assuming role {cross_account_role_arn}")
-            credentials = assume_usecase_role(
-                cross_account_role_arn,
-                usecase.get('external_id'),
-                f"training-{user_id}-{int(datetime.utcnow().timestamp())}"
-            )
-            sagemaker_usecase = boto3.client(
-                'sagemaker',
-                aws_access_key_id=credentials['AccessKeyId'],
-                aws_secret_access_key=credentials['SecretAccessKey'],
-                aws_session_token=credentials['SessionToken']
-            )
-        else:
-            # Single-account: use Lambda's own credentials
-            logger.info("Single-account setup: using Lambda's own credentials")
-            sagemaker_usecase = sagemaker
         
         # Generate unique training job name
         # SageMaker job names can only contain alphanumeric and hyphens
@@ -657,7 +605,7 @@ def get_training_job(event: Dict, context: Any) -> Dict:
         # This ensures we get the latest status even if EventBridge events don't reach us
         if job.get('training_job_name'):
             try:
-                usecase = get_usecase_details(job['usecase_id'])
+                usecase = get_usecase(job['usecase_id'])
                 
                 # Check if this is a cross-account scenario
                 cross_account_role_arn = usecase.get('cross_account_role_arn')
@@ -790,7 +738,7 @@ def get_training_logs(event: Dict, context: Any) -> Dict:
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Get use case details for cross-account access
-        usecase = get_usecase_details(job['usecase_id'])
+        usecase = get_usecase(job['usecase_id'])
         
         # Check if this is a cross-account scenario
         cross_account_role_arn = usecase.get('cross_account_role_arn')
@@ -934,7 +882,7 @@ def download_training_logs(event: Dict, context: Any) -> Dict:
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Get use case details for cross-account access
-        usecase = get_usecase_details(job['usecase_id'])
+        usecase = get_usecase(job['usecase_id'])
         
         # Check if this is a cross-account scenario
         cross_account_role_arn = usecase.get('cross_account_role_arn')

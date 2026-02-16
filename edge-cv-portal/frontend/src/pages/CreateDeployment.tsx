@@ -180,10 +180,6 @@ export default function CreateDeployment() {
   // State
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
-  const [successInfo, setSuccessInfo] = useState<{
-    deployment_id: string;
-    auto_included: Array<{component_name: string; component_version: string; reason: string}>;
-  } | null>(null);
   const [loading, setLoading] = useState(true);
 
   const preSelectedComponentArn = searchParams.get('component_arn');
@@ -509,10 +505,15 @@ export default function CreateDeployment() {
       const deploymentData = {
         usecase_id: selectedUseCase.value,
         deployment_name: deploymentName || undefined,
-        components: selectedComponents.map(c => ({
-          component_name: c.component_name,
-          component_version: c.component_version
-        })),
+        components: selectedComponents.map(c => {
+          const version = (c.component_version && !['0.0.0', 'unknown', 'latest'].includes(c.component_version)) 
+            ? c.component_version 
+            : '';
+          return {
+            component_name: c.component_name,
+            component_version: version
+          };
+        }),
         target_devices: targetType === 'devices' ? targetDevices.map(d => d.value as string) : undefined,
         target_thing_group: targetType === 'group' ? targetThingGroup.trim() : undefined,
         rollout_config: {
@@ -523,15 +524,11 @@ export default function CreateDeployment() {
 
       const response = await apiService.createDeployment(deploymentData);
       
-      // If auto-included components, show info before navigating
-      if (response.auto_included && response.auto_included.length > 0) {
-        setSuccessInfo({
-          deployment_id: response.deployment_id,
-          auto_included: response.auto_included
-        });
-      } else {
+      // Navigate to deployment detail page after successful creation
+      // Use a small delay to ensure the response is fully processed
+      setTimeout(() => {
         navigate(`/deployments/${response.deployment_id}?usecase_id=${selectedUseCase.value}`);
-      }
+      }, 500);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create deployment');
       console.error('Failed to create deployment:', err);
@@ -575,32 +572,6 @@ export default function CreateDeployment() {
               After deployment, log groups will be created automatically when components generate output. 
               See <a href="https://docs.aws.amazon.com/greengrass/latest/developerguide/log-manager-component.html" target="_blank" rel="noopener noreferrer">LogManager documentation</a> for configuration details.
             </Alert>
-            
-            {successInfo && (
-              <Alert
-                type="success"
-                header="Deployment created successfully"
-                action={
-                  <Button onClick={() => navigate(`/deployments/${successInfo.deployment_id}?usecase_id=${selectedUseCase?.value}`)}>
-                    View Deployment
-                  </Button>
-                }
-              >
-                <SpaceBetween size="xs">
-                  <Box>Deployment ID: {successInfo.deployment_id}</Box>
-                  {successInfo.auto_included.length > 0 && (
-                    <Box>
-                      <Box fontWeight="bold">Auto-included components:</Box>
-                      {successInfo.auto_included.map((comp, idx) => (
-                        <Box key={idx} color="text-body-secondary">
-                          • {comp.component_name} v{comp.component_version} - {comp.reason}
-                        </Box>
-                      ))}
-                    </Box>
-                  )}
-                </SpaceBetween>
-              </Alert>
-            )}
 
             {/* Use Case Selection */}
             <FormField label="Use Case" description="Select the use case for this deployment">
@@ -716,6 +687,7 @@ export default function CreateDeployment() {
                                 const isSelected = selectedComponents.some(c => c.arn === comp.arn);
                                 const displayName = getComponentDisplayName(comp.component_name, comp.model_name);
                                 const version = comp.latest_version?.componentVersion || 'latest';
+                                const displayVersion = (version === '0.0.0' || version === 'unknown') ? 'Latest' : `v${version}`;
                                 const archs = getComponentArchitectures(comp.component_name, comp.platforms);
                                 
                                 return (
@@ -729,7 +701,7 @@ export default function CreateDeployment() {
                                         ))}
                                       </SpaceBetween>
                                       <Box color="text-body-secondary" fontSize="body-s">
-                                        v{version} • {comp.component_name}
+                                        {displayVersion} • {comp.component_name}
                                       </Box>
                                       <Button
                                         variant={isSelected ? "normal" : "primary"}
@@ -820,7 +792,12 @@ export default function CreateDeployment() {
                       {
                         id: 'version',
                         header: 'Version',
-                        cell: item => item.component_version,
+                        cell: item => {
+                          const displayVersion = (item.component_version === '0.0.0' || item.component_version === 'unknown') 
+                            ? 'Latest' 
+                            : item.component_version;
+                          return displayVersion;
+                        },
                       },
                       {
                         id: 'scope',
