@@ -89,20 +89,21 @@ class GstPipelineBuilder:
 
     def _add_nvidia_csi_image_source(self, image_source_config, override_processing_pipeline: str = None):
         logger.warning(f"NVIDIA CSI SOURCE CONFIG DEBUG: device={image_source_config.get('device')}, deviceName={image_source_config.get('deviceName')}, pipeline={image_source_config.get('processingPipeline')}")
-        # Use device path for v4l2src (default /dev/video0 for CSI camera)
-        device = image_source_config.get("device", "/dev/video0")
-        deviceName = image_source_config.get("deviceName", "v4l2src")
+        # Use sensor_id for nvarguscamerasrc (default 0 for CSI camera)
+        sensor_id = image_source_config.get("device", "0")
+        deviceName = image_source_config.get("deviceName", "nvarguscamerasrc")
         
-        logger.warning(f"NVIDIA CSI USING: device={device}, deviceName={deviceName}")
+        logger.warning(f"NVIDIA CSI USING: sensor_id={sensor_id}, deviceName={deviceName}")
 
-        self.pipeline_config.add_plugin(PluginDefinition("v4l2src", [
-            PluginArg("device", device),
+        self.pipeline_config.add_plugin(PluginDefinition("nvarguscamerasrc", [
+            PluginArg("sensor_id", sensor_id),
             PluginArg("num-buffers", 1)]))
         logger.debug("in _add_nvidia_csi_image_source override_processing_pipeline="+str(override_processing_pipeline))
         logger.debug("in _add_nvidia_csi_image_source image src processingPipeline="+str(image_source_config.get("processingPipeline")))
         if override_processing_pipeline or image_source_config.get("processingPipeline"):
            self.pipeline_config.add_plugin(override_processing_pipeline or image_source_config.get("processingPipeline"))
         else:
+           self.pipeline_config.add_plugin(PluginDefinition("nvvidconv", []))
            self.pipeline_config.add_plugin(PluginDefinition("videoconvert", []))
         crop_config = image_source_config.get("imageCrop")
         if crop_config:
@@ -309,6 +310,7 @@ class GstPipelineBuilder:
         if not self.image_source and not self.workflow_config:
             return None
         if not self.workflow_config:
+            logger.warning(f"BUILD DEBUG: is_preview={is_preview}, imageCapturePath={self.image_source.get('imageCapturePath')}, imageSourceId={self.image_source.get('imageSourceId')}")
             if is_preview:
                 filename = "{}-{}.jpg".format(constants.DEFAULT_IMAGE_OUTPUT_PREFIX, self.image_source.get("imageSourceId"))
                 location = "{}/{}".format(constants.DEFAULT_IMAGE_SAVE_DIR_PATH, filename)
@@ -320,6 +322,7 @@ class GstPipelineBuilder:
                     location = "{}/{}".format(override_output_location, filename)
                 else:
                     location = "{}/{}".format(self.image_source.get("imageCapturePath"), filename)
+            logger.warning(f"BUILD DEBUG: Final location={location}")
             self.pipeline_config.add_plugin(PluginDefinition("jpegenc", [
                 PluginArg("idct-method", 2),
                 PluginArg("quality", 100)

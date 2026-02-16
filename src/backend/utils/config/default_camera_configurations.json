@@ -68,9 +68,9 @@
 	},
 	"Nvidia CSI" : {
 		"default" : {
-			"processingPipeline" : "videoconvert",
-			"device": "/dev/video0",
-			"deviceName": "v4l2src"
+			"processingPipeline" : "video/x-raw(memory:NVMM),width=3264,height=2464 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert",
+			"device": "0",
+			"deviceName": "nvarguscamerasrc"
 		}
 	},
     "default" : {
