@@ -44,6 +44,10 @@ export const schema = yup.object({
     .min(
       EXPOSURE_MIN,
       `Exposure is invalid. An exposure must be greater than or equal to ${EXPOSURE_MIN}.`,
+    )
+    .max(
+      EXPOSURE_MAX,
+      `Exposure is invalid. An exposure must be less than or equal to ${EXPOSURE_MAX}.`,
     ),
   editGstreamerPipeline: yup
     .string()
