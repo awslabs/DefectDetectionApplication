@@ -157,6 +157,7 @@ export default function EditImageSettings(): JSX.Element {
             cameraStatus={getQuery.data?.cameraStatus?.status}
             cameraId={getQuery.data?.cameraId || ""}
             recheckCameraStatusFn={getQuery.refetch}
+            formIsValid={form.formState.isValid}
           />
         </form>
       </FormProvider>

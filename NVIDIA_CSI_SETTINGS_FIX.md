@@ -2,29 +2,36 @@
 
 ## Issues Fixed
 
-### 1. Save Button Disabled
+### 1. Save Button Disabled ✓ FIXED
 **Problem**: The Save button was disabled after changing gain/exposure values in the Edit Image Settings page.
 
-**Root Cause**: The button was checking `props.cameraStatus !== CameraStatus.Connected` for all camera types, but Nvidia CSI cameras don't use the Arvis camera connection system.
+**Root Cause**: The button was checking camera connection status for all camera types, but Nvidia CSI cameras don't use the Arvis camera connection system.
 
-**Solution**: Changed the condition to only check camera status for Arvis cameras:
-```typescript
-disabled={props.isArvisCamera && props.cameraStatus !== CameraStatus.Connected}
-```
+**Solution**: 
+- Changed the condition to only check camera status for Arvis cameras
+- Added form validation state check for all camera types
+- Save button now enabled when form is valid for Nvidia CSI cameras
 
-### 2. Gain/Exposure Not Affecting Image
-**Problem**: Changing gain and exposure values in the UI didn't affect the captured image brightness.
+### 2. Gain/Exposure Not Affecting Image ⚠️ IN PROGRESS
+**Problem**: Changing gain and exposure values in the UI doesn't reliably affect the captured image brightness.
 
-**Root Cause**: 
-- The UI exposure range was 1-150000, but nvarguscamerasrc expects nanoseconds (13000-683709000)
-- The UI gain range was 1-100, but the IMX219 sensor supports 1.0-10.625
-- Default values were too low (gain=1, exposure=500)
+**Status**: Config file is being updated correctly (verified with jq), but nvarguscamerasrc may not be applying the settings.
 
-**Solution**:
-- Updated exposure range to 13000-683709000 nanoseconds (matching sensor specs)
-- Updated gain range to 1.0-10.625 (matching sensor specs)
-- Changed default values to gain=2, exposure=100000 for better initial brightness
-- Updated constraint text to clarify the units and ranges
+**Possible Root Causes**:
+1. Auto-exposure (AE) is enabled by default and overriding manual settings
+2. nvarguscamerasrc parameter format may be incorrect
+3. Camera firmware may have limitations on manual control
+
+**Current Solution Attempt**:
+- Added `aeantibanding=0` parameter to disable auto-exposure antibanding
+- Using correct parameter format: `exposuretimerange="$EXPOSURE $EXPOSURE"` and `gainrange="$GAIN $GAIN"`
+- Added debug logging to track when settings change
+
+**Next Steps for Testing**:
+1. Run `check_csi_service.sh` to verify service is reading config changes
+2. Run `test_nvargus_params.sh` to test different parameter combinations
+3. Check service logs: `sudo journalctl -u nvidia-csi-capture.service -f`
+4. Try extreme values (very dark vs very bright) to see if any change occurs
 
 ## Files Modified
 

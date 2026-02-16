@@ -58,25 +58,42 @@ LAST_EXPOSURE=$EXPOSURE
 echo "Initial settings - Gain: $GAIN, Exposure: $EXPOSURE (jq available: $USE_JQ)"
 
 # Continuous capture loop
+CAPTURE_COUNT=0
 while true; do
     # Check if config has changed (only if jq is available)
     if [ "$USE_JQ" = "true" ]; then
         read_config
         if [ "$GAIN" != "$LAST_GAIN" ] || [ "$EXPOSURE" != "$LAST_EXPOSURE" ]; then
-            echo "Settings updated - Gain: $GAIN, Exposure: $EXPOSURE"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Settings updated - Gain: $GAIN, Exposure: $EXPOSURE"
             LAST_GAIN=$GAIN
             LAST_EXPOSURE=$EXPOSURE
+            CAPTURE_COUNT=0  # Reset counter to log next capture
         fi
     fi
     
+    # Log every 50th capture to avoid spam
+    if [ $((CAPTURE_COUNT % 50)) -eq 0 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Capturing with Gain=$GAIN, Exposure=$EXPOSURE (capture #$CAPTURE_COUNT)"
+    fi
+    CAPTURE_COUNT=$((CAPTURE_COUNT + 1))
+    
     # Capture with current settings
-    # Note: nvarguscamerasrc uses different parameter names
-    # gain is "gainrange" and exposure is "exposuretimerange"
-    # Values are in format "min max" but we use same value for both
+    # nvarguscamerasrc parameters for manual exposure control:
+    # - aeantibanding: Set to 0 to disable auto-exposure antibanding
+    # - exposuretimerange: "min max" in nanoseconds (both same value for fixed exposure)
+    # - gainrange: "min max" for analog gain (both same value for fixed gain)
+    # - wbmode: 0 = off (manual white balance), 1 = auto
+    #
+    # CRITICAL: nvarguscamerasrc may have auto-exposure enabled by default
+    # Setting exposuretimerange alone may not work if AE is active
+    
+    # Try to capture with manual settings
+    # If the image brightness doesn't change, the camera may be ignoring the settings
     gst-launch-1.0 -q \
         nvarguscamerasrc sensor_id=0 num-buffers=1 \
-        gainrange="$GAIN $GAIN" \
-        exposuretimerange="$EXPOSURE $EXPOSURE" ! \
+        aeantibanding=0 \
+        exposuretimerange="$EXPOSURE $EXPOSURE" \
+        gainrange="$GAIN $GAIN" ! \
         'video/x-raw(memory:NVMM),width=3264,height=2464,framerate=21/1' ! \
         nvvidconv ! \
         'video/x-raw,format=BGRx' ! \
