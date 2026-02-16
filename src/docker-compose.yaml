@@ -16,9 +16,7 @@ services:
       - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /var/run/dbus:/var/run/dbus:ro
-    devices:
-      - /dev/video0:/dev/video0
-      - /dev/video1:/dev/video1
+      - /dev:/dev
     environment:
       - OS=$OS
       - DDA_SYSTEM_USER_ID=$DDA_SYSTEM_USER_ID
@@ -42,6 +40,8 @@ services:
       - GRPC_POLL_STRATEGY=poll
       - GRPC_ENABLE_FORK_SUPPORT=1
       - PYTHONPATH=/opt/tritonserver/backends/python:/
+      - ARGUS_HEADLESS=1
+      - NVARGUS_ENABLE_HEADLESS=1
     deploy:
       resources:
         reservations:
