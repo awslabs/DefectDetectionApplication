@@ -40,11 +40,16 @@ interface CreateNvidiaCSIImageSourceRequest {
   name: string;
   description?: string;
 }
+interface CreateICamImageSourceRequest {
+  type: ImageSourceType.ICam;
+  name: string;
+  description?: string;
+}
 interface CreateImageSourceResponse {
   imageSourceId: string;
 }
 export async function createImageSource(
-  request: CreateCameraImageSourceRequest | CreateFolderImageSourceRequest | CreateNvidiaCSIImageSourceRequest,
+  request: CreateCameraImageSourceRequest | CreateFolderImageSourceRequest | CreateNvidiaCSIImageSourceRequest | CreateICamImageSourceRequest,
 ): Promise<CreateImageSourceResponse> {
   const endpoint = APIList.imageSourcesAPI;
   const { data } = await axios.post<CreateImageSourceResponse>(

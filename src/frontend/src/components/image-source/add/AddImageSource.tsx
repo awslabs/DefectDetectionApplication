@@ -82,6 +82,12 @@ export default function AddImageSource(): JSX.Element {
             name: values.nvidiaCSIName ?? "",
             description: values.nvidiaCSIDescription,
           });
+        case ImageSourceType.ICam:
+          return createImageSource({
+            type: ImageSourceType.ICam,
+            name: values.icamName ?? "",
+            description: values.icamDescription,
+          });
         case ImageSourceType.Folder:
         default:
           return createImageSource({
@@ -104,6 +110,8 @@ export default function AddImageSource(): JSX.Element {
                 ? values.cameraName
                 : values.type === ImageSourceType.NvidiaCSI
                 ? values.nvidiaCSIName
+                : values.type === ImageSourceType.ICam
+                ? values.icamName
                 : values.folderName}
             </strong>
             .
@@ -125,6 +133,8 @@ export default function AddImageSource(): JSX.Element {
                 ? values.cameraName
                 : values.type === ImageSourceType.NvidiaCSI
                 ? values.nvidiaCSIName
+                : values.type === ImageSourceType.ICam
+                ? values.icamName
                 : values.folderName}
             </strong>
             . {error.message}
@@ -197,6 +207,7 @@ export default function AddImageSource(): JSX.Element {
                 }
                 items={[
                   { value: ImageSourceType.Camera, label: "Camera" },
+                  { value: ImageSourceType.ICam, label: "ICAM 520/540" },
                   { value: ImageSourceType.NvidiaCSI, label: "Nvidia CSI" },
                   { value: ImageSourceType.Folder, label: "Folder" },
                 ]}
@@ -312,6 +323,10 @@ export default function AddImageSource(): JSX.Element {
 
             {type === ImageSourceType.NvidiaCSI && (
               <DetailsInput namePrefix="nvidiaCSI" isLoading={false} />
+            )}
+
+            {type === ImageSourceType.ICam && (
+              <DetailsInput namePrefix="icam" isLoading={false} />
             )}
           </SpaceBetween>
         </Form>

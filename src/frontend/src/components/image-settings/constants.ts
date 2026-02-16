@@ -16,9 +16,9 @@
  *
  */
 export const GAIN_MIN = 1;
-export const GAIN_MAX = 100;
-export const EXPOSURE_MIN = 1;
-export const EXPOSURE_MAX = 150000;
+export const GAIN_MAX = 10.625;
+export const EXPOSURE_MIN = 13000;
+export const EXPOSURE_MAX = 683709000;
 
 // TODO: rename based on feedback on Figma:
 // https://www.figma.com/file/hKBVAWa8TIaSBQlsTFTRDy?node-id=3643:224564#439487410

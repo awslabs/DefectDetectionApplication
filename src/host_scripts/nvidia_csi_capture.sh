@@ -16,22 +16,37 @@ chmod 777 "$CAPTURE_DIR"
 
 # Create default config if it doesn't exist
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo '{"gain":1,"exposure":500}' > "$CONFIG_FILE"
+    echo '{"gain":2,"exposure":100000}' > "$CONFIG_FILE"
     chmod 666 "$CONFIG_FILE"
+    echo "Created default config file"
 fi
 
 echo "Starting Nvidia CSI continuous capture..."
 echo "Capture directory: $CAPTURE_DIR"
 echo "Config file: $CONFIG_FILE"
 
+# Check if jq is available
+if ! command -v jq &> /dev/null; then
+    echo "ERROR: jq is not installed. Installing..."
+    apt-get update -qq && apt-get install -y -qq jq || {
+        echo "ERROR: Failed to install jq. Gain/exposure settings will not work."
+        echo "Using default values: gain=2, exposure=100000"
+        GAIN=2
+        EXPOSURE=100000
+        USE_JQ=false
+    }
+else
+    USE_JQ=true
+fi
+
 # Function to read config
 read_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        GAIN=$(jq -r '.gain // 1' "$CONFIG_FILE" 2>/dev/null || echo "1")
-        EXPOSURE=$(jq -r '.exposure // 500' "$CONFIG_FILE" 2>/dev/null || echo "500")
+    if [ "$USE_JQ" = "true" ] && [ -f "$CONFIG_FILE" ]; then
+        GAIN=$(jq -r '.gain // 2' "$CONFIG_FILE" 2>/dev/null || echo "2")
+        EXPOSURE=$(jq -r '.exposure // 100000' "$CONFIG_FILE" 2>/dev/null || echo "100000")
     else
-        GAIN=1
-        EXPOSURE=500
+        GAIN=2
+        EXPOSURE=100000
     fi
 }
 
@@ -40,16 +55,18 @@ read_config
 LAST_GAIN=$GAIN
 LAST_EXPOSURE=$EXPOSURE
 
-echo "Initial settings - Gain: $GAIN, Exposure: $EXPOSURE"
+echo "Initial settings - Gain: $GAIN, Exposure: $EXPOSURE (jq available: $USE_JQ)"
 
 # Continuous capture loop
 while true; do
-    # Check if config has changed
-    read_config
-    if [ "$GAIN" != "$LAST_GAIN" ] || [ "$EXPOSURE" != "$LAST_EXPOSURE" ]; then
-        echo "Settings updated - Gain: $GAIN, Exposure: $EXPOSURE"
-        LAST_GAIN=$GAIN
-        LAST_EXPOSURE=$EXPOSURE
+    # Check if config has changed (only if jq is available)
+    if [ "$USE_JQ" = "true" ]; then
+        read_config
+        if [ "$GAIN" != "$LAST_GAIN" ] || [ "$EXPOSURE" != "$LAST_EXPOSURE" ]; then
+            echo "Settings updated - Gain: $GAIN, Exposure: $EXPOSURE"
+            LAST_GAIN=$GAIN
+            LAST_EXPOSURE=$EXPOSURE
+        fi
     fi
     
     # Capture with current settings

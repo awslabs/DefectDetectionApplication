@@ -37,7 +37,7 @@ export default function EditImageSettingsInput({
           min={GAIN_MIN}
           max={GAIN_MAX}
           label="Gain"
-          constraintText="Numeric values only. Between 1 to 100."
+          constraintText="Numeric values between 1.0 and 10.625 for Nvidia CSI cameras."
         />
 
         <FormSliderInput
@@ -45,7 +45,7 @@ export default function EditImageSettingsInput({
           min={EXPOSURE_MIN}
           max={EXPOSURE_MAX}
           label="Exposure"
-          constraintText="Positive numeric values only."
+          constraintText="Values between 13000 and 683709000 nanoseconds for Nvidia CSI cameras."
         />
       </SpaceBetween>
     </Container>
