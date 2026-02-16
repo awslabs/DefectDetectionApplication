@@ -67,7 +67,9 @@ Manifests:
           BACKEND_DIR="{artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-backend-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64" ;
           APP_DIR="{artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-app-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64" ;
           docker load -i $BACKEND_DIR/flask-app.tar ;
-          docker load -i $APP_DIR/react-webapp.tar.gz
+          docker load -i $APP_DIR/react-webapp.tar.gz ;
+          chmod +x $APP_DIR/host_scripts/*.sh ;
+          bash $APP_DIR/host_scripts/install_nvidia_csi_service.sh
       Run:
         RequiresPrivilege: true
         SetEnv:
@@ -84,6 +86,7 @@ Manifests:
       Shutdown:
         RequiresPrivilege: true
         Script: |
+          systemctl stop nvidia-csi-capture || true
           docker compose --profile $DOCKER_PROFILE -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-app-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/docker-compose.yaml down
     Artifacts:
       - URI: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/aws.edgeml.dda.LocalServer.arm64-backend-aarch64.zip
