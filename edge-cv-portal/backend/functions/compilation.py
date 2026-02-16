@@ -20,7 +20,8 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields, create_s3_path_builder
+    check_user_access, validate_required_fields, create_s3_path_builder,
+    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
 )
 
 # Configure logging
@@ -80,21 +81,6 @@ COMPILATION_TARGETS = {
 }
 
 
-def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
-    """Assume cross-account role for UseCase Account access"""
-    try:
-        response = sts.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=session_name,
-            ExternalId=external_id,
-            DurationSeconds=3600
-        )
-        return response['Credentials']
-    except ClientError as e:
-        logger.error(f"Error assuming role {role_arn}: {str(e)}")
-        raise
-
-
 def get_training_job_details(training_id: str) -> Dict:
     """Get training job details from DynamoDB"""
     try:
@@ -110,25 +96,16 @@ def get_training_job_details(training_id: str) -> Dict:
         raise
 
 
-def get_usecase_details(usecase_id: str) -> Dict:
-    """Get use case details from DynamoDB"""
-    try:
-        table = dynamodb.Table(USECASES_TABLE)
-        response = table.get_item(Key={'usecase_id': usecase_id})
-        
-        if 'Item' not in response:
-            raise ValueError(f"Use case {usecase_id} not found")
-        
-        return response['Item']
-    except Exception as e:
-        logger.error(f"Error getting use case details: {str(e)}")
-        raise
-
-
-def extract_and_repackage_model(model_s3_uri: str, credentials: Dict) -> tuple:
+def extract_and_repackage_model(model_s3_uri: str, s3_client) -> tuple:
     """
     Extract mochi.pt from trained model and get input shape from mochi.json
-    Returns: (repackaged_model_s3_uri, data_input_config)
+    
+    Args:
+        model_s3_uri: S3 URI of the trained model artifact
+        s3_client: boto3 S3 client (already configured with appropriate credentials)
+    
+    Returns:
+        (repackaged_model_s3_uri, data_input_config)
     """
     try:
         # Parse S3 URI
@@ -136,13 +113,8 @@ def extract_and_repackage_model(model_s3_uri: str, credentials: Dict) -> tuple:
         bucket = parsed.netloc
         key = parsed.path.lstrip('/')
         
-        # Create S3 client with assumed role credentials
-        s3_usecase = boto3.client(
-            's3',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+        # Use the provided S3 client
+        s3_usecase = s3_client
         
         # Download model artifact to temp directory
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -253,21 +225,18 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
             })
         
         # Get use case details
-        usecase = get_usecase_details(usecase_id)
+        usecase = get_usecase(usecase_id)
         
-        # Assume cross-account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            f"comp-{int(datetime.utcnow().timestamp())}"
-        )
-        
-        # Create SageMaker client with assumed role
-        sagemaker_usecase = boto3.client(
+        # Create SageMaker and S3 clients (handles both single-account and multi-account scenarios)
+        sagemaker_usecase = get_usecase_client(
             'sagemaker',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
+            usecase,
+            session_name=f"comp-{int(datetime.utcnow().timestamp())}"
+        )
+        s3_usecase = get_usecase_client(
+            's3',
+            usecase,
+            session_name=f"comp-s3-{int(datetime.utcnow().timestamp())}"
         )
         
         # Extract and repackage model
@@ -278,7 +247,7 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
         logger.info(f"Extracting and repackaging model from {model_artifact_s3}")
         repackaged_model_s3, data_input_config = extract_and_repackage_model(
             model_artifact_s3,
-            credentials
+            s3_usecase
         )
         
         # Create S3 path builder for consistent path generation
@@ -481,21 +450,13 @@ def get_compilation_status(event: Dict, context: Any) -> Dict:
             return create_response(404, {'error': 'No compilation jobs found for this training'})
         
         # Get use case details for cross-account access
-        usecase = get_usecase_details(usecase_id)
+        usecase = get_usecase(usecase_id)
         
-        # Assume cross-account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            f"stat-{int(datetime.utcnow().timestamp())}"
-        )
-        
-        # Create SageMaker client with assumed role
-        sagemaker_usecase = boto3.client(
+        # Create SageMaker client (handles both single-account and multi-account scenarios)
+        sagemaker_usecase = get_usecase_client(
             'sagemaker',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
+            usecase,
+            session_name=f"stat-{int(datetime.utcnow().timestamp())}"
         )
         
         # Update status for each compilation job

@@ -287,8 +287,29 @@ def list_private_components(credentials: Dict, region: str, query_params: Dict) 
             # ARN format: arn:aws:greengrass:region:account:components:name:versions:version
             # Index:      0   1   2          3      4       5          6    7        8
             arn_parts = component_arn.split(':')
-            component_name = arn_parts[6] if len(arn_parts) > 6 else 'unknown'
-            version_str = arn_parts[8] if len(arn_parts) > 8 else '0.0.0'
+            
+            # Debug: print the ARN structure
+            print(f"[DEBUG] Full ARN: {component_arn}")
+            print(f"[DEBUG] ARN parts: {arn_parts}")
+            print(f"[DEBUG] ARN parts count: {len(arn_parts)}")
+            
+            # Handle both formats:
+            # 1. Full ARN with version: arn:aws:greengrass:region:account:components:name:versions:version
+            # 2. Component ARN without version: arn:aws:greengrass:region:account:components:name
+            
+            if len(arn_parts) >= 9 and arn_parts[7] == 'versions':
+                # Full ARN with version
+                component_name = arn_parts[6]
+                version_str = arn_parts[8]
+                print(f"[DEBUG] Parsed as full ARN: component={component_name}, version={version_str}")
+            elif len(arn_parts) >= 7:
+                # Component ARN without version - need to query Greengrass for latest version
+                component_name = arn_parts[6]
+                version_str = '0.0.0'  # Default, will be updated from Greengrass
+                print(f"[DEBUG] Parsed as component ARN without version: component={component_name}")
+            else:
+                print(f"[DEBUG] ERROR: Unexpected ARN format with {len(arn_parts)} parts")
+                continue
             
             # Parse version for comparison (handle semver like 1.0.62)
             try:
@@ -305,6 +326,7 @@ def list_private_components(credentials: Dict, region: str, query_params: Dict) 
                     'version_tuple': version_tuple,
                     'tags': tags
                 }
+                print(f"[DEBUG] Updated component_map[{component_name}] = version {version_str}")
         
         # Build component list from deduplicated map
         # Create Greengrass client to fetch component details
@@ -316,21 +338,49 @@ def list_private_components(credentials: Dict, region: str, query_params: Dict) 
             platforms = []
             description = ''
             creation_timestamp = None
+            final_version = comp_data['version_str']
             
             try:
-                component_details = greengrass.describe_component(arn=comp_data['arn'])
+                # If version is 0.0.0, we need to query Greengrass for the latest version
+                if final_version == '0.0.0':
+                    print(f"[DEBUG] Version is 0.0.0 for {component_name}, querying Greengrass for latest version")
+                    # List component versions to find the latest
+                    versions_response = greengrass.list_component_versions(
+                        arn=comp_data['arn'],
+                        maxResults=1
+                    )
+                    if versions_response.get('componentVersions'):
+                        latest_version_info = versions_response['componentVersions'][0]
+                        final_version = latest_version_info.get('componentVersion', '0.0.0')
+                        print(f"[DEBUG] Found latest version from Greengrass: {final_version}")
+                
+                # Now describe the component with the correct version
+                # Build the full ARN with version if we have it
+                if final_version != '0.0.0':
+                    # Construct full ARN with version
+                    arn_with_version = f"{comp_data['arn']}:versions:{final_version}"
+                    print(f"[DEBUG] Describing component with full ARN: {arn_with_version}")
+                    component_details = greengrass.describe_component(arn=arn_with_version)
+                else:
+                    # Use the ARN as-is
+                    print(f"[DEBUG] Describing component with ARN: {comp_data['arn']}")
+                    component_details = greengrass.describe_component(arn=comp_data['arn'])
+                
                 platforms = component_details.get('platforms', [])
                 description = component_details.get('description', '')
                 creation_timestamp = component_details.get('creationTimestamp')
+                
+                print(f"[DEBUG] Successfully described {component_name}: version={final_version}, platforms={len(platforms)}")
+                
             except ClientError as e:
-                print(f"Warning: Could not fetch details for {component_name}: {e}")
+                print(f"Warning: Could not fetch details for {component_name} with ARN {comp_data['arn']}: {e}")
                 # Continue with empty platforms if describe fails
             
             enriched_component = {
                 'arn': comp_data['arn'],
                 'component_name': component_name,
                 'latest_version': {
-                    'componentVersion': comp_data['version_str'],
+                    'componentVersion': final_version,
                     'platforms': platforms
                 },
                 'description': description,

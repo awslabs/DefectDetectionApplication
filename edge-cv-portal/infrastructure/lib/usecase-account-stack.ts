@@ -606,6 +606,28 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
+    // IoT Thing Groups
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'IoTThingGroups',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'iot:CreateThingGroup',
+          'iot:DescribeThingGroup',
+          'iot:UpdateThingGroup',
+          'iot:DeleteThingGroup',
+          'iot:ListThingGroups',
+          'iot:ListThingsInThingGroup',
+          'iot:AddThingToThingGroup',
+          'iot:RemoveThingFromThingGroup',
+          'iot:ListTagsForResource',
+          'iot:TagResource',
+          'iot:UntagResource',
+        ],
+        resources: [`arn:aws:iot:*:${this.account}:thinggroup/*`],
+      })
+    );
+
     // IoT Shadows
     this.role.addToPolicy(
       new iam.PolicyStatement({

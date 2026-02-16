@@ -18,7 +18,8 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields
+    check_user_access, validate_required_fields,
+    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
 )
 
 # Configure logging
@@ -49,21 +50,6 @@ TARGET_TO_PLATFORM = {
 }
 
 
-def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
-    """Assume cross-account role for UseCase Account access"""
-    try:
-        response = sts.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=session_name,
-            ExternalId=external_id,
-            DurationSeconds=3600
-        )
-        return response['Credentials']
-    except ClientError as e:
-        logger.error(f"Error assuming role {role_arn}: {str(e)}")
-        raise
-
-
 def get_training_job_details(training_id: str) -> Dict:
     """Get training job details from DynamoDB"""
     try:
@@ -76,21 +62,6 @@ def get_training_job_details(training_id: str) -> Dict:
         return response['Item']
     except Exception as e:
         logger.error(f"Error getting training job details: {str(e)}")
-        raise
-
-
-def get_usecase_details(usecase_id: str) -> Dict:
-    """Get use case details from DynamoDB"""
-    try:
-        table = dynamodb.Table(USECASES_TABLE)
-        response = table.get_item(Key={'usecase_id': usecase_id})
-        
-        if 'Item' not in response:
-            raise ValueError(f"Use case {usecase_id} not found")
-        
-        return response['Item']
-    except Exception as e:
-        logger.error(f"Error getting use case details: {str(e)}")
         raise
 
 
@@ -263,22 +234,13 @@ def publish_component(event: Dict, context: Any) -> Dict:
                 })
         
         # Get use case details
-        usecase = get_usecase_details(usecase_id)
+        usecase = get_usecase(usecase_id)
         
-        # Assume cross-account role (session name max 64 chars)
-        session_name = f"gg-pub-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            session_name
-        )
-        
-        # Create Greengrass client with assumed role
-        greengrass = boto3.client(
+        # Create Greengrass client (handles both single-account and multi-account scenarios)
+        greengrass = get_usecase_client(
             'greengrassv2',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
+            usecase,
+            session_name=f"gg-pub-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
         )
         
         # Publish component for each target

@@ -676,6 +676,72 @@ def get_usecase(usecase_id: str) -> Dict:
         raise
 
 
+def is_cross_account_setup(usecase: Dict) -> bool:
+    """
+    Detect if a use case is configured for cross-account access.
+    
+    Single-account setup: cross_account_role_arn = 'arn:aws:iam::ACCOUNT_ID:root'
+    Multi-account setup: cross_account_role_arn = 'arn:aws:iam::ACCOUNT_ID:role/ROLE_NAME'
+    
+    Args:
+        usecase: Use case details dict from DynamoDB
+    
+    Returns:
+        True if multi-account setup, False if single-account
+    """
+    cross_account_role_arn = usecase.get('cross_account_role_arn')
+    account_id = usecase.get('account_id')
+    
+    # Must have both fields and the ARN must contain ':role/' to be multi-account
+    return (
+        cross_account_role_arn and 
+        account_id and 
+        ':role/' in cross_account_role_arn
+    )
+
+
+def get_usecase_client(service_name: str, usecase: Dict, session_name: str = None, region: str = None) -> Any:
+    """
+    Get a boto3 client for accessing use case resources.
+    
+    Automatically handles both single-account and multi-account scenarios:
+    - Single-account: Returns client using Lambda's own credentials
+    - Multi-account: Returns client with assumed cross-account role credentials
+    
+    Args:
+        service_name: AWS service name (e.g., 's3', 'sagemaker', 'iot')
+        usecase: Use case details dict from DynamoDB
+        session_name: Optional session name for role assumption (auto-generated if not provided)
+        region: Optional AWS region
+    
+    Returns:
+        boto3 client for the specified service
+    
+    Raises:
+        ClientError: If role assumption fails in multi-account setup
+    """
+    if not session_name:
+        session_name = f"{service_name}-{int(datetime.utcnow().timestamp())}"
+    
+    # Check if this is a cross-account scenario
+    if is_cross_account_setup(usecase):
+        # Multi-account: assume role
+        logger.info(f"Cross-account setup detected: assuming role {usecase.get('cross_account_role_arn')}")
+        credentials = assume_usecase_role(
+            usecase.get('cross_account_role_arn'),
+            usecase.get('external_id'),
+            session_name
+        )
+        return create_boto3_client(service_name, credentials, region)
+    else:
+        # Single-account: use Lambda's own credentials
+        logger.info(f"Single-account setup detected: using Lambda execution role for {service_name}")
+        if region:
+            return boto3.client(service_name, region_name=region)
+        else:
+            return boto3.client(service_name)
+
+
 def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
     """Assume cross-account role for UseCase Account access
     
