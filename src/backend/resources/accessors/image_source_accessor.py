@@ -86,6 +86,7 @@ class ImageSourceAccessor:
                 data["imageSourceConfigId"] = img_src_cfg_id
                 imageCapturePath = constants.IMAGE_CAPTURE_DIR + "/" + image_source_id
                 data["imageCapturePath"] = imageCapturePath
+                logger.warning(f"NVIDIA CSI CREATE DEBUG: imageSourceId={image_source_id}, imageCapturePath={imageCapturePath}")
                 self.__create_folder(imageCapturePath)
             result = self.schema.load(data)
             image_source_dao.create_image_source(db, self.schema.dump(result))
@@ -236,7 +237,7 @@ class ImageSourceAccessor:
         return config_id
 
     def __get_default_image_source_configuration(self, cameraId):
-        # For Nvidia CSI cameras, use default Nvidia CSI config with v4l2src
+        # For Nvidia CSI cameras, use default Nvidia CSI config with nvarguscamerasrc
         if cameraId is None:
             nvidia_csi_config = {
                 "gain": 1,

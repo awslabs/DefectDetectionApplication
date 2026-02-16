@@ -47,6 +47,10 @@ COPY app.py ./
 COPY logging.conf ./
 COPY dao ./dao
 COPY utils ./utils
+# Verify Nvidia CSI config is correct
+RUN echo "Verifying Nvidia CSI configuration..." && \
+    grep -A 5 "Nvidia CSI" ./utils/config/default_camera_configurations.json && \
+    echo "Config verification complete"
 COPY metrics ./metrics
 COPY model ./model
 COPY mqtt ./mqtt
