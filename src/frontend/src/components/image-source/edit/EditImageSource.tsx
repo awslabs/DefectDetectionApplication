@@ -83,6 +83,15 @@ export default function EditImageSource(): JSX.Element {
               description: values.editDescription,
             }),
           });
+        case ImageSourceType.ICam:
+          return editImageSource(imageSourceId, {
+            ...(values.editName !== getQuery.data?.name && {
+              name: values.editName,
+            }),
+            ...(values.editDescription !== getQuery.data?.description && {
+              description: values.editDescription,
+            }),
+          });
         case ImageSourceType.Folder:
         default:
           return editImageSource(imageSourceId, {

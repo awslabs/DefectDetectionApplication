@@ -70,7 +70,16 @@
 		"default" : {
 			"processingPipeline" : "video/x-raw(memory:NVMM),width=3264,height=2464,framerate=21/1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert",
 			"device": "0",
-			"deviceName": "nvarguscamerasrc"
+			"deviceName": "nvarguscamerasrc",
+			"gain": 2,
+			"exposure": 100000
+		}
+	},
+	"ICAM" : {
+		"default" : {
+			"processingPipeline" : "videoconvert",
+			"device": "/dev/video0",
+			"deviceName": "v4l2src"
 		}
 	},
     "default" : {
