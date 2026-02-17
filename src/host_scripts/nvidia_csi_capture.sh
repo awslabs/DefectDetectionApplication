@@ -16,7 +16,7 @@ chmod 777 "$CAPTURE_DIR"
 
 # Create default config if it doesn't exist
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo '{"gain":2,"exposure":200000}' > "$CONFIG_FILE"
+    echo '{"gain":4,"exposure":5000000}' > "$CONFIG_FILE"
     chmod 666 "$CONFIG_FILE"
     echo "Created default config file"
 fi
@@ -30,9 +30,9 @@ if ! command -v jq &> /dev/null; then
     echo "ERROR: jq is not installed. Installing..."
     apt-get update -qq && apt-get install -y -qq jq || {
         echo "ERROR: Failed to install jq. Gain/exposure settings will not work."
-        echo "Using default values: gain=2, exposure=200000"
-        GAIN=2
-        EXPOSURE=200000
+        echo "Using default values: gain=4, exposure=5000000"
+        GAIN=4
+        EXPOSURE=5000000
         USE_JQ=false
     }
 else
@@ -42,11 +42,11 @@ fi
 # Function to read config
 read_config() {
     if [ "$USE_JQ" = "true" ] && [ -f "$CONFIG_FILE" ]; then
-        GAIN=$(jq -r '.gain // 2' "$CONFIG_FILE" 2>/dev/null || echo "2")
-        EXPOSURE=$(jq -r '.exposure // 200000' "$CONFIG_FILE" 2>/dev/null || echo "200000")
+        GAIN=$(jq -r '.gain // 4' "$CONFIG_FILE" 2>/dev/null || echo "4")
+        EXPOSURE=$(jq -r '.exposure // 5000000' "$CONFIG_FILE" 2>/dev/null || echo "5000000")
     else
-        GAIN=2
-        EXPOSURE=200000
+        GAIN=4
+        EXPOSURE=5000000
     fi
 }
 
