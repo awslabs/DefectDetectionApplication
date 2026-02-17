@@ -45,7 +45,7 @@ export default function EditImageSettingsInput({
           min={EXPOSURE_MIN}
           max={EXPOSURE_MAX}
           label="Exposure"
-          constraintText="Values between 50000 and 30000000 nanoseconds (0.05ms to 30ms) for Nvidia CSI cameras."
+          constraintText="Values between 100000 and 30000000 nanoseconds (0.1ms to 30ms). Note: Gain may have more effect on brightness."
         />
       </SpaceBetween>
     </Container>
