@@ -16,7 +16,7 @@ chmod 777 "$CAPTURE_DIR"
 
 # Create default config if it doesn't exist
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo '{"gain":2,"exposure":100000}' > "$CONFIG_FILE"
+    echo '{"gain":2,"exposure":200000}' > "$CONFIG_FILE"
     chmod 666 "$CONFIG_FILE"
     echo "Created default config file"
 fi
@@ -30,9 +30,9 @@ if ! command -v jq &> /dev/null; then
     echo "ERROR: jq is not installed. Installing..."
     apt-get update -qq && apt-get install -y -qq jq || {
         echo "ERROR: Failed to install jq. Gain/exposure settings will not work."
-        echo "Using default values: gain=2, exposure=100000"
+        echo "Using default values: gain=2, exposure=200000"
         GAIN=2
-        EXPOSURE=100000
+        EXPOSURE=200000
         USE_JQ=false
     }
 else
@@ -43,10 +43,10 @@ fi
 read_config() {
     if [ "$USE_JQ" = "true" ] && [ -f "$CONFIG_FILE" ]; then
         GAIN=$(jq -r '.gain // 2' "$CONFIG_FILE" 2>/dev/null || echo "2")
-        EXPOSURE=$(jq -r '.exposure // 100000' "$CONFIG_FILE" 2>/dev/null || echo "100000")
+        EXPOSURE=$(jq -r '.exposure // 200000' "$CONFIG_FILE" 2>/dev/null || echo "200000")
     else
         GAIN=2
-        EXPOSURE=100000
+        EXPOSURE=200000
     fi
 }
 
@@ -79,19 +79,18 @@ while true; do
     
     # Capture with current settings
     # nvarguscamerasrc parameters for manual exposure control:
-    # - aeantibanding: Set to 0 to disable auto-exposure antibanding
-    # - exposuretimerange: "min max" in nanoseconds (both same value for fixed exposure)
-    # - gainrange: "min max" for analog gain (both same value for fixed gain)
-    # - wbmode: 0 = off (manual white balance), 1 = auto
+    # - aeantibanding: Set to 0 to disable auto-exposure antibanding  
+    # - wbmode: Set to 0 to disable auto white balance
+    # - exposuretimerange: "min max" in nanoseconds (safe range: 50000 to 30000000)
+    # - gainrange: "min max" for analog gain (range: 1.0 to 10.625)
     #
-    # CRITICAL: nvarguscamerasrc may have auto-exposure enabled by default
-    # Setting exposuretimerange alone may not work if AE is active
+    # IMPORTANT: The extreme values (13000 and 683709000) are rejected as invalid
+    # Use safe middle range values that the camera accepts
     
-    # Try to capture with manual settings
-    # If the image brightness doesn't change, the camera may be ignoring the settings
     gst-launch-1.0 -q \
         nvarguscamerasrc sensor_id=0 num-buffers=1 \
         aeantibanding=0 \
+        wbmode=0 \
         exposuretimerange="$EXPOSURE $EXPOSURE" \
         gainrange="$GAIN $GAIN" ! \
         'video/x-raw(memory:NVMM),width=3264,height=2464,framerate=21/1' ! \

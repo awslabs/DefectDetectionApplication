@@ -13,20 +13,50 @@ The config file (`/aws_dda/nvidia-csi-capture/config.json`) is being updated cor
 
 ## Diagnostic Steps
 
-### Step 1: Check if config file is being updated
+### Step 0: Verify You're on the HOST (Not in Docker)
+```bash
+# Check if running in Docker
+chmod +x check_where_running.sh
+./check_where_running.sh
+```
+
+**CRITICAL**: nvarguscamerasrc ONLY works on the Jetson HOST, NOT inside Docker containers. If you see "RUNNING INSIDE DOCKER CONTAINER", exit the container first:
+```bash
+exit  # Exit Docker container
+# Now run tests on the host
+```
+
+### Step 0.5: Install Required Packages (If Missing)
+If nvarguscamerasrc is not available, install the required packages:
+```bash
+sudo apt-get update
+sudo apt-get install -y gstreamer1.0-plugins-nvargus nvidia-l4t-gstreamer gstreamer1.0-tools
+```
+
+### Step 1: Check GStreamer Installation
+```bash
+chmod +x diagnose_gstreamer.sh
+./diagnose_gstreamer.sh
+```
+
+This will show:
+- GStreamer version
+- Available Nvidia plugins
+- Whether nvarguscamerasrc is installed
+- Available video devices
 ```bash
 # Watch the config file for changes
 watch -n 1 cat /aws_dda/nvidia-csi-capture/config.json
 ```
 
-### Step 2: Check if service is reading the config
+### Step 2: Check if config file is being updated
 ```bash
 # Check service logs
 sudo journalctl -u nvidia-csi-capture.service -f
 ```
 You should see: "Settings updated - Gain: X, Exposure: Y" when you change settings in the UI.
 
-### Step 3: Test nvarguscamerasrc parameters manually
+### Step 3: Check if service is reading the config
 Run the test script to verify which parameters work:
 ```bash
 chmod +x test_nvargus_params.sh
@@ -35,7 +65,16 @@ chmod +x test_nvargus_params.sh
 
 Compare the brightness of the generated test images in `/tmp/`.
 
-### Step 4: Check available nvarguscamerasrc properties
+### Step 4: Test nvarguscamerasrc parameters manually
+**IMPORTANT**: Run this on the HOST, not inside Docker!
+```bash
+# Exit Docker if you're in it
+exit
+
+# On the Jetson host:
+chmod +x test_nvargus_params.sh
+./test_nvargus_params.sh
+```
 ```bash
 gst-inspect-1.0 nvarguscamerasrc | grep -E "gain|exposure|ae|awb"
 ```
@@ -47,7 +86,7 @@ Look for properties like:
 - `exposuretimerange`: Exposure time range
 - `gainrange`: Gain range
 
-## Solutions to Try
+### Step 5: Check available nvarguscamerasrc properties
 
 ### Solution 1: Disable Auto-Exposure (Current Implementation)
 The capture script now uses `aeantibanding=0` to disable auto-exposure antibanding:
