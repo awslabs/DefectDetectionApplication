@@ -99,7 +99,7 @@ class GstPipelineBuilder:
             
             config = {
                 "gain": image_source_config.get("gain", 2),
-                "exposure": image_source_config.get("exposure", 100000)
+                "exposure": image_source_config.get("exposure", 200000)
             }
             
             with open(config_file, 'w') as f:
