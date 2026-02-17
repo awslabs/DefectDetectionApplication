@@ -36,16 +36,16 @@ export default function EditImageSettingsInput({
           name={namePrefix + "Gain"}
           min={GAIN_MIN}
           max={GAIN_MAX}
-          label="Gain"
-          constraintText="Numeric values between 1.0 and 10.625 for Nvidia CSI cameras."
+          label="Gain (Primary Brightness Control)"
+          constraintText="Adjust gain (1.0 to 10.625) to control image brightness. Higher values = brighter images."
         />
 
         <FormSliderInput
           name={namePrefix + "Exposure"}
           min={EXPOSURE_MIN}
           max={EXPOSURE_MAX}
-          label="Exposure"
-          constraintText="Values between 100000 and 30000000 nanoseconds (0.1ms to 30ms). Note: Gain may have more effect on brightness."
+          label="Exposure (Secondary Control)"
+          constraintText="Exposure time in nanoseconds (1ms to 30ms). Use gain for primary brightness adjustment."
         />
       </SpaceBetween>
     </Container>

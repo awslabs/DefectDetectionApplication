@@ -98,8 +98,8 @@ class GstPipelineBuilder:
             os.makedirs("/aws_dda/nvidia-csi-capture", exist_ok=True)
             
             config = {
-                "gain": image_source_config.get("gain", 2),
-                "exposure": image_source_config.get("exposure", 200000)
+                "gain": image_source_config.get("gain", 4),
+                "exposure": image_source_config.get("exposure", 5000000)
             }
             
             with open(config_file, 'w') as f:
