@@ -61,9 +61,22 @@ export default function EditImageSettingsPage(
   const navigate = useNavigate();
   const values = useWatch<SchemaType>();
   
+  // Debug logging
+  console.log('EditImageSettingsPage Debug:', {
+    formIsValid: props.formIsValid,
+    isArvisCamera: props.isArvisCamera,
+    cameraStatus: props.cameraStatus,
+    values: values
+  });
+  
   // For non-Arvis cameras (like Nvidia CSI), only check form validity
   // For Arvis cameras, check both form validity and camera connection status
   const isSaveDisabled = !props.formIsValid || (props.isArvisCamera && props.cameraStatus !== CameraStatus.Connected);
+  
+  console.log('Save button disabled:', isSaveDisabled, 'Reason:', {
+    formInvalid: !props.formIsValid,
+    arvisCameraDisconnected: props.isArvisCamera && props.cameraStatus !== CameraStatus.Connected
+  });
 
   const initialPipelineValue = props.initialPipelineString;
   const [imageToRenderBase64, setImageToRender] = useState<string | null>();
