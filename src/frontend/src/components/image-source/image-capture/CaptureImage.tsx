@@ -40,6 +40,7 @@ interface CaptureImageProps {
   cameraId: string;
   onCameraReconnect: () => void;
   workflowId: string;
+  isArvisCamera: boolean;
 }
 
 export default function CaptureImage({
@@ -49,6 +50,7 @@ export default function CaptureImage({
   cameraId,
   onCameraReconnect,
   workflowId,
+  isArvisCamera,
 }: CaptureImageProps): JSX.Element {
   const [isLivePreviewChecked, setLivePreviewChecked] = React.useState(true);
   const { connect, isConnecting } = useCameraConnection({
@@ -78,15 +80,8 @@ export default function CaptureImage({
         >
           <OverflowScrollBox contentMinWidth={styleConstants.IMAGE_CONTENT_CONTAINER_MIN_WIDTH}>
             {
-              cameraStatus === CameraStatus.Connected
+              (isArvisCamera && cameraStatus !== CameraStatus.Connected)
                 ? (
-                  <CaptureImageDisplay
-                    isLivePreviewChecked={isLivePreviewChecked}
-                    imgSrcId={imgSrcId}
-                    capturePath={capturePath}
-                  />
-                )
-                : (
                   <ImagePlaceholder
                     placement="center"
                     content={(
@@ -96,6 +91,13 @@ export default function CaptureImage({
                         onConnect={connect}
                       />
                     )}
+                  />
+                )
+                : (
+                  <CaptureImageDisplay
+                    isLivePreviewChecked={isLivePreviewChecked}
+                    imgSrcId={imgSrcId}
+                    capturePath={capturePath}
                   />
                 )
             }
