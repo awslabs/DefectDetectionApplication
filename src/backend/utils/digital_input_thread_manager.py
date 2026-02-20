@@ -142,7 +142,7 @@ class DigitalInputThread(Thread):
                 workflow_output_path=workflow_output_path,
             )
             return r.get("captureLocation")
-        elif self.image_source.get("type") == ImageSourceType.ICAM:
+        elif self.image_source.get("type") == ImageSourceType.ICAM or self.image_source.get("type") == ImageSourceType.NVIDIA_CSI:
             r = self.gst_pipeline_executor.execute_image_source_pipeline(
                 ImageSource(**self.image_source),
                 is_preview=False,

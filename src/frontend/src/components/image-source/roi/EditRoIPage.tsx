@@ -100,13 +100,16 @@ export default function EditRoIPage({
 
   const enablePreviewQuery = cameraStatus === CameraStatus.Connected || !isArvisCamera;
   
-  console.log('EditRoIPage Debug:', {
-    enablePreviewQuery,
-    isArvisCamera,
-    cameraStatus,
-    imageCropPreviewSettings,
-    showCroppedImage
-  });
+  useEffect(() => {
+    console.log('EditRoIPage Debug:', {
+      enablePreviewQuery,
+      isArvisCamera,
+      cameraStatus,
+      imageCropPreviewSettings,
+      showCroppedImage
+    });
+  }, [enablePreviewQuery, isArvisCamera, cameraStatus, imageCropPreviewSettings, showCroppedImage]);
+  
   const previewQuery = useQuery({
     queryKey: ["editCropRoIPreview", imageCropPreviewSettings],
     queryFn: async () => {
@@ -119,6 +122,7 @@ export default function EditRoIPage({
           right: Math.round(imageCropPreviewSettings.right),
         };
       }
+      console.log('EditRoIPage: Fetching preview with crop settings', cropSettings);
       if (initialImageSource?.imageSourceConfiguration) {
         return await getImagePreview(id, {
           imageSourceConfiguration: {
