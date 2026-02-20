@@ -117,7 +117,7 @@ def configure_image_source_and_run_pipeline(workflow:Workflow, db: Session, late
         latency_metrics.add_timestamp(FRAME_CAPTURE_TIMESTAMP)
         return gst_pipeline_executor.execute_workflow_pipeline(workflow, db, frame, latency_metrics=latency_metrics)
     ## DD-18130: Add support for smart cameras
-    elif image_source_dict.get("type") == ImageSourceType.ICAM:
+    elif image_source_dict.get("type") == ImageSourceType.ICAM or image_source_dict.get("type") == ImageSourceType.NVIDIA_CSI:
         return gst_pipeline_executor.execute_workflow_pipeline(workflow, db, latency_metrics=latency_metrics)
     return "", {}
 

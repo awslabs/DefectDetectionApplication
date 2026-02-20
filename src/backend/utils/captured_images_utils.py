@@ -119,7 +119,7 @@ def run_image_capture_pipeline(image_source, workflow_output_path, gst_pipeline_
             workflow_output_path=workflow_output_path, frame_data=get_frame(image_source)
         )
         return r.get("captureLocation")
-    elif image_source.get("type") == ImageSourceType.ICAM:
+    elif image_source.get("type") == ImageSourceType.ICAM or image_source.get("type") == ImageSourceType.NVIDIA_CSI:
         r = gst_pipeline_executor.execute_image_source_pipeline(
             ImageSource(**image_source), is_preview=False, file_prefix=file_prefix,
             workflow_output_path=workflow_output_path

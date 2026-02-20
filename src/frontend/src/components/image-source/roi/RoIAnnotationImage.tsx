@@ -169,6 +169,13 @@ export default function RoIAnnotationImage({
   ]);
 
   useEffect(() => {
+    console.log('RoIAnnotationImage: showCroppedImage changed', {
+      showCroppedImage,
+      regionOfInterestAnnotation,
+      imageHorizontalScaling,
+      imageVerticalScaling
+    });
+    
     if (showCroppedImage) {
       // When showing cropped image, apply the crop settings to the preview
       const crop = scaleUpRoIAnnotation(
@@ -176,6 +183,7 @@ export default function RoIAnnotationImage({
         imageHorizontalScaling,
         imageVerticalScaling,
       );
+      console.log('RoIAnnotationImage: Setting crop for preview', crop);
       setImageCrop(crop);
     } else {
       // When not showing cropped image, show full image and update annotation
@@ -185,6 +193,7 @@ export default function RoIAnnotationImage({
         imageVerticalScaling,
       );
       setImageCropPreview(upScaledRegionOfInterestAnnotation);
+      console.log('RoIAnnotationImage: Setting NoCrop for preview');
       setImageCrop(NoCrop);
     }
   }, [imageHorizontalScaling, imageVerticalScaling, regionOfInterestAnnotation, setImageCrop, setImageCropPreview, showCroppedImage]);
