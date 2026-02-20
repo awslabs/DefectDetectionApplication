@@ -100,7 +100,7 @@ export default function EditRoIPage({
 
   const enablePreviewQuery = cameraStatus === CameraStatus.Connected || !isArvisCamera;
   const previewQuery = useQuery({
-    queryKey: ["editCropRoIPreview", imageCropPreviewSettings],
+    queryKey: ["editCropRoIPreview"],
     queryFn: async () => {
       var cropSettings = NoCrop;
       if (imageCropPreviewSettings) {
