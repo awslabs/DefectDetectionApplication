@@ -162,7 +162,7 @@ export default function EditImageSettingsPage(
               >
                 Cancel
               </Button>
-              <Button variant="primary" formAction="submit" disabled={props.isArvisCamera && props.cameraStatus !== CameraStatus.Connected}>
+              <Button variant="primary" formAction="submit" disabled={props.cameraStatus !== CameraStatus.Connected}>
                 Save
               </Button>
             </SpaceBetween>
