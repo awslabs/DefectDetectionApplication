@@ -45,7 +45,7 @@ mkdir -p ./custom-build/$COMPONENT_NAME
 cd src
 #edgemlsdk
 cd edgemlsdk/
-./build.sh -p $(uname -m) -u $IMAGE_VER 3.9
+./build.sh -p $(uname -m) -u $IMAGE_VER 3.11
 cd ..
 mkdir backend/edgemlsdk
 cp -r edgemlsdk backend/edgemlsdk

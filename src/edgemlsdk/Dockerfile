@@ -96,9 +96,12 @@ RUN cd Python-3.11.14 && \
     make -j$(nproc) && \
     make install && \
     ldconfig
-
-RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.11 1 \
-    && update-alternatives --set python3 /usr/local/bin/python3 
+RUN rm /usr/bin/python3
+#RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3 1 
+#RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.11 1 \
+#    && update-alternatives --set python3 /usr/local/bin/python3 
+#RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.11 1 \
+#    && update-alternatives --set python3 /usr/local/bin/python3.11
 
 ENV PYTHON_EXECUTABLE=/usr/local/bin/python3.11
 ENV Python3_EXECUTABLE=/usr/local/bin/python3.11
@@ -197,7 +200,9 @@ RUN apt-get install libxml2-dev libglib2.0-dev libusb-1.0-0-dev gobject-introspe
 ENV PKG_CONFIG_PATH = /usr/lib/aarch64-linux-gnu/pkgconfig./usr/lib/aarch64-linux-gnu/pkgconfig
  
 # Install meson
-RUN pip3 install meson
+RUN python3 --version
+RUN find / -name "meson.py" -print
+RUN python3 -m pip install meson==1.8.5
 
 # Install aravis sdk release version 0.8
 RUN cd /dependencies \

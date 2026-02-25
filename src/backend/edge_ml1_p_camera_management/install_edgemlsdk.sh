@@ -17,7 +17,7 @@
 set -e
 
 python3 -m pip install boto3
-python3 -m pip install scikit-learn==1.0.2
+python3 -m pip install scikit-learn==1.5.0
 python3 -m pip install dill
 # Requirement(s) of LyraScienceProcessingUtils
 

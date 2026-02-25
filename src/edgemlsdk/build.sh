@@ -18,7 +18,7 @@
 #
 
 platform=$(uname -m)
-python=3.9
+python=3.11
 ubuntu=20.04
 ubuntu=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
 BUILDKIT_PROGRESS=plain
@@ -52,5 +52,5 @@ pushd $rootDir
  
  
 echo "Begin building Docker image. For OS=$ubuntu platform=$platform arch=$pwsh_arch"
-docker build --build-arg OS=$ubuntu --build-arg PLATFORM=$platform --build-arg PWSH_ARCH=$pwsh_arch --build-arg PYTHON_VERSION=$python -t edgemlsdk .
+docker build --build-arg OS=$ubuntu --build-arg PLATFORM=$platform --build-arg PWSH_ARCH=$pwsh_arch --build-arg PYTHON_VERSION=$python --no-cache -t edgemlsdk .
 popd

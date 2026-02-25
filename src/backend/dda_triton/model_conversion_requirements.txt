@@ -4,8 +4,8 @@ meson
 grpcio==1.56.2
 grpcio-tools==1.51.1
 protobuf==4.25.8
-requests==2.32.3
+requests==2.32.4
 opencv-python
-urllib3==2.2.3
-scikit-learn==1.0.2
+urllib3==2.5.0
+scikit-learn==1.5.0
 numpy==1.24.3
