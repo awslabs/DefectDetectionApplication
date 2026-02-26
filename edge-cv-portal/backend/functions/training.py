@@ -339,11 +339,16 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         else:
             logger.info(f"Training data is in UseCase Account: {usecase['account_id']}")
         
+        # Get region from use case (defaults to us-east-1 if not set)
+        usecase_region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
+        logger.info(f"Using region for training: {usecase_region}")
+        
         # Create SageMaker client (handles both single-account and multi-account scenarios)
         sagemaker_usecase = get_usecase_client(
             'sagemaker',
             usecase,
-            session_name=f"training-{user_id}-{int(datetime.utcnow().timestamp())}"
+            session_name=f"training-{user_id}-{int(datetime.utcnow().timestamp())}",
+            region=usecase_region
         )
         
         # Generate unique training job name
@@ -1128,11 +1133,16 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         # Get use case details
         usecase = get_usecase(usecase_id)
         
+        # Get region from use case (defaults to us-east-1 if not set)
+        usecase_region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
+        logger.info(f"Using region for manifest transformation: {usecase_region}")
+        
         # Create S3 client (handles both single-account and multi-account scenarios)
         s3_usecase = get_usecase_client(
             's3',
             usecase,
-            session_name=f"transform-manifest-{user_id}-{int(datetime.utcnow().timestamp())}"
+            session_name=f"transform-manifest-{user_id}-{int(datetime.utcnow().timestamp())}",
+            region=usecase_region
         )
         
         # Download source manifest

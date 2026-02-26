@@ -986,6 +986,7 @@ def create_usecase(event, user):
             'usecase_id': usecase_id,
             'name': body['name'],
             'account_id': account_id,
+            'region': body.get('region', os.environ.get('AWS_REGION', 'us-east-1')),
             's3_bucket': body['s3_bucket'],
             'cross_account_role_arn': cross_account_role_arn,
             'sagemaker_execution_role_arn': sagemaker_role_arn,
@@ -1363,7 +1364,7 @@ def update_usecase(usecase_id, event, user):
         expr_values = {':updated_at': int(datetime.utcnow().timestamp() * 1000)}
         
         updatable_fields = [
-            'name', 's3_bucket', 'owner', 'cost_center', 'default_device_group',
+            'name', 's3_bucket', 'region', 'owner', 'cost_center', 'default_device_group',
             'cross_account_role_arn', 'account_id',
             # Data Account fields
             'data_account_id', 'data_account_role_arn', 'data_account_external_id',

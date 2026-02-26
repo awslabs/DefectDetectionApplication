@@ -1624,6 +1624,19 @@ class ApiService {
       body: JSON.stringify(data),
     });
   }
+
+  // Manifest Validator endpoints
+  async manifestValidator(data: {
+    action: 'validate' | 'transform' | 'fix_timestamps' | 'validate_and_transform';
+    manifestPath: string;
+    usecaseId: string;
+    outputPath?: string;
+  }): Promise<any> {
+    return this.request('/manifest-validator', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
 }
 
 export const apiService = new ApiService();

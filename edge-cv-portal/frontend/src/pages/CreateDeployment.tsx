@@ -20,6 +20,7 @@ import {
   Badge,
   ColumnLayout,
   Tabs,
+  Modal,
 } from '@cloudscape-design/components';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
@@ -181,9 +182,11 @@ export default function CreateDeployment() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [showRemovalWarning, setShowRemovalWarning] = useState(false);
 
   const preSelectedComponentArn = searchParams.get('component_arn');
   const preSelectedComponentArns = searchParams.get('component_arns');
+  const cloneComponentNames = searchParams.get('clone_components');
   const urlUseCaseId = searchParams.get('usecase_id');
 
   // Compute selected device architectures
@@ -225,6 +228,39 @@ export default function CreateDeployment() {
       comp.model_name || comp.component_name.toLowerCase().startsWith('model-')
     );
   }, [selectedComponents]);
+
+  // Compute components that will be removed from each target device
+  const componentsToBeRemoved = useMemo(() => {
+    if (targetType !== 'devices' || targetDevices.length === 0 || selectedComponents.length === 0) return {};
+    
+    const newComponentNames = new Set(selectedComponents.map(c => c.component_name));
+    // Auto-included components won't be in selectedComponents yet, but will be added by backend
+    // Add known auto-includes so they don't show as "removed"
+    const autoIncludePatterns = ['aws.greengrass.Nucleus', 'aws.greengrass.LogManager'];
+    autoIncludePatterns.forEach(p => newComponentNames.add(p));
+    
+    const removals: Record<string, Array<{ component_name: string; version: string }>> = {};
+    
+    for (const opt of targetDevices) {
+      const device = allDevices.find(d => d.device_id === opt.value);
+      if (device?.installed_components && device.installed_components.length > 0) {
+        const removed = device.installed_components.filter(existing => 
+          existing.component_name && 
+          !newComponentNames.has(existing.component_name) &&
+          // Ignore Greengrass internal/dependency components (non-root)
+          !existing.component_name.startsWith('aws.greengrass.clientdevices') &&
+          !existing.component_name.startsWith('aws.greengrass.ShadowManager') &&
+          !existing.component_name.startsWith('aws.greengrass.SecureTunneling')
+        );
+        if (removed.length > 0) {
+          removals[opt.value as string] = removed;
+        }
+      }
+    }
+    return removals;
+  }, [targetDevices, allDevices, selectedComponents, targetType]);
+
+  const hasComponentRemovals = Object.keys(componentsToBeRemoved).length > 0;
 
   // Filter and categorize components based on selected devices
   const { recommendedComponents, compatiblePrivate, compatiblePublic, incompatibleComponents } = useMemo(() => {
@@ -391,7 +427,11 @@ export default function CreateDeployment() {
         device_id: device.device_id,
         platform: device.platform || '',
         architecture: device.architecture || '',
-        status: device.status || 'UNKNOWN'
+        status: device.status || 'UNKNOWN',
+        installed_components: (device.installed_components || []).map((c: any) => ({
+          component_name: c.componentName || c.component_name,
+          version: c.componentVersion || c.version || ''
+        }))
       })));
 
       // Pre-select component(s) if provided in URL
@@ -435,10 +475,33 @@ export default function CreateDeployment() {
             model_name: preSelected.model_name
           }]);
         }
+      } else if (cloneComponentNames) {
+        // Clone deployment - match by component name
+        const names = cloneComponentNames.split(',');
+        const allComponents = [...privateResponse.components, ...(publicResponse.components || [])];
+        const matchedComps = names
+          .map((name: string) => allComponents.find((c: any) => c.component_name === name))
+          .filter(Boolean);
+        
+        const selectedComps = matchedComps.map((comp: any) => {
+          const displayName = getComponentDisplayName(comp.component_name, comp.model_name);
+          const version = comp.latest_version?.componentVersion || 'latest';
+          return {
+            component_name: comp.component_name,
+            component_version: version,
+            arn: comp.arn,
+            scope: comp.scope || 'PRIVATE',
+            displayName,
+            category: getComponentCategory(comp.component_name, comp.model_name, comp.scope),
+            model_name: comp.model_name
+          };
+        });
+        
+        if (selectedComps.length > 0) {
+          setSelectedComponents(selectedComps);
+        }
       }
     } catch (err) {
-      console.error('Failed to load data:', err);
-      setError('Failed to load components and devices');
     } finally {
       setLoading(false);
     }
@@ -482,8 +545,20 @@ export default function CreateDeployment() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // If there are component removals and user hasn't confirmed yet, show warning
+    if (hasComponentRemovals && !showRemovalWarning) {
+      setShowRemovalWarning(true);
+      return;
+    }
+    
+    await executeDeployment();
+  };
+
+  const executeDeployment = async () => {
     setCreating(true);
     setError('');
+    setShowRemovalWarning(false);
 
     try {
       if (!selectedUseCase?.value) {
@@ -899,6 +974,45 @@ export default function CreateDeployment() {
           </SpaceBetween>
         </Container>
       </Form>
+
+      {/* Component Removal Warning Modal */}
+      <Modal
+        visible={showRemovalWarning}
+        onDismiss={() => setShowRemovalWarning(false)}
+        header="Components will be removed"
+        footer={
+          <Box float="right">
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button variant="link" onClick={() => setShowRemovalWarning(false)}>Cancel</Button>
+              <Button variant="primary" loading={creating} onClick={executeDeployment}>
+                Continue Deployment
+              </Button>
+            </SpaceBetween>
+          </Box>
+        }
+      >
+        <SpaceBetween size="m">
+          <Alert type="warning">
+            The following components are currently installed on the target device(s) but are not included in this deployment. 
+            Greengrass will remove them from the device.
+          </Alert>
+          {Object.entries(componentsToBeRemoved).map(([deviceId, removedComps]) => (
+            <SpaceBetween key={deviceId} size="xs">
+              <Box variant="h4">{deviceId}</Box>
+              <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                {removedComps.map(comp => (
+                  <li key={comp.component_name}>
+                    {comp.component_name} {comp.version ? `(v${comp.version})` : ''}
+                  </li>
+                ))}
+              </ul>
+            </SpaceBetween>
+          ))}
+          <Box color="text-body-secondary">
+            If this is not intended, click Cancel and add the missing components to your deployment.
+          </Box>
+        </SpaceBetween>
+      </Modal>
     </form>
   );
 }

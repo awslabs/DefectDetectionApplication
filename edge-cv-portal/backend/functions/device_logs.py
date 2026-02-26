@@ -128,8 +128,15 @@ def list_log_groups(device_id, user, query_params):
         
         # Search for system component logs
         system_prefix = f'/aws/greengrass/GreengrassSystemComponent/{region}/{device_id}'
+        system_prefix_alt = f'/aws/greengrass/GreengrassSystemComponent/{region}/System'
         try:
             response = logs_client.describe_log_groups(logGroupNamePrefix=system_prefix)
+            for lg in response.get('logGroups', []):
+                existing_log_group_names.add(lg['logGroupName'])
+        except ClientError:
+            pass
+        try:
+            response = logs_client.describe_log_groups(logGroupNamePrefix=system_prefix_alt)
             for lg in response.get('logGroups', []):
                 existing_log_group_names.add(lg['logGroupName'])
                 log_groups.append({
@@ -145,7 +152,9 @@ def list_log_groups(device_id, user, query_params):
             logger.warning(f"Could not list system log groups: {e}")
         
         # Search for user component logs
+        # Try device-specific path first, then component-level path (no device in path)
         user_prefix = f'/aws/greengrass/UserComponent/{region}/{device_id}'
+        user_prefix_alt = f'/aws/greengrass/UserComponent/{region}'
         try:
             paginator = logs_client.get_paginator('describe_log_groups')
             for page in paginator.paginate(logGroupNamePrefix=user_prefix):
@@ -167,6 +176,30 @@ def list_log_groups(device_id, user, query_params):
                     })
         except ClientError as e:
             logger.warning(f"Could not list user component log groups: {e}")
+        
+        # Also search component-level log groups (no device_id in path)
+        # LogManager creates groups like /aws/greengrass/UserComponent/{region}/{componentName}
+        if len(log_groups) == 0:
+            try:
+                paginator = logs_client.get_paginator('describe_log_groups')
+                for page in paginator.paginate(logGroupNamePrefix=user_prefix_alt):
+                    for lg in page.get('logGroups', []):
+                        if lg['logGroupName'] not in existing_log_group_names:
+                            existing_log_group_names.add(lg['logGroupName'])
+                            parts = lg['logGroupName'].split('/')
+                            component_name = parts[-1] if len(parts) > 4 else 'Unknown'
+                            
+                            log_groups.append({
+                                'log_group_name': lg['logGroupName'],
+                                'component_type': 'user',
+                                'component_name': component_name,
+                                'creation_time': lg.get('creationTime'),
+                                'stored_bytes': lg.get('storedBytes', 0),
+                                'retention_days': lg.get('retentionInDays'),
+                                'has_logs': True
+                            })
+            except ClientError as e:
+                logger.warning(f"Could not list alt user component log groups: {e}")
         
         # If no log groups found, get installed components and show them as potential log sources
         # This helps users understand what components exist even if logging isn't configured
@@ -287,16 +320,21 @@ def get_component_logs(device_id, component_name, user, query_params):
         else:
             log_group_name = f'/aws/greengrass/UserComponent/{region}/{device_id}/{component_name}'
         
-        # Check if log group exists
+        # Check if log group exists, try alt pattern if not
+        log_group_exists = False
         try:
-            logs_client.describe_log_groups(logGroupNamePrefix=log_group_name, limit=1)
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'ResourceNotFoundException':
-                return create_response(404, {
-                    'error': f'Log group not found for component {component_name}',
-                    'log_group_name': log_group_name
-                })
-            raise
+            resp = logs_client.describe_log_groups(logGroupNamePrefix=log_group_name, limit=1)
+            if resp.get('logGroups'):
+                log_group_exists = True
+        except ClientError:
+            pass
+        
+        if not log_group_exists:
+            # Try alt patterns
+            if component_name == 'GreengrassSystemComponent' or component_name == 'system':
+                log_group_name = f'/aws/greengrass/GreengrassSystemComponent/{region}/System'
+            else:
+                log_group_name = f'/aws/greengrass/UserComponent/{region}/{component_name}'
         
         # Fetch logs using filter_log_events for better filtering
         params = {

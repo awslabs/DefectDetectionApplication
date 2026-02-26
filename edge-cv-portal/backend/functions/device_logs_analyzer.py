@@ -406,6 +406,8 @@ def fetch_device_logs(device_id: str, usecase_id: str, hours_back: int = 1) -> s
         log_group_patterns = [
             f'/aws/greengrass/GreengrassSystemComponent/{region}/{device_id}',
             f'/aws/greengrass/UserComponent/{region}/{device_id}',
+            f'/aws/greengrass/GreengrassSystemComponent/{region}/System',
+            f'/aws/greengrass/UserComponent/{region}',
             f'/aws/greengrass/{usecase_id}/{device_id}',
             f'/aws/greengrass/dda-{device_id}',
             f'/aws/greengrass/{device_id}',
@@ -425,12 +427,17 @@ def fetch_device_logs(device_id: str, usecase_id: str, hours_back: int = 1) -> s
                 for log_group in response.get('logGroups', []):
                     log_group_name = log_group['logGroupName']
                     try:
-                        # Fetch events from this log group
-                        events_response = cross_account_logs_client.filter_log_events(
-                            logGroupName=log_group_name,
-                            startTime=start_time,
-                            limit=1000
-                        )
+                        # Filter by device thing name in log stream if possible
+                        filter_kwargs = {
+                            'logGroupName': log_group_name,
+                            'startTime': start_time,
+                            'limit': 1000
+                        }
+                        # For shared log groups, filter by thing name using interleaved mode
+                        # Log streams are named like /YYYY/MM/DD/thing/{thing-name}
+                        # so we can't use logStreamNamePrefix (date changes daily)
+                        
+                        events_response = cross_account_logs_client.filter_log_events(**filter_kwargs)
                         
                         events = events_response.get('events', [])
                         if events:
