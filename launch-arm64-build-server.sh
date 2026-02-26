@@ -252,6 +252,10 @@ if ! aws iam get-instance-profile --instance-profile-name "$IAM_PROFILE" &>/dev/
         sleep 1
     done
     
+    # Extra wait for IAM eventual consistency - EC2 needs time to see the new profile
+    echo "Waiting 15 seconds for IAM propagation to EC2..."
+    sleep 15
+    
     echo "Instance profile created: $IAM_PROFILE"
 else
     echo "Instance profile already exists: $IAM_PROFILE"

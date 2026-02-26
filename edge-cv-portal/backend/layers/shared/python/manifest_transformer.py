@@ -19,6 +19,9 @@ def detect_ground_truth_attributes(entry: Dict, task_type: str) -> Optional[Dict
     
     For segmentation:
         Returns: label_attr, metadata_attr, mask_ref_attr, mask_ref_metadata_attr
+        
+    Special case: For segmentation-only manifests (no classification labels),
+        returns mask attributes and sets segmentation_only flag
     """
     skip_attrs = {
         'source-ref', 
@@ -41,13 +44,22 @@ def detect_ground_truth_attributes(entry: Dict, task_type: str) -> Optional[Dict
     # Derive label attribute (remove -metadata suffix)
     label_attr = metadata_attr.replace('-metadata', '')
     
-    # Verify label attribute exists
-    if label_attr not in entry:
-        return None
+    # Check if this is a segmentation-only manifest (no classification label)
+    segmentation_only = False
+    if task_type == 'segmentation':
+        # Check if this is actually a mask reference attribute (ends with -ref)
+        if label_attr.endswith('-ref'):
+            # This is a mask reference, not a classification label
+            segmentation_only = True
+            # Don't return None - continue to process as segmentation-only
+        elif label_attr not in entry:
+            # Label attribute doesn't exist and it's not a mask reference
+            return None
     
     result = {
-        'label_attr': label_attr,
-        'metadata_attr': metadata_attr
+        'label_attr': label_attr if not segmentation_only else None,
+        'metadata_attr': metadata_attr,
+        'segmentation_only': segmentation_only
     }
     
     # For segmentation, also find mask reference attributes
@@ -55,20 +67,25 @@ def detect_ground_truth_attributes(entry: Dict, task_type: str) -> Optional[Dict
         mask_ref_attr = None
         mask_ref_metadata_attr = None
         
-        # First, look for any -ref-metadata attribute (highest priority)
-        for key in entry.keys():
-            if key.endswith('-ref-metadata') and key not in skip_attrs:
-                mask_ref_metadata_attr = key
-                mask_ref_attr = key.replace('-metadata', '')
-                break
-        
-        # If not found, look for any -ref attribute
-        if not mask_ref_attr:
+        # If segmentation-only, the detected attributes ARE the mask attributes
+        if segmentation_only:
+            mask_ref_attr = label_attr
+            mask_ref_metadata_attr = metadata_attr
+        else:
+            # First, look for any -ref-metadata attribute (highest priority)
             for key in entry.keys():
-                if key.endswith('-ref') and key not in skip_attrs and not key.endswith('-ref-metadata'):
-                    mask_ref_attr = key
-                    mask_ref_metadata_attr = f"{key}-metadata"
+                if key.endswith('-ref-metadata') and key not in skip_attrs:
+                    mask_ref_metadata_attr = key
+                    mask_ref_attr = key.replace('-metadata', '')
                     break
+            
+            # If not found, look for any -ref attribute
+            if not mask_ref_attr:
+                for key in entry.keys():
+                    if key.endswith('-ref') and key not in skip_attrs and not key.endswith('-ref-metadata'):
+                        mask_ref_attr = key
+                        mask_ref_metadata_attr = f"{key}-metadata"
+                        break
         
         # Verify mask attributes exist
         if mask_ref_attr and mask_ref_attr in entry:
@@ -93,6 +110,15 @@ def transform_manifest_entry(entry: Dict, detected_attrs: Dict, task_type: str) 
         - Class 0 = BACKGROUND (normal)
         - Class 1 = DEFECT (anomaly)
     
+    For segmentation-only manifests (no classification labels):
+        Automatically infers classification labels from filename:
+        - If filename contains "anomaly" (case-insensitive) → anomaly-label = 1
+        - Otherwise → anomaly-label = 0
+        Generates synthetic anomaly-label-metadata
+        
+        NOTE: This is a temporary heuristic matching the SageMaker notebook approach.
+        For production use, customers should provide manifests with explicit classification labels.
+    
     Also updates the 'job-name' field inside metadata to match the new attribute names.
     """
     transformed = {}
@@ -111,21 +137,49 @@ def transform_manifest_entry(entry: Dict, detected_attrs: Dict, task_type: str) 
         
         transformed['source-ref'] = source_ref
     
-    # Transform label attribute
-    label_attr = detected_attrs['label_attr']
-    if label_attr in entry:
-        transformed['anomaly-label'] = entry[label_attr]
-    
-    # Transform metadata attribute
-    metadata_attr = detected_attrs['metadata_attr']
-    if metadata_attr in entry:
-        metadata = entry[metadata_attr].copy() if isinstance(entry[metadata_attr], dict) else entry[metadata_attr]
+    # Handle segmentation-only manifests (infer classification labels)
+    if detected_attrs.get('segmentation_only', False):
+        # Extract filename from source-ref
+        source_ref = entry.get('source-ref', '')
+        filename = source_ref.split('/')[-1].lower()
         
-        # Update job-name inside metadata to match the new attribute name
-        if isinstance(metadata, dict) and 'job-name' in metadata:
-            metadata['job-name'] = 'anomaly-label'
+        # Infer classification label from filename
+        # Check if "anomaly" appears in filename (case-insensitive)
+        # This matches the logic used in the SageMaker training notebook
+        if 'anomaly' in filename:
+            label = 1
+            class_name = 'anomaly'
+        else:
+            label = 0
+            class_name = 'normal'
         
-        transformed['anomaly-label-metadata'] = metadata
+        transformed['anomaly-label'] = label
+        
+        # Generate synthetic classification metadata
+        transformed['anomaly-label-metadata'] = {
+            'class-name': class_name,
+            'confidence': 1.0,
+            'type': 'groundtruth/image-classification',
+            'job-name': 'anomaly-label',
+            'human-annotated': 'yes',
+            'creation-date': entry.get(detected_attrs['metadata_attr'], {}).get('creation-date', '') if detected_attrs.get('metadata_attr') else ''
+        }
+    else:
+        # Transform label attribute (normal case)
+        label_attr = detected_attrs.get('label_attr')
+        if label_attr and label_attr in entry:
+            transformed['anomaly-label'] = entry[label_attr]
+        
+        # Transform metadata attribute (normal case)
+        metadata_attr = detected_attrs.get('metadata_attr')
+        if metadata_attr and metadata_attr in entry:
+            metadata = entry[metadata_attr].copy() if isinstance(entry[metadata_attr], dict) else entry[metadata_attr]
+            
+            # Update job-name inside metadata to match the new attribute name
+            if isinstance(metadata, dict) and 'job-name' in metadata:
+                metadata['job-name'] = 'anomaly-label'
+            
+            transformed['anomaly-label-metadata'] = metadata
     
     # For segmentation, transform mask attributes
     if task_type == 'segmentation':
@@ -155,11 +209,15 @@ def transform_manifest_entry(entry: Dict, detected_attrs: Dict, task_type: str) 
             transformed['anomaly-mask-ref-metadata'] = mask_metadata
     
     # Copy any other attributes (like confidence scores, etc.)
-    skip_attrs = {
-        'source-ref', 
-        label_attr, 
-        metadata_attr
-    }
+    skip_attrs = {'source-ref'}
+    
+    # Add label attributes to skip list if they exist
+    label_attr = detected_attrs.get('label_attr')
+    metadata_attr = detected_attrs.get('metadata_attr')
+    if label_attr:
+        skip_attrs.add(label_attr)
+    if metadata_attr:
+        skip_attrs.add(metadata_attr)
     
     # Add mask attributes to skip list if they exist
     if task_type == 'segmentation':
@@ -167,6 +225,8 @@ def transform_manifest_entry(entry: Dict, detected_attrs: Dict, task_type: str) 
         mask_ref_metadata_attr = detected_attrs.get('mask_ref_metadata_attr')
         if mask_ref_attr:
             skip_attrs.add(mask_ref_attr)
+        if mask_ref_metadata_attr:
+            skip_attrs.add(mask_ref_metadata_attr)
         if mask_ref_metadata_attr:
             skip_attrs.add(mask_ref_metadata_attr)
     

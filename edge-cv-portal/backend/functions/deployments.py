@@ -395,7 +395,29 @@ def create_deployment(body, user):
         
         # Auto-include CloudWatch log manager for device logging
         if needs_nucleus and 'aws.greengrass.LogManager' not in components_map:
-            # Configure LogManager to upload system and component logs
+            # Build componentLogsConfigurationMap dynamically from all components in the deployment
+            component_log_config_map = {}
+            
+            # Always include system-level Greengrass component logs
+            component_log_config_map['com.aws.greengrass'] = {
+                'minimumLogLevel': 'INFO',
+                'diskSpaceLimit': 10,
+                'diskSpaceLimitUnit': 'MB',
+                'deleteLogFileAfterCloudUpload': False
+            }
+            
+            # Add an entry for every user component in the deployment
+            # This ensures model components (user-named) and DDA components all get logged
+            skip_components = {'aws.greengrass.Nucleus', 'aws.greengrass.LogManager'}
+            for comp_name in components_map:
+                if comp_name not in skip_components:
+                    component_log_config_map[comp_name] = {
+                        'minimumLogLevel': 'INFO',
+                        'diskSpaceLimit': 10,
+                        'diskSpaceLimitUnit': 'MB',
+                        'deleteLogFileAfterCloudUpload': False
+                    }
+            
             log_manager_config = {
                 'logsUploaderConfiguration': {
                     'systemLogsConfiguration': {
@@ -405,29 +427,7 @@ def create_deployment(body, user):
                         'diskSpaceLimitUnit': 'MB',
                         'deleteLogFileAfterCloudUpload': False
                     },
-                    'componentLogsConfigurationMap': {
-                        # Upload all component logs
-                        'com.aws.greengrass': {
-                            'minimumLogLevel': 'INFO',
-                            'diskSpaceLimit': 10,
-                            'diskSpaceLimitUnit': 'MB',
-                            'deleteLogFileAfterCloudUpload': False
-                        },
-                        # DDA components
-                        'aws.edgeml.dda': {
-                            'minimumLogLevel': 'INFO',
-                            'diskSpaceLimit': 10,
-                            'diskSpaceLimitUnit': 'MB',
-                            'deleteLogFileAfterCloudUpload': False
-                        },
-                        # Model components
-                        'model': {
-                            'minimumLogLevel': 'INFO',
-                            'diskSpaceLimit': 10,
-                            'diskSpaceLimitUnit': 'MB',
-                            'deleteLogFileAfterCloudUpload': False
-                        }
-                    },
+                    'componentLogsConfigurationMap': component_log_config_map,
                     'periodicUploadIntervalSec': 300  # Upload every 5 minutes
                 }
             }
@@ -443,7 +443,7 @@ def create_deployment(body, user):
                 'component_version': LOG_MANAGER_VERSION,
                 'reason': 'Required for CloudWatch logging from devices'
             })
-            logger.info(f"Auto-included aws.greengrass.LogManager {LOG_MANAGER_VERSION} with configuration for device logging")
+            logger.info(f"Auto-included aws.greengrass.LogManager {LOG_MANAGER_VERSION} with logging for components: {list(component_log_config_map.keys())}")
         
         # Auto-include InferenceUploader for automatic S3 upload of inference results
         # Only include if explicitly enabled in UseCase configuration (opt-in)

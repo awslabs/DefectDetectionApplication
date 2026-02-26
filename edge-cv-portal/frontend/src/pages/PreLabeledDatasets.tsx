@@ -403,19 +403,21 @@ export default function PreLabeledDatasets() {
                 label="Manifest S3 URI"
                 description="S3 path to your manifest file (e.g., s3://bucket/path/manifest.manifest)"
               >
-                <SpaceBetween direction="horizontal" size="xs">
+                <SpaceBetween size="xs">
                   <Input
                     value={formData.manifest_s3_uri}
                     onChange={({ detail }) => setFormData({ ...formData, manifest_s3_uri: detail.value })}
                     placeholder="s3://your-bucket/path/manifest.manifest"
                   />
-                  <Button 
-                    onClick={() => setShowBrowseModal(true)} 
-                    disabled={!selectedUseCase}
-                    variant="normal"
-                  >
-                    Browse S3
-                  </Button>
+                  <Box>
+                    <Button 
+                      onClick={() => setShowBrowseModal(true)} 
+                      disabled={!selectedUseCase}
+                      iconName="search"
+                    >
+                      Browse S3 Bucket
+                    </Button>
+                  </Box>
                 </SpaceBetween>
               </FormField>
 

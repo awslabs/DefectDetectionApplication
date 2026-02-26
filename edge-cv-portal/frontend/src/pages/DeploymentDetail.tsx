@@ -263,6 +263,18 @@ export default function DeploymentDetail() {
                       Cancel Deployment
                     </Button>
                   )}
+                  <Button
+                    iconName="copy"
+                    onClick={() => {
+                      const componentNames = deployment.components
+                        .map(c => c.component_name)
+                        .filter(name => !name.startsWith('aws.greengrass.'))
+                        .join(',');
+                      navigate(`/deployments/create?usecase_id=${usecaseId}&clone_components=${encodeURIComponent(componentNames)}`);
+                    }}
+                  >
+                    Clone Deployment
+                  </Button>
                 </SpaceBetween>
               }
             >

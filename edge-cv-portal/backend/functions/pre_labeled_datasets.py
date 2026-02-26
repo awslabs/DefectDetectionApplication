@@ -12,6 +12,7 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import get_usecase, assume_usecase_role, create_response as shared_create_response, handle_error
 from s3_browse_utils import browse_s3_bucket as browse_s3_bucket_util, filter_manifest_files
+from manifest_transformer import detect_ground_truth_attributes
 
 # Initialize AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -243,7 +244,21 @@ def validate_manifest_file(bucket: str, key: str) -> Dict[str, Any]:
             label_attrs = [k for k in first_entry.keys() if k.endswith('-metadata') and not k.endswith('-ref-metadata')]
             
             if not label_attrs:
-                errors.append("No label column found. Ground Truth manifest must have a label attribute (e.g., 'cookie-classification') with corresponding metadata (e.g., 'cookie-classification-metadata')")
+                # No classification label found - check if this is a valid segmentation-only manifest
+                # Try to detect as segmentation manifest
+                detected_attrs_seg = detect_ground_truth_attributes(first_entry, task_type='segmentation')
+                
+                if detected_attrs_seg and detected_attrs_seg.get('segmentation_only'):
+                    # This is a valid segmentation-only manifest
+                    warnings.append("Segmentation-only manifest detected. Classification labels will be automatically inferred during training (mask present = anomaly, no mask = normal).")
+                else:
+                    # Also try classification in case it's a different format
+                    detected_attrs_cls = detect_ground_truth_attributes(first_entry, task_type='classification')
+                    if detected_attrs_cls:
+                        # Has classification but the detection logic didn't find it with the simple check
+                        warnings.append("Manifest format detected. Will be transformed to DDA format during training.")
+                    else:
+                        errors.append("No label column found. Ground Truth manifest must have a label attribute (e.g., 'cookie-classification') with corresponding metadata (e.g., 'cookie-classification-metadata')")
             else:
                 # Check if all entries have the same label attributes
                 missing_label_entries = set()
