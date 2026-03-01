@@ -1012,6 +1012,18 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     );
 
     const usecaseResource = usecasesResource.addResource('{id}');
+
+    // Verify role endpoint
+    const verifyRoleResource = usecasesResource.addResource('verify-role');
+    verifyRoleResource.addMethod(
+      'POST',
+      useCasesIntegration,
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
     usecaseResource.addMethod(
       'GET',
       useCasesIntegration,

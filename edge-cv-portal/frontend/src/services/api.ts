@@ -155,6 +155,18 @@ class ApiService {
     });
   }
 
+  async verifyRole(roleArn: string, externalId?: string): Promise<{
+    status: string;
+    account_id?: string;
+    assumed_role?: string;
+    error?: string;
+  }> {
+    return this.request('/usecases/verify-role', {
+      method: 'POST',
+      body: JSON.stringify({ role_arn: roleArn, external_id: externalId }),
+    });
+  }
+
   async updateUseCase(id: string, data: Partial<UseCase>): Promise<{ message: string }> {
     return this.request<{ message: string }>(`/usecases/${id}`, {
       method: 'PUT',

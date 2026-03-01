@@ -860,6 +860,8 @@ def handler(event, context):
             return update_usecase(path_parameters['id'], event, user)
         elif http_method == 'DELETE' and path_parameters.get('id'):
             return delete_usecase(path_parameters['id'], user)
+        elif http_method == 'POST' and path.endswith('/verify-role'):
+            return verify_role(event, user)
         
         return create_response(404, {'error': 'Not found'})
         
@@ -933,6 +935,46 @@ def list_usecases(user):
             user['user_id'] if user else 'unknown', 'list_usecases', 'usecase', 'all', 'failure'
         )
         return create_response(500, {'error': f'Failed to list use cases: {str(e)}'})
+
+
+def verify_role(event, user):
+    """Verify that a cross-account role can be assumed"""
+    try:
+        body = json.loads(event.get('body', '{}'))
+        role_arn = body.get('role_arn')
+        external_id = body.get('external_id')
+
+        if not role_arn:
+            return create_response(400, {'error': 'role_arn is required'})
+
+        try:
+            assume_params = {
+                'RoleArn': role_arn,
+                'RoleSessionName': 'verify-role-access',
+                'DurationSeconds': 900
+            }
+            if external_id:
+                assume_params['ExternalId'] = external_id
+
+            response = sts.assume_role(**assume_params)
+            account_id = response['AssumedRoleUser']['Arn'].split(':')[4]
+
+            return create_response(200, {
+                'status': 'success',
+                'account_id': account_id,
+                'assumed_role': response['AssumedRoleUser']['Arn']
+            })
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_msg = e.response['Error']['Message']
+            logger.warning(f"Role verification failed: {error_code} - {error_msg}")
+            return create_response(400, {
+                'status': 'failed',
+                'error': f"{error_code}: {error_msg}"
+            })
+    except Exception as e:
+        logger.error(f"Error verifying role: {str(e)}")
+        return create_response(500, {'error': 'Failed to verify role'})
 
 
 def create_usecase(event, user):

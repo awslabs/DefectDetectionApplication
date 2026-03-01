@@ -1292,3 +1292,39 @@ def validate_usecase_access(user_id: str, usecase_id: str, required_permissions:
             'error': 'Access validation failed',
             'error_code': 'VALIDATION_ERROR'
         }
+
+
+def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str = 'portal-s3-access'):
+    """
+    Get an S3 client with the correct credentials for accessing a bucket.
+    
+    Determines whether the bucket is in the Data Account, UseCase Account,
+    or Portal Account and assumes the appropriate role.
+    
+    Args:
+        usecase: UseCase dict from DynamoDB
+        bucket_name: S3 bucket name to access
+        session_name: STS session name for role assumption
+    
+    Returns:
+        boto3 S3 client with appropriate credentials
+    """
+    data_s3_bucket = usecase.get('data_s3_bucket')
+    data_account_id = usecase.get('data_account_id')
+    usecase_account_id = usecase.get('account_id')
+    
+    is_data_account_bucket = (
+        data_account_id and
+        data_account_id != usecase_account_id and
+        bucket_name == data_s3_bucket
+    )
+    
+    if is_data_account_bucket:
+        role_arn = usecase.get('data_account_role_arn')
+        external_id = usecase.get('data_account_external_id')
+    else:
+        role_arn = usecase.get('cross_account_role_arn')
+        external_id = usecase.get('external_id')
+    
+    credentials = assume_usecase_role(role_arn, external_id, session_name)
+    return create_boto3_client('s3', credentials)

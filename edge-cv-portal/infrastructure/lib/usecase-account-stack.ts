@@ -2,7 +2,6 @@ import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
-import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 
 /**
@@ -82,7 +81,6 @@ export class UseCaseAccountStack extends cdk.Stack {
   public readonly roleArn: string;
   public readonly groundTruthRole: iam.Role;
   public readonly greengrassDevicePolicy: iam.ManagedPolicy;
-  public readonly inferenceResultsBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props: UseCaseAccountStackProps) {
     super(scope, id, props);
@@ -143,34 +141,8 @@ export class UseCaseAccountStack extends cdk.Stack {
       ],
     });
 
-    // Create S3 bucket for inference results
-    // This bucket stores images and metadata uploaded from edge devices
-    this.inferenceResultsBucket = new s3.Bucket(this, 'InferenceResultsBucket', {
-      bucketName: `dda-inference-results-${this.account}`,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      versioned: false,
-      lifecycleRules: [
-        {
-          id: 'DeleteOldInferenceResults',
-          enabled: true,
-          expiration: cdk.Duration.days(90), // Keep inference results for 90 days
-        },
-        {
-          id: 'TransitionToIA',
-          enabled: true,
-          transitions: [
-            {
-              storageClass: s3.StorageClass.INFREQUENT_ACCESS,
-              transitionAfter: cdk.Duration.days(30), // Move to IA after 30 days
-            },
-          ],
-        },
-      ],
-      removalPolicy: cdk.RemovalPolicy.RETAIN, // Don't delete bucket on stack deletion
-    });
-
-    // Add inference results upload permissions to Greengrass device policy
+    // Inference results upload permissions for Greengrass devices
+    // The target bucket is configurable per deployment via InferenceUploader component config
     this.greengrassDevicePolicy.addStatements(
       new iam.PolicyStatement({
         sid: 'AllowInferenceResultsUpload',
@@ -182,8 +154,8 @@ export class UseCaseAccountStack extends cdk.Stack {
           's3:GetBucketLocation',
         ],
         resources: [
-          this.inferenceResultsBucket.bucketArn,
-          `${this.inferenceResultsBucket.bucketArn}/*`,
+          'arn:aws:s3:::dda-inference-results-*',
+          'arn:aws:s3:::dda-inference-results-*/*',
         ],
       })
     );
@@ -807,18 +779,6 @@ export class UseCaseAccountStack extends cdk.Stack {
         ? `${modelArtifactsBucket} + dda-* and *-dda-* patterns`
         : 'dda-* and *-dda-* patterns',
       description: 'S3 buckets Greengrass devices can access for model artifacts',
-    });
-
-    new cdk.CfnOutput(this, 'InferenceResultsBucketName', {
-      value: this.inferenceResultsBucket.bucketName,
-      description: 'S3 bucket for storing inference results from edge devices',
-      exportName: 'DDAInferenceResultsBucketName',
-    });
-
-    new cdk.CfnOutput(this, 'InferenceResultsBucketArn', {
-      value: this.inferenceResultsBucket.bucketArn,
-      description: 'ARN of the inference results S3 bucket',
-      exportName: 'DDAInferenceResultsBucketArn',
     });
 
     // Stack version for upgrade tracking

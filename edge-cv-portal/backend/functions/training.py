@@ -18,7 +18,8 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, create_s3_path_builder,
-    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
+    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase,
+    get_s3_client_for_bucket
 )
 from manifest_transformer import (
     detect_ground_truth_attributes,
@@ -101,25 +102,8 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
             ':role/' in cross_account_role_arn  # Valid role ARN format (not root)
         )
         
-        if is_cross_account:
-            # Multi-account: assume role to access manifest
-            logger.info(f"Cross-account access: assuming role {cross_account_role_arn}")
-            credentials = assume_usecase_role(
-                cross_account_role_arn,
-                usecase.get('external_id'),
-                'validate-manifest'
-            )
-            
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=credentials['AccessKeyId'],
-                aws_secret_access_key=credentials['SecretAccessKey'],
-                aws_session_token=credentials['SessionToken']
-            )
-        else:
-            # Single-account: use Lambda's own credentials
-            logger.info("Single-account setup: using Lambda's own credentials")
-            s3_client = boto3.client('s3')
+        # Get S3 client with correct credentials for the manifest bucket
+        s3_client = get_s3_client_for_bucket(usecase, bucket, 'validate-manifest')
         
         # Download and parse first few lines of manifest
         try:
@@ -1137,13 +1121,9 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         usecase_region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
         logger.info(f"Using region for manifest transformation: {usecase_region}")
         
-        # Create S3 client (handles both single-account and multi-account scenarios)
-        s3_usecase = get_usecase_client(
-            's3',
-            usecase,
-            session_name=f"transform-manifest-{user_id}-{int(datetime.utcnow().timestamp())}",
-            region=usecase_region
-        )
+        # Create S3 client for the source manifest bucket
+        # This handles data account vs usecase account automatically
+        s3_usecase = get_s3_client_for_bucket(usecase, source_bucket, f"xform-{user_id[:8]}-{int(datetime.utcnow().timestamp())}")
         
         # Download source manifest
         logger.info(f"Downloading manifest from {source_manifest_uri}")
@@ -1197,7 +1177,7 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
             output_bucket = output_parts[0]
             output_key = output_parts[1]
         
-        # Upload transformed manifest
+        # Upload transformed manifest (same bucket as source)
         logger.info(f"Uploading transformed manifest to {output_manifest_uri}")
         s3_usecase.put_object(
             Bucket=output_bucket,

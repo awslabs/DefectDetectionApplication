@@ -271,7 +271,8 @@ export default function Settings() {
         const config: Record<string, string> = {};
         
         lines.forEach(line => {
-          const match = line.match(/^([^:]+):\s*(.+)$/);
+          if (line.startsWith('#') || !line.trim()) return;
+          const match = line.match(/^([A-Z_]+)=(.+)$/);
           if (match) {
             config[match[1].trim()] = match[2].trim();
           }
@@ -279,11 +280,11 @@ export default function Settings() {
         
         // Auto-fill form from config file
         setFormData({
-          data_account_id: config['Data Account ID'] || formData.data_account_id,
-          name: formData.name || 'Production Data Account', // Keep user's name if already entered
+          data_account_id: config['DATA_ACCOUNT_ID'] || formData.data_account_id,
+          name: formData.name || 'Data Account',
           description: formData.description || 'Centralized training data storage',
-          role_arn: config['Portal Access Role ARN'] || formData.role_arn,
-          external_id: config['External ID'] || formData.external_id,
+          role_arn: config['ROLE_ARN'] || formData.role_arn,
+          external_id: config['EXTERNAL_ID'] || formData.external_id,
           region: formData.region || 'us-east-1',
         });
         

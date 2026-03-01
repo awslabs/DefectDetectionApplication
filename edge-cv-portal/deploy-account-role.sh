@@ -5,6 +5,9 @@
 
 set -e
 
+# Disable AWS CLI pager to prevent scrolling through JSON output
+export AWS_PAGER=""
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -443,11 +446,12 @@ EOF
 
 elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
     echo "=========================================="
-    echo "UseCase Account Role Setup"
+    echo "UseCase Account Setup (CDK)"
     echo "=========================================="
     echo ""
-    echo "This creates a role in the UseCase Account that allows the Portal Account"
-    echo "to access SageMaker, S3, and Greengrass resources for training and deployment."
+    echo "This deploys the DDA UseCase Account stack using AWS CDK."
+    echo "It creates: IAM cross-account role, SageMaker execution role,"
+    echo "Greengrass device policy, and inference results S3 bucket."
     echo ""
     
     # Get Portal Account ID
@@ -458,225 +462,115 @@ elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
         exit 1
     fi
     
-    # Validate account ID format
-    if ! [[ "$PORTAL_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
-        echo -e "${RED}✗ Invalid account ID format (must be 12 digits)${NC}"
-        exit 1
-    fi
-    
-    # Check if Portal Account is different from current account
+    # Generate or get External ID
+    # Check for existing config file to reuse external ID on re-deploys
     CURRENT_ACCOUNT=$(aws sts get-caller-identity --query 'Account' --output text)
-    if [ "$PORTAL_ACCOUNT_ID" = "$CURRENT_ACCOUNT" ]; then
-        echo -e "${YELLOW}⚠ Warning: Portal Account ID is the same as current account${NC}"
-        echo "This is a single-account setup. You don't need to deploy a cross-account role."
-        echo "In the Portal, use: arn:aws:iam::$CURRENT_ACCOUNT:root as the Role ARN"
-        read -p "Continue anyway? (y/n): " CONTINUE
-        if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
-            echo "Cancelled."
-            exit 0
-        fi
+    EXISTING_CONFIG="usecase-account-${CURRENT_ACCOUNT}-config.txt"
+    EXISTING_EXTERNAL_ID=""
+    if [ -f "$EXISTING_CONFIG" ]; then
+        EXISTING_EXTERNAL_ID=$(grep '^EXTERNAL_ID=' "$EXISTING_CONFIG" | cut -d'=' -f2)
     fi
     
-    echo ""
-    echo "Creating UseCase Account role..."
-    echo "Portal Account: $PORTAL_ACCOUNT_ID"
-    echo ""
-    
-    # Get current region and map to SageMaker account ID
-    CURRENT_REGION=$(aws configure get region || echo "us-east-1")
-    
-    # Map regions to SageMaker account IDs
-    case $CURRENT_REGION in
-        us-east-1)
-            SAGEMAKER_ACCOUNT="432418664414"
-            ;;
-        us-west-2)
-            SAGEMAKER_ACCOUNT="246618743249"
-            ;;
-        eu-west-1)
-            SAGEMAKER_ACCOUNT="685385470294"
-            ;;
-        eu-central-1)
-            SAGEMAKER_ACCOUNT="492215442770"
-            ;;
-        ap-northeast-1)
-            SAGEMAKER_ACCOUNT="501404014126"
-            ;;
-        ap-southeast-1)
-            SAGEMAKER_ACCOUNT="114774131450"
-            ;;
-        ap-southeast-2)
-            SAGEMAKER_ACCOUNT="783357319266"
-            ;;
-        *)
-            # Default to us-east-1 if region not found
-            SAGEMAKER_ACCOUNT="432418664414"
-            echo -e "${YELLOW}⚠ Region $CURRENT_REGION not explicitly mapped, using us-east-1 SageMaker account${NC}"
-            ;;
-    esac
-    
-    # Create trust policy for UseCase Account
-    # Allows both Portal Account and SageMaker service to assume the role
-    TRUST_POLICY=$(cat <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::$PORTAL_ACCOUNT_ID:root"
-      },
-      "Action": "sts:AssumeRole"
-    },
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "sagemaker.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    },
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::$SAGEMAKER_ACCOUNT:root"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOF
-)
-    
-    # Create role
-    if aws iam create-role \
-        --role-name DDAPortalUseCaseRole \
-        --assume-role-policy-document "$TRUST_POLICY" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} Created DDAPortalUseCaseRole"
-    else
-        ROLE_EXISTS=$(aws iam get-role --role-name DDAPortalUseCaseRole 2>/dev/null || echo "")
-        if [ -n "$ROLE_EXISTS" ]; then
-            echo -e "${YELLOW}⚠${NC} DDAPortalUseCaseRole already exists"
-            echo "Updating trust policy with region-aware SageMaker account..."
-            # Create a temporary file for the policy document
-            TEMP_POLICY=$(mktemp)
-            cat > "$TEMP_POLICY" <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::$PORTAL_ACCOUNT_ID:root"
-      },
-      "Action": "sts:AssumeRole"
-    },
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "sagemaker.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    },
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::$SAGEMAKER_ACCOUNT:root"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOF
-            if aws iam update-assume-role-policy \
-                --role-name DDAPortalUseCaseRole \
-                --policy-document file://"$TEMP_POLICY"; then
-                echo -e "${GREEN}✓${NC} Trust policy updated"
-            else
-                echo -e "${RED}✗ Failed to update trust policy${NC}"
-            fi
-            rm -f "$TEMP_POLICY"
+    if [ -n "$EXISTING_EXTERNAL_ID" ]; then
+        echo -e "${YELLOW}⚠ Found existing config: $EXISTING_CONFIG${NC}"
+        echo -e "${YELLOW}  Existing External ID: ${EXISTING_EXTERNAL_ID:0:8}...${EXISTING_EXTERNAL_ID: -4}${NC}"
+        read -p "Reuse existing External ID? (Y/n): " REUSE_ID
+        if [ "$REUSE_ID" != "n" ] && [ "$REUSE_ID" != "N" ]; then
+            EXTERNAL_ID="$EXISTING_EXTERNAL_ID"
+            echo -e "${GREEN}✓ Reusing existing External ID${NC}"
         else
-            echo -e "${RED}✗ Failed to create role. Check IAM permissions.${NC}"
-            exit 1
+            read -p "Enter new External ID (leave blank to generate one): " EXTERNAL_ID
+            if [ -z "$EXTERNAL_ID" ]; then
+                EXTERNAL_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "dda-$(date +%s)")
+                echo -e "${BLUE}Generated new External ID: $EXTERNAL_ID${NC}"
+                echo -e "${RED}⚠ WARNING: If you already registered this account in the portal, you MUST update the External ID there too!${NC}"
+            fi
+        fi
+    else
+        read -p "Enter External ID (leave blank to generate one): " EXTERNAL_ID
+        if [ -z "$EXTERNAL_ID" ]; then
+            EXTERNAL_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "dda-$(date +%s)")
+            echo -e "${BLUE}Generated External ID: $EXTERNAL_ID${NC}"
         fi
     fi
     
-    # Attach policies for UseCase Account
-    echo "Attaching policies..."
+    echo ""
+    echo "Deploying UseCase Account stack..."
+    echo "Portal Account: $PORTAL_ACCOUNT_ID"
+    echo "External ID: ${EXTERNAL_ID:0:8}...${EXTERNAL_ID: -4}"
+    echo ""
     
-    if aws iam attach-role-policy \
-        --role-name DDAPortalUseCaseRole \
-        --policy-arn arn:aws:iam::aws:policy/AmazonSageMakerFullAccess 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} SageMaker policy attached"
-    else
-        echo -e "${YELLOW}⚠${NC} Could not attach SageMaker policy (may already be attached)"
+    # Check CDK bootstrap
+    BOOTSTRAP_VERSION=$(aws ssm get-parameter --name /cdk-bootstrap/hnb659fds/version --query 'Parameter.Value' --output text 2>/dev/null || echo "0")
+
+    # Build CDK context args
+    CDK_CONTEXT="-c portalAccountId=$PORTAL_ACCOUNT_ID -c externalId=$EXTERNAL_ID"
+    if [ "$BOOTSTRAP_VERSION" = "0" ] || [ "$BOOTSTRAP_VERSION" -lt 21 ]; then
+        echo -e "${YELLOW}⚠ CDK bootstrap is missing or outdated (version: $BOOTSTRAP_VERSION, need: 21+)${NC}"
+        echo "Running cdk bootstrap..."
+        cd infrastructure
+        npx cdk bootstrap
+        cd ..
     fi
     
-    if aws iam attach-role-policy \
-        --role-name DDAPortalUseCaseRole \
-        --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} S3 policy attached"
-    else
-        echo -e "${YELLOW}⚠${NC} Could not attach S3 policy (may already be attached)"
-    fi
+    # Build CDK context args
+    CDK_CONTEXT="-c portalAccountId=$PORTAL_ACCOUNT_ID -c externalId=$EXTERNAL_ID"
     
-    if aws iam attach-role-policy \
-        --role-name DDAPortalUseCaseRole \
-        --policy-arn arn:aws:iam::aws:policy/AWSGreengrassFullAccess 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} Greengrass policy attached"
-    else
-        echo -e "${YELLOW}⚠${NC} Could not attach Greengrass policy (may already be attached)"
-    fi
+    # Deploy the stack
+    cd infrastructure
+    npx cdk deploy DDAPortalUseCaseAccountStack \
+        -a "npx ts-node bin/usecase-account-app.ts" \
+        $CDK_CONTEXT \
+        --require-approval never
+    cd ..
     
-    # Get role ARN and external ID
-    ROLE_ARN=$(aws iam get-role --role-name DDAPortalUseCaseRole --query 'Role.Arn' --output text)
-    EXTERNAL_ID=$(openssl rand -hex 16)
+    # Get outputs
+    CURRENT_ACCOUNT=$(aws sts get-caller-identity --query 'Account' --output text)
+    ROLE_ARN="arn:aws:iam::${CURRENT_ACCOUNT}:role/DDAPortalAccessRole"
     
     # Save configuration
-    CONFIG_FILE="usecase-account-$(aws sts get-caller-identity --query 'Account' --output text)-config.txt"
-    
+    CONFIG_FILE="usecase-account-${CURRENT_ACCOUNT}-config.txt"
     cat > "$CONFIG_FILE" << EOF
 # DDA Portal - UseCase Account Configuration
 # Generated: $(date)
+# Deployed via: CDK Stack (DDAPortalUseCaseAccountStack)
 
-# Portal Account ID (where Portal is deployed)
 PORTAL_ACCOUNT_ID=$PORTAL_ACCOUNT_ID
-
-# UseCase Account ID (this account)
-USECASE_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
-
-# Role ARN (use this in Portal when creating UseCase)
+USECASE_ACCOUNT_ID=$CURRENT_ACCOUNT
 ROLE_ARN=$ROLE_ARN
-
-# External ID (use this in Portal when creating UseCase)
 EXTERNAL_ID=$EXTERNAL_ID
+SAGEMAKER_ROLE_ARN=arn:aws:iam::${CURRENT_ACCOUNT}:role/DDASageMakerExecutionRole
 
-# SageMaker Execution Role (optional, for training)
-SAGEMAKER_ROLE_ARN=$(aws iam get-role --role-name DDAPortalUseCaseRole --query 'Role.Arn' --output text)
+# Resources created:
+# - DDAPortalAccessRole (cross-account access)
+# - DDASageMakerExecutionRole (training/compilation)
+# - DDAPortalComponentAccessPolicy (Greengrass device access)
+# - dda-inference-results-${CURRENT_ACCOUNT} (inference results bucket)
 EOF
     
     echo ""
     echo -e "${GREEN}=========================================="
-    echo "UseCase Account Role Created Successfully!"
+    echo "UseCase Account Stack Deployed Successfully!"
     echo "==========================================${NC}"
     echo ""
     echo "Configuration saved to: $CONFIG_FILE"
     echo ""
     echo "Next steps:"
-    echo "1. Copy the configuration file to your Portal Account"
-    echo "2. In the Portal, go to Settings → UseCases"
-    echo "3. Click 'Add UseCase' and fill in:"
-    echo "   - Account ID: $(aws sts get-caller-identity --query 'Account' --output text)"
+    echo "1. In the Portal, go to Settings → UseCases"
+    echo "2. Click 'Add UseCase' and fill in:"
+    echo "   - Account ID: $CURRENT_ACCOUNT"
     echo "   - Role ARN: $ROLE_ARN"
     echo "   - External ID: $EXTERNAL_ID"
+    echo "   - SageMaker Role ARN: arn:aws:iam::${CURRENT_ACCOUNT}:role/DDASageMakerExecutionRole"
     echo ""
     
 elif [ "$DEPLOYMENT_TYPE" = "data" ]; then
     echo "=========================================="
-    echo "Data Account Role Setup"
+    echo "Data Account Setup (CDK)"
     echo "=========================================="
     echo ""
-    echo "This creates a role in the Data Account that allows the Portal Account"
+    echo "This deploys the DDA Data Account stack using AWS CDK."
+    echo "It creates: IAM cross-account role for Portal and UseCase accounts"
     echo "to access S3 buckets for training data storage."
     echo ""
     
@@ -688,122 +582,99 @@ elif [ "$DEPLOYMENT_TYPE" = "data" ]; then
         exit 1
     fi
     
-    # Validate account ID format
-    if ! [[ "$PORTAL_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
-        echo -e "${RED}✗ Invalid account ID format (must be 12 digits)${NC}"
-        exit 1
-    fi
-    
-    # Check if Portal Account is different from current account
+    # Generate or get External ID
+    # Check for existing config file to reuse external ID on re-deploys
     CURRENT_ACCOUNT=$(aws sts get-caller-identity --query 'Account' --output text)
-    if [ "$PORTAL_ACCOUNT_ID" = "$CURRENT_ACCOUNT" ]; then
-        echo -e "${YELLOW}⚠ Warning: Portal Account ID is the same as current account${NC}"
-        echo "This is a single-account setup. You don't need to deploy a cross-account role."
-        echo "In the Portal, use the same account for both UseCase and Data Account."
-        read -p "Continue anyway? (y/n): " CONTINUE
-        if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
-            echo "Cancelled."
-            exit 0
-        fi
+    EXISTING_CONFIG="data-account-${CURRENT_ACCOUNT}-config.txt"
+    EXISTING_EXTERNAL_ID=""
+    if [ -f "$EXISTING_CONFIG" ]; then
+        EXISTING_EXTERNAL_ID=$(grep '^EXTERNAL_ID=' "$EXISTING_CONFIG" | cut -d'=' -f2)
     fi
     
-    echo ""
-    echo "Creating Data Account role..."
-    echo "Portal Account: $PORTAL_ACCOUNT_ID"
-    echo ""
-    
-    # Create trust policy for Data Account
-    TRUST_POLICY=$(cat <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::$PORTAL_ACCOUNT_ID:root"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOF
-)
-    
-    # Create role
-    if aws iam create-role \
-        --role-name DDAPortalDataAccessRole \
-        --assume-role-policy-document "$TRUST_POLICY" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} Created DDAPortalDataAccessRole"
-    else
-        ROLE_EXISTS=$(aws iam get-role --role-name DDAPortalDataAccessRole 2>/dev/null || echo "")
-        if [ -n "$ROLE_EXISTS" ]; then
-            echo -e "${YELLOW}⚠${NC} DDAPortalDataAccessRole already exists"
-            echo "Updating trust policy..."
-            aws iam update-assume-role-policy-document \
-                --role-name DDAPortalDataAccessRole \
-                --policy-document "$TRUST_POLICY" 2>/dev/null || true
-            echo -e "${GREEN}✓${NC} Trust policy updated"
+    if [ -n "$EXISTING_EXTERNAL_ID" ]; then
+        echo -e "${YELLOW}⚠ Found existing config: $EXISTING_CONFIG${NC}"
+        echo -e "${YELLOW}  Existing External ID: ${EXISTING_EXTERNAL_ID:0:8}...${EXISTING_EXTERNAL_ID: -4}${NC}"
+        read -p "Reuse existing External ID? (Y/n): " REUSE_ID
+        if [ "$REUSE_ID" != "n" ] && [ "$REUSE_ID" != "N" ]; then
+            EXTERNAL_ID="$EXISTING_EXTERNAL_ID"
+            echo -e "${GREEN}✓ Reusing existing External ID${NC}"
         else
-            echo -e "${RED}✗ Failed to create role. Check IAM permissions.${NC}"
-            exit 1
+            read -p "Enter new External ID (leave blank to generate one): " EXTERNAL_ID
+            if [ -z "$EXTERNAL_ID" ]; then
+                EXTERNAL_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "dda-$(date +%s)")
+                echo -e "${BLUE}Generated new External ID: $EXTERNAL_ID${NC}"
+                echo -e "${RED}⚠ WARNING: If you already registered this account in the portal, you MUST update the External ID there too!${NC}"
+            fi
+        fi
+    else
+        read -p "Enter External ID (leave blank to generate one): " EXTERNAL_ID
+        if [ -z "$EXTERNAL_ID" ]; then
+            EXTERNAL_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "dda-$(date +%s)")
+            echo -e "${BLUE}Generated External ID: $EXTERNAL_ID${NC}"
         fi
     fi
     
-    # Attach policies for Data Account
-    echo "Attaching policies..."
+    # Optional: data bucket names
+    read -p "Enter data bucket names (comma-separated, leave blank for auto-config): " DATA_BUCKETS
     
-    if aws iam attach-role-policy \
-        --role-name DDAPortalDataAccessRole \
-        --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} S3 policy attached"
-    else
-        echo -e "${YELLOW}⚠${NC} Could not attach S3 policy (may already be attached)"
+    echo ""
+    echo "Deploying Data Account stack..."
+    echo "Portal Account: $PORTAL_ACCOUNT_ID"
+    echo "External ID: ${EXTERNAL_ID:0:8}...${EXTERNAL_ID: -4}"
+    echo ""
+    
+    # Check CDK bootstrap
+    BOOTSTRAP_VERSION=$(aws ssm get-parameter --name /cdk-bootstrap/hnb659fds/version --query 'Parameter.Value' --output text 2>/dev/null || echo "0")
+    if [ "$BOOTSTRAP_VERSION" = "0" ] || [ "$BOOTSTRAP_VERSION" -lt 21 ]; then
+        echo -e "${YELLOW}⚠ CDK bootstrap is missing or outdated (version: $BOOTSTRAP_VERSION, need: 21+)${NC}"
+        echo "Running cdk bootstrap..."
+        cd infrastructure
+        npx cdk bootstrap
+        cd ..
     fi
     
-    if aws iam attach-role-policy \
-        --role-name DDAPortalDataAccessRole \
-        --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} CloudWatch Logs policy attached"
-    else
-        echo -e "${YELLOW}⚠${NC} Could not attach CloudWatch Logs policy (may already be attached)"
+    # Build CDK context args
+    CDK_CONTEXT="-c portalAccountId=$PORTAL_ACCOUNT_ID -c externalId=$EXTERNAL_ID"
+    if [ -n "$DATA_BUCKETS" ]; then
+        CDK_CONTEXT="$CDK_CONTEXT -c dataBucketNames=$DATA_BUCKETS"
     fi
     
-    # Get role ARN and external ID
-    ROLE_ARN=$(aws iam get-role --role-name DDAPortalDataAccessRole --query 'Role.Arn' --output text)
-    EXTERNAL_ID=$(openssl rand -hex 16)
+    # Deploy the stack
+    cd infrastructure
+    npx cdk deploy DDAPortalDataAccountStack \
+        -a "npx ts-node bin/data-account-app.ts" \
+        $CDK_CONTEXT \
+        --require-approval never
+    cd ..
+    
+    # Get outputs
+    CURRENT_ACCOUNT=$(aws sts get-caller-identity --query 'Account' --output text)
+    ROLE_ARN="arn:aws:iam::${CURRENT_ACCOUNT}:role/DDAPortalDataAccessRole"
     
     # Save configuration
-    CONFIG_FILE="data-account-$(aws sts get-caller-identity --query 'Account' --output text)-config.txt"
-    
+    CONFIG_FILE="data-account-${CURRENT_ACCOUNT}-config.txt"
     cat > "$CONFIG_FILE" << EOF
 # DDA Portal - Data Account Configuration
 # Generated: $(date)
+# Deployed via: CDK Stack (DDAPortalDataAccountStack)
 
-# Portal Account ID (where Portal is deployed)
 PORTAL_ACCOUNT_ID=$PORTAL_ACCOUNT_ID
-
-# Data Account ID (this account)
-DATA_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
-
-# Role ARN (use this in Portal when configuring Data Account)
+DATA_ACCOUNT_ID=$CURRENT_ACCOUNT
 ROLE_ARN=$ROLE_ARN
-
-# External ID (use this in Portal when configuring Data Account)
 EXTERNAL_ID=$EXTERNAL_ID
 EOF
     
     echo ""
     echo -e "${GREEN}=========================================="
-    echo "Data Account Role Created Successfully!"
+    echo "Data Account Stack Deployed Successfully!"
     echo "==========================================${NC}"
     echo ""
     echo "Configuration saved to: $CONFIG_FILE"
     echo ""
     echo "Next steps:"
-    echo "1. Copy the configuration file to your Portal Account"
-    echo "2. In the Portal, go to Settings → Data Accounts"
-    echo "3. Click 'Add Data Account' and fill in:"
-    echo "   - Account ID: $(aws sts get-caller-identity --query 'Account' --output text)"
+    echo "1. In the Portal, go to Settings → Data Accounts"
+    echo "2. Click 'Add Data Account' and fill in:"
+    echo "   - Account ID: $CURRENT_ACCOUNT"
     echo "   - Role ARN: $ROLE_ARN"
     echo "   - External ID: $EXTERNAL_ID"
     echo ""

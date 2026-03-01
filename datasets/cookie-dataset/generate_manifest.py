@@ -88,19 +88,33 @@ def generate_classification_manifest(bucket_name, output_file="train_class.manif
         # Build S3 URI with normalized bucket name
         s3_image_uri = f"s3://{bucket_only}/{base_path}/training-images/{img_file.name}"
         
-        # Build manifest entry - use DDA format (standardized names)
-        # This is ready for training without transformation
-        entry = {
-            "source-ref": s3_image_uri,
-            "anomaly-label": label_value,
-            "anomaly-label-metadata": {
-                "job-name": "anomaly-label",
-                "class-name": class_label,
-                "human-annotated": "yes",
-                "creation-date": datetime.utcnow().isoformat() + "Z",
-                "type": "groundtruth/image-classification"
+        # Build manifest entry based on format type
+        if format_type == "ground-truth":
+            # Ground Truth format with job-specific attribute names
+            entry = {
+                "source-ref": s3_image_uri,
+                "cookie-classification": label_value,
+                "cookie-classification-metadata": {
+                    "job-name": "cookie-classification",
+                    "class-name": class_label,
+                    "human-annotated": "yes",
+                    "creation-date": datetime.utcnow().isoformat() + "Z",
+                    "type": "groundtruth/image-classification"
+                }
             }
-        }
+        else:
+            # DDA format with standardized attribute names
+            entry = {
+                "source-ref": s3_image_uri,
+                "anomaly-label": label_value,
+                "anomaly-label-metadata": {
+                    "job-name": "anomaly-label",
+                    "class-name": class_label,
+                    "human-annotated": "yes",
+                    "creation-date": datetime.utcnow().isoformat() + "Z",
+                    "type": "groundtruth/image-classification"
+                }
+            }
         
         manifest_lines.append(json.dumps(entry))
     
