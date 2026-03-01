@@ -346,9 +346,9 @@ export default function UseCases() {
             cell: (item: UseCase) => item.s3_bucket,
           },
           {
-            id: 'cost_center',
-            header: 'Cost Center',
-            cell: (item: UseCase) => item.cost_center || '-',
+            id: 'region',
+            header: 'Region',
+            cell: (item: UseCase) => (item as any).region || 'us-east-1',
           },
           {
             id: 'shared_components',
@@ -515,18 +515,6 @@ export default function UseCases() {
                 setFormData({ ...formData, cross_account_role_arn: detail.value })
               }
               placeholder="arn:aws:iam::123456789012:role/PortalAccessRole"
-            />
-          </FormField>
-
-          <FormField
-            label="Cost Center (Optional)"
-            description="Cost center for tracking expenses"
-            stretch
-          >
-            <Input
-              value={formData.cost_center || ''}
-              onChange={({ detail }) => setFormData({ ...formData, cost_center: detail.value })}
-              placeholder="CC-12345"
             />
           </FormField>
 

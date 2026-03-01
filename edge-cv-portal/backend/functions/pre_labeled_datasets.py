@@ -170,17 +170,28 @@ def validate_manifest(event):
     try:
         body = json.loads(event.get('body', '{}'))
         manifest_s3_uri = body.get('manifest_s3_uri')
+        usecase_id = body.get('usecase_id')
         
         if not manifest_s3_uri:
             return create_response(400, {'error': 'manifest_s3_uri is required'})
+        
+        if not usecase_id:
+            return create_response(400, {'error': 'usecase_id is required'})
         
         # Parse S3 URI
         parsed = urlparse(manifest_s3_uri)
         bucket = parsed.netloc
         key = parsed.path.lstrip('/')
         
+        # Get usecase to determine which account/role to use for S3 access
+        usecase = get_usecase(usecase_id)
+        
+        # Get S3 client with correct credentials for the manifest bucket
+        from shared_utils import get_s3_client_for_bucket
+        s3_client = get_s3_client_for_bucket(usecase, bucket, 'validate-manifest')
+        
         # Validate manifest file
-        validation_result = validate_manifest_file(bucket, key)
+        validation_result = validate_manifest_file(bucket, key, s3_client)
         
         return create_response(200, validation_result)
         
@@ -191,11 +202,13 @@ def validate_manifest(event):
         return create_response(500, {'error': 'Failed to validate manifest', 'details': str(e)})
 
 
-def validate_manifest_file(bucket: str, key: str) -> Dict[str, Any]:
+def validate_manifest_file(bucket: str, key: str, s3_client=None) -> Dict[str, Any]:
     """Validate manifest file format and content"""
     try:
+        if s3_client is None:
+            s3_client = s3
         # Download and parse manifest
-        response = s3.get_object(Bucket=bucket, Key=key)
+        response = s3_client.get_object(Bucket=bucket, Key=key)
         content = response['Body'].read().decode('utf-8')
         
         lines = content.strip().split('\n')

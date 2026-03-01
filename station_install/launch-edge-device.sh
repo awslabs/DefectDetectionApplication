@@ -221,9 +221,36 @@ log_info "AWS Account: $ACCOUNT_ID"
 if [ -n "$IAM_PROFILE" ]; then
     log_info "Validating IAM instance profile: $IAM_PROFILE"
     if ! aws iam get-instance-profile --instance-profile-name "$IAM_PROFILE" &>/dev/null; then
-        log_error "WARNING: IAM instance profile '$IAM_PROFILE' not found"
-        log_error "Device will launch without IAM role (suitable for non-EC2 edge devices)"
-        IAM_PROFILE=""
+        log_warn "IAM instance profile '$IAM_PROFILE' not found. Creating it..."
+        
+        # Create IAM role
+        if ! aws iam get-role --role-name "$IAM_PROFILE" &>/dev/null; then
+            log_info "Creating IAM role: $IAM_PROFILE"
+            aws iam create-role \
+                --role-name "$IAM_PROFILE" \
+                --assume-role-policy-document '{
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {"Service": "ec2.amazonaws.com"},
+                        "Action": "sts:AssumeRole"
+                    }]
+                }' > /dev/null
+            
+            aws iam attach-role-policy \
+                --role-name "$IAM_PROFILE" \
+                --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        fi
+        
+        # Create instance profile and attach role
+        aws iam create-instance-profile --instance-profile-name "$IAM_PROFILE" > /dev/null
+        aws iam add-role-to-instance-profile \
+            --instance-profile-name "$IAM_PROFILE" \
+            --role-name "$IAM_PROFILE"
+        
+        log_info "Waiting 30 seconds for IAM propagation..."
+        sleep 30
+        log_info "Created IAM instance profile: $IAM_PROFILE"
     else
         log_info "IAM instance profile validated: $IAM_PROFILE"
     fi

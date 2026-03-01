@@ -215,7 +215,7 @@ fi
 
 echo "▶ Installing AWS Greengrass Development Kit (GDK)..."
 if ! command -v gdk >/dev/null 2>&1; then
-    run_cmd "sudo python3 -m pip install git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git@v1.6.2" || add_warning "Failed to install GDK CLI from GitHub"
+    run_cmd "pip3 install --user git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git@v1.6.2" || add_warning "Failed to install GDK CLI from GitHub"
 else
     echo "✓ GDK CLI already installed"
 fi
