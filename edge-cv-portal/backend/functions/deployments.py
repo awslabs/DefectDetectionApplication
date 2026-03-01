@@ -494,66 +494,9 @@ def create_deployment(body, user):
         if target_thing_group:
             target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{target_thing_group}"
         elif target_devices:
-            # For single device deployment, create a thing group and add the device to it
-            # Greengrass requires deployments to target thing groups
-            thing_group_name = f"{target_devices[0]}-group"
-            target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{thing_group_name}"
-            
-            try:
-                # Create thing group if it doesn't exist
-                logger.info(f"Creating thing group {thing_group_name} for device {target_devices[0]}")
-                iot_client.create_thing_group(
-                    thingGroupName=thing_group_name,
-                    thingGroupProperties={
-                        'attributePayload': {
-                            'attributes': {
-                                'dda-portal:managed': 'true',
-                                'dda-portal:usecase-id': usecase_id,
-                                'dda-portal:created-by': user['user_id']
-                            }
-                        }
-                    }
-                )
-                logger.info(f"Created thing group {thing_group_name}")
-            except ClientError as e:
-                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-                if error_code == 'ResourceAlreadyExistsException':
-                    logger.info(f"Thing group {thing_group_name} already exists")
-                else:
-                    logger.error(f"Error creating thing group {thing_group_name}: {error_code} - {str(e)}")
-                    return create_response(500, {'error': f'Failed to create thing group: {str(e)}'})
-            except Exception as e:
-                logger.error(f"Unexpected error creating thing group {thing_group_name}: {str(e)}")
-                return create_response(500, {'error': f'Failed to create thing group: {str(e)}'})
-            
-            # Verify thing group exists before proceeding
-            try:
-                logger.info(f"Verifying thing group {thing_group_name} exists")
-                iot_client.describe_thing_group(thingGroupName=thing_group_name)
-                logger.info(f"Verified thing group {thing_group_name} exists")
-            except ClientError as e:
-                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-                logger.error(f"Thing group {thing_group_name} does not exist or cannot be accessed: {error_code} - {str(e)}")
-                return create_response(500, {'error': f'Thing group verification failed: {str(e)}'})
-            
-            # Add device to thing group
-            try:
-                logger.info(f"Adding device {target_devices[0]} to thing group {thing_group_name}")
-                iot_client.add_thing_to_thing_group(
-                    thingGroupName=thing_group_name,
-                    thingName=target_devices[0]
-                )
-                logger.info(f"Added device {target_devices[0]} to thing group {thing_group_name}")
-            except ClientError as e:
-                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-                if error_code == 'ResourceAlreadyExistsException':
-                    logger.info(f"Device {target_devices[0]} already in thing group {thing_group_name}")
-                else:
-                    logger.error(f"Error adding device to thing group: {error_code} - {str(e)}")
-                    return create_response(500, {'error': f'Failed to add device to thing group: {str(e)}'})
-            except Exception as e:
-                logger.error(f"Unexpected error adding device to thing group: {str(e)}")
-                return create_response(500, {'error': f'Failed to add device to thing group: {str(e)}'})
+            # Deploy directly to the thing ARN (Greengrass supports both thing and thinggroup targets)
+            target_arn = f"arn:aws:iot:{region}:{account_id}:thing/{target_devices[0]}"
+            logger.info(f"Deploying directly to device: {target_devices[0]}")
         else:
             return create_response(400, {'error': 'No target devices or thing group specified'})
         
