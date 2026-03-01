@@ -572,6 +572,8 @@ export class UseCaseAccountStack extends cdk.Stack {
           'iot:ListThings',
           'iot:UpdateThing',
           'iot:ListThingGroupsForThing',
+          'iot:AddThingToThingGroup',
+          'iot:RemoveThingFromThingGroup',
           'iot:ListTagsForResource',
         ],
         resources: [`arn:aws:iot:*:${this.account}:thing/*`],
