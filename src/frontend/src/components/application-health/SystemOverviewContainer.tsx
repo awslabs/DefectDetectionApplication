@@ -107,6 +107,9 @@ export default function SystemOverviewContainer(
         <ValueWithLabel label="OpenCV Version">
           <TextContent> {props.systemHealth?.opencvVersion === "NOT_INSTALLED" ? "Not found" : props.systemHealth?.opencvVersion}</TextContent>
         </ValueWithLabel>
+        <ValueWithLabel label="LocalServer Component Version">
+          <TextContent> {props.systemHealth?.localServerVersion === "NOT_FOUND" ? "Not found" : props.systemHealth?.localServerVersion}</TextContent>
+        </ValueWithLabel>
       </ColumnLayout>
     </Container>
   );

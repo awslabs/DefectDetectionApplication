@@ -88,6 +88,7 @@ class GetSystemHealthResponse(BaseModel):
     cudaVersion: str
     tensorRTVersion: str
     opencvVersion: str
+    localServerVersion: str
 
 
 # Function to get CUDA version
@@ -109,6 +110,26 @@ def get_opencv_version_from_lfv():
         logger.warn("opencv_python_headless module is not installed for edge agent")
     return version
 
+def get_local_server_component_version():
+    """Get the version of the LocalServer component from Greengrass"""
+    version = "NOT_FOUND"
+    try:
+        list_components_request = ListComponentsRequest()
+        list_components_operation = ipc_client.new_list_components()
+        list_components_operation.activate(list_components_request)
+        list_components_future = list_components_operation.get_response()
+        list_components_response = list_components_future.result(GG_IPC_FUTURE_TIMEOUT)
+        
+        for component in list_components_response.components:
+            if component.component_name.startswith("aws.edgeml.dda.LocalServer"):
+                version = component.version
+                logger.info(f"Found LocalServer component: {component.component_name} version {version}")
+                break
+    except Exception as e:
+        logger.error(f"Failed to get LocalServer component version: {e}")
+    
+    return version
+
 @router.get("/system-health")
 def get_system_health() -> GetSystemHealthResponse:
     cpu_usage_percent = psutil.cpu_percent(interval=None)
@@ -120,6 +141,7 @@ def get_system_health() -> GetSystemHealthResponse:
     cuda_version = get_cuda_version()
     tensorrt_version = get_tensorrt_version()
     opencv_version = get_opencv_version_from_lfv()
+    local_server_version = get_local_server_component_version()
     system_health = {
         "cpuUsagePercent": cpu_usage_percent,
         "memoryUsagePercent": memory_usage_percent,
@@ -128,7 +150,8 @@ def get_system_health() -> GetSystemHealthResponse:
         "diskUsagePercent": disk_usage_percent,
         "cudaVersion": cuda_version,
         "tensorRTVersion": tensorrt_version,
-        "opencvVersion": opencv_version
+        "opencvVersion": opencv_version,
+        "localServerVersion": local_server_version
     }
     return system_health
 

@@ -206,7 +206,7 @@ export default function AddImageSource(): JSX.Element {
                   </Header>
                 }
                 items={[
-                  { value: ImageSourceType.Camera, label: "Camera" },
+                  { value: ImageSourceType.Camera, label: "GigEVision/USBVision Camera" },
                   { value: ImageSourceType.ICam, label: "ICAM 520/540" },
                   { value: ImageSourceType.NvidiaCSI, label: "Nvidia CSI" },
                   { value: ImageSourceType.Folder, label: "Folder" },

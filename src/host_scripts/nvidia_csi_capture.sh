@@ -44,9 +44,19 @@ read_config() {
     if [ "$USE_JQ" = "true" ] && [ -f "$CONFIG_FILE" ]; then
         GAIN=$(jq -r '.gain // 4' "$CONFIG_FILE" 2>/dev/null || echo "4")
         EXPOSURE=$(jq -r '.exposure // 5000000' "$CONFIG_FILE" 2>/dev/null || echo "5000000")
+        
+        # Read crop settings
+        CROP_TOP=$(jq -r '.crop.top // 0' "$CONFIG_FILE" 2>/dev/null || echo "0")
+        CROP_BOTTOM=$(jq -r '.crop.bottom // 0' "$CONFIG_FILE" 2>/dev/null || echo "0")
+        CROP_LEFT=$(jq -r '.crop.left // 0' "$CONFIG_FILE" 2>/dev/null || echo "0")
+        CROP_RIGHT=$(jq -r '.crop.right // 0' "$CONFIG_FILE" 2>/dev/null || echo "0")
     else
         GAIN=4
         EXPOSURE=5000000
+        CROP_TOP=0
+        CROP_BOTTOM=0
+        CROP_LEFT=0
+        CROP_RIGHT=0
     fi
 }
 
@@ -54,8 +64,9 @@ read_config() {
 read_config
 LAST_GAIN=$GAIN
 LAST_EXPOSURE=$EXPOSURE
+LAST_CROP="$CROP_TOP,$CROP_BOTTOM,$CROP_LEFT,$CROP_RIGHT"
 
-echo "Initial settings - Gain: $GAIN, Exposure: $EXPOSURE (jq available: $USE_JQ)"
+echo "Initial settings - Gain: $GAIN, Exposure: $EXPOSURE, Crop: top=$CROP_TOP bottom=$CROP_BOTTOM left=$CROP_LEFT right=$CROP_RIGHT (jq available: $USE_JQ)"
 
 # Continuous capture loop
 CAPTURE_COUNT=0
@@ -63,10 +74,12 @@ while true; do
     # Check if config has changed (only if jq is available)
     if [ "$USE_JQ" = "true" ]; then
         read_config
-        if [ "$GAIN" != "$LAST_GAIN" ] || [ "$EXPOSURE" != "$LAST_EXPOSURE" ]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Settings updated - Gain: $GAIN, Exposure: $EXPOSURE"
+        CURRENT_CROP="$CROP_TOP,$CROP_BOTTOM,$CROP_LEFT,$CROP_RIGHT"
+        if [ "$GAIN" != "$LAST_GAIN" ] || [ "$EXPOSURE" != "$LAST_EXPOSURE" ] || [ "$CURRENT_CROP" != "$LAST_CROP" ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Settings updated - Gain: $GAIN, Exposure: $EXPOSURE, Crop: top=$CROP_TOP bottom=$CROP_BOTTOM left=$CROP_LEFT right=$CROP_RIGHT"
             LAST_GAIN=$GAIN
             LAST_EXPOSURE=$EXPOSURE
+            LAST_CROP=$CURRENT_CROP
             CAPTURE_COUNT=0  # Reset counter to log next capture
         fi
     fi
@@ -87,6 +100,12 @@ while true; do
     # IMPORTANT: The extreme values (13000 and 683709000) are rejected as invalid
     # Use safe middle range values that the camera accepts
     
+    # Build videocrop parameters if cropping is enabled
+    CROP_PARAMS=""
+    if [ "$CROP_TOP" -gt 0 ] || [ "$CROP_BOTTOM" -gt 0 ] || [ "$CROP_LEFT" -gt 0 ] || [ "$CROP_RIGHT" -gt 0 ]; then
+        CROP_PARAMS="videocrop top=$CROP_TOP bottom=$CROP_BOTTOM left=$CROP_LEFT right=$CROP_RIGHT !"
+    fi
+    
     gst-launch-1.0 -q \
         nvarguscamerasrc sensor_id=0 num-buffers=1 \
         aeantibanding=0 \
@@ -97,6 +116,7 @@ while true; do
         nvvidconv ! \
         'video/x-raw,format=BGRx' ! \
         videoconvert ! \
+        $CROP_PARAMS \
         jpegenc idct-method=2 quality=100 ! \
         filesink location="$TEMP_IMAGE" 2>/dev/null
     

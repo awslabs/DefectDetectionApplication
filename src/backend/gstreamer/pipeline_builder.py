@@ -90,7 +90,7 @@ class GstPipelineBuilder:
     def _add_nvidia_csi_image_source(self, image_source_config, override_processing_pipeline: str = None):
         logger.warning(f"NVIDIA CSI SOURCE CONFIG DEBUG: Using file-based capture from host service")
         
-        # Write gain and exposure settings to config file for host service
+        # Write gain, exposure, and crop settings to config file for host service
         config_file = "/aws_dda/nvidia-csi-capture/config.json"
         try:
             import json
@@ -102,11 +102,21 @@ class GstPipelineBuilder:
                 "exposure": image_source_config.get("exposure", 5000000)
             }
             
+            # Add crop settings if present
+            crop_config = image_source_config.get("imageCrop")
+            if crop_config:
+                config["crop"] = {
+                    "top": crop_config.get("top", 0),
+                    "bottom": crop_config.get("bottom", 0),
+                    "left": crop_config.get("left", 0),
+                    "right": crop_config.get("right", 0)
+                }
+            
             with open(config_file, 'w') as f:
                 json.dump(config, f)
             os.chmod(config_file, 0o666)
             
-            logger.warning(f"NVIDIA CSI: Updated config - gain={config['gain']}, exposure={config['exposure']}")
+            logger.warning(f"NVIDIA CSI: Updated config - gain={config['gain']}, exposure={config['exposure']}, crop={config.get('crop', 'none')}")
         except Exception as e:
             logger.error(f"NVIDIA CSI: Failed to write config file: {e}")
         
