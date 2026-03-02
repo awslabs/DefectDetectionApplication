@@ -87,6 +87,46 @@ class GstPipelineBuilder:
             ]))
         logger.debug("building pipeline for icam")
 
+    def _add_nvidia_csi_image_source(self, image_source_config, override_processing_pipeline: str = None):
+        logger.warning(f"NVIDIA CSI SOURCE CONFIG DEBUG: Using file-based capture from host service")
+        
+        # Write gain, exposure, and crop settings to config file for host service
+        config_file = "/aws_dda/nvidia-csi-capture/config.json"
+        try:
+            import json
+            import os
+            os.makedirs("/aws_dda/nvidia-csi-capture", exist_ok=True)
+            
+            config = {
+                "gain": image_source_config.get("gain", 4),
+                "exposure": image_source_config.get("exposure", 5000000)
+            }
+            
+            # Add crop settings if present
+            crop_config = image_source_config.get("imageCrop")
+            if crop_config:
+                config["crop"] = {
+                    "top": crop_config.get("top", 0),
+                    "bottom": crop_config.get("bottom", 0),
+                    "left": crop_config.get("left", 0),
+                    "right": crop_config.get("right", 0)
+                }
+            
+            with open(config_file, 'w') as f:
+                json.dump(config, f)
+            os.chmod(config_file, 0o666)
+            
+            logger.warning(f"NVIDIA CSI: Updated config - gain={config['gain']}, exposure={config['exposure']}, crop={config.get('crop', 'none')}")
+        except Exception as e:
+            logger.error(f"NVIDIA CSI: Failed to write config file: {e}")
+        
+        # Nvidia CSI uses file-based capture from host service
+        # The host service continuously captures to /aws_dda/nvidia-csi-capture/latest.jpg
+        file_path = "/aws_dda/nvidia-csi-capture/latest.jpg"
+        
+        self._add_file_image_source(file_path)
+        logger.debug("building pipeline for nvidia csi using file source")
+
     def _add_file_image_source(self, file_path):
         self.pipeline_config.add_plugin(PluginDefinition("filesrc",
                                                             [PluginArg("blocksize", -1),
@@ -247,6 +287,13 @@ class GstPipelineBuilder:
                 image_source_config = utils.convert_sqlalchemy_object_to_dict(image_source_config)
             self._add_icam_image_source(image_source_config, override_processing_pipeline)
 
+        elif source_type == ImageSourceType.NVIDIA_CSI:
+            image_source_config = self.image_source.get("imageSourceConfiguration", None)
+            logger.debug("nvidia csi image_source_config="+str(image_source_config))
+            if not isinstance(image_source_config, dict):
+                image_source_config = utils.convert_sqlalchemy_object_to_dict(image_source_config)
+            self._add_nvidia_csi_image_source(image_source_config, override_processing_pipeline)
+
         elif source_type == ImageSourceType.FOLDER:
             if override_folder_source_file:
                 self._add_file_image_source(override_folder_source_file)
@@ -275,6 +322,7 @@ class GstPipelineBuilder:
         if not self.image_source and not self.workflow_config:
             return None
         if not self.workflow_config:
+            logger.warning(f"BUILD DEBUG: is_preview={is_preview}, imageCapturePath={self.image_source.get('imageCapturePath')}, imageSourceId={self.image_source.get('imageSourceId')}")
             if is_preview:
                 filename = "{}-{}.jpg".format(constants.DEFAULT_IMAGE_OUTPUT_PREFIX, self.image_source.get("imageSourceId"))
                 location = "{}/{}".format(constants.DEFAULT_IMAGE_SAVE_DIR_PATH, filename)
@@ -286,6 +334,7 @@ class GstPipelineBuilder:
                     location = "{}/{}".format(override_output_location, filename)
                 else:
                     location = "{}/{}".format(self.image_source.get("imageCapturePath"), filename)
+            logger.warning(f"BUILD DEBUG: Final location={location}")
             self.pipeline_config.add_plugin(PluginDefinition("jpegenc", [
                 PluginArg("idct-method", 2),
                 PluginArg("quality", 100)

@@ -66,6 +66,22 @@
 			"processingPipeline" : "capsfilter caps=video/x-raw,format=RGB ! videoconvert"
 		}
 	},
+	"Nvidia CSI" : {
+		"default" : {
+			"processingPipeline" : "video/x-raw(memory:NVMM),width=3264,height=2464,framerate=21/1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert",
+			"device": "0",
+			"deviceName": "nvarguscamerasrc",
+			"gain": 4,
+			"exposure": 5000000
+		}
+	},
+	"ICAM" : {
+		"default" : {
+			"processingPipeline" : "videoconvert",
+			"device": "/dev/video0",
+			"deviceName": "v4l2src"
+		}
+	},
     "default" : {
 		"default" : {
 			"processingPipeline": "capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"

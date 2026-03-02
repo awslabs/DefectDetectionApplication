@@ -34,7 +34,7 @@ import CaptureWorkflowInfo from "./CaptureWorkflowInfo";
 import Divider from "components/common/Divider";
 import { useNavigate } from "react-router-dom";
 import { Workflow, WorkflowCaptureTaskStatus } from "components/workflow/types";
-import { getWorkflowMetadata, isArvisCameraImageSource, isICamImageSource } from "components/utils";
+import { getWorkflowMetadata, isArvisCameraImageSource, isICamImageSource, isNvidiaCSIImageSource } from "components/utils";
 import { RunWorkflowRequest, getWorkflowCaptureTask, runWorkflow } from "api/WorkflowAPI";
 import { useForm } from "react-hook-form";
 import { CaptureConfigSchemaType, captureConfigSchema } from "./captureConfigSchema";
@@ -161,7 +161,7 @@ export default function ImageCaptureWorkflowContent({ workflow }: ImageCaptureWo
     // Don't refetch if capture is in progress. Real camera has issue when
     // trying to capture and preview at the same time.
     refetchInterval: PREVIEW_REFRESH_INTERVAL_MS,
-    enabled: !!imageSourceId && isCameraType && !isTaskRunning && isAPITrigger && (imageSource?.cameraStatus?.status === CameraStatus.Connected || isICamImageSource(imageSource?.type)),
+    enabled: !!imageSourceId && isCameraType && !isTaskRunning && isAPITrigger && (imageSource?.cameraStatus?.status === CameraStatus.Connected || isICamImageSource(imageSource?.type) || isNvidiaCSIImageSource(imageSource?.type)),
   });
 
   const { data: latestWorkflowResult, isLoading: isLoadingLatestWorkflowResult } = useQuery({

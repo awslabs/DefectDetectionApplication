@@ -75,6 +75,10 @@ export default function EditRoIPage({
   );
   const [isImageLoading, setImageLoading] = useState(true);
   const [showCroppedImage, setShowCroppedImage] = useState(false);
+  
+  useEffect(() => {
+    console.log('ROI Preview Toggle Changed:', showCroppedImage, 'Crop Settings:', imageCropPreviewSettings);
+  }, [showCroppedImage]);
   const [regionOfInterestAnnotation, setRegionOfInterestAnnotation] =
     useState<RegionOfInterest>(initialRegionOfInterest);
   const [showValidationMessage, setShowValidationMessage] = useState(false);
@@ -99,8 +103,9 @@ export default function EditRoIPage({
   }, [initialRegionOfInterest]);
 
   const enablePreviewQuery = cameraStatus === CameraStatus.Connected || !isArvisCamera;
+  
   const previewQuery = useQuery({
-    queryKey: ["editCropRoIPreview"],
+    queryKey: ["editCropRoIPreview", imageCropPreviewSettings],
     queryFn: async () => {
       var cropSettings = NoCrop;
       if (imageCropPreviewSettings) {
@@ -111,6 +116,7 @@ export default function EditRoIPage({
           right: Math.round(imageCropPreviewSettings.right),
         };
       }
+      console.log('EditRoIPage: Fetching preview with crop settings', cropSettings);
       if (initialImageSource?.imageSourceConfiguration) {
         return await getImagePreview(id, {
           imageSourceConfiguration: {
