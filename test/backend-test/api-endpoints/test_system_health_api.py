@@ -28,11 +28,13 @@ class TestSystemHealth(LocalServerBaseTestCase):
     @patch("psutil.cpu_percent")
     @patch("psutil.virtual_memory")
     @patch("shutil.disk_usage")
-    def test_system_health(self, disk_usage_mock, psutil_memory_mock, psutil_cpu_mock):
+    @patch("endpoints.system.get_local_server_component_version")
+    def test_system_health(self, local_server_version_mock, disk_usage_mock, psutil_memory_mock, psutil_cpu_mock):
         psutil_cpu_mock.return_value = 5.5
         psutil_memory_mock.return_value.percent = 34.5
         disk_usage = collections.namedtuple('usage', 'total used free')
         disk_usage_mock.return_value = disk_usage(total=57039806464, used=23638577152, free=33384452096)
+        local_server_version_mock.return_value = "1.0.0"
 
         for url in self.url:
             with self.subTest(url=url):
@@ -45,4 +47,5 @@ class TestSystemHealth(LocalServerBaseTestCase):
                 assert response_data["diskTotalSize"] == "53 GB"
                 assert response_data["diskUsedSize"] == "22 GB"
                 assert response_data["diskUsagePercent"] == 41.44
+                assert response_data["localServerVersion"] == "1.0.0"
     
