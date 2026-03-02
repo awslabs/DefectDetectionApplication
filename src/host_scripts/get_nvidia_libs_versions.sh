@@ -143,6 +143,15 @@ echo "JETSON_TENSORRT=${JETSON_TENSORRT}" >> /tmp/.dda.env
 if [ -f /sys/devices/soc0/soc_id ]; then
     is_gpu=0
 fi
+
+# Check L4T version - JetPack 4.9+ (R32.7.x) should use generic profile
+# because it doesn't support nvidia runtime with deploy.resources.reservations
+L4T_VERSION="${JETSON_L4T_RELEASE}.${JETSON_L4T_REVISION}"
+if [[ "$L4T_VERSION" =~ ^32\.[7-9] ]] || [[ "$L4T_VERSION" =~ ^3[3-9]\. ]]; then
+    echo "Detected L4T ${L4T_VERSION} - using generic profile for compatibility" >&2
+    is_gpu=0
+fi
+
 #Use gpu if aarch64 and CUDA is present
 if [ $is_gpu -eq 1 ] && [ $arch = "aarch64" ]; then
     echo DOCKER_PROFILE='tegra' >> /tmp/.dda.env
