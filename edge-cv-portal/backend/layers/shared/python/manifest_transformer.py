@@ -187,14 +187,6 @@ def transform_manifest_entry(entry: Dict, detected_attrs: Dict, task_type: str) 
         mask_ref_attr = detected_attrs.get('mask_ref_attr')
         if mask_ref_attr and mask_ref_attr in entry:
             mask_ref = entry[mask_ref_attr]
-            # Normalize mask S3 URI
-            mask_ref = mask_ref.replace('s3://s3://', 's3://')
-            mask_ref = mask_ref.replace('//', '/')
-            mask_ref = 's3://' + mask_ref.lstrip('s3:/').lstrip('/')
-            
-            # Fix incorrect path patterns
-            mask_ref = mask_ref.replace('/cookies/mask-images/', '/cookies/dataset-files/mask-images/')
-            
             transformed['anomaly-mask-ref'] = mask_ref
         
         # Transform mask reference metadata
