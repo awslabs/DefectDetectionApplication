@@ -875,12 +875,6 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     this.api = apiGatewayStack.api;
     this.apiUrl = apiGatewayStack.apiUrl;
 
-    // Update UseCases handler with Portal API URL for shared components provisioning
-    // Done after API is fully created and all routes are added
-    useCasesHandler.addEnvironment('PORTAL_API_URL', cdk.Fn.sub('https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/v1', {
-      ApiId: apiGatewayStack.api.restApiId,
-    }));
-
     // Outputs
     new cdk.CfnOutput(this, 'ApiUrl', {
       value: apiGatewayStack.apiUrl,
