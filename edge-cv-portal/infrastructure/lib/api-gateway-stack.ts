@@ -49,8 +49,10 @@ export class ApiGatewayStack extends cdk.NestedStack {
       deployOptions: {
         stageName: 'v1',
         tracingEnabled: true,
-        loggingLevel: apigateway.MethodLoggingLevel.INFO,
-        dataTraceEnabled: true,
+        // Logging disabled - requires CloudWatch Logs role to be set up in account
+        // To enable: Set up CloudWatch Logs role for API Gateway first
+        // loggingLevel: apigateway.MethodLoggingLevel.INFO,
+        // dataTraceEnabled: true,
         metricsEnabled: true,
       },
       defaultCorsPreflightOptions: {
