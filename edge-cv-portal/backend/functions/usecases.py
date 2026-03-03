@@ -57,14 +57,25 @@ def provision_shared_components_via_api(
         from botocore.auth import SigV4Auth
         from botocore.awsrequest import AWSRequest
         
-        # Get the Portal API URL from environment
+        # Get the Portal API URL from environment or construct it
         portal_api_url = os.environ.get('PORTAL_API_URL')
-        logger.info(f"provision_shared_components_via_api called for usecase {usecase_id}")
-        logger.info(f"PORTAL_API_URL from environment: {portal_api_url}")
         
+        # If not explicitly set, construct from AWS environment variables
         if not portal_api_url:
-            logger.warning("PORTAL_API_URL not configured, skipping shared components provisioning")
-            return {'status': 'skipped', 'reason': 'PORTAL_API_URL not configured'}
+            # AWS Lambda always has AWS_REGION available
+            region = os.environ.get('AWS_REGION', 'us-east-1')
+            # Get API Gateway ID from the API_GATEWAY_ID environment variable
+            api_id = os.environ.get('API_GATEWAY_ID')
+            
+            if api_id:
+                portal_api_url = f"https://{api_id}.execute-api.{region}.amazonaws.com/v1"
+                logger.info(f"Constructed PORTAL_API_URL from API_GATEWAY_ID: {portal_api_url}")
+            else:
+                logger.warning("Neither PORTAL_API_URL nor API_GATEWAY_ID configured, skipping shared components provisioning")
+                return {'status': 'skipped', 'reason': 'API URL not configured'}
+        
+        logger.info(f"provision_shared_components_via_api called for usecase {usecase_id}")
+        logger.info(f"Using PORTAL_API_URL: {portal_api_url}")
         
         # Prepare the provisioning request
         provision_url = f"{portal_api_url}/shared-components/provision"
