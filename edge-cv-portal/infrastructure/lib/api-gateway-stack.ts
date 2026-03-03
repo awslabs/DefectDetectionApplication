@@ -582,10 +582,6 @@ export class ApiGatewayStack extends cdk.NestedStack {
 
     this.apiUrl = this.api.url;
 
-    // Update UseCases handler with Portal API URL for shared components provisioning
-    // This is done here in the nested stack to avoid circular dependency
-    props.useCasesHandler.addEnvironment('PORTAL_API_URL', this.api.url);
-
     // Outputs
     new cdk.CfnOutput(this, 'ApiUrl', {
       value: this.api.url,
