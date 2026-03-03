@@ -586,12 +586,13 @@ export class ApiGatewayStack extends cdk.NestedStack {
     new cdk.CfnOutput(this, 'ApiUrl', {
       value: this.api.url,
       description: 'API Gateway URL',
-      exportName: 'EdgeCVPortalApiUrl',
+      // Don't export from nested stack - parent will export it
     });
 
     new cdk.CfnOutput(this, 'ApiId', {
       value: this.api.restApiId,
       description: 'API Gateway ID',
+      // Don't export from nested stack - parent will export it
     });
   }
 }
