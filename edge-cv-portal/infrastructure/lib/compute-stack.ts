@@ -10,9 +10,7 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import * as path from 'path';
-import { ApiCoreStack } from './api-core-stack';
-import { ApiDataStack } from './api-data-stack';
-import { ApiModelStack } from './api-model-stack';
+import { ApiGatewayStack } from './api-gateway-stack';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
@@ -844,86 +842,20 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       description: 'Instructions for enabling cross-account EventBridge',
     });
 
-    // API Gateway
-    this.api = new apigateway.RestApi(this, 'EdgeCVPortalAPI', {
-      restApiName: 'Edge CV Portal API',
-      description: 'API for Edge CV Admin Portal',
-      deployOptions: {
-        stageName: 'v1',
-        tracingEnabled: true,
-        loggingLevel: apigateway.MethodLoggingLevel.INFO,
-        dataTraceEnabled: true,
-        metricsEnabled: true,
-      },
-      defaultCorsPreflightOptions: {
-        allowOrigins: apigateway.Cors.ALL_ORIGINS,
-        allowMethods: apigateway.Cors.ALL_METHODS,
-        allowHeaders: [
-          'Content-Type',
-          'X-Amz-Date',
-          'Authorization',
-          'X-Api-Key',
-          'X-Amz-Security-Token',
-        ],
-      },
-    });
-
-    // Update UseCases handler with Portal API URL for shared components provisioning
-    // This must be done after API is created but before routes are added
-    useCasesHandler.addEnvironment('PORTAL_API_URL', cdk.Fn.sub('https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/v1', {
-      ApiId: this.api.restApiId,
-    }));
-
-    // Cognito Authorizer
-    const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'CognitoAuthorizer', {
-      cognitoUserPools: [props.userPool],
-      authorizerName: 'EdgeCVPortalAuthorizer',
-      identitySource: 'method.request.header.Authorization',
-    });
-
-    // JWT Lambda Authorizer (alternative to Cognito) - commented out for now
-    // Uncomment and configure when needed for SSO integration
-    /*
-    const jwtAuthorizer = new apigateway.TokenAuthorizer(this, 'JwtAuthorizer', {
-      handler: jwtAuthorizerHandler,
-      authorizerName: 'EdgeCVPortalJwtAuthorizer',
-      identitySource: 'method.request.header.Authorization',
-      resultsCacheTtl: cdk.Duration.minutes(5),
-    });
-    */
-
-    // Create Nested Stacks for API Routes
-    // This splits the API Gateway resources across multiple stacks to avoid the 500 resource limit
-    
-    // Core API Routes: Auth, Users, UseCases, Devices, Deployments, Audit Logs
-    const apiCoreStack = new ApiCoreStack(this, 'ApiCoreRoutes', {
-      api: this.api,
-      authorizer,
+    // API Gateway in Nested Stack
+    // Moving API Gateway to a nested stack solves the 500 resource limit
+    const apiGatewayStack = new ApiGatewayStack(this, 'ApiGateway', {
+      userPool: props.userPool,
       authHandler,
       userManagementHandler,
       useCasesHandler,
       devicesHandler,
       deviceLogsHandler,
       deploymentsHandler,
-      auditLogsHandler,
-    });
-
-    // Data API Routes: Data Management, Datasets, Labeling, Data Accounts
-    new ApiDataStack(this, 'ApiDataRoutes', {
-      api: this.api,
-      authorizer,
-      usecaseResource: apiCoreStack.usecaseResource,
       dataManagementHandler,
       datasetsHandler,
       preLabeledDatasetsHandler,
       labelingHandler,
-      dataAccountsHandler,
-    });
-
-    // Model API Routes: Training, Compilation, Models, Components
-    new ApiModelStack(this, 'ApiModelRoutes', {
-      api: this.api,
-      authorizer,
       trainingHandler,
       compilationHandler,
       packagingHandler,
@@ -933,28 +865,31 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       modelConverterHandler,
       componentsHandler,
       sharedComponentsHandler,
+      dataAccountsHandler,
+      auditLogsHandler,
       lambdaEnvironment,
       createLambdaRole,
       sharedLayer,
     });
 
-    this.apiUrl = this.api.url;
+    this.api = apiGatewayStack.api;
+    this.apiUrl = apiGatewayStack.apiUrl;
 
     // Update UseCases handler with Portal API URL for shared components provisioning
     // Done after API is fully created and all routes are added
     useCasesHandler.addEnvironment('PORTAL_API_URL', cdk.Fn.sub('https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/v1', {
-      ApiId: this.api.restApiId,
+      ApiId: apiGatewayStack.api.restApiId,
     }));
 
     // Outputs
     new cdk.CfnOutput(this, 'ApiUrl', {
-      value: this.api.url,
+      value: apiGatewayStack.apiUrl,
       description: 'API Gateway URL',
       exportName: 'EdgeCVPortalApiUrl',
     });
 
     new cdk.CfnOutput(this, 'ApiId', {
-      value: this.api.restApiId,
+      value: apiGatewayStack.api.restApiId,
       description: 'API Gateway ID',
     });
 
