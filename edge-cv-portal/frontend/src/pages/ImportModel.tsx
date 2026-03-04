@@ -21,6 +21,7 @@ import {
   Spinner,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import { validateS3Uri } from '../utils/s3Validation';
 
 interface ValidationResult {
   valid: boolean;
@@ -239,6 +240,7 @@ export default function ImportModel() {
               label="Model S3 URI"
               description="S3 URI of the model artifact (tar.gz file)"
               constraintText="Format: s3://bucket/path/model.tar.gz"
+              errorText={validateS3Uri(modelS3Uri)}
             >
               <Input
                 value={modelS3Uri}

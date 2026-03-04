@@ -11,11 +11,13 @@ import {
   Select,
   SelectProps,
   Alert,
-  Checkbox,
   ColumnLayout,
   Box,
   Tiles,
   Modal,
+  Toggle,
+  Popover,
+  StatusIndicator,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
@@ -49,12 +51,7 @@ export default function CreateTraining() {
     value: 'ml.g4dn.2xlarge',
   });
   const [maxRuntime, setMaxRuntime] = useState('3600'); // 1 hour default for classification
-  const [autoCompile, setAutoCompile] = useState(true);
-  const [selectedTargets, setSelectedTargets] = useState({
-    x86_64: true,
-    aarch64: true,
-    jetson: false,
-  });
+  const [segheadOnly, setSegheadOnly] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [manifestFormat, setManifestFormat] = useState<'dda' | 'ground-truth' | 'unknown' | null>(null);
@@ -66,21 +63,23 @@ export default function CreateTraining() {
 
   // Define options before they're used in useEffect
   const modelTypeOptions: SelectProps.Option[] = [
-    { label: 'Classification', value: 'classification', description: 'Binary defect detection' },
+    { label: 'Classification', value: 'classification', description: 'Binary normal/anomaly detection. Faster training, smaller model. Best for pass/fail inspection.' },
     {
       label: 'Classification (Robust)',
       value: 'classification-robust',
-      description: 'Enhanced classification model',
+      description: 'Simulates angle and lighting variations. Use when camera position or lighting varies. Training time: 6-24+ hours.',
+      tags: ['Long training time'],
     },
     {
       label: 'Segmentation',
       value: 'segmentation',
-      description: 'Pixel-level defect localization',
+      description: 'Pixel-level defect localization with mask output. Shows exactly where defects are. Requires mask-annotated training data.',
     },
     {
       label: 'Segmentation (Robust)',
       value: 'segmentation-robust',
-      description: 'Enhanced segmentation model',
+      description: 'Segmentation with angle/lighting simulation. Use for variable environments. Training time: 6-24+ hours.',
+      tags: ['Long training time'],
     },
   ];
 
@@ -323,10 +322,6 @@ export default function CreateTraining() {
       setSubmitting(true);
       setError(null);
 
-      const compilationTargets = Object.entries(selectedTargets)
-        .filter(([, checked]) => checked)
-        .map(([target]) => target);
-
       await apiService.createTrainingJob({
         usecase_id: useCaseId.value as string,
         model_source: modelSource.value as string,
@@ -336,8 +331,7 @@ export default function CreateTraining() {
         dataset_manifest_s3: manifestUri.trim(),
         instance_type: instanceType.value as string,
         max_runtime_seconds: parseInt(maxRuntime),
-        auto_compile: autoCompile,
-        compilation_targets: autoCompile ? compilationTargets : undefined,
+        ...(segheadOnly && { hyperparameters: { seghead_only: 'true' } }),
       });
 
       navigate('/training');
@@ -522,14 +516,52 @@ export default function CreateTraining() {
                 selectedOption={modelType}
                 onChange={({ detail }) => {
                   setModelType(detail.selectedOption);
-                  // Update max runtime based on model type - segmentation takes longer but should still be reasonable
                   const isSegmentation = detail.selectedOption?.value?.includes('segmentation');
-                  setMaxRuntime(isSegmentation ? '7200' : '3600'); // 2 hours for segmentation, 1 hour for classification
+                  const isRobust = detail.selectedOption?.value?.includes('robust');
+                  setMaxRuntime(isRobust ? '86400' : isSegmentation ? '7200' : '3600');
+                  // Reset seghead_only when switching away from segmentation
+                  if (!isSegmentation) setSegheadOnly(false);
                 }}
                 options={modelTypeOptions}
                 selectedAriaLabel="Selected"
               />
             </FormField>
+
+            {modelType.value?.includes('robust') && (
+              <Alert type="warning">
+                Robust mode simulates multiple camera angles and lighting conditions during training.
+                This significantly increases training time (6-24+ hours). Use it when your production
+                environment has variable lighting or camera positions. If you have fixed cameras and
+                controlled lighting, standard mode will train faster and perform just as well.
+              </Alert>
+            )}
+
+            {modelType.value?.includes('segmentation') && (
+              <FormField
+                label={
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <span>Segmentation head only</span>
+                    <Popover
+                      dismissButton={false}
+                      position="top"
+                      size="medium"
+                      triggerType="custom"
+                      content="Disables the binary classifier and uses only the segmentation head for predictions. Enable this if the binary classifier is producing false negatives on defective parts. The segmentation mask alone is often more accurate for detecting subtle defects."
+                    >
+                      <StatusIndicator type="info">Info</StatusIndicator>
+                    </Popover>
+                  </SpaceBetween>
+                }
+                stretch
+              >
+                <Toggle
+                  checked={segheadOnly}
+                  onChange={({ detail }) => setSegheadOnly(detail.checked)}
+                >
+                  Disable binary classifier (use segmentation mask only)
+                </Toggle>
+              </FormField>
+            )}
 
             <FormField
               label="Dataset Source"
@@ -663,52 +695,16 @@ export default function CreateTraining() {
           </SpaceBetween>
         </Container>
 
-        <Container header={<Header variant="h2">Post-Training Options</Header>}>
-          <SpaceBetween size="m">
-            <Checkbox checked={autoCompile} onChange={({ detail }) => setAutoCompile(detail.checked)}>
-              Automatically compile model after training completes
-            </Checkbox>
-
-            {autoCompile && (
-              <FormField
-                label="Compilation Targets"
-                description="Select target platforms for edge deployment"
-                stretch
-              >
-                <SpaceBetween size="s">
-                  <Checkbox
-                    checked={selectedTargets.x86_64}
-                    onChange={({ detail }) =>
-                      setSelectedTargets({ ...selectedTargets, x86_64: detail.checked })
-                    }
-                  >
-                    x86_64 CPU (Intel/AMD processors)
-                  </Checkbox>
-                  <Checkbox
-                    checked={selectedTargets.aarch64}
-                    onChange={({ detail }) =>
-                      setSelectedTargets({ ...selectedTargets, aarch64: detail.checked })
-                    }
-                  >
-                    ARM64 (Standard ARM processors)
-                  </Checkbox>
-                  <Checkbox
-                    checked={selectedTargets.jetson}
-                    onChange={({ detail }) =>
-                      setSelectedTargets({ ...selectedTargets, jetson: detail.checked })
-                    }
-                  >
-                    Jetson Xavier (ARM64 with NVIDIA GPU)
-                  </Checkbox>
-                </SpaceBetween>
-              </FormField>
-            )}
-
-            <Alert type="info">
-              Compilation optimizes your model for specific edge hardware using SageMaker Neo.
-              Compiled models will be automatically packaged as Greengrass components.
-            </Alert>
-          </SpaceBetween>
+        <Container header={<Header variant="h2">Next Steps After Training</Header>}>
+          <Alert type="info">
+            Once training completes successfully, follow these steps to deploy your model to edge devices:
+            <ol style={{ marginTop: '8px', marginBottom: 0 }}>
+              <li>Go to <strong>Training</strong> page and verify the job status is <strong>Completed</strong></li>
+              <li>Navigate to <strong>Components</strong> → click <strong>Compile Model</strong> to compile for your target architecture (ARM64 or x86_64)</li>
+              <li>After compilation, the model is automatically packaged as a Greengrass component</li>
+              <li>Go to <strong>Deployments</strong> → <strong>Create Deployment</strong> to deploy the compiled model to your edge devices</li>
+            </ol>
+          </Alert>
         </Container>
 
         <Container header={<Header variant="h2">Summary</Header>}>
@@ -755,21 +751,6 @@ export default function CreateTraining() {
                   }
                 </Box>
               </Box>
-              <Box>
-                <Box variant="awsui-key-label">Auto-Compile</Box>
-                <Box>{autoCompile ? 'Yes' : 'No'}</Box>
-              </Box>
-              {autoCompile && (
-                <Box>
-                  <Box variant="awsui-key-label">Targets</Box>
-                  <Box>
-                    {Object.entries(selectedTargets)
-                      .filter(([, checked]) => checked)
-                      .map(([target]) => target)
-                      .join(', ') || 'None selected'}
-                  </Box>
-                </Box>
-              )}
             </SpaceBetween>
           </ColumnLayout>
         </Container>

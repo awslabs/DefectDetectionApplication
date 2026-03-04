@@ -200,6 +200,17 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
                 'message': 'Invalid attribute type'
             }
         
+        # Check for task type mismatch: manifest has segmentation fields but user selected classification
+        if model_type in ['classification'] and 'anomaly-mask-ref' in first_entry:
+            return {
+                'valid': False,
+                'errors': [
+                    'Manifest contains segmentation fields (anomaly-mask-ref) but training type is set to Classification.',
+                    'Either select Segmentation as the model type, or use a classification-only manifest.'
+                ],
+                'message': 'Task type mismatch: manifest is segmentation but training type is classification'
+            }
+        
         if not isinstance(first_entry.get('anomaly-label'), (int, float)):
             return {
                 'valid': False,
@@ -271,8 +282,15 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         model_type = body['model_type']
         dataset_manifest_s3 = body['dataset_manifest_s3'].strip()
         instance_type = body.get('instance_type', 'ml.g4dn.2xlarge')
-        # Set default max runtime based on model type - segmentation takes longer but should still be reasonable
-        default_max_runtime = 7200 if model_type in ['segmentation', 'segmentation-robust'] else 3600  # 2 hours for segmentation, 1 hour for classification
+        # Set default max runtime based on model type
+        is_robust = model_type.endswith('-robust')
+        is_segmentation = 'segmentation' in model_type
+        if is_robust:
+            default_max_runtime = 86400  # 24 hours for robust (angle/lighting simulation)
+        elif is_segmentation:
+            default_max_runtime = 7200   # 2 hours for segmentation
+        else:
+            default_max_runtime = 3600   # 1 hour for classification
         max_runtime = body.get('max_runtime_seconds', default_max_runtime)
         hyperparameters = body.get('hyperparameters', {})
         auto_compile = body.get('auto_compile', False)

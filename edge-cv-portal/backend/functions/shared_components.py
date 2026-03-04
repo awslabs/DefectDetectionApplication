@@ -31,7 +31,7 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, assume_cross_account_role,
-    create_boto3_client
+    create_boto3_client, get_usecase_region
 )
 
 logger = logging.getLogger()
@@ -237,7 +237,8 @@ def share_component_to_usecase(
     external_id: str,
     component_name: str,
     component_version: str,
-    user_id: str
+    user_id: str,
+    usecase_region: str = None
 ) -> Dict:
     """
     Share a portal component to a usecase account.
@@ -272,12 +273,12 @@ def share_component_to_usecase(
         
         # Assume cross-account role
         credentials = assume_cross_account_role(cross_account_role_arn, external_id)
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = usecase_region or os.environ.get('AWS_REGION', 'us-east-1')
         
         # Create Greengrass client for usecase account
         greengrass_usecase = create_boto3_client('greengrassv2', credentials, region)
         
-        component_arn = f"arn:aws:greengrass:{AWS_REGION}:{usecase_account_id}:components:{component_name}:versions:{component_version}"
+        component_arn = f"arn:aws:greengrass:{region}:{usecase_account_id}:components:{component_name}:versions:{component_version}"
         
         # Try to create component in usecase account
         try:
@@ -344,7 +345,8 @@ def provision_shared_components_for_usecase(
     cross_account_role_arn: str,
     external_id: str,
     user_id: str,
-    component_version: str = None  # Deprecated - versions discovered dynamically
+    component_version: str = None,  # Deprecated - versions discovered dynamically
+    usecase_region: str = None
 ) -> List[Dict]:
     """
     Provision all shared components for a new usecase.
@@ -384,7 +386,8 @@ def provision_shared_components_for_usecase(
                 external_id=external_id,
                 component_name=config['name'],
                 component_version=platform_version,
-                user_id=user_id
+                user_id=user_id,
+                usecase_region=usecase_region
             )
             results.append(result)
             logger.info(f"Provisioned {config['name']} v{platform_version} for usecase {usecase_id}")
@@ -434,7 +437,8 @@ def provision_shared_components_for_usecase(
                 external_id=external_id,
                 component_name=config['name'],
                 component_version=config['version'],
-                user_id=user_id
+                user_id=user_id,
+                usecase_region=usecase_region
             )
             # Mark as platform-independent
             result['platform'] = 'all'
@@ -753,7 +757,8 @@ def provision_components(event: Dict, user: Dict) -> Dict:
                         usecase_account_id=usecase['account_id'],
                         cross_account_role_arn=usecase['cross_account_role_arn'],
                         external_id=usecase['external_id'],
-                        user_id=user_id
+                        user_id=user_id,
+                        usecase_region=get_usecase_region(usecase)
                     )
                     
                     # Update the usecase to mark shared components as provisioned
@@ -827,7 +832,8 @@ def provision_components(event: Dict, user: Dict) -> Dict:
                 usecase_account_id=usecase['account_id'],
                 cross_account_role_arn=usecase['cross_account_role_arn'],
                 external_id=usecase['external_id'],
-                user_id=user_id
+                user_id=user_id,
+                usecase_region=get_usecase_region(usecase)
             )
             
             log_audit_event(
@@ -1091,7 +1097,8 @@ def update_all_usecases(event: Dict, user: Dict) -> Dict:
                     usecase_account_id=usecase['account_id'],
                     cross_account_role_arn=usecase['cross_account_role_arn'],
                     external_id=usecase['external_id'],
-                    user_id=user['user_id']
+                    user_id=user['user_id'],
+                    usecase_region=get_usecase_region(usecase)
                 )
                 
                 # Check results - both 'shared' and 'already_exists' are success

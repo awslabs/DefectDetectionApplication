@@ -19,6 +19,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import S3Browser from '../components/S3Browser';
+import { validateS3Uri } from '../utils/s3Validation';
 
 interface PreLabeledDataset {
   dataset_id: string;
@@ -399,6 +400,7 @@ export default function PreLabeledDatasets() {
               <FormField
                 label="Manifest S3 URI"
                 description="S3 path to your manifest file (e.g., s3://bucket/path/manifest.manifest)"
+                errorText={validateS3Uri(formData.manifest_s3_uri)}
               >
                 <SpaceBetween size="xs">
                   <Input

@@ -1412,12 +1412,13 @@ def update_usecase(usecase_id, event, user):
         body = json.loads(event.get('body', '{}'))
         table = dynamodb.Table(USECASES_TABLE)
         
-        # Build update expression
+        # Build update expression with expression attribute names for reserved keywords
         update_expr = "SET updated_at = :updated_at"
         expr_values = {':updated_at': int(datetime.utcnow().timestamp() * 1000)}
+        expr_names = {}
         
         updatable_fields = [
-            'name', 's3_bucket', 'region', 'owner', 'cost_center', 'default_device_group',
+            'name', 's3_bucket', 'region', 'owner', 'default_device_group',
             'cross_account_role_arn', 'account_id',
             # Data Account fields
             'data_account_id', 'data_account_role_arn', 'data_account_external_id',
@@ -1425,14 +1426,20 @@ def update_usecase(usecase_id, event, user):
         ]
         for field in updatable_fields:
             if field in body:
-                update_expr += f", {field} = :{field}"
+                alias = f"#{field}"
+                expr_names[alias] = field
+                update_expr += f", {alias} = :{field}"
                 expr_values[f":{field}"] = body[field]
         
-        table.update_item(
-            Key={'usecase_id': usecase_id},
-            UpdateExpression=update_expr,
-            ExpressionAttributeValues=expr_values
-        )
+        update_params = {
+            'Key': {'usecase_id': usecase_id},
+            'UpdateExpression': update_expr,
+            'ExpressionAttributeValues': expr_values
+        }
+        if expr_names:
+            update_params['ExpressionAttributeNames'] = expr_names
+        
+        table.update_item(**update_params)
         
         log_audit_event(
             user['user_id'], 'update_usecase', 'usecase', usecase_id,

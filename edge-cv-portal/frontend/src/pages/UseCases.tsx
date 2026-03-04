@@ -21,6 +21,7 @@ import { apiService } from '../services/api';
 import { UseCase } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import TeamManagement from '../components/TeamManagement';
+import { validateBucketName } from '../utils/s3Validation';
 
 interface FormDataType {
   name: string;
@@ -28,7 +29,6 @@ interface FormDataType {
   s3_bucket: string;
   s3_prefix: string;
   cross_account_role_arn: string;
-  cost_center: string;
   data_account_id: string;
   data_account_role_arn: string;
   data_account_external_id: string;
@@ -52,7 +52,6 @@ export default function UseCases() {
     s3_bucket: '',
     s3_prefix: '',
     cross_account_role_arn: '',
-    cost_center: '',
     data_account_id: '',
     data_account_role_arn: '',
     data_account_external_id: '',
@@ -67,7 +66,6 @@ export default function UseCases() {
       s3_bucket: '',
       s3_prefix: '',
       cross_account_role_arn: '',
-      cost_center: '',
       data_account_id: '',
       data_account_role_arn: '',
       data_account_external_id: '',
@@ -183,8 +181,7 @@ export default function UseCases() {
       account_id: useCase.account_id,
       s3_bucket: useCase.s3_bucket,
       s3_prefix: useCase.s3_prefix || '',
-      cross_account_role_arn: useCase.cross_account_role_arn,
-      cost_center: useCase.cost_center || '',
+      cross_account_role_arn: useCase.cross_account_role_arn || '',
       data_account_id: useCase.data_account_id || '',
       data_account_role_arn: useCase.data_account_role_arn || '',
       data_account_external_id: useCase.data_account_external_id || '',
@@ -196,8 +193,8 @@ export default function UseCases() {
 
   const handleUpdate = () => {
     if (!selectedUseCase) return;
-    if (!formData.name || !formData.account_id || !formData.s3_bucket || !formData.cross_account_role_arn) {
-      setError('Name, Account ID, S3 Bucket, and Role ARN are required');
+    if (!formData.name || !formData.s3_bucket) {
+      setError('Name and S3 Bucket are required');
       return;
     }
     updateMutation.mutate({ id: selectedUseCase.usecase_id, data: formData });
@@ -351,30 +348,6 @@ export default function UseCases() {
             cell: (item: UseCase) => (item as any).region || 'us-east-1',
           },
           {
-            id: 'shared_components',
-            header: 'Shared Components',
-            cell: (item: UseCase) => {
-              // Check if provisioning is in progress
-              if (item.shared_components?.status === 'provisioning') {
-                return <StatusIndicator type="loading">Provisioning...</StatusIndicator>;
-              }
-              
-              if (!item.shared_components_provisioned) {
-                return <StatusIndicator type="pending">Not provisioned</StatusIndicator>;
-              }
-              if (!item.shared_components || !Array.isArray(item.shared_components.components)) {
-                return <StatusIndicator type="warning">Unknown status</StatusIndicator>;
-              }
-              const components = item.shared_components.components;
-              const successCount = components.filter(c => c.status === 'shared').length;
-              const failedCount = components.filter(c => c.status === 'failed').length;
-              if (failedCount > 0) {
-                return <StatusIndicator type="error">{successCount} OK, {failedCount} failed</StatusIndicator>;
-              }
-              return <StatusIndicator type="success">{successCount} provisioned</StatusIndicator>;
-            },
-          },
-          {
             id: 'created_at',
             header: 'Created',
             cell: (item: UseCase) => new Date(item.created_at).toLocaleDateString(),
@@ -468,39 +441,17 @@ export default function UseCases() {
             />
           </FormField>
 
+          {(selectedUseCase as any)?.setup_type !== 'single-account' && (
+          <>
           <FormField
             label="AWS Account ID"
-            description="The AWS account where resources are located"
+            description="The UseCase account where SageMaker and Greengrass resources are located"
             stretch
           >
             <Input
               value={formData.account_id}
               onChange={({ detail }) => setFormData({ ...formData, account_id: detail.value })}
               placeholder="123456789012"
-            />
-          </FormField>
-
-          <FormField
-            label="S3 Bucket"
-            description="S3 bucket for storing datasets and artifacts"
-            stretch
-          >
-            <Input
-              value={formData.s3_bucket}
-              onChange={({ detail }) => setFormData({ ...formData, s3_bucket: detail.value })}
-              placeholder="my-usecase-bucket"
-            />
-          </FormField>
-
-          <FormField
-            label="S3 Prefix (Optional)"
-            description="S3 prefix for organizing data within the bucket"
-            stretch
-          >
-            <Input
-              value={formData.s3_prefix || ''}
-              onChange={({ detail }) => setFormData({ ...formData, s3_prefix: detail.value })}
-              placeholder="datasets/"
             />
           </FormField>
 
@@ -514,10 +465,27 @@ export default function UseCases() {
               onChange={({ detail }) =>
                 setFormData({ ...formData, cross_account_role_arn: detail.value })
               }
-              placeholder="arn:aws:iam::123456789012:role/PortalAccessRole"
+              placeholder="arn:aws:iam::123456789012:role/DDAPortalAccessRole"
+            />
+          </FormField>
+          </>
+          )}
+
+          <FormField
+            label="S3 Bucket"
+            description="S3 bucket for storing datasets and artifacts"
+            errorText={validateBucketName(formData.s3_bucket)}
+            stretch
+          >
+            <Input
+              value={formData.s3_bucket}
+              onChange={({ detail }) => setFormData({ ...formData, s3_bucket: detail.value })}
+              placeholder="my-usecase-bucket"
             />
           </FormField>
 
+          {(selectedUseCase as any)?.setup_type !== 'single-account' && (
+          <>
           <Header variant="h3">Data Account Configuration (Optional)</Header>
           <Alert type="info">
             Configure a separate Data Account if your training data is stored in a different AWS account than your UseCase account.
@@ -563,6 +531,7 @@ export default function UseCases() {
           <FormField
             label="Data S3 Bucket (Optional)"
             description="Default S3 bucket in the Data Account"
+            errorText={validateBucketName(formData.data_s3_bucket || '')}
             stretch
           >
             <Input
@@ -583,6 +552,8 @@ export default function UseCases() {
               placeholder="datasets/"
             />
           </FormField>
+          </>
+          )}
         </SpaceBetween>
       </Modal>
 

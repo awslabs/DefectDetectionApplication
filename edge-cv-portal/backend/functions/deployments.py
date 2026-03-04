@@ -12,7 +12,7 @@ from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, is_super_user, get_usecase,
-    get_usecase_client
+    get_usecase_client, get_usecase_region
 )
 
 logger = logging.getLogger()
@@ -96,7 +96,7 @@ def list_deployments(user, query_params):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         
         # Create Greengrass client (handles both single-account and cross-account)
         greengrass_client = get_usecase_client(
@@ -170,7 +170,7 @@ def get_deployment(deployment_id, user, query_params):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         
         # Create Greengrass client (handles both single-account and cross-account)
         greengrass_client = get_usecase_client(
@@ -344,7 +344,7 @@ def create_deployment(body, user):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         account_id = usecase.get('account_id', '')
         
         # Create Greengrass client (handles both single-account and cross-account)
@@ -583,7 +583,7 @@ def cancel_deployment(deployment_id, user, query_params):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         
         # Create Greengrass client (handles both single-account and cross-account)
         greengrass_client = get_usecase_client(
