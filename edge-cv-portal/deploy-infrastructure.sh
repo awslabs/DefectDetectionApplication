@@ -23,7 +23,7 @@ echo ""
 cd infrastructure
 
 echo "📦 Installing dependencies..."
-npm install
+npm ci
 
 echo "🔨 Building TypeScript..."
 npm run build

@@ -94,7 +94,7 @@ echo ""
 
 # Install dependencies
 echo "Step 2: Installing dependencies..."
-npm install
+npm ci
 
 # Build the application
 echo "Step 3: Building application..."
