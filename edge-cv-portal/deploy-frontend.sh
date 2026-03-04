@@ -118,33 +118,16 @@ CLOUDFRONT_URL=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs[?OutputKey==`DistributionDomainName`].OutputValue' \
   --output text)
 
-# Step 6: Update cdk.json with CloudFront domain for auto-CORS configuration
+# Step 6: Update Lambda env with CloudFront domain for auto-CORS configuration
 echo ""
-echo "Step 6: Configuring CloudFront domain for auto-CORS..."
+echo "Step 6: Deploying backend with CloudFront domain for auto-CORS..."
 cd "$SCRIPT_DIR/infrastructure"
 
-# Check if jq is available
-if command -v jq &> /dev/null; then
-  # Use jq to update cdk.json
-  CURRENT_DOMAIN=$(jq -r '.context.cloudFrontDomain // empty' cdk.json)
-  if [ "$CURRENT_DOMAIN" != "$CLOUDFRONT_URL" ]; then
-    echo "Updating cdk.json with CloudFront domain: $CLOUDFRONT_URL"
-    jq --arg domain "$CLOUDFRONT_URL" '.context.cloudFrontDomain = $domain' cdk.json > cdk.json.tmp && mv cdk.json.tmp cdk.json
-    
-    # Redeploy compute stack to update Lambda environment variable
-    echo "Step 7: Redeploying backend with CloudFront domain..."
-    npm run build
-    npx cdk deploy EdgeCVPortalComputeStack --require-approval never
-    echo "Backend updated with CloudFront domain for auto-CORS configuration."
-  else
-    echo "CloudFront domain already configured in cdk.json"
-  fi
-else
-  echo "WARNING: jq not installed. Please manually add cloudFrontDomain to cdk.json:"
-  echo "  \"cloudFrontDomain\": \"$CLOUDFRONT_URL\""
-  echo ""
-  echo "Then run: cd infrastructure && cdk deploy EdgeCVPortalComputeStack"
-fi
+echo "Redeploying compute stack with CloudFront domain: $CLOUDFRONT_URL"
+npm run build
+npx cdk deploy EdgeCVPortalComputeStack --require-approval never \
+  -c cloudFrontDomain="$CLOUDFRONT_URL"
+echo "✅ Backend updated with CloudFront domain for auto-CORS configuration."
 
 echo ""
 echo "=========================================="

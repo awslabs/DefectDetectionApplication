@@ -9,6 +9,7 @@ src/edgemlsdk/cached-debs/
 
 # OS files
 .DS_Store
+**/.DS_Store
 __pycache__/
 *.pyc
 

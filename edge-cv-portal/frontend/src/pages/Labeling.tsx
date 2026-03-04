@@ -23,6 +23,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { LabelingJob, UseCase } from '../types';
 import { apiService } from '../services/api';
+import { validateS3Uri } from '../utils/s3Validation';
 
 interface PreLabeledDataset {
   dataset_id: string;
@@ -556,6 +557,7 @@ export default function Labeling() {
               <FormField
                 label="Manifest S3 URI"
                 description="S3 path to your manifest file (e.g., s3://bucket/path/manifest.manifest)"
+                errorText={validateS3Uri(formData.manifest_s3_uri)}
                 stretch
               >
                 <Input

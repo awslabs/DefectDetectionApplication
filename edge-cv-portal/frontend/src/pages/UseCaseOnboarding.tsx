@@ -16,6 +16,7 @@ import {
   Select,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import { validateBucketName } from '../utils/s3Validation';
 
 interface OnboardingState {
   // Step 1: Setup Type Selection
@@ -32,6 +33,7 @@ interface OnboardingState {
   sagemakerExecutionRoleArn: string;
   externalId: string;
   s3Bucket: string;
+  s3Prefix: string;
 
   // Step 4: Role Deployment Status
   roleDeployed: boolean;
@@ -75,6 +77,7 @@ export default function UseCaseOnboarding() {
     sagemakerExecutionRoleArn: '',
     externalId: '',
     s3Bucket: '',
+    s3Prefix: '',
     roleDeployed: false,
     roleVerified: false,
     s3Created: false,
@@ -134,9 +137,6 @@ export default function UseCaseOnboarding() {
       // Backend will auto-detect account_id and roles
       if (state.setupType === 'single-account') {
         useCaseData.s3_bucket = state.s3Bucket;
-        // Don't set s3_prefix - backend will use empty string by default
-        // Don't set account_id, cross_account_role_arn, sagemaker_execution_role_arn
-        // Backend will auto-detect these
       } else {
         // Multi-account setup: all fields required
         useCaseData.account_id = state.accountId;
@@ -149,19 +149,36 @@ export default function UseCaseOnboarding() {
           useCaseData.data_account_id = state.accountId;
           useCaseData.data_s3_bucket = state.s3Bucket;
           useCaseData.s3_bucket = state.s3Bucket;
+          if (state.s3Prefix) useCaseData.s3_prefix = state.s3Prefix;
         } else {
           useCaseData.data_account_id = state.dataAccountId;
           useCaseData.data_account_role_arn = state.dataAccountRoleArn;
           useCaseData.data_account_external_id = state.dataAccountExternalId;
           useCaseData.data_s3_bucket = state.dataS3Bucket;
           useCaseData.s3_bucket = state.s3Bucket;
+          if (state.s3Prefix) useCaseData.s3_prefix = state.s3Prefix;
         }
       }
 
-      await apiService.createUseCase(useCaseData);
+      const result = await apiService.createUseCase(useCaseData) as any;
 
-      // Navigate to use cases list after creating
-      navigate('/usecases');
+      // Check for provisioning warnings
+      const warnings: string[] = [];
+      if (result.shared_components?.status === 'failed') {
+        warnings.push(`Shared components provisioning failed: ${result.shared_components.error || 'Unknown error'}. You can retry from the UseCases page.`);
+      }
+      if (result.data_bucket_policy?.status === 'failed') {
+        warnings.push(`Data bucket policy update failed: ${result.data_bucket_policy.error}`);
+      }
+
+      if (warnings.length > 0) {
+        setError(`Use case created with warnings:\n${warnings.join('\n')}`);
+        // Still navigate after a delay so user can read the warning
+        setTimeout(() => navigate('/usecases'), 5000);
+      } else {
+        // Navigate to use cases list after creating
+        navigate('/usecases');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create use case');
     } finally {
@@ -278,17 +295,31 @@ export default function UseCaseOnboarding() {
                   />
                 </FormField>
 
+                {state.setupType === 'multi-account' && (
                 <FormField
-                  label="AWS Region"
-                  description="AWS region where your edge devices and resources are located"
+                  label="UseCase Account Region"
+                  description="Region where the UseCase Account's SageMaker, IoT, and Greengrass resources are deployed"
                   stretch
                 >
-                  <Input
-                    value={state.region}
-                    onChange={({ detail }) => updateState({ region: detail.value })}
-                    placeholder="e.g., us-east-1, us-east-2, us-west-2"
+                  <Select
+                    selectedOption={
+                      state.region
+                        ? { label: state.region, value: state.region }
+                        : null
+                    }
+                    onChange={({ detail }) =>
+                      updateState({ region: detail.selectedOption.value || '' })
+                    }
+                    options={[
+                      { label: 'us-east-1 — N. Virginia', value: 'us-east-1' },
+                      { label: 'us-east-2 — Ohio', value: 'us-east-2' },
+                      { label: 'us-west-1 — N. California', value: 'us-west-1' },
+                      { label: 'us-west-2 — Oregon', value: 'us-west-2' },
+                    ]}
+                    placeholder="Select a region"
                   />
                 </FormField>
+                )}
 
                 {state.setupType === 'single-account' && (
                   <>
@@ -296,12 +327,13 @@ export default function UseCaseOnboarding() {
                     <FormField
                       label="S3 Bucket"
                       description="S3 bucket for storing training datasets, models, and labeling results"
+                      errorText={validateBucketName(state.s3Bucket)}
                       stretch
                     >
                       <Input
                         value={state.s3Bucket}
                         onChange={({ detail }) => updateState({ s3Bucket: detail.value })}
-                        placeholder="e.g., dda-cookie-dataset"
+                        placeholder="e.g., my-training-data-bucket"
                       />
                     </FormField>
                   </>
@@ -458,6 +490,7 @@ export default function UseCaseOnboarding() {
                     <FormField
                       label="Data S3 Bucket"
                       description="S3 bucket in the Data Account containing your training data"
+                      errorText={validateBucketName(state.dataS3Bucket)}
                       stretch
                     >
                       <Input
@@ -470,6 +503,7 @@ export default function UseCaseOnboarding() {
                     <FormField
                       label="UseCase S3 Bucket"
                       description="S3 bucket in the UseCase Account for SageMaker outputs (models, manifests, checkpoints)"
+                      errorText={validateBucketName(state.s3Bucket)}
                       stretch
                     >
                       <Input
@@ -488,12 +522,13 @@ export default function UseCaseOnboarding() {
                   <FormField
                     label="S3 Bucket"
                     description="S3 bucket in the UseCase Account for all data and models"
+                    errorText={validateBucketName(state.s3Bucket)}
                     stretch
                   >
                     <Input
                       value={state.s3Bucket}
                       onChange={({ detail }) => updateState({ s3Bucket: detail.value })}
-                      placeholder="e.g., dda-cookie-dataset"
+                      placeholder="e.g., my-training-data-bucket"
                     />
                   </FormField>
                 </Container>

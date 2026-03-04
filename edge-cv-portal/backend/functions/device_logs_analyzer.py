@@ -14,7 +14,7 @@ import boto3
 from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, check_user_access, is_super_user, 
-    get_usecase, assume_cross_account_role, create_boto3_client
+    get_usecase, assume_cross_account_role, create_boto3_client, get_usecase_region
 )
 
 logger = logging.getLogger()
@@ -397,7 +397,7 @@ def fetch_device_logs(device_id: str, usecase_id: str, hours_back: int = 1) -> s
             usecase['external_id']
         )
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         
         # Create CloudWatch Logs client with assumed role
         cross_account_logs_client = create_boto3_client('logs', credentials, region)

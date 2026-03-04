@@ -11,7 +11,7 @@ from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, is_super_user, assume_cross_account_role, get_usecase,
-    create_boto3_client
+    create_boto3_client, get_usecase_region
 )
 
 # Import the analyzer function
@@ -115,7 +115,7 @@ def list_log_groups(device_id, user, query_params):
             usecase['external_id']
         )
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         
         # Create CloudWatch Logs client with assumed role
         logs_client = create_boto3_client('logs', credentials, region)
@@ -299,7 +299,7 @@ def get_component_logs(device_id, component_name, user, query_params):
             usecase['external_id']
         )
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         
         # Create CloudWatch Logs client with assumed role
         logs_client = create_boto3_client('logs', credentials, region)

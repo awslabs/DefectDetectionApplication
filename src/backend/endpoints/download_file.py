@@ -209,7 +209,8 @@ def get_inference_result_data_for_retraining(
     manifest_file_name = "manifest-{}".format(now.strftime("%Y-%m-%d-%H-%M-%S"))
     manifest_file_path = os.path.join(DDA_SYSTEM_FOLDER, manifest_file_name)
     with open(manifest_file_path, "w") as json_file:
-        json.dump(manifest_data, json_file, indent=4)
+        for entry in manifest_data:
+            json_file.write(json.dumps(entry) + "\n")
 
     if predictionResult in PREDICTION:
         # Only prefix the zip file name with prediction type if the contents have guaranteed prediction results (we filtered)
