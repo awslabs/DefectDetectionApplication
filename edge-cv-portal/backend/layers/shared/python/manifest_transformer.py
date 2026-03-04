@@ -123,19 +123,9 @@ def transform_manifest_entry(entry: Dict, detected_attrs: Dict, task_type: str) 
     """
     transformed = {}
     
-    # Copy and normalize source-ref (always present)
+    # Copy source-ref as-is (never modify S3 URIs)
     if 'source-ref' in entry:
-        source_ref = entry['source-ref']
-        # Normalize S3 URI: remove duplicate s3:// prefixes and double slashes
-        source_ref = source_ref.replace('s3://s3://', 's3://')
-        source_ref = source_ref.replace('//', '/')
-        source_ref = 's3://' + source_ref.lstrip('s3:/').lstrip('/')
-        
-        # Fix incorrect path patterns
-        source_ref = source_ref.replace('/cookies/training-images/', '/cookies/dataset-files/training-images/')
-        source_ref = source_ref.replace('/cookies/mask-images/', '/cookies/dataset-files/mask-images/')
-        
-        transformed['source-ref'] = source_ref
+        transformed['source-ref'] = entry['source-ref']
     
     # Handle segmentation-only manifests (infer classification labels)
     if detected_attrs.get('segmentation_only', False):
