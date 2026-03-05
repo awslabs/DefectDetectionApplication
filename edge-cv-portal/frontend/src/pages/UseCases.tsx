@@ -367,7 +367,7 @@ export default function UseCases() {
                 ]}
                 onItemClick={({ detail }) => {
                   if (detail.id === 'browse') {
-                    navigate(`/labeling/datasets?usecase_id=${item.usecase_id}`);
+                    navigate(`/data?usecase_id=${item.usecase_id}`);
                   } else if (detail.id === 'team') {
                     setSelectedUseCase(item);
                     setShowTeamModal(true);

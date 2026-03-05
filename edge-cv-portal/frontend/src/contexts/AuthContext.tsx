@@ -1,13 +1,18 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { Amplify } from 'aws-amplify';
-import { signIn, signOut, getCurrentUser, fetchAuthSession } from 'aws-amplify/auth';
+import { signIn, signOut, getCurrentUser, fetchAuthSession, confirmSignIn, updatePassword, resetPassword, confirmResetPassword } from 'aws-amplify/auth';
 import { User, UserRole } from '../types';
 
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  needsNewPassword: boolean;
   login: (username: string, password: string) => Promise<void>;
+  completeNewPassword: (newPassword: string, userAttributes?: Record<string, string>) => Promise<void>;
+  changePassword: (oldPassword: string, newPassword: string) => Promise<void>;
+  forgotPassword: (username: string) => Promise<void>;
+  forgotPasswordSubmit: (username: string, code: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   error: string | null;
 }
@@ -61,6 +66,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [needsNewPassword, setNeedsNewPassword] = useState(false);
 
   useEffect(() => {
     initAuth();
@@ -109,10 +115,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setIsLoading(true);
       
       await configureAmplify();
-      const { isSignedIn } = await signIn({ username, password });
+      const result = await signIn({ username, password });
       
-      if (isSignedIn) {
+      if (result.isSignedIn) {
+        setNeedsNewPassword(false);
         await checkAuth();
+      } else if (result.nextStep?.signInStep === 'CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED') {
+        setNeedsNewPassword(true);
+        setIsLoading(false);
+        // Don't throw — the UI will show the change password form
+      } else {
+        throw new Error(`Unexpected sign-in step: ${result.nextStep?.signInStep}`);
       }
     } catch (err: any) {
       console.error('Login error:', err);
@@ -120,6 +133,67 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw err;
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const completeNewPassword = async (newPassword: string, userAttributes?: Record<string, string>) => {
+    try {
+      setError(null);
+      setIsLoading(true);
+      
+      // Cognito may require user attributes (like given_name) when completing the new password challenge.
+      // Pass them as the challengeResponse along with the new password.
+      const result = await confirmSignIn({ 
+        challengeResponse: newPassword,
+        options: userAttributes ? { userAttributes } : undefined,
+      });
+      
+      if (result.isSignedIn) {
+        setNeedsNewPassword(false);
+        await checkAuth();
+      } else {
+        throw new Error('Password change succeeded but sign-in did not complete');
+      }
+    } catch (err: any) {
+      console.error('Change password error:', err);
+      setError(err.message || 'Failed to change password');
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const forgotPassword = async (username: string) => {
+    try {
+      setError(null);
+      await configureAmplify();
+      await resetPassword({ username });
+    } catch (err: any) {
+      console.error('Forgot password error:', err);
+      setError(err.message || 'Failed to send reset code');
+      throw err;
+    }
+  };
+
+  const forgotPasswordSubmit = async (username: string, code: string, newPassword: string) => {
+    try {
+      setError(null);
+      await confirmResetPassword({ username, confirmationCode: code, newPassword });
+    } catch (err: any) {
+      console.error('Reset password error:', err);
+      setError(err.message || 'Failed to reset password');
+      throw err;
+    }
+  };
+
+  const changePassword = async (oldPassword: string, newPassword: string) => {
+    try {
+      setError(null);
+      await updatePassword({ oldPassword, newPassword });
+    } catch (err: any) {
+      console.error('Change password error:', err);
+      setError(err.message || 'Failed to change password');
+      throw err;
     }
   };
 
@@ -139,7 +213,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         user,
         isAuthenticated: !!user,
         isLoading,
+        needsNewPassword,
         login,
+        completeNewPassword,
+        changePassword,
+        forgotPassword,
+        forgotPasswordSubmit,
         logout,
         error,
       }}
