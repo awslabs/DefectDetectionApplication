@@ -114,6 +114,7 @@ export class ComputeStack extends cdk.Stack {
           'greengrass:CreateDeployment',
           'greengrass:CancelDeployment',
           'iot:DescribeThing',
+          'iot:DescribeEndpoint',
           'iot:DescribeThingGroup',
           'iot:GetThingType',
           'iot:ListThings',

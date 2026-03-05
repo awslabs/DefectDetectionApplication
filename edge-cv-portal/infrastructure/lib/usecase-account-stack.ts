@@ -11,7 +11,7 @@ import { Construct } from 'constructs';
  * - MINOR: New features (new permissions, new resources)
  * - PATCH: Bug fixes
  */
-const STACK_VERSION = '1.3.0';
+const STACK_VERSION = '1.4.0';
 
 export interface UseCaseAccountStackProps extends cdk.StackProps {
   /**
@@ -623,6 +623,19 @@ export class UseCaseAccountStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['iot:CreateJob', 'iot:DescribeJob', 'iot:CancelJob', 'iot:ListJobs'],
         resources: [`arn:aws:iot:*:${this.account}:job/*`],
+      })
+    );
+
+    // IoT Endpoint - required for Greengrass CreateDeployment targeting individual things
+    // Without this, Greengrass cannot call IoT Core services for the target thing
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'IoTEndpoint',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'iot:DescribeEndpoint',
+        ],
+        resources: ['*'],
       })
     );
 
