@@ -144,7 +144,7 @@ aws iam attach-role-policy \
 ROLE_ARN=$(aws iam get-role --role-name APIGatewayCloudWatchLogsRole --query 'Role.Arn' --output text)
 aws apigateway update-account \
   --patch-operations op=replace,path=/cloudwatchRoleArn,value=$ROLE_ARN \
-  --region us-east-1
+  --region us-east-2
 ```
 
 > **Note**: This is a one-time setup per AWS account.
@@ -197,8 +197,8 @@ These are automatically shared when you create a UseCase in the portal. The UseC
 USER_POOL_ID=$(aws cloudformation describe-stacks \
   --stack-name EdgeCVPortalAuthStack \
   --query 'Stacks[0].Outputs[?OutputKey==`AuthConfig`].OutputValue' \
-  --output text --region us-east-1 | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
-REGION="us-east-1"
+  --output text --region us-east-2 | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
+REGION="us-east-2"
 
 aws cognito-idp admin-create-user \
   --user-pool-id $USER_POOL_ID \
@@ -210,7 +210,7 @@ aws cognito-idp admin-create-user \
 aws cognito-idp admin-set-user-password \
   --user-pool-id $USER_POOL_ID \
   --username admin \
-  --password YourSecurePassword123! \
+  --password YourSecurePassword1234! \
   --permanent \
   --region $REGION
 
@@ -238,7 +238,7 @@ Then launch and connect:
 ```bash
 # Launch build server (from edge-cv-portal directory)
 cd edge-cv-portal
-./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME
+./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME --region REGION
 
 # Set permissions on your key pair
 chmod 400 ~/.ssh/YOUR_KEY_NAME.pem
@@ -325,7 +325,7 @@ This provisions Greengrass components, creates `DDAPortalComponentAccessPolicy`,
 
 ### Step 7: Setting Up Edge Servers
 
-Edge device setup is a manual process. After building the DDA application, provision edge servers with AWS IoT Greengrass.
+Edge device setup is a manual process. After building the DDA application, provision edge servers with AWS IoT Greengrass using the scripts in /station_install/setup_station.sh on the device itself.
 
 **Prerequisites:**
 - DDA application built and published (Step 4)
