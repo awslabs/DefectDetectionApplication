@@ -9,6 +9,8 @@ ComponentDependencies:
     VersionRequirement: ">=2.4.0"
   aws.greengrass.ShadowManager:
     VersionRequirement: ">=2.2.0"
+  aws.greengrass.Cli:
+    VersionRequirement: ">=2.6.0"
 ComponentConfiguration:
   DefaultConfiguration:
     StreamShadowName: "streamConfigurationShadow"
