@@ -44,6 +44,10 @@ echo "Recipe file: $RECIPE_FILE"
 cp $RECIPE_FILE recipe.yaml
 
 print_step "Creating GDK configuration"
+# Detect region from AWS CLI config (used for publish and tagging)
+REGION=$(aws configure get region || echo "us-east-1")
+echo "Region: $REGION"
+
 # Create gdk-config.json with architecture-specific component name
 cat > gdk-config.json << EOF
 {
@@ -62,7 +66,7 @@ cat > gdk-config.json << EOF
       },
       "publish": {
         "bucket": "dda-component",
-        "region": "us-east-1"
+        "region": "${REGION}"
       }
     }
   },
@@ -126,7 +130,6 @@ fi
 print_step "Tagging component for portal discovery"
 # Tag the published component with dda-portal:managed=true
 
-REGION=$(aws configure get region || echo "us-east-1")
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 COMPONENT_ARN=$(aws greengrassv2 list-components \
