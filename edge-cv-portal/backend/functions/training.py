@@ -225,6 +225,31 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
                 'message': 'Invalid metadata type'
             }
         
+        # Spot-check that referenced S3 files exist (first entry only)
+        missing_refs = []
+        for ref_field in ['source-ref', 'anomaly-mask-ref']:
+            ref_uri = first_entry.get(ref_field)
+            if not ref_uri or not isinstance(ref_uri, str) or not ref_uri.startswith('s3://'):
+                continue
+            ref_parts = ref_uri.replace('s3://', '').split('/', 1)
+            if len(ref_parts) != 2:
+                continue
+            ref_bucket, ref_key = ref_parts
+            try:
+                ref_s3 = get_s3_client_for_bucket(usecase, ref_bucket, f"validate-{ref_field}")
+                ref_s3.head_object(Bucket=ref_bucket, Key=ref_key)
+            except ClientError as e:
+                code = e.response['Error']['Code']
+                if code in ('404', 'NoSuchKey'):
+                    missing_refs.append(f"{ref_field}: {ref_uri}")
+        
+        if missing_refs:
+            return {
+                'valid': False,
+                'errors': [f"Referenced file not found: {ref}" for ref in missing_refs],
+                'message': 'Manifest references files that do not exist in S3. Check that images/masks have been uploaded.'
+            }
+        
         # All validations passed
         return {
             'valid': True,
@@ -1157,6 +1182,41 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         manifest_lines = manifest_content.strip().split('\n')
         if not manifest_lines:
             return create_response(400, {'error': 'Source manifest is empty'})
+        
+        # Validate that referenced S3 files exist (spot-check first few entries)
+        logger.info("Validating referenced S3 files exist...")
+        missing_files = []
+        check_count = min(5, len(manifest_lines))  # Check up to 5 entries
+        for i in range(check_count):
+            try:
+                entry = json.loads(manifest_lines[i])
+            except json.JSONDecodeError:
+                continue
+            
+            for ref_field in ['source-ref', 'anomaly-mask-ref']:
+                ref_uri = entry.get(ref_field)
+                if not ref_uri or not ref_uri.startswith('s3://'):
+                    continue
+                ref_parts = ref_uri.replace('s3://', '').split('/', 1)
+                if len(ref_parts) != 2:
+                    continue
+                ref_bucket, ref_key = ref_parts
+                try:
+                    ref_s3 = get_s3_client_for_bucket(usecase, ref_bucket, f"validate-ref-{i}")
+                    ref_s3.head_object(Bucket=ref_bucket, Key=ref_key)
+                except ClientError as e:
+                    code = e.response['Error']['Code']
+                    if code in ('404', 'NoSuchKey'):
+                        missing_files.append(f"Line {i+1} {ref_field}: {ref_uri}")
+                    # Skip access denied — the file may exist but we can't check from this role
+        
+        if missing_files:
+            return create_response(400, {
+                'error': 'Referenced files not found in S3. Fix the manifest or upload the missing files before transforming.',
+                'missing_files': missing_files,
+                'checked': check_count,
+                'total_entries': len(manifest_lines)
+            })
         
         # Transform manifest using shared utility
         logger.info(f"Transforming manifest with {len(manifest_lines)} entries from {source_manifest_uri}")

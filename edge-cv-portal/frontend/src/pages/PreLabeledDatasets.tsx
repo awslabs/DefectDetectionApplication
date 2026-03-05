@@ -320,6 +320,15 @@ export default function PreLabeledDatasets() {
               ),
             },
             {
+              id: 'manifest_s3_uri',
+              header: 'Manifest URI',
+              cell: (item: PreLabeledDataset) => (
+                <Box fontSize="body-s" color="text-body-secondary">
+                  {item.manifest_s3_uri}
+                </Box>
+              ),
+            },
+            {
               id: 'created_at',
               header: 'Created',
               cell: (item: PreLabeledDataset) => new Date(item.created_at * 1000).toLocaleDateString(),

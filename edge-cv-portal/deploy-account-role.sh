@@ -90,12 +90,24 @@ if [ "$DEPLOYMENT_TYPE" = "single-account" ]; then
     
     # Create trust policy for SageMaker
     # Get current region and map to SageMaker account ID
-    CURRENT_REGION=$(aws configure get region || echo "us-east-1")
+    CURRENT_REGION=$(aws configure get region 2>/dev/null)
+    if [ -z "$CURRENT_REGION" ]; then
+        echo -e "${RED}❌ ERROR: No AWS region configured.${NC}"
+        echo "   Run: aws configure set region <your-region>"
+        exit 1
+    fi
     
-    # Map regions to SageMaker account IDs
+    # Map regions to SageMaker Ground Truth account IDs
+    # https://docs.aws.amazon.com/sagemaker/latest/dg/sms-workforce-create-private-oidc.html
     case $CURRENT_REGION in
         us-east-1)
             SAGEMAKER_ACCOUNT="X"
+            ;;
+        us-east-2)
+            SAGEMAKER_ACCOUNT="266458841044"
+            ;;
+        us-west-1)
+            SAGEMAKER_ACCOUNT="632365934929"
             ;;
         us-west-2)
             SAGEMAKER_ACCOUNT="X"
@@ -116,9 +128,9 @@ if [ "$DEPLOYMENT_TYPE" = "single-account" ]; then
             SAGEMAKER_ACCOUNT="X"
             ;;
         *)
-            # Default to us-east-1 if region not found
-            SAGEMAKER_ACCOUNT='aws sts get-caller-identity --query Account --output text'
-            echo sagemakeraccountid= $SAGEMAKER_ACCOUNT
+            echo -e "${RED}❌ ERROR: Region $CURRENT_REGION is not supported for SageMaker Ground Truth.${NC}"
+            echo "   Supported regions: us-east-1, us-east-2, us-west-1, us-west-2, eu-west-1, eu-central-1, ap-northeast-1, ap-southeast-1, ap-southeast-2"
+            exit 1
             ;;
     esac
     

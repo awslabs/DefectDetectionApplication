@@ -137,6 +137,8 @@ export class ComputeStack extends cdk.Stack {
           'logs:FilterLogEvents',
           'sts:AssumeRole',
           'execute-api:Invoke',
+          's3:GetBucketCors',
+          's3:PutBucketCors',
         ],
         resources: ['*'],
       }));

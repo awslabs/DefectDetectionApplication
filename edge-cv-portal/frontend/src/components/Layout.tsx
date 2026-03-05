@@ -1,9 +1,17 @@
+import { useState } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import {
   AppLayout,
   TopNavigation,
   SideNavigation,
   SideNavigationProps,
+  Modal,
+  SpaceBetween,
+  FormField,
+  Input,
+  Button,
+  Box,
+  Alert,
 } from '@cloudscape-design/components';
 import { useAuth } from '../contexts/AuthContext';
 import { getConfig } from '../config';
@@ -11,9 +19,16 @@ import { getConfig } from '../config';
 export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, logout } = useAuth();
+  const { user, logout, changePassword } = useAuth();
   const config = getConfig();
   const branding = config.branding;
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changePwLoading, setChangePwLoading] = useState(false);
+  const [changePwError, setChangePwError] = useState('');
+  const [changePwSuccess, setChangePwSuccess] = useState(false);
 
   // Base navigation items for all users
   const baseNavigationItems: SideNavigationProps.Item[] = [
@@ -84,6 +99,10 @@ export default function Layout() {
                 disabled: true,
               },
               {
+                id: 'change-password',
+                text: 'Change Password',
+              },
+              {
                 id: 'logout',
                 text: 'Sign out',
               },
@@ -92,6 +111,13 @@ export default function Layout() {
               if (detail.id === 'logout') {
                 await logout();
                 navigate('/login');
+              } else if (detail.id === 'change-password') {
+                setShowChangePassword(true);
+                setChangePwError('');
+                setChangePwSuccess(false);
+                setOldPassword('');
+                setNewPassword('');
+                setConfirmPassword('');
               }
             },
           },
@@ -112,6 +138,81 @@ export default function Layout() {
         toolsHide
         navigationWidth={200}
       />
+
+      <Modal
+        visible={showChangePassword}
+        onDismiss={() => setShowChangePassword(false)}
+        header="Change Password"
+        footer={
+          <Box float="right">
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button onClick={() => setShowChangePassword(false)}>Cancel</Button>
+              <Button
+                variant="primary"
+                loading={changePwLoading}
+                onClick={async () => {
+                  setChangePwError('');
+                  if (!oldPassword || !newPassword || !confirmPassword) {
+                    setChangePwError('All fields are required');
+                    return;
+                  }
+                  if (newPassword !== confirmPassword) {
+                    setChangePwError('New passwords do not match');
+                    return;
+                  }
+                  if (newPassword.length < 8) {
+                    setChangePwError('Password must be at least 8 characters');
+                    return;
+                  }
+                  try {
+                    setChangePwLoading(true);
+                    await changePassword(oldPassword, newPassword);
+                    setChangePwSuccess(true);
+                  } catch (err: any) {
+                    setChangePwError(err.message || 'Failed to change password');
+                  } finally {
+                    setChangePwLoading(false);
+                  }
+                }}
+              >
+                Change Password
+              </Button>
+            </SpaceBetween>
+          </Box>
+        }
+      >
+        <SpaceBetween size="l">
+          {changePwError && <Alert type="error">{changePwError}</Alert>}
+          {changePwSuccess && (
+            <Alert type="success">Password changed successfully.</Alert>
+          )}
+          {!changePwSuccess && (
+            <>
+              <FormField label="Current Password">
+                <Input
+                  type="password"
+                  value={oldPassword}
+                  onChange={({ detail }) => setOldPassword(detail.value)}
+                />
+              </FormField>
+              <FormField label="New Password">
+                <Input
+                  type="password"
+                  value={newPassword}
+                  onChange={({ detail }) => setNewPassword(detail.value)}
+                />
+              </FormField>
+              <FormField label="Confirm New Password">
+                <Input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={({ detail }) => setConfirmPassword(detail.value)}
+                />
+              </FormField>
+            </>
+          )}
+        </SpaceBetween>
+      </Modal>
     </>
   );
 }
