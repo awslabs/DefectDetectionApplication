@@ -101,7 +101,7 @@ if [ "$DEPLOYMENT_TYPE" = "single-account" ]; then
     # https://docs.aws.amazon.com/sagemaker/latest/dg/sms-workforce-create-private-oidc.html
     case $CURRENT_REGION in
         us-east-1)
-            SAGEMAKER_ACCOUNT="X"
+            SAGEMAKER_ACCOUNT="432418664414"
             ;;
         us-east-2)
             SAGEMAKER_ACCOUNT="266458841044"
@@ -110,22 +110,22 @@ if [ "$DEPLOYMENT_TYPE" = "single-account" ]; then
             SAGEMAKER_ACCOUNT="632365934929"
             ;;
         us-west-2)
-            SAGEMAKER_ACCOUNT="X"
+            SAGEMAKER_ACCOUNT="246618743249"
             ;;
         eu-west-1)
-            SAGEMAKER_ACCOUNT="X"
+            SAGEMAKER_ACCOUNT="685385470294"
             ;;
         eu-central-1)
-            SAGEMAKER_ACCOUNT="X"
+            SAGEMAKER_ACCOUNT="492215442770"
             ;;
         ap-northeast-1)
-            SAGEMAKER_ACCOUNT="X"
+            SAGEMAKER_ACCOUNT="501404014126"
             ;;
         ap-southeast-1)
-            SAGEMAKER_ACCOUNT="X"
+            SAGEMAKER_ACCOUNT="114774131450"
             ;;
         ap-southeast-2)
-            SAGEMAKER_ACCOUNT="X"
+            SAGEMAKER_ACCOUNT="783357319266"
             ;;
         *)
             echo -e "${RED}❌ ERROR: Region $CURRENT_REGION is not supported for SageMaker Ground Truth.${NC}"
