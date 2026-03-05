@@ -616,13 +616,24 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
-    // IoT Jobs
+    // IoT Jobs - Greengrass CreateDeployment requires these as dependent actions.
+    // iot:CreateJob needs both job/* and thing/* resources since the job targets a thing.
     this.role.addToPolicy(
       new iam.PolicyStatement({
         sid: 'IoTJobs',
         effect: iam.Effect.ALLOW,
-        actions: ['iot:CreateJob', 'iot:DescribeJob', 'iot:CancelJob', 'iot:ListJobs'],
-        resources: [`arn:aws:iot:*:${this.account}:job/*`],
+        actions: [
+          'iot:CreateJob',
+          'iot:DescribeJob',
+          'iot:UpdateJob',
+          'iot:CancelJob',
+          'iot:ListJobs',
+        ],
+        resources: [
+          `arn:aws:iot:*:${this.account}:job/*`,
+          `arn:aws:iot:*:${this.account}:thing/*`,
+          `arn:aws:iot:*:${this.account}:thinggroup/*`,
+        ],
       })
     );
 

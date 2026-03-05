@@ -95,30 +95,30 @@ if [ "$DEPLOYMENT_TYPE" = "single-account" ]; then
     # Map regions to SageMaker account IDs
     case $CURRENT_REGION in
         us-east-1)
-            SAGEMAKER_ACCOUNT="432418664414"
+            SAGEMAKER_ACCOUNT="X"
             ;;
         us-west-2)
-            SAGEMAKER_ACCOUNT="246618743249"
+            SAGEMAKER_ACCOUNT="X"
             ;;
         eu-west-1)
-            SAGEMAKER_ACCOUNT="685385470294"
+            SAGEMAKER_ACCOUNT="X"
             ;;
         eu-central-1)
-            SAGEMAKER_ACCOUNT="492215442770"
+            SAGEMAKER_ACCOUNT="X"
             ;;
         ap-northeast-1)
-            SAGEMAKER_ACCOUNT="501404014126"
+            SAGEMAKER_ACCOUNT="X"
             ;;
         ap-southeast-1)
-            SAGEMAKER_ACCOUNT="114774131450"
+            SAGEMAKER_ACCOUNT="X"
             ;;
         ap-southeast-2)
-            SAGEMAKER_ACCOUNT="783357319266"
+            SAGEMAKER_ACCOUNT="X"
             ;;
         *)
             # Default to us-east-1 if region not found
-            SAGEMAKER_ACCOUNT="432418664414"
-            echo -e "${YELLOW}⚠ Region $CURRENT_REGION not explicitly mapped, using us-east-1 SageMaker account${NC}"
+            SAGEMAKER_ACCOUNT='aws sts get-caller-identity --query Account --output text'
+            echo sagemakeraccountid= $SAGEMAKER_ACCOUNT
             ;;
     esac
     
@@ -426,6 +426,77 @@ EOF
         fi
     fi
     
+    # Associate Greengrass service role with this account
+    # This is required for Greengrass CreateDeployment to interact with IoT Core
+    # (e.g., creating IoT Jobs when deploying to individual things)
+    echo ""
+    echo "Setting up Greengrass service role..."
+    
+    # Check if a Greengrass service role is already associated
+    EXISTING_GG_ROLE=$(aws greengrassv2 get-service-role-for-account --region "$CURRENT_REGION" 2>/dev/null || echo "")
+    
+    if echo "$EXISTING_GG_ROLE" | grep -q "roleArn"; then
+        echo -e "${GREEN}✓${NC} Greengrass service role already associated"
+        echo "  $(echo "$EXISTING_GG_ROLE" | grep -o '"roleArn": "[^"]*"')"
+    else
+        # Check if the Greengrass_ServiceRole exists
+        if aws iam get-role --role-name Greengrass_ServiceRole 2>/dev/null > /dev/null; then
+            echo -e "${YELLOW}⚠${NC} Greengrass_ServiceRole exists but is not associated"
+        else
+            echo "Creating Greengrass_ServiceRole..."
+            GG_TRUST_POLICY=$(cat <<GGEOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "greengrass.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "aws:SourceAccount": "$CURRENT_ACCOUNT"
+        }
+      }
+    }
+  ]
+}
+GGEOF
+)
+            if aws iam create-role \
+                --role-name Greengrass_ServiceRole \
+                --assume-role-policy-document "$GG_TRUST_POLICY" 2>/dev/null; then
+                echo -e "${GREEN}✓${NC} Created Greengrass_ServiceRole"
+            else
+                echo -e "${RED}✗ Failed to create Greengrass_ServiceRole${NC}"
+            fi
+        fi
+        
+        # Attach the managed policy
+        aws iam attach-role-policy \
+            --role-name Greengrass_ServiceRole \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AWSGreengrassResourceAccessRolePolicy 2>/dev/null \
+            && echo -e "${GREEN}✓${NC} Attached AWSGreengrassResourceAccessRolePolicy" \
+            || echo -e "${YELLOW}⚠${NC} Policy may already be attached"
+        
+        # Wait for role propagation
+        echo "Waiting for IAM role propagation..."
+        sleep 10
+        
+        # Associate the role with the account
+        GG_ROLE_ARN="arn:aws:iam::${CURRENT_ACCOUNT}:role/Greengrass_ServiceRole"
+        if aws greengrassv2 associate-service-role-to-account \
+            --role-arn "$GG_ROLE_ARN" \
+            --region "$CURRENT_REGION" 2>/dev/null; then
+            echo -e "${GREEN}✓${NC} Associated Greengrass service role with account in $CURRENT_REGION"
+        else
+            echo -e "${RED}✗ Failed to associate Greengrass service role${NC}"
+            echo "  You may need to do this manually:"
+            echo "  aws greengrassv2 associate-service-role-to-account --role-arn $GG_ROLE_ARN --region $CURRENT_REGION"
+        fi
+    fi
+    
     echo ""
     echo -e "${GREEN}=========================================="
     echo "Single-Account Role Created Successfully!"
@@ -434,6 +505,7 @@ EOF
     echo "The following have been created:"
     echo "  • DDASageMakerExecutionRole - for SageMaker training/compilation/labeling"
     echo "  • DDAPortalComponentAccessPolicy - for Greengrass device access to model artifacts"
+    echo "  • Greengrass_ServiceRole - for Greengrass to access IoT Core services"
     echo ""
     echo "Next steps:"
     echo "1. Attach the managed policy to your Greengrass device role:"
@@ -527,6 +599,73 @@ elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
     # Get outputs
     CURRENT_ACCOUNT=$(aws sts get-caller-identity --query 'Account' --output text)
     ROLE_ARN="arn:aws:iam::${CURRENT_ACCOUNT}:role/DDAPortalAccessRole"
+    
+    # Associate Greengrass service role with this account
+    # Required for Greengrass CreateDeployment to call IoT Core services
+    # (e.g., creating IoT Jobs when deploying to individual things)
+    echo ""
+    echo "Setting up Greengrass service role..."
+    
+    CURRENT_REGION=$(aws configure get region || echo "us-east-1")
+    EXISTING_GG_ROLE=$(aws greengrassv2 get-service-role-for-account --region "$CURRENT_REGION" 2>/dev/null || echo "")
+    
+    if echo "$EXISTING_GG_ROLE" | grep -q "roleArn"; then
+        echo -e "${GREEN}✓${NC} Greengrass service role already associated"
+        echo "  $(echo "$EXISTING_GG_ROLE" | grep -o '"roleArn": "[^"]*"')"
+    else
+        if aws iam get-role --role-name Greengrass_ServiceRole 2>/dev/null > /dev/null; then
+            echo -e "${YELLOW}⚠${NC} Greengrass_ServiceRole exists but is not associated"
+        else
+            echo "Creating Greengrass_ServiceRole..."
+            GG_TRUST_POLICY=$(cat <<GGEOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "greengrass.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "aws:SourceAccount": "$CURRENT_ACCOUNT"
+        }
+      }
+    }
+  ]
+}
+GGEOF
+)
+            if aws iam create-role \
+                --role-name Greengrass_ServiceRole \
+                --assume-role-policy-document "$GG_TRUST_POLICY" 2>/dev/null; then
+                echo -e "${GREEN}✓${NC} Created Greengrass_ServiceRole"
+            else
+                echo -e "${RED}✗ Failed to create Greengrass_ServiceRole${NC}"
+            fi
+        fi
+        
+        aws iam attach-role-policy \
+            --role-name Greengrass_ServiceRole \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AWSGreengrassResourceAccessRolePolicy 2>/dev/null \
+            && echo -e "${GREEN}✓${NC} Attached AWSGreengrassResourceAccessRolePolicy" \
+            || echo -e "${YELLOW}⚠${NC} Policy may already be attached"
+        
+        echo "Waiting for IAM role propagation..."
+        sleep 10
+        
+        GG_ROLE_ARN="arn:aws:iam::${CURRENT_ACCOUNT}:role/Greengrass_ServiceRole"
+        if aws greengrassv2 associate-service-role-to-account \
+            --role-arn "$GG_ROLE_ARN" \
+            --region "$CURRENT_REGION" 2>/dev/null; then
+            echo -e "${GREEN}✓${NC} Associated Greengrass service role with account in $CURRENT_REGION"
+        else
+            echo -e "${RED}✗ Failed to associate Greengrass service role${NC}"
+            echo "  You may need to do this manually:"
+            echo "  aws greengrassv2 associate-service-role-to-account --role-arn $GG_ROLE_ARN --region $CURRENT_REGION"
+        fi
+    fi
     
     # Save configuration
     CONFIG_FILE="usecase-account-${CURRENT_ACCOUNT}-config.txt"
