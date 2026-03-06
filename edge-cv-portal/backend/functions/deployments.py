@@ -28,9 +28,8 @@ DEPLOYMENTS_TABLE = os.environ.get('DEPLOYMENTS_TABLE', 'dda-portal-deployments'
 MIN_NUCLEUS_VERSION = '2.4.0'  # Reference only — not used in deployment components
 
 # CloudWatch log manager for device logging
-# We omit componentVersion to let Greengrass resolve the latest compatible version
-# automatically based on the device's Nucleus version.
-LOG_MANAGER_VERSION = None  # Resolved dynamically by Greengrass
+# Version 2.3.9 supports Nucleus >=2.1.0 <2.14.0
+LOG_MANAGER_VERSION = '2.3.9'
 
 # Components that require Nucleus to be explicitly included in deployment
 # Model components (model-*) also need Nucleus since they depend on DDA components
@@ -427,16 +426,17 @@ def create_deployment(body, user):
             }
             
             components_map['aws.greengrass.LogManager'] = {
+                'componentVersion': LOG_MANAGER_VERSION,
                 'configurationUpdate': {
                     'merge': json.dumps(log_manager_config)
                 }
             }
             auto_included.append({
                 'component_name': 'aws.greengrass.LogManager',
-                'component_version': 'latest',
+                'component_version': LOG_MANAGER_VERSION,
                 'reason': 'Required for CloudWatch logging from devices'
             })
-            logger.info(f"Auto-included aws.greengrass.LogManager (latest) with logging for components: {list(component_log_config_map.keys())}")
+            logger.info(f"Auto-included aws.greengrass.LogManager {LOG_MANAGER_VERSION} with logging for components: {list(component_log_config_map.keys())}")
         
         # Auto-include InferenceUploader for automatic S3 upload of inference results
         # Only include if explicitly enabled in UseCase configuration (opt-in)
