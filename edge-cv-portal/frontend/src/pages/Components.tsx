@@ -184,15 +184,6 @@ export default function Components() {
     }
   };
 
-  const getComponentType = (type: string) => {
-    const typeMap: Record<string, string> = {
-      'aws.greengrass.generic': 'Generic',
-      'aws.greengrass.lambda': 'Lambda',
-      'aws.greengrass.nucleus': 'Nucleus',
-    };
-    return typeMap[type] || type;
-  };
-
   const getPlatformBadges = (platforms: Component['platforms']) => {
     if (!platforms || platforms.length === 0) return 'All platforms';
     
@@ -339,11 +330,6 @@ export default function Components() {
                 cell: (item: Component) => getStatusIndicator(item.status),
               },
               {
-                id: 'type',
-                header: 'Type',
-                cell: (item: Component) => getComponentType(item.component_type),
-              },
-              {
                 id: 'platforms',
                 header: 'Platforms',
                 cell: (item: Component) => (
@@ -353,33 +339,19 @@ export default function Components() {
                 ),
               },
               {
-                id: 'model_name',
-                header: 'Model Name',
-                cell: (item: Component) => item.model_name || item.component_name,
-              },
-              {
                 id: 'publisher',
                 header: 'Publisher',
-                cell: (item: Component) => (
-                  <Box>
-                    <Box variant="strong">{item.publisher || 'DDA Portal'}</Box>
-                    {item.created_by_portal && (
-                      <Badge color="green">Portal Created</Badge>
-                    )}
-                  </Box>
-                ),
+                cell: (item: Component) => item.publisher || 'DDA Portal',
               },
               {
                 id: 'deployments',
                 header: 'Deployments',
-                cell: (item: Component) => (
-                  <Box>
-                    <Box variant="strong">{item.deployment_info?.active_deployments ?? 0}</Box>
-                    <Box variant="small" color="text-body-secondary">
-                      {item.deployment_info?.device_count ?? 0} device{(item.deployment_info?.device_count ?? 0) !== 1 ? 's' : ''}
-                    </Box>
-                  </Box>
-                ),
+                cell: (item: Component) => {
+                  const count = item.deployment_info?.active_deployments ?? 0;
+                  return count > 0
+                    ? `${count} active`
+                    : 'None';
+                },
               },
               {
                 id: 'created',
