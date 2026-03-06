@@ -23,6 +23,7 @@ import {
   Link,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import { validateS3Uri } from '../utils/s3Validation';
 
 interface ModelInspectionResult {
   type: string;
@@ -279,6 +280,7 @@ export default function SmartImport() {
                 label="Model File (S3 URI)"
                 description="S3 URI of your PyTorch model file (.pt)"
                 constraintText="Just the raw .pt file - no special packaging required!"
+                errorText={validateS3Uri(modelS3Uri)}
               >
                 <Input
                   value={modelS3Uri}

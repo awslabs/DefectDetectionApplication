@@ -6,9 +6,11 @@ ComponentDescription: DDA Local Web Server App - AMD64
 ComponentPublisher: Amazon
 ComponentDependencies:
   aws.greengrass.Nucleus:
-    VersionRequirement: ">=2.4.0"
+    VersionRequirement: ">=2.13.0"
   aws.greengrass.ShadowManager:
     VersionRequirement: ">=2.2.0"
+  aws.greengrass.Cli:
+    VersionRequirement: ">=2.6.0"
 ComponentConfiguration:
   DefaultConfiguration:
     StreamShadowName: "streamConfigurationShadow"

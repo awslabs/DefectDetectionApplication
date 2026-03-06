@@ -18,6 +18,7 @@ import { S3Dataset } from '../types';
 import { apiService } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
 import S3Browser from '../components/S3Browser';
+import { validateS3Uri } from '../utils/s3Validation';
 
 interface LocationState {
   dataset?: S3Dataset;
@@ -388,7 +389,7 @@ export default function CreateLabelingJob() {
                   label="S3 URI"
                   description="The S3 location containing images to label"
                   constraintText="Required"
-                  errorText={datasetS3Uri && !datasetS3Uri.startsWith('s3://') ? 'Must start with s3://' : ''}
+                  errorText={validateS3Uri(datasetS3Uri)}
                 >
                   <SpaceBetween direction="horizontal" size="xs">
                     <Input
@@ -432,6 +433,7 @@ export default function CreateLabelingJob() {
                   <FormField
                     label="Mask Prefix (Optional)"
                     description="S3 location containing segmentation masks for this task"
+                    errorText={validateS3Uri(maskPrefix)}
                   >
                     <Input
                       value={maskPrefix}

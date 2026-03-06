@@ -1,3 +1,7 @@
+# OS files
+.DS_Store
+**/.DS_Store
+
 # Manifest files with account numbers
 datasets/**/*.manifest
 datasets/**/*_class.manifest

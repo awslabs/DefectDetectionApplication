@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Wizard,
@@ -13,8 +13,10 @@ import {
   Button,
   ColumnLayout,
   StatusIndicator,
+  Select,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import { validateBucketName } from '../utils/s3Validation';
 
 interface OnboardingState {
   // Step 1: Setup Type Selection
@@ -23,7 +25,6 @@ interface OnboardingState {
   // Step 2: Basic Info
   useCaseName: string;
   description: string;
-  costCenter: string;
   region: string;  // AWS region where devices are located
 
   // Step 3: AWS Account Setup
@@ -32,6 +33,7 @@ interface OnboardingState {
   sagemakerExecutionRoleArn: string;
   externalId: string;
   s3Bucket: string;
+  s3Prefix: string;
 
   // Step 4: Role Deployment Status
   roleDeployed: boolean;
@@ -49,10 +51,6 @@ interface OnboardingState {
   dataAccountExternalId: string;
   dataS3Bucket: string;
   dataRoleVerified: boolean;
-
-  // SageMaker Asset Storage Option
-  // Can store in UseCase Account bucket or Data Account bucket
-  sagemakerAssetsInDataAccount: boolean;
 }
 
 export default function UseCaseOnboarding() {
@@ -60,18 +58,26 @@ export default function UseCaseOnboarding() {
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [registeredDataAccounts, setRegisteredDataAccounts] = useState<Array<{
+    data_account_id: string;
+    name: string;
+    role_arn: string;
+    external_id: string;
+    region: string;
+  }>>([]);
+  const [selectedDataAccount, setSelectedDataAccount] = useState<string | null>(null);
 
   const [state, setState] = useState<OnboardingState>({
     setupType: 'multi-account',
     useCaseName: '',
     description: '',
-    costCenter: '',
     region: 'us-east-1',  // Default region
     accountId: '',
     roleArn: '',
     sagemakerExecutionRoleArn: '',
     externalId: '',
     s3Bucket: '',
+    s3Prefix: '',
     roleDeployed: false,
     roleVerified: false,
     s3Created: false,
@@ -83,22 +89,36 @@ export default function UseCaseOnboarding() {
     dataAccountExternalId: '',
     dataS3Bucket: '',
     dataRoleVerified: false,
-    // SageMaker assets default to Data Account bucket (simpler setup)
-    sagemakerAssetsInDataAccount: true,
   });
 
   const updateState = (updates: Partial<OnboardingState>) => {
     setState((prev) => ({ ...prev, ...updates }));
   };
 
+  // Load registered data accounts from Settings
+  useEffect(() => {
+    const loadDataAccounts = async () => {
+      try {
+        const result = await apiService.listDataAccounts();
+        setRegisteredDataAccounts(result.data_accounts || []);
+      } catch (err) {
+        console.error('Failed to load data accounts:', err);
+      }
+    };
+    loadDataAccounts();
+  }, []);
+
   const handleVerifyRole = async () => {
     try {
       setError(null);
-      // TODO: Call API to verify role can be assumed
-      await new Promise((resolve) => setTimeout(resolve, 1000)); // Simulate API call
-      updateState({ roleVerified: true });
+      const result = await apiService.verifyRole(state.roleArn, state.externalId);
+      if (result.status === 'success') {
+        updateState({ roleVerified: true });
+      } else {
+        setError(`Role verification failed: ${result.error}`);
+      }
     } catch (err) {
-      setError('Failed to verify role. Please check the ARN and External ID.');
+      setError(err instanceof Error ? err.message : 'Failed to verify role. Please check the ARN and External ID.');
     }
   };
 
@@ -110,7 +130,6 @@ export default function UseCaseOnboarding() {
       // Create the use case
       const useCaseData: Record<string, unknown> = {
         name: state.useCaseName,
-        cost_center: state.costCenter,
         region: state.region,  // Include region
       };
 
@@ -118,9 +137,6 @@ export default function UseCaseOnboarding() {
       // Backend will auto-detect account_id and roles
       if (state.setupType === 'single-account') {
         useCaseData.s3_bucket = state.s3Bucket;
-        // Don't set s3_prefix - backend will use empty string by default
-        // Don't set account_id, cross_account_role_arn, sagemaker_execution_role_arn
-        // Backend will auto-detect these
       } else {
         // Multi-account setup: all fields required
         useCaseData.account_id = state.accountId;
@@ -133,24 +149,36 @@ export default function UseCaseOnboarding() {
           useCaseData.data_account_id = state.accountId;
           useCaseData.data_s3_bucket = state.s3Bucket;
           useCaseData.s3_bucket = state.s3Bucket;
+          if (state.s3Prefix) useCaseData.s3_prefix = state.s3Prefix;
         } else {
           useCaseData.data_account_id = state.dataAccountId;
           useCaseData.data_account_role_arn = state.dataAccountRoleArn;
           useCaseData.data_account_external_id = state.dataAccountExternalId;
           useCaseData.data_s3_bucket = state.dataS3Bucket;
-          
-          if (state.sagemakerAssetsInDataAccount) {
-            useCaseData.s3_bucket = state.dataS3Bucket;
-          } else {
-            useCaseData.s3_bucket = state.s3Bucket;
-          }
+          useCaseData.s3_bucket = state.s3Bucket;
+          if (state.s3Prefix) useCaseData.s3_prefix = state.s3Prefix;
         }
       }
 
-      await apiService.createUseCase(useCaseData);
+      const result = await apiService.createUseCase(useCaseData) as any;
 
-      // Always navigate to labeling workflow after creating use case
-      navigate('/labeling/create');
+      // Check for provisioning warnings
+      const warnings: string[] = [];
+      if (result.shared_components?.status === 'failed') {
+        warnings.push(`Shared components provisioning failed: ${result.shared_components.error || 'Unknown error'}. You can retry from the UseCases page.`);
+      }
+      if (result.data_bucket_policy?.status === 'failed') {
+        warnings.push(`Data bucket policy update failed: ${result.data_bucket_policy.error}`);
+      }
+
+      if (warnings.length > 0) {
+        setError(`Use case created with warnings:\n${warnings.join('\n')}`);
+        // Still navigate after a delay so user can read the warning
+        setTimeout(() => navigate('/usecases'), 5000);
+      } else {
+        // Navigate to use cases list after creating
+        navigate('/usecases');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create use case');
     } finally {
@@ -267,29 +295,31 @@ export default function UseCaseOnboarding() {
                   />
                 </FormField>
 
+                {state.setupType === 'multi-account' && (
                 <FormField
-                  label="Cost Center"
-                  description="Cost center or department for billing tracking"
+                  label="UseCase Account Region"
+                  description="Region where the UseCase Account's SageMaker, IoT, and Greengrass resources are deployed"
                   stretch
                 >
-                  <Input
-                    value={state.costCenter}
-                    onChange={({ detail }) => updateState({ costCenter: detail.value })}
-                    placeholder="e.g., DEPT-001"
+                  <Select
+                    selectedOption={
+                      state.region
+                        ? { label: state.region, value: state.region }
+                        : null
+                    }
+                    onChange={({ detail }) =>
+                      updateState({ region: detail.selectedOption.value || '' })
+                    }
+                    options={[
+                      { label: 'us-east-1 — N. Virginia', value: 'us-east-1' },
+                      { label: 'us-east-2 — Ohio', value: 'us-east-2' },
+                      { label: 'us-west-1 — N. California', value: 'us-west-1' },
+                      { label: 'us-west-2 — Oregon', value: 'us-west-2' },
+                    ]}
+                    placeholder="Select a region"
                   />
                 </FormField>
-
-                <FormField
-                  label="AWS Region"
-                  description="AWS region where your edge devices and resources are located"
-                  stretch
-                >
-                  <Input
-                    value={state.region}
-                    onChange={({ detail }) => updateState({ region: detail.value })}
-                    placeholder="e.g., us-east-1, us-east-2, us-west-2"
-                  />
-                </FormField>
+                )}
 
                 {state.setupType === 'single-account' && (
                   <>
@@ -297,12 +327,13 @@ export default function UseCaseOnboarding() {
                     <FormField
                       label="S3 Bucket"
                       description="S3 bucket for storing training datasets, models, and labeling results"
+                      errorText={validateBucketName(state.s3Bucket)}
                       stretch
                     >
                       <Input
                         value={state.s3Bucket}
                         onChange={({ detail }) => updateState({ s3Bucket: detail.value })}
-                        placeholder="e.g., dda-cookie-dataset"
+                        placeholder="e.g., my-training-data-bucket"
                       />
                     </FormField>
                   </>
@@ -326,7 +357,7 @@ export default function UseCaseOnboarding() {
                           type="radio"
                           name="dataAccountChoice"
                           checked={!state.dataAccountSameAsUseCase}
-                          onChange={() => updateState({ dataAccountSameAsUseCase: false, sagemakerAssetsInDataAccount: true })}
+                          onChange={() => updateState({ dataAccountSameAsUseCase: false })}
                         />{' '}
                         <strong>Separate Data Account</strong> (recommended for enterprise)
                         <Box variant="small" color="text-body-secondary">
@@ -350,6 +381,158 @@ export default function UseCaseOnboarding() {
                   </FormField>
                 </SpaceBetween>
               </Container>
+
+              {/* Data Account fields - show when Separate Data Account is selected */}
+              {!state.dataAccountSameAsUseCase && (
+                <Container header={<Header variant="h2">Data Account Details</Header>}>
+                  <SpaceBetween size="m">
+                    {registeredDataAccounts.length > 0 ? (
+                      <>
+                        <FormField
+                          label="Select Data Account"
+                          description="Choose a data account registered in Settings, or enter details manually"
+                          stretch
+                        >
+                          <Select
+                            selectedOption={
+                              selectedDataAccount
+                                ? {
+                                    label: `${registeredDataAccounts.find(a => a.data_account_id === selectedDataAccount)?.name || ''} (${selectedDataAccount})`,
+                                    value: selectedDataAccount,
+                                  }
+                                : null
+                            }
+                            onChange={({ detail }) => {
+                              const accountId = detail.selectedOption.value || '';
+                              setSelectedDataAccount(accountId);
+                              if (accountId === '__manual__') {
+                                updateState({
+                                  dataAccountId: '',
+                                  dataAccountRoleArn: '',
+                                  dataAccountExternalId: '',
+                                });
+                              } else {
+                                const account = registeredDataAccounts.find(a => a.data_account_id === accountId);
+                                if (account) {
+                                  updateState({
+                                    dataAccountId: account.data_account_id,
+                                    dataAccountRoleArn: account.role_arn,
+                                    dataAccountExternalId: account.external_id,
+                                  });
+                                }
+                              }
+                            }}
+                            options={[
+                              ...registeredDataAccounts.map(account => ({
+                                label: `${account.name} (${account.data_account_id})`,
+                                value: account.data_account_id,
+                                description: account.role_arn,
+                              })),
+                              { label: 'Enter manually...', value: '__manual__' },
+                            ]}
+                            placeholder="Select a registered data account"
+                          />
+                        </FormField>
+
+                        {selectedDataAccount && selectedDataAccount !== '__manual__' && (
+                          <Alert type="success">
+                            Account ID, Role ARN, and External ID auto-filled from registered data account.
+                          </Alert>
+                        )}
+                      </>
+                    ) : (
+                      <Alert type="info">
+                        No data accounts registered yet. Enter details manually below, or register data accounts in <strong>Settings → Data Accounts</strong> first.
+                      </Alert>
+                    )}
+
+                    {(registeredDataAccounts.length === 0 || selectedDataAccount === '__manual__') && (
+                      <>
+                        <FormField
+                          label="Data Account ID"
+                          description="AWS Account ID where your training data is stored"
+                          stretch
+                        >
+                          <Input
+                            value={state.dataAccountId}
+                            onChange={({ detail }) => updateState({ dataAccountId: detail.value })}
+                            placeholder="123456789012"
+                          />
+                        </FormField>
+
+                        <FormField
+                          label="Data Account Role ARN"
+                          description="Role ARN from the Data Account deployment (DDAPortalDataAccessRole)"
+                          stretch
+                        >
+                          <Input
+                            value={state.dataAccountRoleArn}
+                            onChange={({ detail }) => updateState({ dataAccountRoleArn: detail.value })}
+                            placeholder="arn:aws:iam::123456789012:role/DDAPortalDataAccessRole"
+                          />
+                        </FormField>
+
+                        <FormField
+                          label="Data Account External ID"
+                          description="External ID configured in the Data Account role trust policy"
+                          stretch
+                        >
+                          <Input
+                            value={state.dataAccountExternalId}
+                            onChange={({ detail }) => updateState({ dataAccountExternalId: detail.value })}
+                            placeholder="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                            type="password"
+                          />
+                        </FormField>
+                      </>
+                    )}
+
+                    <FormField
+                      label="Data S3 Bucket"
+                      description="S3 bucket in the Data Account containing your training data"
+                      errorText={validateBucketName(state.dataS3Bucket)}
+                      stretch
+                    >
+                      <Input
+                        value={state.dataS3Bucket}
+                        onChange={({ detail }) => updateState({ dataS3Bucket: detail.value })}
+                        placeholder="e.g., my-training-data-bucket"
+                      />
+                    </FormField>
+
+                    <FormField
+                      label="UseCase S3 Bucket"
+                      description="S3 bucket in the UseCase Account for SageMaker outputs (models, manifests, checkpoints)"
+                      errorText={validateBucketName(state.s3Bucket)}
+                      stretch
+                    >
+                      <Input
+                        value={state.s3Bucket}
+                        onChange={({ detail }) => updateState({ s3Bucket: detail.value })}
+                        placeholder="e.g., my-usecase-output-bucket"
+                      />
+                    </FormField>
+                  </SpaceBetween>
+                </Container>
+              )}
+
+              {/* S3 bucket for same-account data */}
+              {state.dataAccountSameAsUseCase && (
+                <Container header={<Header variant="h2">S3 Storage</Header>}>
+                  <FormField
+                    label="S3 Bucket"
+                    description="S3 bucket in the UseCase Account for all data and models"
+                    errorText={validateBucketName(state.s3Bucket)}
+                    stretch
+                  >
+                    <Input
+                      value={state.s3Bucket}
+                      onChange={({ detail }) => updateState({ s3Bucket: detail.value })}
+                      placeholder="e.g., my-training-data-bucket"
+                    />
+                  </FormField>
+                </Container>
+              )}
 
               <Container header={<Header variant="h2">Why is this role needed?</Header>}>
                 <SpaceBetween size="s">
@@ -437,21 +620,20 @@ export default function UseCaseOnboarding() {
                             const reader = new FileReader();
                             reader.onload = (event) => {
                               const content = event.target?.result as string;
-                              // Parse the config file
                               const lines = content.split('\n');
                               const config: Record<string, string> = {};
                               lines.forEach(line => {
-                                const match = line.match(/^([^:]+):\s*(.+)$/);
+                                if (line.startsWith('#') || !line.trim()) return;
+                                const match = line.match(/^([A-Z_]+)=(.+)$/);
                                 if (match) {
                                   config[match[1].trim()] = match[2].trim();
                                 }
                               });
-                              // Update state with parsed values
                               updateState({
-                                accountId: config['Account ID'] || '',
-                                roleArn: config['Role ARN'] || '',
-                                sagemakerExecutionRoleArn: config['SageMaker Execution Role ARN'] || '',
-                                externalId: config['External ID'] || '',
+                                accountId: config['USECASE_ACCOUNT_ID'] || '',
+                                roleArn: config['ROLE_ARN'] || '',
+                                sagemakerExecutionRoleArn: config['SAGEMAKER_ROLE_ARN'] || '',
+                                externalId: config['EXTERNAL_ID'] || '',
                               });
                             };
                             reader.readAsText(file);
@@ -565,10 +747,6 @@ export default function UseCaseOnboarding() {
                   </SpaceBetween>
                   <SpaceBetween size="xs">
                     <div>
-                      <Box variant="awsui-key-label">Cost Center</Box>
-                      <Box>{state.costCenter || 'Not specified'}</Box>
-                    </div>
-                    <div>
                       <Box variant="awsui-key-label">S3 Bucket</Box>
                       <Box>{state.s3Bucket}</Box>
                     </div>
@@ -622,15 +800,8 @@ export default function UseCaseOnboarding() {
                       <Box>
                         <Box variant="awsui-key-label">SageMaker Outputs</Box>
                         <Box>
-                          {state.sagemakerAssetsInDataAccount ? (
-                            <code>s3://{state.dataS3Bucket}</code>
-                          ) : (
-                            state.s3Bucket ? (
-                              <code>s3://{state.s3Bucket}</code>
-                            ) : (
-                              <StatusIndicator type="error">Not configured</StatusIndicator>
-                            )
-                          )}
+                          <code>s3://{state.s3Bucket}</code>
+                          <Box variant="small" color="text-body-secondary">UseCase Account ({state.accountId})</Box>
                         </Box>
                       </Box>
                     </SpaceBetween>

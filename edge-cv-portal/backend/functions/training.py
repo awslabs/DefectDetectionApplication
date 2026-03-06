@@ -18,7 +18,8 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, create_s3_path_builder,
-    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
+    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase,
+    get_s3_client_for_bucket
 )
 from manifest_transformer import (
     detect_ground_truth_attributes,
@@ -101,25 +102,8 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
             ':role/' in cross_account_role_arn  # Valid role ARN format (not root)
         )
         
-        if is_cross_account:
-            # Multi-account: assume role to access manifest
-            logger.info(f"Cross-account access: assuming role {cross_account_role_arn}")
-            credentials = assume_usecase_role(
-                cross_account_role_arn,
-                usecase.get('external_id'),
-                'validate-manifest'
-            )
-            
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=credentials['AccessKeyId'],
-                aws_secret_access_key=credentials['SecretAccessKey'],
-                aws_session_token=credentials['SessionToken']
-            )
-        else:
-            # Single-account: use Lambda's own credentials
-            logger.info("Single-account setup: using Lambda's own credentials")
-            s3_client = boto3.client('s3')
+        # Get S3 client with correct credentials for the manifest bucket
+        s3_client = get_s3_client_for_bucket(usecase, bucket, 'validate-manifest')
         
         # Download and parse first few lines of manifest
         try:
@@ -216,6 +200,17 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
                 'message': 'Invalid attribute type'
             }
         
+        # Check for task type mismatch: manifest has segmentation fields but user selected classification
+        if model_type in ['classification'] and 'anomaly-mask-ref' in first_entry:
+            return {
+                'valid': False,
+                'errors': [
+                    'Manifest contains segmentation fields (anomaly-mask-ref) but training type is set to Classification.',
+                    'Either select Segmentation as the model type, or use a classification-only manifest.'
+                ],
+                'message': 'Task type mismatch: manifest is segmentation but training type is classification'
+            }
+        
         if not isinstance(first_entry.get('anomaly-label'), (int, float)):
             return {
                 'valid': False,
@@ -228,6 +223,31 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
                 'valid': False,
                 'errors': ['anomaly-label-metadata must be an object'],
                 'message': 'Invalid metadata type'
+            }
+        
+        # Spot-check that referenced S3 files exist (first entry only)
+        missing_refs = []
+        for ref_field in ['source-ref', 'anomaly-mask-ref']:
+            ref_uri = first_entry.get(ref_field)
+            if not ref_uri or not isinstance(ref_uri, str) or not ref_uri.startswith('s3://'):
+                continue
+            ref_parts = ref_uri.replace('s3://', '').split('/', 1)
+            if len(ref_parts) != 2:
+                continue
+            ref_bucket, ref_key = ref_parts
+            try:
+                ref_s3 = get_s3_client_for_bucket(usecase, ref_bucket, f"validate-{ref_field}")
+                ref_s3.head_object(Bucket=ref_bucket, Key=ref_key)
+            except ClientError as e:
+                code = e.response['Error']['Code']
+                if code in ('404', 'NoSuchKey'):
+                    missing_refs.append(f"{ref_field}: {ref_uri}")
+        
+        if missing_refs:
+            return {
+                'valid': False,
+                'errors': [f"Referenced file not found: {ref}" for ref in missing_refs],
+                'message': 'Manifest references files that do not exist in S3. Check that images/masks have been uploaded.'
             }
         
         # All validations passed
@@ -287,8 +307,15 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         model_type = body['model_type']
         dataset_manifest_s3 = body['dataset_manifest_s3'].strip()
         instance_type = body.get('instance_type', 'ml.g4dn.2xlarge')
-        # Set default max runtime based on model type - segmentation takes longer but should still be reasonable
-        default_max_runtime = 7200 if model_type in ['segmentation', 'segmentation-robust'] else 3600  # 2 hours for segmentation, 1 hour for classification
+        # Set default max runtime based on model type
+        is_robust = model_type.endswith('-robust')
+        is_segmentation = 'segmentation' in model_type
+        if is_robust:
+            default_max_runtime = 86400  # 24 hours for robust (angle/lighting simulation)
+        elif is_segmentation:
+            default_max_runtime = 7200   # 2 hours for segmentation
+        else:
+            default_max_runtime = 3600   # 1 hour for classification
         max_runtime = body.get('max_runtime_seconds', default_max_runtime)
         hyperparameters = body.get('hyperparameters', {})
         auto_compile = body.get('auto_compile', False)
@@ -1137,13 +1164,9 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         usecase_region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
         logger.info(f"Using region for manifest transformation: {usecase_region}")
         
-        # Create S3 client (handles both single-account and multi-account scenarios)
-        s3_usecase = get_usecase_client(
-            's3',
-            usecase,
-            session_name=f"transform-manifest-{user_id}-{int(datetime.utcnow().timestamp())}",
-            region=usecase_region
-        )
+        # Create S3 client for the source manifest bucket
+        # This handles data account vs usecase account automatically
+        s3_usecase = get_s3_client_for_bucket(usecase, source_bucket, f"xform-{user_id[:8]}-{int(datetime.utcnow().timestamp())}")
         
         # Download source manifest
         logger.info(f"Downloading manifest from {source_manifest_uri}")
@@ -1159,6 +1182,41 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         manifest_lines = manifest_content.strip().split('\n')
         if not manifest_lines:
             return create_response(400, {'error': 'Source manifest is empty'})
+        
+        # Validate that referenced S3 files exist (spot-check first few entries)
+        logger.info("Validating referenced S3 files exist...")
+        missing_files = []
+        check_count = min(5, len(manifest_lines))  # Check up to 5 entries
+        for i in range(check_count):
+            try:
+                entry = json.loads(manifest_lines[i])
+            except json.JSONDecodeError:
+                continue
+            
+            for ref_field in ['source-ref', 'anomaly-mask-ref']:
+                ref_uri = entry.get(ref_field)
+                if not ref_uri or not ref_uri.startswith('s3://'):
+                    continue
+                ref_parts = ref_uri.replace('s3://', '').split('/', 1)
+                if len(ref_parts) != 2:
+                    continue
+                ref_bucket, ref_key = ref_parts
+                try:
+                    ref_s3 = get_s3_client_for_bucket(usecase, ref_bucket, f"validate-ref-{i}")
+                    ref_s3.head_object(Bucket=ref_bucket, Key=ref_key)
+                except ClientError as e:
+                    code = e.response['Error']['Code']
+                    if code in ('404', 'NoSuchKey'):
+                        missing_files.append(f"Line {i+1} {ref_field}: {ref_uri}")
+                    # Skip access denied — the file may exist but we can't check from this role
+        
+        if missing_files:
+            return create_response(400, {
+                'error': 'Referenced files not found in S3. Fix the manifest or upload the missing files before transforming.',
+                'missing_files': missing_files,
+                'checked': check_count,
+                'total_entries': len(manifest_lines)
+            })
         
         # Transform manifest using shared utility
         logger.info(f"Transforming manifest with {len(manifest_lines)} entries from {source_manifest_uri}")
@@ -1197,7 +1255,7 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
             output_bucket = output_parts[0]
             output_key = output_parts[1]
         
-        # Upload transformed manifest
+        # Upload transformed manifest (same bucket as source)
         logger.info(f"Uploading transformed manifest to {output_manifest_uri}")
         s3_usecase.put_object(
             Bucket=output_bucket,

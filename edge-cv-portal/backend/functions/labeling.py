@@ -23,7 +23,8 @@ from shared_utils import (
     get_usecase,
     assume_usecase_role,
     create_response,
-    handle_error
+    handle_error,
+    get_usecase_region
 )
 
 dynamodb = boto3.resource('dynamodb')
@@ -304,7 +305,7 @@ def create_labeling_job(event):
         logger.info(f"Creating Ground Truth job: {sagemaker_job_name}")
         
         # Map task types to SageMaker built-in algorithm ARNs
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         task_type_arn_mapping = {
             'Classification': f'arn:aws:sagemaker:{region}:aws:labeling-job-algorithm/image-classification',
             'ObjectDetection': f'arn:aws:sagemaker:{region}:aws:labeling-job-algorithm/bounding-box',
@@ -783,9 +784,10 @@ def get_label_attribute_name(task_type: str) -> str:
     return mapping.get(task_type, 'label')
 
 
-def get_ui_template_arn(task_type: str) -> str:
+def get_ui_template_arn(task_type: str, region: str = None) -> str:
     """Get AWS-provided UI template ARN for task type."""
-    region = os.environ.get('AWS_REGION', 'us-east-1')
+    if not region:
+        region = os.environ.get('AWS_REGION', 'us-east-1')
     
     templates = {
         'ObjectDetection': f"arn:aws:sagemaker:{region}:aws:labeling-job-template/BoundingBox",
@@ -812,9 +814,10 @@ def get_ui_template_s3_uri(task_type: str):
     return None
 
 
-def get_pre_human_task_lambda_arn(task_type: str) -> str:
+def get_pre_human_task_lambda_arn(task_type: str, region: str = None) -> str:
     """Get pre-annotation Lambda ARN for task type."""
-    region = os.environ.get('AWS_REGION', 'us-east-1')
+    if not region:
+        region = os.environ.get('AWS_REGION', 'us-east-1')
     account = '432418664414'  # AWS-owned account for Ground Truth Lambdas
     
     lambdas = {
@@ -826,9 +829,10 @@ def get_pre_human_task_lambda_arn(task_type: str) -> str:
     return lambdas.get(task_type, lambdas['ObjectDetection'])
 
 
-def get_annotation_consolidation_lambda_arn(task_type: str) -> str:
+def get_annotation_consolidation_lambda_arn(task_type: str, region: str = None) -> str:
     """Get annotation consolidation Lambda ARN for task type."""
-    region = os.environ.get('AWS_REGION', 'us-east-1')
+    if not region:
+        region = os.environ.get('AWS_REGION', 'us-east-1')
     account = '432418664414'  # AWS-owned account for Ground Truth Lambdas
     
     lambdas = {

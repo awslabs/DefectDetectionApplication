@@ -476,16 +476,21 @@ if [ "$UBUNTU_VERSION" = "18.04" ]; then
     add_error "Python 3.9 installation from source failed"
   fi
   
-  # Set up alternatives for python3.9
+  # On 18.04, do NOT change the system python3 (3.6) — apt and other system
+  # tools depend on it and its C extensions (apt_pkg, etc.).
+  # Just create a python3.9 symlink so DDA components can find it.
   if [ -x /usr/local/bin/python3.9 ]; then
-    run_cmd "update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1" || add_warning "Failed to set python3 alternative"
     ln -sf /usr/local/bin/python3.9 /usr/bin/python3.9 2>/dev/null || add_warning "Failed to create python3.9 symlink"
+    echo "✓ Python 3.9 available as python3.9 (system python3 left as 3.6)"
   fi
 else
   if ! install_from_ppa; then
     add_error "Python 3.9 installation from PPA failed"
   fi
-  run_cmd "update-alternatives --install /usr/local/bin/python3 python3 /usr/bin/python3.9 1" || add_warning "Failed to set python3 alternative"
+  # Do NOT change the system python3 — apt and other OS tools depend on the
+  # system Python (3.8 on 20.04, 3.10 on 22.04) and its C extensions (apt_pkg).
+  # Python 3.9 is available as python3.9 via the deadsnakes PPA.
+  echo "✓ Python 3.9 available as python3.9 (system python3 left unchanged)"
 fi
 
 if ! run_cmd "apt-get install python3-pip -y"; then
@@ -536,41 +541,149 @@ fi
 echo ""
 
 echo "▶ Installing Docker..."
-if check_command docker; then
-    echo "✓ Docker already installed"
-else
-    if ! run_cmd "mkdir -m 0755 -p /etc/apt/keyrings"; then
-        add_warning "Failed to create keyrings directory"
+
+# Remove snap Docker if present — the snap bundles iptables 1.8.10 (nf_tables)
+# which is incompatible with older kernels (4.9.x on JetPack 4.6.x / Ubuntu 18.04).
+# It also conflicts with the apt docker.io package we need.
+if snap list docker >/dev/null 2>&1; then
+    echo "Removing snap Docker (incompatible with this kernel)..."
+    run_cmd "snap stop docker" || true
+    run_cmd "snap remove docker --purge" || run_cmd "snap remove docker" || add_warning "Failed to remove snap docker"
+    # Also remove snap docker-compose if present
+    if snap list docker-compose >/dev/null 2>&1; then
+        run_cmd "snap remove docker-compose --purge" || run_cmd "snap remove docker-compose" || true
     fi
-    
-    if ! run_cmd "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"; then
-        add_error "Failed to download Docker GPG key"
-    elif ! run_cmd "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable' | tee /etc/apt/sources.list.d/docker.list > /dev/null"; then
-        add_error "Failed to add Docker repository"
-    elif ! run_cmd "apt-get update"; then
-        add_error "Failed to update package manager after adding Docker repo"
-    elif ! run_cmd "apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y"; then
-        add_error "Failed to install Docker packages"
-    elif ! run_cmd "docker run hello-world"; then
-        add_warning "Docker installed but hello-world test failed"
+    # Clean up snap Docker state
+    run_cmd "rm -rf /var/snap/docker" || true
+    echo "✓ Snap Docker removed"
+    # Clear the hash so bash doesn't cache the old snap docker path
+    hash -r 2>/dev/null
+fi
+
+if check_command docker && docker ps >/dev/null 2>&1; then
+    # Check if docker compose V2 (plugin) is available
+    if docker compose version >/dev/null 2>&1; then
+        echo "✓ Docker already installed with Compose V2 plugin"
     else
-        echo "✓ Docker installed successfully"
+        echo "⚠️  Docker found but Compose V2 plugin missing — installing plugin..."
+        COMPOSE_ARCH=$(uname -m)
+        case "$COMPOSE_ARCH" in
+            aarch64) COMPOSE_ARCH="aarch64" ;;
+            x86_64)  COMPOSE_ARCH="x86_64" ;;
+        esac
+        mkdir -p /usr/local/lib/docker/cli-plugins
+        if run_cmd "curl -fsSL https://github.com/docker/compose/releases/download/v2.24.7/docker-compose-linux-${COMPOSE_ARCH} -o /usr/local/lib/docker/cli-plugins/docker-compose"; then
+            run_cmd "chmod +x /usr/local/lib/docker/cli-plugins/docker-compose"
+            if docker compose version >/dev/null 2>&1; then
+                echo "✓ Docker Compose V2 plugin installed successfully"
+            else
+                add_error "Docker Compose V2 plugin installed but not working"
+            fi
+        else
+            add_error "Failed to download Docker Compose V2 plugin"
+        fi
     fi
+else
+    if [ "$UBUNTU_VERSION" = "18.04" ]; then
+        # Ubuntu 18.04 / JetPack 4.6.x — NVIDIA ships its own Docker 19.03 with
+        # nvidia-container-runtime pre-configured. docker-ce from Docker's repo
+        # conflicts with NVIDIA's packages and breaks the daemon.
+        # We must fully purge any docker-ce remnants before installing docker.io.
+        echo "Ubuntu 18.04 / JetPack detected — using NVIDIA-provided Docker..."
+        
+        # Purge any conflicting docker-ce packages and config left from prior installs
+        if dpkg -l docker-ce >/dev/null 2>&1 || dpkg -l docker-ce-cli >/dev/null 2>&1; then
+            echo "Removing conflicting docker-ce packages..."
+            run_cmd "systemctl stop docker.socket" || true
+            run_cmd "systemctl stop docker" || true
+            run_cmd "systemctl stop containerd" || true
+            run_cmd "apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" || true
+            run_cmd "apt-get autoremove -y" || true
+            # Clean up leftover config and state that prevent docker.io from starting
+            run_cmd "rm -rf /var/lib/docker" || true
+            run_cmd "rm -rf /var/lib/containerd" || true
+            run_cmd "rm -f /etc/apt/sources.list.d/docker.list" || true
+            run_cmd "rm -f /etc/apt/keyrings/docker.gpg" || true
+            echo "✓ Conflicting docker-ce packages removed"
+        fi
+        
+        # Install NVIDIA's Docker packages
+        if ! run_cmd "apt-get update"; then
+            add_warning "Failed to update package manager"
+        fi
+        if ! run_cmd "apt-get install -y docker.io containerd"; then
+            add_error "Failed to install docker.io"
+        else
+            echo "✓ docker.io installed"
+        fi
+        
+        # Install nvidia-container-runtime if not present (needed for GPU containers)
+        if ! dpkg -l nvidia-container-runtime >/dev/null 2>&1; then
+            run_cmd "apt-get install -y nvidia-container-runtime" || add_warning "nvidia-container-runtime not available — GPU containers may not work"
+        fi
+        
+        # Install Compose V2 plugin manually (required for --profile flag)
+        echo "Installing Docker Compose V2 plugin..."
+        COMPOSE_ARCH=$(uname -m)
+        case "$COMPOSE_ARCH" in
+            aarch64) COMPOSE_ARCH="aarch64" ;;
+            x86_64)  COMPOSE_ARCH="x86_64" ;;
+        esac
+        mkdir -p /usr/local/lib/docker/cli-plugins
+        if run_cmd "curl -fsSL https://github.com/docker/compose/releases/download/v2.24.7/docker-compose-linux-${COMPOSE_ARCH} -o /usr/local/lib/docker/cli-plugins/docker-compose"; then
+            run_cmd "chmod +x /usr/local/lib/docker/cli-plugins/docker-compose"
+            echo "✓ Docker Compose V2 plugin installed"
+        else
+            add_error "Failed to download Docker Compose V2 plugin"
+        fi
+    else
+        if ! run_cmd "mkdir -m 0755 -p /etc/apt/keyrings"; then
+            add_warning "Failed to create keyrings directory"
+        fi
+        
+        if ! run_cmd "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"; then
+            add_error "Failed to download Docker GPG key"
+        elif ! run_cmd "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable' | tee /etc/apt/sources.list.d/docker.list > /dev/null"; then
+            add_error "Failed to add Docker repository"
+        elif ! run_cmd "apt-get update"; then
+            add_error "Failed to update package manager after adding Docker repo"
+        elif ! run_cmd "apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y"; then
+            add_error "Failed to install Docker packages"
+        elif ! run_cmd "docker run hello-world"; then
+            add_warning "Docker installed but hello-world test failed"
+        else
+            echo "✓ Docker installed successfully"
+        fi
+    fi
+fi
+
+# Ensure Docker daemon is enabled and running
+echo "▶ Enabling and starting Docker service..."
+run_cmd "systemctl enable docker" || add_warning "Failed to enable Docker service"
+if ! run_cmd "systemctl start docker"; then
+    add_error "Failed to start Docker daemon"
+else
+    echo "✓ Docker daemon is running"
 fi
 echo ""
 
 echo "▶ Installing Greengrass Core..."
-if ! run_cmd "curl -s 'https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-${greengrass_version}.zip' > 'greengrass-${greengrass_version}.zip'"; then
-    add_error "Failed to download Greengrass"
-elif ! run_cmd "unzip -o greengrass-${greengrass_version}.zip -d GreengrassInstaller"; then
-    add_error "Failed to extract Greengrass"
+if [ -f "greengrass-${greengrass_version}.zip" ] && [ -d "GreengrassInstaller" ]; then
+    echo "✓ Greengrass already downloaded and extracted, skipping"
 else
-    run_cmd "rm greengrass-${greengrass_version}.zip" || add_warning "Failed to clean up Greengrass zip"
+    if [ ! -f "greengrass-${greengrass_version}.zip" ]; then
+        if ! run_cmd "curl -s 'https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-${greengrass_version}.zip' > 'greengrass-${greengrass_version}.zip'"; then
+            add_error "Failed to download Greengrass"
+        fi
+    fi
     
-    if ! run_cmd "java -jar ./GreengrassInstaller/lib/Greengrass.jar --version"; then
-        add_warning "Failed to verify Greengrass installation"
-    else
-        echo "✓ Greengrass Core downloaded and extracted"
+    if [ -f "greengrass-${greengrass_version}.zip" ]; then
+        rm -rf GreengrassInstaller
+        if ! run_cmd "unzip -o greengrass-${greengrass_version}.zip -d GreengrassInstaller"; then
+            add_error "Failed to extract Greengrass"
+        else
+            echo "✓ Greengrass Core downloaded and extracted"
+        fi
     fi
 fi
 echo ""
@@ -585,6 +698,7 @@ echo ""
 
 echo "▶ Configuring Greengrass permissions..."
 run_cmd "usermod -aG video ggc_user" || add_warning "Failed to add ggc_user to video group"
+run_cmd "usermod -aG docker ggc_user" || add_warning "Failed to add ggc_user to docker group"
 run_cmd "usermod -aG dda_system_group ggc_user" || add_warning "Failed to add ggc_user to dda_system_group"
 run_cmd "usermod -aG ggc_group dda_system_user" || add_warning "Failed to add dda_system_user to ggc_group"
 

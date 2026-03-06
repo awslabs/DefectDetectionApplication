@@ -10,6 +10,7 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import * as path from 'path';
+import { ApiGatewayStack } from './api-gateway-stack';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
@@ -113,6 +114,7 @@ export class ComputeStack extends cdk.Stack {
           'greengrass:CreateDeployment',
           'greengrass:CancelDeployment',
           'iot:DescribeThing',
+          'iot:DescribeEndpoint',
           'iot:DescribeThingGroup',
           'iot:GetThingType',
           'iot:ListThings',
@@ -122,15 +124,21 @@ export class ComputeStack extends cdk.Stack {
           'iot:RemoveThingFromThingGroup',
           'iot:CreateJob',
           'iot:DescribeJob',
+          'iot:UpdateJob',
           'iot:GetJobDocument',
           'iot:ListJobs',
           'iot:CancelJob',
+          'iot:GetThingShadow',
+          'iot:UpdateThingShadow',
+          'iot:DeleteThingShadow',
           'logs:GetLogEvents',
           'logs:DescribeLogStreams',
           'logs:DescribeLogGroups',
           'logs:FilterLogEvents',
           'sts:AssumeRole',
           'execute-api:Invoke',
+          's3:GetBucketCors',
+          's3:PutBucketCors',
         ],
         resources: ['*'],
       }));
@@ -841,951 +849,119 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       description: 'Instructions for enabling cross-account EventBridge',
     });
 
-    // API Gateway
-    this.api = new apigateway.RestApi(this, 'EdgeCVPortalAPI', {
-      restApiName: 'Edge CV Portal API',
-      description: 'API for Edge CV Admin Portal',
-      deployOptions: {
-        stageName: 'v1',
-        tracingEnabled: true,
-        loggingLevel: apigateway.MethodLoggingLevel.INFO,
-        dataTraceEnabled: true,
-        metricsEnabled: true,
-      },
-      defaultCorsPreflightOptions: {
-        allowOrigins: apigateway.Cors.ALL_ORIGINS,
-        allowMethods: apigateway.Cors.ALL_METHODS,
-        allowHeaders: [
-          'Content-Type',
-          'X-Amz-Date',
-          'Authorization',
-          'X-Api-Key',
-          'X-Amz-Security-Token',
-        ],
-      },
+    // API Gateway in Nested Stack
+    // Moving API Gateway to a nested stack solves the 500 resource limit
+    const apiGatewayStack = new ApiGatewayStack(this, 'ApiGateway', {
+      userPool: props.userPool,
+      authHandler,
+      userManagementHandler,
+      useCasesHandler,
+      devicesHandler,
+      deviceLogsHandler,
+      deploymentsHandler,
+      dataManagementHandler,
+      datasetsHandler,
+      preLabeledDatasetsHandler,
+      labelingHandler,
+      trainingHandler,
+      compilationHandler,
+      packagingHandler,
+      greengrassPublishHandler,
+      modelsHandler,
+      modelImportHandler,
+      modelConverterHandler,
+      componentsHandler,
+      sharedComponentsHandler,
+      dataAccountsHandler,
+      auditLogsHandler,
+      lambdaEnvironment,
+      createLambdaRole,
+      sharedLayer,
     });
 
-    // Update UseCases handler with Portal API URL for shared components provisioning
-    // This must be done after API is created but before routes are added
-    useCasesHandler.addEnvironment('PORTAL_API_URL', cdk.Fn.sub('https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/v1', {
-      ApiId: this.api.restApiId,
-    }));
+    this.api = apiGatewayStack.api;
+    this.apiUrl = apiGatewayStack.apiUrl;
 
-    // Cognito Authorizer
-    const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'CognitoAuthorizer', {
-      cognitoUserPools: [props.userPool],
-      authorizerName: 'EdgeCVPortalAuthorizer',
-      identitySource: 'method.request.header.Authorization',
-    });
-
-    // JWT Lambda Authorizer (alternative to Cognito) - commented out for now
-    // Uncomment and configure when needed for SSO integration
-    /*
-    const jwtAuthorizer = new apigateway.TokenAuthorizer(this, 'JwtAuthorizer', {
-      handler: jwtAuthorizerHandler,
-      authorizerName: 'EdgeCVPortalJwtAuthorizer',
-      identitySource: 'method.request.header.Authorization',
-      resultsCacheTtl: cdk.Duration.minutes(5),
-    });
-    */
-
-    // Create Lambda integrations (this helps avoid circular dependencies)
-    const useCasesIntegration = new apigateway.LambdaIntegration(useCasesHandler);
-    const devicesIntegration = new apigateway.LambdaIntegration(devicesHandler);
-    const deviceLogsIntegration = new apigateway.LambdaIntegration(deviceLogsHandler);
-    const deploymentsIntegration = new apigateway.LambdaIntegration(deploymentsHandler);
-    const authIntegration = new apigateway.LambdaIntegration(authHandler);
-    const userManagementIntegration = new apigateway.LambdaIntegration(userManagementHandler);
-    const datasetsIntegration = new apigateway.LambdaIntegration(datasetsHandler);
-    const preLabeledDatasetsIntegration = new apigateway.LambdaIntegration(preLabeledDatasetsHandler);
-    const labelingIntegration = new apigateway.LambdaIntegration(labelingHandler);
-    const trainingIntegration = new apigateway.LambdaIntegration(trainingHandler);
-    const compilationIntegration = new apigateway.LambdaIntegration(compilationHandler);
-    const packagingIntegration = new apigateway.LambdaIntegration(packagingHandler);
-    const greengrassPublishIntegration = new apigateway.LambdaIntegration(greengrassPublishHandler);
-    const componentsIntegration = new apigateway.LambdaIntegration(componentsHandler);
-    const dataManagementIntegration = new apigateway.LambdaIntegration(dataManagementHandler);
-    const sharedComponentsIntegration = new apigateway.LambdaIntegration(sharedComponentsHandler);
-    const modelImportIntegration = new apigateway.LambdaIntegration(modelImportHandler);
-    const modelConverterIntegration = new apigateway.LambdaIntegration(modelConverterHandler);
-    const modelsIntegration = new apigateway.LambdaIntegration(modelsHandler);
-    const auditLogsIntegration = new apigateway.LambdaIntegration(auditLogsHandler);
-
-    // API Resources
-    // Auth endpoints
-    const authResource = this.api.root.addResource('auth');
-    authResource.addResource('me').addMethod(
-      'GET',
-      authIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Token refresh endpoint (no authorization required as it uses refresh token)
-    authResource.addResource('refresh').addMethod(
-      'POST',
-      authIntegration,
-      {
-        authorizationType: apigateway.AuthorizationType.NONE,
-      }
-    );
-
-    // User Management endpoints
-    const usersResource = this.api.root.addResource('users');
-    usersResource.addMethod(
-      'GET',
-      userManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Assign role endpoint
-    const assignRoleResource = usersResource.addResource('assign-role');
-    assignRoleResource.addMethod(
-      'POST',
-      userManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // User-specific endpoints
-    const userResource = usersResource.addResource('{user_id}');
-    
-    // User permissions endpoint
-    const userPermissionsResource = userResource.addResource('permissions');
-    userPermissionsResource.addMethod(
-      'GET',
-      userManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // User roles endpoint
-    const userRolesResource = userResource.addResource('roles');
-    const userRoleResource = userRolesResource.addResource('{usecase_id}');
-    userRoleResource.addMethod(
-      'DELETE',
-      userManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Current user's use cases
-    const meResource = usersResource.addResource('me');
-    const myUsecasesResource = meResource.addResource('usecases');
-    myUsecasesResource.addMethod(
-      'GET',
-      userManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // UseCases endpoints
-    const usecasesResource = this.api.root.addResource('usecases');
-    usecasesResource.addMethod(
-      'GET',
-      useCasesIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    usecasesResource.addMethod(
-      'POST',
-      useCasesIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const usecaseResource = usecasesResource.addResource('{id}');
-    usecaseResource.addMethod(
-      'GET',
-      useCasesIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    usecaseResource.addMethod(
-      'PUT',
-      useCasesIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    usecaseResource.addMethod(
-      'DELETE',
-      useCasesIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Data Management endpoints (under usecases/{usecase_id}/data)
-    const usecaseDataResource = usecaseResource.addResource('data');
-    
-    // Buckets endpoints
-    const dataBucketsResource = usecaseDataResource.addResource('buckets');
-    dataBucketsResource.addMethod(
-      'GET',
-      dataManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    dataBucketsResource.addMethod(
-      'POST',
-      dataManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Folders endpoints
-    const dataFoldersResource = usecaseDataResource.addResource('folders');
-    dataFoldersResource.addMethod(
-      'GET',
-      dataManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    dataFoldersResource.addMethod(
-      'POST',
-      dataManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Upload URL endpoint
-    const dataUploadUrlResource = usecaseDataResource.addResource('upload-url');
-    dataUploadUrlResource.addMethod(
-      'POST',
-      dataManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Batch upload URLs endpoint
-    const dataBatchUploadResource = usecaseDataResource.addResource('batch-upload-urls');
-    dataBatchUploadResource.addMethod(
-      'POST',
-      dataManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Configure data account endpoint
-    const dataConfigureResource = usecaseDataResource.addResource('configure');
-    dataConfigureResource.addMethod(
-      'POST',
-      dataManagementIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Datasets endpoints
-    const datasetsResource = this.api.root.addResource('datasets');
-    datasetsResource.addMethod(
-      'GET',
-      datasetsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const datasetsCountResource = datasetsResource.addResource('count');
-    datasetsCountResource.addMethod(
-      'POST',
-      datasetsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Pre-labeled datasets endpoints
-    const preLabeledResource = datasetsResource.addResource('pre-labeled');
-    preLabeledResource.addMethod(
-      'GET',
-      preLabeledDatasetsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    preLabeledResource.addMethod(
-      'POST',
-      preLabeledDatasetsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const preLabeledItemResource = preLabeledResource.addResource('{id}');
-    preLabeledItemResource.addMethod(
-      'GET',
-      preLabeledDatasetsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    preLabeledItemResource.addMethod(
-      'DELETE',
-      preLabeledDatasetsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Manifest validation endpoint
-    const validateManifestResource = datasetsResource.addResource('validate-manifest');
-    validateManifestResource.addMethod(
-      'POST',
-      preLabeledDatasetsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Image preview endpoint
-    const previewResource = datasetsResource.addResource('preview');
-    previewResource.addMethod(
-      'GET',
-      datasetsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Workteams endpoint (for listing available workteams)
-    const workteamsResource = this.api.root.addResource('workteams');
-    workteamsResource.addMethod(
-      'GET',
-      labelingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Labeling endpoints
-    const labelingResource = this.api.root.addResource('labeling');
-    labelingResource.addMethod(
-      'GET',
-      labelingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    labelingResource.addMethod(
-      'POST',
-      labelingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const labelingJobResource = labelingResource.addResource('{id}');
-    labelingJobResource.addMethod(
-      'GET',
-      labelingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const labelingManifestResource = labelingJobResource.addResource('manifest');
-    labelingManifestResource.addMethod(
-      'GET',
-      labelingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Labeling workteams endpoint
-    const labelingWorkteamsResource = labelingResource.addResource('workteams');
-    labelingWorkteamsResource.addMethod(
-      'GET',
-      labelingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Devices endpoints
-    const devicesResource = this.api.root.addResource('devices');
-    devicesResource.addMethod(
-      'GET',
-      devicesIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const deviceResource = devicesResource.addResource('{id}');
-    deviceResource.addMethod(
-      'GET',
-      devicesIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Device Logs endpoints
-    const deviceLogsResource = deviceResource.addResource('logs');
-    deviceLogsResource.addMethod(
-      'GET',
-      deviceLogsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const deviceComponentLogsResource = deviceLogsResource.addResource('{component}');
-    deviceComponentLogsResource.addMethod(
-      'GET',
-      deviceLogsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Deployments endpoints
-    const deploymentsResource = this.api.root.addResource('deployments');
-    deploymentsResource.addMethod(
-      'GET',
-      deploymentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    deploymentsResource.addMethod(
-      'POST',
-      deploymentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const deploymentResource = deploymentsResource.addResource('{id}');
-    deploymentResource.addMethod(
-      'GET',
-      deploymentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    deploymentResource.addMethod(
-      'DELETE',
-      deploymentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Training endpoints
-    const trainingResource = this.api.root.addResource('training');
-    trainingResource.addMethod(
-      'GET',
-      trainingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    trainingResource.addMethod(
-      'POST',
-      trainingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Training transform-manifest endpoint
-    const trainingTransformManifestResource = trainingResource.addResource('transform-manifest');
-    trainingTransformManifestResource.addMethod(
-      'POST',
-      trainingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const trainingJobResource = trainingResource.addResource('{id}');
-    trainingJobResource.addMethod(
-      'GET',
-      trainingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Training logs endpoint
-    const trainingLogsResource = trainingJobResource.addResource('logs');
-    trainingLogsResource.addMethod(
-      'GET',
-      trainingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Training logs download endpoint
-    const trainingLogsDownloadResource = trainingLogsResource.addResource('download');
-    trainingLogsDownloadResource.addMethod(
-      'GET',
-      trainingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Compilation endpoints
-    const compileResource = trainingJobResource.addResource('compile');
-    compileResource.addMethod(
-      'POST',
-      compilationIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    compileResource.addMethod(
-      'GET',
-      compilationIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Packaging endpoints
-    const packageResource = trainingJobResource.addResource('package');
-    packageResource.addMethod(
-      'POST',
-      packagingIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Greengrass publishing endpoints
-    const publishResource = trainingJobResource.addResource('publish');
-    publishResource.addMethod(
-      'POST',
-      greengrassPublishIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Models endpoints (for BYOM - Bring Your Own Model)
-    const modelsResource = this.api.root.addResource('models');
-    
-    // List models endpoint (Model Registry)
-    modelsResource.addMethod(
-      'GET',
-      modelsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    
-    // Model format specification endpoint
-    const modelFormatSpecResource = modelsResource.addResource('format-spec');
-    modelFormatSpecResource.addMethod(
-      'GET',
-      modelImportIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Model validation endpoint
-    const modelValidateResource = modelsResource.addResource('validate');
-    modelValidateResource.addMethod(
-      'POST',
-      modelImportIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Model import endpoint
-    const modelImportResource = modelsResource.addResource('import');
-    modelImportResource.addMethod(
-      'POST',
-      modelImportIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Model conversion endpoint (auto-generate DDA metadata)
-    const modelConvertResource = modelsResource.addResource('convert');
-    modelConvertResource.addMethod(
-      'POST',
-      modelConverterIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Model inspection endpoint (detect architecture)
-    const modelInspectResource = modelsResource.addResource('inspect');
-    modelInspectResource.addMethod(
-      'POST',
-      modelConverterIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Supported model types endpoint
-    const modelTypesResource = modelsResource.addResource('types');
-    modelTypesResource.addMethod(
-      'GET',
-      modelConverterIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Individual model endpoints
-    const modelResource = modelsResource.addResource('{id}');
-    modelResource.addMethod(
-      'GET',
-      modelsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    modelResource.addMethod(
-      'DELETE',
-      modelsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Model stage update endpoint
-    const modelStageResource = modelResource.addResource('stage');
-    modelStageResource.addMethod(
-      'PUT',
-      modelsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Components endpoints for Greengrass Component Browser
-    const componentsResource = this.api.root.addResource('components');
-    componentsResource.addMethod(
-      'GET',
-      componentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    componentsResource.addMethod(
-      'POST',
-      componentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const componentResource = componentsResource.addResource('{id}');
-    componentResource.addMethod(
-      'GET',
-      componentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    componentResource.addMethod(
-      'DELETE',
-      componentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    const componentVersionsResource = componentResource.addResource('versions');
-    componentVersionsResource.addMethod(
-      'GET',
-      componentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Component discovery endpoint
-    const discoverResource = componentsResource.addResource('discover');
-    discoverResource.addMethod(
-      'POST',
-      componentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Component Configuration endpoints
-    const componentConfigurationHandler = new lambda.Function(this, 'ComponentConfigurationHandler', {
+    // Custom Resource to update UseCases Lambda environment variable with API Gateway ID
+    // This avoids circular dependency by updating the Lambda AFTER both resources are created
+    const updateLambdaEnv = new lambda.Function(this, 'UpdateLambdaEnv', {
       runtime: lambda.Runtime.PYTHON_3_11,
-      handler: 'component_configuration.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
-      role: createLambdaRole('ComponentConfiguration'),
-      environment: lambdaEnvironment,
-      layers: [sharedLayer],
+      handler: 'index.handler',
+      code: lambda.Code.fromInline(`
+import json
+import boto3
+import cfnresponse
+
+lambda_client = boto3.client('lambda')
+
+def handler(event, context):
+    try:
+        if event['RequestType'] in ['Create', 'Update']:
+            function_name = event['ResourceProperties']['FunctionName']
+            api_gateway_id = event['ResourceProperties']['ApiGatewayId']
+            
+            # Get current environment variables
+            response = lambda_client.get_function_configuration(FunctionName=function_name)
+            env_vars = response.get('Environment', {}).get('Variables', {})
+            
+            # Add API_GATEWAY_ID
+            env_vars['API_GATEWAY_ID'] = api_gateway_id
+            
+            # Update Lambda environment
+            lambda_client.update_function_configuration(
+                FunctionName=function_name,
+                Environment={'Variables': env_vars}
+            )
+            
+            print(f"Updated {function_name} with API_GATEWAY_ID={api_gateway_id}")
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                'Message': f'Updated Lambda environment'
+            })
+        else:
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        cfnresponse.send(event, context, cfnresponse.FAILED, {
+            'Message': str(e)
+        })
+      `),
       timeout: cdk.Duration.seconds(60),
     });
 
-    const componentConfigurationIntegration = new apigateway.LambdaIntegration(componentConfigurationHandler);
-
-    // GET /components/schema - Get component configuration schema
-    const schemaResource = componentsResource.addResource('schema');
-    schemaResource.addMethod(
-      'GET',
-      componentConfigurationIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // POST /components/configure - Configure component and create deployment
-    const configureResource = componentsResource.addResource('configure');
-    configureResource.addMethod(
-      'POST',
-      componentConfigurationIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Shared Components endpoints for dda-LocalServer provisioning
-    const sharedComponentsResource = this.api.root.addResource('shared-components');
-    sharedComponentsResource.addMethod(
-      'GET',
-      sharedComponentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Available shared components from portal
-    const availableSharedResource = sharedComponentsResource.addResource('available');
-    availableSharedResource.addMethod(
-      'GET',
-      sharedComponentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Provision shared components to usecase
-    // NOTE: This endpoint is called by Lambda with SigV4 signing (not Cognito JWT)
-    // So we don't apply the Cognito authorizer here. The Lambda's IAM role provides authentication.
-    const provisionSharedResource = sharedComponentsResource.addResource('provision');
-    provisionSharedResource.addMethod(
-      'POST',
-      sharedComponentsIntegration
-      // No authorizer - Lambda uses SigV4 signing with IAM role
-    );
-
-    // Get shared components update status (Portal Admin)
-    const statusSharedResource = sharedComponentsResource.addResource('status');
-    statusSharedResource.addMethod(
-      'GET',
-      sharedComponentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Update all usecases with latest shared components (Portal Admin)
-    const updateAllSharedResource = sharedComponentsResource.addResource('update-all');
-    updateAllSharedResource.addMethod(
-      'POST',
-      sharedComponentsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Data Accounts endpoints (Portal Admin only)
-    const dataAccountsIntegration = new apigateway.LambdaIntegration(dataAccountsHandler);
-    const dataAccountsResource = this.api.root.addResource('data-accounts');
-    
-    // GET /data-accounts - List all Data Accounts
-    dataAccountsResource.addMethod(
-      'GET',
-      dataAccountsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    
-    // POST /data-accounts - Register new Data Account
-    dataAccountsResource.addMethod(
-      'POST',
-      dataAccountsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    
-    // Data Account by ID
-    const dataAccountIdResource = dataAccountsResource.addResource('{id}');
-    
-    // GET /data-accounts/{id} - Get Data Account details
-    dataAccountIdResource.addMethod(
-      'GET',
-      dataAccountsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    
-    // PUT /data-accounts/{id} - Update Data Account
-    dataAccountIdResource.addMethod(
-      'PUT',
-      dataAccountsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    
-    // DELETE /data-accounts/{id} - Delete Data Account
-    dataAccountIdResource.addMethod(
-      'DELETE',
-      dataAccountsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-    
-    // POST /data-accounts/{id}/test - Test connection
-    const testConnectionResource = dataAccountIdResource.addResource('test');
-    testConnectionResource.addMethod(
-      'POST',
-      dataAccountsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    // Audit Logs endpoints
-    const auditLogsResource = this.api.root.addResource('audit-logs');
-    auditLogsResource.addMethod(
-      'GET',
-      auditLogsIntegration,
-      {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      }
-    );
-
-    this.apiUrl = this.api.url;
-
-    // Update UseCases handler with Portal API URL for shared components provisioning
-    // Done after API is fully created and all routes are added
-    useCasesHandler.addEnvironment('PORTAL_API_URL', cdk.Fn.sub('https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/v1', {
-      ApiId: this.api.restApiId,
+    // Grant permissions to update Lambda configuration
+    updateLambdaEnv.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'lambda:GetFunctionConfiguration',
+        'lambda:UpdateFunctionConfiguration',
+      ],
+      resources: [useCasesHandler.functionArn],
     }));
+
+    // Create custom resource
+    const lambdaEnvUpdater = new cdk.CustomResource(this, 'LambdaEnvUpdater', {
+      serviceToken: updateLambdaEnv.functionArn,
+      properties: {
+        FunctionName: useCasesHandler.functionName,
+        ApiGatewayId: apiGatewayStack.api.restApiId,
+        // Force update when API changes
+        Timestamp: Date.now().toString(),
+      },
+    });
+
+    // Ensure custom resource runs after both Lambda and API Gateway are created
+    lambdaEnvUpdater.node.addDependency(useCasesHandler);
+    lambdaEnvUpdater.node.addDependency(apiGatewayStack);
 
     // Outputs
     new cdk.CfnOutput(this, 'ApiUrl', {
-      value: this.api.url,
+      value: apiGatewayStack.apiUrl,
       description: 'API Gateway URL',
       exportName: 'EdgeCVPortalApiUrl',
     });
 
     new cdk.CfnOutput(this, 'ApiId', {
-      value: this.api.restApiId,
+      value: apiGatewayStack.api.restApiId,
       description: 'API Gateway ID',
     });
 

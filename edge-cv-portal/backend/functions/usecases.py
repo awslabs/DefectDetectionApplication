@@ -57,14 +57,25 @@ def provision_shared_components_via_api(
         from botocore.auth import SigV4Auth
         from botocore.awsrequest import AWSRequest
         
-        # Get the Portal API URL from environment
+        # Get the Portal API URL from environment or construct it
         portal_api_url = os.environ.get('PORTAL_API_URL')
-        logger.info(f"provision_shared_components_via_api called for usecase {usecase_id}")
-        logger.info(f"PORTAL_API_URL from environment: {portal_api_url}")
         
+        # If not explicitly set, construct from AWS environment variables
         if not portal_api_url:
-            logger.warning("PORTAL_API_URL not configured, skipping shared components provisioning")
-            return {'status': 'skipped', 'reason': 'PORTAL_API_URL not configured'}
+            # AWS Lambda always has AWS_REGION available
+            region = os.environ.get('AWS_REGION', 'us-east-1')
+            # Get API Gateway ID from the API_GATEWAY_ID environment variable
+            api_id = os.environ.get('API_GATEWAY_ID')
+            
+            if api_id:
+                portal_api_url = f"https://{api_id}.execute-api.{region}.amazonaws.com/v1"
+                logger.info(f"Constructed PORTAL_API_URL from API_GATEWAY_ID: {portal_api_url}")
+            else:
+                logger.warning("Neither PORTAL_API_URL nor API_GATEWAY_ID configured, skipping shared components provisioning")
+                return {'status': 'skipped', 'reason': 'API URL not configured'}
+        
+        logger.info(f"provision_shared_components_via_api called for usecase {usecase_id}")
+        logger.info(f"Using PORTAL_API_URL: {portal_api_url}")
         
         # Prepare the provisioning request
         provision_url = f"{portal_api_url}/shared-components/provision"
@@ -860,6 +871,8 @@ def handler(event, context):
             return update_usecase(path_parameters['id'], event, user)
         elif http_method == 'DELETE' and path_parameters.get('id'):
             return delete_usecase(path_parameters['id'], user)
+        elif http_method == 'POST' and path.endswith('/verify-role'):
+            return verify_role(event, user)
         
         return create_response(404, {'error': 'Not found'})
         
@@ -933,6 +946,46 @@ def list_usecases(user):
             user['user_id'] if user else 'unknown', 'list_usecases', 'usecase', 'all', 'failure'
         )
         return create_response(500, {'error': f'Failed to list use cases: {str(e)}'})
+
+
+def verify_role(event, user):
+    """Verify that a cross-account role can be assumed"""
+    try:
+        body = json.loads(event.get('body', '{}'))
+        role_arn = body.get('role_arn')
+        external_id = body.get('external_id')
+
+        if not role_arn:
+            return create_response(400, {'error': 'role_arn is required'})
+
+        try:
+            assume_params = {
+                'RoleArn': role_arn,
+                'RoleSessionName': 'verify-role-access',
+                'DurationSeconds': 900
+            }
+            if external_id:
+                assume_params['ExternalId'] = external_id
+
+            response = sts.assume_role(**assume_params)
+            account_id = response['AssumedRoleUser']['Arn'].split(':')[4]
+
+            return create_response(200, {
+                'status': 'success',
+                'account_id': account_id,
+                'assumed_role': response['AssumedRoleUser']['Arn']
+            })
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_msg = e.response['Error']['Message']
+            logger.warning(f"Role verification failed: {error_code} - {error_msg}")
+            return create_response(400, {
+                'status': 'failed',
+                'error': f"{error_code}: {error_msg}"
+            })
+    except Exception as e:
+        logger.error(f"Error verifying role: {str(e)}")
+        return create_response(500, {'error': 'Failed to verify role'})
 
 
 def create_usecase(event, user):
@@ -1359,12 +1412,13 @@ def update_usecase(usecase_id, event, user):
         body = json.loads(event.get('body', '{}'))
         table = dynamodb.Table(USECASES_TABLE)
         
-        # Build update expression
+        # Build update expression with expression attribute names for reserved keywords
         update_expr = "SET updated_at = :updated_at"
         expr_values = {':updated_at': int(datetime.utcnow().timestamp() * 1000)}
+        expr_names = {}
         
         updatable_fields = [
-            'name', 's3_bucket', 'region', 'owner', 'cost_center', 'default_device_group',
+            'name', 's3_bucket', 'region', 'owner', 'default_device_group',
             'cross_account_role_arn', 'account_id',
             # Data Account fields
             'data_account_id', 'data_account_role_arn', 'data_account_external_id',
@@ -1372,14 +1426,20 @@ def update_usecase(usecase_id, event, user):
         ]
         for field in updatable_fields:
             if field in body:
-                update_expr += f", {field} = :{field}"
+                alias = f"#{field}"
+                expr_names[alias] = field
+                update_expr += f", {alias} = :{field}"
                 expr_values[f":{field}"] = body[field]
         
-        table.update_item(
-            Key={'usecase_id': usecase_id},
-            UpdateExpression=update_expr,
-            ExpressionAttributeValues=expr_values
-        )
+        update_params = {
+            'Key': {'usecase_id': usecase_id},
+            'UpdateExpression': update_expr,
+            'ExpressionAttributeValues': expr_values
+        }
+        if expr_names:
+            update_params['ExpressionAttributeNames'] = expr_names
+        
+        table.update_item(**update_params)
         
         log_audit_event(
             user['user_id'], 'update_usecase', 'usecase', usecase_id,

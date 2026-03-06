@@ -12,7 +12,12 @@ echo ""
 
 # Get account and region info
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-REGION=$(aws configure get region || echo "us-east-1")
+REGION=$(aws configure get region 2>/dev/null)
+if [ -z "$REGION" ]; then
+    echo "❌ ERROR: No AWS region configured."
+    echo "   Run: aws configure set region <your-region>"
+    exit 1
+fi
 BUCKET_NAME="dda-component-${REGION}-${ACCOUNT_ID}"
 
 echo "Using S3 bucket: $BUCKET_NAME"

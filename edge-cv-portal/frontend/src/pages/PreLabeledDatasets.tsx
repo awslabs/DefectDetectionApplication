@@ -19,6 +19,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import S3Browser from '../components/S3Browser';
+import { validateS3Uri } from '../utils/s3Validation';
 
 interface PreLabeledDataset {
   dataset_id: string;
@@ -127,18 +128,18 @@ export default function PreLabeledDatasets() {
 
   const validateManifest = async () => {
     if (!formData.manifest_s3_uri) {
-      setError('Please provide S3 URI');
+      setValidation({ valid: false, errors: ['Please provide S3 URI'], warnings: [], stats: { total_images: 0, task_type: '', label_distribution: {}, sample_entries: [] } });
       return;
     }
 
     if (!selectedUseCase) {
-      setError('No use case selected');
+      setValidation({ valid: false, errors: ['No use case selected'], warnings: [], stats: { total_images: 0, task_type: '', label_distribution: {}, sample_entries: [] } });
       return;
     }
 
     try {
       setValidating(true);
-      setError(null);
+      setValidation(null);
       
       const result = await apiService.validateManifest({
         usecase_id: selectedUseCase.usecase_id,
@@ -146,12 +147,9 @@ export default function PreLabeledDatasets() {
       });
       
       setValidation(result as any);
-      
-      if (!result.valid) {
-        setError(`Validation failed: ${result.errors?.join(', ')}`);
-      }
     } catch (err) {
-      setError('Failed to validate manifest');
+      const message = err instanceof Error ? err.message : 'Failed to validate manifest';
+      setValidation({ valid: false, errors: [message], warnings: [], stats: { total_images: 0, task_type: '', label_distribution: {}, sample_entries: [] } });
       console.error('Validation error:', err);
     } finally {
       setValidating(false);
@@ -322,6 +320,15 @@ export default function PreLabeledDatasets() {
               ),
             },
             {
+              id: 'manifest_s3_uri',
+              header: 'Manifest URI',
+              cell: (item: PreLabeledDataset) => (
+                <Box fontSize="body-s" color="text-body-secondary">
+                  {item.manifest_s3_uri}
+                </Box>
+              ),
+            },
+            {
               id: 'created_at',
               header: 'Created',
               cell: (item: PreLabeledDataset) => new Date(item.created_at * 1000).toLocaleDateString(),
@@ -402,6 +409,7 @@ export default function PreLabeledDatasets() {
               <FormField
                 label="Manifest S3 URI"
                 description="S3 path to your manifest file (e.g., s3://bucket/path/manifest.manifest)"
+                errorText={validateS3Uri(formData.manifest_s3_uri)}
               >
                 <SpaceBetween size="xs">
                   <Input

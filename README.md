@@ -14,8 +14,9 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
   - [Step 2: Build and Deploy Frontend](#step-2-build-and-deploy-frontend)
   - [Step 3: Post-Deployment Setup](#step-3-post-deployment-setup)
   - [Step 4: Build DDA Application](#step-4-build-dda-application-build-server)
-  - [Step 5: Create UseCase](#step-5-create-usecase)
-  - [Step 6: Setting Up Edge Servers](#step-6-setting-up-edge-servers)
+  - [Step 5: Set Up Accounts](#step-5-set-up-accounts)
+  - [Step 6: Create UseCase](#step-6-create-usecase)
+  - [Step 7: Setting Up Edge Servers](#step-7-setting-up-edge-servers)
 - [Deploy DDA Application to Edge Device](#deploy-dda-application-to-edge-device)
 - [Deployments](#deployments)
 - [Devices](#devices)
@@ -104,7 +105,18 @@ Portal Account          UseCase Account         Data Account (Optional)
 - AWS CLI configured
 - Node.js 18+, Python 3.11+
 - AWS CDK: `npm install -g aws-cdk`
-- [AWS Marketplace subscription](https://aws.amazon.com/marketplace/pp/prodview-j72hhmlt6avp6) (in UseCase Account)
+- [AWS Marketplace subscription](https://aws.amazon.com/marketplace/pp/prodview-j72hhmlt6avp6) (in UseCase Account — see below)
+
+> **Important: AWS Marketplace Subscription Required**
+> 
+> The DDA training algorithm is an AWS Marketplace product. You must subscribe **in the UseCase Account** (the account where SageMaker runs) before creating training jobs.
+> 
+> 1. Sign in to the **UseCase Account** AWS Console
+> 2. Go to [AWS Marketplace - DDA Algorithm](https://aws.amazon.com/marketplace/pp/prodview-j72hhmlt6avp6)
+> 3. Click **Continue to Subscribe** → **Accept Terms**
+> 4. Wait for the subscription to become active (usually a few minutes)
+> 
+> For multi-account setups, the subscription must be in the UseCase Account (where SageMaker runs), not the Portal Account or Data Account.
 
 ### Step 1: Deploy Portal Infrastructure (Portal Account)
 
@@ -132,7 +144,7 @@ aws iam attach-role-policy \
 ROLE_ARN=$(aws iam get-role --role-name APIGatewayCloudWatchLogsRole --query 'Role.Arn' --output text)
 aws apigateway update-account \
   --patch-operations op=replace,path=/cloudwatchRoleArn,value=$ROLE_ARN \
-  --region us-east-1
+  --region us-east-2
 ```
 
 > **Note**: This is a one-time setup per AWS account.
@@ -141,10 +153,18 @@ aws apigateway update-account \
 
 ```bash
 cd edge-cv-portal
+
+# First time only: bootstrap CDK in your account
+cd infrastructure
 npm install
-cdk bootstrap  # First time only
+npx cdk bootstrap
+cd ..
+
+# Deploy all stacks
 ./deploy-infrastructure.sh
 ```
+
+> **Note**: `cdk bootstrap` must be run from `edge-cv-portal/infrastructure/` where `cdk.json` lives. The `deploy-infrastructure.sh` script handles `npm install` and `cdk deploy` for you after that.
 
 **What gets deployed:** CloudFront, API Gateway, Cognito, DynamoDB, Lambda functions, S3 buckets, IAM roles.
 
@@ -152,27 +172,12 @@ cdk bootstrap  # First time only
 
 ### Step 2: Build and Deploy Frontend
 
-#### 2.1 Frontend Configuration (config.json)
-
-Edit `edge-cv-portal/frontend/public/config.json` with your CDK output values:
-
-```json
-{
-  "apiUrl": "https://<API_GATEWAY_ID>.execute-api.us-east-1.amazonaws.com/prod",
-  "userPoolId": "us-east-1_<USER_POOL_ID>",
-  "userPoolClientId": "<CLIENT_ID>",
-  "region": "us-east-1"
-}
-```
-
-#### 2.2 Build and Deploy
-
 ```bash
 cd edge-cv-portal
 ./deploy-frontend.sh
 ```
 
-This builds the React app, uploads to S3, and invalidates CloudFront cache.
+This automatically generates `config.json` from CDK stack outputs, builds the React app, uploads to S3, and invalidates CloudFront cache.
 
 ### Step 3: Post-Deployment Setup
 
@@ -188,8 +193,12 @@ These are automatically shared when you create a UseCase in the portal. The UseC
 #### 3.2 Create Portal Admin User
 
 ```bash
-USER_POOL_ID="<from CDK output>"
-REGION="us-east-1"
+# Get User Pool ID from CDK output (or use the value from config.json)
+USER_POOL_ID=$(aws cloudformation describe-stacks \
+  --stack-name EdgeCVPortalAuthStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`AuthConfig`].OutputValue' \
+  --output text --region us-east-2 | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
+REGION="us-east-2"
 
 aws cognito-idp admin-create-user \
   --user-pool-id $USER_POOL_ID \
@@ -201,7 +210,7 @@ aws cognito-idp admin-create-user \
 aws cognito-idp admin-set-user-password \
   --user-pool-id $USER_POOL_ID \
   --username admin \
-  --password YourSecurePassword123! \
+  --password YourSecurePassword1234! \
   --permanent \
   --region $REGION
 
@@ -227,11 +236,19 @@ curl -L https://ifconfig.me
 Then launch and connect:
 
 ```bash
-# Launch build server
-./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME
+# Launch build server (from edge-cv-portal directory)
+cd edge-cv-portal
+./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME --region REGION
 
-# Connect and build
+# Set permissions on your key pair
+chmod 400 ~/.ssh/YOUR_KEY_NAME.pem
+
+# Connect to the build server
 ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@<PUBLIC_IP>
+
+# Clone the repo and build
+mkdir -p ~/workspace
+cd ~/workspace
 git clone https://github.com/awslabs/DefectDetectionApplication.git
 cd DefectDetectionApplication
 ./setup-build-server.sh
@@ -245,7 +262,7 @@ cd DefectDetectionApplication
 - `--instance-type TYPE` - EC2 instance type (default: m6g.4xlarge)
 - `--volume-size SIZE` - Root volume size in GB (default: 100)
 - `--region REGION` - AWS region (default: us-east-1)
-- `--iam-profile PROFILE` - IAM instance profile name (default: dda-build-role)
+- `--iam-profile PROFILE` - IAM instance profile name (default: dda-build-role, auto-created if missing)
 
 **What the build script does:**
 - Creates IAM role (`dda-build-role`) if needed
@@ -264,11 +281,9 @@ If you prefer manual IAM role and EC2 setup, create a role with trust policy for
 
 </details>
 
-### Step 5: Create UseCase
+### Step 5: Set Up Accounts
 
-#### 5.1 Set Up IAM Roles (if needed)
-
-For multi-account setups:
+#### 5.1 UseCase Account (Required)
 
 ```bash
 cd edge-cv-portal
@@ -276,19 +291,41 @@ cd edge-cv-portal
 ```
 
 - **Option 1**: Single-account setup (creates `DDASageMakerExecutionRole`)
-- **Option 2**: Multi-account setup (creates `DDAPortalAccessRole` in UseCase account)
+- **Option 2**: Multi-account UseCase account (creates `DDAPortalAccessRole` + `DDASageMakerExecutionRole`)
 
-#### 5.2 Create UseCase in Portal
+Save the generated `usecase-account-*-config.txt` file — you'll upload it when creating a UseCase.
+
+#### 5.2 Data Account (Optional, for multi-account)
+
+If your training data lives in a separate AWS account:
+
+```bash
+cd edge-cv-portal
+./deploy-account-role.sh
+# Select option 3: Data Account
+```
+
+Save the generated `data-account-*-config.txt` file, then register it in the portal:
+
+1. Go to **Settings** → **Data Accounts** → **Add Data Account**
+2. Upload the `data-account-*-config.txt` file to auto-fill the fields
+3. Enter a name and click **Register**
+
+This only needs to be done once per data account. All future UseCases can select it from a dropdown.
+
+### Step 6: Create UseCase
 
 1. Go to **UseCases** → **Create UseCase**
-2. Fill in: UseCase Name, Description, S3 Bucket, Role ARN (multi-account only)
-3. Click **Create**
+2. Choose setup type (Single Account or Multi-Account)
+3. For multi-account: upload `usecase-account-*-config.txt` to auto-fill role details
+4. Configure data account (select from registered accounts or enter manually)
+5. Click **Create**
 
 This provisions Greengrass components, creates `DDAPortalComponentAccessPolicy`, and sets up S3 buckets.
 
-### Step 6: Setting Up Edge Servers
+### Step 7: Setting Up Edge Servers
 
-Edge device setup is a manual process. After building the DDA application, provision edge servers with AWS IoT Greengrass.
+Edge device setup is a manual process. After building the DDA application, provision edge servers with AWS IoT Greengrass using the scripts in /station_install/setup_station.sh on the device itself.
 
 **Prerequisites:**
 - DDA application built and published (Step 4)
@@ -297,10 +334,15 @@ Edge device setup is a manual process. After building the DDA application, provi
 #### Testing with EC2 Instances
 
 ```bash
-# Launch edge device
-./station_install/launch-edge-device.sh \
-  --thing-name dda-edge-1 \
-  --key-name YOUR_KEY_NAME
+# Launch edge device (from the station_install directory)
+cd station_install
+./launch-edge-device.sh \
+  -n dda-edge-1 \
+  -k YOUR_KEY_NAME \
+  -c auto
+
+# Set permissions on your key pair
+chmod 400 ~/.ssh/YOUR_KEY_NAME.pem
 
 # Connect and setup
 ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@<PUBLIC_IP>
@@ -652,6 +694,12 @@ aws iam list-attached-role-policies --role-name GreengrassV2TokenExchangeRole
 
 ### Training Issues
 
+**"Caller is not subscribed to the marketplace offering"**: Subscribe to the DDA algorithm in the **UseCase Account** (not Portal Account):
+1. Sign in to the UseCase Account console
+2. Go to [AWS Marketplace - DDA Algorithm](https://aws.amazon.com/marketplace/pp/prodview-j72hhmlt6avp6)
+3. Click **Continue to Subscribe** → **Accept Terms**
+4. Wait a few minutes for activation, then retry
+
 **"Manifest validation failed"**: Transform the manifest first using the portal's Transform Manifest button.
 
 **"MaxRuntimeExceeded"**: Increase Max Runtime (recommend 14400-21600s for production datasets).
@@ -676,6 +724,7 @@ defect-detection-application/
 │   │   ├── src/components/      # Shared components
 │   │   └── src/services/        # API services
 │   ├── deploy-account-role.sh   # Account setup
+│   ├── launch-arm64-build-server.sh  # Build server launcher
 │   └── deploy-frontend.sh       # Frontend deployment
 ├── src/                         # DDA edge application
 │   ├── backend/                 # Python Flask backend
@@ -688,7 +737,6 @@ defect-detection-application/
 ├── datasets/                    # Sample datasets
 ├── build-custom.sh              # Custom build logic
 ├── gdk-component-build-and-publish.sh
-├── launch-arm64-build-server.sh
 └── setup-build-server.sh
 ```
 

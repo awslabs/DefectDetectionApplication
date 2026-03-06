@@ -14,7 +14,8 @@ from shared_utils import (
     cors_headers,
     handle_error,
     check_user_access,
-    create_boto3_client
+    create_boto3_client,
+    get_usecase_region
 )
 
 def lambda_handler(event, context):
@@ -113,7 +114,7 @@ def list_components(user_info: Dict, query_params: Dict, headers: Dict) -> Dict:
         external_id = use_case['external_id']
         
         credentials = assume_cross_account_role(cross_account_role_arn, external_id)
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(use_case)
         
         components = []
         
@@ -464,7 +465,7 @@ def get_component_details(user_info: Dict, component_arn: str, query_params: Dic
         external_id = use_case['external_id']
         
         credentials = assume_cross_account_role(cross_account_role_arn, external_id)
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(use_case)
         
         # Create Greengrass client with assumed role
         greengrass = create_boto3_client('greengrassv2', credentials, region)
@@ -617,7 +618,7 @@ def delete_component(user_info: Dict, component_arn: str, query_params: Dict, he
         external_id = use_case['external_id']
         
         credentials = assume_cross_account_role(cross_account_role_arn, external_id)
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(use_case)
         
         # Create Greengrass client with assumed role
         greengrass = create_boto3_client('greengrassv2', credentials, region)

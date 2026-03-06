@@ -12,7 +12,7 @@ from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, is_super_user, get_usecase,
-    get_usecase_client
+    get_usecase_client, get_usecase_region
 )
 
 logger = logging.getLogger()
@@ -22,9 +22,10 @@ dynamodb = boto3.resource('dynamodb')
 DEPLOYMENTS_TABLE = os.environ.get('DEPLOYMENTS_TABLE', 'dda-portal-deployments')
 
 # Minimum Greengrass Nucleus version required for DDA components
-# Using 2.13.0 instead of 2.14.0 due to LogManager version constraint (<2.14.0)
-# This is auto-included in deployments to prevent version mismatch errors
-MIN_NUCLEUS_VERSION = '2.13.0'
+# Nucleus is already installed on the device — we don't pin versions in deployments.
+# The DDA LocalServer recipe declares >=2.4.0 as a dependency.
+# If the device's Nucleus is too old, Greengrass will report the conflict.
+MIN_NUCLEUS_VERSION = '2.4.0'  # Reference only — not used in deployment components
 
 # CloudWatch log manager for device logging
 # Version 2.3.9 supports Nucleus >=2.1.0 <2.14.0
@@ -96,7 +97,7 @@ def list_deployments(user, query_params):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         
         # Create Greengrass client (handles both single-account and cross-account)
         greengrass_client = get_usecase_client(
@@ -170,7 +171,7 @@ def get_deployment(deployment_id, user, query_params):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         
         # Create Greengrass client (handles both single-account and cross-account)
         greengrass_client = get_usecase_client(
@@ -344,7 +345,7 @@ def create_deployment(body, user):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         account_id = usecase.get('account_id', '')
         
         # Create Greengrass client (handles both single-account and cross-account)
@@ -379,19 +380,11 @@ def create_deployment(body, user):
                         needs_nucleus = True
                         break
         
-        # Auto-include Greengrass Nucleus if deploying DDA components
-        # This prevents "FAILED_NO_STATE_CHANGE" errors when Nucleus version needs updating
+        # NOTE: We intentionally do NOT auto-include Nucleus in deployments.
+        # Pinning Nucleus to an exact version (e.g., =2.13.0) conflicts with devices
+        # that already have a newer version (e.g., 2.16.1). The DDA LocalServer recipe
+        # declares >=2.4.0 as a dependency, which Greengrass resolves automatically.
         auto_included = []
-        if needs_nucleus and 'aws.greengrass.Nucleus' not in components_map:
-            components_map['aws.greengrass.Nucleus'] = {
-                'componentVersion': MIN_NUCLEUS_VERSION
-            }
-            auto_included.append({
-                'component_name': 'aws.greengrass.Nucleus',
-                'component_version': MIN_NUCLEUS_VERSION,
-                'reason': 'Required for DDA component dependencies'
-            })
-            logger.info(f"Auto-included aws.greengrass.Nucleus {MIN_NUCLEUS_VERSION} for DDA component deployment")
         
         # Auto-include CloudWatch log manager for device logging
         if needs_nucleus and 'aws.greengrass.LogManager' not in components_map:
@@ -494,66 +487,9 @@ def create_deployment(body, user):
         if target_thing_group:
             target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{target_thing_group}"
         elif target_devices:
-            # For single device deployment, create a thing group and add the device to it
-            # Greengrass requires deployments to target thing groups
-            thing_group_name = f"{target_devices[0]}-group"
-            target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{thing_group_name}"
-            
-            try:
-                # Create thing group if it doesn't exist
-                logger.info(f"Creating thing group {thing_group_name} for device {target_devices[0]}")
-                iot_client.create_thing_group(
-                    thingGroupName=thing_group_name,
-                    thingGroupProperties={
-                        'attributePayload': {
-                            'attributes': {
-                                'dda-portal:managed': 'true',
-                                'dda-portal:usecase-id': usecase_id,
-                                'dda-portal:created-by': user['user_id']
-                            }
-                        }
-                    }
-                )
-                logger.info(f"Created thing group {thing_group_name}")
-            except ClientError as e:
-                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-                if error_code == 'ResourceAlreadyExistsException':
-                    logger.info(f"Thing group {thing_group_name} already exists")
-                else:
-                    logger.error(f"Error creating thing group {thing_group_name}: {error_code} - {str(e)}")
-                    return create_response(500, {'error': f'Failed to create thing group: {str(e)}'})
-            except Exception as e:
-                logger.error(f"Unexpected error creating thing group {thing_group_name}: {str(e)}")
-                return create_response(500, {'error': f'Failed to create thing group: {str(e)}'})
-            
-            # Verify thing group exists before proceeding
-            try:
-                logger.info(f"Verifying thing group {thing_group_name} exists")
-                iot_client.describe_thing_group(thingGroupName=thing_group_name)
-                logger.info(f"Verified thing group {thing_group_name} exists")
-            except ClientError as e:
-                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-                logger.error(f"Thing group {thing_group_name} does not exist or cannot be accessed: {error_code} - {str(e)}")
-                return create_response(500, {'error': f'Thing group verification failed: {str(e)}'})
-            
-            # Add device to thing group
-            try:
-                logger.info(f"Adding device {target_devices[0]} to thing group {thing_group_name}")
-                iot_client.add_thing_to_thing_group(
-                    thingGroupName=thing_group_name,
-                    thingName=target_devices[0]
-                )
-                logger.info(f"Added device {target_devices[0]} to thing group {thing_group_name}")
-            except ClientError as e:
-                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-                if error_code == 'ResourceAlreadyExistsException':
-                    logger.info(f"Device {target_devices[0]} already in thing group {thing_group_name}")
-                else:
-                    logger.error(f"Error adding device to thing group: {error_code} - {str(e)}")
-                    return create_response(500, {'error': f'Failed to add device to thing group: {str(e)}'})
-            except Exception as e:
-                logger.error(f"Unexpected error adding device to thing group: {str(e)}")
-                return create_response(500, {'error': f'Failed to add device to thing group: {str(e)}'})
+            # Deploy directly to the thing ARN (Greengrass supports both thing and thinggroup targets)
+            target_arn = f"arn:aws:iot:{region}:{account_id}:thing/{target_devices[0]}"
+            logger.info(f"Deploying directly to device: {target_devices[0]}")
         else:
             return create_response(400, {'error': 'No target devices or thing group specified'})
         
@@ -640,7 +576,7 @@ def cancel_deployment(deployment_id, user, query_params):
         if not usecase:
             return create_response(404, {'error': 'Use case not found'})
         
-        region = os.environ.get('AWS_REGION', 'us-east-1')
+        region = get_usecase_region(usecase)
         
         # Create Greengrass client (handles both single-account and cross-account)
         greengrass_client = get_usecase_client(

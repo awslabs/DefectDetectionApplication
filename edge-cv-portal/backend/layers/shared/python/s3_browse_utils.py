@@ -10,7 +10,7 @@ Provides reusable functions for browsing S3 bucket contents with support for:
 
 import boto3
 from typing import Dict, List, Any, Optional, Callable
-from shared_utils import assume_usecase_role, get_usecase
+from shared_utils import assume_usecase_role, get_usecase, get_s3_client_for_bucket
 
 
 def browse_s3_bucket(
@@ -52,43 +52,8 @@ def browse_s3_bucket(
     if not target_bucket:
         raise ValueError('No S3 bucket configured for this use case')
     
-    # Determine if we need to assume a role for cross-account access
-    data_account_id = usecase.get('data_account_id')
-    usecase_account_id = usecase.get('account_id')
-    is_separate_data_account = (
-        data_account_id and 
-        data_account_id != usecase_account_id
-    )
-    
-    if is_separate_data_account:
-        # Use data account credentials
-        data_role_arn = usecase.get('data_account_role_arn')
-        data_external_id = usecase.get('data_account_external_id')
-        
-        if not data_role_arn or not data_external_id:
-            raise ValueError(
-                'Data account role not configured for cross-account access'
-            )
-        
-        credentials = assume_usecase_role(
-            data_role_arn,
-            data_external_id,
-            'browse-s3-bucket'
-        )
-    else:
-        # Use usecase account credentials
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            'browse-s3-bucket'
-        )
-    
-    s3_client = boto3.client(
-        's3',
-        aws_access_key_id=credentials['AccessKeyId'],
-        aws_secret_access_key=credentials['SecretAccessKey'],
-        aws_session_token=credentials['SessionToken']
-    )
+    # Get S3 client with correct credentials for the target bucket
+    s3_client = get_s3_client_for_bucket(usecase, target_bucket, 'browse-s3-bucket')
     
     # List objects in bucket
     folders = []
@@ -96,7 +61,7 @@ def browse_s3_bucket(
     
     paginator = s3_client.get_paginator('list_objects_v2')
     pages = paginator.paginate(
-        Bucket=bucket,
+        Bucket=target_bucket,
         Prefix=prefix,
         Delimiter=delimiter
     )
@@ -132,7 +97,7 @@ def browse_s3_bucket(
                 'size_mb': round(file_size / (1024 * 1024), 2),
                 'last_modified': last_modified,
                 'type': file_type,
-                's3_uri': f's3://{bucket}/{key}'
+                's3_uri': f's3://{target_bucket}/{key}'
             }
             
             # Apply filter if provided
@@ -157,7 +122,7 @@ def browse_s3_bucket(
         breadcrumbs.append({'name': 'root', 'prefix': ''})
     
     return {
-        'bucket': bucket,
+        'bucket': target_bucket,
         'current_prefix': prefix,
         'breadcrumbs': breadcrumbs,
         'folders': folders,
@@ -177,9 +142,10 @@ def detect_file_type(filename: str) -> str:
     Returns:
         File type: 'manifest', 'image', or 'file'
     """
-    if filename.endswith('.manifest'):
+    lower = filename.lower()
+    if lower.endswith(('.manifest', '.jsonl')) or 'manifest' in lower:
         return 'manifest'
-    elif filename.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')):
+    elif lower.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')):
         return 'image'
     else:
         return 'file'
