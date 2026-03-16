@@ -143,9 +143,11 @@ echo "JETSON_TENSORRT=${JETSON_TENSORRT}" >> /tmp/.dda.env
 if [ -f /sys/devices/soc0/soc_id ]; then
     is_gpu=0
 fi
-#Use gpu if aarch64 and CUDA is present
+#Use gpu profile based on architecture and CUDA presence
 if [ $is_gpu -eq 1 ] && [ $arch = "aarch64" ]; then
     echo DOCKER_PROFILE='tegra' >> /tmp/.dda.env
+elif [ $is_gpu -eq 1 ] && [ $arch = "x86_64" ]; then
+    echo DOCKER_PROFILE='x86_cuda' >> /tmp/.dda.env
 else
     echo DOCKER_PROFILE='generic' >> /tmp/.dda.env
 fi
