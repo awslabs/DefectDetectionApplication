@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 # Copyright 2025 Amazon Web Services, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -47,7 +48,7 @@ mkdir -p ./custom-build/$COMPONENT_NAME
 cd src
 #edgemlsdk
 cd edgemlsdk/
-./build.sh -p $ARCHITECTURE -u $IMAGE_VER 3.9 || { echo "edgemlsdk build failed"; exit 1; }
+./build.sh -p $ARCHITECTURE -u $IMAGE_VER -y 3.9 || { echo "edgemlsdk build failed"; exit 1; }
 cd ..
 mkdir -p backend/edgemlsdk
 cp -r edgemlsdk backend/edgemlsdk
@@ -77,6 +78,17 @@ cp $EXTRACTED_DIR/debs/triton-core.deb $(pwd)/backend/edgemlsdk/
 cp $EXTRACTED_DIR/debs/triton-python-backend.deb $(pwd)/backend/edgemlsdk/
 cp $EXTRACTED_DIR/tars/triton_installation_files.tar.gz $(pwd)/backend/edgemlsdk/
 echo done copying binaries
+
+# Verify all required debs are present before proceeding
+for f in aws-c-iot.deb aws-crt-cpp.deb aws-iot-device-sdk-cpp-v2.deb aws-sdk-cpp.deb \
+         PanoramaSDK.deb openssl.deb liborc-0.4-0.deb triton-core.deb \
+         triton-python-backend.deb panorama-1.0-py3-none-any.whl triton_installation_files.tar.gz; do
+    if [ ! -f "$(pwd)/backend/edgemlsdk/$f" ]; then
+        echo "ERROR: Required file backend/edgemlsdk/$f not found after copy"
+        exit 1
+    fi
+done
+echo "All required edgemlsdk artifacts verified"
 # rest of the application - build sequentially to avoid OOM during compilation
 docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache
 docker-compose --profile tegra -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache

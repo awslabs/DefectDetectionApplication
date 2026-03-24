@@ -53,6 +53,9 @@ pushd $rootDir
 # Clean previous extraction
 rm -rf $rootDir/extracted-debs
 
+# Ensure cached-debs directory exists (may be empty on first build)
+mkdir -p $rootDir/cached-debs
+
 echo "Begin building Docker image. For OS=$ubuntu platform=$platform arch=$pwsh_arch"
 
 # Step 1: Build the full edgemlsdk image (cached by buildx)
@@ -63,17 +66,14 @@ docker buildx build --platform linux/arm64 \
     --build-arg PYTHON_VERSION=$python \
     -t edgemlsdk .
 
-# Step 2: Extract debs/tars using the extractor stage and --output type=local
-# The extractor stage is defined at the end of the Dockerfile and only copies /debs/ and /tars/
-# This reuses the build cache from step 1, so it's nearly instant.
-docker buildx build --platform linux/arm64 \
-    --build-arg OS=$ubuntu \
-    --build-arg PLATFORM=$platform \
-    --build-arg PWSH_ARCH=$pwsh_arch \
-    --build-arg PYTHON_VERSION=$python \
-    --target extractor \
-    --output type=local,dest=$rootDir/extracted-debs \
-    .
+# Step 2: Extract debs/tars from the built image using docker cp
+# Using docker cp instead of --output type=local to avoid lchown permission errors
+# Note: we create from the builder stage since the extractor stage (FROM scratch) has no command
+mkdir -p $rootDir/extracted-debs/debs $rootDir/extracted-debs/tars
+CONTAINER_ID=$(docker create --platform linux/arm64 edgemlsdk /bin/true)
+docker cp $CONTAINER_ID:/debs/. $rootDir/extracted-debs/debs/
+docker cp $CONTAINER_ID:/tars/. $rootDir/extracted-debs/tars/
+docker rm $CONTAINER_ID
 
 echo "Extraction complete. Checking extracted files..."
 ls -la $rootDir/extracted-debs/debs/ 2>/dev/null || echo "WARNING: No debs found in extracted-debs/"

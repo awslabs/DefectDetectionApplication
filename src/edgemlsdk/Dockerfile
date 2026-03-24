@@ -43,7 +43,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gtk-doc-tools xsltproc gettext \
     libcairo2 libcairo2-dev libexif-dev libarchive-dev libnuma-dev libb64-dev \
     rapidjson-dev libre2-dev python-dev \
-    ninja-build checkinstall ffmpeg swig \
+    ninja-build checkinstall ffmpeg swig lcov \
+    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LD_LIBRARY_PATH=/usr/local/lib/
@@ -246,6 +247,7 @@ RUN . /tmp/build-env.sh && \
         echo "=== Triton attempt $i failed, retrying... ===" && sleep 2; \
     done && \
     mv build/python/install/backends/python build/tritonserver/install/backends && \
+    cp -a build/tritonserver/install/backends/python build/python/install/backends/python && \
     cd build/opt/ && \
     tar cvzf triton_installation_files.tar.gz tritonserver/ && \
     mkdir -p /dependencies/tars/ && \
