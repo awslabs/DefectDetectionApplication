@@ -35,7 +35,7 @@ apt-get update -y || {
 }
 
 echo "Installing wget and build tools..."
-apt-get install -y --no-install-recommends wget build-essential ninja-build meson || {
+apt-get install -y --no-install-recommends wget build-essential ninja-build || {
     echo "Failed to install build tools"
     exit 1
 }
@@ -74,7 +74,11 @@ cd aravis-0.8.26 || {
     exit 1
 }
 
-meson setup -Dprefix=/usr build || {
+# Remove static .a libraries that cause linker issues (missing pthread/pcre)
+# Force meson to use shared .so libraries instead
+rm -f /usr/lib/aarch64-linux-gnu/libglib-2.0.a /usr/lib/aarch64-linux-gnu/libcairo.a
+
+meson setup -Dprefix=/usr -Dviewer=disabled build || {
     echo "Failed to setup meson build"
     exit 1
 }
@@ -84,8 +88,9 @@ cd build || {
     exit 1
 }
 
-ninja || {
-    echo "Failed to build with ninja"
+ninja -j1 || ninja -j1 || ninja -j1 || ninja -j1 || ninja -j1 || \
+ninja -j1 || ninja -j1 || ninja -j1 || ninja -j1 || ninja -j1 || {
+    echo "Failed to build with ninja after 10 attempts"
     exit 1
 }
 

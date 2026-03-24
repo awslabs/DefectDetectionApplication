@@ -1,7 +1,7 @@
 ---
 RecipeFormatVersion: "2020-01-25"
 ComponentName: "aws.edgeml.dda.LocalServer.arm64"
-ComponentVersion: "1.0.0"
+ComponentVersion: "2.0.0"
 ComponentDescription: DDA Local Web Server App - ARM64
 ComponentPublisher: Amazon
 ComponentDependencies:

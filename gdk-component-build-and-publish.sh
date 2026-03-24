@@ -2,7 +2,7 @@
 set -e
 
 # Get architecture and determine recipe file
-ARCH=$(uname -m)
+ARCH=$1
 case $ARCH in
     x86_64)
         RECIPE_FILE="recipe-amd64.yaml"
@@ -10,7 +10,7 @@ case $ARCH in
         ;;
     aarch64)
         RECIPE_FILE="recipe-arm64.yaml"
-        COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64"
+        COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64JP5"
         ;;
     *)
         echo "Unsupported architecture: $ARCH"
@@ -39,7 +39,8 @@ cat > gdk-config.json << EOF
           "bash",
           "build-custom.sh",
           "${COMPONENT_NAME}",
-          "NEXT_PATCH"
+          "NEXT_PATCH",
+          "${ARCH}"
         ]
       },
       "publish": {

@@ -4,6 +4,7 @@ services:
     network_mode: "host"
     build: ./backend
     image: flask-app
+    platform: linux/arm64/v8 
     privileged: true
     expose:
       - "5000"

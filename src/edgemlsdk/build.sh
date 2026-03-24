@@ -49,8 +49,41 @@ fi
  
 rootDir="$( cd -- "$( dirname -- "${BASH_SOURCE[0]:-$0}"; )" &> /dev/null && pwd 2> /dev/null; )";
 pushd $rootDir
- 
- 
+
+# Clean previous extraction
+rm -rf $rootDir/extracted-debs
+
 echo "Begin building Docker image. For OS=$ubuntu platform=$platform arch=$pwsh_arch"
-docker build --build-arg OS=$ubuntu --build-arg PLATFORM=$platform --build-arg PWSH_ARCH=$pwsh_arch --build-arg PYTHON_VERSION=$python -t edgemlsdk .
+
+# Step 1: Build the full edgemlsdk image (cached by buildx)
+docker buildx build --platform linux/arm64 \
+    --build-arg OS=$ubuntu \
+    --build-arg PLATFORM=$platform \
+    --build-arg PWSH_ARCH=$pwsh_arch \
+    --build-arg PYTHON_VERSION=$python \
+    -t edgemlsdk .
+
+# Step 2: Extract debs/tars using the extractor stage and --output type=local
+# The extractor stage is defined at the end of the Dockerfile and only copies /debs/ and /tars/
+# This reuses the build cache from step 1, so it's nearly instant.
+docker buildx build --platform linux/arm64 \
+    --build-arg OS=$ubuntu \
+    --build-arg PLATFORM=$platform \
+    --build-arg PWSH_ARCH=$pwsh_arch \
+    --build-arg PYTHON_VERSION=$python \
+    --target extractor \
+    --output type=local,dest=$rootDir/extracted-debs \
+    .
+
+echo "Extraction complete. Checking extracted files..."
+ls -la $rootDir/extracted-debs/debs/ 2>/dev/null || echo "WARNING: No debs found in extracted-debs/"
+ls -la $rootDir/extracted-debs/tars/ 2>/dev/null || echo "WARNING: No tars found in extracted-debs/"
+
+# Cache the openssl deb for future builds (skips the slow QEMU compilation next time)
+if ls $rootDir/extracted-debs/debs/openssl*.deb 1>/dev/null 2>&1; then
+    mkdir -p $rootDir/cached-debs
+    cp $rootDir/extracted-debs/debs/openssl*.deb $rootDir/cached-debs/
+    echo "Cached openssl deb to $rootDir/cached-debs/ for future builds"
+fi
+
 popd

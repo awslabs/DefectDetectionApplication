@@ -1,463 +1,325 @@
-ARG OS
-FROM public.ecr.aws/ubuntu/ubuntu:${OS}
+FROM nvcr.io/nvidia/l4t-jetpack:r35.4.1 AS builder
 ARG OS
 ARG PLATFORM
-# Use non-interactive mode to suppress any prompt during installation
+ARG PWSH_ARCH
+ARG PYTHON_VERSION
 ENV DEBIAN_FRONTEND noninteractive
 
-# Install basic dev libraries
-RUN apt-get update 
-RUN apt-get install build-essential software-properties-common lsb-release git curl libcurl4 libcurl4-openssl-dev \
-    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good libsqlite3-dev gnupg pkg-config \
-    gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-alsa gstreamer1.0-gl \
-    gstreamer1.0-gtk3 gstreamer1.0-qt5 libgstrtspserver-1.0-dev libgirepository1.0-dev libudev-dev libssl-dev --fix-missing -y
-RUN apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80 16FAAD7AF99A65E2
-# build openssl3 if on older system for the AWS IoT library
-RUN if [ "$OS" = "18.04" ]; then \
-    	apt-get install -y wget build-essential zlib1g-dev ca-certificates; \
-    	wget https://github.com/openssl/openssl/releases/download/openssl-3.0.17/openssl-3.0.17.tar.gz; \
-    	tar -xzf openssl-3.0.17.tar.gz;  \
-    	cd openssl-3.0.17; \
-    	./config --prefix=/usr/local/ssl --openssldir=/usr/local/ssl shared zlib; \
-    	make; \
-    	make install; \
-        ldconfig; \ 
-        ls -al /usr/local/ssl; \
-        mkdir -p /usr/local/ssl/certs; \
-        cp /etc/ssl/certs/ca-certificates.crt /usr/local/ssl/certs/; \
-       
-    fi
+# ── 0. Detect QEMU — sets IS_QEMU=1 if running under emulation ────────────
+# Native aarch64 builds skip all retry loops, -O0, -j1, and libevent patches.
+RUN if head -1 /proc/self/maps 2>/dev/null | grep -q qemu; then \
+        echo "1" > /tmp/.is_qemu; \
+    elif [ -f /usr/bin/qemu-aarch64-static ] || [ -f /usr/bin/qemu-aarch64 ]; then \
+        echo "1" > /tmp/.is_qemu; \
+    else \
+        echo "0" > /tmp/.is_qemu; \
+    fi && \
+    echo "QEMU detected: $(cat /tmp/.is_qemu)"
+
+# Helper: sets shell vars used by every build step
+# Usage: source /tmp/build-env.sh at the start of each RUN
+RUN IS_QEMU=$(cat /tmp/.is_qemu) && \
+    if [ "$IS_QEMU" = "1" ]; then \
+        printf 'JOBS=1\nRETRIES=30\nOPENSSL_CFLAGS="-O0"\nOPENSSL_ASM="no-asm"\nEXTRA_CFLAGS="-O0 -D_GNU_SOURCE"\nCONAN_JOBS_ARGS="-c tools.build:jobs=1"\nMAKE_CMD="make -j1"\nNINJA_CMD="ninja -j1"\nB2_CMD="./b2 -j1"\nTRITON_PARALLEL=1\n' > /tmp/build-env.sh; \
+    else \
+        NCPU=$(nproc) && \
+        printf "JOBS=$NCPU\nRETRIES=1\nOPENSSL_CFLAGS=\"\"\nOPENSSL_ASM=\"\"\nEXTRA_CFLAGS=\"\"\nCONAN_JOBS_ARGS=\"\"\nMAKE_CMD=\"make -j$NCPU\"\nNINJA_CMD=\"ninja -j$NCPU\"\nB2_CMD=\"./b2 -j$NCPU\"\nTRITON_PARALLEL=$NCPU\n" > /tmp/build-env.sh; \
+    fi && \
+    echo "=== Build environment ===" && cat /tmp/build-env.sh
+
+
+# ── 1. System packages ─────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential software-properties-common lsb-release git curl wget gpg unzip rsync \
+    clang \
+    libcurl4 libcurl4-openssl-dev libsqlite3-dev gnupg pkg-config libudev-dev libssl-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x \
+    gstreamer1.0-alsa gstreamer1.0-gl gstreamer1.0-gtk3 gstreamer1.0-qt5 \
+    libgstrtspserver-1.0-dev libgstreamer-plugins-good1.0-dev \
+    libgirepository1.0-dev gobject-introspection \
+    libxml2-dev libglib2.0-dev libusb-1.0-0-dev libgtk-3-dev libjpeg-dev \
+    gtk-doc-tools xsltproc gettext \
+    libcairo2 libcairo2-dev libexif-dev libarchive-dev libnuma-dev libb64-dev \
+    rapidjson-dev libre2-dev python-dev \
+    ninja-build checkinstall ffmpeg swig \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV LD_LIBRARY_PATH=/usr/local/lib/
-RUN echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
-#RUN /usr/local/ssl/bin/openssl  version
-RUN apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80 16FAAD7AF99A65E2
-# Install gcc/g++ 11
 
-RUN add-apt-repository ppa:ubuntu-toolchain-r/test && \
-    apt-get update && \  
-    apt install gcc-11 g++-11 -y && \
-    rm /usr/bin/gcc && \
-    rm /usr/bin/g++ && \
-    ln -s /usr/bin/gcc-11 /usr/bin/gcc && \
-    ln -s /usr/bin/g++-11 /usr/bin/g++
+# ── 2. CMake 3.21.3 from Kitware ──────────────────────────────────────────
+RUN wget -O /etc/apt/trusted.gpg.d/kitware.asc https://apt.kitware.com/keys/kitware-archive-latest.asc && \
+    echo "deb https://apt.kitware.com/ubuntu/ focal main" > /etc/apt/sources.list.d/kitware.list && \
+    apt-get update && \
+    apt-get install -y cmake-data=3.21.3-0kitware1ubuntu20.04.1 cmake=3.21.3-0kitware1ubuntu20.04.1 && \
+    rm -f /etc/apt/sources.list.d/kitware.list /etc/apt/trusted.gpg.d/kitware.asc && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install latest version of clang
-RUN apt-get install gpg wget -y && \
-    wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
-    apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80 15CF4D18AF4F7421 && \
-    apt update
+# ── 3. Python 3.9 + pip tooling ───────────────────────────────────────────
+RUN rm -f /etc/apt/sources.list.d/*kitware* && \
+    sed -i '/kitware/d' /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install -y python${PYTHON_VERSION}-dev libpython${PYTHON_VERSION} \
+    python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python3-pip && \
+    rm -rf /var/lib/apt/lists/* && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
+    rm -f /usr/bin/python && ln -s /usr/bin/python3.9 /usr/bin/python && \
+    python${PYTHON_VERSION} -m pip install --user --upgrade pip && \
+    python${PYTHON_VERSION} -m pip install --upgrade build
 
-ARG OS
-RUN if [ "$OS" = "18.04" ]; then \
-        add-apt-repository "deb http://apt.llvm.org/bionic/ llvm-toolchain-bionic main"; \
+ENV PYTHON_EXECUTABLE=/usr/bin/python3.9
+ENV Python3_EXECUTABLE=/usr/bin/python3.9
+ENV Python3_INCLUDE_DIR=/usr/include/python3.9
+ENV Python3_LIBRARY=/usr/lib/libpython3.9.so
+
+# ── 4. Python packages ────────────────────────────────────────────────────
+RUN pip3 install --upgrade pip setuptools==64.0.3 wheel build hatchling packaging==24.2 && \
+    pip3 install --ignore-installed PyYAML && \
+    pip3 install conan && conan profile detect && \
+    pip3 install --upgrade pydantic setuptools==64.0.3 meson && \
+    pip3 install Cython boto3 awscrt multiprocess coverage pylint && \
+    pip3 install pygobject==3.44.1
+
+# ── 5. AWS CLI ─────────────────────────────────────────────────────────────
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-${PLATFORM}.zip" -o awscliv2.zip && \
+    unzip -q awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
+
+# ── 6. PowerShell ─────────────────────────────────────────────────────────
+RUN curl -L -o /tmp/powershell.tar.gz https://github.com/PowerShell/PowerShell/releases/download/v7.2.3/powershell-7.2.3-linux-$PWSH_ARCH.tar.gz && \
+    mkdir -p /opt/microsoft/powershell/7 && \
+    tar zxf /tmp/powershell.tar.gz -C /opt/microsoft/powershell/7 && \
+    chmod +x /opt/microsoft/powershell/7/pwsh && \
+    ln -s /opt/microsoft/powershell/7/pwsh /usr/bin/pwsh && \
+    rm /tmp/powershell.tar.gz
+
+# ── 7. OpenSSL 3.x (cached or built from source) ──────────────────────────
+RUN mkdir -p /dependencies/debs
+COPY cached-debs/ /dependencies/cached-debs/
+RUN . /tmp/build-env.sh && \
+    if ls /dependencies/cached-debs/openssl*.deb 1>/dev/null 2>&1; then \
+        echo "=== Using cached OpenSSL deb ===" && \
+        cp /dependencies/cached-debs/openssl*.deb /dependencies/debs/ && \
+        dpkg -i /dependencies/debs/openssl*.deb; \
     else \
-        add-apt-repository "deb https://apt.llvm.org/focal/ llvm-toolchain-focal-19 main"; \
+        echo "=== Building OpenSSL from source (QEMU=$(cat /tmp/.is_qemu)) ===" && \
+        cd /dependencies && \
+        git clone --depth 1 -b openssl-3.3.0 https://github.com/openssl/openssl.git && \
+        cd openssl && \
+        CFLAGS="$OPENSSL_CFLAGS" ./Configure --prefix=/usr/local/ssl --openssldir=/usr/local/ssl \
+            shared zlib no-docs no-tests $OPENSSL_ASM && \
+        for i in $(seq 1 $RETRIES); do \
+            echo "=== OpenSSL build attempt $i ===" && \
+            $MAKE_CMD && break; \
+            echo "=== Attempt $i failed, retrying... ===" && sleep 1; \
+        done && \
+        test -f libssl.so || (echo "OpenSSL build failed" && exit 1) && \
+        checkinstall -y && \
+        mv /dependencies/openssl/openssl*.deb /dependencies/debs && \
+        rm -rf /dependencies/openssl; \
     fi
+RUN rm -rf /usr/local/include/openssl
 
-RUN apt update && \
-    apt-get install clang -y
+# ── 8. aws-crt-cpp ────────────────────────────────────────────────────────
+COPY patches/aws-crt-cpp-s2n.diff /tmp/aws-crt-cpp-s2n.diff
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    git clone https://github.com/awslabs/aws-crt-cpp.git && \
+    cd aws-crt-cpp && \
+    git checkout 6158ecefd0e0d53b2cf5e9d09f8c42f57e741e35 && \
+    git submodule update --init --recursive && \
+    cp /tmp/aws-crt-cpp-s2n.diff crt/s2n/aws-crt-cpp-s2n.diff && \
+    cd crt/s2n && git apply aws-crt-cpp-s2n.diff && \
+    mkdir /dependencies/aws-crt-cpp/build && \
+    cd /dependencies/aws-crt-cpp/build && \
+    cmake -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/ \
+        -DCMAKE_INSTALL_PREFIX=/usr/ -DUSE_OPENSSL=ON -DBUILD_SHARED_LIBS=ON ../ && \
+    for i in $(seq 1 $RETRIES); do $NINJA_CMD install && break; echo "=== ninja attempt $i failed ===" && sleep 1; done
 
-# Install the latest versions of CMake
-RUN if [ "$OS" = "18.04" ]; then \
-        apt-get install -y software-properties-common lsb-release && \
-        apt-get clean all && \
-        wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null && \
-        apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main" && \
-        apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80  6AF7F09730B3F0A4 && \
-        apt-get update && \
-        apt-get install kitware-archive-keyring && \
-        rm /etc/apt/trusted.gpg.d/kitware.gpg && \
-        apt-get update && \
-        apt-get install cmake=3.21.3-0kitware1ubuntu18.04.1 cmake-data=3.21.3-0kitware1ubuntu18.04.1 -y; \
-    else \
-        apt-get install -y software-properties-common lsb-release && \
-        apt-get clean all && \
-        wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null && \
-        apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main" && \
-        apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80  6AF7F09730B3F0A4 && \
-        apt-get update && \
-        apt-get install kitware-archive-keyring && \
-        rm /etc/apt/trusted.gpg.d/kitware.gpg && \
-        apt-get update && \
-        apt-get install cmake=3.21.3-0kitware1ubuntu20.04.1 cmake-data=3.21.3-0kitware1ubuntu20.04.1 -y; \
-    fi
+# ── 9. aws-sdk-cpp ────────────────────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    PLATFORM=$(uname -m) && \
+    git clone https://github.com/aws/aws-sdk-cpp && \
+    cd aws-sdk-cpp && \
+    git checkout c63eb9e5f059ae2595cae8c79732c6938ca36b7d && \
+    git submodule update --init --recursive && \
+    mkdir build && cd build && \
+    cmake -GNinja -DBUILD_TESTING=OFF \
+        -DCMAKE_MODULE_PATH=/usr/lib/$PLATFORM-linux-gnu/cmake \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/ -DCMAKE_INSTALL_PREFIX=/usr/ \
+        -DBUILD_DEPS=OFF -DBUILD_ONLY="s3;sts;transfer;iot;iot-data;sagemaker-edge;secretsmanager" ../ && \
+    for i in $(seq 1 $RETRIES); do $NINJA_CMD install && break; echo "=== ninja attempt $i failed ===" && sleep 1; done
 
-# Install specific version of Python
-#ARG PYTHON_VERSION
-#RUN echo "Python Version = ${PYTHON_VERSION}"
-#RUN apt-get install python${PYTHON_VERSION}-dev libpython${PYTHON_VERSION} python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python3-pip -y && \
-#    python${PYTHON_VERSION} -m pip install --user --upgrade pip && \
-#    python${PYTHON_VERSION} -m pip install --upgrade build
+# ── 10. aws-c-iot ─────────────────────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    git clone https://github.com/awslabs/aws-c-iot.git && \
+    cd aws-c-iot && \
+    git checkout 6e59b4660fecbc20c74493aee7da8a7b486b2966 && \
+    git submodule update --init --recursive && \
+    mkdir build && cd build && \
+    cmake -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_PREFIX_PATH=/usr/ \
+        -DCMAKE_INSTALL_PREFIX=/usr/ -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_BUILD_TYPE="Release" -DBUILD_TESTING=OFF \
+        -DCMAKE_HAVE_THREADS_LIBRARY=1 -DCMAKE_USE_PTHREADS_INIT=1 -DTHREADS_PREFER_PTHREAD_FLAG=ON ../ && \
+    for i in $(seq 1 $RETRIES); do $NINJA_CMD install && break; echo "=== ninja attempt $i failed ===" && sleep 1; done
 
-RUN wget https://www.python.org/ftp/python/3.9.23/Python-3.9.23.tgz
-RUN tar -xzf Python-3.9.23.tgz
-RUN cd Python-3.9.23 && \
-    ./configure --enable-optimizations --enable-shared && \
-    make -j$(nproc) && \
-    make install && \
-    ldconfig
+# ── 11. Aravis SDK ────────────────────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    git clone https://github.com/AravisProject/aravis.git && \
+    cd aravis && \
+    git checkout 96cea9835ce1535547d8680c8b0be33e97f6cb30 && \
+    git submodule update --init --recursive && \
+    meson setup build -Dtests=false -Dintrospection=disabled && \
+    cd build && \
+    for i in $(seq 1 $RETRIES); do $NINJA_CMD && break; echo "=== ninja attempt $i failed ===" && sleep 1; done && \
+    ninja install
 
-RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1 \
-    && update-alternatives --set python3 /usr/local/bin/python3.9 
+# ── 12. aws-iot-device-sdk-cpp-v2 ─────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    PLATFORM=$(uname -m) && \
+    git clone https://github.com/aws/aws-iot-device-sdk-cpp-v2.git && \
+    cd aws-iot-device-sdk-cpp-v2 && \
+    git checkout f7cbf0982d2f23902406a0ba696a1a900b732a7e && \
+    git submodule update --init --recursive && \
+    mkdir build && cd build && \
+    cmake -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_MODULE_PATH=/usr/lib/$PLATFORM-linux-gnu/cmake \
+        -DCMAKE_INSTALL_PREFIX=/usr/ -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_DEPS=OFF -DCMAKE_BUILD_TYPE="Release" -DBUILD_TESTING=OFF ../ && \
+    for i in $(seq 1 $RETRIES); do $NINJA_CMD install && break; echo "=== ninja attempt $i failed ===" && sleep 1; done
 
-ENV PYTHON_EXECUTABLE=/usr/local/bin/python3.9
-ENV Python3_EXECUTABLE=/usr/local/bin/python3.9
-ENV Python3_INCLUDE_DIR=/usr/local/include/python3.9
-ENV Python3_LIBRARY=/usr/local/lib/libpython3.9.so
-RUN find / -name "libpython3.9.so.1.0" -print
-
-RUN pip3 install --upgrade pip setuptools wheel build hatchling
-RUN python3.9 -c "import ssl; print('SSL support:', ssl.OPENSSL_VERSION)" || echo "SSL module not available"
-RUN python3.9 -c "import urllib.request; urllib.request.urlopen('https://pypi.org')" || echo "HTTPS connection failed"
-
-# Conan version 2.1.0 has a bug causing build failure. Github issue: https://github.com/conan-io/conan/issues/15742
-# Installing v.2.0.17 for now. Modify this after bug is resolved
-RUN pip3 install pyYAML && \
-    pip3 install conan && \
-    conan profile detect
-RUN pip3 install --upgrade pydantic setuptools
-# Coverage Tools
-RUN apt-get install lcov -y
-
-# Install AWS and panorama cli
-RUN apt-get install unzip -y
-RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-${PLATFORM}.zip" -o awscliv2.zip \
-    && unzip awscliv2.zip \
-    && ./aws/install
-
-# Install openssl
-# Although Ubuntu 18.04 and 20.04 use openssl 1.1.x, when DDA consumes EdgeML SDK the automated container scan detects multiple CVEs
-# We need to install openssl >= 3.1.1, may as well get the newest version as of writing (3.3.0)
-# Using a mismatched version can lead to seg-fault from some AWS calls, so make sure to distribute and use the same version
-RUN apt-get install checkinstall -y && \
-    mkdir -p /dependencies/debs
-RUN cd /dependencies \
-    && git clone https://github.com/openssl/openssl.git \
-    && cd openssl \
-    && git checkout f84622c7e7f83a9bba30b25898182090801e752d \
-    && git submodule update --init --recursive \
-    && ./Configure --prefix=/usr/local/ssl --openssldir=/usr/local/ssl shared zlib no-docs no-tests \
-    && make -j$(nproc)\
-    && checkinstall -y \
-    && mv /dependencies/openssl/openssl*.deb /dependencies/debs \
-    && rm -rf /dependencies/openssl
-
-# Get the AWS dependencies
-# TODO: Should be made to Conan package
-# Install Aws Cpp SDK
-# Prefer shared libs
-# Link to crypto from the system and as a shared lib
-# Do not build aws-crt-cpp twice (once from aws-sdk-cpp and other from aws-iot-device-sdk-cpp-v2
-# TODO: have to build aws-crt-cpp separately as BUILD_SHARED_LIBS is not propagated to it from its parent aws-sdk-cpp
-RUN rm -rf /usr/local/include/openssl 
-RUN apt-get install ninja-build -y
-RUN cd /dependencies \
-    && git clone https://github.com/awslabs/aws-crt-cpp.git \
-    && cd aws-crt-cpp \
-    && git checkout 6158ecefd0e0d53b2cf5e9d09f8c42f57e741e35 \
-    && git submodule update --init --recursive
-# Fix artifacts tests:
-# s2n_init() failed: 402653268 (Failed to load or unload an openssl provider)
-# Fatal error condition occurred in /dependencies/aws-crt-cpp/crt/aws-c-io/source/s2n/s2n_tls_channel_handler.c:197: 0 && "s2n_init() failed"
-# https://stackoverflow.com/a/74611780
-COPY patches/aws-crt-cpp-s2n.diff /dependencies/aws-crt-cpp/crt/s2n/aws-crt-cpp-s2n.diff
-RUN cd /dependencies/aws-crt-cpp/crt/s2n \
-    && git apply aws-crt-cpp-s2n.diff \
-    && mkdir /dependencies/aws-crt-cpp/build \
-    && cd /dependencies/aws-crt-cpp/build \
-    && cmake -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/ -DCMAKE_INSTALL_PREFIX=/usr/ -DUSE_OPENSSL=ON -DBUILD_SHARED_LIBS=ON ../ \
-    && ninja install
-
-
-RUN cd /dependencies \
-    && PLATFORM=$(uname -m) \
-    && git clone https://github.com/aws/aws-sdk-cpp \
-    && cd aws-sdk-cpp \
-    && git checkout c63eb9e5f059ae2595cae8c79732c6938ca36b7d \
-    && git submodule update --init --recursive \
-    && mkdir build \
-    && cd build \
-    && cmake -GNinja -DBUILD_TESTING=OFF -DCMAKE_MODULE_PATH=/usr/lib/$PLATFORM-linux-gnu/cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/ -DCMAKE_INSTALL_PREFIX=/usr/ -DBUILD_DEPS=OFF -DBUILD_ONLY="s3;sts;transfer;iot;iot-data;sagemaker-edge;secretsmanager" ../ \
-    && ninja install
-
-# We build this separately as its part of aws-iot-sdk crt, and not in aws-cpp-sdk crt
-RUN cd /dependencies \
-     && git clone https://github.com/awslabs/aws-c-iot.git \
-     && cd aws-c-iot \
-     && git checkout 6e59b4660fecbc20c74493aee7da8a7b486b2966 \
-     && git submodule update --init --recursive \
-     && mkdir build \
-     && cd build \
-     && cmake -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_PREFIX_PATH=/usr/ -DCMAKE_INSTALL_PREFIX=/usr/ -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE="Release" -DBUILD_TESTING=OFF ../ \
-     && ninja install
-
-# Install Dependencies for aravis sdk
-RUN apt-get install libxml2-dev libglib2.0-dev libusb-1.0-0-dev gobject-introspection \
-            libgtk-3-dev libjpeg-dev gtk-doc-tools  xsltproc \
-            libgstreamer-plugins-good1.0-dev \
-            gettext -y
-ENV PKG_CONFIG_PATH = /usr/lib/aarch64-linux-gnu/pkgconfig./usr/lib/aarch64-linux-gnu/pkgconfig
- 
-# Install meson
-RUN pip3 install meson
-
-# Install aravis sdk release version 0.8
-RUN cd /dependencies \
-    && git clone https://github.com/AravisProject/aravis.git \
-    && cd aravis \
-    && git checkout 96cea9835ce1535547d8680c8b0be33e97f6cb30 \
-    && git submodule update --init --recursive \
-    && meson setup build -Dtests=false \
-    && cd build \
-    && ninja \
-    && ninja install
-
-# Build shared libs, and don't build aws-crt-app deps as its already build by aws-sdk-cpp
-# build aws-c-iot separately
-# TODO: AwsFindPackage from aws-crt-cpp is installed in /usr/lib/$ARCH-linux-gnu/ needed to add CMAKE_MODULE_PATH override
-# TODO: turned off testing BUILD_TESTING to workaround  eventstream_rpc test build failure
-RUN cd /dependencies \
-    && PLATFORM=$(uname -m) \
-    && git clone https://github.com/aws/aws-iot-device-sdk-cpp-v2.git \
-    && cd aws-iot-device-sdk-cpp-v2 \
-    && git checkout f7cbf0982d2f23902406a0ba696a1a900b732a7e \
-    && git submodule update --init --recursive \
-    && mkdir build \
-    && cd build \
-    && cmake -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_MODULE_PATH=/usr/lib/$PLATFORM-linux-gnu/cmake -DCMAKE_INSTALL_PREFIX=/usr/ -DBUILD_SHARED_LIBS=ON -DBUILD_DEPS=OFF -DCMAKE_BUILD_TYPE="Release" -DBUILD_TESTING=OFF ../ \
-    && ninja install
-
-# Debug helpers
-RUN apt-get install gdb -y
-RUN apt-get install vim -y
-
-# Python Dependencies
-RUN echo "check which python we are using"
-RUN which python3
-RUN which pip3
-RUN pip3 --version
-RUN which pip
-RUN pip --version
-RUN which python3.9
-RUN python3 --version
-RUN apt-get install libcairo2 libcairo2-dev -y
-RUN apt-get remove --autoremove python3-gi -y \
-    && pip install Cython boto3 awscrt multiprocess conan coverage pylint 
-#RUN pip install scalene 
-
-RUN pip3 install pygobject==3.44.1
-ENV PYTHON_EXECUTABLE=/usr/local/bin/python3.9
-ENV Python3_EXECUTABLE=/usr/local/bin/python3.9
-ENV Python3_INCLUDE_DIR=/usr/local/include/python3.9
-ENV Python3_LIBRARY=/usr/local/lib/libpython3.9.so
-
-# Install SWIG
-RUN mkdir /swig \
-    && cd /swig \
-    && wget http://prdownloads.sourceforge.net/swig/swig-4.0.2.tar.gz \
-    && mkdir swig \
-    && tar -xzvf swig-4.0.2.tar.gz -C ./swig \
-    && rm swig-4.0.2.tar.gz \
-    && cd ./swig/swig-4.0.2 \
-    && ./configure \
-    && make \
-    && make install
-
-RUN apt-get install rsync -y
-
-# Install powershell
-ARG PWSH_ARCH
-RUN curl -L -o /tmp/powershell.tar.gz https://github.com/PowerShell/PowerShell/releases/download/v7.2.3/powershell-7.2.3-linux-$PWSH_ARCH.tar.gz \
-    && mkdir -p /opt/microsoft/powershell/7 \
-    && tar zxf /tmp/powershell.tar.gz -C /opt/microsoft/powershell/7 \
-    && chmod +x /opt/microsoft/powershell/7/pwsh \
-    && ln -s /opt/microsoft/powershell/7/pwsh /usr/bin/pwsh
-
-RUN apt-get install nasm -y
-
-# ffmpeg
-RUN cd /dependencies \
-    && git clone https://github.com/FFmpeg/FFmpeg.git
-
-RUN cd /dependencies/FFmpeg \
-    && git checkout ffb5153
-
-    RUN export CFLAGS='-fstack-protector-strong -fpie -pie -Wl,-z,relro,-z,now -D_FORTIFY_SOURCE=2' \
-    && export CXXFLAGS='${CFLAGS}' \
-    && cd /dependencies/FFmpeg \
-    && ./configure --disable-everything --disable-gpl --disable-version3 --disable-nonfree --disable-static --disable-network --enable-shared --enable-muxer=mp4 --prefix=/dependencies/FFmpeg/install \
-    && make \
-    && make install
-
-# Install ffmpeg to use some of it's tools without needing to compile everything
-RUN apt-get install ffmpeg -y
-
-# Install Triton Server and it's dependencies
-RUN apt-get update && \
-    apt-get install rapidjson-dev libre2-dev -y
-RUN apt-get install python-dev -y
-
-# Use --no-check-certificate to resolve following error
-# ERROR: cannot verify boostorg.jfrog.io's certificate, issued by 'CN=GeoTrust TLS RSA CA G1,OU=www.digicert.com,O=DigiCert Inc,C=US':
-# Self-signed certificate encountered.
-RUN cd /dependencies && \
+# ── 13. Boost 1.81 ────────────────────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
     wget --no-check-certificate https://github.com/boostorg/boost/releases/download/boost-1.81.0/boost-1.81.0.tar.gz && \
-    tar -xzvf boost-1.81.0.tar.gz && \
-    rm boost-1.81.0.tar.gz && \
-    cd boost-1.81.0 && \
-    ./bootstrap.sh && \
-    ./b2 install
+    tar -xzf boost-1.81.0.tar.gz && rm boost-1.81.0.tar.gz && \
+    cd boost-1.81.0 && ./bootstrap.sh && \
+    for i in $(seq 1 $RETRIES); do $B2_CMD install && break; echo "=== b2 attempt $i failed ===" && sleep 1; done && \
+    cd / && rm -rf /dependencies/boost-1.81.0
 
-
-#RUN cd /dependencies && \
- #   wget --no-check-certificate https://github.com/boostorg/boost/releases/download/boost-1.81.0/boost-1.81.0.tar.gz && \
-    #wget https://cytranet-dal.dl.sourceforge.net/project/boost/boost/1.81.0/boost_1_81_0.tar.gz --no-check-certificate && \
-  #  tar -xzvf boost_1_81_0.tar.gz && \
-   # rm boost-1_81_0.tar.gz && \
-    #cd boost-1_81_0 && \
-    #./bootstrap.sh && \
-    #./b2 install
-RUN apt-get install libnuma-dev -y \
-    && rm /usr/bin/python \
-    && ln -s /usr/bin/python3.9 /usr/bin/python
-
-RUN apt-get install libarchive-dev -y
-
-# Triton checkout tag
-# Current tag 2.45.0 released on April 30,2024.
-# Fixed tag for reproducible build and patching.
-# Patching for building with static stdc++.
-RUN cd /dependencies && \
+# ── 14. Triton Inference Server ────────────────────────────────────────────
+COPY patches/edgeml-triton-server.diff /tmp/edgeml-triton-server.diff
+COPY patches/edgeml-triton-core.diff /tmp/edgeml-triton-core.diff
+RUN . /tmp/build-env.sh && \
+    IS_QEMU=$(cat /tmp/.is_qemu) && \
+    cd /dependencies && \
     git clone https://github.com/triton-inference-server/server.git && \
-    cd server && \
-    git checkout tags/v2.45.0
-# copy server diff and core diff
-COPY patches/edgeml-triton-server.diff /dependencies/server/edgeml-triton-server.diff
-COPY patches/edgeml-triton-core.diff /dependencies/server/edgeml-triton-core.diff
-#b64-dev required for triton metrics
-RUN apt-get install libb64-dev -y
-# Apply server patch, internally the server patch applies core patch, build triton.
-RUN echo PATH=$PATH
-RUN export
-# Remove Python 3.6 system packages that pybind11 is finding
-RUN if [ "$OS" = "18.04" ]; then \
-    apt-get remove --purge python python3.6 python3.6-minimal libpython3.6 libpython3.6-minimal libpython3.6-stdlib python3-minimal python3-distutils python3-lib2to3 -y;  \
-    apt-get autoremove -y; \
-    ln -sf /usr/local/bin/python3.9 /usr/bin/python3; \
-    mkdir -p /usr/include/python3.6m;  \ 
-    ln -sf /usr/local/include/python3.9/* /usr/include/python3.6m/; \
-    fi
-
-#RUN echo "=== Python Debug Info ===" && \
-#    python3 --version && \
-#    which python3 && \
-#    ls -la /usr/bin/python* && \
-#    ls -la /usr/include/python* && \
-#    find /usr -name "python*.pc" 2>/dev/null && \
-#    dpkg -l | grep python3 && \
-#    echo "=== Environment Variables ===" && \
-#    env | grep -i python && \
-#    echo "=== End Debug ==="
-RUN    export PYBIND11_FINDPYTHON=ON && \
-    cd /dependencies/server && \ 
+    cd server && git checkout tags/v2.45.0 && \
+    cp /tmp/edgeml-triton-server.diff . && \
+    cp /tmp/edgeml-triton-core.diff . && \
+    export PYBIND11_FINDPYTHON=ON && \
+    export MAKEFLAGS="-j$JOBS" && \
+    if [ "$IS_QEMU" = "1" ]; then export CFLAGS="$EXTRA_CFLAGS"; export CXXFLAGS="$EXTRA_CFLAGS"; fi && \
     git apply edgeml-triton-server.diff && \
-    python3.9 build.py --enable-logging  --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
-    --extra-core-cmake-arg=TRITON_ENABLE_ENSEMBLE=ON \
-    --extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON \
-    --extra-core-cmake-arg=-DPYBIND11_FINDPYTHON=ON \
-    --extra-core-cmake-arg=CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-    --extra-core-cmake-arg=PYTHON_EXECUTABLE=/usr/local/bin/python3.9 \
-    --extra-core-cmake-arg=-DPYTHON_EXECUTABLE=/usr/local/bin/python3.9 \
-    --extra-core-cmake-arg=PYTHON_INCLUDE_DIR=/usr/local/include/python3.9 \
-    --extra-core-cmake-arg=PYTHON_LIBRARY=/usr/local/lib/libpython3.9.so \
-    --extra-core-cmake-arg=PYTHON_LIBRARIES=/usr/local/lib/libpython3.9.so \ 
-    --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/local/include/python3.9 \
-    --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.9 \
-    --backend python --build-dir=`pwd`/build
-RUN mv /dependencies/server/build/python/install/backends/python /dependencies/server/build/tritonserver/install/backends
+    for i in $(seq 1 $RETRIES); do \
+        echo "=== Triton build attempt $i ===" && \
+        if [ "$IS_QEMU" = "1" ]; then \
+            LE_CMAKE=$(find build/ -path "*/libevent/src/libevent/CMakeLists.txt" 2>/dev/null | head -1) && \
+            if [ -n "$LE_CMAKE" ] && ! grep -q "QEMU_FIX" "$LE_CMAKE" 2>/dev/null; then \
+                echo "Patching libevent CMakeLists.txt for QEMU" && \
+                sed -i '1i # QEMU_FIX: force POSIX features that cmake tests miss under QEMU\nset(EVENT__HAVE_FCNTL_H 1)\nset(EVENT__HAVE_NETDB_H 1)\nset(EVENT__HAVE_UNISTD_H 1)\nset(EVENT__HAVE_ARPA_INET_H 1)\nset(EVENT__HAVE_NETINET_IN_H 1)\nset(EVENT__HAVE_SYS_SOCKET_H 1)\nset(EVENT__HAVE_POLL_H 1)\nset(EVENT__HAVE_PTHREADS 1)\nset(EVENT__HAVE_EPOLL 1)\nset(EVENT__HAVE_PIPE2 1)\nset(EVENT__HAVE_GETADDRINFO 1)\nset(EVENT__HAVE_GETSERVBYNAME 1)\nset(EVENT__HAVE_GETPROTOBYNUMBER 1)\nset(EVENT__HAVE_GETNAMEINFO 1)' "$LE_CMAKE" && \
+                LE_BUILD=$(find build/ -path "*/libevent/src/libevent-build" -type d 2>/dev/null | head -1) && \
+                if [ -n "$LE_BUILD" ]; then rm -rf "$LE_BUILD"; fi; \
+            fi; \
+        fi && \
+        python3.9 build.py --enable-logging --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
+            --build-parallel $TRITON_PARALLEL \
+            --extra-core-cmake-arg=TRITON_ENABLE_ENSEMBLE=ON \
+            --extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON \
+            --extra-core-cmake-arg=-DPYBIND11_FINDPYTHON=ON \
+            --extra-core-cmake-arg=CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            --extra-core-cmake-arg=TRITON_CORE_ENABLE_TESTS=OFF \
+            --extra-core-cmake-arg=PYTHON_EXECUTABLE=/usr/bin/python3.9 \
+            --extra-core-cmake-arg=-DPYTHON_EXECUTABLE=/usr/bin/python3.9 \
+            --extra-core-cmake-arg=PYTHON_INCLUDE_DIR=/usr/include/python3.9 \
+            --extra-core-cmake-arg=PYTHON_LIBRARY=/usr/lib/libpython3.9.so \
+            --extra-core-cmake-arg=PYTHON_LIBRARIES=/usr/lib/libpython3.9.so \
+            --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/include/python3.9 \
+            --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.9 \
+            --backend python --build-dir=$(pwd)/build && break; \
+        echo "=== Triton attempt $i failed, retrying... ===" && sleep 2; \
+    done && \
+    mv build/python/install/backends/python build/tritonserver/install/backends && \
+    cd build/opt/ && \
+    tar cvzf triton_installation_files.tar.gz tritonserver/ && \
+    mkdir -p /dependencies/tars/ && \
+    cp triton_installation_files.tar.gz /dependencies/tars/
 
-RUN cd /dependencies/server/build/opt/ \
-    && tar cvzf triton_installation_files.tar.gz tritonserver/ \
-    && mkdir -p /dependencies/tars/ \
-    && cp triton_installation_files.tar.gz /dependencies/tars/
+# ── 15. c-periphery (GPIO) ────────────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    git clone https://github.com/vsergeev/c-periphery && \
+    cd c-periphery && \
+    git checkout 91f9678d2a35a3af3c633f20165bdde8bea32209 && \
+    mkdir build && cd build && cmake ../ && \
+    for i in $(seq 1 $RETRIES); do $MAKE_CMD && break; echo "=== make attempt $i failed ===" && sleep 1; done && \
+    make install
 
-# Download c-periphery for GPIO protocol client.
-RUN cd /dependencies \
-        && git clone https://github.com/vsergeev/c-periphery \
-        && cd c-periphery \
-        && git checkout 91f9678d2a35a3af3c633f20165bdde8bea32209 \
-        && mkdir build \
-        && cd build \
-        && cmake ../ \
-        && make \
-        && make install
-  
-# Download exif dependencies.
-RUN apt-get -y install libexif-dev
-
-
+# ── 16. EdgeML SDK build + package all debs ────────────────────────────────
 COPY src ./src
+COPY create_aws_triton_deps_pkg.sh /dependencies/debs/
+RUN cd /dependencies/debs && chmod +x create_aws_triton_deps_pkg.sh && ./create_aws_triton_deps_pkg.sh
 
-COPY create_aws_triton_deps_pkg.sh /dependencies/debs
-RUN cd /dependencies/debs \
-    && chmod +x create_aws_triton_deps_pkg.sh \
-    && ./create_aws_triton_deps_pkg.sh
+# Download system packages needed by backend
+RUN cd /dependencies/debs && \
+    apt-get update && \
+    apt-get download libgstreamer1.0-dev && \
+    apt-get download libgstreamer1.0 && \
+    apt-get download libgstreamer-plugins-base1.0 && \
+    apt-get download libgstreamer-plugins-base1.0-dev && \
+    apt-get download liborc-0.4-0 && \
+    apt-get download libstdc++6
 
-# Install GStreamer packages needed for build
-RUN apt-get update && apt-get install -y \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev \
-    libglib2.0-dev \
-    libxml2-dev
+# Build EdgeML SDK (conan + cmake)
+# civetweb SSL disabled — the SDK uses mg_init_library(0) so SSL is not needed.
+RUN . /tmp/build-env.sh && \
+    cd src/ && \
+    for i in $(seq 1 $RETRIES); do \
+        echo "=== conan build attempt $i ===" && \
+        MAKEFLAGS="-j$JOBS" CONAN_CPU_COUNT=$JOBS \
+        conan build . --build=missing \
+          -o civetweb/*:with_ssl=False \
+          $CONAN_JOBS_ARGS && break; \
+        echo "=== conan attempt $i failed, retrying... ===" && sleep 2; \
+    done && \
+    cd build/Release && \
+    export LD_LIBRARY_PATH=$(pwd)/lib && \
+    for i in $(seq 1 $RETRIES); do $MAKE_CMD install && break; echo "=== make attempt $i failed ===" && sleep 1; done && \
+    cd ./install/ && \
+    chmod a+x create_debian.sh && \
+    ./create_debian.sh && \
+    pwsh ./create_whl.ps1 -InstallDirectory ./lib -Version 1.0
 
-# Download other packages
-RUN cd /dependencies/debs \
-    && apt-get download libgstreamer1.0-dev \
-    && apt-get download libgstreamer1.0 \
-    && apt-get download libgstreamer-plugins-base1.0 \
-    && apt-get download libgstreamer-plugins-base1.0-dev \
-    && apt-get download liborc-0.4-0 \
-    && apt-get download libstdc++6
-#TODO add if check here, 1.15 for ubuntu 18.04/20.04 and 1.16 for 22.04+
-#RUN wget --no-check-certificate https://github.com/civetweb/civetweb/archive/refs/tags/v1.15.tar.gz \
-#    && tar -xzvf v1.15.tar.gz \
-#    && cd civetweb-1.15 \
-#    && make build \
-#    && make build install \
-#    && ldconfig 
-
-RUN cd src/ \
-    && conan build . --build=missing \
-    && cd build/Release \
-    && export LD_LIBRARY_PATH=$(pwd)/lib \
-    && make install \
-    && cd ./install/ \
-    && chmod a+x create_debian.sh \
-    && ./create_debian.sh \
-    && pwsh ./create_whl.ps1 -InstallDirectory ./lib -Version 1.0 \
-    && mkdir -p /debs/ \
-    && cd ../../../../ \
-    && cp src/build/Release/install/Panorama*.deb /debs/PanoramaSDK.deb \
-    && cp src/build/Release/install/lib/python_package/dist/*.whl /debs/panorama.whl \
-    && cp /dependencies/debs/aws-c-iot.deb /debs/aws-c-iot.deb \ 
-    && cp /dependencies/debs/aws-crt-cpp.deb  /debs/aws-crt-cpp.deb \
-    && cp /dependencies/debs/libgstreamer1.0-0_*.deb /debs/libgstreamer1.0.deb \
-    && cp /dependencies/debs/libgstreamer1.0-dev*.deb /debs/libgstreamer1.0-dev.deb \
-    && cp /dependencies/debs/aws-iot-device-sdk-cpp-v2.deb  /debs/aws-iot-device-sdk-cpp-v2.deb \
-    && cp /dependencies/debs/liborc-0.4-0*.deb /debs/liborc-0.4-0.deb \
-    && cp /dependencies/debs/aws-sdk-cpp.deb /debs/aws-sdk-cpp.deb \
-    && cp /dependencies/debs/libstdc++6*.deb /debs/libstdc++6.deb \
-    && cp /dependencies/debs/libgstreamer-plugins-base1.0-0*.deb /debs/libgstreamer-plugins-base1.0-dev.deb \
-    && cp /dependencies/debs/openssl_*.deb /debs/openssl.deb \
-    && cp /dependencies/debs/libgstreamer-plugins-base1.0-dev*.deb  /debs/libgstreamer-plugins-base1.0-dev.deb \
-    && cp /dependencies/debs/triton-core.deb /debs/triton-core.deb \
-    && cp /dependencies/debs/triton-python-backend.deb /debs/triton-python-backend.deb \
-    && mkdir -p /tars \
-    && cd /tars \
-    && cp /dependencies/tars/triton_installation_files.tar.gz .
-
-
+# ── 17. Collect all output artifacts ───────────────────────────────────────
+RUN mkdir -p /debs/ /tars/ && \
+    cp src/build/Release/install/Panorama*.deb /debs/PanoramaSDK.deb && \
+    cp src/build/Release/install/lib/python_package/dist/*.whl /debs/panorama.whl && \
+    cp /dependencies/debs/aws-c-iot.deb /debs/aws-c-iot.deb && \
+    cp /dependencies/debs/aws-crt-cpp.deb /debs/aws-crt-cpp.deb && \
+    cp /dependencies/debs/libgstreamer1.0-0_*.deb /debs/libgstreamer1.0.deb && \
+    cp /dependencies/debs/libgstreamer1.0-dev*.deb /debs/libgstreamer1.0-dev.deb && \
+    cp /dependencies/debs/aws-iot-device-sdk-cpp-v2.deb /debs/aws-iot-device-sdk-cpp-v2.deb && \
+    cp /dependencies/debs/liborc-0.4-0*.deb /debs/liborc-0.4-0.deb && \
+    cp /dependencies/debs/aws-sdk-cpp.deb /debs/aws-sdk-cpp.deb && \
+    cp /dependencies/debs/libstdc++6*.deb /debs/libstdc++6.deb && \
+    cp /dependencies/debs/libgstreamer-plugins-base1.0-0*.deb /debs/libgstreamer-plugins-base1.0.deb && \
+    cp /dependencies/debs/openssl_*.deb /debs/openssl.deb && \
+    cp /dependencies/debs/libgstreamer-plugins-base1.0-dev*.deb /debs/libgstreamer-plugins-base1.0-dev.deb && \
+    cp /dependencies/debs/triton-core.deb /debs/triton-core.deb && \
+    cp /dependencies/debs/triton-python-backend.deb /debs/triton-python-backend.deb && \
+    cp /dependencies/tars/triton_installation_files.tar.gz /tars/
 
 RUN apt-get clean
 
 ### End of EdgeML SDK
+
+# Extractor stage: only contains the debs and tars for --output type=local extraction
+FROM scratch AS extractor
+COPY --from=builder /debs/ /debs/
+COPY --from=builder /tars/ /tars/
