@@ -18,7 +18,21 @@ CALLER_IDENTITY=$(aws sts get-caller-identity 2>&1) || {
 
 AWS_ACCOUNT_ID=$(echo "$CALLER_IDENTITY" | python3 -c "import sys,json; print(json.load(sys.stdin)['Account'])")
 AWS_ARN=$(echo "$CALLER_IDENTITY" | python3 -c "import sys,json; print(json.load(sys.stdin)['Arn'])")
-AWS_REGION=$(aws configure get region 2>/dev/null || echo "${AWS_DEFAULT_REGION:-us-east-1}")
+AWS_REGION=$(aws configure get region 2>/dev/null || echo "${AWS_DEFAULT_REGION:-}")
+
+if [ -z "$AWS_REGION" ]; then
+    echo ""
+    echo "ERROR: No AWS region configured."
+    echo ""
+    echo "Set a region before building:"
+    echo "  aws configure set region us-east-2"
+    echo "  export AWS_DEFAULT_REGION=us-east-2"
+    exit 1
+fi
+
+export AWS_REGION
+export AWS_DEFAULT_REGION="$AWS_REGION"
+
 echo "  Account: $AWS_ACCOUNT_ID"
 echo "  Role/User: $AWS_ARN"
 echo "  Region: $AWS_REGION"
