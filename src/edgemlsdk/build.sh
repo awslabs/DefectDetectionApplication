@@ -74,11 +74,15 @@ docker build \
     --build-arg PWSH_ARCH=$pwsh_arch \
     --build-arg PYTHON_VERSION=$python \
     -f $DOCKERFILE \
-    -t edgemlsdk .
+    -t edgemlsdk . || { echo "ERROR: edgemlsdk Docker build failed"; exit 1; }
 
 # Extract debs/tars from the built image using docker cp
 mkdir -p $rootDir/extracted-debs/debs $rootDir/extracted-debs/tars
 CONTAINER_ID=$(docker create edgemlsdk /bin/true)
+if [ -z "$CONTAINER_ID" ]; then
+    echo "ERROR: Failed to create container from edgemlsdk image"
+    exit 1
+fi
 docker cp $CONTAINER_ID:/debs/. $rootDir/extracted-debs/debs/
 docker cp $CONTAINER_ID:/tars/. $rootDir/extracted-debs/tars/
 docker rm $CONTAINER_ID
