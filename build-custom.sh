@@ -110,8 +110,14 @@ fi
 export OS=$IMAGE_VER
 
 echo "Building backend with $BACKEND_DOCKERFILE..."
-docker-compose --profile generic -f docker-compose.yaml build --no-cache
-docker-compose --profile tegra -f docker-compose.yaml build --no-cache
+if [ "$ARCHITECTURE" = "x86_64" ]; then
+    # x86_64 only needs the generic profile (no Tegra/GPU support)
+    docker-compose --profile generic -f docker-compose.yaml build --no-cache
+else
+    # aarch64 builds both profiles
+    docker-compose --profile generic -f docker-compose.yaml build --no-cache
+    docker-compose --profile tegra -f docker-compose.yaml build --no-cache
+fi
 cd ..
 
 # save Docker images separately for Greengrass (each artifact must be < 2GB)
