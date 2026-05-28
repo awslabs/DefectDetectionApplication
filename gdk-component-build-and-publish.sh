@@ -105,7 +105,7 @@ cat > gdk-config.json << EOF
         ]
       },
       "publish": {
-        "bucket": "dda-component",
+        "bucket": "dda-component-${AWS_REGION}-${AWS_ACCOUNT_ID}",
         "region": "${AWS_REGION}"
       }
     }
@@ -135,7 +135,7 @@ echo "Total artifact size: $(numfmt --to=iec $TOTAL_SIZE)"
 if [ "$TOTAL_SIZE" -gt 2147483648 ]; then
     echo ""
     echo "WARNING: Total artifacts exceed Greengrass 2GB limit ($(numfmt --to=iec $TOTAL_SIZE))."
-    echo "Using ECR-based deployment instead of artifact-based deployment."
+    echo "Using ECR for Docker images + S3 for scripts/config."
     echo ""
 
     # Push Docker images to ECR instead
@@ -176,10 +176,26 @@ if [ "$TOTAL_SIZE" -gt 2147483648 ]; then
     docker tag react-webapp:latest "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}"
     docker push "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}"
 
-    # Create a lightweight recipe that pulls from ECR instead of using artifacts
+    # Upload the small app artifact (scripts + docker-compose) to S3
+    # Remove the large backend zip, keep only the app zip
+    BUCKET="dda-component-${REGION}-${AWS_ACCOUNT_ID}"
+    APP_ARTIFACT="${COMPONENT_NAME}-app-$(arch).zip"
+    APP_ZIP="greengrass-build/artifacts/${COMPONENT_NAME}/NEXT_PATCH/${APP_ARTIFACT}"
+    S3_KEY="${COMPONENT_NAME}/${COMPONENT_VERSION}/${APP_ARTIFACT}"
+
+    if [ -f "$APP_ZIP" ] && [ -s "$APP_ZIP" ]; then
+        echo "Uploading app artifact to S3 ($(numfmt --to=iec $(stat --format=%s "$APP_ZIP")))..."
+        aws s3 cp "$APP_ZIP" "s3://${BUCKET}/${S3_KEY}" --region "$REGION"
+    else
+        echo "ERROR: App artifact not found at $APP_ZIP"
+        exit 1
+    fi
+
+    # Update recipe: ECR for docker pull in Install, keep S3 artifact for scripts
     RECIPE_FILE="greengrass-build/recipes/recipe.yaml"
-    # Update recipe to use docker pull instead of docker load
-    python3 - "$RECIPE_FILE" "$ECR_REPO_BACKEND" "$ECR_REPO_FRONTEND" "$COMPONENT_VERSION" "$REGION" "$AWS_ACCOUNT_ID" << 'PYEOF'
+    S3_ARTIFACT_URI="s3://${BUCKET}/${S3_KEY}"
+
+    python3 - "$RECIPE_FILE" "$ECR_REPO_BACKEND" "$ECR_REPO_FRONTEND" "$COMPONENT_VERSION" "$REGION" "$AWS_ACCOUNT_ID" "$S3_ARTIFACT_URI" "$APP_ARTIFACT" << 'PYEOF'
 import sys, yaml
 
 recipe_file = sys.argv[1]
@@ -188,6 +204,8 @@ ecr_frontend = sys.argv[3]
 version = sys.argv[4]
 region = sys.argv[5]
 account_id = sys.argv[6]
+s3_artifact_uri = sys.argv[7]
+app_artifact_name = sys.argv[8]
 
 with open(recipe_file) as f:
     recipe = yaml.safe_load(f)
@@ -196,34 +214,58 @@ recipe['ComponentVersion'] = version
 
 ecr_registry = f"{account_id}.dkr.ecr.{region}.amazonaws.com"
 
-# Update lifecycle to pull from ECR
+# Add DockerApplicationManager and TokenExchangeService as dependencies
+# These handle ECR authentication automatically
+if 'ComponentDependencies' not in recipe:
+    recipe['ComponentDependencies'] = {}
+recipe['ComponentDependencies']['aws.greengrass.DockerApplicationManager'] = {
+    'VersionRequirement': '~2.0.0'
+}
+recipe['ComponentDependencies']['aws.greengrass.TokenExchangeService'] = {
+    'VersionRequirement': '~2.0.0'
+}
+
+# Derive the artifact decompressed path prefix from the app artifact name
+# e.g. aws.edgeml.dda.LocalServer.arm64JP5-app-aarch64
+app_artifact_base = app_artifact_name.replace('.zip', '')
+
+# Update lifecycle and artifacts
 for manifest in recipe.get('Manifests', []):
     lifecycle = manifest.get('Lifecycle', {})
+
+    # Install: tag the ECR images as local names, clean dangling images
     lifecycle['Install'] = {
         'RequiresPrivilege': True,
         'Script': (
             f'docker images --quiet --filter=dangling=true | xargs --no-run-if-empty docker rmi -f ; '
-            f'aws ecr get-login-password --region {region} | docker login --username AWS --password-stdin {ecr_registry} ; '
-            f'docker pull {ecr_backend}:{version} && docker tag {ecr_backend}:{version} flask-app:latest ; '
-            f'docker pull {ecr_frontend}:{version} && docker tag {ecr_frontend}:{version} react-webapp:latest'
+            f'docker tag {ecr_backend}:{version} flask-app:latest ; '
+            f'docker tag {ecr_frontend}:{version} react-webapp:latest'
         )
     }
-    # Remove artifacts section since we're using ECR
-    manifest.pop('Artifacts', None)
+
+    # Artifacts: docker: URIs for ECR images + S3 URI for scripts/compose
+    manifest['Artifacts'] = [
+        {'URI': f'docker:{ecr_backend}:{version}'},
+        {'URI': f'docker:{ecr_frontend}:{version}'},
+        {'URI': s3_artifact_uri, 'Unarchive': 'ZIP'}
+    ]
 
 with open(recipe_file, 'w') as f:
     yaml.dump(recipe, f, default_flow_style=False, sort_keys=False)
 
-print(f"Updated recipe to use ECR: {ecr_backend}:{version}")
+print(f"Updated recipe: docker: artifacts + S3 app artifact")
+print(f"  Docker: {ecr_backend}:{version}")
+print(f"  Docker: {ecr_frontend}:{version}")
+print(f"  S3:     {s3_artifact_uri}")
 PYEOF
 
-    # Create component version via API (no artifacts, just recipe)
+    # Create component version via API
     echo "Creating component version in Greengrass..."
     aws greengrassv2 create-component-version \
         --inline-recipe fileb://"$RECIPE_FILE" \
         --region "$REGION"
 
-    echo "Component ${COMPONENT_NAME} v${COMPONENT_VERSION} published successfully (ECR-based)!"
+    echo "Component ${COMPONENT_NAME} v${COMPONENT_VERSION} published successfully (ECR + S3)!"
 else
     # Under 2GB - use standard GDK publish
     echo "Publishing component via GDK..."

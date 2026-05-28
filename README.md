@@ -364,11 +364,54 @@ DDA consists of several key components:
     ]
 }
 ```   
-   - Attach S3 permissions for component downloads
 
 3. **Create IAM roles**:
    - Build server role: `dda-build-role` (attach `dda-build-policy` + `dda-ecr-publish` + `AmazonSSMManagedInstanceCore`)
    - Edge device role: `dda-greengrass-role` (attach `dda-greengrass-policy` + `AmazonSSMManagedInstanceCore`)
+
+4. **Update the Greengrass Token Exchange Role** (created automatically during Greengrass provisioning):
+   
+   The `GreengrassV2TokenExchangeRole` is the role that Greengrass components use at runtime to access AWS services. After provisioning the edge device, add these inline policies to it:
+
+   **Inline policy: `ECRPullAccess`** (required for JP5 ECR-based deployments):
+   ```json
+   {
+       "Version": "2012-10-17",
+       "Statement": [
+           {
+               "Sid": "ECRPull",
+               "Effect": "Allow",
+               "Action": [
+                   "ecr:GetAuthorizationToken",
+                   "ecr:BatchGetImage",
+                   "ecr:GetDownloadUrlForLayer"
+               ],
+               "Resource": "*"
+           }
+       ]
+   }
+   ```
+
+   **Inline policy: `GreengrassComponentS3Access`** (required for downloading component artifacts):
+   ```json
+   {
+       "Version": "2012-10-17",
+       "Statement": [
+           {
+               "Effect": "Allow",
+               "Action": [
+                   "s3:GetObject",
+                   "s3:GetObjectVersion"
+               ],
+               "Resource": [
+                   "arn:aws:s3:::dda-component-*/*"
+               ]
+           }
+       ]
+   }
+   ```
+
+   > **Note**: The `GreengrassV2TokenExchangeRole` is separate from the `dda-greengrass-role` used for device provisioning. It's created by the Greengrass installer and used by components at runtime.
 
 #### Step 1: Set up Build Environment
 

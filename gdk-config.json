@@ -14,7 +14,7 @@
         ]
       },
       "publish": {
-        "bucket": "dda-component",
+        "bucket": "dda-component-us-east-2-948285518686",
         "region": "us-east-2"
       }
     }
