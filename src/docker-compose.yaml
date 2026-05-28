@@ -2,9 +2,14 @@ version: "3.0"
 services:
   backend_tegra_gpu_enabled:
     network_mode: "host"
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
+      args:
+        OS: ${OS:-20.04}
+        PLATFORM: ${PLATFORM:-aarch64}
     image: flask-app
-    platform: linux/arm64/v8 
+    platform: linux/arm64/v8
     privileged: true
     expose:
       - "5000"
@@ -48,7 +53,12 @@ services:
     profiles: [tegra]
   backend_generic:
     network_mode: "host"
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
+      args:
+        OS: ${OS:-20.04}
+        PLATFORM: ${PLATFORM:-x86_64}
     image: flask-app
     privileged: true
     expose:

@@ -36,7 +36,7 @@
 ## Push Updated Docker image to ECR Part of Build Process
 This step will build and push docker images(ubuntu 20.04, 18.04) correspodning to docker container platform (x86 or aarch64)
 
-0. Make sure AWS Tokens for account 691462484548 are valid before running below steps
+0. Make sure AWS Tokens for your build account are valid before running below steps
 1. Runing below command will build docker image part of build process and publishes to corresponding ECR repositiory
 ```
 conan build . --build=missing -o publish_docker_image=True

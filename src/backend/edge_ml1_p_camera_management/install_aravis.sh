@@ -22,12 +22,6 @@ set -e  # Exit on any error
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 cd $SCRIPT_DIR
 
-# echo "Adding Debian repository..."
-# echo "deb http://archive.debian.org/debian buster-backports main" >> /etc/apt/sources.list || {
-#     echo "Failed to add repository"
-#     exit 1
-# }
-
 echo "Updating package lists..."
 apt-get update -y || {
     echo "Failed to update package lists"
@@ -39,9 +33,6 @@ apt-get install -y --no-install-recommends wget build-essential ninja-build || {
     echo "Failed to install build tools"
     exit 1
 }
-
-#echo "Cleaning up previous installation..."
-#rm -rf aravis-0.8.26 aravis-0.8.26.tar.xz
 
 echo "Downloading Aravis..."
 wget https://github.com/AravisProject/aravis/releases/download/0.8.26/aravis-0.8.26.tar.xz || {
@@ -74,9 +65,12 @@ cd aravis-0.8.26 || {
     exit 1
 }
 
-# Remove static .a libraries that cause linker issues (missing pthread/pcre)
-# Force meson to use shared .so libraries instead
-rm -f /usr/lib/aarch64-linux-gnu/libglib-2.0.a /usr/lib/aarch64-linux-gnu/libcairo.a
+# On aarch64 with l4t-jetpack base, remove static .a libraries that cause linker issues
+# (missing pthread/pcre symbols). Force meson to use shared .so libraries instead.
+ARCH=$(uname -m)
+if [ "$ARCH" = "aarch64" ]; then
+    rm -f /usr/lib/aarch64-linux-gnu/libglib-2.0.a /usr/lib/aarch64-linux-gnu/libcairo.a
+fi
 
 meson setup -Dprefix=/usr -Dviewer=disabled build || {
     echo "Failed to setup meson build"
@@ -88,9 +82,8 @@ cd build || {
     exit 1
 }
 
-ninja -j1 || ninja -j1 || ninja -j1 || ninja -j1 || ninja -j1 || \
-ninja -j1 || ninja -j1 || ninja -j1 || ninja -j1 || ninja -j1 || {
-    echo "Failed to build with ninja after 10 attempts"
+ninja || {
+    echo "Failed to build with ninja"
     exit 1
 }
 

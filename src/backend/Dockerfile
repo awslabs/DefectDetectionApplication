@@ -1,30 +1,19 @@
 ARG OS
-ARG PLATFORM
-#FROM public.ecr.aws/ubuntu/ubuntu:${OS}
-FROM nvcr.io/nvidia/l4t-jetpack:r35.4.1
+FROM public.ecr.aws/ubuntu/ubuntu:${OS}
 ENV DEBIAN_FRONTEND=noninteractive
-# Disable py3compile during apt installs to prevent segfaults in l4t-jetpack base image
-RUN if [ -f /usr/bin/py3compile ]; then mv /usr/bin/py3compile /usr/bin/py3compile.bak && \
-    echo '#!/bin/sh' > /usr/bin/py3compile && chmod +x /usr/bin/py3compile; fi && \
-    if [ -f /usr/bin/py3clean ]; then mv /usr/bin/py3clean /usr/bin/py3clean.bak && \
-    echo '#!/bin/sh' > /usr/bin/py3clean && chmod +x /usr/bin/py3clean; fi
-RUN apt-get update && \
-    dpkg --configure -a || true && \
-    apt-get install -f -y || true && \
-    dpkg --purge --force-depends python3-distro-info unattended-upgrades python3-urllib3 python3-requests python3-requests-unixsocket python3-six software-properties-common python3-software-properties || true && \
-    apt-get install -y --no-install-recommends wget build-essential libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb python3.9 python3.9-dev
+RUN apt-get update && apt-get install -y software-properties-common wget build-essential libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb
 RUN apt-get update
-#RUN wget https://www.python.org/ftp/python/3.9.23/Python-3.9.23.tgz
-#RUN tar -xzf Python-3.9.23.tgz
-#RUN cd Python-3.9.23 && \
-#    ./configure --enable-optimizations --enable-shared && \
-#    make -j$(nproc) && \
-#    make install
-#RUN apt-get install --reinstall python3-apt
-#RUN python3 -m ensurepip --upgrade
-# Add toolchain PPA directly to avoid add-apt-repository Python issues
-RUN echo "deb https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu focal main" > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list && \
-    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 1E9377A2BA9EF27F && \
+RUN wget https://www.python.org/ftp/python/3.9.23/Python-3.9.23.tgz
+RUN tar -xzf Python-3.9.23.tgz
+RUN cd Python-3.9.23 && \
+    ./configure --enable-optimizations --enable-shared && \
+    make -j$(nproc) && \
+    make install
+RUN find / -name "libpython3.9.so.1.0" -print
+RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1 \
+    && update-alternatives --set python3 /usr/local/bin/python3.9
+
+RUN add-apt-repository ppa:ubuntu-toolchain-r/test -y && \
     apt-get update && \
     apt install gcc-11 g++-11 -y && \
     rm /usr/bin/gcc && \
@@ -39,93 +28,16 @@ COPY requirements.txt ./
 
 COPY edge_ml1_p_camera_management ./edge_ml1_p_camera_management
 COPY edgeagent ./edgeagent
-# Run apt installs from prereqs while python3 is still 3.8 (avoids py3compile segfault)
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends \
-    pkgconf libcairo2-dev libgirepository1.0-dev libgl1-mesa-glx libsm6 libxext6
-
-# Install aravis apt dependencies before switching python3 (avoids py3compile segfault)
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends wget build-essential ninja-build \
-    gstreamer1.0-plugins-bad libxml2-dev libglib2.0-dev libusb-1.0-0-dev gobject-introspection \
-    libgtk-3-dev gtk-doc-tools xsltproc libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good \
-    libgirepository1.0-dev gettext pkg-config libcairo2-dev
-
-# Install remaining apt packages before switching python3
-RUN apt update -y && \
-    apt-get install -y libssl1.1 libexif12 libcurl4 libarchive13 \
-    gstreamer1.0-tools gstreamer1.0-libav ffmpeg
-
-# CVE fixes - also before python3 switch
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
-    libgnutls28-dev libuv1 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Restore py3compile/py3clean now that all apt installs are done
-RUN if [ -f /usr/bin/py3compile.bak ]; then mv /usr/bin/py3compile.bak /usr/bin/py3compile; fi && \
-    if [ -f /usr/bin/py3clean.bak ]; then mv /usr/bin/py3clean.bak /usr/bin/py3clean; fi
-
-# NOW switch python3 to 3.9 — all apt installs are done, no more py3compile under 3.9
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1 \
-    && update-alternatives --set python3 /usr/bin/python3.9
-RUN wget -q https://bootstrap.pypa.io/get-pip.py && python3 get-pip.py && rm get-pip.py
-
-# Run the pip parts of prereqs (install C-extension packages sequentially to avoid OOM gcc segfaults)
-ENV MAKEFLAGS="-j1"
-# Ensure cc symlink exists for meson-based builds
-RUN ln -sf /usr/bin/gcc /usr/bin/cc
-# Force pip/setuptools to use gcc-11 and limit parallelism to avoid OOM gcc segfaults on ARM
-ENV CC=/usr/bin/gcc
-ENV CFLAGS="-O1"
-# Override os.cpu_count() to return 1, limiting setuptools parallel compilation
-RUN echo 'import os; os.cpu_count = lambda: 1' > /usr/lib/python3.9/sitecustomize.py
-# Retry pip installs to handle intermittent QEMU segfaults during cross-compilation
-RUN pip install --no-cache-dir pycairo==1.23.0 || \
-    pip install --no-cache-dir pycairo==1.23.0 || \
-    pip install --no-cache-dir pycairo==1.23.0 || \
-    pip install --no-cache-dir pycairo==1.23.0 || \
-    pip install --no-cache-dir pycairo==1.23.0
-RUN pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2 || \
-    sleep 2 && pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2 || \
-    sleep 2 && pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2 || \
-    sleep 2 && pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2 || \
-    sleep 2 && pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2 || \
-    sleep 2 && pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2 || \
-    sleep 2 && pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2 || \
-    sleep 2 && pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2 || \
-    sleep 2 && pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2 || \
-    sleep 2 && pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2
-RUN pip install --no-cache-dir psutil==5.9.5 || \
-    pip install --no-cache-dir psutil==5.9.5 || \
-    pip install --no-cache-dir psutil==5.9.5 || \
-    pip install --no-cache-dir psutil==5.9.5 || \
-    pip install --no-cache-dir psutil==5.9.5
-RUN pip install --no-cache-dir -r ./requirements.txt || \
-    pip install --no-cache-dir -r ./requirements.txt || \
-    pip install --no-cache-dir -r ./requirements.txt || \
-    pip install --no-cache-dir -r ./requirements.txt || \
-    pip install --no-cache-dir -r ./requirements.txt
-RUN pip install --no-cache-dir --upgrade requests
-# Remove the cpu_count override
-RUN rm -f /usr/lib/python3.9/sitecustomize.py
-# Build aravis from source (apt deps already installed above)
-RUN pip install --no-cache-dir meson ninja
-# Downgrade setuptools so g-ir-scanner can find distutils.msvccompiler (removed in setuptools>=71)
-RUN pip install --no-cache-dir 'setuptools<71'
-# Fix g-ir-scanner to use python3.8 (its _giscanner C extension is built for 3.8)
-# The shebang might be #!/usr/bin/python3 or #!/usr/bin/env python3
-RUN cp /usr/bin/g-ir-scanner /usr/bin/g-ir-scanner.bak && \
-    echo '#!/usr/bin/python3.8' > /usr/bin/g-ir-scanner && \
-    tail -n +2 /usr/bin/g-ir-scanner.bak >> /usr/bin/g-ir-scanner && \
-    chmod +x /usr/bin/g-ir-scanner && \
-    head -1 /usr/bin/g-ir-scanner
-RUN CFLAGS="" ./edge_ml1_p_camera_management/install_aravis.sh
-# Restore latest setuptools after aravis build
-RUN pip install --no-cache-dir --upgrade setuptools
+RUN ./edge_ml1_p_camera_management/prereqs_install.sh 
+RUN ./edge_ml1_p_camera_management/install_aravis.sh
 RUN python3.9 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
+RUN apt update -y
+RUN apt-get install libssl1.1 -y
+RUN apt update -y
+RUN apt install libexif12 libcurl4 libarchive13 gstreamer1.0-tools gstreamer1.0-libav ffmpeg -y
+RUN if [ "$OS" = "18.04" ] ; then \
+    apt install libavcodec-extra57i -y; \
+    fi
 
 RUN find / -name "libpython3.9.so.1.0" -print
 
@@ -153,6 +65,16 @@ COPY dda_triton ./dda_triton
 COPY lyra_anomalies_mask_utils ./lyra_anomalies_mask_utils
 COPY lyra_science_processing_utils ./lyra_science_processing_utils
 CMD ["python3.9", "app.py"]
+
+# Temporary to fix CVE-2024-24806 and CVE-2024-0553 until slim-buster base image is fixed
+RUN apt-get update \
+    # Install build tools (if needed for compiling)
+    && apt-get install -y --no-install-recommends build-essential \
+    # Install tools for managing libraries
+    libgnutls28-dev libuv1 \
+    # Clean up to reduce image size
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 ## TODO: Remove copy edgemlsdk files here. Change to direct build in Docker
 # To test and build - Copy artifacts file to /src/backend/edgemlsdk

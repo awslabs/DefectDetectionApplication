@@ -15,27 +15,31 @@ set -e
 # limitations under the License.
 
 if [ $# -ne 3 ]; then
-  echo 1>&2 "Usage: $0 COMPONENT-NAME COMPONENT-VERSIONi ARCH"
+  echo 1>&2 "Usage: $0 COMPONENT-NAME COMPONENT-VERSION ARCH"
   exit 3
 fi
 
 COMPONENT_NAME=$1
 VERSION=$2
-
-ARCHITECTURE=`uname -m`
 ARCHITECTURE=$3
-# change to 20.04 or 18.04
-# TODO add 20.04 for JP5
-IMAGE_VER="18.04"
-#IMAGE_VER="20.04"
+
 BUILDKIT_PROGRESS=plain
 export BUILDKIT_PROGRESS
+
+# Detect Ubuntu version from host
 IMAGE_VER=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
-
-# Export as environment variable
-export IMAGE_VER 
-
+export IMAGE_VER
 echo "Ubuntu version: $IMAGE_VER"
+
+# Determine if this is a JP5 build based on component name
+IS_JP5=0
+if echo "$COMPONENT_NAME" | grep -q "JP5"; then
+    IS_JP5=1
+fi
+
+echo "Architecture: $ARCHITECTURE"
+echo "JetPack 5: $IS_JP5"
+
 # copy recipe to greengrass-build
 cp recipe.yaml ./greengrass-build/recipes
 
@@ -44,17 +48,23 @@ rm -rf ./custom-build
 mkdir -p ./custom-build/$COMPONENT_NAME
 
 # build Docker images
-# to save build time, remove "--no-cache" parameter
 cd src
-#edgemlsdk
+
+# edgemlsdk build
 cd edgemlsdk/
-./build.sh -p $ARCHITECTURE -u $IMAGE_VER -y 3.9 || { echo "edgemlsdk build failed"; exit 1; }
+if [ "$IS_JP5" = "1" ]; then
+    ./build.sh -p $ARCHITECTURE -u $IMAGE_VER -y 3.9 -j 5
+else
+    ./build.sh -p $ARCHITECTURE -u $IMAGE_VER -y 3.9
+fi
 cd ..
+
+# Copy edgemlsdk artifacts to backend build context
 mkdir -p backend/edgemlsdk
-cp -r edgemlsdk backend/edgemlsdk
 # Clean stale debs from previous builds
 rm -f backend/edgemlsdk/*.deb backend/edgemlsdk/*.whl backend/edgemlsdk/*.tar.gz
-# Copy debs/tars from extracted-debs directory (populated by build.sh --output type=local)
+
+# Copy debs/tars from extracted-debs directory (populated by build.sh)
 EXTRACTED_DIR=$(pwd)/edgemlsdk/extracted-debs
 if [ ! -d "$EXTRACTED_DIR/debs" ]; then
     echo "ERROR: extracted-debs/debs not found at $EXTRACTED_DIR"
@@ -77,9 +87,9 @@ cp $EXTRACTED_DIR/debs/panorama.whl $(pwd)/backend/edgemlsdk/panorama-1.0-py3-no
 cp $EXTRACTED_DIR/debs/triton-core.deb $(pwd)/backend/edgemlsdk/
 cp $EXTRACTED_DIR/debs/triton-python-backend.deb $(pwd)/backend/edgemlsdk/
 cp $EXTRACTED_DIR/tars/triton_installation_files.tar.gz $(pwd)/backend/edgemlsdk/
-echo done copying binaries
+echo "Done copying binaries"
 
-# Verify all required debs are present before proceeding
+# Verify all required artifacts are present
 for f in aws-c-iot.deb aws-crt-cpp.deb aws-iot-device-sdk-cpp-v2.deb aws-sdk-cpp.deb \
          PanoramaSDK.deb openssl.deb liborc-0.4-0.deb triton-core.deb \
          triton-python-backend.deb panorama-1.0-py3-none-any.whl triton_installation_files.tar.gz; do
@@ -89,14 +99,32 @@ for f in aws-c-iot.deb aws-crt-cpp.deb aws-iot-device-sdk-cpp-v2.deb aws-sdk-cpp
     fi
 done
 echo "All required edgemlsdk artifacts verified"
-# rest of the application - build sequentially to avoid OOM during compilation
-docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache
-docker-compose --profile tegra -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache
+
+# Build backend and frontend Docker images
+# Select the correct Dockerfile for the backend
+if [ "$IS_JP5" = "1" ]; then
+    export BACKEND_DOCKERFILE="Dockerfile.jp5"
+else
+    export BACKEND_DOCKERFILE="Dockerfile"
+fi
+export OS=$IMAGE_VER
+
+echo "Building backend with $BACKEND_DOCKERFILE..."
+docker-compose --profile generic -f docker-compose.yaml build --no-cache
+docker-compose --profile tegra -f docker-compose.yaml build --no-cache
 cd ..
-# save Docker images as tar
-echo "save docker images as tarvballs"
-docker save --output ./custom-build/$COMPONENT_NAME/flask-app.tar flask-app
-docker save --output ./custom-build/$COMPONENT_NAME/react-webapp.tar react-webapp
+
+# save Docker images separately for Greengrass (each artifact must be < 2GB)
+echo "Saving docker images as separate artifacts..."
+docker save react-webapp | gzip > ./custom-build/$COMPONENT_NAME/react-webapp.tar.gz
+
+FLASK_TAR="./custom-build/$COMPONENT_NAME/flask-app.tar"
+docker save flask-app --output "$FLASK_TAR"
+FLASK_SIZE=$(stat --format=%s "$FLASK_TAR")
+echo "flask-app.tar size: $(numfmt --to=iec $FLASK_SIZE)"
+
+echo "Image sizes:"
+ls -lh ./custom-build/$COMPONENT_NAME/*.tar* 
 
 # include docker-compose.yaml in archive
 cp src/docker-compose.yaml ./custom-build/$COMPONENT_NAME/
@@ -111,16 +139,30 @@ mkdir -p ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/
 cp src/backend/triggers/outputs/dio.py ./custom-build/$COMPONENT_NAME/
 cp -r src/host_scripts ./custom-build/$COMPONENT_NAME/
 
-# zip up archive
-zip -r -X ./custom-build/$COMPONENT_NAME-$ARCHITECTURE.zip ./custom-build/$COMPONENT_NAME
+# Package as separate artifacts to stay under 2GB Greengrass limit
+# Artifact 1: backend Docker image (large)
+echo "Creating backend artifact..."
+zip -r -X ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/$COMPONENT_NAME-backend-$ARCHITECTURE.zip \
+    ./custom-build/$COMPONENT_NAME/flask-app.tar
 
-# dev test, create temp zip file for supported architecture not in development
-#for arch in "aarch64" "x86_64"; do
-touch $COMPONENT_NAME-aarch64.zip
-mv $COMPONENT_NAME-aarch64.zip ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/
-touch $COMPONENT_NAME-x86_64.zip
-mv $COMPONENT_NAME-x86_64.zip ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/
-#done
+# Artifact 2: frontend image + scripts + compose (small)
+echo "Creating frontend+scripts artifact..."
+zip -r -X ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/$COMPONENT_NAME-app-$ARCHITECTURE.zip \
+    ./custom-build/$COMPONENT_NAME/react-webapp.tar.gz \
+    ./custom-build/$COMPONENT_NAME/docker-compose.yaml \
+    ./custom-build/$COMPONENT_NAME/host_scripts \
+    ./custom-build/$COMPONENT_NAME/dio.py \
+    ./custom-build/$COMPONENT_NAME/backend \
+    ./custom-build/$COMPONENT_NAME/frontend
 
-# copy archive to greengrass-build
-cp ./custom-build/$COMPONENT_NAME-$ARCHITECTURE.zip ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/
+echo "Artifact sizes:"
+ls -lh ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/*.zip
+
+# Check if any artifact exceeds 2GB
+for zipfile in ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/*.zip; do
+    SIZE=$(stat --format=%s "$zipfile")
+    if [ "$SIZE" -gt 2147483648 ]; then
+        echo "NOTE: $zipfile is $(numfmt --to=iec $SIZE) - exceeds 2GB Greengrass artifact limit."
+        echo "The publish script will use ECR-based deployment instead."
+    fi
+done

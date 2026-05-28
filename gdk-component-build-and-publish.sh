@@ -1,16 +1,78 @@
 #!/bin/bash
 set -e
 
-# Get architecture and determine recipe file
-ARCH=$1
-case $ARCH in
+# ── Pre-flight: verify AWS credentials ────────────────────────────────────
+echo "Checking AWS credentials..."
+CALLER_IDENTITY=$(aws sts get-caller-identity 2>&1) || {
+    echo ""
+    echo "ERROR: AWS credentials not configured or expired."
+    echo ""
+    echo "Please configure credentials before building:"
+    echo "  aws configure                    # for long-term credentials"
+    echo "  aws sso login --profile <name>   # for SSO"
+    echo "  export AWS_PROFILE=<name>        # to select a profile"
+    echo ""
+    echo "The build requires valid credentials to publish the Greengrass component."
+    exit 1
+}
+
+AWS_ACCOUNT_ID=$(echo "$CALLER_IDENTITY" | python3 -c "import sys,json; print(json.load(sys.stdin)['Account'])")
+AWS_ARN=$(echo "$CALLER_IDENTITY" | python3 -c "import sys,json; print(json.load(sys.stdin)['Arn'])")
+AWS_REGION=$(aws configure get region 2>/dev/null || echo "${AWS_DEFAULT_REGION:-us-east-1}")
+echo "  Account: $AWS_ACCOUNT_ID"
+echo "  Role/User: $AWS_ARN"
+echo "  Region: $AWS_REGION"
+echo ""
+
+# Usage: ./gdk-component-build-and-publish.sh [ARCH] [JETPACK]
+# ARCH: x86_64 or aarch64 (default: auto-detect from host)
+# JETPACK: 4 or 5 (required for aarch64 builds)
+#
+# Supported configurations:
+#   x86_64              -> aws.edgeml.dda.LocalServer.amd64      (Ubuntu 20.04)
+#   aarch64 + JP4       -> aws.edgeml.dda.LocalServer.arm64      (Ubuntu 18.04, L4T r32.x)
+#   aarch64 + JP5       -> aws.edgeml.dda.LocalServer.arm64JP5   (Ubuntu 20.04, L4T r35.x)
+#
+# Examples:
+#   ./gdk-component-build-and-publish.sh                  # x86_64 (auto-detect)
+#   ./gdk-component-build-and-publish.sh aarch64 4        # ARM64 JetPack 4.6
+#   ./gdk-component-build-and-publish.sh aarch64 5        # ARM64 JetPack 5
+
+# Get architecture
+ARCH="${1:-$(arch)}"
+echo "Architecture: $ARCH"
+
+# Determine JetPack version for aarch64
+if [ "$ARCH" = "aarch64" ]; then
+    if [ -z "$2" ]; then
+        echo "ERROR: JetPack version is required for aarch64 builds."
+        echo "Usage: $0 aarch64 <4|5>"
+        echo "  4 = JetPack 4.6 (Ubuntu 18.04, L4T r32.x)"
+        echo "  5 = JetPack 5   (Ubuntu 20.04, L4T r35.x)"
+        exit 1
+    fi
+    JETPACK="$2"
+    if [ "$JETPACK" != "4" ] && [ "$JETPACK" != "5" ]; then
+        echo "ERROR: JETPACK must be 4 or 5, got: $JETPACK"
+        exit 1
+    fi
+    echo "JetPack version: $JETPACK"
+fi
+
+# Determine recipe file and component name
+case "$ARCH" in
     x86_64)
         RECIPE_FILE="recipe-amd64.yaml"
         COMPONENT_NAME="aws.edgeml.dda.LocalServer.amd64"
         ;;
     aarch64)
-        RECIPE_FILE="recipe-arm64.yaml"
-        COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64JP5"
+        if [ "$JETPACK" = "5" ]; then
+            RECIPE_FILE="recipe-arm64-jp5.yaml"
+            COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64JP5"
+        else
+            RECIPE_FILE="recipe-arm64.yaml"
+            COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64"
+        fi
         ;;
     *)
         echo "Unsupported architecture: $ARCH"
@@ -21,7 +83,6 @@ esac
 echo "Building component for architecture: $ARCH"
 echo "Component name: $COMPONENT_NAME"
 echo "Using recipe: $RECIPE_FILE"
-
 
 # Use architecture-specific recipe
 cp $RECIPE_FILE recipe.yaml
@@ -45,7 +106,7 @@ cat > gdk-config.json << EOF
       },
       "publish": {
         "bucket": "dda-component",
-        "region": "us-east-1"
+        "region": "${AWS_REGION}"
       }
     }
   },
@@ -57,12 +118,115 @@ EOF
 rm -rf greengrass-build/
 rm -rf .gdk/
 
-# Build and publish component
+# Build component
 echo "Building component..."
 gdk component build
 
-echo "Publishing component..."
-gdk component publish
+# Check total artifact size
+TOTAL_SIZE=0
+for artifact in greengrass-build/artifacts/$COMPONENT_NAME/NEXT_PATCH/*.zip; do
+    if [ -s "$artifact" ]; then
+        SIZE=$(stat --format=%s "$artifact")
+        TOTAL_SIZE=$((TOTAL_SIZE + SIZE))
+    fi
+done
+echo "Total artifact size: $(numfmt --to=iec $TOTAL_SIZE)"
 
+if [ "$TOTAL_SIZE" -gt 2147483648 ]; then
+    echo ""
+    echo "WARNING: Total artifacts exceed Greengrass 2GB limit ($(numfmt --to=iec $TOTAL_SIZE))."
+    echo "Using ECR-based deployment instead of artifact-based deployment."
+    echo ""
 
-echo "Component ${COMPONENT_NAME} built and published successfully!"
+    # Push Docker images to ECR instead
+    REGION="$AWS_REGION"
+    ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+    ECR_REPO_BACKEND="${ECR_REGISTRY}/dda/flask-app"
+    ECR_REPO_FRONTEND="${ECR_REGISTRY}/dda/react-webapp"
+
+    # Login to ECR
+    aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+    # Create repos if they don't exist
+    aws ecr describe-repositories --repository-names dda/flask-app --region $REGION 2>/dev/null || \
+        aws ecr create-repository --repository-name dda/flask-app --region $REGION
+    aws ecr describe-repositories --repository-names dda/react-webapp --region $REGION 2>/dev/null || \
+        aws ecr create-repository --repository-name dda/react-webapp --region $REGION
+
+    # Determine version tag
+    LATEST_VERSION=$(aws greengrassv2 list-component-versions \
+        --arn "arn:aws:greengrass:${REGION}:${AWS_ACCOUNT_ID}:components:${COMPONENT_NAME}" \
+        --query 'componentVersions[0].componentVersion' --output text 2>/dev/null || echo "0.0.0")
+    if [ "$LATEST_VERSION" = "None" ] || [ "$LATEST_VERSION" = "0.0.0" ]; then
+        COMPONENT_VERSION="1.0.0"
+    else
+        MAJOR=$(echo $LATEST_VERSION | cut -d. -f1)
+        MINOR=$(echo $LATEST_VERSION | cut -d. -f2)
+        PATCH=$(echo $LATEST_VERSION | cut -d. -f3)
+        COMPONENT_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+    fi
+    echo "Component version: $COMPONENT_VERSION"
+
+    # Tag and push images
+    echo "Pushing flask-app to ECR..."
+    docker tag flask-app:latest "${ECR_REPO_BACKEND}:${COMPONENT_VERSION}"
+    docker push "${ECR_REPO_BACKEND}:${COMPONENT_VERSION}"
+
+    echo "Pushing react-webapp to ECR..."
+    docker tag react-webapp:latest "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}"
+    docker push "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}"
+
+    # Create a lightweight recipe that pulls from ECR instead of using artifacts
+    RECIPE_FILE="greengrass-build/recipes/recipe.yaml"
+    # Update recipe to use docker pull instead of docker load
+    python3 - "$RECIPE_FILE" "$ECR_REPO_BACKEND" "$ECR_REPO_FRONTEND" "$COMPONENT_VERSION" "$REGION" "$AWS_ACCOUNT_ID" << 'PYEOF'
+import sys, yaml
+
+recipe_file = sys.argv[1]
+ecr_backend = sys.argv[2]
+ecr_frontend = sys.argv[3]
+version = sys.argv[4]
+region = sys.argv[5]
+account_id = sys.argv[6]
+
+with open(recipe_file) as f:
+    recipe = yaml.safe_load(f)
+
+recipe['ComponentVersion'] = version
+
+ecr_registry = f"{account_id}.dkr.ecr.{region}.amazonaws.com"
+
+# Update lifecycle to pull from ECR
+for manifest in recipe.get('Manifests', []):
+    lifecycle = manifest.get('Lifecycle', {})
+    lifecycle['Install'] = {
+        'RequiresPrivilege': True,
+        'Script': (
+            f'docker images --quiet --filter=dangling=true | xargs --no-run-if-empty docker rmi -f ; '
+            f'aws ecr get-login-password --region {region} | docker login --username AWS --password-stdin {ecr_registry} ; '
+            f'docker pull {ecr_backend}:{version} && docker tag {ecr_backend}:{version} flask-app:latest ; '
+            f'docker pull {ecr_frontend}:{version} && docker tag {ecr_frontend}:{version} react-webapp:latest'
+        )
+    }
+    # Remove artifacts section since we're using ECR
+    manifest.pop('Artifacts', None)
+
+with open(recipe_file, 'w') as f:
+    yaml.dump(recipe, f, default_flow_style=False, sort_keys=False)
+
+print(f"Updated recipe to use ECR: {ecr_backend}:{version}")
+PYEOF
+
+    # Create component version via API (no artifacts, just recipe)
+    echo "Creating component version in Greengrass..."
+    aws greengrassv2 create-component-version \
+        --inline-recipe fileb://"$RECIPE_FILE" \
+        --region "$REGION"
+
+    echo "Component ${COMPONENT_NAME} v${COMPONENT_VERSION} published successfully (ECR-based)!"
+else
+    # Under 2GB - use standard GDK publish
+    echo "Publishing component via GDK..."
+    gdk component publish
+    echo "Component ${COMPONENT_NAME} built and published successfully!"
+fi
