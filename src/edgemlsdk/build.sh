@@ -69,6 +69,7 @@ echo "Begin building Docker image. For OS=$ubuntu platform=$platform arch=$pwsh_
 
 # Build the edgemlsdk image
 docker build \
+    --load \
     --build-arg OS=$ubuntu \
     --build-arg PLATFORM=$platform \
     --build-arg PWSH_ARCH=$pwsh_arch \
