@@ -54,6 +54,7 @@ sudo apt-get install python3-pip -y
 python3.9 -m pip install --upgrade pip
 python3.9 -m pip install --no-compile --force-reinstall requests==2.32.3
 python3.9 -m pip install --no-compile protobuf
+python3.9 -m pip install --no-compile "botocore[crt]"
 
 
 # Install AWS CLI v2 and GDK
