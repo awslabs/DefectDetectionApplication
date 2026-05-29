@@ -206,6 +206,9 @@ else
     echo "✓ AWS CLI already installed"
 fi
 
+echo "▶ Installing botocore[crt] (required by GDK publish for credential resolution)..."
+run_cmd "sudo pip3 install --no-compile 'botocore[crt]'" || add_warning "Failed to install botocore[crt] - 'gdk component publish' may fail to resolve credentials"
+
 echo "▶ Installing AWS CDK (optional for build server)..."
 if ! command -v cdk >/dev/null 2>&1; then
     run_cmd "sudo npm install -g aws-cdk" || add_warning "Failed to install AWS CDK (optional - not required for component builds)"
