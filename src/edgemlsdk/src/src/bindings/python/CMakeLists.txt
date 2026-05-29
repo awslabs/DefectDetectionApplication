@@ -59,5 +59,5 @@ FILECOPY(FILE ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}/panorama_projections.py DESTINAT
 add_dependencies(COPY_panorama_projections COPY_python_package panorama_projections_python)
 
 FILECOPY(FILE ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}/_panorama_projections.so DESTINATION ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}/python_package/src/panorama)
-add_dependencies(COPY__panorama_projections panorama_projections_python)
+add_dependencies(COPY__panorama_projections COPY_python_package panorama_projections_python)
 install(DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}/python_package DESTINATION ./lib)

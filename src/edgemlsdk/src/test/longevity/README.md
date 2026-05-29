@@ -5,7 +5,7 @@
  - install aws cli 
  - install python3 and python3-pip
  - install boto3
- - paste admin/ReadOnly credentials for account `691462484548` on terminal
+ - paste admin/ReadOnly credentials for your AWS account on terminal
  ### Run Longevity Tests
  
  ```

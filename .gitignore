@@ -1,0 +1,13 @@
+# Build artifacts
+*.log
+custom-build/
+greengrass-build/
+.gdk/
+src/backend/edgemlsdk/
+src/edgemlsdk/extracted-debs/
+src/edgemlsdk/cached-debs/
+
+# OS files
+.DS_Store
+__pycache__/
+*.pyc

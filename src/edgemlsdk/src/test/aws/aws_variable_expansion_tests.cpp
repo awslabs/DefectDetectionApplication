@@ -77,7 +77,7 @@ void SecretsManagerExpansionTest()
 
     {
         ComPtr<IStringProperty> property;
-        ASSERT_S(CreateStringProperty(property.AddressOf(), "id", "{\"type\":\"secretsmanager\", \"value\":\"arn:aws:secretsmanager:us-west-2:691462484548:secret:panorama-sdk-v2/test/test_camera_credential-8tWMKC;username\"}"));
+        ASSERT_S(CreateStringProperty(property.AddressOf(), "id", "{\"type\":\"secretsmanager\", \"value\":\"arn:aws:secretsmanager:us-west-2:123456789012:secret:panorama-sdk-v2/test/test_camera_credential-8tWMKC;username\"}"));
 
         ComPtr<IVariableExpansion> variable;
         ASSERT_S(CreateSecretsManagerExpansion(variable.AddressOf(), property, credProvider));
@@ -93,7 +93,7 @@ void SecretsManagerExpansionTest()
         new_value["username"] = "MyUsername";
         new_value["password"] = "MyPassword";
         ASSERT_FALSE(variable->Stale());
-        ASSERT_S(WriteSecretsManagerValue("arn:aws:secretsmanager:us-west-2:691462484548:secret:panorama-sdk-v2/test/test_camera_credential-8tWMKC", new_value.dump().c_str(), credProvider));
+        ASSERT_S(WriteSecretsManagerValue("arn:aws:secretsmanager:us-west-2:123456789012:secret:panorama-sdk-v2/test/test_camera_credential-8tWMKC", new_value.dump().c_str(), credProvider));
         ASSERT_TRUE(variable->Stale());
 
         property->Set("{\"type\":\"secretsmanager\", \"value\":\"invalid_arn\"}");

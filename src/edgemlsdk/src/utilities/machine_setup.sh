@@ -159,7 +159,7 @@ check_and_install_python_module boto3
 check_and_install_python_module awscrt
 
 # Install CBS-CLI and configure (Will give errors if already run, can be ignored)
-toolbox registry add s3://cbs-toolbox-498039791012-us-west-2/tools.json
+toolbox registry add s3://cbs-toolbox-ACCOUNT_ID-us-west-2/tools.json
 toolbox install cbs-cli
 cbs_configure
 conan profile detect
