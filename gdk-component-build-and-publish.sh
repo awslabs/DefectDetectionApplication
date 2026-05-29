@@ -45,11 +45,16 @@ cp $RECIPE_FILE recipe.yaml
 
 print_step "Creating GDK configuration"
 
-# Use the configured AWS region
-GDK_REGION=$(aws configure get region 2>/dev/null)
+# Use the configured AWS region (fall back to env vars; aws configure get
+# returns exit 1 when unset, which would abort the script under `set -e`)
+GDK_REGION=$(aws configure get region 2>/dev/null || true)
+if [ -z "$GDK_REGION" ]; then
+    GDK_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
+fi
 if [ -z "$GDK_REGION" ]; then
     echo "❌ ERROR: No AWS region configured."
     echo "   Run: aws configure set region <your-region>"
+    echo "   Or:  export AWS_REGION=<your-region>"
     exit 1
 fi
 echo "Using region: $GDK_REGION"
@@ -136,18 +141,17 @@ fi
 print_step "Tagging component for portal discovery"
 # Tag the published component with dda-portal:managed=true
 
-REGION=$(aws configure get region 2>/dev/null)
+REGION=$(aws configure get region 2>/dev/null || true)
 if [ -z "$REGION" ]; then
-    echo "❌ ERROR: No AWS region configured for tagging."
-    exit 1
+    REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 fi
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
 
 COMPONENT_ARN=$(aws greengrassv2 list-components \
     --scope PRIVATE \
     --region $REGION \
     --query "components[?componentName=='${COMPONENT_NAME}'].arn | [0]" \
-    --output text 2>/dev/null)
+    --output text 2>/dev/null || true)
 
 if [ -n "$COMPONENT_ARN" ] && [ "$COMPONENT_ARN" != "None" ]; then
     echo "Found component ARN: $COMPONENT_ARN"
