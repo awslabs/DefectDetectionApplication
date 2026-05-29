@@ -170,13 +170,13 @@ DDA consists of several key components:
 - **Minimum**: 4GB RAM, 20GB storage, x86_64 or ARM64 processor
 - **Recommended**: 8GB RAM, 64GB storage, GPU acceleration (optional)
 - **Supported Platforms**:
-  - x86_64 CPU systems
-  - ARM64 CPU systems
-  - NVIDIA Jetson devices (Xavier Only with Jetpack 4.X, JP5+ coming soon)
+  - x86_64 CPU systems (Ubuntu 20.04)
+  - NVIDIA Jetson devices with JetPack 4.6 (Ubuntu 18.04, aarch64)
+  - NVIDIA Jetson devices with JetPack 5 (Ubuntu 20.04, aarch64)
 - **Supported Operating Systems**:
-  - X86 Ubuntu 20.04, 22.04, (24.04 coming soon)
-  - Jetson devices currently Jetpack 4.X
-  - ARM64 - Ubuntu 18.04-22.04
+  - x86_64: Ubuntu 20.04, 22.04
+  - ARM64 JetPack 4.6: Ubuntu 18.04
+  - ARM64 JetPack 5: Ubuntu 20.04
 
 ### Supported Cameras and Sensors
 
@@ -250,6 +250,59 @@ DDA consists of several key components:
    }
    ```
 
+2. **Create ECR publish policy** (required for large Docker images that exceed the 2 GB Greengrass artifact limit):
+   - Policy name: `dda-ecr-publish`
+   - This policy allows the build server to push Docker images to ECR and create Greengrass component versions that pull from ECR at deployment time.
+   - Replace `[AWS account id]` with your account ID:
+   ```json
+   {
+       "Version": "2012-10-17",
+       "Statement": [
+           {
+               "Sid": "ECRAuth",
+               "Effect": "Allow",
+               "Action": "ecr:GetAuthorizationToken",
+               "Resource": "*"
+           },
+           {
+               "Sid": "ECRRepoManage",
+               "Effect": "Allow",
+               "Action": [
+                   "ecr:CreateRepository",
+                   "ecr:DescribeRepositories",
+                   "ecr:TagResource"
+               ],
+               "Resource": "arn:aws:ecr:*:[AWS account id]:repository/dda/*"
+           },
+           {
+               "Sid": "ECRPush",
+               "Effect": "Allow",
+               "Action": [
+                   "ecr:BatchCheckLayerAvailability",
+                   "ecr:InitiateLayerUpload",
+                   "ecr:UploadLayerPart",
+                   "ecr:CompleteLayerUpload",
+                   "ecr:PutImage",
+                   "ecr:BatchGetImage",
+                   "ecr:GetDownloadUrlForLayer"
+               ],
+               "Resource": "arn:aws:ecr:*:[AWS account id]:repository/dda/*"
+           },
+           {
+               "Sid": "GreengrassPublish",
+               "Effect": "Allow",
+               "Action": [
+                   "greengrass:CreateComponentVersion",
+                   "greengrass:ListComponentVersions"
+               ],
+               "Resource": "arn:aws:greengrass:*:[AWS account id]:components:aws.edgeml.dda.*"
+           }
+       ]
+   }
+   ```
+
+   > **Note**: The JetPack 5 (ARM64) backend Docker image exceeds the Greengrass 2 GB artifact size limit. The build script automatically detects this and pushes images to ECR instead. The edge devices will pull from ECR during component installation, so the device's token exchange role also needs `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, and `ecr:GetDownloadUrlForLayer` permissions (see edge device policy below).
+
 2. **Create edge device policy**:
    - Policy name: `dda-greengrass-policy`
 ```json
@@ -273,6 +326,16 @@ DDA consists of several key components:
                 "arn:aws:s3:::*/*",
                 "arn:aws:s3:::*"
             ]
+        },
+        {
+            "Sid": "ECRPull",
+            "Effect": "Allow",
+            "Action": [
+                "ecr:GetAuthorizationToken",
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer"
+            ],
+            "Resource": "*"
         },
         {
             "Effect": "Allow",
@@ -301,32 +364,80 @@ DDA consists of several key components:
     ]
 }
 ```   
-   - Attach S3 permissions for component downloads
 
 3. **Create IAM roles**:
-   - Build server role: `dda-build-role` (attach `dda-build-policy` + `AmazonSSMManagedInstanceCore`)
+   - Build server role: `dda-build-role` (attach `dda-build-policy` + `dda-ecr-publish` + `AmazonSSMManagedInstanceCore`)
    - Edge device role: `dda-greengrass-role` (attach `dda-greengrass-policy` + `AmazonSSMManagedInstanceCore`)
+
+4. **Update the Greengrass Token Exchange Role** (created automatically during Greengrass provisioning):
+   
+   The `GreengrassV2TokenExchangeRole` is the role that Greengrass components use at runtime to access AWS services. After provisioning the edge device, add these inline policies to it:
+
+   **Inline policy: `ECRPullAccess`** (required for JP5 ECR-based deployments):
+   ```json
+   {
+       "Version": "2012-10-17",
+       "Statement": [
+           {
+               "Sid": "ECRPull",
+               "Effect": "Allow",
+               "Action": [
+                   "ecr:GetAuthorizationToken",
+                   "ecr:BatchGetImage",
+                   "ecr:GetDownloadUrlForLayer"
+               ],
+               "Resource": "*"
+           }
+       ]
+   }
+   ```
+
+   **Inline policy: `GreengrassComponentS3Access`** (required for downloading component artifacts):
+   ```json
+   {
+       "Version": "2012-10-17",
+       "Statement": [
+           {
+               "Effect": "Allow",
+               "Action": [
+                   "s3:GetObject",
+                   "s3:GetObjectVersion"
+               ],
+               "Resource": [
+                   "arn:aws:s3:::dda-component-*/*"
+               ]
+           }
+       ]
+   }
+   ```
+
+   > **Note**: The `GreengrassV2TokenExchangeRole` is separate from the `dda-greengrass-role` used for device provisioning. It's created by the Greengrass installer and used by components at runtime.
 
 #### Step 1: Set up Build Environment
 
 1. **Launch EC2 build instance**:
    
-   **The EC2 build instance depends on the edge device configuration:**
+   **The EC2 build instance must match the target edge device architecture:**
    
-   **If your edge device is ARM64 (Jetson Xavier, ARM64 systems):**
+   **If your edge device is ARM64 JetPack 4.6 (Jetson Xavier, L4T r32.x):**
    ```bash
-   # Launch Ubuntu 18.04 ARM64, g4dn.2xlarge
+   # Launch Ubuntu 18.04 ARM64 (e.g., a1.2xlarge or c6g.2xlarge)
    # Storage: 512GB, Security: SSH (port 22)
    # Attach IAM role: dda-build-role
-   # AMI: Find Ubuntu 18.04 in AWS Marketplace → [Ryan to add details]
+   ```
+   
+   **If your edge device is ARM64 JetPack 5 (Jetson Orin, L4T r35.x):**
+   ```bash
+   # Launch Ubuntu 20.04 ARM64 (e.g., a1.2xlarge or c6g.2xlarge)
+   # Storage: 512GB, Security: SSH (port 22)
+   # Attach IAM role: dda-build-role
    ```
    
    **If your edge device is x86_64 CPU (Intel/AMD systems):**
    ```bash
-   # Launch Ubuntu 20.04 x86_64, g4dn.2xlarge
+   # Launch Ubuntu 20.04 x86_64 (e.g., c5.2xlarge or g4dn.2xlarge)
    # Storage: 512GB, Security: SSH (port 22)
    # Attach IAM role: dda-build-role
-   # AMI: Ubuntu 20.04 → [Ryan to add details]
    ```
 
 2. **Connect and setup**:
@@ -365,8 +476,20 @@ DDA consists of several key components:
 
 2. **Build and publish**:
    ```bash
-  ./gdk-component-build-and-publish.sh >logfile.log 2>&1 &
+   # For x86_64 builds (auto-detects architecture):
+   ./gdk-component-build-and-publish.sh > build.log 2>&1 &
+
+   # For ARM64 JetPack 4.6 builds:
+   ./gdk-component-build-and-publish.sh aarch64 4 > build.log 2>&1 &
+
+   # For ARM64 JetPack 5 builds:
+   ./gdk-component-build-and-publish.sh aarch64 5 > build.log 2>&1 &
+
+   # Monitor build progress:
+   tail -f build.log
    ```
+
+   > **Note**: For JetPack 5 builds, the Docker image exceeds the Greengrass 2 GB artifact limit. The build script automatically pushes to ECR and creates a component that pulls images at install time. Ensure the `dda-ecr-publish` policy is attached to your build role.
 
 #### Step 3: Set up Edge Device
 

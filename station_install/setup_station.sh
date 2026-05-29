@@ -241,7 +241,23 @@ java -jar ./GreengrassInstaller/lib/Greengrass.jar --version
 # Create IoT thing
 # Replace aws-region, thing-name, thing-group-name and etc with your desird value
 # If it fails with "The role with name GreengrassV2TokenExchangeRole cannot be found", rerun the command
-java -Droot="/aws_dda/greengrass/v2" -Dlog.store=FILE   -jar ./GreengrassInstaller/lib/Greengrass.jar   --aws-region ${aws_region}   --thing-name ${thing_name} --thing-group-name DDA_transition_EC2_Group   --thing-policy-name GreengrassV2IoTThingPolicy   --tes-role-name GreengrassV2TokenExchangeRole   --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias   --component-default-user ggc_user:ggc_group   --setup-system-service true --provision true
+# Export credentials for Java SDK (it cannot use SSO cache or IMDS in all contexts)
+if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+    # Try to get credentials from the AWS CLI (works with SSO, instance roles, etc.)
+    eval $(aws configure export-credentials --format env 2>/dev/null) || true
+fi
+# Pass credentials as Java system properties to guarantee the SDK sees them
+JAVA_CRED_PROPS=""
+if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+    JAVA_CRED_PROPS="-Daws.accessKeyId=$AWS_ACCESS_KEY_ID -Daws.secretAccessKey=$AWS_SECRET_ACCESS_KEY"
+    if [ -n "$AWS_SESSION_TOKEN" ]; then
+        JAVA_CRED_PROPS="$JAVA_CRED_PROPS -Daws.sessionToken=$AWS_SESSION_TOKEN"
+    fi
+fi
+echo "DEBUG: AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:0:10}..."
+echo "DEBUG: JAVA_CRED_PROPS set: $([ -n \"$JAVA_CRED_PROPS\" ] && echo 'yes' || echo 'NO - credentials missing!')"
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+java -Droot="/aws_dda/greengrass/v2" -Dlog.store=FILE $JAVA_CRED_PROPS -jar ./GreengrassInstaller/lib/Greengrass.jar   --aws-region ${aws_region}   --thing-name ${thing_name} --thing-group-name DDA_transition_EC2_Group   --thing-policy-name GreengrassV2IoTThingPolicy   --tes-role-name GreengrassV2TokenExchangeRole   --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias   --component-default-user ggc_user:ggc_group   --setup-system-service true --provision true
 
 # Add ggc_user to a group that allows access to GPU and driver
 usermod -aG video ggc_user

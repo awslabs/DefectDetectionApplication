@@ -1,19 +1,18 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ff578c97..368e888f 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -139,6 +139,14 @@ endif()
  set(TRITON_CORE_HEADERS_ONLY OFF)
  
  FetchContent_MakeAvailable(repo-third-party repo-core)
-+# Apply patch to triton core repo, update with versions of triton as needed.
-+# Define a custom command to apply a Git patch before the target is built
-+execute_process(
-+  COMMAND git apply --ignore-whitespace ${CMAKE_CURRENT_SOURCE_DIR}/edgeml-triton-core.diff
-+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/_deps/repo-core-src/
-+  COMMAND_ERROR_IS_FATAL ANY
-+)
-+message(STATUS ${CMAKE_CURRENT_BINARY_DIR}/_deps/repo-core-src/)
++# Disable triton-core tests (std::filesystem issue under QEMU)
++set(CORE_TEST_CMAKE "${CMAKE_CURRENT_BINARY_DIR}/_deps/repo-core-src/src/test/CMakeLists.txt")
++if(EXISTS ${CORE_TEST_CMAKE})
++  file(READ ${CORE_TEST_CMAKE} _test_content)
++  file(WRITE ${CORE_TEST_CMAKE} "return()\n${_test_content}")
++endif()
++set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -static-libstdc++")
++message(STATUS "Applied triton-core patches")
  
  #
  # Triton server executable and examples
@@ -21,5 +20,5 @@ index ff578c97..368e888f 100644
      -DTRITON_VERSION:STRING=${TRITON_VERSION}
    DEPENDS ${TRITON_DEPENDS}
  )
-+# install the model config prototbuf python file
++# install the model config protobuf python file
 +install(FILES "${CMAKE_CURRENT_BINARY_DIR}/_deps/repo-core-build/triton-core/_deps/repo-common-src/protobuf/model_config.proto" DESTINATION "${CMAKE_INSTALL_PREFIX}/protobuf/")

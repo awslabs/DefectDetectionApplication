@@ -3,14 +3,14 @@
         "envelopeVersion": "2021-01-01",
         "packages": [
             {
-                "name": "691462484548::edgemlsdk_longevity",
+                "name": "ACCOUNT_ID::edgemlsdk_longevity",
                 "version": "1.0"
             }
         ],
         "nodes": [
             {
                 "name": "longevity_node",
-                "interface": "691462484548::edgemlsdk_longevity.edgemlsdk_longevity_asset_interface",
+                "interface": "ACCOUNT_ID::edgemlsdk_longevity.edgemlsdk_longevity_asset_interface",
                 "overridable": false,
                 "launch": "onAppStart"
             },
