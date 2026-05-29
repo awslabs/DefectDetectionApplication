@@ -5,9 +5,8 @@ set -e
 # This component enables edge devices to upload inference results to S3
 
 COMPONENT_NAME="aws.edgeml.dda.InferenceUploader"
-COMPONENT_VERSION="1.0.0"
 
-echo "Building and publishing ${COMPONENT_NAME} v${COMPONENT_VERSION}"
+echo "Building and publishing ${COMPONENT_NAME}"
 echo ""
 
 # Get account and region info
@@ -29,32 +28,90 @@ if ! aws s3 ls "s3://${BUCKET_NAME}" 2>/dev/null; then
     aws s3 mb "s3://${BUCKET_NAME}" --region "${REGION}"
 fi
 
-# Upload artifacts to S3
-ARTIFACT_PREFIX="${COMPONENT_NAME}/${COMPONENT_VERSION}"
-echo "Uploading artifacts to s3://${BUCKET_NAME}/${ARTIFACT_PREFIX}/"
+# Determine the next available component version.
+# Find the latest published version and bump the minor number; if none exists, start at 1.0.0.
+echo "Determining component version..."
+COMPONENT_ARN="arn:aws:greengrass:${REGION}:${ACCOUNT_ID}:components:${COMPONENT_NAME}"
+LATEST_VERSION=$(aws greengrassv2 list-component-versions \
+    --arn "${COMPONENT_ARN}" \
+    --region "${REGION}" \
+    --query 'componentVersions[0].componentVersion' \
+    --output text 2>/dev/null || echo "None")
 
-aws s3 cp inference-uploader/artifacts/inference_uploader.py "s3://${BUCKET_NAME}/${ARTIFACT_PREFIX}/inference_uploader.py"
-aws s3 cp inference-uploader/artifacts/requirements.txt "s3://${BUCKET_NAME}/${ARTIFACT_PREFIX}/requirements.txt"
-
-echo "Artifacts uploaded successfully"
+if [ "$LATEST_VERSION" = "None" ] || [ -z "$LATEST_VERSION" ]; then
+    COMPONENT_VERSION="1.0.0"
+else
+    MAJOR=$(echo "$LATEST_VERSION" | cut -d. -f1)
+    MINOR=$(echo "$LATEST_VERSION" | cut -d. -f2)
+    COMPONENT_VERSION="${MAJOR}.$((MINOR + 1)).0"
+fi
+echo "Publishing version: ${COMPONENT_VERSION}"
 echo ""
 
-# Update recipe with actual bucket name and version
-RECIPE_FILE="recipe_processed.yaml"
-cat inference-uploader/recipe.yaml | \
-  sed "s|BUCKET_NAME|${BUCKET_NAME}|g" | \
-  sed "s|COMPONENT_VERSION|${COMPONENT_VERSION}|g" > "${RECIPE_FILE}"
+# Publish helper: uploads artifacts for a given version and creates the component version.
+# Returns 0 on success, 10 on version conflict (so the caller can retry with a higher version).
+publish_version() {
+    local version="$1"
+    local artifact_prefix="${COMPONENT_NAME}/${version}"
 
-# Create component version in Greengrass
-echo "Creating component version in Greengrass..."
+    echo "Uploading artifacts to s3://${BUCKET_NAME}/${artifact_prefix}/"
+    aws s3 cp inference-uploader/artifacts/inference_uploader.py "s3://${BUCKET_NAME}/${artifact_prefix}/inference_uploader.py"
+    aws s3 cp inference-uploader/artifacts/requirements.txt "s3://${BUCKET_NAME}/${artifact_prefix}/requirements.txt"
+    echo "Artifacts uploaded successfully"
+    echo ""
 
-aws greengrassv2 create-component-version \
-  --inline-recipe fileb://"${RECIPE_FILE}" \
-  --region "${REGION}" \
-  --tags "dda-portal:managed=true,dda-portal:component-type=inference-uploader,dda-portal:shared-component=true"
+    # Render the recipe with the bucket name and version
+    local recipe_file="recipe_processed.yaml"
+    cat inference-uploader/recipe.yaml | \
+        sed "s|BUCKET_NAME|${BUCKET_NAME}|g" | \
+        sed "s|COMPONENT_VERSION|${version}|g" | \
+        sed "s|ComponentVersion: '[^']*'|ComponentVersion: '${version}'|g" > "${recipe_file}"
 
-# Clean up temporary file
-rm -f "${RECIPE_FILE}"
+    echo "Creating component version ${version} in Greengrass..."
+    local create_output
+    if create_output=$(aws greengrassv2 create-component-version \
+        --inline-recipe fileb://"${recipe_file}" \
+        --region "${REGION}" \
+        --tags "dda-portal:managed=true,dda-portal:component-type=inference-uploader,dda-portal:shared-component=true" 2>&1); then
+        rm -f "${recipe_file}"
+        return 0
+    else
+        rm -f "${recipe_file}"
+        if echo "$create_output" | grep -q "ConflictException"; then
+            echo "⚠ Version ${version} already exists, will retry with a higher version..."
+            return 10
+        fi
+        echo "❌ ERROR creating component version:"
+        echo "$create_output"
+        return 1
+    fi
+}
+
+# Try to publish, bumping the minor version on conflict (up to 10 attempts).
+MAX_ATTEMPTS=10
+attempt=0
+while [ $attempt -lt $MAX_ATTEMPTS ]; do
+    set +e
+    publish_version "${COMPONENT_VERSION}"
+    rc=$?
+    set -e
+
+    if [ $rc -eq 0 ]; then
+        break
+    elif [ $rc -eq 10 ]; then
+        MAJOR=$(echo "$COMPONENT_VERSION" | cut -d. -f1)
+        MINOR=$(echo "$COMPONENT_VERSION" | cut -d. -f2)
+        COMPONENT_VERSION="${MAJOR}.$((MINOR + 1)).0"
+        attempt=$((attempt + 1))
+    else
+        exit 1
+    fi
+done
+
+if [ $attempt -ge $MAX_ATTEMPTS ]; then
+    echo "❌ ERROR: Could not publish after ${MAX_ATTEMPTS} version-bump attempts."
+    exit 1
+fi
 
 echo ""
 
@@ -69,7 +126,7 @@ COMPONENT_ARN=$(aws greengrassv2 list-components \
 
 if [ -n "$COMPONENT_ARN" ] && [ "$COMPONENT_ARN" != "None" ]; then
     echo "Found component ARN: $COMPONENT_ARN"
-    
+
     if aws greengrassv2 tag-resource \
         --resource-arn "$COMPONENT_ARN" \
         --tags "dda-portal:managed=true" \
