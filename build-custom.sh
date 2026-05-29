@@ -24,7 +24,6 @@ COMPONENT_NAME=$1
 VERSION=$2
 ARCHITECTURE=`uname -m`
 # change to 20.04 or 18.04
-# TODO add 20.04 for JP5
 IMAGE_VER="18.04"
 #IMAGE_VER="20.04"
 BUILDKIT_PROGRESS=plain
@@ -34,7 +33,16 @@ IMAGE_VER=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
 # Export as environment variable
 export IMAGE_VER 
 
+# Determine if this is a JP5 (JetPack 5 / Jetson Orin, L4T r35.x) build.
+# JP5 components are named with "JP5" (e.g. aws.edgeml.dda.LocalServer.arm64JP5).
+IS_JP5=0
+if echo "$COMPONENT_NAME" | grep -q "JP5"; then
+    IS_JP5=1
+fi
+
 echo "Ubuntu version: $IMAGE_VER"
+echo "Architecture: $ARCHITECTURE"
+echo "JetPack 5: $IS_JP5"
 # copy recipe to greengrass-build
 cp recipe.yaml ./greengrass-build/recipes
 
@@ -47,7 +55,11 @@ mkdir -p ./custom-build/$COMPONENT_NAME
 cd src
 #edgemlsdk
 cd edgemlsdk/
-./build.sh -p $(uname -m) -u $IMAGE_VER 3.9
+if [ "$IS_JP5" = "1" ]; then
+  ./build.sh -p $(uname -m) -u $IMAGE_VER -y 3.9 -j 5
+else
+  ./build.sh -p $(uname -m) -u $IMAGE_VER 3.9
+fi
 cd ..
 echo "Current directory: $(pwd)"
 echo "Checking for edgemlsdk directory: $(ls -ld edgemlsdk 2>&1)"
@@ -77,6 +89,13 @@ docker cp $id:/tars/triton_installation_files.tar.gz  $(pwd)/backend/edgemlsdk/
 docker rm -v $id
 echo done copying binaries
 # rest of the application
+# Select the backend Dockerfile: JP5 uses an L4T r35.x base image.
+if [ "$IS_JP5" = "1" ]; then
+  export BACKEND_DOCKERFILE="Dockerfile.jp5"
+else
+  export BACKEND_DOCKERFILE="Dockerfile"
+fi
+echo "Backend Dockerfile: $BACKEND_DOCKERFILE"
 echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 docker-compose --profile tegra --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache || { echo "ERROR: docker-compose build failed"; exit 1; }
 cd ..

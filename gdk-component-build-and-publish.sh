@@ -18,6 +18,15 @@ print_step() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
+# Parse optional flags. --jp5 (or a positional "jp5") selects the JetPack 5
+# (Jetson Orin / L4T r35.x) build on aarch64 hosts. Default is unchanged.
+JETPACK5=0
+for arg in "$@"; do
+    case "$arg" in
+        --jp5|jp5|JP5) JETPACK5=1 ;;
+    esac
+done
+
 # Get architecture and determine recipe file
 ARCH=$(uname -m)
 case $ARCH in
@@ -26,8 +35,13 @@ case $ARCH in
         COMPONENT_NAME="aws.edgeml.dda.LocalServer.amd64"
         ;;
     aarch64)
-        RECIPE_FILE="recipe-arm64.yaml"
-        COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64"
+        if [ "$JETPACK5" = "1" ]; then
+            RECIPE_FILE="recipe-arm64-jp5.yaml"
+            COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64JP5"
+        else
+            RECIPE_FILE="recipe-arm64.yaml"
+            COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64"
+        fi
         ;;
     *)
         echo "Unsupported architecture: $ARCH"
@@ -37,6 +51,7 @@ esac
 
 print_step "Detecting architecture and preparing configuration"
 echo "Architecture: $ARCH"
+echo "JetPack 5: $JETPACK5"
 echo "Component name: $COMPONENT_NAME"
 echo "Recipe file: $RECIPE_FILE"
 
