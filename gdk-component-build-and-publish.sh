@@ -18,24 +18,61 @@ print_step() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
-# Parse optional flags. --jp5 (or a positional "jp5") selects the JetPack 5
-# (Jetson Orin / L4T r35.x) build on aarch64 hosts. Default is unchanged.
-JETPACK5=0
+# Usage: ./gdk-component-build-and-publish.sh [ARCH] [JETPACK]
+#   ARCH:    x86_64 or aarch64 (default: auto-detect from host)
+#   JETPACK: 4 or 5 (required for aarch64 builds)
+#
+# Supported configurations:
+#   x86_64           -> aws.edgeml.dda.LocalServer.amd64      (Ubuntu 20.04)
+#   aarch64 + JP4    -> aws.edgeml.dda.LocalServer.arm64      (Ubuntu 18.04, L4T r32.x)
+#   aarch64 + JP5    -> aws.edgeml.dda.LocalServer.arm64JP5   (Ubuntu 20.04, L4T r35.x)
+#
+# Examples:
+#   ./gdk-component-build-and-publish.sh                 # auto-detect arch (x86_64)
+#   ./gdk-component-build-and-publish.sh aarch64 4       # ARM64 JetPack 4.6
+#   ./gdk-component-build-and-publish.sh aarch64 5       # ARM64 JetPack 5
+#
+# Argument parsing is order-independent and accepts both the positional JetPack
+# number (4|5) and the --jp4/--jp5 flags (kept as backward-compatible aliases).
+ARCH=""
+JETPACK=""
 for arg in "$@"; do
     case "$arg" in
-        --jp5|jp5|JP5) JETPACK5=1 ;;
+        x86_64|amd64)        ARCH="x86_64" ;;
+        aarch64|arm64)       ARCH="aarch64" ;;
+        4|jp4|JP4|--jp4)     JETPACK="4" ;;
+        5|jp5|JP5|--jp5)     JETPACK="5" ;;
+        *)
+            echo "Unknown argument: $arg"
+            echo "Usage: $0 [x86_64|aarch64] [4|5]"
+            exit 1
+            ;;
     esac
 done
 
-# Get architecture and determine recipe file
-ARCH=$(uname -m)
+# Default ARCH to the host architecture when not supplied.
+if [ -z "$ARCH" ]; then
+    ARCH=$(uname -m)
+fi
+
+# Determine recipe file and component name.
 case $ARCH in
     x86_64)
         RECIPE_FILE="recipe-amd64.yaml"
         COMPONENT_NAME="aws.edgeml.dda.LocalServer.amd64"
         ;;
     aarch64)
-        if [ "$JETPACK5" = "1" ]; then
+        # JetPack version is required for aarch64 so we never silently publish
+        # the wrong component (passing nothing previously defaulted to JP4 and
+        # produced aws.edgeml.dda.LocalServer.arm64 even when JP5 was intended).
+        if [ -z "$JETPACK" ]; then
+            echo "ERROR: JetPack version is required for aarch64 builds."
+            echo "Usage: $0 aarch64 <4|5>"
+            echo "  4 = JetPack 4.6 (Ubuntu 18.04, L4T r32.x)  -> aws.edgeml.dda.LocalServer.arm64"
+            echo "  5 = JetPack 5   (Ubuntu 20.04, L4T r35.x)  -> aws.edgeml.dda.LocalServer.arm64JP5"
+            exit 1
+        fi
+        if [ "$JETPACK" = "5" ]; then
             RECIPE_FILE="recipe-arm64-jp5.yaml"
             COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64JP5"
         else
@@ -51,7 +88,7 @@ esac
 
 print_step "Detecting architecture and preparing configuration"
 echo "Architecture: $ARCH"
-echo "JetPack 5: $JETPACK5"
+echo "JetPack version: ${JETPACK:-n/a}"
 echo "Component name: $COMPONENT_NAME"
 echo "Recipe file: $RECIPE_FILE"
 
