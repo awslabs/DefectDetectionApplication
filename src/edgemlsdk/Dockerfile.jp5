@@ -269,7 +269,7 @@ RUN mkdir -p /debs/ /tars/ && \
     cp /dependencies/debs/aws-sdk-cpp.deb /debs/aws-sdk-cpp.deb && \
     cp /dependencies/debs/libstdc++6*.deb /debs/libstdc++6.deb && \
     cp /dependencies/debs/libgstreamer-plugins-base1.0-0*.deb /debs/libgstreamer-plugins-base1.0.deb && \
-    cp /dependencies/debs/openssl_*.deb /debs/openssl.deb && \
+    cp /dependencies/debs/openssl*.deb /debs/openssl.deb && \
     cp /dependencies/debs/libgstreamer-plugins-base1.0-dev*.deb /debs/libgstreamer-plugins-base1.0-dev.deb && \
     cp /dependencies/debs/triton-core.deb /debs/triton-core.deb && \
     cp /dependencies/debs/triton-python-backend.deb /debs/triton-python-backend.deb && \
