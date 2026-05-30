@@ -63,6 +63,12 @@ fi
 cd ..
 echo "Current directory: $(pwd)"
 echo "Checking for edgemlsdk directory: $(ls -ld edgemlsdk 2>&1)"
+# Start from a clean staging dir. build-custom.sh is run repeatedly on the same
+# build server; a leftover backend/edgemlsdk from a previous run makes the
+# `cp -r edgemlsdk backend/edgemlsdk` below merge into a stale nested tree and
+# fail (cannot stat .../extracted-debs/debs/*.deb). Removing it first makes every
+# run behave like a clean checkout.
+rm -rf backend/edgemlsdk
 mkdir -p backend/edgemlsdk
 if [ ! -d "edgemlsdk" ]; then
   echo "ERROR: edgemlsdk directory not found at $(pwd)/edgemlsdk"
