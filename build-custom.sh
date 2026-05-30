@@ -97,7 +97,17 @@ else
 fi
 echo "Backend Dockerfile: $BACKEND_DOCKERFILE"
 echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
-docker-compose --profile tegra --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache || { echo "ERROR: docker-compose build failed"; exit 1; }
+# Select profiles by architecture. The `tegra` service targets Jetson
+# (platform linux/arm64/v8) and must NOT be built on x86_64 hosts — doing so
+# forces an emulated arm64 build that fails compiling Python from source
+# ("cannot compute sizeof (long double)"). x86_64 uses only `generic`.
+if [ "$ARCHITECTURE" = "x86_64" ]; then
+  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache \
+    || { echo "ERROR: docker-compose build failed"; exit 1; }
+else
+  docker-compose --profile tegra --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache \
+    || { echo "ERROR: docker-compose build failed"; exit 1; }
+fi
 cd ..
 # save Docker images as tar
 echo "save docker images as tarvballs"
