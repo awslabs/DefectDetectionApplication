@@ -117,8 +117,13 @@ fi
 cd ..
 # save Docker images as tar
 echo "save docker images as tarvballs"
-docker save --output ./custom-build/$COMPONENT_NAME/flask-app.tar flask-app
-docker save --output ./custom-build/$COMPONENT_NAME/react-webapp.tar react-webapp
+# Use stdout redirection rather than `docker save --output`. Under snap Docker,
+# `--output` writes a transient `.tmp-<name><rand>` file in the destination dir
+# and renames it; that temp file would briefly appear in the staging dir and
+# break the packaging `zip` (exit 18 "could not open for reading"). Redirecting
+# stdout lets the shell create the final file directly — no snap temp file.
+docker save flask-app > ./custom-build/$COMPONENT_NAME/flask-app.tar
+docker save react-webapp > ./custom-build/$COMPONENT_NAME/react-webapp.tar
 
 # include docker-compose.yaml in archive
 cp src/docker-compose.yaml ./custom-build/$COMPONENT_NAME/
@@ -134,11 +139,52 @@ cp src/backend/triggers/outputs/dio.py ./custom-build/$COMPONENT_NAME/
 cp -r src/host_scripts ./custom-build/$COMPONENT_NAME/
 
 # zip up archive
+ARCHIVE="./custom-build/$COMPONENT_NAME-$ARCHITECTURE.zip"
+rm -f "$ARCHIVE"
 # Remove any transient docker-save temp files (e.g. .tmp-react-webapp.tar<rand>)
-# that snap Docker may leave briefly in the build dir; otherwise `zip -r` can
-# enumerate them and then fail with exit 18 when they are renamed away mid-zip.
+# that snap Docker may leave briefly in the build dir.
 rm -f ./custom-build/$COMPONENT_NAME/.tmp-* 2>/dev/null || true
-zip -r -X ./custom-build/$COMPONENT_NAME-$ARCHITECTURE.zip ./custom-build/$COMPONENT_NAME -x '*/.tmp-*'
+
+# Diagnostics: make the next failure conclusive (zip version, what we're about
+# to package, and free space on the build volume).
+echo "Packaging artifact: $ARCHIVE"
+echo "zip version: $(zip --version 2>/dev/null | head -1)"
+echo "Staging dir contents:"
+ls -lh ./custom-build/$COMPONENT_NAME/ || true
+echo "Disk free on build volume:"
+df -h ./custom-build/ | tail -n +1 || true
+
+# Package an EXPLICIT member list rather than `zip -r <dir>`. A recursive scan
+# of the staging dir can enumerate a transient file (e.g. a snap Docker save
+# temp) and then fail with exit 18 / "could not open for reading" /
+# "Could not create output file" when that file is renamed away mid-zip.
+# Listing only the files we staged removes that race entirely.
+ZIP_MEMBERS=(
+  "custom-build/$COMPONENT_NAME/docker-compose.yaml"
+  "custom-build/$COMPONENT_NAME/flask-app.tar"
+  "custom-build/$COMPONENT_NAME/react-webapp.tar"
+  "custom-build/$COMPONENT_NAME/dio.py"
+  "custom-build/$COMPONENT_NAME/host_scripts"
+  "custom-build/$COMPONENT_NAME/backend"
+  "custom-build/$COMPONENT_NAME/frontend"
+)
+zip -r -X "$ARCHIVE" "${ZIP_MEMBERS[@]}" -x '*/.tmp-*' || {
+  rc=$?
+  echo "ERROR: packaging zip failed (exit $rc)."
+  echo "  Staging dir:"
+  ls -lh ./custom-build/$COMPONENT_NAME/ || true
+  echo "  Disk free:"
+  df -h ./custom-build/ || true
+  exit $rc
+}
+
+# Verify the archive is complete/readable before handing it to GDK. `zip -T`
+# is part of zip itself (no unzip dependency required).
+if ! zip -T "$ARCHIVE" >/dev/null 2>&1; then
+  echo "ERROR: packaged archive $ARCHIVE failed integrity check (zip -T)."
+  exit 1
+fi
+echo "Archive created: $(ls -lh "$ARCHIVE" | awk '{print $5, $9}')"
 
 # copy archive to greengrass-build
-cp ./custom-build/$COMPONENT_NAME-$ARCHITECTURE.zip ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/
+cp "$ARCHIVE" ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/
