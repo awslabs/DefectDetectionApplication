@@ -58,7 +58,7 @@ cd edgemlsdk/
 if [ "$IS_JP5" = "1" ]; then
   ./build.sh -p $(uname -m) -u $IMAGE_VER -y 3.9 -j 5
 else
-  ./build.sh -p $(uname -m) -u $IMAGE_VER 3.9
+  ./build.sh -p $(uname -m) -u $IMAGE_VER -y 3.9
 fi
 cd ..
 echo "Current directory: $(pwd)"
@@ -133,12 +133,6 @@ cp -r src/host_scripts ./custom-build/$COMPONENT_NAME/
 # enumerate them and then fail with exit 18 when they are renamed away mid-zip.
 rm -f ./custom-build/$COMPONENT_NAME/.tmp-* 2>/dev/null || true
 zip -r -X ./custom-build/$COMPONENT_NAME-$ARCHITECTURE.zip ./custom-build/$COMPONENT_NAME -x '*/.tmp-*'
-
-# dev test, create temp zip file for supported architecture not in development
-for arch in "aarch64" "x86_64"; do
-  touch $COMPONENT_NAME-$arch.zip
-  mv $COMPONENT_NAME-$arch.zip ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/
-done
 
 # copy archive to greengrass-build
 cp ./custom-build/$COMPONENT_NAME-$ARCHITECTURE.zip ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/
