@@ -118,7 +118,11 @@ cp src/backend/triggers/outputs/dio.py ./custom-build/$COMPONENT_NAME/
 cp -r src/host_scripts ./custom-build/$COMPONENT_NAME/
 
 # zip up archive
-zip -r -X ./custom-build/$COMPONENT_NAME-$ARCHITECTURE.zip ./custom-build/$COMPONENT_NAME
+# Remove any transient docker-save temp files (e.g. .tmp-react-webapp.tar<rand>)
+# that snap Docker may leave briefly in the build dir; otherwise `zip -r` can
+# enumerate them and then fail with exit 18 when they are renamed away mid-zip.
+rm -f ./custom-build/$COMPONENT_NAME/.tmp-* 2>/dev/null || true
+zip -r -X ./custom-build/$COMPONENT_NAME-$ARCHITECTURE.zip ./custom-build/$COMPONENT_NAME -x '*/.tmp-*'
 
 # dev test, create temp zip file for supported architecture not in development
 for arch in "aarch64" "x86_64"; do
