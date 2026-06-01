@@ -134,6 +134,10 @@ else
       set -e
       python3.9 -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures
       export PYTHONPATH=/repo/src/backend
+      # The backend imports the triton/panorama bindings at collection time
+      # (via conftest). docker-compose normally provides these loader paths at
+      # Run time; replicate them here so libtritonserver.so resolves.
+      export LD_LIBRARY_PATH=/opt/tritonserver/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
       python3.9 -m pytest \
         test/backend-test/utils/test_auth.py \
         test/backend-test/api-endpoints/test_auth_info_api.py \
