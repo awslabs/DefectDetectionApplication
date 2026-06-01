@@ -50,6 +50,59 @@ class TestGetLocalServerComponentVersion(LocalServerBaseTestCase):
 
     JP5_PATH = "/greengrass/v2/work/aws.edgeml.dda.LocalServer.arm64JP5-aarch64"
 
+    # Realistic full Greengrass artifact paths, which embed the deployed version.
+    JP5_FULL_PATH = (
+        "/greengrass/v2/packages/artifacts-unarchived/"
+        "aws.edgeml.dda.LocalServer.arm64JP5/1.0.5/"
+        "aws.edgeml.dda.LocalServer.arm64JP5-aarch64"
+    )
+    ARM64_FULL_PATH = (
+        "/greengrass/v2/packages/artifacts-unarchived/"
+        "aws.edgeml.dda.LocalServer.arm64/1.0.5/"
+        "aws.edgeml.dda.LocalServer.arm64-aarch64"
+    )
+
+    def test_version_read_from_artifact_path_ignores_leftover_component(self):
+        from endpoints import system
+
+        # The nucleus still knows a leftover arm64 1.0.108, but the running
+        # component's own artifact path says 1.0.5 — the path must win.
+        components = [
+            _component("aws.edgeml.dda.LocalServer.arm64", "1.0.108"),
+            _component("aws.edgeml.dda.LocalServer.arm64JP5", "1.0.108"),
+        ]
+        with patch.dict(os.environ, {"LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH": self.JP5_FULL_PATH}), \
+                patch("endpoints.system.ipc_client", _mock_ipc_client_with_components(components)):
+            version = system.get_local_server_component_version()
+
+        self.assertEqual(version, "1.0.5")
+
+    def test_version_from_path_does_not_call_ipc(self):
+        from endpoints import system
+
+        mock_ipc = _mock_ipc_client_with_components([])
+        with patch.dict(os.environ, {"LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH": self.ARM64_FULL_PATH}), \
+                patch("endpoints.system.ipc_client", mock_ipc):
+            version = system.get_local_server_component_version()
+
+        self.assertEqual(version, "1.0.5")
+        # Path resolution is ground truth; IPC must not be consulted.
+        mock_ipc.new_list_components.assert_not_called()
+
+    def test_falls_back_to_ipc_when_path_has_no_version(self):
+        from endpoints import system
+
+        # No version segment in the path -> must fall back to IPC exact match.
+        components = [
+            _component("aws.edgeml.dda.LocalServer.arm64", "1.0.108"),
+            _component("aws.edgeml.dda.LocalServer.arm64JP5", "1.0.4"),
+        ]
+        with patch.dict(os.environ, {"LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH": self.JP5_PATH}), \
+                patch("endpoints.system.ipc_client", _mock_ipc_client_with_components(components)):
+            version = system.get_local_server_component_version()
+
+        self.assertEqual(version, "1.0.4")
+
     def test_returns_running_variant_version_when_multiple_variants_present(self):
         from endpoints import system
 

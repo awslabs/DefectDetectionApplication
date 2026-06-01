@@ -111,25 +111,58 @@ def get_opencv_version_from_lfv():
         logger.warn("opencv_python_headless module is not installed for edge agent")
     return version
 
-def get_local_server_component_version():
-    """Get the version of the LocalServer component from Greengrass.
+def _parse_version_from_decompressed_path(decompressed_path, own_component_name):
+    """Extract this component's deployed version from its artifact path.
 
-    Multiple LocalServer variants (.arm64, .arm64JP5, .amd64) can be present
-    on a single core device, and they all share the "aws.edgeml.dda.LocalServer"
-    prefix. Matching by prefix and taking the first hit can therefore report a
-    different (e.g. leftover) variant's version than the one actually running
-    here. Resolve THIS component's exact name from the decompressed-path env
-    var the recipe injects (e.g. ".../aws.edgeml.dda.LocalServer.arm64JP5-aarch64")
-    and match it exactly; fall back to the prefix match only if that name
-    cannot be determined.
+    Greengrass resolves {artifacts:decompressedPath} to
+        <root>/packages/artifacts-unarchived/<component-name>/<version>/<artifact-dir>
+    and the recipe appends "/<component-name>-<arch>", so the env var looks like
+        .../aws.edgeml.dda.LocalServer.arm64/1.0.5/aws.edgeml.dda.LocalServer.arm64-aarch64
+    The version is therefore the path segment immediately preceding the final
+    "<component-name>-<arch>" segment. This is THIS running component's own
+    artifact path, so it is ground truth — unaffected by any other (leftover)
+    LocalServer component the nucleus might also know about.
+    """
+    if not decompressed_path:
+        return None
+
+    # Prefer the version that immediately follows this component's directory.
+    if own_component_name:
+        m = re.search(
+            r"/" + re.escape(own_component_name) + r"/(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.]+)?)/",
+            decompressed_path,
+        )
+        if m:
+            return m.group(1)
+
+    # Fallback: the semver that is the second-to-last path segment.
+    m = re.search(r"/(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.]+)?)/[^/]+/?$", decompressed_path)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def get_local_server_component_version():
+    """Get the version of the LocalServer component actually running here.
+
+    Multiple LocalServer variants (.arm64, .arm64JP5, .amd64) — and multiple
+    versions of the same variant — can be known to the nucleus on a single core
+    device. Matching Greengrass's component list by name prefix (or even by
+    exact name) can therefore report a different/leftover version than the one
+    deployed and running here.
+
+    The reliable source is THIS component's own artifact path, which the recipe
+    injects as LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH and which embeds both
+    the exact component name and the deployed version. Read the version from
+    there first; only fall back to the IPC component list if the path cannot be
+    parsed.
     """
     version = "NOT_FOUND"
 
-    # The recipe sets LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH to
-    # "{artifacts:decompressedPath}/<component-name>-<arch>". The last path
-    # segment is "<component-name>-<arch>"; component names are dot-separated
-    # and contain no '-', and the arch suffix (aarch64 / x86_64) contains none
-    # either, so rsplit on the final '-' yields the exact component name.
+    # The last path segment is "<component-name>-<arch>"; component names are
+    # dot-separated and contain no '-', and the arch suffix (aarch64 / x86_64)
+    # contains none either, so rsplit on the final '-' yields the exact name.
     own_component_name = None
     decompressed_path = os.getenv("LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH")
     if decompressed_path:
@@ -138,6 +171,14 @@ def get_local_server_component_version():
         if candidate.startswith(DDA_LOCAL_SERVER_COMPONENT):
             own_component_name = candidate
 
+    # 1) Ground truth: version embedded in this component's own artifact path.
+    path_version = _parse_version_from_decompressed_path(decompressed_path, own_component_name)
+    if path_version:
+        logger.info(f"Resolved LocalServer version from artifact path: {path_version}")
+        return path_version
+
+    # 2) Fallback: query Greengrass, matching this component's exact name when
+    #    known, otherwise the first prefix match (legacy behavior).
     try:
         list_components_request = ListComponentsRequest()
         list_components_operation = ipc_client.new_list_components()
