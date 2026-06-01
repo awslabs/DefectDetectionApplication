@@ -631,6 +631,58 @@ aws iam list-attached-role-policies --role-name GreengrassV2TokenExchangeRole
 - Verify component exists in your account
 - Check architecture matches (arm64 vs x86_64)
 
+**Deployment Fails — Component Store Full** (`DISK_SPACE_CRITICAL` / `SizeLimitException`):
+
+```
+SizeLimitException: Component store size limit reached:
+  12545441763 bytes existing, 3561542 bytes needed, 10000000000 bytes maximum allowed total
+```
+
+The Greengrass component store has hit its size cap (default 10 GB). This is
+almost always caused by **old LocalServer versions piling up** — pre-ECR builds
+embedded the full multi-GB Docker image tar in the artifact zip, and Greengrass
+keeps an archived (`packages/artifacts/`) and unarchived
+(`packages/artifacts-unarchived/`) copy of every version. A couple of those fill
+the store. (The new deployment "bytes needed" is often tiny — e.g. ~3.5 MB for an
+ECR-based component — which itself tells you the store is full of stale data.)
+
+1. Find which versions are on disk and which one is currently deployed:
+```bash
+sudo du -sh /aws_dda/greengrass/v2/packages/artifacts/aws.edgeml.dda.LocalServer.*/* | sort -h
+sudo du -sh /aws_dda/greengrass/v2/packages/artifacts-unarchived/aws.edgeml.dda.LocalServer.*/* | sort -h
+# Currently-running version:
+grep -i "Resolved component" /aws_dda/greengrass/v2/logs/greengrass.log | tail -3
+```
+
+2. Remove the OLD version directories from both `artifacts/` and
+   `artifacts-unarchived/`. **Never delete the version that is currently
+   deployed/running** (replace `<OLD_VERSION>` accordingly):
+```bash
+sudo systemctl stop greengrass
+sudo rm -rf /aws_dda/greengrass/v2/packages/artifacts/aws.edgeml.dda.LocalServer.arm64/<OLD_VERSION>
+sudo rm -rf /aws_dda/greengrass/v2/packages/artifacts-unarchived/aws.edgeml.dda.LocalServer.arm64/<OLD_VERSION>
+sudo systemctl start greengrass
+```
+   Then re-trigger the deployment.
+
+   Alternatively, raise the store cap via the nucleus configuration (then let
+   Greengrass garbage-collect unreferenced versions):
+```json
+"aws.greengrass.Nucleus": {
+  "configurationUpdate": { "merge": "{\"componentStoreMaxSizeBytes\":\"30000000000\"}" }
+}
+```
+
+3. **Prevent recurrence:** publish the LocalServer component through the ECR/S3
+   path so artifacts stay small (a few MB instead of multiple GB). This happens
+   automatically when the packaged artifact exceeds 2 GB — see
+   `gdk-component-build-and-publish.sh`. Rebuild/publish for the device's
+   architecture (e.g. `./gdk-component-build-and-publish.sh aarch64 4` for
+   JetPack 4) and deploy that version. ECR-based components also require the
+   device token-exchange role to have `ecr:GetAuthorizationToken`,
+   `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, and `s3:GetObject` in the
+   device's region.
+
 **Inference Endpoint Not Responding:**
 ```bash
 ps aux | grep LocalServer
