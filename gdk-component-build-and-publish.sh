@@ -5,6 +5,26 @@ set -o pipefail
 # Build and publish Greengrass components using GDK
 # This script builds components and publishes them to the Greengrass component repository
 
+# ── Pre-flight: verify AWS credentials before the (long) build ──────────────
+# Publishing needs valid credentials. Check them up front so an expired session
+# fails in seconds rather than after a full image build + packaging (which can
+# take 10-15+ minutes). This check was on main and was dropped during the rebase.
+echo "Checking AWS credentials..."
+if ! CALLER_IDENTITY=$(aws sts get-caller-identity 2>&1); then
+    echo ""
+    echo "❌ ERROR: AWS credentials are not valid or have expired."
+    echo "   ${CALLER_IDENTITY}"
+    echo ""
+    echo "   Re-authenticate before building/publishing, e.g.:"
+    echo "     aws sso login --profile <name>"
+    echo "     aws login"
+    echo "     export AWS_PROFILE=<name>"
+    echo ""
+    echo "   (Credentials are required to publish the Greengrass component.)"
+    exit 1
+fi
+echo "✓ AWS credentials valid"
+
 # Step tracking
 STEP=0
 TOTAL_STEPS=8
