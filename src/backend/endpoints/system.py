@@ -55,6 +55,7 @@ from typing import Literal
 # Custom Modules
 from utils.constants import (
     DDA_GG_COMPONENT_NAME_PREFIX,
+    DDA_LOCAL_SERVER_COMPONENT,
     DDA_ROOT_FOLDER,
     GET_DDA_COMPONENT_STATUS_HEALTHY,
     GET_DDA_COMPONENT_STATUS_UNHEALTHY,
@@ -111,23 +112,57 @@ def get_opencv_version_from_lfv():
     return version
 
 def get_local_server_component_version():
-    """Get the version of the LocalServer component from Greengrass"""
+    """Get the version of the LocalServer component from Greengrass.
+
+    Multiple LocalServer variants (.arm64, .arm64JP5, .amd64) can be present
+    on a single core device, and they all share the "aws.edgeml.dda.LocalServer"
+    prefix. Matching by prefix and taking the first hit can therefore report a
+    different (e.g. leftover) variant's version than the one actually running
+    here. Resolve THIS component's exact name from the decompressed-path env
+    var the recipe injects (e.g. ".../aws.edgeml.dda.LocalServer.arm64JP5-aarch64")
+    and match it exactly; fall back to the prefix match only if that name
+    cannot be determined.
+    """
     version = "NOT_FOUND"
+
+    # The recipe sets LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH to
+    # "{artifacts:decompressedPath}/<component-name>-<arch>". The last path
+    # segment is "<component-name>-<arch>"; component names are dot-separated
+    # and contain no '-', and the arch suffix (aarch64 / x86_64) contains none
+    # either, so rsplit on the final '-' yields the exact component name.
+    own_component_name = None
+    decompressed_path = os.getenv("LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH")
+    if decompressed_path:
+        last_segment = os.path.basename(decompressed_path.rstrip("/"))
+        candidate = last_segment.rsplit("-", 1)[0]
+        if candidate.startswith(DDA_LOCAL_SERVER_COMPONENT):
+            own_component_name = candidate
+
     try:
         list_components_request = ListComponentsRequest()
         list_components_operation = ipc_client.new_list_components()
         list_components_operation.activate(list_components_request)
         list_components_future = list_components_operation.get_response()
         list_components_response = list_components_future.result(GG_IPC_FUTURE_TIMEOUT)
-        
+
+        prefix_match_version = None
         for component in list_components_response.components:
-            if component.component_name.startswith("aws.edgeml.dda.LocalServer"):
-                version = component.version
-                logger.info(f"Found LocalServer component: {component.component_name} version {version}")
-                break
+            if own_component_name is not None:
+                if component.component_name == own_component_name:
+                    version = component.version
+                    logger.info(f"Found LocalServer component: {component.component_name} version {version}")
+                    break
+            elif component.component_name.startswith(DDA_LOCAL_SERVER_COMPONENT):
+                # No exact name available; remember the first prefix match as a fallback.
+                if prefix_match_version is None:
+                    prefix_match_version = component.version
+                    logger.info(f"Found LocalServer component (prefix match): {component.component_name} version {component.version}")
+
+        if version == "NOT_FOUND" and prefix_match_version is not None:
+            version = prefix_match_version
     except Exception as e:
         logger.error(f"Failed to get LocalServer component version: {e}")
-    
+
     return version
 
 @router.get("/system-health")
