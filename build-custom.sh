@@ -115,6 +115,34 @@ else
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 fi
 cd ..
+
+# ── Run backend unit tests inside the freshly built flask-app image ─────────
+# These tests import the full backend (edgemlsdk bindings, native libs, the
+# FastAPI app), so they can only run where those deps already exist — i.e.
+# inside the flask-app image we just built. Mount the repo so the tests run
+# against the source tree, install the test-only packages on the fly, and run
+# pytest. A failure fails the build here, before packaging. Set
+# SKIP_BACKEND_TESTS=1 to bypass (e.g. for a quick local rebuild).
+if [ "${SKIP_BACKEND_TESTS:-0}" = "1" ]; then
+  echo "SKIP_BACKEND_TESTS=1 set — skipping backend unit tests."
+else
+  echo "Running backend unit tests inside the flask-app image..."
+  REPO_ROOT="$(pwd)"
+  docker run --rm \
+    -v "$REPO_ROOT":/repo -w /repo \
+    --entrypoint bash flask-app -c '
+      set -e
+      python3.9 -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures
+      export PYTHONPATH=/repo/src/backend
+      python3.9 -m pytest \
+        test/backend-test/utils/test_auth.py \
+        test/backend-test/api-endpoints/test_auth_info_api.py \
+        test/backend-test/utils/test_user_group_management_utils.py \
+        test/backend-test/utils/test_dda_user_management_utils.py -v
+    ' || { echo "ERROR: backend unit tests failed"; exit 1; }
+  echo "Backend unit tests passed."
+fi
+
 # save Docker images as tar
 echo "save docker images as tarvballs"
 # Use stdout redirection rather than `docker save --output`. Under snap Docker,
