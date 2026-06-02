@@ -139,12 +139,13 @@ else
 fi
 echo "JETSON_TENSORRT=${JETSON_TENSORRT}" >> /tmp/.dda.env
 
-#Disable gpu for orin container , this file found only on orin devices for now.
-if [ -f /sys/devices/soc0/soc_id ]; then
-    is_gpu=0
-fi
-
-#Use gpu if aarch64 and CUDA is present
+# Use the GPU (tegra) profile when this is an aarch64 Jetson with CUDA present.
+# This covers both JetPack 4 (Xavier, L4T r32.x) and JetPack 5 (Orin, L4T r35.x);
+# the JP5-specific backend image is selected at build time (Dockerfile.jp5), while
+# the runtime profile is the same `tegra` profile that mounts the CUDA libraries.
+# NOTE: Orin is intentionally NOT disabled here — the old "disable gpu for orin"
+# guard was for a bug that no longer applies, and disabling it left the container
+# without the CUDA mounts.
 if [ $is_gpu -eq 1 ] && [ $arch = "aarch64" ]; then
     echo DOCKER_PROFILE='tegra' >> /tmp/.dda.env
 else
