@@ -142,7 +142,8 @@ else
         test/backend-test/utils/test_auth.py \
         test/backend-test/api-endpoints/test_auth_info_api.py \
         test/backend-test/utils/test_user_group_management_utils.py \
-        test/backend-test/utils/test_dda_user_management_utils.py -v
+        test/backend-test/utils/test_dda_user_management_utils.py \
+        test/backend-test/host_scripts/test_docker_profile_selection.py -v
     ' || { echo "ERROR: backend unit tests failed"; exit 1; }
   echo "Backend unit tests passed."
 fi
