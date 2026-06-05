@@ -689,7 +689,30 @@ fi
 echo ""
 
 echo "▶ Provisioning Greengrass Core Device..."
-if ! run_cmd "java -Droot=/aws_dda/greengrass/v2 -Dlog.store=FILE -jar ./GreengrassInstaller/lib/Greengrass.jar --aws-region ${aws_region} --thing-name ${thing_name} --thing-group-name DDA_transition_EC2_Group --thing-policy-name GreengrassV2IoTThingPolicy --tes-role-name GreengrassV2TokenExchangeRole --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias --component-default-user ggc_user:ggc_group --setup-system-service true --provision true"; then
+# The Greengrass provisioner is a Java app that uses the AWS Java SDK's default
+# credential provider chain. That chain cannot read the AWS CLI's credential
+# sources in all contexts (SSO cache, `aws login` session, some IMDS setups),
+# which fails with:
+#   SdkClientException: Unable to load credentials from any of the providers...
+# Materialize the active credentials via the CLI and pass them to Java both as
+# environment variables and as -Daws.* system properties so the SDK always sees
+# them. (Fix ported from the jp5v2 branch; lost during the merge/rebase.)
+if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+    eval "$(aws configure export-credentials --format env 2>/dev/null)" || true
+fi
+
+JAVA_CRED_PROPS=""
+if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+    JAVA_CRED_PROPS="-Daws.accessKeyId=$AWS_ACCESS_KEY_ID -Daws.secretAccessKey=$AWS_SECRET_ACCESS_KEY"
+    if [ -n "$AWS_SESSION_TOKEN" ]; then
+        JAVA_CRED_PROPS="$JAVA_CRED_PROPS -Daws.sessionToken=$AWS_SESSION_TOKEN"
+    fi
+else
+    add_warning "No AWS credentials resolved for Greengrass provisioning - provisioning will likely fail. Ensure 'aws sts get-caller-identity' works first."
+fi
+
+if ! AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+    run_cmd "java -Droot=/aws_dda/greengrass/v2 -Dlog.store=FILE $JAVA_CRED_PROPS -jar ./GreengrassInstaller/lib/Greengrass.jar --aws-region ${aws_region} --thing-name ${thing_name} --thing-group-name DDA_transition_EC2_Group --thing-policy-name GreengrassV2IoTThingPolicy --tes-role-name GreengrassV2TokenExchangeRole --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias --component-default-user ggc_user:ggc_group --setup-system-service true --provision true"; then
     add_error "Greengrass provisioning failed"
 else
     echo "✓ Greengrass Core provisioned successfully"
@@ -740,6 +763,39 @@ do
 done
 
 echo "✓ Directory permissions configured"
+echo ""
+
+echo "▶ Installing OpenCV for application health reporting..."
+# The Application Health Overview page reads the OpenCV version from the LFV
+# edge-agent venv site-packages (see get_opencv_version_from_lfv in
+# src/backend/endpoints/system.py, which appends this path to sys.path and looks
+# up the 'opencv_python_headless' distribution). The LocalServer backend runs in
+# a container with /aws_dda bind-mounted, so this venv path is the only
+# station-writable location the backend can actually read. Pre-seed
+# opencv-python-headless there so the health page reports a version by default
+# instead of "Not found".
+lfv_agent_component="aws.iot.lookoutvision.EdgeAgent"
+lfv_venv_site_packages="${dda_greengrass_root_folder}/work/${lfv_agent_component}/env/lib/python3.9/site-packages"
+
+if [ -z "$PYTHON39" ]; then
+    add_warning "python3.9 not found - skipping OpenCV install for health reporting"
+else
+    if run_cmd "mkdir -p ${lfv_venv_site_packages}"; then
+        if run_cmd "$PYTHON39 -m pip install --target ${lfv_venv_site_packages} --upgrade opencv-python-headless"; then
+            echo "✓ OpenCV (opencv-python-headless) installed for health reporting"
+            # Make readable by the Greengrass component user that runs the LFV
+            # agent / LocalServer (created during provisioning above).
+            if isUserExists ggc_user; then
+                run_cmd "chown -R ggc_user:ggc_group ${dda_greengrass_root_folder}/work/${lfv_agent_component}" \
+                    || add_warning "Failed to set ownership on LFV agent venv path"
+            fi
+        else
+            add_warning "Failed to install opencv-python-headless - health page may show OpenCV as 'Not found'"
+        fi
+    else
+        add_warning "Failed to create LFV agent venv path for OpenCV install"
+    fi
+fi
 echo ""
 
 echo "▶ Setting up CloudWatch Logs diagnostics..."
