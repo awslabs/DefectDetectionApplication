@@ -35,7 +35,7 @@ import subprocess
 import re
 import sys
 
-from typing import Optional
+from typing import Optional, List
 import importlib.metadata
 
 # Aws Modules
@@ -73,7 +73,7 @@ from endpoints.route.access_log_router import get_api_router
 import logging
 logger = logging.getLogger(__name__)
 
-from utils.gg_utils import list_gg_components, restart_components
+from utils.gg_utils import list_gg_components, restart_components, list_all_gg_components_with_details
 router = get_api_router()
 
 EDGE_AGENT_VENV_SITE_PACKAGE_PATH = EDGE_AGENT_VENV_PATH + "/env/lib/" + PYTHON38 + "/site-packages"
@@ -262,6 +262,23 @@ def get_dda_component_status() -> GetDdaComponentHealthStatusResponse:
         ]:
             return {"status": GET_DDA_COMPONENT_STATUS_UNHEALTHY}
     return {"status": GET_DDA_COMPONENT_STATUS_HEALTHY}
+
+
+class GreengrassComponent(BaseModel):
+    componentName: str
+    version: str
+    state: str
+
+
+class ListGreengrassComponentsResponse(BaseModel):
+    components: List[GreengrassComponent]
+
+
+@router.get("/greengrass-components")
+def list_greengrass_components() -> ListGreengrassComponentsResponse:
+    logger.info("Received request to list Greengrass components")
+    components = list_all_gg_components_with_details()
+    return {"components": components}
 
 
 class SnapshotPathResponse(BaseModel):

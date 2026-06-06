@@ -198,7 +198,7 @@ USER_POOL_ID=$(aws cloudformation describe-stacks \
   --stack-name EdgeCVPortalAuthStack \
   --query 'Stacks[0].Outputs[?OutputKey==`AuthConfig`].OutputValue' \
   --output text --region us-east-2 | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
-REGION="us-east-2"
+REGION="us-east-1"
 
 aws cognito-idp admin-create-user \
   --user-pool-id $USER_POOL_ID \

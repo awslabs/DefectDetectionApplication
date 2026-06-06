@@ -29,3 +29,9 @@ export interface SystemHealth {
 export interface Snapshot {
   archivePath: string;
 }
+
+export interface GreengrassComponent {
+  componentName: string;
+  version: string;
+  state: string;
+}
