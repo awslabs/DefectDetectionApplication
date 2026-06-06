@@ -17,6 +17,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { validateBucketName } from '../utils/s3Validation';
+import S3BucketPicker from '../components/S3BucketPicker';
 
 interface OnboardingState {
   // Step 1: Setup Type Selection
@@ -130,6 +131,7 @@ export default function UseCaseOnboarding() {
       // Create the use case
       const useCaseData: Record<string, unknown> = {
         name: state.useCaseName,
+        description: state.description,  // Persist the description entered in Basic Information
         region: state.region,  // Include region
       };
 
@@ -326,15 +328,22 @@ export default function UseCaseOnboarding() {
                     <Box variant="h3">S3 Storage Configuration</Box>
                     <FormField
                       label="S3 Bucket"
-                      description="S3 bucket for storing training datasets, models, and labeling results"
+                      description="Browse and select a bucket in this account, or type a bucket name below. Used for storing training datasets, models, and labeling results."
                       errorText={validateBucketName(state.s3Bucket)}
                       stretch
                     >
-                      <Input
-                        value={state.s3Bucket}
-                        onChange={({ detail }) => updateState({ s3Bucket: detail.value })}
-                        placeholder="e.g., my-training-data-bucket"
-                      />
+                      <SpaceBetween size="s">
+                        <S3BucketPicker
+                          selectedBucket={state.s3Bucket}
+                          onSelect={(bucketName) => updateState({ s3Bucket: bucketName })}
+                          region={state.region}
+                        />
+                        <Input
+                          value={state.s3Bucket}
+                          onChange={({ detail }) => updateState({ s3Bucket: detail.value })}
+                          placeholder="e.g., my-training-data-bucket"
+                        />
+                      </SpaceBetween>
                     </FormField>
                   </>
                 )}

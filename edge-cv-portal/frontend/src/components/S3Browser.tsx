@@ -36,7 +36,14 @@ interface S3BrowserProps {
   visible: boolean;
   onDismiss: () => void;
   usecaseId: string;
+  /** Called when a file is selected (file-selection mode). */
   onSelectFile?: (s3Uri: string) => void;
+  /**
+   * Called when a folder is selected (folder-selection mode). When provided,
+   * each folder gets a "Select Folder" action and a "Select current folder"
+   * button is shown for the location currently being browsed.
+   */
+  onSelectFolder?: (s3Uri: string) => void;
   fileFilter?: (item: S3BrowseItem) => boolean;
   title?: string;
   selectButtonText?: string;
@@ -47,6 +54,7 @@ export default function S3Browser({
   onDismiss,
   usecaseId,
   onSelectFile,
+  onSelectFolder,
   fileFilter,
   title = 'Browse S3 Bucket',
   selectButtonText = 'Select',
@@ -54,6 +62,8 @@ export default function S3Browser({
   const [browsingS3, setBrowsingS3] = useState(false);
   const [s3Browse, setS3Browse] = useState<S3BrowseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const folderMode = !!onSelectFolder;
 
   // Load initial bucket contents when modal opens
   useEffect(() => {
@@ -89,11 +99,25 @@ export default function S3Browser({
     }
   };
 
+  // Folders don't carry an s3_uri from the backend, so build it from the
+  // bucket + folder prefix. Always ends with a trailing slash.
+  const folderUri = (prefix: string): string =>
+    `s3://${s3Browse?.bucket}/${prefix}`;
+
+  const handleSelectFolder = (prefix: string) => {
+    if (onSelectFolder && s3Browse?.bucket && prefix) {
+      onSelectFolder(folderUri(prefix));
+      onDismiss();
+    }
+  };
+
   const getFilteredFiles = () => {
     if (!s3Browse) return [];
     if (!fileFilter) return s3Browse.files;
     return s3Browse.files.filter(fileFilter);
   };
+
+  const currentPrefix = s3Browse?.current_prefix || '';
 
   return (
     <Modal
@@ -103,7 +127,20 @@ export default function S3Browser({
       size="large"
       footer={
         <Box float="right">
-          <Button onClick={onDismiss}>Close</Button>
+          <SpaceBetween direction="horizontal" size="xs">
+            {folderMode && (
+              <Button
+                variant="primary"
+                disabled={!currentPrefix}
+                onClick={() => handleSelectFolder(currentPrefix)}
+              >
+                {currentPrefix
+                  ? `Select current folder (${currentPrefix})`
+                  : 'Select current folder'}
+              </Button>
+            )}
+            <Button onClick={onDismiss}>Close</Button>
+          </SpaceBetween>
         </Box>
       }
     >
@@ -111,6 +148,13 @@ export default function S3Browser({
         {error && (
           <Alert type="error" dismissible onDismiss={() => setError(null)}>
             {error}
+          </Alert>
+        )}
+
+        {folderMode && (
+          <Alert type="info">
+            Navigate into a folder and click its <strong>Select Folder</strong>{' '}
+            action, or open it and use <strong>Select current folder</strong> below.
           </Alert>
         )}
 
@@ -124,12 +168,17 @@ export default function S3Browser({
               <BreadcrumbGroup
                 items={s3Browse.breadcrumbs.map((bc) => ({
                   text: bc.name,
-                  href: '#',
-                  onClick: (e: React.MouseEvent<HTMLAnchorElement>) => {
-                    e.preventDefault();
-                    browseS3Bucket(bc.prefix);
-                  },
+                  // Encode the prefix in href so the group-level onClick can
+                  // navigate. Cloudscape ignores per-item onClick handlers.
+                  href: `#${encodeURIComponent(bc.prefix)}`,
                 }))}
+                onClick={(e) => {
+                  e.preventDefault();
+                  const prefix = decodeURIComponent(
+                    (e.detail.href || '#').slice(1),
+                  );
+                  browseS3Bucket(prefix);
+                }}
               />
             )}
 
@@ -156,6 +205,22 @@ export default function S3Browser({
                             </Button>
                           ),
                         },
+                        ...(folderMode
+                          ? [
+                              {
+                                id: 'action',
+                                header: 'Action',
+                                cell: (item: S3BrowseItem) => (
+                                  <Button
+                                    variant="link"
+                                    onClick={() => handleSelectFolder(item.prefix!)}
+                                  >
+                                    {selectButtonText}
+                                  </Button>
+                                ),
+                              },
+                            ]
+                          : []),
                       ]}
                       items={s3Browse.folders}
                       variant="embedded"
@@ -195,18 +260,22 @@ export default function S3Browser({
                               ? new Date(item.last_modified).toLocaleDateString()
                               : '-',
                         },
-                        {
-                          id: 'action',
-                          header: 'Action',
-                          cell: (item: S3BrowseItem) => (
-                            <Button
-                              variant="link"
-                              onClick={() => handleSelectFile(item)}
-                            >
-                              {selectButtonText}
-                            </Button>
-                          ),
-                        },
+                        ...(onSelectFile
+                          ? [
+                              {
+                                id: 'action',
+                                header: 'Action',
+                                cell: (item: S3BrowseItem) => (
+                                  <Button
+                                    variant="link"
+                                    onClick={() => handleSelectFile(item)}
+                                  >
+                                    {selectButtonText}
+                                  </Button>
+                                ),
+                              },
+                            ]
+                          : []),
                       ]}
                       items={getFilteredFiles()}
                       variant="embedded"
@@ -215,7 +284,11 @@ export default function S3Browser({
                 )}
 
                 {s3Browse.folders.length === 0 && getFilteredFiles().length === 0 && (
-                  <Alert type="info">No files or folders found in this location</Alert>
+                  <Alert type="info">
+                    {folderMode
+                      ? 'This folder has no subfolders. Use "Select current folder" below to choose this location.'
+                      : 'No files or folders found in this location'}
+                  </Alert>
                 )}
               </>
             )}

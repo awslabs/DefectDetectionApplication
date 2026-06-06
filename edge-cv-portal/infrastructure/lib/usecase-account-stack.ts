@@ -373,7 +373,7 @@ export class UseCaseAccountStack extends cdk.Stack {
       new iam.PolicyStatement({
         sid: 'GroundTruthWorkteams',
         effect: iam.Effect.ALLOW,
-        actions: ['sagemaker:ListWorkteams'],
+        actions: ['sagemaker:ListWorkteams', 'sagemaker:DescribeWorkteam'],
         resources: ['*'],
       })
     );

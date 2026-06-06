@@ -2,7 +2,7 @@
  * API service for making HTTP requests to the backend
  */
 import { getConfig } from '../config';
-import { UseCase, Device, User } from '../types';
+import { UseCase, Device, User, S3Bucket } from '../types';
 
 class ApiService {
   private get baseUrl(): string {
@@ -75,6 +75,19 @@ class ApiService {
   // UseCase endpoints
   async listUseCases(): Promise<{ usecases: UseCase[]; count: number }> {
     return this.request<{ usecases: UseCase[]; count: number }>('/usecases');
+  }
+
+  // List S3 buckets in the current (portal) account - used by Onboard New Use Case
+  async listS3Buckets(): Promise<{ buckets: S3Bucket[]; count: number }> {
+    return this.request<{ buckets: S3Bucket[]; count: number }>('/s3-buckets');
+  }
+
+  // Create a new S3 bucket in the current (portal) account with default settings
+  async createS3Bucket(data: { name: string; region?: string }): Promise<{ bucket: S3Bucket }> {
+    return this.request<{ bucket: S3Bucket }>('/s3-buckets', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
   }
 
   // Dataset endpoints
@@ -453,6 +466,7 @@ class ApiService {
     num_workers_per_object?: number;
     task_time_limit?: number;
     mask_prefix?: string;
+    enable_automated_labeling?: boolean;
   }): Promise<{
     job_id: string;
     sagemaker_job_name: string;
@@ -490,6 +504,8 @@ class ApiService {
       updated_at: number;
       completed_at?: number;
       failure_reason?: string;
+      console_url?: string;
+      worker_portal_url?: string;
     };
   }> {
     return this.request(`/labeling/${jobId}`);

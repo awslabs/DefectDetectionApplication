@@ -12,6 +12,7 @@ import {
   Alert,
   Textarea,
   Button,
+  Checkbox,
 } from '@cloudscape-design/components';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { S3Dataset } from '../types';
@@ -46,6 +47,7 @@ export default function CreateLabelingJob() {
   });
   const [labelCategories, setLabelCategories] = useState('');
   const [instructions, setInstructions] = useState('');
+  const [enableAutomatedLabeling, setEnableAutomatedLabeling] = useState(false);
   const [workteams, setWorkteams] = useState<any[]>([]);
   const [selectedWorkteam, setSelectedWorkteam] = useState<SelectProps.Option | null>(null);
   const [loadingWorkteams, setLoadingWorkteams] = useState(false);
@@ -194,10 +196,13 @@ export default function CreateLabelingJob() {
     setCreating(true);
     setError('');
     try {
-      // Validate all steps before submission
+      // Validate all steps before submission; jump to the first invalid step
+      // so the user sees the relevant fields alongside the error message.
       for (let i = 0; i < 4; i++) {
         if (!validateStep(i)) {
+          setActiveStepIndex(i);
           setCreating(false);
+          window.scrollTo({ top: 0, behavior: 'smooth' });
           return;
         }
       }
@@ -257,12 +262,14 @@ export default function CreateLabelingJob() {
         num_workers_per_object: 1,
         task_time_limit: 600,
         mask_prefix: maskPrefixValue,
+        enable_automated_labeling: enableAutomatedLabeling,
       });
 
       navigate('/labeling');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create labeling job. Please try again.');
       console.error('Failed to create labeling job:', err);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     } finally {
       setCreating(false);
     }
@@ -276,6 +283,17 @@ export default function CreateLabelingJob() {
         </Header>
       }
     >
+      <SpaceBetween size="l">
+        {error && (
+          <Alert
+            type="error"
+            header="Couldn't create the labeling job"
+            dismissible
+            onDismiss={() => setError('')}
+          >
+            {error}
+          </Alert>
+        )}
       <Wizard
         i18nStrings={{
           stepNumberLabel: (stepNumber) => `Step ${stepNumber}`,
@@ -310,8 +328,6 @@ export default function CreateLabelingJob() {
             description: 'Basic job information',
             content: (
               <SpaceBetween size="l">
-                {error && <Alert type="error">{error}</Alert>}
-                
                 <FormField
                   label="Job Name"
                   description="A unique name for this labeling job"
@@ -490,6 +506,18 @@ export default function CreateLabelingJob() {
                     rows={5}
                   />
                 </FormField>
+
+                <FormField
+                  label="Automated labeling (optional)"
+                  description="Use SageMaker Ground Truth active learning to auto-label a portion of your data and reduce human labeling effort. Only supported for built-in task types."
+                >
+                  <Checkbox
+                    checked={enableAutomatedLabeling}
+                    onChange={({ detail }) => setEnableAutomatedLabeling(detail.checked)}
+                  >
+                    Enable automated data labeling (active learning)
+                  </Checkbox>
+                </FormField>
               </SpaceBetween>
             ),
           },
@@ -586,6 +614,10 @@ export default function CreateLabelingJob() {
                   <Box variant="awsui-key-label">Label Categories</Box>
                   <Box>{labelCategories || '-'}</Box>
                 </Box>
+                <Box>
+                  <Box variant="awsui-key-label">Automated Labeling</Box>
+                  <Box>{enableAutomatedLabeling ? 'Enabled' : 'Disabled'}</Box>
+                </Box>
 
                 <Box variant="h3">Workforce</Box>
                 <Box>
@@ -611,16 +643,16 @@ export default function CreateLabelingJob() {
         ]}
       />
 
-      {/* S3 Browser Modal for dataset selection */}
+      {/* S3 Browser Modal for dataset selection (folder-selection mode) */}
       <S3Browser
         visible={showBrowseModal}
         onDismiss={() => setShowBrowseModal(false)}
         usecaseId={selectedUseCase?.usecase_id || ''}
-        onSelectFile={selectDatasetFromBrowser}
-        fileFilter={(item) => item.type === 'folder'}
+        onSelectFolder={selectDatasetFromBrowser}
         title="Select Dataset Folder"
         selectButtonText="Select Folder"
       />
+      </SpaceBetween>
     </Container>
   );
 }

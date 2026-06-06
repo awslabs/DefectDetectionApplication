@@ -174,6 +174,17 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
+    // S3 buckets in the current (portal) account - used by Onboard New Use Case
+    const s3BucketsResource = this.api.root.addResource('s3-buckets');
+    s3BucketsResource.addMethod('GET', useCasesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    s3BucketsResource.addMethod('POST', useCasesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
     // Data Management endpoints
     const usecaseDataResource = usecaseResource.addResource('data');
     

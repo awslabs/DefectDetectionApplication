@@ -65,6 +65,8 @@ export default function LabelingDetail() {
         created_by: apiJob.created_by,
         created_at: apiJob.created_at,
         completed_at: apiJob.completed_at,
+        console_url: apiJob.console_url,
+        worker_portal_url: apiJob.worker_portal_url,
       };
       
       setJob(mappedJob);
@@ -253,6 +255,36 @@ export default function LabelingDetail() {
                           <Box fontSize="body-s">
                             {job.ground_truth_job_arn}
                           </Box>
+                        ),
+                      },
+                      {
+                        label: 'Worker Portal',
+                        value: job.worker_portal_url ? (
+                          <Link
+                            href={job.worker_portal_url}
+                            external
+                            externalIconAriaLabel="Opens in a new tab"
+                          >
+                            {job.worker_portal_url}
+                          </Link>
+                        ) : (
+                          <Box fontSize="body-s" color="text-status-inactive">
+                            Not available yet (private workforce sign-in URL)
+                          </Box>
+                        ),
+                      },
+                      {
+                        label: 'AWS Console',
+                        value: job.console_url ? (
+                          <Link
+                            href={job.console_url}
+                            external
+                            externalIconAriaLabel="Opens in a new tab"
+                          >
+                            View labeling job in SageMaker Ground Truth
+                          </Link>
+                        ) : (
+                          '-'
                         ),
                       },
                       {

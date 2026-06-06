@@ -13,9 +13,16 @@ export interface User {
 
 export type UserRole = 'PortalAdmin' | 'UseCaseAdmin' | 'DataScientist' | 'Operator' | 'Viewer';
 
+export interface S3Bucket {
+  name: string;
+  creation_date?: string | null;
+  region?: string;
+}
+
 export interface UseCase {
   usecase_id: string;
   name: string;
+  description?: string;
   account_id: string;
   s3_bucket: string;
   s3_prefix?: string;
@@ -199,6 +206,8 @@ export interface LabelingJob {
   created_by: string;
   created_at: number;
   completed_at?: number;
+  console_url?: string;
+  worker_portal_url?: string;
 }
 
 export interface S3Dataset {

@@ -157,6 +157,7 @@ def create_labeling_job(event):
         workforce_arn = body['workforce_arn']
         instructions = body.get('instructions', '')
         num_workers = body.get('num_workers_per_object', 1)
+        enable_automated_labeling = bool(body.get('enable_automated_labeling', False))
         task_time_limit = body.get('task_time_limit', 600)
         mask_prefix = body.get('mask_prefix')  # Optional for segmentation
         
@@ -304,12 +305,65 @@ def create_labeling_job(event):
         # Step 6: Create Ground Truth labeling job
         logger.info(f"Creating Ground Truth job: {sagemaker_job_name}")
         
-        # Map task types to SageMaker built-in algorithm ARNs
+        # Map task types to SageMaker built-in algorithm ARNs (for automated/active learning)
         region = get_usecase_region(usecase)
         task_type_arn_mapping = {
             'Classification': f'arn:aws:sagemaker:{region}:aws:labeling-job-algorithm/image-classification',
             'ObjectDetection': f'arn:aws:sagemaker:{region}:aws:labeling-job-algorithm/bounding-box',
             'Segmentation': f'arn:aws:sagemaker:{region}:aws:labeling-job-algorithm/semantic-segmentation'
+        }
+        
+        # Built-in task types require PRE/ACS Lambdas (these make it a built-in
+        # job rather than "Custom") plus a worker task template in S3.
+        # NOTE: image classification & semantic segmentation use UiTemplateS3Uri,
+        # NOT HumanTaskUiArn (that's only for NER / 3D point cloud / video frame).
+        pre_lambda_arn, acs_lambda_arn = get_builtin_task_lambdas(task_type, region)
+        if not pre_lambda_arn or not acs_lambda_arn:
+            return create_response(400, {
+                'error': f"Unsupported task type '{task_type}' or region '{region}' "
+                         f"for built-in labeling. Supported task types: "
+                         f"{', '.join(GROUND_TRUTH_TASK_FUNCTIONS.keys())}."
+            })
+        
+        # Generate and upload the worker task template to the output bucket.
+        template_key = f"templates/{job_id}.liquid.html"
+        template_body = generate_worker_template(task_type, label_categories)
+        logger.info(f"Uploading worker template to s3://{output_bucket}/{template_key}")
+        s3.put_object(
+            Bucket=output_bucket,
+            Key=template_key,
+            Body=template_body.encode('utf-8'),
+            ContentType='text/html'
+        )
+        ui_template_s3_uri = f"s3://{output_bucket}/{template_key}"
+        
+        # Built-in image task types also require a label-category config JSON
+        # (referenced via LabelCategoryConfigS3Uri) listing the categories.
+        label_config_key = f"label-categories/{job_id}.json"
+        label_config_body = generate_label_category_config(label_categories)
+        logger.info(f"Uploading label category config to s3://{output_bucket}/{label_config_key}")
+        s3.put_object(
+            Bucket=output_bucket,
+            Key=label_config_key,
+            Body=label_config_body.encode('utf-8'),
+            ContentType='application/json'
+        )
+        label_category_config_s3_uri = f"s3://{output_bucket}/{label_config_key}"
+        
+        human_task_config = {
+            'WorkteamArn': workforce_arn,
+            'TaskTitle': job_name,
+            'TaskDescription': instructions or f"Label images for {job_name}",
+            'NumberOfHumanWorkersPerDataObject': num_workers,
+            'TaskTimeLimitInSeconds': task_time_limit,
+            'TaskAvailabilityLifetimeInSeconds': 864000,  # 10 days
+            'PreHumanTaskLambdaArn': pre_lambda_arn,
+            'AnnotationConsolidationConfig': {
+                'AnnotationConsolidationLambdaArn': acs_lambda_arn
+            },
+            'UiConfig': {
+                'UiTemplateS3Uri': ui_template_s3_uri
+            }
         }
         
         labeling_job_params = {
@@ -326,28 +380,23 @@ def create_labeling_job(event):
                 'S3OutputPath': output_s3_uri
             },
             'RoleArn': ground_truth_role_arn,
-            'HumanTaskConfig': {
-                'WorkteamArn': workforce_arn,
-                'TaskTitle': job_name,
-                'TaskDescription': instructions or f"Label images for {job_name}",
-                'NumberOfHumanWorkersPerDataObject': num_workers,
-                'TaskTimeLimitInSeconds': task_time_limit,
-                'TaskAvailabilityLifetimeInSeconds': 864000,  # 10 days
-                'UiConfig': {
-                    'UiTemplateS3Uri': f's3://sagemaker-{region}-{usecase["account_id"]}/ground-truth-labeling-templates/default.html'
-                }
-            },
+            'LabelCategoryConfigS3Uri': label_category_config_s3_uri,
+            'HumanTaskConfig': human_task_config,
             'Tags': [
                 {'Key': 'UseCase', 'Value': usecase_id},
                 {'Key': 'JobName', 'Value': job_name}
             ]
         }
         
-        # Only add LabelingJobAlgorithmsConfig for built-in task types (not custom)
-        if task_type in task_type_arn_mapping:
-            algorithm_arn = task_type_arn_mapping[task_type]
+        # Automated (active) learning is OPTIONAL and only valid for built-in
+        # task types. Only attach it when the user explicitly enables it.
+        if enable_automated_labeling:
+            if task_type not in task_type_arn_mapping:
+                return create_response(400, {
+                    'error': f"Automated labeling isn't supported for task type '{task_type}'."
+                })
             labeling_job_params['LabelingJobAlgorithmsConfig'] = {
-                'LabelingJobAlgorithmSpecificationArn': algorithm_arn
+                'LabelingJobAlgorithmSpecificationArn': task_type_arn_mapping[task_type]
             }
         
         sagemaker.create_labeling_job(**labeling_job_params)
@@ -402,15 +451,15 @@ def create_labeling_job(event):
                 return create_response(400, {'error': error_message.replace('Member', 'Field')})
             elif 'WorkteamArn' in error_message or 'workteam' in error_message.lower():
                 return create_response(400, {
-                    'error': 'Invalid workteam. Please ensure the workteam exists in SageMaker Ground Truth and is properly configured.'
+                    'error': f'Invalid workteam. Ensure the workteam exists in SageMaker Ground Truth and is properly configured. Details: {error_message}'
                 })
             elif 'ManifestS3Uri' in error_message or 'manifest' in error_message.lower():
                 return create_response(400, {
-                    'error': 'Failed to access the manifest file. Please ensure the S3 bucket and prefix are correct and contain images.'
+                    'error': f'Failed to access the manifest file. Ensure the S3 bucket and prefix are correct and contain images. Details: {error_message}'
                 })
             elif 'UiTemplateS3Uri' in error_message or 'template' in error_message.lower():
                 return create_response(400, {
-                    'error': 'Failed to create the labeling UI template. Please try again or contact support.'
+                    'error': f'Problem with the labeling UI template. Details: {error_message}'
                 })
             else:
                 return create_response(400, {'error': f"Validation error: {error_message}"})
@@ -461,6 +510,19 @@ def get_labeling_job(job_id: str):
         
         job = response['Item']
         
+        # Region for building console / worker-portal links
+        try:
+            region_for_links = get_usecase_region(get_usecase(job['usecase_id']))
+        except Exception:
+            region_for_links = os.environ.get('AWS_REGION', 'us-east-1')
+        
+        # Deep link to the labeling job in the SageMaker Ground Truth console.
+        if job.get('sagemaker_job_name'):
+            job['console_url'] = (
+                f"https://{region_for_links}.console.aws.amazon.com/sagemaker/groundtruth"
+                f"?region={region_for_links}#/labeling-jobs/details/{job['sagemaker_job_name']}"
+            )
+        
         # Sync latest status from SageMaker Ground Truth
         if job.get('sagemaker_job_name'):
             try:
@@ -481,6 +543,25 @@ def get_labeling_job(job_id: str):
                 sm_response = sagemaker.describe_labeling_job(
                     LabelingJobName=job['sagemaker_job_name']
                 )
+                
+                # Resolve the worker portal sign-in URL from the workteam's
+                # Cognito sub-domain so labelers know where to log in.
+                try:
+                    workteam_arn = (
+                        sm_response.get('HumanTaskConfig', {}).get('WorkteamArn')
+                        or job.get('workforce_arn')
+                    )
+                    if workteam_arn:
+                        wt_name = workteam_arn.split('/')[-1]
+                        wt_resp = sagemaker.describe_workteam(WorkteamName=wt_name)
+                        sub_domain = wt_resp.get('Workteam', {}).get('SubDomain')
+                        if sub_domain:
+                            job['worker_portal_url'] = (
+                                sub_domain if sub_domain.startswith('http')
+                                else f"https://{sub_domain}"
+                            )
+                except Exception as e:
+                    logger.warning(f"Could not resolve worker portal URL: {str(e)}")
                 
                 status = sm_response['LabelingJobStatus']
                 timestamp = int(datetime.utcnow().timestamp())
@@ -782,6 +863,101 @@ def get_label_attribute_name(task_type: str) -> str:
         'Segmentation': 'semantic-segmentation-ref'  # Must end with '-ref' for Segmentation
     }
     return mapping.get(task_type, 'label')
+
+
+# AWS account that hosts the Ground Truth built-in PRE/ACS Lambda functions,
+# keyed by region. Source: SageMaker API Reference (HumanTaskConfig /
+# AnnotationConsolidationConfig).
+GROUND_TRUTH_LAMBDA_ACCOUNTS = {
+    'us-east-1': '432418664414',
+    'us-east-2': '266458841044',
+    'us-west-2': '081040173940',
+    'ca-central-1': '918755190332',
+    'eu-west-1': '568282634449',
+    'eu-west-2': '487402164563',
+    'eu-central-1': '203001061592',
+    'ap-northeast-1': '477331159723',
+    'ap-northeast-2': '845288260483',
+    'ap-south-1': '565803892007',
+    'ap-southeast-1': '377565633583',
+    'ap-southeast-2': '454466003867',
+}
+
+# Built-in task type -> Ground Truth Lambda function name suffix.
+GROUND_TRUTH_TASK_FUNCTIONS = {
+    'Classification': 'ImageMultiClass',
+    'ObjectDetection': 'BoundingBox',
+    'Segmentation': 'SemanticSegmentation',
+}
+
+
+def get_builtin_task_lambdas(task_type: str, region: str):
+    """Return (PreHumanTaskLambdaArn, AnnotationConsolidationLambdaArn) for a
+    built-in Ground Truth task type, or (None, None) if unsupported/region
+    unknown. These are required for built-in labeling jobs."""
+    account = GROUND_TRUTH_LAMBDA_ACCOUNTS.get(region)
+    func = GROUND_TRUTH_TASK_FUNCTIONS.get(task_type)
+    if not account or not func:
+        return None, None
+    pre = f"arn:aws:lambda:{region}:{account}:function:PRE-{func}"
+    acs = f"arn:aws:lambda:{region}:{account}:function:ACS-{func}"
+    return pre, acs
+
+
+def generate_label_category_config(label_categories) -> str:
+    """Build the LabelCategoryConfigS3Uri JSON document required by built-in
+    image task types (image classification / semantic segmentation)."""
+    return json.dumps({
+        'document-version': '2018-11-28',
+        'labels': [{'label': c} for c in label_categories]
+    })
+
+
+def generate_worker_template(task_type: str, label_categories) -> str:
+    """Build a Ground Truth Liquid worker-task template (HTML) for a built-in
+    image task type. SageMaker requires a UiTemplateS3Uri for image
+    classification / semantic segmentation (HumanTaskUiArn is only for NER,
+    3D point cloud, and video frame jobs).
+
+    Categories are bound from the label-category config via
+    `task.input.labels` (the canonical Ground Truth pattern) rather than
+    hardcoded, so the UI stays in sync with LabelCategoryConfigS3Uri.
+    """
+    if task_type == 'Segmentation':
+        return """<script src="https://assets.crowd.aws/crowd-html-elements.js"></script>
+<crowd-form>
+  <crowd-semantic-segmentation
+    name="crowd-semantic-segmentation"
+    src="{{ task.input.taskObject | grant_read_access }}"
+    header="Segment the image"
+    labels="{{ task.input.labels | to_json | escape }}"
+  >
+    <full-instructions header="Segmentation instructions">
+      Use the tools to label every pixel that belongs to each category.
+    </full-instructions>
+    <short-instructions>
+      Paint each region with the matching category.
+    </short-instructions>
+  </crowd-semantic-segmentation>
+</crowd-form>"""
+
+    # Default: image (multi-class / single-label) classification
+    return """<script src="https://assets.crowd.aws/crowd-html-elements.js"></script>
+<crowd-form>
+  <crowd-image-classifier
+    name="crowd-image-classifier"
+    src="{{ task.input.taskObject | grant_read_access }}"
+    header="Classify the image"
+    categories="{{ task.input.labels | to_json | escape }}"
+  >
+    <full-instructions header="Classification instructions">
+      Choose the single category that best describes the image.
+    </full-instructions>
+    <short-instructions>
+      Select the category that best describes the image.
+    </short-instructions>
+  </crowd-image-classifier>
+</crowd-form>"""
 
 
 def get_ui_template_arn(task_type: str, region: str = None) -> str:

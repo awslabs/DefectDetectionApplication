@@ -829,6 +829,104 @@ def configure_eventbridge_permission(usecase_account_id: str) -> dict:
         }
 
 
+def list_s3_buckets(user):
+    """List S3 buckets in the current (portal) AWS account.
+
+    Used by the 'Onboard New Use Case' flow so the user can browse and pick a
+    bucket instead of typing its name. Runs in the portal account with the
+    Lambda execution role (no cross-account assume-role) and returns each
+    bucket's name, creation date, and region.
+    """
+    try:
+        s3 = boto3.client('s3')
+        response = s3.list_buckets()
+
+        buckets = []
+        for b in response.get('Buckets', []):
+            name = b.get('Name')
+            created = b.get('CreationDate')
+            region = None
+            try:
+                loc = s3.get_bucket_location(Bucket=name)
+                # us-east-1 is returned as None/empty by the API
+                region = loc.get('LocationConstraint') or 'us-east-1'
+            except ClientError as e:
+                logger.warning(f"Could not get location for bucket {name}: {str(e)}")
+                region = 'unknown'
+
+            buckets.append({
+                'name': name,
+                'creation_date': created.isoformat() if hasattr(created, 'isoformat') else None,
+                'region': region,
+            })
+
+        buckets.sort(key=lambda x: (x['name'] or '').lower())
+
+        log_audit_event(
+            user.get('user_id', 'unknown'), 'list_s3_buckets', 'usecase', 'current-account',
+            'success', {'bucket_count': len(buckets)}
+        )
+
+        return create_response(200, {'buckets': buckets, 'count': len(buckets)})
+    except ClientError as e:
+        logger.error(f"AWS error listing S3 buckets: {str(e)}")
+        return create_response(500, {'error': f"Failed to list S3 buckets: {str(e)}"})
+    except Exception as e:
+        logger.error(f"Error listing S3 buckets: {str(e)}", exc_info=True)
+        return create_response(500, {'error': 'Internal server error'})
+
+
+def create_s3_bucket(event, user):
+    """Create a new S3 bucket in the current (portal) account with default settings.
+
+    Used by the 'Onboard New Use Case' flow as an alternative to selecting an
+    existing bucket. Keeps it simple: default permissions/ownership, created in
+    the requested region (defaults to the Lambda's region). us-east-1 must not
+    send a LocationConstraint.
+    """
+    try:
+        body = json.loads(event.get('body', '{}'))
+        name = (body.get('name') or '').strip()
+        region = (body.get('region') or os.environ.get('AWS_REGION', 'us-east-1')).strip()
+
+        if not name:
+            return create_response(400, {'error': 'Bucket name is required'})
+
+        s3 = boto3.client('s3')
+        create_args = {'Bucket': name}
+        # us-east-1 is the API default and rejects an explicit LocationConstraint.
+        if region != 'us-east-1':
+            create_args['CreateBucketConfiguration'] = {'LocationConstraint': region}
+
+        try:
+            s3.create_bucket(**create_args)
+        except ClientError as e:
+            code = e.response.get('Error', {}).get('Code', '')
+            if code == 'BucketAlreadyOwnedByYou':
+                # Already owned by this account - treat as success (idempotent).
+                logger.info(f"Bucket {name} already owned by this account")
+            elif code == 'BucketAlreadyExists':
+                return create_response(409, {
+                    'error': f"Bucket name '{name}' is already taken (S3 bucket names are globally unique). Try another name."
+                })
+            else:
+                logger.error(f"Failed to create bucket {name}: {str(e)}")
+                return create_response(400, {'error': f"Failed to create bucket: {str(e)}"})
+
+        log_audit_event(
+            user.get('user_id', 'unknown'), 'create_s3_bucket', 'usecase', name,
+            'success', {'region': region}
+        )
+
+        return create_response(201, {'bucket': {'name': name, 'region': region}})
+    except ClientError as e:
+        logger.error(f"AWS error creating S3 bucket: {str(e)}")
+        return create_response(500, {'error': f"Failed to create S3 bucket: {str(e)}"})
+    except Exception as e:
+        logger.error(f"Error creating S3 bucket: {str(e)}", exc_info=True)
+        return create_response(500, {'error': 'Internal server error'})
+
+
 def handler(event, context):
     """
     Handle use case management requests
@@ -860,6 +958,13 @@ def handler(event, context):
             }
         
         user = get_user_from_event(event)
+        
+        # /s3-buckets - list (GET) or create (POST) buckets in the current account
+        if path.endswith('/s3-buckets'):
+            if http_method == 'GET':
+                return list_s3_buckets(user)
+            elif http_method == 'POST':
+                return create_s3_bucket(event, user)
         
         if http_method == 'GET' and not path_parameters.get('id'):
             return list_usecases(user)
@@ -1038,6 +1143,7 @@ def create_usecase(event, user):
         item = {
             'usecase_id': usecase_id,
             'name': body['name'],
+            'description': body.get('description', ''),
             'account_id': account_id,
             'region': body.get('region', os.environ.get('AWS_REGION', 'us-east-1')),
             's3_bucket': body['s3_bucket'],
@@ -1418,7 +1524,7 @@ def update_usecase(usecase_id, event, user):
         expr_names = {}
         
         updatable_fields = [
-            'name', 's3_bucket', 'region', 'owner', 'default_device_group',
+            'name', 'description', 's3_bucket', 'region', 'owner', 'default_device_group',
             'cross_account_role_arn', 'account_id',
             # Data Account fields
             'data_account_id', 'data_account_role_arn', 'data_account_external_id',
