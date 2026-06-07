@@ -17,6 +17,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { validateBucketName } from '../utils/s3Validation';
+import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 import S3BucketPicker from '../components/S3BucketPicker';
 
 interface OnboardingState {
@@ -119,7 +120,8 @@ export default function UseCaseOnboarding() {
         setError(`Role verification failed: ${result.error}`);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to verify role. Please check the ARN and External ID.');
+      setError(getErrorMessage(err, 'Failed to verify role. Please check the ARN and External ID.'));
+      scrollToTop();
     }
   };
 
@@ -182,7 +184,8 @@ export default function UseCaseOnboarding() {
         navigate('/usecases');
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create use case');
+      setError(getErrorMessage(err, 'Failed to create use case'));
+      scrollToTop();
     } finally {
       setSubmitting(false);
     }

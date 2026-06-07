@@ -26,6 +26,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import { UseCase } from '../types';
 import { useUsecase } from '../contexts/UsecaseContext';
+import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
 interface ComponentSelection {
   component_name: string;
@@ -605,8 +606,9 @@ export default function CreateDeployment() {
         navigate(`/deployments/${response.deployment_id}?usecase_id=${selectedUseCase.value}`);
       }, 500);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create deployment');
+      setError(getErrorMessage(err, 'Failed to create deployment'));
       console.error('Failed to create deployment:', err);
+      scrollToTop();
     } finally {
       setCreating(false);
     }
@@ -847,6 +849,7 @@ export default function CreateDeployment() {
                 {/* Selected components table */}
                 {selectedComponents.length > 0 && (
                   <Table
+                    resizableColumns
                     items={selectedComponents}
                     columnDefinitions={[
                       {

@@ -24,6 +24,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { validateS3Uri } from '../utils/s3Validation';
+import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
 interface ModelInspectionResult {
   type: string;
@@ -43,7 +44,8 @@ const COMPILATION_TARGETS: MultiselectProps.Option[] = [
   { label: 'x86_64 CPU', value: 'x86_64-cpu', description: 'Intel/AMD 64-bit processors' },
   { label: 'x86_64 CUDA', value: 'x86_64-cuda', description: 'NVIDIA GPU on x86_64' },
   { label: 'ARM64 CPU', value: 'arm64-cpu', description: 'ARM 64-bit processors' },
-  { label: 'Jetson Xavier', value: 'jetson-xavier', description: 'NVIDIA Jetson Xavier' },
+  { label: 'Jetson Xavier (JetPack 4.x)', value: 'jetson-xavier', description: 'NVIDIA Jetson Xavier — CUDA 10.2, TensorRT 8.2.1' },
+  { label: 'Jetson Xavier (JetPack 5.x)', value: 'jetson-xavier-jp5', description: 'NVIDIA Jetson Xavier — CUDA 11.4, TensorRT 8.5.2' },
 ];
 
 const COMMON_DIMENSIONS: Record<string, { label: string; value: string }[]> = {
@@ -153,7 +155,8 @@ export default function SmartImport() {
       
     } catch (err) {
       console.error('Inspection error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to inspect model');
+      setError(getErrorMessage(err, 'Failed to inspect model'));
+      scrollToTop();
     } finally {
       setInspecting(false);
     }
@@ -216,7 +219,8 @@ export default function SmartImport() {
       
     } catch (err) {
       console.error('Conversion error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to convert model');
+      setError(getErrorMessage(err, 'Failed to convert model'));
+      scrollToTop();
     } finally {
       setConverting(false);
     }

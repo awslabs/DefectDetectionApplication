@@ -54,6 +54,19 @@ COMPILATION_TARGETS = {
             'jetson-platform': 'xavier'
         })
     },
+    'jetson-xavier-jp5': {
+        'os': 'LINUX',
+        'arch': 'ARM64',
+        'accelerator': 'NVIDIA',
+        'compiler_options': json.dumps({
+            'cuda-ver': '11.4',
+            'gpu-code': 'sm_72',
+            'trt-ver': '8.5.2',
+            'max-workspace-size': '2147483648',
+            'precision-mode': 'fp16',
+            'jetson-platform': 'xavier'
+        })
+    },
     'x86_64-cpu': {
         'os': 'LINUX',
         'arch': 'X86_64',
@@ -79,6 +92,29 @@ COMPILATION_TARGETS = {
         'compiler_options': None
     }
 }
+
+
+def derive_compilation_status(compilation_jobs):
+    """Aggregate per-target compilation job statuses into a single overall
+    status for the model/training record. Returns one of the values the UI
+    understands: 'InProgress', 'Completed', or 'Failed'.
+
+    SageMaker compilation statuses are uppercase (STARTING, INPROGRESS,
+    COMPLETED, FAILED, STOPPING, STOPPED). Rules:
+      - any job still running (STARTING/INPROGRESS) -> 'InProgress'
+      - otherwise, all jobs COMPLETED -> 'Completed'
+      - otherwise (some FAILED/STOPPED and none running) -> 'Failed'
+    """
+    if not compilation_jobs:
+        return None
+
+    statuses = [str(j.get('status', '')).upper() for j in compilation_jobs]
+    running = {'STARTING', 'INPROGRESS', 'IN_PROGRESS'}
+    if any(s in running for s in statuses):
+        return 'InProgress'
+    if statuses and all(s == 'COMPLETED' for s in statuses):
+        return 'Completed'
+    return 'Failed'
 
 
 def get_training_job_details(training_id: str) -> Dict:
@@ -271,6 +307,7 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
             # Create safe target name for SageMaker job naming
             target_name_mapping = {
                 'jetson-xavier': 'jetson',
+                'jetson-xavier-jp5': 'jetsonjp5',
                 'x86_64-cpu': 'x86cpu',
                 'x86_64-cuda': 'x86cuda',
                 'arm64-cpu': 'arm64cpu'
@@ -355,11 +392,13 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
         table = dynamodb.Table(TRAINING_JOBS_TABLE)
         timestamp = int(datetime.utcnow().timestamp() * 1000)
         
+        overall_status = derive_compilation_status(compilation_jobs)
         table.update_item(
             Key={'training_id': training_id},
-            UpdateExpression='SET compilation_jobs = :jobs, updated_at = :updated',
+            UpdateExpression='SET compilation_jobs = :jobs, compilation_status = :cstatus, updated_at = :updated',
             ExpressionAttributeValues={
                 ':jobs': compilation_jobs,
+                ':cstatus': overall_status,
                 ':updated': timestamp
             }
         )
@@ -487,18 +526,21 @@ def get_compilation_status(event: Dict, context: Any) -> Dict:
         table = dynamodb.Table(TRAINING_JOBS_TABLE)
         timestamp = int(datetime.utcnow().timestamp() * 1000)
         
+        overall_status = derive_compilation_status(updated_jobs)
         table.update_item(
             Key={'training_id': training_id},
-            UpdateExpression='SET compilation_jobs = :jobs, updated_at = :updated',
+            UpdateExpression='SET compilation_jobs = :jobs, compilation_status = :cstatus, updated_at = :updated',
             ExpressionAttributeValues={
                 ':jobs': updated_jobs,
+                ':cstatus': overall_status,
                 ':updated': timestamp
             }
         )
         
         return create_response(200, {
             'training_id': training_id,
-            'compilation_jobs': updated_jobs
+            'compilation_jobs': updated_jobs,
+            'compilation_status': overall_status
         })
         
     except Exception as e:

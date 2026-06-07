@@ -150,6 +150,7 @@ export default function DatasetBrowser() {
       )}
       
       <Table
+        resizableColumns
         columnDefinitions={[
           {
             id: 'prefix',

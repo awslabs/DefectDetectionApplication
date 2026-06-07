@@ -163,6 +163,7 @@ export default function Devices() {
       )}
       
       <Table
+        resizableColumns
         header={
           <Header
             variant="h1"

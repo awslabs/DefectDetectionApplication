@@ -363,6 +363,7 @@ export default function Components() {
               {
                 id: 'actions',
                 header: 'Actions',
+                minWidth: 320,
                 cell: (item: Component) => (
                   <SpaceBetween direction="horizontal" size="xs">
                     <Button
@@ -405,6 +406,7 @@ export default function Components() {
             items={paginatedComponents}
             loading={loading}
             loadingText="Loading components..."
+            resizableColumns
             selectedItems={selectedItems}
             onSelectionChange={({ detail }) => setSelectedItems(detail.selectedItems)}
             selectionType="multi"

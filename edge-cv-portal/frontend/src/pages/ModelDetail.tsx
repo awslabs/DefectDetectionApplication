@@ -18,6 +18,8 @@ import {
   Spinner,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import CompilationTab from '../components/CompilationTab';
+import { TrainingJob } from '../types';
 
 interface Model {
   model_id: string;
@@ -62,12 +64,22 @@ export default function ModelDetail() {
   const navigate = useNavigate();
   
   const [model, setModel] = useState<Model | null>(null);
+  const [trainingJob, setTrainingJob] = useState<TrainingJob | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showPromoteModal, setShowPromoteModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [targetStage, setTargetStage] = useState<SelectProps.Option | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+
+  const loadTrainingJob = async (trainingId: string) => {
+    try {
+      const tj = await apiService.getTrainingJob(trainingId);
+      setTrainingJob(tj as TrainingJob);
+    } catch (err) {
+      console.error('Failed to load training job for compilation tab:', err);
+    }
+  };
 
   useEffect(() => {
     const loadModel = async () => {
@@ -77,6 +89,12 @@ export default function ModelDetail() {
       try {
         const response = await apiService.getModel(modelId);
         setModel(response.model);
+        // Load the underlying training job so the Compilation tab can drive
+        // compilation from here too (model_id === training_id for trained models).
+        const trainingId = response.model.training_job_id || response.model.model_id;
+        if (trainingId && response.model.source === 'trained') {
+          loadTrainingJob(trainingId);
+        }
       } catch (err: any) {
         console.error('Failed to load model:', err);
         setError(err.message || 'Failed to load model');
@@ -251,30 +269,43 @@ export default function ModelDetail() {
         </Container>
       )}
 
-      {model.compilation_jobs && model.compilation_jobs.length > 0 && (
-        <Container header={<Header variant="h2">Compilation Jobs</Header>}>
-          <Table
-            items={model.compilation_jobs}
-            columnDefinitions={[
-              { id: 'target', header: 'Target', cell: (item) => <Badge>{item.target}</Badge> },
-              { id: 'status', header: 'Status', cell: (item) => {
-                if (item.status === 'COMPLETED') return <Badge color="green">Completed</Badge>;
-                if (item.status === 'INPROGRESS') return <Badge color="blue">In Progress</Badge>;
-                if (item.status === 'FAILED') return <Badge color="red">Failed</Badge>;
-                return <Badge>{item.status}</Badge>;
-              }},
-              { id: 'output', header: 'Output', cell: (item) => item.compiled_model_s3 ? 
-                <Box fontSize="body-s" color="text-status-info">Available</Box> : 
-                <Box fontSize="body-s" color="text-status-inactive">N/A</Box> },
-            ]}
-            empty={<Box textAlign="center">No compilation jobs</Box>}
-          />
-        </Container>
+      {trainingJob ? (
+        <CompilationTab
+          trainingId={model.training_job_id || model.model_id}
+          trainingJob={trainingJob}
+          onRefresh={() => {
+            const trainingId = model.training_job_id || model.model_id;
+            if (trainingId) loadTrainingJob(trainingId);
+          }}
+        />
+      ) : (
+        model.compilation_jobs && model.compilation_jobs.length > 0 && (
+          <Container header={<Header variant="h2">Compilation Jobs</Header>}>
+            <Table
+              resizableColumns
+              items={model.compilation_jobs}
+              columnDefinitions={[
+                { id: 'target', header: 'Target', cell: (item) => <Badge>{item.target}</Badge> },
+                { id: 'status', header: 'Status', cell: (item) => {
+                  if (item.status === 'COMPLETED') return <Badge color="green">Completed</Badge>;
+                  if (item.status === 'INPROGRESS') return <Badge color="blue">In Progress</Badge>;
+                  if (item.status === 'FAILED') return <Badge color="red">Failed</Badge>;
+                  return <Badge>{item.status}</Badge>;
+                }},
+                { id: 'output', header: 'Output', cell: (item) => item.compiled_model_s3 ? 
+                  <Box fontSize="body-s" color="text-status-info">Available</Box> : 
+                  <Box fontSize="body-s" color="text-status-inactive">N/A</Box> },
+              ]}
+              empty={<Box textAlign="center">No compilation jobs</Box>}
+            />
+          </Container>
+        )
       )}
 
       {model.component_arns && Object.keys(model.component_arns).length > 0 && (
         <Container header={<Header variant="h2">Greengrass Components</Header>}>
           <Table
+            resizableColumns
             items={Object.entries(model.component_arns).map(([platform, arn]) => ({ platform, arn }))}
             columnDefinitions={[
               { id: 'platform', header: 'Platform', cell: (item) => <Badge>{item.platform}</Badge> },
@@ -290,6 +321,7 @@ export default function ModelDetail() {
       <Container header={<Header variant="h2" counter={`(${model.deployed_devices.length})`}>Deployed Devices</Header>}>
         {model.deployed_devices.length > 0 ? (
           <Table
+            resizableColumns
             items={model.deployed_devices.map((deviceId) => ({ device_id: deviceId }))}
             columnDefinitions={[
               { id: 'device_id', header: 'Device ID', cell: (item) => (

@@ -67,6 +67,7 @@ export default function ManifestTransformer({ usecaseId, preSelectedJobId }: Man
         name: job.job_name,
         manifest_s3: '',
         output_s3: job.output_s3_uri || '',
+        output_manifest_s3_uri: job.output_manifest_s3_uri || '',
         task_type: job.task_type as LabelingJob['task_type'],
         images_count: job.image_count,
         labeled_count: job.labeled_objects || 0,
@@ -89,15 +90,19 @@ export default function ManifestTransformer({ usecaseId, preSelectedJobId }: Man
   const handleJobSelection = (option: SelectProps.Option) => {
     setSelectedJob(option);
     const job = labelingJobs.find(j => j.job_id === option.value);
-    if (job && job.output_s3) {
-      // Construct source manifest URI from output S3 path
-      const sourceManifestUri = `${job.output_s3}manifests/output/output.manifest`;
-      setSourceManifestUri(sourceManifestUri);
-      
-      // Auto-fill transformed manifest URI with -dda suffix
-      const transformedManifestUri = `${job.output_s3}manifests/output/output-dda.manifest`;
-      setOutputManifestUri(transformedManifestUri);
-      
+    if (job) {
+      // Prefer the real output manifest URI captured from SageMaker (it includes
+      // the SageMaker job-name segment). Only fall back to constructing a path
+      // if the backend didn't provide one.
+      const source = job.output_manifest_s3_uri
+        || (job.output_s3 ? `${job.output_s3}manifests/output/output.manifest` : '');
+      setSourceManifestUri(source);
+
+      // Auto-fill transformed manifest URI with -dda suffix.
+      if (source) {
+        setOutputManifestUri(source.replace('.manifest', '-dda.manifest'));
+      }
+
       // Auto-detect task type from job
       if (job.task_type === 'Segmentation') {
         setTaskType({ label: 'Segmentation', value: 'segmentation' });
@@ -275,12 +280,12 @@ export default function ManifestTransformer({ usecaseId, preSelectedJobId }: Man
                   <strong>Transformed Manifest:</strong> <code>{result.transformed_manifest_uri}</code>
                 </Box>
                 <Box>
-                  <strong>Total Entries:</strong> {result.stats.total_entries}
+                  <strong>Total Entries:</strong> {result.stats?.total_entries ?? '—'}
                 </Box>
                 <Box>
-                  <strong>Transformed:</strong> {result.stats.transformed}
+                  <strong>Transformed:</strong> {result.stats?.transformed ?? '—'}
                 </Box>
-                {result.stats.skipped > 0 && (
+                {(result.stats?.skipped ?? 0) > 0 && (
                   <Box color="text-status-warning">
                     <strong>Skipped:</strong> {result.stats.skipped}
                   </Box>
@@ -291,17 +296,30 @@ export default function ManifestTransformer({ usecaseId, preSelectedJobId }: Man
             <ExpandableSection headerText="Detected Attributes">
               <SpaceBetween size="xs">
                 <Box>
-                  <strong>Original Label Attribute:</strong> <code>{result.detected_attributes.label_attr}</code>
+                  <strong>Detected Ground Truth fields:</strong>{' '}
+                  <code>
+                    {result.detected_field_mapping
+                      ? JSON.stringify(result.detected_field_mapping)
+                      : '—'}
+                  </code>
                 </Box>
                 <Box>
-                  <strong>Original Metadata Attribute:</strong> <code>{result.detected_attributes.metadata_attr}</code>
+                  <strong>DDA Label Attribute:</strong> <code>{result.dda_attributes?.label ?? '—'}</code>
                 </Box>
                 <Box>
-                  <strong>DDA Label Attribute:</strong> <code>{result.dda_attributes.label}</code>
+                  <strong>DDA Metadata Attribute:</strong> <code>{result.dda_attributes?.metadata ?? '—'}</code>
                 </Box>
-                <Box>
-                  <strong>DDA Metadata Attribute:</strong> <code>{result.dda_attributes.metadata}</code>
-                </Box>
+                {result.dda_attributes?.mask_ref && (
+                  <Box>
+                    <strong>DDA Mask Attribute:</strong> <code>{result.dda_attributes.mask_ref}</code>
+                  </Box>
+                )}
+                {result.dda_attributes?.mask_ref_metadata && (
+                  <Box>
+                    <strong>DDA Mask Metadata Attribute:</strong>{' '}
+                    <code>{result.dda_attributes.mask_ref_metadata}</code>
+                  </Box>
+                )}
               </SpaceBetween>
             </ExpandableSection>
 
@@ -321,7 +339,7 @@ export default function ManifestTransformer({ usecaseId, preSelectedJobId }: Man
               </ExpandableSection>
             )}
 
-            {result.stats.errors && result.stats.errors.length > 0 && (
+            {result.stats?.errors && result.stats.errors.length > 0 && (
               <ExpandableSection headerText={`Errors (${result.stats.errors.length})`}>
                 <SpaceBetween size="xxs">
                   {result.stats.errors.map((err: string, idx: number) => (

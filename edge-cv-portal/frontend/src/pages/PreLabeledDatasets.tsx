@@ -20,6 +20,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import S3Browser from '../components/S3Browser';
 import { validateS3Uri } from '../utils/s3Validation';
+import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
 interface PreLabeledDataset {
   dataset_id: string;
@@ -193,8 +194,9 @@ export default function PreLabeledDatasets() {
       
       await loadDatasets();
     } catch (err) {
-      setError('Failed to create dataset');
+      setError(getErrorMessage(err, 'Failed to create dataset'));
       console.error('Creation error:', err);
+      scrollToTop();
     } finally {
       setCreating(false);
     }
@@ -207,8 +209,9 @@ export default function PreLabeledDatasets() {
       await apiService.deletePreLabeledDataset(datasetId);
       await loadDatasets();
     } catch (err) {
-      setError('Failed to delete dataset');
+      setError(getErrorMessage(err, 'Failed to delete dataset'));
       console.error('Delete error:', err);
+      scrollToTop();
     }
   };
 
@@ -286,6 +289,7 @@ export default function PreLabeledDatasets() {
         )}
 
         <Table
+          resizableColumns
           columnDefinitions={[
             {
               id: 'name',

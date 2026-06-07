@@ -21,6 +21,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
+import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
 export default function CreateTraining() {
   const navigate = useNavigate();
@@ -83,11 +84,18 @@ export default function CreateTraining() {
     },
   ];
 
+  // Instance types supported by the AWS Marketplace "Computer Vision Defect
+  // Detection" training algorithm. This MUST match the algorithm's
+  // SupportedTrainingInstanceTypes (TrainingSpecification) — other types are
+  // rejected at job creation with "Unsupported instanceType". The algorithm
+  // currently supports only these two g4dn (NVIDIA T4) sizes.
   const instanceTypeOptions: SelectProps.Option[] = [
     { label: 'ml.g4dn.2xlarge (GPU - Recommended)', value: 'ml.g4dn.2xlarge' },
-    { label: 'ml.p3.2xlarge (GPU - High Performance)', value: 'ml.p3.2xlarge' },
-    { label: 'ml.m5.xlarge (CPU - Budget)', value: 'ml.m5.xlarge' },
+    { label: 'ml.g4dn.4xlarge (GPU - More compute)', value: 'ml.g4dn.4xlarge' },
   ];
+
+  // Flattened list of the individual instance options (for value lookups).
+  const flatInstanceOptions: SelectProps.Option[] = instanceTypeOptions;
 
   // Populate form from cloned job
   useEffect(() => {
@@ -105,7 +113,7 @@ export default function CreateTraining() {
       
       // Set instance type
       if (cloneFrom.instance_type) {
-        const instanceOption = instanceTypeOptions.find(opt => opt.value === cloneFrom.instance_type);
+        const instanceOption = flatInstanceOptions.find(opt => opt.value === cloneFrom.instance_type);
         if (instanceOption) {
           setInstanceType(instanceOption);
         }
@@ -284,7 +292,7 @@ export default function CreateTraining() {
       setManifestFormat('dda');
       setShowTransformModal(false);
     } catch (err) {
-      setTransformError(err instanceof Error ? err.message : 'Failed to transform manifest');
+      setTransformError(getErrorMessage(err, 'Failed to transform manifest'));
     } finally {
       setTransforming(false);
     }
@@ -331,13 +339,13 @@ export default function CreateTraining() {
         dataset_manifest_s3: manifestUri.trim(),
         instance_type: instanceType.value as string,
         max_runtime_seconds: parseInt(maxRuntime),
-        ...(segheadOnly && { hyperparameters: { seghead_only: 'true' } }),
+        ...(segheadOnly && { hyperparameters: { classification_logic: 'seg_head' } }),
       });
 
       navigate('/training');
     } catch (err) {
       console.error('Failed to create training job:', err);
-      const errorMessage = err instanceof Error ? err.message : 'Failed to create training job';
+      const errorMessage = getErrorMessage(err, 'Failed to create training job');
       
       // Check if error is about manifest validation
       if (errorMessage.includes('Manifest validation failed')) {
@@ -345,6 +353,7 @@ export default function CreateTraining() {
       } else {
         setError(errorMessage);
       }
+      scrollToTop();
     } finally {
       setSubmitting(false);
     }
@@ -519,7 +528,7 @@ export default function CreateTraining() {
                   const isSegmentation = detail.selectedOption?.value?.includes('segmentation');
                   const isRobust = detail.selectedOption?.value?.includes('robust');
                   setMaxRuntime(isRobust ? '86400' : isSegmentation ? '7200' : '3600');
-                  // Reset seghead_only when switching away from segmentation
+                  // Reset seghead-only when switching away from segmentation
                   if (!isSegmentation) setSegheadOnly(false);
                 }}
                 options={modelTypeOptions}
@@ -546,7 +555,7 @@ export default function CreateTraining() {
                       position="top"
                       size="medium"
                       triggerType="custom"
-                      content="Disables the binary classifier and uses only the segmentation head for predictions. Enable this if the binary classifier is producing false negatives on defective parts. The segmentation mask alone is often more accurate for detecting subtle defects."
+                      content="Trains using only the segmentation head (classification_logic=seg_head). Enable this if the binary classifier is producing false negatives on defective parts. The segmentation mask alone is often more accurate for detecting subtle defects."
                     >
                       <StatusIndicator type="info">Info</StatusIndicator>
                     </Popover>
@@ -558,7 +567,7 @@ export default function CreateTraining() {
                   checked={segheadOnly}
                   onChange={({ detail }) => setSegheadOnly(detail.checked)}
                 >
-                  Disable binary classifier (use segmentation mask only)
+                  Use segmentation head only (disable binary classifier)
                 </Toggle>
               </FormField>
             )}

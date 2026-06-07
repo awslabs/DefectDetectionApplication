@@ -20,6 +20,7 @@ import { apiService } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
 import S3Browser from '../components/S3Browser';
 import { validateS3Uri } from '../utils/s3Validation';
+import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
 interface LocationState {
   dataset?: S3Dataset;
@@ -267,9 +268,9 @@ export default function CreateLabelingJob() {
 
       navigate('/labeling');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create labeling job. Please try again.');
+      setError(getErrorMessage(err, 'Failed to create labeling job. Please try again.'));
       console.error('Failed to create labeling job:', err);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      scrollToTop();
     } finally {
       setCreating(false);
     }

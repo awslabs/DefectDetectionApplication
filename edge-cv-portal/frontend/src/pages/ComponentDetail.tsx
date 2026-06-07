@@ -326,6 +326,7 @@ export default function ComponentDetail() {
             content: (
               <Container>
                 <Table
+                  resizableColumns
                   columnDefinitions={[
                     {
                       id: 'version',

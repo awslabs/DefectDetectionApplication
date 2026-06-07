@@ -16,7 +16,8 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields
+    check_user_access, validate_required_fields,
+    get_usecase, get_usecase_client
 )
 
 # Configure logging
@@ -228,6 +229,66 @@ def get_model(event: Dict, context: Any) -> Dict:
         # Check user access
         if not check_user_access(user_id, usecase_id):
             return create_response(403, {'error': 'Insufficient permissions'})
+        
+        # Sync live compilation status from SageMaker for any non-terminal jobs
+        # so the model detail page reflects current state (jobs are otherwise
+        # only refreshed from the training detail page's Compilation tab).
+        compilation_jobs = item.get('compilation_jobs', [])
+        TERMINAL = {'COMPLETED', 'FAILED', 'STOPPED'}
+        jobs_to_sync = [
+            j for j in compilation_jobs
+            if j.get('compilation_job_name')
+            and str(j.get('status', '')).upper() not in TERMINAL
+        ]
+        if jobs_to_sync:
+            try:
+                usecase = get_usecase(usecase_id)
+                sagemaker = get_usecase_client(
+                    'sagemaker', usecase,
+                    session_name=f"model-compile-sync-{int(datetime.utcnow().timestamp())}"
+                )
+                changed = False
+                for job in jobs_to_sync:
+                    try:
+                        resp = sagemaker.describe_compilation_job(
+                            CompilationJobName=job['compilation_job_name']
+                        )
+                        new_status = resp['CompilationJobStatus']
+                        if new_status != job.get('status'):
+                            changed = True
+                        job['status'] = new_status
+                        if new_status == 'COMPLETED':
+                            job['compiled_model_s3'] = resp['ModelArtifacts']['S3ModelArtifacts']
+                        elif new_status == 'FAILED':
+                            job['failure_reason'] = resp.get('FailureReason', 'Unknown')
+                    except Exception as e:
+                        logger.warning(f"Could not sync compilation job {job.get('compilation_job_name')}: {str(e)}")
+                if changed:
+                    # Derive overall status to match what the Models list reads.
+                    statuses = [str(j.get('status', '')).upper() for j in compilation_jobs]
+                    running = {'STARTING', 'INPROGRESS', 'IN_PROGRESS'}
+                    if any(s in running for s in statuses):
+                        overall = 'InProgress'
+                    elif statuses and all(s == 'COMPLETED' for s in statuses):
+                        overall = 'Completed'
+                    else:
+                        overall = 'Failed'
+                    item['compilation_jobs'] = compilation_jobs
+                    item['compilation_status'] = overall
+                    try:
+                        training_table.update_item(
+                            Key={'training_id': model_id},
+                            UpdateExpression='SET compilation_jobs = :jobs, compilation_status = :cstatus, updated_at = :updated',
+                            ExpressionAttributeValues={
+                                ':jobs': compilation_jobs,
+                                ':cstatus': overall,
+                                ':updated': int(datetime.utcnow().timestamp() * 1000)
+                            }
+                        )
+                    except Exception as e:
+                        logger.warning(f"Could not persist compilation status sync: {str(e)}")
+            except Exception as e:
+                logger.warning(f"Could not init SageMaker client for compilation sync: {str(e)}")
         
         # Get deployment info
         deployed_devices = []

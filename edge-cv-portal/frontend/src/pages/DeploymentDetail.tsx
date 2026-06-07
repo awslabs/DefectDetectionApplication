@@ -391,6 +391,7 @@ export default function DeploymentDetail() {
                   <SpaceBetween size="l">
                     {deployment.effective_deployments && deployment.effective_deployments.length > 0 ? (
                       <Table
+                        resizableColumns
                         columnDefinitions={[
                           {
                             id: 'device',
@@ -471,6 +472,7 @@ export default function DeploymentDetail() {
                 label: `Components (${deployment.components?.length || 0})`,
                 content: (
                   <Table
+                    resizableColumns
                     columnDefinitions={[
                       {
                         id: 'name',

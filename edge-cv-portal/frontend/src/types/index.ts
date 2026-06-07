@@ -206,6 +206,7 @@ export interface LabelingJob {
   created_by: string;
   created_at: number;
   completed_at?: number;
+  output_manifest_s3_uri?: string;
   console_url?: string;
   worker_portal_url?: string;
 }

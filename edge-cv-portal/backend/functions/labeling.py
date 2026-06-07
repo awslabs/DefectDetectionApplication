@@ -24,7 +24,8 @@ from shared_utils import (
     assume_usecase_role,
     create_response,
     handle_error,
-    get_usecase_region
+    get_usecase_region,
+    create_boto3_client
 )
 
 dynamodb = boto3.resource('dynamodb')
@@ -97,6 +98,79 @@ def list_labeling_jobs(event):
         )
         
         jobs = response.get('Items', [])
+        
+        # Sync live status from SageMaker for any non-terminal jobs so the list
+        # reflects current state without needing to open the detail page.
+        # Terminal states (Completed/Failed/Stopped) are not re-queried.
+        TERMINAL = {'Completed', 'Failed', 'Stopped'}
+        jobs_to_sync = [
+            j for j in jobs
+            if j.get('sagemaker_job_name') and j.get('status') not in TERMINAL
+        ]
+        if jobs_to_sync:
+            sagemaker = None
+            try:
+                usecase = get_usecase(usecase_id)
+                credentials = assume_usecase_role(
+                    usecase['cross_account_role_arn'],
+                    usecase['external_id'],
+                    'labeling-list-sync'
+                )
+                sagemaker = create_boto3_client(
+                    'sagemaker', credentials, get_usecase_region(usecase)
+                )
+            except Exception as e:
+                logger.warning(f"Could not init SageMaker client for status sync: {str(e)}")
+
+            if sagemaker is not None:
+                for job in jobs_to_sync:
+                    try:
+                        sm = sagemaker.describe_labeling_job(
+                            LabelingJobName=job['sagemaker_job_name']
+                        )
+                        new_status = sm['LabelingJobStatus']
+                        labeled_count = sm.get('LabelCounters', {}).get('HumanLabeled', 0)
+                        progress = 0
+                        if int(job.get('image_count', 0) or 0) > 0:
+                            progress = int((labeled_count / job['image_count']) * 100)
+
+                        if (new_status != job.get('status')
+                                or labeled_count != job.get('labeled_objects')):
+                            ts = int(datetime.utcnow().timestamp())
+                            update_expr = ('SET #status = :s, updated_at = :u, '
+                                           'labeled_objects = :l, progress_percent = :p')
+                            expr_values = {
+                                ':s': new_status,
+                                ':u': ts,
+                                ':l': labeled_count,
+                                ':p': progress,
+                            }
+                            expr_names = {'#status': 'status'}
+                            if new_status == 'Completed':
+                                update_expr += ', completed_at = :c'
+                                expr_values[':c'] = ts
+                            elif new_status == 'Failed':
+                                update_expr += ', failure_reason = :r'
+                                expr_values[':r'] = sm.get('FailureReason', 'Unknown')
+                            labeling_jobs_table.update_item(
+                                Key={'job_id': job['job_id']},
+                                UpdateExpression=update_expr,
+                                ExpressionAttributeValues=expr_values,
+                                ExpressionAttributeNames=expr_names,
+                            )
+                            # Reflect in the in-memory item for this response
+                            job['status'] = new_status
+                            job['updated_at'] = ts
+                            job['labeled_objects'] = labeled_count
+                            job['progress_percent'] = progress
+                            if new_status == 'Completed':
+                                job['completed_at'] = ts
+                            elif new_status == 'Failed':
+                                job['failure_reason'] = sm.get('FailureReason', 'Unknown')
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not sync status for {job.get('sagemaker_job_name')}: {str(e)}"
+                        )
         
         # Filter by status if provided
         if status_filter:

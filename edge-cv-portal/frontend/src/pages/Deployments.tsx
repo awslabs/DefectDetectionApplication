@@ -231,6 +231,7 @@ export default function Deployments() {
       )}
       
       <Table
+        resizableColumns
         header={
           <Header
             variant="h1"

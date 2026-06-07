@@ -29,9 +29,15 @@ interface CompilationTabProps {
 const COMPILATION_TARGETS = [
   {
     id: 'jetson-xavier',
-    name: 'NVIDIA Jetson Xavier',
-    description: 'ARM64 with NVIDIA GPU acceleration for edge AI inference',
+    name: 'NVIDIA Jetson Xavier (JetPack 4.x)',
+    description: 'ARM64 with NVIDIA GPU acceleration for edge AI inference (CUDA 10.2, TensorRT 8.2.1)',
     recommended: true,
+  },
+  {
+    id: 'jetson-xavier-jp5',
+    name: 'NVIDIA Jetson Xavier (JetPack 5.x)',
+    description: 'ARM64 with NVIDIA GPU acceleration for edge AI inference (CUDA 11.4, TensorRT 8.5.2)',
+    recommended: false,
   },
   {
     id: 'x86_64-cpu',
@@ -84,14 +90,30 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
     }
   };
 
-  // Auto-refresh every 30 seconds if there are in-progress jobs
+  // Sync once when the tab mounts (or training changes) so the view isn't
+  // stale on first render — without this you'd have to click Refresh manually.
   useEffect(() => {
-    const hasInProgressJobs = compilationJobs.some(job => job.status === 'InProgress');
-    
-    if (hasInProgressJobs) {
-      const interval = setInterval(refreshCompilationStatus, 30000);
+    refreshCompilationStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trainingId]);
+
+  // Poll every 15s while any job is not in a terminal state. Status values can
+  // be the frontend form ('InProgress') or raw SageMaker values ('STARTING',
+  // 'INPROGRESS'), so detect non-terminal jobs case-insensitively. The interval
+  // is recreated whenever compilationJobs changes and is cleared automatically
+  // once all jobs reach a terminal state.
+  useEffect(() => {
+    const isNonTerminal = (status?: string) => {
+      const s = String(status || '').toUpperCase();
+      return s !== 'COMPLETED' && s !== 'FAILED' && s !== 'STOPPED';
+    };
+    const hasActiveJobs = compilationJobs.some(job => isNonTerminal(job.status));
+
+    if (hasActiveJobs) {
+      const interval = setInterval(refreshCompilationStatus, 15000);
       return () => clearInterval(interval);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [compilationJobs, trainingId]);
 
   // Debug modal state changes
@@ -402,6 +424,7 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
         }
       >
         <Table
+          resizableColumns
           columnDefinitions={[
             {
               id: 'target',
@@ -714,7 +737,8 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
 // Helper functions
 function getTargetDescription(target: string): string {
   const descriptions: Record<string, string> = {
-    'jetson-xavier': 'NVIDIA Jetson Xavier (ARM64 + GPU)',
+    'jetson-xavier': 'NVIDIA Jetson Xavier — JetPack 4.x (ARM64 + GPU)',
+    'jetson-xavier-jp5': 'NVIDIA Jetson Xavier — JetPack 5.x (ARM64 + GPU)',
     'x86_64-cpu': 'x86_64 CPU only',
     'x86_64-cuda': 'x86_64 with NVIDIA GPU',
     'arm64-cpu': 'ARM64 CPU only',

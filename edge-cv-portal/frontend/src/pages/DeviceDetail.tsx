@@ -395,6 +395,7 @@ export default function DeviceDetail() {
             content: (
               <Container header={<Header variant="h2">Installed Components</Header>}>
                 <Table
+                  resizableColumns
                   items={device.installed_components || []}
                   columnDefinitions={[
                     {
@@ -440,6 +441,7 @@ export default function DeviceDetail() {
             content: (
               <Container header={<Header variant="h2">Effective Deployments</Header>}>
                 <Table
+                  resizableColumns
                   items={device.deployments || []}
                   columnDefinitions={[
                     {

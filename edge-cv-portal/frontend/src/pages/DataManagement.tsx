@@ -597,6 +597,7 @@ export default function DataManagement() {
             }
           >
             <Table
+              resizableColumns
               columnDefinitions={[
                 {
                   id: 'name',
@@ -694,6 +695,7 @@ export default function DataManagement() {
             </Alert>
           )}
           <Table
+            resizableColumns
             columnDefinitions={[
               {
                 id: 'name',
@@ -815,6 +817,7 @@ export default function DataManagement() {
 
           {uploadFiles.length > 0 && (
             <Table
+              resizableColumns
               columnDefinitions={[
                 {
                   id: 'name',

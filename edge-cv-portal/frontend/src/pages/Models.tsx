@@ -176,6 +176,7 @@ export default function Models() {
       )}
       
       <Table
+        resizableColumns
         header={
           <Header
             variant="h1"

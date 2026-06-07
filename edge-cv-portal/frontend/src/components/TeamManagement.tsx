@@ -223,6 +223,7 @@ export default function TeamManagement({
 
         {/* Team Members Table */}
         <Table
+          resizableColumns
           loading={isLoading}
           items={teamMembers}
           columnDefinitions={[

@@ -295,6 +295,7 @@ export default function UseCases() {
       )}
 
       <Table
+        resizableColumns
         header={
           <Header
             variant="h1"

@@ -44,6 +44,7 @@ PLATFORM_DEPENDENCIES = {
 # Target to platform mapping
 TARGET_TO_PLATFORM = {
     'jetson-xavier': 'aarch64',
+    'jetson-xavier-jp5': 'aarch64',
     'arm64-cpu': 'aarch64',
     'x86_64-cpu': 'amd64',
     'x86_64-cuda': 'amd64'

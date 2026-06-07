@@ -283,6 +283,7 @@ export default function AuditLogs() {
         </SpaceBetween>
 
         <Table
+          resizableColumns
           columnDefinitions={[
             {
               id: 'timestamp',

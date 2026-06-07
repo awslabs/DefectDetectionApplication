@@ -700,6 +700,7 @@ def get_model_format_spec(event: Dict, context: Any) -> Dict:
         ],
         'supported_compilation_targets': [
             'jetson-xavier',
+            'jetson-xavier-jp5',
             'x86_64-cpu',
             'x86_64-cuda',
             'arm64-cpu'

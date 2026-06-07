@@ -24,6 +24,7 @@ import { useNavigate } from 'react-router-dom';
 import { LabelingJob, UseCase } from '../types';
 import { apiService } from '../services/api';
 import { validateS3Uri } from '../utils/s3Validation';
+import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
 interface PreLabeledDataset {
   dataset_id: string;
@@ -188,7 +189,7 @@ export default function Labeling() {
         setError(`Validation failed: ${result.errors?.join(', ')}`);
       }
     } catch (err) {
-      setError('Failed to validate manifest');
+      setError(getErrorMessage(err, 'Failed to validate manifest'));
       console.error('Validation error:', err);
     } finally {
       setValidating(false);
@@ -232,8 +233,9 @@ export default function Labeling() {
       
       await loadPreLabeledDatasets();
     } catch (err) {
-      setError('Failed to create dataset');
+      setError(getErrorMessage(err, 'Failed to create dataset'));
       console.error('Creation error:', err);
+      scrollToTop();
     } finally {
       setCreating(false);
     }
@@ -246,7 +248,7 @@ export default function Labeling() {
       await apiService.deletePreLabeledDataset(datasetId);
       await loadPreLabeledDatasets();
     } catch (err) {
-      setError('Failed to delete dataset');
+      setError(getErrorMessage(err, 'Failed to delete dataset'));
       console.error('Delete error:', err);
     }
   };
@@ -360,6 +362,7 @@ export default function Labeling() {
 
         {dataSourceType === 'labeling' ? (
           <Table
+            resizableColumns
             columnDefinitions={[
               {
                 id: 'name',
@@ -430,6 +433,7 @@ export default function Labeling() {
           />
         ) : (
           <Table
+            resizableColumns
             columnDefinitions={[
               {
                 id: 'name',

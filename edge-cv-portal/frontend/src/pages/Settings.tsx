@@ -17,6 +17,7 @@ import {
   StatusIndicator,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
 interface DataAccount {
   data_account_id: string;
@@ -81,7 +82,8 @@ export default function Settings() {
       resetForm();
       loadDataAccounts();
     } catch (err: any) {
-      setError(err.message || 'Failed to register Data Account');
+      setError(getErrorMessage(err, 'Failed to register Data Account'));
+      scrollToTop();
     } finally {
       setLoading(false);
     }
@@ -100,7 +102,8 @@ export default function Settings() {
       resetForm();
       loadDataAccounts();
     } catch (err: any) {
-      setError(err.message || 'Failed to update Data Account');
+      setError(getErrorMessage(err, 'Failed to update Data Account'));
+      scrollToTop();
     } finally {
       setLoading(false);
     }
@@ -116,7 +119,8 @@ export default function Settings() {
       setSuccess('Data Account deleted successfully');
       loadDataAccounts();
     } catch (err: any) {
-      setError(err.message || 'Failed to delete Data Account');
+      setError(getErrorMessage(err, 'Failed to delete Data Account'));
+      scrollToTop();
     } finally {
       setLoading(false);
     }
@@ -134,7 +138,8 @@ export default function Settings() {
       }
       loadDataAccounts();
     } catch (err: any) {
-      setError(err.message || 'Failed to test connection');
+      setError(getErrorMessage(err, 'Failed to test connection'));
+      scrollToTop();
     } finally {
       setTestingConnection(null);
     }
@@ -170,6 +175,7 @@ export default function Settings() {
       {success && <Alert type="success" dismissible onDismiss={() => setSuccess('')}>{success}</Alert>}
 
       <Table
+        resizableColumns
         items={dataAccounts}
         loading={loading}
         loadingText="Loading Data Accounts..."

@@ -22,6 +22,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { validateS3Uri } from '../utils/s3Validation';
+import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
 interface ValidationResult {
   valid: boolean;
@@ -45,7 +46,8 @@ const COMPILATION_TARGETS: MultiselectProps.Option[] = [
   { label: 'x86_64 CPU', value: 'x86_64-cpu', description: 'Intel/AMD 64-bit processors' },
   { label: 'x86_64 CUDA', value: 'x86_64-cuda', description: 'NVIDIA GPU on x86_64' },
   { label: 'ARM64 CPU', value: 'arm64-cpu', description: 'ARM 64-bit processors' },
-  { label: 'Jetson Xavier', value: 'jetson-xavier', description: 'NVIDIA Jetson Xavier' },
+  { label: 'Jetson Xavier (JetPack 4.x)', value: 'jetson-xavier', description: 'NVIDIA Jetson Xavier — CUDA 10.2, TensorRT 8.2.1' },
+  { label: 'Jetson Xavier (JetPack 5.x)', value: 'jetson-xavier-jp5', description: 'NVIDIA Jetson Xavier — CUDA 11.4, TensorRT 8.5.2' },
 ];
 
 export default function ImportModel() {
@@ -107,11 +109,13 @@ export default function ImportModel() {
       }
     } catch (err) {
       console.error('Validation error:', err);
-      setError(err instanceof Error ? err.message : 'Validation failed');
+      const msg = getErrorMessage(err, 'Validation failed');
+      setError(msg);
       setValidationResult({
         valid: false,
-        error: err instanceof Error ? err.message : 'Validation failed',
+        error: msg,
       });
+      scrollToTop();
     } finally {
       setValidating(false);
     }
@@ -151,7 +155,8 @@ export default function ImportModel() {
       }, 2000);
     } catch (err) {
       console.error('Import error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to import model');
+      setError(getErrorMessage(err, 'Failed to import model'));
+      scrollToTop();
     } finally {
       setSubmitting(false);
     }

@@ -204,6 +204,7 @@ export default function Training() {
         </Alert>
       )}
       <Table
+        resizableColumns
         loading={loading}
         header={
           <Header
