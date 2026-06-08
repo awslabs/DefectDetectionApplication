@@ -185,7 +185,7 @@ This automatically generates `config.json` from CDK stack outputs, builds the Re
 
 When you deploy the portal infrastructure, the following Greengrass components are automatically provisioned and shared with UseCase accounts:
 
-- **LocalServer** - Core DDA inference component
+- **LocalServer** - Core DDA inference component. The backend container packages the **NVIDIA Triton Inference Server**, which loads compiled models and serves inference; the GStreamer pipeline calls into Triton via the `emltriton` plugin.
 - **InferenceUploader** - Optional component for uploading inference results to S3
 
 These are automatically shared when you create a UseCase in the portal. The UseCase creation also provisions the `DDAPortalComponentAccessPolicy` required by edge devices.
@@ -511,6 +511,8 @@ Edge device provisioning and management is a manual process. The portal handles 
 │   ├── config/
 │   ├── logs/
 │   └── packages/
+├── dda_triton/
+│   └── triton_model_repo/      # NVIDIA Triton model repository (compiled models)
 ├── image-capture/              # Captured images from camera
 ├── inference-results/          # Inference results
 ├── em_agent/                   # Edge Manager Agent
@@ -736,6 +738,108 @@ export GST_DEBUG=3
 v4l2-ctl --list-devices
 gst-launch-1.0 v4l2src device=/dev/video0 ! autovideosink
 ```
+
+### Model Loading (Triton Server)
+
+The DDA backend packages the **NVIDIA Triton Inference Server** at
+`/opt/tritonserver`. Compiled models are placed in the Triton model repository at
+`/aws_dda/dda_triton/triton_model_repo/`. Before deploying a model (or when
+debugging a pipeline crash), verify the model loads cleanly in Triton.
+
+```bash
+# Test Triton server directly to verify model loading.
+cd /opt/tritonserver/bin
+./tritonserver --model-repository /aws_dda/dda_triton/triton_model_repo/
+
+# Expected output should show models in READY status:
+# +-------------------------------------------+---------+--------+
+# | Model                                     | Version | Status |
+# +-------------------------------------------+---------+--------+
+# | base_model-bd-dda-classification-arm64    | 1       | READY  |
+# | marshal_model-bd-dda-classification-arm64 | 1       | READY  |
+# | model-bd-dda-classification-arm64         | 1       | READY  |
+# +-------------------------------------------+---------+--------+
+```
+
+If a model shows `UNAVAILABLE` instead of `READY`, fix the underlying model
+error (often a Python syntax error in the model's `model.py`) before deploying
+or running the pipeline — a model that fails to load in Triton will crash the
+GStreamer inference pipeline (commonly with a `SIGSEGV`).
+
+### GStreamer / Triton Inference Pipeline
+
+DDA uses GStreamer pipelines for video processing and ML inference. The custom
+`emltriton` (Triton inference) and `emlcapture` (result capture) plugins live in
+`/usr/lib/panoramagst/`. Troubleshoot pipeline issues as follows:
+
+```bash
+# Install GStreamer tools if not available
+sudo apt update
+sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+
+# Set GStreamer plugin path for DDA custom plugins
+export GST_PLUGIN_PATH=/usr/lib/panoramagst/
+
+# Enable GStreamer debug logging
+export GST_DEBUG=3  # or GST_DEBUG=4 for more verbose output
+
+# Confirm the DDA custom plugins are present and loadable
+gst-inspect-1.0 | grep -E "emltriton|emlcapture"
+gst-inspect-1.0 emltriton
+gst-inspect-1.0 emlcapture
+
+# Test the full DDA inference pipeline with a sample image
+gst-launch-1.0 filesrc blocksize=-1 location="/aws_dda/bd-classification/test-anomaly-1.jpg" ! \
+  jpegdec idct-method=2 ! \
+  videoconvert ! \
+  videoflip method=automatic ! \
+  capsfilter caps=video/x-raw,format=RGB ! \
+  emltriton model-repo=/aws_dda/dda_triton/triton_model_repo \
+    server-path=/opt/tritonserver \
+    model=model-bd-dda-classification-arm64 \
+    metadata='{"sagemaker_edge_core_capture_data_disk_path": "/aws_dda/inference-results/test", "capture_id": "test-pipeline"}' \
+    correlation-id=test-pipeline ! \
+  jpegenc idct-method=2 quality=100 ! \
+  emlcapture buffer-message-id=file-target_/aws_dda/inference-results/test-jpg \
+    interval=0 \
+    meta=triton_inference_output_overlay:file-target_/aws_dda/inference-results/test-overlay.jpg
+```
+
+**Debugging pipeline crashes (SIGSEGV)** — work from the simplest case up:
+
+```bash
+# 1. Verify the model loads in Triton first (see Model Loading above).
+cd /opt/tritonserver/bin
+./tritonserver --model-repository /aws_dda/dda_triton/triton_model_repo/
+
+# 2. Test a decode-only pipeline (no inference) to rule out the input image.
+export GST_PLUGIN_PATH=/usr/lib/panoramagst/
+gst-launch-1.0 filesrc location="/aws_dda/cookies/test-anomaly-3.jpg" ! \
+  jpegdec ! videoconvert ! jpegenc ! filesink location="/tmp/test-output.jpg"
+
+# 3. Run the full pipeline INSIDE the backend container (recommended), where the
+#    Triton libs and plugin paths are already configured.
+docker ps | grep backend
+docker exec -it <backend-container-name> bash
+# Inside the container:
+export GST_PLUGIN_PATH=/usr/lib/panoramagst/
+gst-launch-1.0 filesrc blocksize=-1 location="/aws_dda/cookies/test-anomaly-3.jpg" ! \
+  emexifextract ! jpegdec idct-method=2 ! videoconvert ! videoflip method=automatic ! \
+  capsfilter caps=video/x-raw,format=RGB ! \
+  emltriton model-repo=/aws_dda/dda_triton/triton_model_repo \
+    server-path=/opt/tritonserver model=model-rajat-segmentation \
+    metadata='{"capture_id": "test-pipeline"}' correlation-id=test-pipeline ! \
+  jpegenc idct-method=2 quality=100 ! \
+  emlcapture buffer-message-id=file-target_/aws_dda/inference-results/test-jpg interval=0
+```
+
+**Common GStreamer / Triton issues:**
+- **Segmentation fault**: usually a model that failed to load in Triton or a corrupted model file — verify the model is `READY` in Triton first.
+- **Plugin not found**: ensure `GST_PLUGIN_PATH` includes `/usr/lib/panoramagst/`.
+- **Model loading errors**: confirm the Triton server is running and the `model-repo`/`model` paths are correct.
+- **Model syntax errors**: fix Python syntax errors in the model's `model.py` (these surface as `UNAVAILABLE` in Triton).
+- **Permission errors**: check file permissions on input images and output directories.
+- **Memory issues**: monitor system resources during pipeline execution.
 
 ### CloudWatch LogManager Issues
 
