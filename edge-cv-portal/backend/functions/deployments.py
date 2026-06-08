@@ -40,6 +40,95 @@ DDA_COMPONENTS_REQUIRING_NUCLEUS = [
 ]
 
 
+def _version_key(version_str):
+    """Convert a semantic version string to a comparable tuple. Non-numeric parts sort last."""
+    parts = []
+    for part in str(version_str).split('.'):
+        try:
+            parts.append((0, int(part)))
+        except ValueError:
+            parts.append((1, part))
+    return tuple(parts)
+
+
+def get_device_nucleus_version(greengrass_client, thing_name):
+    """
+    Return the Greengrass Nucleus version currently running on a core device,
+    or None if it can't be determined.
+    """
+    if not thing_name:
+        return None
+    try:
+        resp = greengrass_client.get_core_device(coreDeviceThingName=thing_name)
+        version = resp.get('coreVersion')
+        if version:
+            logger.info(f"Device {thing_name} is running Nucleus {version}")
+            return version
+    except Exception as e:
+        logger.warning(f"Could not read core device {thing_name} nucleus version: {e}")
+    return None
+
+
+def resolve_target_running_nucleus(greengrass_client, iot_client, target_devices, target_thing_group, region, account_id):
+    """
+    Determine the Nucleus version currently installed on the deployment target.
+    For a single device we query it directly; for a thing group we inspect the
+    member devices and use the first running version found (assuming a
+    homogeneous group). Returns a version string or None.
+    """
+    thing_names = []
+    if target_devices:
+        thing_names = list(target_devices)
+    elif target_thing_group:
+        try:
+            paginator = iot_client.get_paginator('list_things_in_thing_group')
+            for page in paginator.paginate(thingGroupName=target_thing_group, maxResults=50):
+                thing_names.extend(page.get('things', []))
+                if thing_names:
+                    break
+        except Exception as e:
+            logger.warning(f"Could not list things in group {target_thing_group}: {e}")
+
+    for thing_name in thing_names:
+        version = get_device_nucleus_version(greengrass_client, thing_name)
+        if version:
+            return version
+    return None
+
+
+def get_latest_nucleus_version(greengrass_client, region):
+    """
+    Return the latest available aws.greengrass.Nucleus version.
+
+    Greengrass refuses to update the Nucleus across minor/major versions unless
+    the Nucleus is included as an explicit top-level target component. By
+    auto-including the latest Nucleus version as a top-level component, the
+    deployment is allowed to update the Nucleus and the
+    "no component of type nucleus was included as target component" error is avoided.
+
+    Returns the latest version string (e.g. '2.17.0') or None if it can't be
+    determined (in which case the caller should include Nucleus without a pinned
+    version so Greengrass resolves the latest itself).
+    """
+    nucleus_arn = f"arn:aws:greengrass:{region}:aws:components:aws.greengrass.Nucleus"
+    versions = []
+    try:
+        paginator = greengrass_client.get_paginator('list_component_versions')
+        for page in paginator.paginate(arn=nucleus_arn):
+            for cv in page.get('componentVersions', []):
+                v = cv.get('componentVersion')
+                if v:
+                    versions.append(v)
+    except Exception as e:
+        logger.warning(f"Could not list aws.greengrass.Nucleus versions: {e}")
+
+    if versions:
+        latest = sorted(versions, key=_version_key)[-1]
+        logger.info(f"Latest available aws.greengrass.Nucleus version: {latest}")
+        return latest
+    return None
+
+
 def handler(event, context):
     """
     Handle deployment management requests
@@ -64,6 +153,9 @@ def handler(event, context):
         user = get_user_from_event(event)
         
         if http_method == 'GET' and not path_parameters.get('id'):
+            # Sub-resource: look up the existing deployment for a specific target
+            if path.endswith('/target-deployment') or query_parameters.get('target_device') or query_parameters.get('target_thing_group'):
+                return get_target_deployment(user, query_parameters)
             return list_deployments(user, query_parameters)
         elif http_method == 'GET' and path_parameters.get('id'):
             return get_deployment(path_parameters['id'], user, query_parameters)
@@ -318,6 +410,169 @@ def get_deployment(deployment_id, user, query_params):
         return create_response(500, {'error': 'Failed to get deployment'})
 
 
+def find_latest_deployment_for_target(greengrass_client, target_arn):
+    """
+    Return the latest (currently-effective) Greengrass deployment for a target ARN,
+    or None if the target has no deployment yet.
+
+    Greengrass deployments are immutable: creating a new deployment to the same
+    target ARN supersedes the previous one. There is only ever one
+    `isLatestForTarget` deployment per target. We use this to treat re-deployments
+    as revisions of the existing deployment rather than brand-new deployments.
+    """
+    next_token = None
+    try:
+        while True:
+            params = {'maxResults': 100, 'targetArn': target_arn}
+            if next_token:
+                params['nextToken'] = next_token
+            response = greengrass_client.list_deployments(**params)
+            for dep in response.get('deployments', []):
+                if dep.get('isLatestForTarget'):
+                    return dep
+            next_token = response.get('nextToken')
+            if not next_token:
+                break
+    except Exception as e:
+        logger.warning(f"Could not look up existing deployment for {target_arn}: {e}")
+    return None
+
+
+def find_group_member_individual_deployments(greengrass_client, iot_client, region, account_id, thing_group_name):
+    """
+    For a thing group target, find member devices that already have their OWN
+    individual (thing-level) deployment. These create a conflict: a device with
+    both a thing-level deployment and a group-level deployment ends up running two
+    deployments, with unpredictable merged behavior. The UI should warn the user
+    to cancel the individual deployments first.
+
+    Returns a list of dicts: {device, deployment_id, deployment_name, deployment_status}.
+    """
+    conflicts = []
+    member_things = []
+    try:
+        paginator = iot_client.get_paginator('list_things_in_thing_group')
+        for page in paginator.paginate(thingGroupName=thing_group_name, maxResults=100):
+            member_things.extend(page.get('things', []))
+    except Exception as e:
+        logger.warning(f"Could not list things in group {thing_group_name}: {e}")
+        return conflicts
+
+    for thing_name in member_things:
+        thing_arn = f"arn:aws:iot:{region}:{account_id}:thing/{thing_name}"
+        individual = find_latest_deployment_for_target(greengrass_client, thing_arn)
+        if individual:
+            conflicts.append({
+                'device': thing_name,
+                'deployment_id': individual.get('deploymentId'),
+                'deployment_name': individual.get('deploymentName', ''),
+                'deployment_status': individual.get('deploymentStatus', 'UNKNOWN'),
+            })
+    return conflicts
+
+
+def get_target_deployment(user, query_params):
+    """
+    Return the existing latest deployment for a given target so the UI can
+    decide whether a new deployment would be a revision of an existing one.
+
+    Query params: usecase_id (required), target_device OR target_thing_group.
+    """
+    try:
+        usecase_id = query_params.get('usecase_id')
+        target_device = query_params.get('target_device')
+        target_thing_group = query_params.get('target_thing_group')
+
+        if not usecase_id:
+            return create_response(400, {'error': 'usecase_id parameter required'})
+        if not target_device and not target_thing_group:
+            return create_response(400, {'error': 'target_device or target_thing_group required'})
+
+        if not is_super_user(user['user_id']) and not check_user_access(user['user_id'], usecase_id):
+            return create_response(403, {'error': 'Access denied'})
+
+        usecase = get_usecase(usecase_id)
+        if not usecase:
+            return create_response(404, {'error': 'Use case not found'})
+
+        region = get_usecase_region(usecase)
+        account_id = usecase.get('account_id', '')
+
+        greengrass_client = get_usecase_client(
+            'greengrassv2',
+            usecase,
+            session_name=f"gg-target-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+            region=region
+        )
+
+        if target_thing_group:
+            target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{target_thing_group}"
+        else:
+            target_arn = f"arn:aws:iot:{region}:{account_id}:thing/{target_device}"
+
+        # For a thing group target, detect member devices that already have their
+        # own individual (thing-level) deployment — these conflict with a group
+        # deployment and should be cancelled first.
+        group_member_conflicts = []
+        if target_thing_group:
+            iot_client = get_usecase_client(
+                'iot',
+                usecase,
+                session_name=f"iot-target-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+                region=region
+            )
+            group_member_conflicts = find_group_member_individual_deployments(
+                greengrass_client, iot_client, region, account_id, target_thing_group
+            )
+
+        existing = find_latest_deployment_for_target(greengrass_client, target_arn)
+        if not existing:
+            return create_response(200, {
+                'existing_deployment': None,
+                'group_member_conflicts': group_member_conflicts,
+            })
+
+        deployment_id = existing.get('deploymentId')
+
+        # Fetch full details so the UI can pre-load components for revision
+        components = []
+        deployment_name = existing.get('deploymentName', '')
+        try:
+            detail = greengrass_client.get_deployment(deploymentId=deployment_id)
+            deployment_name = detail.get('deploymentName', deployment_name)
+            for comp_name, comp_config in detail.get('components', {}).items():
+                components.append({
+                    'component_name': comp_name,
+                    'component_version': comp_config.get('componentVersion', 'latest'),
+                })
+        except Exception as e:
+            logger.warning(f"Could not get deployment detail for {deployment_id}: {e}")
+
+        creation_ts = existing.get('creationTimestamp')
+        if creation_ts and hasattr(creation_ts, 'isoformat'):
+            creation_ts = creation_ts.isoformat()
+
+        return create_response(200, {
+            'existing_deployment': {
+                'deployment_id': deployment_id,
+                'deployment_name': deployment_name,
+                'target_arn': target_arn,
+                'deployment_status': existing.get('deploymentStatus', 'UNKNOWN'),
+                'revision_id': existing.get('revisionId', ''),
+                'creation_timestamp': creation_ts,
+                'components': components,
+            },
+            'group_member_conflicts': group_member_conflicts,
+        })
+
+    except ClientError as e:
+        logger.error(f"AWS error getting target deployment: {str(e)}")
+        return create_response(500, {'error': f'Failed to get target deployment: {str(e)}'})
+    except Exception as e:
+        logger.error(f"Error getting target deployment: {str(e)}")
+        return create_response(500, {'error': 'Failed to get target deployment'})
+
+
 def create_deployment(body, user):
     """Create a new Greengrass deployment"""
     try:
@@ -380,10 +635,12 @@ def create_deployment(body, user):
                         needs_nucleus = True
                         break
         
-        # NOTE: We intentionally do NOT auto-include Nucleus in deployments.
-        # Pinning Nucleus to an exact version (e.g., =2.13.0) conflicts with devices
-        # that already have a newer version (e.g., 2.16.1). The DDA LocalServer recipe
-        # declares >=2.4.0 as a dependency, which Greengrass resolves automatically.
+        # NOTE: When DDA components are deployed we auto-include the latest Nucleus
+        # as a top-level component (resolved below, after the target is known).
+        # DDA components depend on Nucleus, and Greengrass refuses to perform a
+        # minor/major Nucleus update unless Nucleus is an explicit target component
+        # ("no component of type nucleus was included as target component").
+        # Including it as a top-level component authorizes the update.
         auto_included = []
         
         # Auto-include CloudWatch log manager for device logging
@@ -492,11 +749,70 @@ def create_deployment(body, user):
             logger.info(f"Deploying directly to device: {target_devices[0]}")
         else:
             return create_response(400, {'error': 'No target devices or thing group specified'})
+
+        # Auto-include Nucleus as a top-level component, pinned to the version the
+        # device is ALREADY RUNNING.
+        #
+        # DDA components depend on Nucleus (>=2.4.0). Greengrass refuses to update
+        # the Nucleus across minor/major versions unless Nucleus is an explicit
+        # top-level target component ("no component of type nucleus was included as
+        # target component"). However, pinning to the LATEST Nucleus breaks other
+        # auto-included components: e.g. aws.greengrass.LogManager requires Nucleus
+        # < 2.15.0, so pinning to 2.17.0 produces a NoAvailableComponentVersion
+        # conflict.
+        #
+        # The safe choice is to pin Nucleus to the version the device is already
+        # running. That version is, by definition, already installed and compatible
+        # with the device, it satisfies the "explicit top-level component"
+        # requirement, and it avoids forcing an incompatible upgrade. We only fall
+        # back to the latest version (or unpinned) if the running version can't be
+        # determined.
+        if needs_nucleus and 'aws.greengrass.Nucleus' not in components_map:
+            running_nucleus = resolve_target_running_nucleus(
+                greengrass_client, iot_client, target_devices,
+                target_thing_group, region, account_id
+            )
+            if running_nucleus:
+                components_map['aws.greengrass.Nucleus'] = {
+                    'componentVersion': running_nucleus
+                }
+                auto_included.append({
+                    'component_name': 'aws.greengrass.Nucleus',
+                    'component_version': running_nucleus,
+                    'reason': 'Pinned to the version already running on the device to satisfy the explicit-nucleus requirement without forcing an incompatible upgrade'
+                })
+                logger.info(f"Pinned aws.greengrass.Nucleus to running device version {running_nucleus}")
+            else:
+                # Could not read the running version. Fall back to including Nucleus
+                # without a pinned version so Greengrass resolves a compatible one
+                # itself (respecting all component constraints).
+                components_map['aws.greengrass.Nucleus'] = {}
+                auto_included.append({
+                    'component_name': 'aws.greengrass.Nucleus',
+                    'component_version': 'auto',
+                    'reason': 'Included as top-level component (unpinned) so Greengrass resolves a compatible Nucleus version'
+                })
+                logger.info("Auto-included aws.greengrass.Nucleus (unpinned) as top-level component")
         
+        # Determine whether this target already has a deployment. Greengrass
+        # deployments are immutable; creating a new deployment to the same target
+        # ARN supersedes the previous one (a revision). To keep the deployment
+        # identity stable for the user, reuse the existing deployment's name when
+        # revising rather than generating a brand-new timestamped name.
+        existing_deployment = find_latest_deployment_for_target(greengrass_client, target_arn)
+        is_revision = existing_deployment is not None
+
         # Generate deployment name if not provided
         if not deployment_name:
-            timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-            deployment_name = f"portal-deployment-{timestamp}"
+            if is_revision and existing_deployment.get('deploymentName'):
+                deployment_name = existing_deployment['deploymentName']
+                logger.info(
+                    f"Revising existing deployment '{deployment_name}' "
+                    f"({existing_deployment.get('deploymentId')}) for target {target_arn}"
+                )
+            else:
+                timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+                deployment_name = f"portal-deployment-{timestamp}"
         
         # Create deployment
         deployment_params = {
@@ -526,15 +842,19 @@ def create_deployment(body, user):
         deployment_id = response.get('deploymentId')
         
         log_audit_event(
-            user['user_id'], 'create_deployment', 'deployment', deployment_id,
+            user['user_id'],
+            'revise_deployment' if is_revision else 'create_deployment',
+            'deployment', deployment_id,
             'success', {
                 'usecase_id': usecase_id,
                 'components': list(components_map.keys()),
-                'target_arn': target_arn
+                'target_arn': target_arn,
+                'is_revision': is_revision,
+                'superseded_deployment_id': existing_deployment.get('deploymentId') if is_revision else None
             }
         )
         
-        logger.info(f"Created deployment {deployment_id} for usecase {usecase_id}")
+        logger.info(f"{'Revised' if is_revision else 'Created'} deployment {deployment_id} for usecase {usecase_id}")
         
         # Build response with full component list
         deployed_components = [
@@ -548,7 +868,9 @@ def create_deployment(body, user):
             'iot_job_arn': response.get('iotJobArn', ''),
             'components': deployed_components,
             'auto_included': auto_included,
-            'message': 'Deployment created successfully'
+            'is_revision': is_revision,
+            'superseded_deployment_id': existing_deployment.get('deploymentId') if is_revision else None,
+            'message': 'Deployment updated successfully' if is_revision else 'Deployment created successfully'
         })
         
     except ClientError as e:

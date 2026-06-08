@@ -1015,6 +1015,44 @@ else
         add_warning "Could not attach CloudWatch Logs policy. Device may not be able to upload logs to CloudWatch."
     fi
     echo ""
+
+    # 3.5 Add ECR access policy (inline policy)
+    # Required for Docker-based components (e.g. aws.edgeml.dda.LocalServer) whose
+    # artifacts are published to ECR. Without ecr:GetAuthorizationToken the device
+    # fails with GET_ECR_CREDENTIAL_ERROR / "Failed to get auth token for docker login".
+    # ecr:GetAuthorizationToken does not support resource scoping and must use "*".
+    echo "3.5 Adding ECR access policy..."
+    if run_cmd "aws iam put-role-policy \
+      --role-name GreengrassV2TokenExchangeRole \
+      --policy-name ECRComponentAccess \
+      --policy-document '{
+        \"Version\": \"2012-10-17\",
+        \"Statement\": [
+          {
+            \"Sid\": \"AllowEcrAuthToken\",
+            \"Effect\": \"Allow\",
+            \"Action\": [
+              \"ecr:GetAuthorizationToken\"
+            ],
+            \"Resource\": \"*\"
+          },
+          {
+            \"Sid\": \"AllowEcrImagePull\",
+            \"Effect\": \"Allow\",
+            \"Action\": [
+              \"ecr:BatchGetImage\",
+              \"ecr:GetDownloadUrlForLayer\",
+              \"ecr:BatchCheckLayerAvailability\"
+            ],
+            \"Resource\": \"arn:aws:ecr:*:${aws_account_id}:repository/dda/*\"
+          }
+        ]
+      }'"; then
+        echo "   ✓ ECR access policy attached"
+    else
+        add_warning "Could not attach ECR access policy. Device may not be able to pull Docker-based components from ECR."
+    fi
+    echo ""
     
     # 4. Verify all policies are attached
     echo "4. Verifying role policies..."

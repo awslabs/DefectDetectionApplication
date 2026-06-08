@@ -981,6 +981,36 @@ class ApiService {
     return this.request(`/deployments/${deploymentId}?usecase_id=${usecaseId}`);
   }
 
+  async getTargetDeployment(params: {
+    usecase_id: string;
+    target_device?: string;
+    target_thing_group?: string;
+  }): Promise<{
+    existing_deployment: null | {
+      deployment_id: string;
+      deployment_name: string;
+      target_arn: string;
+      deployment_status: string;
+      revision_id: string;
+      creation_timestamp: string;
+      components: Array<{
+        component_name: string;
+        component_version: string;
+      }>;
+    };
+    group_member_conflicts?: Array<{
+      device: string;
+      deployment_id: string;
+      deployment_name: string;
+      deployment_status: string;
+    }>;
+  }> {
+    const qs = new URLSearchParams({ usecase_id: params.usecase_id });
+    if (params.target_device) qs.set('target_device', params.target_device);
+    if (params.target_thing_group) qs.set('target_thing_group', params.target_thing_group);
+    return this.request(`/deployments?${qs.toString()}`);
+  }
+
   async createDeployment(data: {
     usecase_id: string;
     deployment_name?: string;
@@ -1008,6 +1038,8 @@ class ApiService {
       component_version: string;
       reason: string;
     }>;
+    is_revision?: boolean;
+    superseded_deployment_id?: string | null;
   }> {
     return this.request('/deployments', {
       method: 'POST',

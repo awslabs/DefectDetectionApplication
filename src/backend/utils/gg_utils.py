@@ -158,8 +158,8 @@ def list_all_gg_components_with_details():
         for component in list_components_response.components:
             components.append({
                 "componentName": component.component_name,
-                "version": component.version,
-                "state": component.state,
+                "version": component.version or "—",
+                "state": component.state or "UNKNOWN",
             })
     finally:
         ipc_client.close()

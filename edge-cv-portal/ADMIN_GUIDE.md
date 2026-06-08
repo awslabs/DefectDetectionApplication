@@ -504,7 +504,7 @@ Devices are registered using the `setup_station.sh` script in the `station_insta
 - Downloads and installs AWS IoT Greengrass Core v2
 - Creates an IoT Thing and provisions certificates
 - Creates `GreengrassV2TokenExchangeRole` for device credentials
-- Attaches `DDAPortalComponentAccessPolicy` for cross-account S3 access
+- Attaches `DDAPortalComponentAccessPolicy` for cross-account S3 access and ECR image pulls
 - Tags the Greengrass Core Device with `dda-portal:managed=true` for portal discovery
 
 **Prerequisites:**

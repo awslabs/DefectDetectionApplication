@@ -16,6 +16,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
+import { useTableSort } from '../hooks/useTableSort';
 
 interface Model {
   model_id: string;
@@ -154,6 +155,8 @@ export default function Models() {
     return matchesText;
   });
 
+  const { items: sortedModels, sortingProps } = useTableSort(filteredModels);
+
   const stageOptions: SelectProps.Option[] = [
     { label: 'All Stages', value: '' },
     { label: 'Production', value: 'production' },
@@ -225,7 +228,8 @@ export default function Models() {
         }
         loading={loading}
         loadingText="Loading models..."
-        items={filteredModels}
+        items={sortedModels}
+        {...sortingProps}
         columnDefinitions={[
           {
             id: 'name',

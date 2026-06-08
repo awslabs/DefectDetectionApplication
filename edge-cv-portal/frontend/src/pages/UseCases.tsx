@@ -22,6 +22,7 @@ import { UseCase } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import TeamManagement from '../components/TeamManagement';
 import { validateBucketName } from '../utils/s3Validation';
+import { useTableSort } from '../hooks/useTableSort';
 
 interface FormDataType {
   name: string;
@@ -80,6 +81,8 @@ export default function UseCases() {
     staleTime: 10000, // Consider data stale after 10 seconds
     refetchInterval: 15000, // Auto-refresh every 15 seconds to catch async provisioning updates
   });
+
+  const { items: sortedUseCases, sortingProps } = useTableSort<UseCase>(data?.usecases || []);
 
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Partial<UseCase> }) =>
@@ -315,7 +318,8 @@ export default function UseCases() {
           </Header>
         }
         loading={isLoading}
-        items={data?.usecases || []}
+        items={sortedUseCases}
+        {...sortingProps}
         columnDefinitions={[
           {
             id: 'name',

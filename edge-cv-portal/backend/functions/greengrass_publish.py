@@ -41,6 +41,21 @@ PLATFORM_DEPENDENCIES = {
     'amd64': 'aws.edgeml.dda.LocalServer.amd64'
 }
 
+# Compilation target -> DDA LocalServer component name.
+# This is more specific than PLATFORM_DEPENDENCIES because aarch64 has two
+# LocalServer variants: arm64 (JetPack 4, requires Nucleus >=2.13.0) and
+# arm64JP5 (JetPack 5, requires Nucleus >=2.4.0). A model compiled for a JP5
+# device MUST depend on the arm64JP5 variant, otherwise the deployment pulls in
+# the JP4 LocalServer and its Nucleus >=2.13.0 requirement conflicts with the
+# JP5 device's Nucleus 2.12.0.
+TARGET_TO_LOCAL_SERVER = {
+    'jetson-xavier': 'aws.edgeml.dda.LocalServer.arm64',        # JetPack 4
+    'jetson-xavier-jp5': 'aws.edgeml.dda.LocalServer.arm64JP5',  # JetPack 5
+    'arm64-cpu': 'aws.edgeml.dda.LocalServer.arm64',
+    'x86_64-cpu': 'aws.edgeml.dda.LocalServer.amd64',
+    'x86_64-cuda': 'aws.edgeml.dda.LocalServer.amd64',
+}
+
 # Target to platform mapping
 TARGET_TO_PLATFORM = {
     'jetson-xavier': 'aarch64',
@@ -49,6 +64,19 @@ TARGET_TO_PLATFORM = {
     'x86_64-cpu': 'amd64',
     'x86_64-cuda': 'amd64'
 }
+
+
+def resolve_local_server_component(target: str, platform: str) -> str:
+    """
+    Resolve the correct DDA LocalServer dependency for a model component.
+
+    Prefer the target-specific mapping (which distinguishes JetPack 4 vs 5 for
+    aarch64); fall back to the platform-level default for unknown targets.
+    """
+    return TARGET_TO_LOCAL_SERVER.get(
+        target,
+        PLATFORM_DEPENDENCIES.get(platform, 'aws.edgeml.dda.LocalServer')
+    )
 
 
 def get_training_job_details(training_id: str) -> Dict:
@@ -83,15 +111,16 @@ def generate_component_recipe(
     friendly_name: str,
     platform: str,
     artifact_s3_uri: str,
-    model_unarchived_path: str
+    model_unarchived_path: str,
+    target: str = None
 ) -> Dict:
     """
     Generate Greengrass component recipe
     Phase 3: Component Creation from DDA notebook
     """
     
-    # Determine DDA LocalServer dependency based on platform
-    local_server_component = PLATFORM_DEPENDENCIES.get(platform, 'aws.edgeml.dda.LocalServer')
+    # Determine DDA LocalServer dependency based on target (JP4 vs JP5) / platform
+    local_server_component = resolve_local_server_component(target, platform)
     
     recipe = {
         'RecipeFormatVersion': '2020-01-25',
@@ -278,7 +307,8 @@ def publish_component(event: Dict, context: Any) -> Dict:
                     friendly_name=f"{friendly_name} ({target})",
                     platform=platform,
                     artifact_s3_uri=artifact_s3_uri,
-                    model_unarchived_path=model_unarchived_path
+                    model_unarchived_path=model_unarchived_path,
+                    target=target
                 )
                 
                 logger.info(f"Creating Greengrass component: {target_component_name} v{component_version}")

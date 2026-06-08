@@ -1,13 +1,40 @@
 import json
 import boto3
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 from botocore.exceptions import ClientError
 
 # Import shared utilities
 import sys
 sys.path.append('/opt/python')
+
+
+def _timestamp_sort_key(component: Dict[str, Any]) -> float:
+    """
+    Return a comparable epoch-seconds value for a component's creation timestamp.
+
+    boto3 returns timezone-aware datetimes, but timestamps may also be missing
+    (None), ISO strings, or numeric. Normalizing everything to a float avoids
+    "can't compare offset-naive and offset-aware datetimes" errors during sort.
+    """
+    value = component.get('creation_timestamp')
+    if value is None:
+        return float('-inf')
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            if not dt.tzinfo:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except (ValueError, AttributeError):
+            return float('-inf')
+    return float('-inf')
 from shared_utils import (
     get_user_from_event, 
     assume_cross_account_role,
@@ -142,10 +169,7 @@ def list_components(user_info: Dict, query_params: Dict, headers: Dict) -> Dict:
         if sort_by == 'component_name':
             components.sort(key=lambda x: x['component_name'], reverse=reverse)
         elif sort_by == 'creation_timestamp':
-            components.sort(
-                key=lambda x: x.get('creation_timestamp') or datetime.min, 
-                reverse=reverse
-            )
+            components.sort(key=_timestamp_sort_key, reverse=reverse)
         
         return {
             'statusCode': 200,

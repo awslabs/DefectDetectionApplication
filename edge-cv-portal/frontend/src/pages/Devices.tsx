@@ -17,6 +17,7 @@ import {
 import { apiService } from '../services/api';
 import { Device, UseCase } from '../types';
 import { useUsecase } from '../contexts/UsecaseContext';
+import { useTableSort } from '../hooks/useTableSort';
 
 export default function Devices() {
   const navigate = useNavigate();
@@ -154,6 +155,8 @@ export default function Devices() {
     );
   });
 
+  const { items: sortedDevices, sortingProps } = useTableSort(filteredDevices);
+
   return (
     <SpaceBetween size="l">
       {error && (
@@ -202,7 +205,8 @@ export default function Devices() {
           </Header>
         }
         loading={loading}
-        items={filteredDevices}
+        items={sortedDevices}
+        {...sortingProps}
         selectionType="multi"
         selectedItems={selectedItems}
         onSelectionChange={({ detail }) => setSelectedItems(detail.selectedItems)}

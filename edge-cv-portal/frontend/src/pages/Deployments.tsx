@@ -20,6 +20,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import { UseCase } from '../types';
 import { useUsecase } from '../contexts/UsecaseContext';
+import { useTableSort } from '../hooks/useTableSort';
 
 interface DeploymentItem {
   deployment_id: string;
@@ -128,6 +129,12 @@ export default function Deployments() {
     }
   };
 
+  const getTargetName = (targetArn: string) => {
+    if (!targetArn) return '-';
+    const parts = targetArn.split('/');
+    return parts[parts.length - 1] || targetArn;
+  };
+
   // Filter deployments
   const filteredDeployments = deployments.filter(dep => {
     const matchesText = !filterText || 
@@ -142,7 +149,8 @@ export default function Deployments() {
   });
 
   // Paginate
-  const paginatedDeployments = filteredDeployments.slice(
+  const { items: sortedDeployments, sortingProps } = useTableSort(filteredDeployments);
+  const paginatedDeployments = sortedDeployments.slice(
     (currentPage - 1) * PAGE_SIZE,
     currentPage * PAGE_SIZE
   );
@@ -171,12 +179,6 @@ export default function Deployments() {
       default:
         return <StatusIndicator type="info">{status || 'Unknown'}</StatusIndicator>;
     }
-  };
-
-  const getTargetName = (targetArn: string) => {
-    if (!targetArn) return '-';
-    const parts = targetArn.split('/');
-    return parts[parts.length - 1] || targetArn;
   };
 
   const getTargetType = (targetArn: string) => {
@@ -302,6 +304,7 @@ export default function Deployments() {
         }
         loading={loading}
         items={paginatedDeployments}
+        {...sortingProps}
         selectionType="single"
         selectedItems={selectedItems}
         onSelectionChange={({ detail }) => setSelectedItems(detail.selectedItems)}
@@ -331,6 +334,8 @@ export default function Deployments() {
                 <span>{getTargetName(item.target_arn)}</span>
               </SpaceBetween>
             ),
+            sortingComparator: (a, b) =>
+              getTargetName(a.target_arn).localeCompare(getTargetName(b.target_arn)),
           },
           {
             id: 'status',
@@ -344,6 +349,8 @@ export default function Deployments() {
             cell: (item) => item.is_latest_for_target ? 
               <StatusIndicator type="success">Yes</StatusIndicator> : 
               <Box color="text-body-secondary">No</Box>,
+            sortingComparator: (a, b) =>
+              Number(a.is_latest_for_target) - Number(b.is_latest_for_target),
           },
           {
             id: 'created',

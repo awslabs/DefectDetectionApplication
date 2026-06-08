@@ -419,6 +419,26 @@ EOF
         "arn:aws:s3:::dda-inference-results-*",
         "arn:aws:s3:::dda-inference-results-*/*"
       ]
+    },
+    {
+      "Sid": "AllowEcrAuthToken",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowEcrImagePull",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchCheckLayerAvailability"
+      ],
+      "Resource": [
+        "arn:aws:ecr:*:${CURRENT_ACCOUNT}:repository/dda/*"
+      ]
     }
   ]
 }
@@ -516,7 +536,7 @@ GGEOF
     echo ""
     echo "The following have been created:"
     echo "  • DDASageMakerExecutionRole - for SageMaker training/compilation/labeling"
-    echo "  • DDAPortalComponentAccessPolicy - for Greengrass device access to model artifacts"
+    echo "  • DDAPortalComponentAccessPolicy - for Greengrass device access to model artifacts (S3) and Docker component images (ECR)"
     echo "  • Greengrass_ServiceRole - for Greengrass to access IoT Core services"
     echo ""
     echo "Next steps:"

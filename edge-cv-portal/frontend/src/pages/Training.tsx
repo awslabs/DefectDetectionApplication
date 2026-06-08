@@ -16,6 +16,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
+import { useTableSort } from '../hooks/useTableSort';
 
 interface TrainingJob {
   training_id: string;
@@ -187,6 +188,8 @@ export default function Training() {
     return matchesText && matchesStatus;
   });
 
+  const { items: sortedJobs, sortingProps } = useTableSort(filteredJobs);
+
   const statusOptions: SelectProps.Option[] = [
     { label: 'All Statuses', value: '' },
     { label: 'In Progress', value: 'in_progress' },
@@ -242,7 +245,8 @@ export default function Training() {
             Training Jobs
           </Header>
         }
-        items={filteredJobs}
+        items={sortedJobs}
+        {...sortingProps}
         columnDefinitions={[
           {
             id: 'model_name',

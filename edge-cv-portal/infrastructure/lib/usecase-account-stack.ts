@@ -117,7 +117,7 @@ export class UseCaseAccountStack extends cdk.Stack {
     // Uses pattern-based access to cover all DDA buckets without needing to specify each one
     this.greengrassDevicePolicy = new iam.ManagedPolicy(this, 'DDAGreengrassDevicePolicy', {
       managedPolicyName: 'DDAPortalComponentAccessPolicy',
-      description: 'Allows Greengrass devices to download DDA component artifacts from Portal and UseCase S3 buckets',
+      description: 'Allows Greengrass devices to download DDA component artifacts from Portal and UseCase S3 buckets, and pull Docker component images from ECR',
       statements: [
         // Access to Portal Account's component bucket (for DDA LocalServer)
         new iam.PolicyStatement({
@@ -156,6 +156,31 @@ export class UseCaseAccountStack extends cdk.Stack {
         resources: [
           'arn:aws:s3:::dda-inference-results-*',
           'arn:aws:s3:::dda-inference-results-*/*',
+        ],
+      })
+    );
+
+    // ECR access for Greengrass devices to pull Docker-based components
+    // (e.g. aws.edgeml.dda.LocalServer images published to ECR).
+    // ecr:GetAuthorizationToken does NOT support resource-level scoping and must
+    // use "*"; the image-pull actions are scoped to this account's ECR repos.
+    this.greengrassDevicePolicy.addStatements(
+      new iam.PolicyStatement({
+        sid: 'AllowEcrAuthToken',
+        effect: iam.Effect.ALLOW,
+        actions: ['ecr:GetAuthorizationToken'],
+        resources: ['*'],
+      }),
+      new iam.PolicyStatement({
+        sid: 'AllowEcrImagePull',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'ecr:BatchGetImage',
+          'ecr:GetDownloadUrlForLayer',
+          'ecr:BatchCheckLayerAvailability',
+        ],
+        resources: [
+          `arn:aws:ecr:*:${cdk.Aws.ACCOUNT_ID}:repository/dda/*`,
         ],
       })
     );

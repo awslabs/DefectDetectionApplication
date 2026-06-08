@@ -18,6 +18,7 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import { useUsecase } from '../contexts/UsecaseContext';
 import apiService from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
 
 interface AuditLogEntry {
   event_id: string;
@@ -179,6 +180,8 @@ export default function AuditLogs() {
         log.user_id?.toLowerCase().includes(searchText.toLowerCase())
       )
     : logs;
+
+  const { items: sortedLogs, sortingProps } = useTableSort(filteredLogs);
 
   if (!isPortalAdmin && user?.role !== 'UseCaseAdmin') {
     return (
@@ -355,7 +358,8 @@ export default function AuditLogs() {
               },
             },
           ]}
-          items={filteredLogs}
+          items={sortedLogs}
+          {...sortingProps}
           loading={loading}
           loadingText="Loading audit logs"
           sortingDisabled={false}

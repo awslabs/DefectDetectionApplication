@@ -185,10 +185,35 @@ export default function CreateDeployment() {
   const [loading, setLoading] = useState(true);
   const [showRemovalWarning, setShowRemovalWarning] = useState(false);
 
+  // Existing deployment for the selected target (revise mode). Greengrass
+  // deployments are immutable and one-per-target; deploying again revises the
+  // existing deployment rather than creating a parallel one.
+  interface ExistingDeployment {
+    deployment_id: string;
+    deployment_name: string;
+    deployment_status: string;
+    components: Array<{ component_name: string; component_version: string }>;
+  }
+  const [existingDeployment, setExistingDeployment] = useState<ExistingDeployment | null>(null);
+  const [checkingExisting, setCheckingExisting] = useState(false);
+
+  // Member devices of a target thing group that already have their own individual
+  // (thing-level) deployments. These conflict with a group deployment.
+  interface GroupMemberConflict {
+    device: string;
+    deployment_id: string;
+    deployment_name: string;
+    deployment_status: string;
+  }
+  const [groupMemberConflicts, setGroupMemberConflicts] = useState<GroupMemberConflict[]>([]);
+  const [showGroupConflictWarning, setShowGroupConflictWarning] = useState(false);
+
   const preSelectedComponentArn = searchParams.get('component_arn');
   const preSelectedComponentArns = searchParams.get('component_arns');
   const cloneComponentNames = searchParams.get('clone_components');
   const urlUseCaseId = searchParams.get('usecase_id');
+  const reviseTargetDevice = searchParams.get('target_device');
+  const reviseTargetThingGroup = searchParams.get('target_thing_group');
 
   // Compute selected device architectures
   const selectedDeviceArchitectures = useMemo(() => {
@@ -351,6 +376,110 @@ export default function CreateDeployment() {
     }
   }, [selectedUseCase]);
 
+  // When a single target is selected, check whether it already has a deployment.
+  // If so, we switch to "revise" mode: reuse the existing name and (when the user
+  // hasn't already chosen components) pre-load the existing component set.
+  useEffect(() => {
+    const checkExisting = async () => {
+      if (!selectedUseCase?.value) {
+        setExistingDeployment(null);
+        return;
+      }
+
+      let targetDevice: string | undefined;
+      let targetGroup: string | undefined;
+      if (targetType === 'devices') {
+        // Revision identity only applies to a single device target
+        setGroupMemberConflicts([]);
+        if (targetDevices.length === 1) {
+          targetDevice = targetDevices[0].value as string;
+        } else {
+          setExistingDeployment(null);
+          return;
+        }
+      } else {
+        if (targetThingGroup.trim()) {
+          targetGroup = targetThingGroup.trim();
+        } else {
+          setExistingDeployment(null);
+          setGroupMemberConflicts([]);
+          return;
+        }
+      }
+
+      try {
+        setCheckingExisting(true);
+        const resp = await apiService.getTargetDeployment({
+          usecase_id: selectedUseCase.value as string,
+          target_device: targetDevice,
+          target_thing_group: targetGroup,
+        });
+        setExistingDeployment(resp.existing_deployment);
+        setGroupMemberConflicts(resp.group_member_conflicts || []);
+
+        // Pre-populate the deployment name so the revision keeps the same identity
+        if (resp.existing_deployment) {
+          if (!deploymentName) {
+            setDeploymentName(resp.existing_deployment.deployment_name || '');
+          }
+          // If the user hasn't selected components yet, pre-load the existing set
+          // so they revise rather than wipe the device.
+          if (selectedComponents.length === 0 && resp.existing_deployment.components.length > 0) {
+            preloadExistingComponents(resp.existing_deployment.components);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to check existing deployment:', err);
+        setExistingDeployment(null);
+        setGroupMemberConflicts([]);
+      } finally {
+        setCheckingExisting(false);
+      }
+    };
+    checkExisting();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedUseCase, targetType, targetDevices, targetThingGroup, allPrivateComponents, allPublicComponents]);
+
+  // Map existing deployment components (by name) to selectable component entries.
+  const preloadExistingComponents = (
+    existingComps: Array<{ component_name: string; component_version: string }>
+  ) => {
+    const allComponents = [...allPrivateComponents, ...allPublicComponents];
+    // Skip auto-included infrastructure that the backend re-adds automatically.
+    const autoManaged = new Set(['aws.greengrass.Nucleus', 'aws.greengrass.LogManager']);
+
+    const preloaded: ComponentSelection[] = [];
+    for (const ec of existingComps) {
+      if (autoManaged.has(ec.component_name)) continue;
+      const match = allComponents.find(c => c.component_name === ec.component_name);
+      if (match) {
+        preloaded.push({
+          component_name: match.component_name,
+          component_version: ec.component_version || match.latest_version?.componentVersion || 'latest',
+          arn: match.arn,
+          scope: match.scope,
+          displayName: getComponentDisplayName(match.component_name, match.model_name),
+          category: getComponentCategory(match.component_name, match.model_name, match.scope),
+          model_name: match.model_name,
+        });
+      } else {
+        // Component not found in catalog (e.g. removed) - still represent it so the
+        // user is aware it's currently deployed.
+        preloaded.push({
+          component_name: ec.component_name,
+          component_version: ec.component_version || 'latest',
+          arn: ec.component_name,
+          scope: 'PRIVATE',
+          displayName: getComponentDisplayName(ec.component_name),
+          category: getComponentCategory(ec.component_name),
+        });
+      }
+    }
+    if (preloaded.length > 0) {
+      setSelectedComponents(preloaded);
+    }
+  };
+
   const loadUseCases = async () => {
     try {
       const response = await apiService.listUseCases();
@@ -424,7 +553,7 @@ export default function CreateDeployment() {
 
       // Store device data with architecture info
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      setAllDevices(devicesResponse.devices.map((device: any) => ({
+      const mappedDevices = devicesResponse.devices.map((device: any) => ({
         device_id: device.device_id,
         platform: device.platform || '',
         architecture: device.architecture || '',
@@ -433,7 +562,25 @@ export default function CreateDeployment() {
           component_name: c.componentName || c.component_name,
           version: c.componentVersion || c.version || ''
         }))
-      })));
+      }));
+      setAllDevices(mappedDevices);
+
+      // Revise mode: pre-select the target from URL so the existing-deployment
+      // detection kicks in and pre-loads the current component set.
+      if (reviseTargetThingGroup) {
+        setTargetType('group');
+        setTargetThingGroup(reviseTargetThingGroup);
+      } else if (reviseTargetDevice) {
+        setTargetType('devices');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const match = mappedDevices.find((d: any) => d.device_id === reviseTargetDevice);
+        setTargetDevices([{
+          label: reviseTargetDevice,
+          value: reviseTargetDevice,
+          ...(match?.architecture ? { tags: [match.architecture.toUpperCase()] } : {}),
+        }]);
+      }
+
 
       // Pre-select component(s) if provided in URL
       if (preSelectedComponentArns) {
@@ -546,7 +693,14 @@ export default function CreateDeployment() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
+    // If deploying to a group whose members have individual deployments, require
+    // explicit confirmation before proceeding.
+    if (targetType === 'group' && groupMemberConflicts.length > 0 && !showGroupConflictWarning) {
+      setShowGroupConflictWarning(true);
+      return;
+    }
+
     // If there are component removals and user hasn't confirmed yet, show warning
     if (hasComponentRemovals && !showRemovalWarning) {
       setShowRemovalWarning(true);
@@ -560,6 +714,7 @@ export default function CreateDeployment() {
     setCreating(true);
     setError('');
     setShowRemovalWarning(false);
+    setShowGroupConflictWarning(false);
 
     try {
       if (!selectedUseCase?.value) {
@@ -627,7 +782,7 @@ export default function CreateDeployment() {
               loading={creating}
               disabled={selectedComponents.length === 0 || (targetType === 'devices' && targetDevices.length === 0)}
             >
-              Create Deployment
+              {existingDeployment ? 'Update Deployment' : 'Create Deployment'}
             </Button>
           </SpaceBetween>
         }
@@ -635,13 +790,30 @@ export default function CreateDeployment() {
       >
         <Container
           header={
-            <Header variant="h1" description="Deploy components to edge devices">
-              Create Deployment
+            <Header
+              variant="h1"
+              description={existingDeployment
+                ? 'This target already has a deployment. Saving will revise the existing deployment.'
+                : 'Deploy components to edge devices'}
+            >
+              {existingDeployment ? 'Update Deployment' : 'Create Deployment'}
             </Header>
           }
         >
           <SpaceBetween size="l">
             {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+
+            {/* Revise-mode banner */}
+            {existingDeployment && (
+              <Alert type="info" header="Revising existing deployment">
+                This target is already running deployment{' '}
+                <strong>{existingDeployment.deployment_name || existingDeployment.deployment_id}</strong>{' '}
+                (status: {existingDeployment.deployment_status}). A device can only have one active
+                deployment, so saving will <strong>update and supersede</strong> the existing deployment
+                rather than create a new one. The current components have been pre-loaded below — adjust
+                them as needed.
+              </Alert>
+            )}
             
             {/* CloudWatch Logging Info */}
             <Alert type="info" header="CloudWatch Logging">
@@ -891,10 +1063,12 @@ export default function CreateDeployment() {
                         header: 'Actions',
                         cell: item => (
                           <Button
-                            variant="icon"
+                            variant="normal"
                             iconName="remove"
                             onClick={() => handleRemoveComponent(item.arn)}
-                          />
+                          >
+                            Remove
+                          </Button>
                         ),
                       },
                     ]}
@@ -925,15 +1099,28 @@ export default function CreateDeployment() {
                 description="Select the devices to deploy to. Components will be filtered by device architecture."
                 constraintText="Required - Select at least one device"
               >
-                <Multiselect
-                  selectedOptions={targetDevices}
-                  onChange={({ detail }) => setTargetDevices(detail.selectedOptions)}
-                  options={deviceOptions}
-                  placeholder={loading ? "Loading devices..." : "Select devices"}
-                  filteringType="auto"
-                  disabled={loading}
-                  tokenLimit={3}
-                />
+                <SpaceBetween size="xs">
+                  <Multiselect
+                    selectedOptions={targetDevices}
+                    onChange={({ detail }) => setTargetDevices(detail.selectedOptions)}
+                    options={deviceOptions}
+                    placeholder={loading ? "Loading devices..." : "Select devices"}
+                    filteringType="auto"
+                    disabled={loading}
+                    tokenLimit={3}
+                  />
+                  {checkingExisting && (
+                    <Box color="text-body-secondary" fontSize="body-s">Checking for existing deployment…</Box>
+                  )}
+                  {targetDevices.length > 1 && (
+                    <Alert type="warning">
+                      You've selected multiple devices. Existing-deployment detection and revision only
+                      apply when a single device is targeted. Deploying to multiple devices at once may
+                      create separate deployments per device. To revise a specific device's deployment,
+                      select just that one device.
+                    </Alert>
+                  )}
+                </SpaceBetween>
               </FormField>
             ) : (
               <FormField
@@ -941,11 +1128,41 @@ export default function CreateDeployment() {
                 description="Enter the name of the IoT thing group to deploy to"
                 constraintText="Required"
               >
-                <Input
-                  value={targetThingGroup}
-                  onChange={({ detail }) => setTargetThingGroup(detail.value)}
-                  placeholder="e.g., production-devices"
-                />
+                <SpaceBetween size="xs">
+                  <Input
+                    value={targetThingGroup}
+                    onChange={({ detail }) => setTargetThingGroup(detail.value)}
+                    placeholder="e.g., production-devices"
+                  />
+                  {checkingExisting && (
+                    <Box color="text-body-secondary" fontSize="body-s">Checking group members for existing deployments…</Box>
+                  )}
+                  {groupMemberConflicts.length > 0 && (
+                    <Alert type="warning" header="Devices in this group have individual deployments">
+                      <SpaceBetween size="xs">
+                        <Box>
+                          The following device(s) in this thing group already have their own
+                          individual (device-level) deployment. A device that has both an individual
+                          deployment and a group deployment will run two deployments at once, which
+                          can lead to conflicting or unpredictable component state.
+                        </Box>
+                        <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                          {groupMemberConflicts.map(c => (
+                            <li key={c.device}>
+                              <strong>{c.device}</strong> — {c.deployment_name || c.deployment_id}{' '}
+                              ({c.deployment_status})
+                            </li>
+                          ))}
+                        </ul>
+                        <Box variant="p" color="text-body-secondary">
+                          <strong>Recommended:</strong> Cancel the individual deployment(s) on these
+                          devices before deploying to the group, so the group deployment becomes the
+                          single source of truth. You can cancel a deployment from its detail page.
+                        </Box>
+                      </SpaceBetween>
+                    </Alert>
+                  )}
+                </SpaceBetween>
               </FormField>
             )}
 
@@ -977,6 +1194,54 @@ export default function CreateDeployment() {
           </SpaceBetween>
         </Container>
       </Form>
+
+      {/* Group Member Conflict Warning Modal */}
+      <Modal
+        visible={showGroupConflictWarning}
+        onDismiss={() => setShowGroupConflictWarning(false)}
+        header="Devices already have individual deployments"
+        footer={
+          <Box float="right">
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button variant="link" onClick={() => setShowGroupConflictWarning(false)}>Cancel</Button>
+              <Button
+                variant="primary"
+                loading={creating}
+                onClick={() => {
+                  // Proceed past the group-conflict gate; component-removal gate (if any) still applies.
+                  setShowGroupConflictWarning(false);
+                  if (hasComponentRemovals) {
+                    setShowRemovalWarning(true);
+                  } else {
+                    executeDeployment();
+                  }
+                }}
+              >
+                Deploy anyway
+              </Button>
+            </SpaceBetween>
+          </Box>
+        }
+      >
+        <SpaceBetween size="m">
+          <Alert type="warning">
+            One or more devices in this thing group already have their own individual
+            (device-level) deployment. Deploying to the group will leave those devices running
+            two deployments at once, which can cause conflicting component state.
+          </Alert>
+          <ul style={{ margin: 0, paddingLeft: '20px' }}>
+            {groupMemberConflicts.map(c => (
+              <li key={c.device}>
+                <strong>{c.device}</strong> — {c.deployment_name || c.deployment_id} ({c.deployment_status})
+              </li>
+            ))}
+          </ul>
+          <Box color="text-body-secondary">
+            We recommend cancelling these individual deployments first so the group deployment
+            is the single source of truth. Click Cancel to go back, or Deploy anyway to proceed.
+          </Box>
+        </SpaceBetween>
+      </Modal>
 
       {/* Component Removal Warning Modal */}
       <Modal

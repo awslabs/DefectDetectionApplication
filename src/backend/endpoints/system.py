@@ -266,8 +266,8 @@ def get_dda_component_status() -> GetDdaComponentHealthStatusResponse:
 
 class GreengrassComponent(BaseModel):
     componentName: str
-    version: str
-    state: str
+    version: Optional[str] = None
+    state: Optional[str] = None
 
 
 class ListGreengrassComponentsResponse(BaseModel):

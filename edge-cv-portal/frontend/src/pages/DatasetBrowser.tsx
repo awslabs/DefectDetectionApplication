@@ -14,6 +14,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { S3Dataset } from '../types';
 import { apiService } from '../services/api';
 import ImagePreview from '../components/ImagePreview';
+import { useTableSort } from '../hooks/useTableSort';
 
 export default function DatasetBrowser() {
   const navigate = useNavigate();
@@ -74,6 +75,8 @@ export default function DatasetBrowser() {
     setPreviewPrefix(prefix);
     setPreviewVisible(true);
   };
+
+  const { items: sortedDatasets, sortingProps } = useTableSort(datasets);
 
   return (
     <Container
@@ -196,7 +199,8 @@ export default function DatasetBrowser() {
             ),
           },
         ]}
-        items={datasets}
+        items={sortedDatasets}
+        {...sortingProps}
         loading={loading}
         loadingText="Loading datasets"
         selectionType="single"

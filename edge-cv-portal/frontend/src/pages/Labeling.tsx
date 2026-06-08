@@ -25,6 +25,7 @@ import { LabelingJob, UseCase } from '../types';
 import { apiService } from '../services/api';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
+import { useTableSort } from '../hooks/useTableSort';
 
 interface PreLabeledDataset {
   dataset_id: string;
@@ -292,6 +293,9 @@ export default function Labeling() {
     }
   };
 
+  const { items: sortedJobs, sortingProps: jobsSortingProps } = useTableSort(jobs);
+  const { items: sortedDatasets, sortingProps: datasetsSortingProps } = useTableSort(datasets);
+
   return (
     <Container
       header={
@@ -406,7 +410,8 @@ export default function Labeling() {
                 sortingField: 'created_at',
               },
             ]}
-            items={jobs}
+            items={sortedJobs}
+            {...jobsSortingProps}
             loading={loading}
             loadingText="Loading labeling jobs"
             selectionType="single"
@@ -439,6 +444,7 @@ export default function Labeling() {
                 id: 'name',
                 header: 'Dataset Name',
                 cell: (item: PreLabeledDataset) => item.name,
+                sortingField: 'name',
               },
               {
                 id: 'task_type',
@@ -448,11 +454,13 @@ export default function Labeling() {
                     {item.task_type}
                   </Badge>
                 ),
+                sortingField: 'task_type',
               },
               {
                 id: 'image_count',
                 header: 'Images',
                 cell: (item: PreLabeledDataset) => item.image_count?.toLocaleString() || 'Unknown',
+                sortingField: 'image_count',
               },
               {
                 id: 'label_stats',
@@ -471,6 +479,7 @@ export default function Labeling() {
                 id: 'created_at',
                 header: 'Created',
                 cell: (item: PreLabeledDataset) => new Date(item.created_at * 1000).toLocaleDateString(),
+                sortingField: 'created_at',
               },
               {
                 id: 'actions',
@@ -485,7 +494,8 @@ export default function Labeling() {
                 ),
               },
             ]}
-            items={datasets}
+            items={sortedDatasets}
+            {...datasetsSortingProps}
             loading={loading}
             empty={
               <Box textAlign="center" color="inherit">

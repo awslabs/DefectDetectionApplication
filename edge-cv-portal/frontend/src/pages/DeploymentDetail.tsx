@@ -264,6 +264,20 @@ export default function DeploymentDetail() {
                     </Button>
                   )}
                   <Button
+                    iconName="edit"
+                    variant="primary"
+                    onClick={() => {
+                      const targetType = getTargetType(deployment.target_arn);
+                      const targetName = getTargetName(deployment.target_arn);
+                      const targetParam = targetType === 'group'
+                        ? `target_thing_group=${encodeURIComponent(targetName)}`
+                        : `target_device=${encodeURIComponent(targetName)}`;
+                      navigate(`/deployments/create?usecase_id=${usecaseId}&${targetParam}`);
+                    }}
+                  >
+                    Revise Deployment
+                  </Button>
+                  <Button
                     iconName="copy"
                     onClick={() => {
                       const componentNames = deployment.components

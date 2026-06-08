@@ -405,6 +405,33 @@ aws iam list-attached-role-policies --role-name GreengrassV2TokenExchangeRole
 
 Should include `DDAPortalComponentAccessPolicy`.
 
+### Model Deployment Fails with ECR Credential Error
+
+**Error:** `GET_ECR_CREDENTIAL_ERROR` / `Failed to get auth token for docker login` /
+`ecr:GetAuthorizationToken ... not authorized`
+
+**Cause:** Docker-based components (e.g. `aws.edgeml.dda.LocalServer`) pull their
+image from ECR, so the device token-exchange role needs ECR permissions.
+
+**Solution:** These permissions ship in the latest `DDAPortalComponentAccessPolicy`
+and are also re-applied as the `ECRComponentAccess` inline policy by
+`setup_station.sh`. For a device provisioned before this change, re-run
+`setup_station.sh`, or add them manually:
+```bash
+aws iam put-role-policy --role-name GreengrassV2TokenExchangeRole \
+  --policy-name ECRComponentAccess \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      { "Sid": "AllowEcrAuthToken", "Effect": "Allow",
+        "Action": ["ecr:GetAuthorizationToken"], "Resource": "*" },
+      { "Sid": "AllowEcrImagePull", "Effect": "Allow",
+        "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+        "Resource": "arn:aws:ecr:*:<ACCOUNT_ID>:repository/dda/*" }
+    ]
+  }'
+```
+
 ### Can't Connect to Device
 
 ```bash

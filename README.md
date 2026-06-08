@@ -198,14 +198,8 @@ USER_POOL_ID=$(aws cloudformation describe-stacks \
   --stack-name EdgeCVPortalAuthStack \
   --query 'Stacks[0].Outputs[?OutputKey==`AuthConfig`].OutputValue' \
   --output text --region us-east-2 | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
-REGION="us-east-1"
 
-aws cognito-idp admin-create-user \
-  --user-pool-id $USER_POOL_ID \
-  --username admin \
-  --message-action SUPPRESS \
-  --temporary-password TempPassword123! \
-  --region $REGION
+
 
 aws cognito-idp admin-set-user-password \
   --user-pool-id $USER_POOL_ID \
@@ -626,6 +620,40 @@ Verify device role has `DDAPortalComponentAccessPolicy` attached:
 ```bash
 aws iam list-attached-role-policies --role-name GreengrassV2TokenExchangeRole
 ```
+
+**Deployment Fails — Can't Pull Docker Image from ECR** (`GET_ECR_CREDENTIAL_ERROR` / `Failed to get auth token for docker login`):
+
+```
+EcrException: User: .../GreengrassV2TokenExchangeRole is not authorized to perform:
+  ecr:GetAuthorizationToken on resource: * because no identity-based policy allows the action
+```
+
+Docker-based components (e.g. `aws.edgeml.dda.LocalServer`) pull their image from
+ECR, so the device token-exchange role needs ECR permissions. These are included
+in the latest `DDAPortalComponentAccessPolicy` (and re-applied as the
+`ECRComponentAccess` inline policy by `setup_station.sh`). If you provisioned the
+device before this was added:
+
+```bash
+# Refresh the managed policy (re-run in the UseCase account)
+./edge-cv-portal/deploy-account-role.sh        # updates DDAPortalComponentAccessPolicy
+
+# OR add the permissions directly to the device role:
+aws iam put-role-policy --role-name GreengrassV2TokenExchangeRole \
+  --policy-name ECRComponentAccess \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      { "Sid": "AllowEcrAuthToken", "Effect": "Allow",
+        "Action": ["ecr:GetAuthorizationToken"], "Resource": "*" },
+      { "Sid": "AllowEcrImagePull", "Effect": "Allow",
+        "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+        "Resource": "arn:aws:ecr:*:<ACCOUNT_ID>:repository/dda/*" }
+    ]
+  }'
+```
+`ecr:GetAuthorizationToken` does not support resource scoping and must use `"*"`.
+No device restart is needed — the role change takes effect on the next deployment retry.
 
 **Deployment Fails** (`COMPONENT_VERSION_REQUIREMENTS_NOT_MET`):
 - Verify component exists in your account
