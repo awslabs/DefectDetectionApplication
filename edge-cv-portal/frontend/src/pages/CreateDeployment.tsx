@@ -691,6 +691,30 @@ export default function CreateDeployment() {
     setSelectedComponents(selectedComponents.filter(c => c.arn !== arn));
   };
 
+  // Look up the latest available version for an already-selected component
+  // (matched by ARN/component name against the loaded catalog).
+  const getLatestVersionFor = (item: ComponentSelection): string | null => {
+    const allComponents = [...allPrivateComponents, ...allPublicComponents];
+    const match = allComponents.find(
+      c => c.arn === item.arn || c.component_name === item.component_name
+    );
+    const latest = match?.latest_version?.componentVersion;
+    if (!latest || latest === '0.0.0' || latest === 'unknown') return null;
+    return latest;
+  };
+
+  // Bump a selected component to its latest available version IN PLACE so the
+  // revise/deploy flow needs only a single deployment (no remove + re-add).
+  const handleUpdateToLatest = (arn: string) => {
+    setSelectedComponents(prev =>
+      prev.map(c => {
+        if (c.arn !== arn) return c;
+        const latest = getLatestVersionFor(c);
+        return latest ? { ...c, component_version: latest } : c;
+      })
+    );
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -1020,10 +1044,32 @@ export default function CreateDeployment() {
 
                 {/* Selected components table */}
                 {selectedComponents.length > 0 && (
-                  <Table
-                    resizableColumns
-                    items={selectedComponents}
-                    columnDefinitions={[
+                  <SpaceBetween size="xs">
+                    {existingDeployment && selectedComponents.some(c => {
+                      const latest = getLatestVersionFor(c);
+                      return latest && latest !== c.component_version
+                        && c.component_version !== '0.0.0' && c.component_version !== 'unknown' && c.component_version !== 'latest';
+                    }) && (
+                      <Box>
+                        <Button
+                          iconName="upload"
+                          onClick={() => {
+                            setSelectedComponents(prev => prev.map(c => {
+                              const latest = getLatestVersionFor(c);
+                              const updatable = latest && latest !== c.component_version
+                                && c.component_version !== '0.0.0' && c.component_version !== 'unknown' && c.component_version !== 'latest';
+                              return updatable ? { ...c, component_version: latest as string } : c;
+                            }));
+                          }}
+                        >
+                          Update all to latest
+                        </Button>
+                      </Box>
+                    )}
+                    <Table
+                      resizableColumns
+                      items={selectedComponents}
+                      columnDefinitions={[
                       {
                         id: 'name',
                         header: 'Component',
@@ -1043,10 +1089,20 @@ export default function CreateDeployment() {
                         id: 'version',
                         header: 'Version',
                         cell: item => {
-                          const displayVersion = (item.component_version === '0.0.0' || item.component_version === 'unknown') 
-                            ? 'Latest' 
+                          const displayVersion = (item.component_version === '0.0.0' || item.component_version === 'unknown')
+                            ? 'Latest'
                             : item.component_version;
-                          return displayVersion;
+                          const latest = getLatestVersionFor(item);
+                          const updateAvailable = latest && latest !== item.component_version
+                            && item.component_version !== '0.0.0' && item.component_version !== 'unknown' && item.component_version !== 'latest';
+                          return (
+                            <SpaceBetween direction="horizontal" size="xs">
+                              <span>{displayVersion}</span>
+                              {updateAvailable && (
+                                <Badge color="blue">update available: v{latest}</Badge>
+                              )}
+                            </SpaceBetween>
+                          );
                         },
                       },
                       {
@@ -1061,19 +1117,36 @@ export default function CreateDeployment() {
                       {
                         id: 'actions',
                         header: 'Actions',
-                        cell: item => (
-                          <Button
-                            variant="normal"
-                            iconName="remove"
-                            onClick={() => handleRemoveComponent(item.arn)}
-                          >
-                            Remove
-                          </Button>
-                        ),
+                        cell: item => {
+                          const latest = getLatestVersionFor(item);
+                          const updateAvailable = latest && latest !== item.component_version
+                            && item.component_version !== '0.0.0' && item.component_version !== 'unknown' && item.component_version !== 'latest';
+                          return (
+                            <SpaceBetween direction="horizontal" size="xs">
+                              {updateAvailable && (
+                                <Button
+                                  variant="normal"
+                                  iconName="upload"
+                                  onClick={() => handleUpdateToLatest(item.arn)}
+                                >
+                                  Update to latest
+                                </Button>
+                              )}
+                              <Button
+                                variant="normal"
+                                iconName="remove"
+                                onClick={() => handleRemoveComponent(item.arn)}
+                              >
+                                Remove
+                              </Button>
+                            </SpaceBetween>
+                          );
+                        },
                       },
                     ]}
                     empty={<Box textAlign="center">No components selected</Box>}
                   />
+                  </SpaceBetween>
                 )}
               </SpaceBetween>
             </FormField>

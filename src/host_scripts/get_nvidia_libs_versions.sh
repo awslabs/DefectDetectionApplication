@@ -44,7 +44,6 @@ if [ ! -z "$JETSON_CUDNN" ] && [ $has_dpkg -eq 1 ]; then
     JETSON_CUDNN=$(echo $JETSON_CUDNN | sed 's/.*libcudnn[0-9] \([^ ]*\).*/\1/' | cut -d '-' -f1 )
 else
     JETSON_CUDNN="NOT_INSTALLED"
-    is_gpu=0
 fi
 
 # Export NVIDIA CuDNN Library
@@ -55,8 +54,6 @@ JETSON_MODEL="UNKNOWN"
 if [ -f /sys/firmware/devicetree/base/model ]; then
     JETSON_MODEL=$(tr -d '\0' < /sys/firmware/devicetree/base/model)
     JETSON_MODEL=${JETSON_MODEL// /_}
-else
-    is_gpu=0
 fi
 echo "JETSON_MODEL=\"${JETSON_MODEL}\"" >> /tmp/.dda.env
 
@@ -67,7 +64,6 @@ if [ -f /sys/module/tegra_fuse/parameters/tegra_chip_id ]; then
     JETSON_CHIP_ID=${JETSON_CHIP_ID// /_}
 else
     JETSON_CHIP_ID="NOT_AVAILABLE"
-    is_gpu=0
 fi
 echo "JETSON_CHIP_ID=\"${JETSON_CHIP_ID}\"" >> /tmp/.dda.env
 
@@ -79,7 +75,6 @@ if [ -f /proc/device-tree/compatible ]; then
     JETSON_SOC=${JETSON_SOC// /_}
 else
     JETSON_SOC="NOT_AVAILABLE"
-    is_gpu=0
 fi
 echo "JETSON_SOC=\"${JETSON_SOC}\"" >> /tmp/.dda.env
 
@@ -95,7 +90,6 @@ else
     # Load release and revision
     JETSON_L4T_RELEASE="N"
     JETSON_L4T_REVISION="N.N"
-    is_gpu=0
 fi
 echo "JETSON_L4T=${JETSON_L4T_RELEASE}.${JETSON_L4T_REVISION}" >> /tmp/.dda.env
 
@@ -105,7 +99,6 @@ if [ ! -z "$JETSON_NVINFER" ] && [ $has_dpkg -eq 1 ]; then
     JETSON_NVINFER=$(echo $JETSON_NVINFER | sed 's/.*libnvinfer-bin \([^ ]*\).*/\1/' )
 else
     JETSON_NVINFER="NOT_INSTALLED"
-    is_gpu=0
 fi
 echo "JETSON_NVINFER=${JETSON_NVINFER}" >> /tmp/.dda.env
 
@@ -115,7 +108,6 @@ if [ ! -z "$JETSON_CONTAINER_TOOLKIT" ] && [ $has_dpkg -eq 1 ]; then
     JETSON_CONTAINER_TOOLKIT=$(echo $JETSON_CONTAINER_TOOLKIT | sed 's/.*nvidia-container-toolkit \([^ ]*\).*/\1/' | cut -d '-' -f1 )
 else
     JETSON_CONTAINER_TOOLKIT="NOT_INSTALLED"
-    is_gpu=0
 fi
 echo "JETSON_CONTAINER_TOOLKIT=${JETSON_CONTAINER_TOOLKIT}" >> /tmp/.dda.env
 
@@ -125,7 +117,6 @@ if [ ! -z "$JETSON_CONTAINER_RUNTIME" ] && [ $has_dpkg -eq 1 ]; then
     JETSON_CONTAINER_RUNTIME=$(echo $JETSON_CONTAINER_RUNTIME | sed 's/.*nvidia-container-runtime \([^ ]*\).*/\1/' | cut -d '-' -f1)
 else
     JETSON_CONTAINER_RUNTIME="NOT_INSTALLED"
-    is_gpu=0
 fi
 echo "JETSON_CONTAINER_RUNTIME=${JETSON_CONTAINER_RUNTIME}" >> /tmp/.dda.env
 
@@ -135,9 +126,28 @@ if [ ! -z "$JETSON_TENSORRT" ] && [ $has_dpkg -eq 1 ]; then
     JETSON_TENSORRT=$(echo $JETSON_TENSORRT | sed 's/.*tensorrt \([^ ]*\).*/\1/' | cut -d '-' -f1 )
 else
     JETSON_TENSORRT="NOT_INSTALLED"
-    is_gpu=0
 fi
 echo "JETSON_TENSORRT=${JETSON_TENSORRT}" >> /tmp/.dda.env
+
+# Profile decision is driven by HARDWARE/DRIVER presence, not by optional package
+# version strings. The earlier version flipped is_gpu=0 whenever any of the
+# informational dpkg lookups above failed to match (cuDNN, libnvinfer-bin,
+# nvidia-container-toolkit/runtime, tensorrt). On a working Jetson where one of
+# those packages is named differently or absent, that incorrectly selected the
+# 'generic' profile, which does NOT mount the host Tegra driver libraries
+# (/usr/lib/aarch64-linux-gnu/tegra). The result: libcuda.so.1 is missing inside
+# the container and DLR fails to load the model into Triton with
+# "libcuda.so.1: cannot open shared object file".
+#
+# The 'tegra' profile is required whenever this is an aarch64 Jetson with CUDA
+# present AND the host actually ships the Tegra CUDA driver (libcuda.so.1).
+TEGRA_DRIVER_DIR="/usr/lib/aarch64-linux-gnu/tegra"
+if [ "$arch" = "aarch64" ] && [ "$is_gpu" -eq 1 ] && ls "$TEGRA_DRIVER_DIR"/libcuda.so* >/dev/null 2>&1; then
+    is_gpu=1
+else
+    # Not a CUDA-capable aarch64 Jetson with the Tegra driver present.
+    is_gpu=0
+fi
 
 # Use the GPU (tegra) profile when this is an aarch64 Jetson with CUDA present.
 # This covers both JetPack 4 (Xavier, L4T r32.x) and JetPack 5 (Orin, L4T r35.x);

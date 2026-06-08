@@ -48,13 +48,15 @@ services:
       - PYTHONPATH=/opt/tritonserver/backends/python:/
       - ARGUS_HEADLESS=1
       - NVARGUS_ENABLE_HEADLESS=1
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # On Jetson/L4T, GPU access is provided by the NVIDIA Container Runtime, not
+    # by the Compose `deploy.resources.reservations.devices` (--gpus / CDI)
+    # mechanism. The latter invokes the NVIDIA Container Runtime Hook directly,
+    # which Jetson does NOT support and fails with:
+    #   "invoking the NVIDIA Container Runtime Hook directly ... is not supported.
+    #    Please use the NVIDIA Container Runtime instead."
+    # `runtime: nvidia` selects the nvidia runtime, which injects the Tegra GPU
+    # driver libraries (libcuda.so.1, etc.) into the container.
+    runtime: nvidia
     profiles: [tegra]
   backend_generic:
     network_mode: "host"

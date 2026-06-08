@@ -667,6 +667,67 @@ else
 fi
 echo ""
 
+# Register the NVIDIA Container Runtime with the Docker daemon (Jetson/aarch64).
+#
+# On Jetson/L4T the DDA LocalServer container gets GPU access via
+# `runtime: nvidia` in docker-compose (the supported mechanism). That requires
+# the `nvidia` runtime to be registered in /etc/docker/daemon.json. NVIDIA's
+# JetPack 4.6 Docker pre-registers it, but a stock docker-ce install on
+# JetPack 5 (Ubuntu 20.04) installs nvidia-container-runtime WITHOUT wiring it
+# into the daemon, so containers fail to start with:
+#   "unknown or invalid runtime name: nvidia"
+# Registering it here (idempotent) fixes that. Without it, compose falls back to
+# the unsupported --gpus/CDI hook and fails with:
+#   "invoking the NVIDIA Container Runtime Hook directly ... is not supported."
+ARCH_RAW=$(uname -m)
+if [ "$ARCH_RAW" = "aarch64" ]; then
+    echo "▶ Configuring NVIDIA Container Runtime for Docker (Jetson)..."
+    if docker info 2>/dev/null | grep -qi "Runtimes:.*nvidia"; then
+        echo "✓ nvidia runtime already registered with Docker"
+    elif command -v nvidia-ctk >/dev/null 2>&1; then
+        # Preferred: let the toolkit wire up the runtime and set it as default.
+        if run_cmd "nvidia-ctk runtime configure --runtime=docker --set-as-default"; then
+            run_cmd "systemctl restart docker" || add_warning "Failed to restart Docker after nvidia-ctk configure"
+            echo "✓ nvidia runtime registered via nvidia-ctk"
+        else
+            add_warning "nvidia-ctk runtime configure failed — GPU containers may not start"
+        fi
+    elif command -v nvidia-container-runtime >/dev/null 2>&1; then
+        # Fallback: merge the nvidia runtime into /etc/docker/daemon.json directly.
+        echo "nvidia-ctk not found — registering nvidia runtime in daemon.json directly..."
+        NVIDIA_RUNTIME_PATH=$(command -v nvidia-container-runtime)
+        mkdir -p /etc/docker
+        python3 - "$NVIDIA_RUNTIME_PATH" <<'PYEOF' || add_warning "Failed to update /etc/docker/daemon.json with nvidia runtime"
+import json, os, sys
+runtime_path = sys.argv[1]
+path = "/etc/docker/daemon.json"
+cfg = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            cfg = json.load(f) or {}
+    except (ValueError, OSError):
+        cfg = {}
+runtimes = cfg.setdefault("runtimes", {})
+runtimes["nvidia"] = {"path": runtime_path, "runtimeArgs": []}
+# Make nvidia the default runtime so `runtime: nvidia` and plain runs both work.
+cfg.setdefault("default-runtime", "nvidia")
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+print("Updated /etc/docker/daemon.json")
+PYEOF
+        run_cmd "systemctl restart docker" || add_warning "Failed to restart Docker after daemon.json update"
+        if docker info 2>/dev/null | grep -qi "Runtimes:.*nvidia"; then
+            echo "✓ nvidia runtime registered via daemon.json"
+        else
+            add_warning "nvidia runtime still not registered — GPU containers may not start"
+        fi
+    else
+        add_warning "Neither nvidia-ctk nor nvidia-container-runtime found — GPU containers will not start. Install nvidia-container-runtime."
+    fi
+    echo ""
+fi
+
 echo "▶ Installing Greengrass Core..."
 if [ -f "greengrass-${greengrass_version}.zip" ] && [ -d "GreengrassInstaller" ]; then
     echo "✓ Greengrass already downloaded and extracted, skipping"
