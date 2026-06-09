@@ -704,7 +704,8 @@ def get_model_format_spec(event: Dict, context: Any) -> Dict:
             'jetson-xavier-jp6',
             'x86_64-cpu',
             'x86_64-cuda',
-            'arm64-cpu'
+            'arm64-cpu',
+            'onnx'
         ]
     }
     

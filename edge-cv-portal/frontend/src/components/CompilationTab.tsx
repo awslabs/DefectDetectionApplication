@@ -63,6 +63,12 @@ const COMPILATION_TARGETS = [
     description: 'ARM 64-bit CPU-only inference (e.g., AWS Graviton)',
     recommended: false,
   },
+  {
+    id: 'onnx',
+    name: 'ONNX Runtime (portable)',
+    description: 'Export the trained model to ONNX (.onnx) for the pluggable ONNX Runtime engine — runs on Jetson/x86 without Neo/DLR. See docs/multi-runtime-inference.md.',
+    recommended: false,
+  },
 ];
 
 export default function CompilationTab({ trainingId, trainingJob, onRefresh }: CompilationTabProps) {
@@ -749,6 +755,7 @@ function getTargetDescription(target: string): string {
     'x86_64-cpu': 'x86_64 CPU only',
     'x86_64-cuda': 'x86_64 with NVIDIA GPU',
     'arm64-cpu': 'ARM64 CPU only',
+    'onnx': 'ONNX Runtime — portable .onnx export (no Neo/DLR)',
   };
   return descriptions[target] || 'Unknown architecture';
 }
