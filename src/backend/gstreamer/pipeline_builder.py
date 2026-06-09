@@ -87,12 +87,77 @@ class GstPipelineBuilder:
             ]))
         logger.debug("building pipeline for icam")
 
+    def _add_nvidia_csi_image_source(self, image_source_config, override_processing_pipeline: str = None):
+        logger.warning(f"NVIDIA CSI SOURCE CONFIG DEBUG: Using file-based capture from host service")
+        
+        # Write gain, exposure, and crop settings to config file for host service
+        config_file = "/aws_dda/nvidia-csi-capture/config.json"
+        try:
+            import json
+            import os
+            os.makedirs("/aws_dda/nvidia-csi-capture", exist_ok=True)
+            
+            config = {
+                "gain": image_source_config.get("gain", 4),
+                "exposure": image_source_config.get("exposure", 5000000)
+            }
+            
+            # Add crop settings if present
+            crop_config = image_source_config.get("imageCrop")
+            if crop_config:
+                config["crop"] = {
+                    "top": crop_config.get("top", 0),
+                    "bottom": crop_config.get("bottom", 0),
+                    "left": crop_config.get("left", 0),
+                    "right": crop_config.get("right", 0)
+                }
+            
+            with open(config_file, 'w') as f:
+                json.dump(config, f)
+            os.chmod(config_file, 0o666)
+            
+            logger.warning(f"NVIDIA CSI: Updated config - gain={config['gain']}, exposure={config['exposure']}, crop={config.get('crop', 'none')}")
+        except Exception as e:
+            logger.error(f"NVIDIA CSI: Failed to write config file: {e}")
+        
+        # Nvidia CSI uses file-based capture from host service
+        # The host service continuously captures to /aws_dda/nvidia-csi-capture/latest.jpg
+        file_path = "/aws_dda/nvidia-csi-capture/latest.jpg"
+        
+        self._add_file_image_source(file_path)
+        logger.debug("building pipeline for nvidia csi using file source")
+
     def _add_file_image_source(self, file_path):
+        if self._is_jp6():
+            # JetPack 6 ONLY. The Neo model's bundled libdlr.so (loaded in-process
+            # via emltriton) brings its own libjpeg that interposes the system
+            # libjpeg GStreamer's jpegdec uses, so jpegdec dies with "Improper
+            # call to JPEG library in state 205" once a model is loaded. The
+            # hardware nvv4l2decoder avoids libjpeg but mis-decodes these iPhone
+            # JPEGs (stride/MPF issues -> visibly distorted output). The robust
+            # path is to decode the JPEG in Python with Pillow (its own
+            # libjpeg-turbo, immune to the collision; verified correct in-process
+            # with DLR loaded), bake in EXIF orientation, and stage a PNG that
+            # the pipeline reads via pngdec (libpng, not libjpeg). This drops
+            # emexifextract/jpegparse/videoflip since orientation is already
+            # applied. Gated to JP6; JP4/JP5/x86 keep the jpegdec path.
+            png_path = self._stage_decoded_png(file_path)
+            self.pipeline_config.add_plugin(PluginDefinition("filesrc",
+                                                                [PluginArg("blocksize", -1),
+                                                                PluginArg("location", f'"{png_path}"')
+                                                                ]))
+            self.pipeline_config.add_plugin(PluginDefinition("pngdec"))
+            self.pipeline_config.add_plugin(PluginDefinition("videoconvert"))
+            return
+
         self.pipeline_config.add_plugin(PluginDefinition("filesrc",
                                                             [PluginArg("blocksize", -1),
                                                             PluginArg("location", f'"{file_path}"')
                                                             ]))
         self.pipeline_config.add_plugin(PluginDefinition("emexifextract"))
+        # jpegparse delimits each JPEG into a clean SOI->EOI frame before jpegdec
+        # (required on GStreamer 1.20 to avoid intermittent "no valid frames").
+        self.pipeline_config.add_plugin(PluginDefinition("jpegparse"))
         self.pipeline_config.add_plugin(PluginDefinition("jpegdec",
                                                             [PluginArg("idct-method", 2)
                                                             ]))
@@ -100,6 +165,37 @@ class GstPipelineBuilder:
         self.pipeline_config.add_plugin(PluginDefinition("videoflip",
                                                             [PluginArg("method", "automatic")
                                                               ]))     
+
+    @staticmethod
+    def _is_jp6() -> bool:
+        """True when running on the JetPack 6 LocalServer variant. Detected via
+        the LocalServer component path env (contains 'JP6'), the same signal
+        endpoints/system.py uses to report the LocalServer version."""
+        import os
+        path = os.environ.get("LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH", "")
+        return "JP6" in path
+
+    @staticmethod
+    def _stage_decoded_png(file_path: str) -> str:
+        """Decode a JPEG to a temp PNG using Pillow, applying EXIF orientation.
+
+        Used by the JP6 file source to avoid GStreamer's libjpeg-based jpegdec
+        (which collides with the model's libdlr.so libjpeg) and the hardware
+        nvv4l2decoder (which mis-decodes these JPEGs). Pillow uses its own
+        libjpeg-turbo, which decodes correctly even with DLR loaded in-process.
+        Returns the PNG path; falls back to the original file on any failure.
+        """
+        import os
+        try:
+            from PIL import Image, ImageOps
+            png_path = f"{file_path}.dda_decoded.png"
+            with Image.open(file_path) as im:
+                im = ImageOps.exif_transpose(im.convert("RGB"))
+                im.save(png_path)
+            return png_path
+        except Exception as e:
+            logger.error(f"JP6 PNG staging failed for '{file_path}', falling back to original: {e}")
+            return file_path
         
     def _add_pre_processing_plugins(self):
         self.pipeline_config.add_plugin(PluginDefinition("capsfilter caps=video/x-raw,format=RGB"))
@@ -247,6 +343,13 @@ class GstPipelineBuilder:
                 image_source_config = utils.convert_sqlalchemy_object_to_dict(image_source_config)
             self._add_icam_image_source(image_source_config, override_processing_pipeline)
 
+        elif source_type == ImageSourceType.NVIDIA_CSI:
+            image_source_config = self.image_source.get("imageSourceConfiguration", None)
+            logger.debug("nvidia csi image_source_config="+str(image_source_config))
+            if not isinstance(image_source_config, dict):
+                image_source_config = utils.convert_sqlalchemy_object_to_dict(image_source_config)
+            self._add_nvidia_csi_image_source(image_source_config, override_processing_pipeline)
+
         elif source_type == ImageSourceType.FOLDER:
             if override_folder_source_file:
                 self._add_file_image_source(override_folder_source_file)
@@ -275,6 +378,7 @@ class GstPipelineBuilder:
         if not self.image_source and not self.workflow_config:
             return None
         if not self.workflow_config:
+            logger.warning(f"BUILD DEBUG: is_preview={is_preview}, imageCapturePath={self.image_source.get('imageCapturePath')}, imageSourceId={self.image_source.get('imageSourceId')}")
             if is_preview:
                 filename = "{}-{}.jpg".format(constants.DEFAULT_IMAGE_OUTPUT_PREFIX, self.image_source.get("imageSourceId"))
                 location = "{}/{}".format(constants.DEFAULT_IMAGE_SAVE_DIR_PATH, filename)
@@ -286,6 +390,7 @@ class GstPipelineBuilder:
                     location = "{}/{}".format(override_output_location, filename)
                 else:
                     location = "{}/{}".format(self.image_source.get("imageCapturePath"), filename)
+            logger.warning(f"BUILD DEBUG: Final location={location}")
             self.pipeline_config.add_plugin(PluginDefinition("jpegenc", [
                 PluginArg("idct-method", 2),
                 PluginArg("quality", 100)

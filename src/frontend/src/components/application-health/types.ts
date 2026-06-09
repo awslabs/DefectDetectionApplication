@@ -24,7 +24,14 @@ export interface SystemHealth {
   cudaVersion: string;
   tensorRTVersion: string;
   opencvVersion: string;
+  localServerVersion: string;
 }
 export interface Snapshot {
   archivePath: string;
+}
+
+export interface GreengrassComponent {
+  componentName: string;
+  version: string;
+  state: string;
 }

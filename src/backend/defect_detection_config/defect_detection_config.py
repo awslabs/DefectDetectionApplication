@@ -53,18 +53,22 @@ class DefectDetectionConfig:
 
     def __init__(self, ipc_client):
         self.ipc_client = ipc_client
-        # This operation will not send or receive any data until activate() is called.
-        # Call activate() when you’re ready for callbacks and events to fire.
-        self.config_request = self.ipc_client.new_get_configuration()
         self.config_cache = dict()
         self.lock = Lock()
 
     def get_component_config(self, name: str):
         # guarantee thread-safe when this is called by multiple threads
         with self.lock:
+            # An event-stream RPC operation (continuation) is SINGLE-USE: once
+            # activate()/close() has run, the same object cannot be activated
+            # again — doing so raises RuntimeError 38 (AWS_ERROR_INVALID_STATE).
+            # So create a fresh GetConfiguration operation for every call rather
+            # than reusing one cached in __init__ (which made the first call
+            # succeed and every subsequent call fail in a loop).
+            config_request = self.ipc_client.new_get_configuration()
             request = model.GetConfigurationRequest(component_name=name)
-            self.config_request.activate(request)
-            full_response = self.config_request.get_response()
+            config_request.activate(request)
+            full_response = config_request.get_response()
             
             try:
                 value = full_response.result(TIME_OUT).value
@@ -80,8 +84,8 @@ class DefectDetectionConfig:
             except Exception as e:
                 logger.error('Exception occurred: '+ str(e))
                 value = {}
-            
-            self.config_request.close()
+            finally:
+                config_request.close()
         return value
     
     def get_local_server_component_name(self):

@@ -48,6 +48,11 @@ GObject.threads_init()
 import logging
 logger = logging.getLogger(__name__)
 
+# Hard upper bound on how long a single pipeline run may take before the
+# watchdog force-quits the GLib main loop. Prevents a stalled pipeline (no
+# EOS/ERROR) from hanging the flask worker indefinitely.
+PIPELINE_TIMEOUT_SEC = 120
+
 class GstPipelineManager:
 
     def __init__(self):
@@ -78,11 +83,35 @@ class GstPipelineManager:
         # https://gstreamer.freedesktop.org/documentation/tutorials/basic/debugging-tools.html?gi-language=c
         os.environ["GST_DEBUG"] = "4"  # Logs all informational messages.
         os.environ["GST_DEBUG_NO_COLOR"] = "1"  # No colors, https://stackoverflow.com/a/56551269
+        
+        # Set DISPLAY for Argus camera daemon (nvarguscamerasrc)
+        if "DISPLAY" not in os.environ:
+            os.environ["DISPLAY"] = ":0"
+        
         pipeline = None
         loop = None
+        # ERROR messages arrive on the GStreamer bus inside a GLib signal
+        # callback. Raising a Python exception from within that C callback does
+        # NOT propagate out to loop.run() — GLib prints the traceback to stderr
+        # and keeps the loop running, so loop.run() would block forever and the
+        # whole flask-app hangs. Instead, capture the error here, quit the loop,
+        # and raise AFTER loop.run() returns (back on this thread).
+        pipeline_error = {}
         def on_message(bus, message):
             acceptable_messages = [Gst.MessageType.ERROR, Gst.MessageType.EOS, Gst.MessageType.TAG]
             if message.type not in acceptable_messages:
+                return
+            if message.type == Gst.MessageType.ERROR:
+                err, dbg = message.parse_error()
+                src_name = message.src.get_name() if message.src else "unknown"
+                logger.error("Pipeline ERROR - {} : {}".format(src_name, err.message))
+                if dbg:
+                    logger.debug(f"Debug information: {dbg}")
+                pipeline_error["message"] = "Pipeline failed with: {}. {}".format(
+                    err.message, dbg if dbg else ""
+                )
+                logger.info("Quitting loop")
+                loop.quit()
                 return
             parsed_tag_values.update(self.parse_msg(message, latency_metrics=latency_metrics))
             if message.type != Gst.MessageType.TAG:
@@ -100,6 +129,24 @@ class GstPipelineManager:
             bus.add_signal_watch()
             bus.connect("message", on_message)
 
+            # Safety watchdog: guarantee the loop terminates even if the
+            # pipeline stalls without ever posting EOS or ERROR (otherwise
+            # loop.run() blocks forever and the flask worker hangs).
+            def _watchdog():
+                if loop.is_running():
+                    logger.error(
+                        f"Pipeline watchdog timeout after {PIPELINE_TIMEOUT_SEC}s; "
+                        "forcing loop quit."
+                    )
+                    pipeline_error.setdefault(
+                        "message",
+                        f"Pipeline timed out after {PIPELINE_TIMEOUT_SEC}s without "
+                        "completing (no EOS/ERROR received).",
+                    )
+                    loop.quit()
+                return False  # one-shot
+            watchdog_id = GLib.timeout_add_seconds(PIPELINE_TIMEOUT_SEC, _watchdog)
+
             logger.warning("Setting pipeline to PLAYING state")
             ret = pipeline.set_state(Gst.State.PLAYING)
             if ret == Gst.StateChangeReturn.FAILURE:
@@ -112,6 +159,15 @@ class GstPipelineManager:
             logger.warning("Running pipeline main loop")
             loop.run()
             logger.warning("Pipeline main loop completed")
+            # Cancel the watchdog if it didn't fire (ignore if already removed).
+            try:
+                GLib.source_remove(watchdog_id)
+            except Exception:
+                pass
+            # If the bus reported an ERROR, raise it now that the loop has
+            # cleanly exited (raising inside the callback would hang the loop).
+            if pipeline_error:
+                raise PipelineExecutionException(pipeline_error["message"])
         except GError as e:
             logger.error("PipelineSyntaxException:" + str(e))
             raise PipelineSyntaxException(str(e))

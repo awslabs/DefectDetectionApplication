@@ -35,7 +35,7 @@ import subprocess
 import re
 import sys
 
-from typing import Optional
+from typing import Optional, List
 import importlib.metadata
 
 # Aws Modules
@@ -55,6 +55,7 @@ from typing import Literal
 # Custom Modules
 from utils.constants import (
     DDA_GG_COMPONENT_NAME_PREFIX,
+    DDA_LOCAL_SERVER_COMPONENT,
     DDA_ROOT_FOLDER,
     GET_DDA_COMPONENT_STATUS_HEALTHY,
     GET_DDA_COMPONENT_STATUS_UNHEALTHY,
@@ -72,7 +73,7 @@ from endpoints.route.access_log_router import get_api_router
 import logging
 logger = logging.getLogger(__name__)
 
-from utils.gg_utils import list_gg_components, restart_components
+from utils.gg_utils import list_gg_components, restart_components, list_all_gg_components_with_details
 router = get_api_router()
 
 EDGE_AGENT_VENV_SITE_PACKAGE_PATH = EDGE_AGENT_VENV_PATH + "/env/lib/" + PYTHON38 + "/site-packages"
@@ -88,6 +89,7 @@ class GetSystemHealthResponse(BaseModel):
     cudaVersion: str
     tensorRTVersion: str
     opencvVersion: str
+    localServerVersion: str
 
 
 # Function to get CUDA version
@@ -109,6 +111,101 @@ def get_opencv_version_from_lfv():
         logger.warn("opencv_python_headless module is not installed for edge agent")
     return version
 
+def _parse_version_from_decompressed_path(decompressed_path, own_component_name):
+    """Extract this component's deployed version from its artifact path.
+
+    Greengrass resolves {artifacts:decompressedPath} to
+        <root>/packages/artifacts-unarchived/<component-name>/<version>/<artifact-dir>
+    and the recipe appends "/<component-name>-<arch>", so the env var looks like
+        .../aws.edgeml.dda.LocalServer.arm64/1.0.5/aws.edgeml.dda.LocalServer.arm64-aarch64
+    The version is therefore the path segment immediately preceding the final
+    "<component-name>-<arch>" segment. This is THIS running component's own
+    artifact path, so it is ground truth — unaffected by any other (leftover)
+    LocalServer component the nucleus might also know about.
+    """
+    if not decompressed_path:
+        return None
+
+    # Prefer the version that immediately follows this component's directory.
+    if own_component_name:
+        m = re.search(
+            r"/" + re.escape(own_component_name) + r"/(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.]+)?)/",
+            decompressed_path,
+        )
+        if m:
+            return m.group(1)
+
+    # Fallback: the semver that is the second-to-last path segment.
+    m = re.search(r"/(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.]+)?)/[^/]+/?$", decompressed_path)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def get_local_server_component_version():
+    """Get the version of the LocalServer component actually running here.
+
+    Multiple LocalServer variants (.arm64, .arm64JP5, .amd64) — and multiple
+    versions of the same variant — can be known to the nucleus on a single core
+    device. Matching Greengrass's component list by name prefix (or even by
+    exact name) can therefore report a different/leftover version than the one
+    deployed and running here.
+
+    The reliable source is THIS component's own artifact path, which the recipe
+    injects as LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH and which embeds both
+    the exact component name and the deployed version. Read the version from
+    there first; only fall back to the IPC component list if the path cannot be
+    parsed.
+    """
+    version = "NOT_FOUND"
+
+    # The last path segment is "<component-name>-<arch>"; component names are
+    # dot-separated and contain no '-', and the arch suffix (aarch64 / x86_64)
+    # contains none either, so rsplit on the final '-' yields the exact name.
+    own_component_name = None
+    decompressed_path = os.getenv("LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH")
+    if decompressed_path:
+        last_segment = os.path.basename(decompressed_path.rstrip("/"))
+        candidate = last_segment.rsplit("-", 1)[0]
+        if candidate.startswith(DDA_LOCAL_SERVER_COMPONENT):
+            own_component_name = candidate
+
+    # 1) Ground truth: version embedded in this component's own artifact path.
+    path_version = _parse_version_from_decompressed_path(decompressed_path, own_component_name)
+    if path_version:
+        logger.info(f"Resolved LocalServer version from artifact path: {path_version}")
+        return path_version
+
+    # 2) Fallback: query Greengrass, matching this component's exact name when
+    #    known, otherwise the first prefix match (legacy behavior).
+    try:
+        list_components_request = ListComponentsRequest()
+        list_components_operation = ipc_client.new_list_components()
+        list_components_operation.activate(list_components_request)
+        list_components_future = list_components_operation.get_response()
+        list_components_response = list_components_future.result(GG_IPC_FUTURE_TIMEOUT)
+
+        prefix_match_version = None
+        for component in list_components_response.components:
+            if own_component_name is not None:
+                if component.component_name == own_component_name:
+                    version = component.version
+                    logger.info(f"Found LocalServer component: {component.component_name} version {version}")
+                    break
+            elif component.component_name.startswith(DDA_LOCAL_SERVER_COMPONENT):
+                # No exact name available; remember the first prefix match as a fallback.
+                if prefix_match_version is None:
+                    prefix_match_version = component.version
+                    logger.info(f"Found LocalServer component (prefix match): {component.component_name} version {component.version}")
+
+        if version == "NOT_FOUND" and prefix_match_version is not None:
+            version = prefix_match_version
+    except Exception as e:
+        logger.error(f"Failed to get LocalServer component version: {e}")
+
+    return version
+
 @router.get("/system-health")
 def get_system_health() -> GetSystemHealthResponse:
     cpu_usage_percent = psutil.cpu_percent(interval=None)
@@ -120,6 +217,7 @@ def get_system_health() -> GetSystemHealthResponse:
     cuda_version = get_cuda_version()
     tensorrt_version = get_tensorrt_version()
     opencv_version = get_opencv_version_from_lfv()
+    local_server_version = get_local_server_component_version()
     system_health = {
         "cpuUsagePercent": cpu_usage_percent,
         "memoryUsagePercent": memory_usage_percent,
@@ -128,7 +226,8 @@ def get_system_health() -> GetSystemHealthResponse:
         "diskUsagePercent": disk_usage_percent,
         "cudaVersion": cuda_version,
         "tensorRTVersion": tensorrt_version,
-        "opencvVersion": opencv_version
+        "opencvVersion": opencv_version,
+        "localServerVersion": local_server_version
     }
     return system_health
 
@@ -163,6 +262,23 @@ def get_dda_component_status() -> GetDdaComponentHealthStatusResponse:
         ]:
             return {"status": GET_DDA_COMPONENT_STATUS_UNHEALTHY}
     return {"status": GET_DDA_COMPONENT_STATUS_HEALTHY}
+
+
+class GreengrassComponent(BaseModel):
+    componentName: str
+    version: Optional[str] = None
+    state: Optional[str] = None
+
+
+class ListGreengrassComponentsResponse(BaseModel):
+    components: List[GreengrassComponent]
+
+
+@router.get("/greengrass-components")
+def list_greengrass_components() -> ListGreengrassComponentsResponse:
+    logger.info("Received request to list Greengrass components")
+    components = list_all_gg_components_with_details()
+    return {"components": components}
 
 
 class SnapshotPathResponse(BaseModel):

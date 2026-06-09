@@ -185,8 +185,15 @@ static GstFlowReturn gst_emexifextract_transform_ip(GstBaseTransform* transform,
     exif_data = exif_data_new_from_data(map.data, size);
     gst_buffer_unmap(buf, &map);
     if (!exif_data) {
-        TraceError("Encountered unknown error while retrieving EXIF data.");
-        return GST_FLOW_ERROR;
+        // A JPEG with no EXIF/APP1 metadata is perfectly valid and must NOT
+        // fail the pipeline. Older libexif (Ubuntu 20.04 / JetPack 5) returned
+        // an empty ExifData here; newer libexif (Ubuntu 22.04 / JetPack 6)
+        // returns NULL when no EXIF marker is present. Returning GST_FLOW_ERROR
+        // in that case dropped the buffer so the downstream jpegdec saw "no
+        // valid frames decoded". Instead, default to orientation 1 (rotate-0),
+        // emit the tag, and pass the buffer through unchanged.
+        TraceInfo("No EXIF data present in image; defaulting orientation to 1 (rotate-0).");
+        return gst_emexifextract_set_image_orientation_tag(transform, 1);
     }
  
     orientation_entry = exif_data_get_entry(exif_data, EXIF_TAG_ORIENTATION);

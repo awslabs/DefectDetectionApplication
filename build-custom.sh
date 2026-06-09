@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+set -o pipefail
 # Copyright 2025 Amazon Web Services, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,32 +15,42 @@ set -e
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-if [ $# -ne 3 ]; then
-  echo 1>&2 "Usage: $0 COMPONENT-NAME COMPONENT-VERSION ARCH"
+if [ $# -ne 2 ]; then
+  echo 1>&2 "Usage: $0 COMPONENT-NAME COMPONENT-VERSION"
   exit 3
 fi
 
 COMPONENT_NAME=$1
 VERSION=$2
-ARCHITECTURE=$3
-
+ARCHITECTURE=`uname -m`
+# change to 20.04 or 18.04
+IMAGE_VER="18.04"
+#IMAGE_VER="20.04"
 BUILDKIT_PROGRESS=plain
 export BUILDKIT_PROGRESS
-
-# Detect Ubuntu version from host
 IMAGE_VER=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
-export IMAGE_VER
-echo "Ubuntu version: $IMAGE_VER"
 
-# Determine if this is a JP5 build based on component name
+# Export as environment variable
+export IMAGE_VER 
+
+# Determine the JetPack target from the component name.
+# JP5 components are named with "JP5" (e.g. aws.edgeml.dda.LocalServer.arm64JP5),
+# JP6 components with "JP6" (e.g. aws.edgeml.dda.LocalServer.arm64JP6).
 IS_JP5=0
-if echo "$COMPONENT_NAME" | grep -q "JP5"; then
+IS_JP6=0
+JETPACK_ARG=""
+if echo "$COMPONENT_NAME" | grep -q "JP6"; then
+    IS_JP6=1
+    JETPACK_ARG="6"
+elif echo "$COMPONENT_NAME" | grep -q "JP5"; then
     IS_JP5=1
+    JETPACK_ARG="5"
 fi
 
+echo "Ubuntu version: $IMAGE_VER"
 echo "Architecture: $ARCHITECTURE"
 echo "JetPack 5: $IS_JP5"
-
+echo "JetPack 6: $IS_JP6"
 # copy recipe to greengrass-build
 cp recipe.yaml ./greengrass-build/recipes
 
@@ -48,89 +59,114 @@ rm -rf ./custom-build
 mkdir -p ./custom-build/$COMPONENT_NAME
 
 # build Docker images
+# to save build time, remove "--no-cache" parameter
 cd src
-
-# edgemlsdk build
+#edgemlsdk
 cd edgemlsdk/
-if [ "$IS_JP5" = "1" ]; then
-    ./build.sh -p $ARCHITECTURE -u $IMAGE_VER -y 3.9 -j 5
+if [ -n "$JETPACK_ARG" ]; then
+  ./build.sh -p $(uname -m) -u $IMAGE_VER -y 3.9 -j "$JETPACK_ARG"
 else
-    ./build.sh -p $ARCHITECTURE -u $IMAGE_VER -y 3.9
+  ./build.sh -p $(uname -m) -u $IMAGE_VER -y 3.9
 fi
 cd ..
-
-# Copy edgemlsdk artifacts to backend build context
+echo "Current directory: $(pwd)"
+echo "Checking for edgemlsdk directory: $(ls -ld edgemlsdk 2>&1)"
+# Start from a clean staging dir. build-custom.sh is run repeatedly on the same
+# build server; a leftover backend/edgemlsdk from a previous run makes the
+# `cp -r edgemlsdk backend/edgemlsdk` below merge into a stale nested tree and
+# fail (cannot stat .../extracted-debs/debs/*.deb). Removing it first makes every
+# run behave like a clean checkout.
+rm -rf backend/edgemlsdk
 mkdir -p backend/edgemlsdk
-# Clean stale debs from previous builds
-rm -f backend/edgemlsdk/*.deb backend/edgemlsdk/*.whl backend/edgemlsdk/*.tar.gz
-
-# Copy debs/tars from extracted-debs directory (populated by build.sh)
-EXTRACTED_DIR=$(pwd)/edgemlsdk/extracted-debs
-if [ ! -d "$EXTRACTED_DIR/debs" ]; then
-    echo "ERROR: extracted-debs/debs not found at $EXTRACTED_DIR"
-    echo "The edgemlsdk build.sh should have extracted debs to this directory."
-    exit 1
+if [ ! -d "edgemlsdk" ]; then
+  echo "ERROR: edgemlsdk directory not found at $(pwd)/edgemlsdk"
+  exit 1
 fi
-echo "Copying debs from $EXTRACTED_DIR..."
-cp $EXTRACTED_DIR/debs/PanoramaSDK.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/aws-c-iot.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/aws-crt-cpp.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/aws-iot-device-sdk-cpp-v2.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/aws-sdk-cpp.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/libgstreamer-plugins-base1.0-dev.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/libgstreamer1.0-dev.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/libgstreamer1.0.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/liborc-0.4-0.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/libstdc++6.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/openssl.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/panorama.whl $(pwd)/backend/edgemlsdk/panorama-1.0-py3-none-any.whl
-cp $EXTRACTED_DIR/debs/triton-core.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/debs/triton-python-backend.deb $(pwd)/backend/edgemlsdk/
-cp $EXTRACTED_DIR/tars/triton_installation_files.tar.gz $(pwd)/backend/edgemlsdk/
-echo "Done copying binaries"
-
-# Verify all required artifacts are present
-for f in aws-c-iot.deb aws-crt-cpp.deb aws-iot-device-sdk-cpp-v2.deb aws-sdk-cpp.deb \
-         PanoramaSDK.deb openssl.deb liborc-0.4-0.deb triton-core.deb \
-         triton-python-backend.deb panorama-1.0-py3-none-any.whl triton_installation_files.tar.gz; do
-    if [ ! -f "$(pwd)/backend/edgemlsdk/$f" ]; then
-        echo "ERROR: Required file backend/edgemlsdk/$f not found after copy"
-        exit 1
-    fi
-done
-echo "All required edgemlsdk artifacts verified"
-
-# Build backend and frontend Docker images
-# Select the correct Dockerfile for the backend
-if [ "$IS_JP5" = "1" ]; then
-    export BACKEND_DOCKERFILE="Dockerfile.jp5"
+cp -r edgemlsdk backend/edgemlsdk || { echo "ERROR: Failed to copy edgemlsdk from $(pwd)/edgemlsdk to $(pwd)/backend/edgemlsdk"; exit 1; }
+echo copying $id
+id=$(docker create edgemlsdk)
+docker cp $id:/debs/PanoramaSDK.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/aws-c-iot.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/aws-crt-cpp.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/aws-iot-device-sdk-cpp-v2.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/aws-sdk-cpp.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/libgstreamer-plugins-base1.0-dev.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/libgstreamer1.0-dev.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/libgstreamer1.0.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/liborc-0.4-0.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/libstdc++6.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/openssl.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/panorama.whl $(pwd)/backend/edgemlsdk/panorama-1.0-py3-none-any.whl
+docker cp $id:/debs/triton-core.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/debs/triton-python-backend.deb $(pwd)/backend/edgemlsdk/
+docker cp $id:/tars/triton_installation_files.tar.gz  $(pwd)/backend/edgemlsdk/
+docker rm -v $id
+echo done copying binaries
+# rest of the application
+# Select the backend Dockerfile: JP5 uses an L4T r35.x base, JP6 an L4T r36.x base.
+if [ "$IS_JP6" = "1" ]; then
+  export BACKEND_DOCKERFILE="Dockerfile.jp6"
+elif [ "$IS_JP5" = "1" ]; then
+  export BACKEND_DOCKERFILE="Dockerfile.jp5"
 else
-    export BACKEND_DOCKERFILE="Dockerfile"
+  export BACKEND_DOCKERFILE="Dockerfile"
 fi
-export OS=$IMAGE_VER
-
-echo "Building backend with $BACKEND_DOCKERFILE..."
+echo "Backend Dockerfile: $BACKEND_DOCKERFILE"
+echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
+# Select profiles by architecture. The `tegra` service targets Jetson
+# (platform linux/arm64/v8) and must NOT be built on x86_64 hosts — doing so
+# forces an emulated arm64 build that fails compiling Python from source
+# ("cannot compute sizeof (long double)"). x86_64 uses only `generic`.
 if [ "$ARCHITECTURE" = "x86_64" ]; then
-    # x86_64 only needs the generic profile (no Tegra/GPU support)
-    docker-compose --profile generic -f docker-compose.yaml build --no-cache
+  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache \
+    || { echo "ERROR: docker-compose build failed"; exit 1; }
 else
-    # aarch64 builds both profiles
-    docker-compose --profile generic -f docker-compose.yaml build --no-cache
-    docker-compose --profile tegra -f docker-compose.yaml build --no-cache
+  docker-compose --profile tegra --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache \
+    || { echo "ERROR: docker-compose build failed"; exit 1; }
 fi
 cd ..
 
-# save Docker images separately for Greengrass (each artifact must be < 2GB)
-echo "Saving docker images as separate artifacts..."
-docker save react-webapp | gzip > ./custom-build/$COMPONENT_NAME/react-webapp.tar.gz
+# ── Run backend unit tests inside the freshly built flask-app image ─────────
+# These tests import the full backend (edgemlsdk bindings, native libs, the
+# FastAPI app), so they can only run where those deps already exist — i.e.
+# inside the flask-app image we just built. Mount the repo so the tests run
+# against the source tree, install the test-only packages on the fly, and run
+# pytest. A failure fails the build here, before packaging. Set
+# SKIP_BACKEND_TESTS=1 to bypass (e.g. for a quick local rebuild).
+if [ "${SKIP_BACKEND_TESTS:-0}" = "1" ]; then
+  echo "SKIP_BACKEND_TESTS=1 set — skipping backend unit tests."
+else
+  echo "Running backend unit tests inside the flask-app image..."
+  REPO_ROOT="$(pwd)"
+  docker run --rm \
+    -v "$REPO_ROOT":/repo -w /repo \
+    --entrypoint bash flask-app -c '
+      set -e
+      python3.9 -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures
+      export PYTHONPATH=/repo/src/backend
+      # The backend imports the triton/panorama bindings at collection time
+      # (via conftest). docker-compose normally provides these loader paths at
+      # Run time; replicate them here so libtritonserver.so resolves.
+      export LD_LIBRARY_PATH=/opt/tritonserver/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
+      python3.9 -m pytest \
+        test/backend-test/utils/test_auth.py \
+        test/backend-test/api-endpoints/test_auth_info_api.py \
+        test/backend-test/utils/test_user_group_management_utils.py \
+        test/backend-test/utils/test_dda_user_management_utils.py \
+        test/backend-test/host_scripts/test_docker_profile_selection.py -v
+    ' || { echo "ERROR: backend unit tests failed"; exit 1; }
+  echo "Backend unit tests passed."
+fi
 
-FLASK_TAR="./custom-build/$COMPONENT_NAME/flask-app.tar"
-docker save flask-app --output "$FLASK_TAR"
-FLASK_SIZE=$(stat --format=%s "$FLASK_TAR")
-echo "flask-app.tar size: $(numfmt --to=iec $FLASK_SIZE)"
-
-echo "Image sizes:"
-ls -lh ./custom-build/$COMPONENT_NAME/*.tar* 
+# save Docker images as tar
+echo "save docker images as tarvballs"
+# Use stdout redirection rather than `docker save --output`. Under snap Docker,
+# `--output` writes a transient `.tmp-<name><rand>` file in the destination dir
+# and renames it; that temp file would briefly appear in the staging dir and
+# break the packaging `zip` (exit 18 "could not open for reading"). Redirecting
+# stdout lets the shell create the final file directly — no snap temp file.
+docker save flask-app > ./custom-build/$COMPONENT_NAME/flask-app.tar
+docker save react-webapp > ./custom-build/$COMPONENT_NAME/react-webapp.tar
 
 # include docker-compose.yaml in archive
 cp src/docker-compose.yaml ./custom-build/$COMPONENT_NAME/
@@ -145,30 +181,53 @@ mkdir -p ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/
 cp src/backend/triggers/outputs/dio.py ./custom-build/$COMPONENT_NAME/
 cp -r src/host_scripts ./custom-build/$COMPONENT_NAME/
 
-# Package as separate artifacts to stay under 2GB Greengrass limit
-# Artifact 1: backend Docker image (large)
-echo "Creating backend artifact..."
-zip -r -X ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/$COMPONENT_NAME-backend-$ARCHITECTURE.zip \
-    ./custom-build/$COMPONENT_NAME/flask-app.tar
+# zip up archive
+ARCHIVE="./custom-build/$COMPONENT_NAME-$ARCHITECTURE.zip"
+rm -f "$ARCHIVE"
+# Remove any transient docker-save temp files (e.g. .tmp-react-webapp.tar<rand>)
+# that snap Docker may leave briefly in the build dir.
+rm -f ./custom-build/$COMPONENT_NAME/.tmp-* 2>/dev/null || true
 
-# Artifact 2: frontend image + scripts + compose (small)
-echo "Creating frontend+scripts artifact..."
-zip -r -X ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/$COMPONENT_NAME-app-$ARCHITECTURE.zip \
-    ./custom-build/$COMPONENT_NAME/react-webapp.tar.gz \
-    ./custom-build/$COMPONENT_NAME/docker-compose.yaml \
-    ./custom-build/$COMPONENT_NAME/host_scripts \
-    ./custom-build/$COMPONENT_NAME/dio.py \
-    ./custom-build/$COMPONENT_NAME/backend \
-    ./custom-build/$COMPONENT_NAME/frontend
+# Diagnostics: make the next failure conclusive (zip version, what we're about
+# to package, and free space on the build volume).
+echo "Packaging artifact: $ARCHIVE"
+echo "zip version: $(zip --version 2>/dev/null | head -1)"
+echo "Staging dir contents:"
+ls -lh ./custom-build/$COMPONENT_NAME/ || true
+echo "Disk free on build volume:"
+df -h ./custom-build/ | tail -n +1 || true
 
-echo "Artifact sizes:"
-ls -lh ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/*.zip
+# Package an EXPLICIT member list rather than `zip -r <dir>`. A recursive scan
+# of the staging dir can enumerate a transient file (e.g. a snap Docker save
+# temp) and then fail with exit 18 / "could not open for reading" /
+# "Could not create output file" when that file is renamed away mid-zip.
+# Listing only the files we staged removes that race entirely.
+ZIP_MEMBERS=(
+  "custom-build/$COMPONENT_NAME/docker-compose.yaml"
+  "custom-build/$COMPONENT_NAME/flask-app.tar"
+  "custom-build/$COMPONENT_NAME/react-webapp.tar"
+  "custom-build/$COMPONENT_NAME/dio.py"
+  "custom-build/$COMPONENT_NAME/host_scripts"
+  "custom-build/$COMPONENT_NAME/backend"
+  "custom-build/$COMPONENT_NAME/frontend"
+)
+zip -r -X "$ARCHIVE" "${ZIP_MEMBERS[@]}" -x '*/.tmp-*' || {
+  rc=$?
+  echo "ERROR: packaging zip failed (exit $rc)."
+  echo "  Staging dir:"
+  ls -lh ./custom-build/$COMPONENT_NAME/ || true
+  echo "  Disk free:"
+  df -h ./custom-build/ || true
+  exit $rc
+}
 
-# Check if any artifact exceeds 2GB
-for zipfile in ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/*.zip; do
-    SIZE=$(stat --format=%s "$zipfile")
-    if [ "$SIZE" -gt 2147483648 ]; then
-        echo "NOTE: $zipfile is $(numfmt --to=iec $SIZE) - exceeds 2GB Greengrass artifact limit."
-        echo "The publish script will use ECR-based deployment instead."
-    fi
-done
+# Verify the archive is complete/readable before handing it to GDK. `zip -T`
+# is part of zip itself (no unzip dependency required).
+if ! zip -T "$ARCHIVE" >/dev/null 2>&1; then
+  echo "ERROR: packaged archive $ARCHIVE failed integrity check (zip -T)."
+  exit 1
+fi
+echo "Archive created: $(ls -lh "$ARCHIVE" | awk '{print $5, $9}')"
+
+# copy archive to greengrass-build
+cp "$ARCHIVE" ./greengrass-build/artifacts/$COMPONENT_NAME/$VERSION/

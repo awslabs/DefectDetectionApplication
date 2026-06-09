@@ -72,6 +72,7 @@ export const APIList = {
   snapshot: `${Connection.ENDPOINT}/snapshot`,
   restartDda: `${Connection.ENDPOINT}/restart-dda`,
   getDdaComponentStatus: `${Connection.ENDPOINT}/dda-component-status`,
+  greengrassComponents: `${Connection.ENDPOINT}/greengrass-components`,
   getStation: `${Connection.ENDPOINT}/system/station`,
   getCapture: `${Connection.ENDPOINT}/workflows/{workflow_id}/capture-details/{capture_id}`,
   getAuthConfig: `${Connection.ENDPOINT}/authorization-configurations`,

@@ -21,12 +21,15 @@ import {
   SpaceBetween,
 } from "@cloudscape-design/components";
 import { getSystemHealth } from "api/SystemHealthAPI";
+import { getGreengrassComponents } from "api/GreengrassComponentsAPI";
 import { useQuery } from "@tanstack/react-query";
 import SystemOverviewContainer from "./SystemOverviewContainer";
+import GreengrassComponentsContainer from "./GreengrassComponentsContainer";
 import ApplicationLogsAndRestartContainer from "./ApplicationLogsAndRestartContainer";
 import { HEALTH_PAGE_API_TIMEOUT } from "./constants";
 
 const systemHealthPollInterval = 2000;
+const componentsPollInterval = 10000;
 
 export default function ApplicationHealthOverview(): JSX.Element {
   const systemHealth = useQuery({
@@ -37,6 +40,12 @@ export default function ApplicationHealthOverview(): JSX.Element {
     },
   });
 
+  const greengrassComponents = useQuery({
+    queryKey: ["getGreengrassComponents"],
+    queryFn: () => getGreengrassComponents(HEALTH_PAGE_API_TIMEOUT),
+    refetchInterval: () => componentsPollInterval,
+  });
+
   const systemHealthProps = !!systemHealth.data ? { systemHealth: systemHealth.data } : {};
   return (
     <ContentLayout
@@ -44,6 +53,10 @@ export default function ApplicationHealthOverview(): JSX.Element {
     >
       <SpaceBetween size="l">
         <SystemOverviewContainer {...systemHealthProps} />
+        <GreengrassComponentsContainer
+          components={greengrassComponents.data}
+          loading={greengrassComponents.isLoading}
+        />
         <ApplicationLogsAndRestartContainer />
       </SpaceBetween>
     </ContentLayout>

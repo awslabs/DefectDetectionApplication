@@ -1,0 +1,15 @@
+{
+  "apiUrl": "https://your-api-gateway-url.execute-api.us-east-1.amazonaws.com/v1",
+  "userPoolId": "us-east-1_XXXXXXXXX",
+  "userPoolClientId": "xxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "region": "us-east-1",
+  "branding": {
+    "applicationName": "Defect Detection Application Portal",
+    "companyName": "Your Company Name",
+    "logoUrl": "/logo.png",
+    "faviconUrl": "/favicon.ico",
+    "primaryColor": "#0073bb",
+    "supportEmail": "support@yourcompany.com",
+    "documentationUrl": "https://docs.yourcompany.com"
+  }
+}

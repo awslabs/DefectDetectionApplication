@@ -74,8 +74,26 @@ class ImageSourceAccessor:
                 self.__create_folder(data.get("location"))
             ## DD-18130: Add support for smart cameras
             elif data.get("type") == ImageSourceType.ICAM.value:
+                img_src_cfg_id = self.__create_image_source_configuration(
+                    data.get("imageSourceConfiguration"),
+                    "ICAM",  # Use "ICAM" as cameraId to trigger ICAM config
+                    db
+                )
+                data["imageSourceConfigId"] = img_src_cfg_id
                 imageCapturePath = constants.IMAGE_CAPTURE_DIR + "/" + image_source_id
                 data["imageCapturePath"] = imageCapturePath
+                logger.warning(f"ICAM CREATE DEBUG: imageSourceId={image_source_id}, imageCapturePath={imageCapturePath}")
+                self.__create_folder(imageCapturePath)
+            elif data.get("type") == ImageSourceType.NVIDIA_CSI.value:
+                img_src_cfg_id = self.__create_image_source_configuration(
+                    data.get("imageSourceConfiguration"),
+                    None,
+                    db
+                )
+                data["imageSourceConfigId"] = img_src_cfg_id
+                imageCapturePath = constants.IMAGE_CAPTURE_DIR + "/" + image_source_id
+                data["imageCapturePath"] = imageCapturePath
+                logger.warning(f"NVIDIA CSI CREATE DEBUG: imageSourceId={image_source_id}, imageCapturePath={imageCapturePath}")
                 self.__create_folder(imageCapturePath)
             result = self.schema.load(data)
             image_source_dao.create_image_source(db, self.schema.dump(result))
@@ -226,8 +244,29 @@ class ImageSourceAccessor:
         return config_id
 
     def __get_default_image_source_configuration(self, cameraId):
+        # For Nvidia CSI cameras, use default Nvidia CSI config with nvarguscamerasrc
         if cameraId is None:
-            raise ValidationError("CameraId is required")
+            nvidia_csi_config = {
+                "gain": 1,
+                "exposure": 500,
+                "processingPipeline": self.default_camera_config.get("Nvidia CSI").get("default").get("processingPipeline"),
+                "device": self.default_camera_config.get("Nvidia CSI").get("default").get("device"),
+                "deviceName": self.default_camera_config.get("Nvidia CSI").get("default").get("deviceName")
+            }
+            logger.warning(f"NVIDIA CSI CONFIG DEBUG: {nvidia_csi_config}")
+            return nvidia_csi_config
+        
+        # For ICAM cameras (cameraId starts with "ICAM"), use ICAM config
+        if cameraId and cameraId.startswith("ICAM"):
+            icam_config = {
+                "gain": 1,
+                "exposure": 500,
+                "processingPipeline": self.default_camera_config.get("ICAM").get("default").get("processingPipeline"),
+                "device": self.default_camera_config.get("ICAM").get("default").get("device"),
+                "deviceName": self.default_camera_config.get("ICAM").get("default").get("deviceName")
+            }
+            logger.warning(f"ICAM CONFIG DEBUG: {icam_config}")
+            return icam_config
 
         # Fetch make and model of camera by CameraID
         camera = aravis_functions.getCamera(cameraId)
@@ -251,7 +290,7 @@ class ImageSourceAccessor:
         return new_image_sources
 
     def update_image_source_with_camera_status(self, image_source_dict):
-        if image_source_dict.get('type') == ImageSourceType.FOLDER:
+        if image_source_dict.get('type') == ImageSourceType.FOLDER or image_source_dict.get('type') == ImageSourceType.NVIDIA_CSI or image_source_dict.get('type') == ImageSourceType.ICAM:
             image_source_dict["cameraStatus"] = None
         else:
             camera_id = image_source_dict.get('cameraId', None)

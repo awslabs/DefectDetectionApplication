@@ -9,5 +9,12 @@ src/edgemlsdk/cached-debs/
 
 # OS files
 .DS_Store
+**/.DS_Store
 __pycache__/
 *.pyc
+
+# Manifest files with account numbers
+datasets/**/*.manifest
+datasets/**/*_class.manifest
+datasets/**/*_segmentation.manifest
+.vscode/**

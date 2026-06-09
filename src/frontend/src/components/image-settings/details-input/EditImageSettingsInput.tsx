@@ -36,16 +36,16 @@ export default function EditImageSettingsInput({
           name={namePrefix + "Gain"}
           min={GAIN_MIN}
           max={GAIN_MAX}
-          label="Gain"
-          constraintText="Numeric values only. Between 1 to 100."
+          label="Gain (Primary Brightness Control)"
+          constraintText="Adjust gain (1.0 to 10.625) to control image brightness. Higher values = brighter images."
         />
 
         <FormSliderInput
           name={namePrefix + "Exposure"}
           min={EXPOSURE_MIN}
           max={EXPOSURE_MAX}
-          label="Exposure"
-          constraintText="Positive numeric values only."
+          label="Exposure (Secondary Control)"
+          constraintText="Exposure time in nanoseconds (1ms to 30ms). Use gain for primary brightness adjustment."
         />
       </SpaceBetween>
     </Container>

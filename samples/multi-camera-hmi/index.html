@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Camera HMI</title>
+  <style>
+    :root {
+      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
+      --text: #e4e4e7; --text-muted: #8b8d98;
+      --accent: #3b82f6; --accent-hover: #2563eb;
+      --success: #22c55e; --danger: #ef4444; --warning: #f59e0b;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); height: 100vh;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    button {
+      cursor: pointer; border: none; font-family: inherit; font-size: 0.875rem;
+      border-radius: 6px; padding: 8px 16px; transition: background 0.15s, opacity 0.15s;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    input[type="text"] {
+      font-family: inherit; font-size: 0.875rem; padding: 8px 12px;
+      border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    }
+    input[type="text"]:focus { outline: none; border-color: var(--accent); }
+
+    /* Custom dropdown */
+    .dropdown { position: relative; display: inline-block; }
+    .dropdown-toggle {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--text); cursor: pointer;
+      font-size: 0.875rem; font-family: inherit; white-space: nowrap;
+      min-width: 0;
+    }
+    .dropdown-toggle:hover { border-color: var(--accent); }
+    .dropdown-toggle .arrow { font-size: 0.6rem; color: var(--text-muted); flex-shrink: 0; }
+    .dropdown-toggle .dd-label { overflow: hidden; text-overflow: ellipsis; }
+    .dropdown-menu {
+      display: none; position: absolute; top: 100%; left: 0; margin-top: 4px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+      min-width: 100%; max-height: 240px; overflow-y: auto; z-index: 9999;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .dropdown-menu.open { display: block; }
+    .dropdown-menu.open-up { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }
+    .dropdown-item {
+      padding: 8px 12px; cursor: pointer; font-size: 0.85rem;
+      white-space: nowrap; color: var(--text);
+    }
+    .dropdown-item:hover { background: var(--accent); color: white; }
+    .dropdown-item.selected { background: rgba(59,130,246,0.15); }
+    .dropdown-item.selected:hover { background: var(--accent); color: white; }
+
+    /* Connect screen */
+    .connect-screen {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100vh; gap: 24px;
+    }
+    .connect-box {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 32px 40px; display: flex; flex-direction: column; gap: 16px;
+      min-width: 380px; max-width: 480px;
+    }
+    .connect-title { font-size: 1.3rem; font-weight: 600; text-align: center; }
+    .connect-subtitle { font-size: 0.85rem; color: var(--text-muted); text-align: center; }
+    .connect-field { display: flex; flex-direction: column; gap: 6px; }
+    .connect-field label { font-size: 0.8rem; color: var(--text-muted); font-weight: 500; }
+    .connect-field input { padding: 10px 14px; font-size: 0.95rem; }
+    .connect-row { display: flex; gap: 8px; }
+    .connect-row input { flex: 1; }
+    .connect-row .port-input { max-width: 90px; }
+    .connect-btn {
+      background: var(--accent); color: white; font-weight: 600; padding: 10px 20px;
+      font-size: 0.95rem; width: 100%; margin-top: 4px;
+    }
+    .connect-btn:hover:not(:disabled) { background: var(--accent-hover); }
+    .connect-error {
+      color: var(--danger); font-size: 0.82rem; text-align: center;
+      background: rgba(239,68,68,0.1); padding: 8px 12px; border-radius: 6px; display: none;
+    }
+    .connect-hint { font-size: 0.75rem; color: var(--text-muted); text-align: center; }
+
+    /* Toolbar */
+    .toolbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border);
+      flex-shrink: 0; gap: 16px; flex-wrap: wrap; position: relative; z-index: 100;
+    }
+    .toolbar-group { display: flex; align-items: center; gap: 12px; }
+    .title { font-size: 1.1rem; font-weight: 600; white-space: nowrap; }
+    .toggle-group { display: flex; gap: 4px; background: var(--bg); border-radius: 8px; padding: 3px; }
+    .toggle-btn {
+      background: transparent; color: var(--text-muted); padding: 6px 14px; font-size: 0.8rem; font-weight: 500;
+    }
+    .toggle-btn.active { background: var(--accent); color: white; }
+    .toggle-btn.live-active { background: var(--success); color: white; }
+    .host-badge {
+      font-size: 0.75rem; color: var(--text-muted); background: var(--bg);
+      padding: 4px 10px; border-radius: 4px; cursor: pointer;
+    }
+    .host-badge:hover { color: var(--text); }
+    .run-btn { background: var(--accent); color: white; font-weight: 600; padding: 8px 20px; }
+    .run-btn:hover:not(:disabled) { background: var(--accent-hover); }
+    .label { font-size: 0.85rem; color: var(--text-muted); white-space: nowrap; }
+
+    /* Error banner */
+    .error-banner {
+      background: rgba(239,68,68,0.15); color: var(--danger); padding: 10px 20px;
+      font-size: 0.85rem; border-bottom: 1px solid rgba(239,68,68,0.3); display: none;
+    }
+
+    /* Grid */
+    .grid { display: grid; flex: 1; gap: 4px; padding: 4px; min-height: 0; grid-template-columns: 1fr 1fr; }
+    .grid.mode-2 { grid-template-rows: 1fr; }
+    .grid.mode-4 { grid-template-rows: 1fr 1fr; }
+
+    /* Camera panel */
+    .panel {
+      display: flex; flex-direction: column; background: var(--surface);
+      border: 2px solid var(--border); border-radius: 8px; overflow: hidden; min-height: 0;
+      transition: border-color 0.3s;
+    }
+    .panel.result-anomaly { border-color: var(--danger); }
+    .panel.result-normal { border-color: var(--success); }
+    .panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 12px; background: rgba(0,0,0,0.2); flex-shrink: 0;
+      position: relative; z-index: 50;
+    }
+    .panel-header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .slot-label {
+      font-size: 0.8rem; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0;
+    }
+    .panel-header .dropdown-toggle { font-size: 0.78rem; padding: 4px 8px; max-width: 200px; }
+    .panel-header .dropdown-menu { font-size: 0.78rem; }
+    .run-slot-btn {
+      width: 32px; height: 32px; padding: 0; display: flex; align-items: center;
+      justify-content: center; background: var(--accent); color: white;
+      border-radius: 50%; font-size: 0.85rem; flex-shrink: 0;
+    }
+    .run-slot-btn:hover:not(:disabled) { background: var(--accent-hover); }
+    .image-area {
+      flex: 1; position: relative; display: flex; align-items: center;
+      justify-content: center; background: #000; min-height: 0; overflow: hidden;
+    }
+    .image-area img { max-width: 100%; max-height: 100%; object-fit: contain; display: none; }
+    .image-area img.visible { display: block; }
+    .placeholder { color: var(--text-muted); font-size: 0.85rem; }
+    .overlay {
+      position: absolute; inset: 0; background: rgba(0,0,0,0.6);
+      display: none; flex-direction: column; align-items: center;
+      justify-content: center; gap: 10px; color: white; font-size: 0.85rem;
+    }
+    .overlay.visible { display: flex; }
+    .spinner {
+      width: 28px; height: 28px; border: 3px solid rgba(255,255,255,0.2);
+      border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .result-bar {
+      display: none; align-items: center; gap: 12px; padding: 8px 12px;
+      font-size: 0.8rem; font-weight: 600; flex-shrink: 0;
+    }
+    .result-bar.visible { display: flex; }
+    .result-bar.bar-normal { background: rgba(34,197,94,0.15); color: var(--success); }
+    .result-bar.bar-anomaly { background: rgba(239,68,68,0.15); color: var(--danger); }
+    .result-confidence { color: var(--text-muted); font-weight: 400; }
+    .result-timing { color: var(--text-muted); font-weight: 400; font-size: 0.75rem; }
+    .result-anomalies { color: var(--warning); font-weight: 400; font-size: 0.75rem; }
+    .error-bar {
+      padding: 6px 12px; background: rgba(239,68,68,0.1);
+      color: var(--danger); font-size: 0.78rem; flex-shrink: 0; display: none;
+    }
+    .error-bar.visible { display: block; }
+    .loading {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; height: 100vh; gap: 16px; color: var(--text-muted);
+    }
+    .loading .spinner { width: 40px; height: 40px; border-width: 3px; border-color: var(--border); border-top-color: var(--accent); }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<!-- Connect screen -->
+<div id="connect-screen" class="connect-screen">
+  <div class="connect-box">
+    <div class="connect-title">Multi-Camera HMI</div>
+    <div class="connect-subtitle">Enter the host or IP address of the edge device running the DDA server</div>
+    <div class="connect-field">
+      <label for="host-input">Edge Device Address</label>
+      <div class="connect-row">
+        <input type="text" id="host-input" placeholder="e.g. 192.168.1.100 or my-device.local" />
+        <input type="text" id="port-input" class="port-input" placeholder="5000" value="5000" />
+      </div>
+    </div>
+    <div id="connect-error" class="connect-error"></div>
+    <button id="connect-btn" class="connect-btn" onclick="connectToDevice()">Connect</button>
+    <div class="connect-hint">The DDA API typically runs on port 5000 (HTTP) or 5443 (HTTPS)</div>
+  </div>
+</div>
+
+<!-- Loading screen -->
+<div id="loading-screen" class="loading hidden">
+  <div class="spinner"></div>
+  <p id="loading-msg">Connecting to DDA server...</p>
+</div>
+
+<!-- Main app -->
+<div id="app" class="hidden" style="display:flex;flex-direction:column;height:100vh;overflow:hidden;">
+  <header class="toolbar">
+    <div class="toolbar-group">
+      <h1 class="title">Multi-Camera HMI</h1>
+      <div class="toggle-group">
+        <button class="toggle-btn" data-grid="2" onclick="setGridMode(2)">2 View</button>
+        <button class="toggle-btn active" data-grid="4" onclick="setGridMode(4)">4 View</button>
+      </div>
+      <button id="live-btn" class="toggle-btn live-active" onclick="toggleLive()">⏸ Pause Live</button>
+      <span id="host-badge" class="host-badge" onclick="disconnect()" title="Click to disconnect and change device"></span>
+    </div>
+    <div class="toolbar-group">
+      <label class="label">Workflow:</label>
+      <div id="wf-dropdown" class="dropdown"></div>
+      <button id="run-btn" class="run-btn" onclick="runSelectedWorkflow()" disabled>▶ Run Workflow</button>
+    </div>
+  </header>
+  <div id="error-banner" class="error-banner"></div>
+  <div id="grid" class="grid mode-4"></div>
+</div>
+
+<script>
+(function() {
+  var API_BASE = "";
+  var POLL_INTERVAL = 2000;
+  var STORAGE_KEY = "dda-hmi-last-host";
+
+  var gridMode = 4;
+  var livePolling = true;
+  var imageSources = [];
+  var workflows = [];
+  var slots = [newSlot(), newSlot(), newSlot(), newSlot()];
+  var pollTimer = null;
+  var pollInFlight = {};
+  var selectedWorkflowId = "";
+
+  function newSlot() {
+    return { imageSource: null, latestImage: null, inferenceResult: null,
+             processingTime: null, isRunning: false, error: null };
+  }
+
+  // ── Custom Dropdown Component ───────────────────────────────────────
+  // Replaces native <select> with div-based dropdown that works everywhere
+  function createDropdown(container, options, selectedValue, placeholder, onChange) {
+    container.innerHTML = "";
+    container.className = "dropdown";
+
+    var toggle = document.createElement("div");
+    toggle.className = "dropdown-toggle";
+    var labelSpan = document.createElement("span");
+    labelSpan.className = "dd-label";
+    var arrow = document.createElement("span");
+    arrow.className = "arrow";
+    arrow.textContent = "▼";
+    toggle.appendChild(labelSpan);
+    toggle.appendChild(arrow);
+
+    var menu = document.createElement("div");
+    menu.className = "dropdown-menu";
+
+    // Set label
+    var selectedOpt = null;
+    for (var i = 0; i < options.length; i++) {
+      if (options[i].value === selectedValue) { selectedOpt = options[i]; break; }
+    }
+    labelSpan.textContent = selectedOpt ? selectedOpt.label : placeholder;
+
+    // Build items
+    for (var i = 0; i < options.length; i++) {
+      (function(opt) {
+        var item = document.createElement("div");
+        item.className = "dropdown-item" + (opt.value === selectedValue ? " selected" : "");
+        item.textContent = opt.label;
+        item.addEventListener("click", function(e) {
+          e.stopPropagation();
+          menu.classList.remove("open", "open-up");
+          labelSpan.textContent = opt.label;
+          // Update selected state
+          var items = menu.querySelectorAll(".dropdown-item");
+          for (var j = 0; j < items.length; j++) items[j].classList.remove("selected");
+          item.classList.add("selected");
+          if (onChange) onChange(opt.value);
+        });
+        menu.appendChild(item);
+      })(options[i]);
+    }
+
+    toggle.addEventListener("click", function(e) {
+      e.stopPropagation();
+      // Close all other open dropdowns first
+      var allMenus = document.querySelectorAll(".dropdown-menu.open, .dropdown-menu.open-up");
+      for (var k = 0; k < allMenus.length; k++) {
+        if (allMenus[k] !== menu) allMenus[k].classList.remove("open", "open-up");
+      }
+      if (menu.classList.contains("open") || menu.classList.contains("open-up")) {
+        menu.classList.remove("open", "open-up");
+      } else {
+        // Check if there's room below, otherwise open upward
+        var rect = toggle.getBoundingClientRect();
+        var spaceBelow = window.innerHeight - rect.bottom;
+        if (spaceBelow < 200) {
+          menu.classList.add("open-up");
+        } else {
+          menu.classList.add("open");
+        }
+      }
+    });
+
+    container.appendChild(toggle);
+    container.appendChild(menu);
+    return container;
+  }
+
+  // Close dropdowns when clicking outside
+  document.addEventListener("click", function() {
+    var allMenus = document.querySelectorAll(".dropdown-menu.open, .dropdown-menu.open-up");
+    for (var i = 0; i < allMenus.length; i++) allMenus[i].classList.remove("open", "open-up");
+  });
+
+  // ── Connection screen ───────────────────────────────────────────────
+  function initConnectScreen() {
+    var saved = "";
+    try { saved = localStorage.getItem(STORAGE_KEY) || ""; } catch(e) {}
+    var hostInput = document.getElementById("host-input");
+    var portInput = document.getElementById("port-input");
+    if (saved) {
+      try { var url = new URL(saved); hostInput.value = url.hostname; portInput.value = url.port || "5000"; }
+      catch(e) { hostInput.value = saved; }
+    } else { hostInput.value = window.location.hostname || "localhost"; }
+    hostInput.addEventListener("keydown", function(e) { if (e.key === "Enter") connectToDevice(); });
+    portInput.addEventListener("keydown", function(e) { if (e.key === "Enter") connectToDevice(); });
+  }
+
+  window.connectToDevice = function() {
+    var host = document.getElementById("host-input").value.trim();
+    var port = document.getElementById("port-input").value.trim() || "5000";
+    var errEl = document.getElementById("connect-error");
+    var btn = document.getElementById("connect-btn");
+    if (!host) { errEl.textContent = "Please enter a host or IP address"; errEl.style.display = "block"; return; }
+    var protocol = (port === "5443") ? "https" : "http";
+    API_BASE = protocol + "://" + host + ":" + port;
+    errEl.style.display = "none"; btn.disabled = true; btn.textContent = "Connecting...";
+    apiGet("/system-health", function(err) {
+      if (err) {
+        btn.disabled = false; btn.textContent = "Connect";
+        errEl.textContent = "Cannot reach DDA server at " + API_BASE + ". Check the address and ensure the server is running.";
+        errEl.style.display = "block"; API_BASE = ""; return;
+      }
+      try { localStorage.setItem(STORAGE_KEY, API_BASE); } catch(e) {}
+      document.getElementById("connect-screen").classList.add("hidden");
+      document.getElementById("loading-screen").classList.remove("hidden");
+      document.getElementById("loading-msg").textContent = "Connected to " + API_BASE + " — loading...";
+      document.getElementById("host-badge").textContent = "⚡ " + host + ":" + port;
+      loadApp();
+    });
+  };
+
+  window.disconnect = function() {
+    stopPolling(); livePolling = true; imageSources = []; workflows = [];
+    slots = [newSlot(), newSlot(), newSlot(), newSlot()]; API_BASE = ""; selectedWorkflowId = "";
+    document.getElementById("app").classList.add("hidden");
+    document.getElementById("loading-screen").classList.add("hidden");
+    document.getElementById("error-banner").style.display = "none";
+    document.getElementById("connect-screen").classList.remove("hidden");
+    document.getElementById("connect-error").style.display = "none";
+    document.getElementById("connect-btn").disabled = false;
+    document.getElementById("connect-btn").textContent = "Connect";
+  };
+
+  // ── API helpers ─────────────────────────────────────────────────────
+  function apiGet(path, cb) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", API_BASE + path);
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.timeout = 8000;
+    xhr.onload = function() {
+      if (xhr.status >= 200 && xhr.status < 300) { try { cb(null, JSON.parse(xhr.responseText)); } catch(e) { cb(e); } }
+      else { cb(new Error("HTTP " + xhr.status)); }
+    };
+    xhr.onerror = function() { cb(new Error("Network error")); };
+    xhr.ontimeout = function() { cb(new Error("Connection timeout")); };
+    xhr.send();
+  }
+
+  function apiPost(path, body, cb) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", API_BASE + path);
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.timeout = 30000;
+    xhr.onload = function() {
+      if (xhr.status >= 200 && xhr.status < 300) { try { cb(null, JSON.parse(xhr.responseText)); } catch(e) { cb(e); } }
+      else { var msg = "HTTP " + xhr.status; try { msg = JSON.parse(xhr.responseText).detail || msg; } catch(e) {} cb(new Error(msg)); }
+    };
+    xhr.onerror = function() { cb(new Error("Network error")); };
+    xhr.ontimeout = function() { cb(new Error("Request timeout")); };
+    xhr.send(JSON.stringify(body || {}));
+  }
+
+  // ── Load app ────────────────────────────────────────────────────────
+  function loadApp() {
+    var loaded = 0, errors = [];
+    function checkDone() {
+      if (++loaded < 2) return;
+      document.getElementById("loading-screen").classList.add("hidden");
+      var app = document.getElementById("app"); app.classList.remove("hidden"); app.style.display = "flex";
+      if (errors.length > 0) showError("Warning: " + errors.join("; "));
+      imageSources = imageSources.filter(function(s) {
+        return s.type === "Camera" || s.type === "ICam" || s.type === "NvidiaCSI";
+      });
+      for (var i = 0; i < slots.length; i++) { if (imageSources[i]) slots[i].imageSource = imageSources[i]; }
+      buildWorkflowDropdown();
+      buildGrid();
+      startPolling();
+    }
+    apiGet("/image-sources", function(err, data) { if (err) errors.push(err.message); else imageSources = data || []; checkDone(); });
+    apiGet("/workflows", function(err, data) { if (err) errors.push(err.message); else workflows = data || []; checkDone(); });
+  }
+
+  function buildWorkflowDropdown() {
+    var opts = [{ value: "", label: "-- Select workflow --" }];
+    for (var i = 0; i < workflows.length; i++) {
+      var wf = workflows[i];
+      var lbl = wf.name || wf.workflowId;
+      if (wf.featureConfigurations && wf.featureConfigurations[0] && wf.featureConfigurations[0].modelName) {
+        lbl += " (" + wf.featureConfigurations[0].modelName + ")";
+      }
+      opts.push({ value: wf.workflowId, label: lbl });
+    }
+    if (workflows.length > 0) selectedWorkflowId = workflows[0].workflowId;
+    createDropdown(document.getElementById("wf-dropdown"), opts, selectedWorkflowId, "-- Select workflow --", function(val) {
+      selectedWorkflowId = val;
+      document.getElementById("run-btn").disabled = !val;
+    });
+    document.getElementById("run-btn").disabled = !selectedWorkflowId;
+  }
+
+  // ── Grid & Panels ──────────────────────────────────────────────────
+  function buildGrid() {
+    var grid = document.getElementById("grid");
+    grid.innerHTML = ""; grid.className = "grid mode-" + gridMode;
+    for (var i = 0; i < gridMode; i++) grid.appendChild(buildPanel(i));
+    updateAllPanels();
+  }
+
+  function buildSourceDropdown(container, idx) {
+    var opts = [{ value: "", label: "-- No source --" }];
+    for (var j = 0; j < imageSources.length; j++) {
+      opts.push({
+        value: imageSources[j].imageSourceId,
+        label: (imageSources[j].name || imageSources[j].imageSourceId) + " (" + imageSources[j].type + ")"
+      });
+    }
+    var curVal = slots[idx].imageSource ? slots[idx].imageSource.imageSourceId : "";
+    createDropdown(container, opts, curVal, "-- No source --", function(val) { assignSource(idx, val); });
+  }
+
+  function buildPanel(idx) {
+    var panel = document.createElement("div"); panel.className = "panel"; panel.id = "panel-" + idx;
+    var header = document.createElement("div"); header.className = "panel-header";
+    var headerLeft = document.createElement("div"); headerLeft.className = "panel-header-left";
+    var label = document.createElement("span"); label.className = "slot-label"; label.textContent = "Camera " + (idx + 1);
+    var ddContainer = document.createElement("div"); ddContainer.id = "source-dd-" + idx;
+    buildSourceDropdown(ddContainer, idx);
+    headerLeft.appendChild(label); headerLeft.appendChild(ddContainer);
+    var runBtn = document.createElement("button"); runBtn.className = "run-slot-btn"; runBtn.id = "run-slot-btn-" + idx;
+    runBtn.title = "Run inference on this camera"; runBtn.textContent = "▶";
+    runBtn.onclick = (function(i) { return function() { runOnSlot(i); }; })(idx);
+    header.appendChild(headerLeft); header.appendChild(runBtn);
+
+    var imageArea = document.createElement("div"); imageArea.className = "image-area";
+    var img = document.createElement("img"); img.id = "cam-img-" + idx; img.alt = "Camera " + (idx + 1) + " feed";
+    var ph = document.createElement("div"); ph.className = "placeholder"; ph.id = "placeholder-" + idx;
+    ph.textContent = slots[idx].imageSource ? "Waiting for image..." : "Select an image source";
+    var ov = document.createElement("div"); ov.className = "overlay"; ov.id = "overlay-" + idx;
+    ov.innerHTML = '<div class="spinner"></div><span>Running inference...</span>';
+    imageArea.appendChild(img); imageArea.appendChild(ph); imageArea.appendChild(ov);
+
+    var rb = document.createElement("div"); rb.className = "result-bar"; rb.id = "result-bar-" + idx;
+    rb.innerHTML = '<span class="result-label"></span><span class="result-confidence"></span><span class="result-timing"></span><span class="result-anomalies"></span>';
+    var eb = document.createElement("div"); eb.className = "error-bar"; eb.id = "error-bar-" + idx;
+
+    panel.appendChild(header); panel.appendChild(imageArea); panel.appendChild(rb); panel.appendChild(eb);
+    return panel;
+  }
+
+  function updatePanel(idx) {
+    var slot = slots[idx]; var panel = document.getElementById("panel-" + idx);
+    if (!panel) return;
+
+    // Border
+    if (slot.inferenceResult && slot.inferenceResult.inference_result === "Anomaly") {
+      panel.classList.add("result-anomaly"); panel.classList.remove("result-normal");
+    } else if (slot.inferenceResult) {
+      panel.classList.add("result-normal"); panel.classList.remove("result-anomaly");
+    } else { panel.classList.remove("result-anomaly", "result-normal"); }
+
+    // Image — only update when data changes
+    var img = document.getElementById("cam-img-" + idx);
+    var ph = document.getElementById("placeholder-" + idx);
+    if (slot.latestImage) {
+      var hash = slot.latestImage.length + slot.latestImage.slice(-16);
+      if (img.getAttribute("data-h") !== hash) {
+        img.setAttribute("data-h", hash);
+        img.src = slot.latestImage.indexOf("data:") === 0 ? slot.latestImage : "data:image/jpeg;base64," + slot.latestImage;
+      }
+      if (!img.classList.contains("visible")) img.classList.add("visible");
+      ph.style.display = "none";
+    } else {
+      img.removeAttribute("data-h"); img.classList.remove("visible");
+      ph.style.display = ""; ph.textContent = slot.imageSource ? "Waiting for image..." : "Select an image source";
+    }
+
+    // Overlay
+    var ov = document.getElementById("overlay-" + idx);
+    if (slot.isRunning) { if (!ov.classList.contains("visible")) ov.classList.add("visible"); }
+    else { ov.classList.remove("visible"); }
+
+    // Run button
+    var rb = document.getElementById("run-slot-btn-" + idx);
+    rb.disabled = !slot.imageSource || slot.isRunning || !selectedWorkflowId;
+    rb.textContent = slot.isRunning ? "⏳" : "▶";
+
+    // Result bar
+    var bar = document.getElementById("result-bar-" + idx);
+    if (slot.inferenceResult) {
+      var r = slot.inferenceResult; var isA = r.inference_result === "Anomaly";
+      bar.classList.add("visible"); bar.classList.toggle("bar-anomaly", isA); bar.classList.toggle("bar-normal", !isA);
+      bar.querySelector(".result-label").textContent = isA ? "⚠ ANOMALY" : "✓ NORMAL";
+      bar.querySelector(".result-confidence").textContent = (r.confidence * 100).toFixed(1) + "% confidence";
+      bar.querySelector(".result-timing").textContent = slot.processingTime != null ? slot.processingTime.toFixed(0) + "ms" : "";
+      if (r.anomalies) {
+        bar.querySelector(".result-anomalies").textContent = Object.keys(r.anomalies).map(function(k) { return r.anomalies[k]["class-name"]; }).join(", ");
+      } else { bar.querySelector(".result-anomalies").textContent = ""; }
+    } else { bar.classList.remove("visible", "bar-anomaly", "bar-normal"); }
+
+    // Error bar
+    var eb = document.getElementById("error-bar-" + idx);
+    if (slot.error) { eb.textContent = slot.error; eb.classList.add("visible"); }
+    else { eb.classList.remove("visible"); }
+  }
+
+  function updateAllPanels() { for (var i = 0; i < gridMode; i++) updatePanel(i); }
+
+  // ── Actions ─────────────────────────────────────────────────────────
+  function assignSource(idx, sourceId) {
+    var source = null;
+    for (var i = 0; i < imageSources.length; i++) {
+      if (imageSources[i].imageSourceId === sourceId) { source = imageSources[i]; break; }
+    }
+    slots[idx] = newSlot(); slots[idx].imageSource = source;
+    updatePanel(idx);
+  }
+
+  window.setGridMode = function(mode) {
+    gridMode = mode;
+    document.querySelectorAll("[data-grid]").forEach(function(btn) {
+      btn.className = "toggle-btn" + (parseInt(btn.getAttribute("data-grid")) === mode ? " active" : "");
+    });
+    buildGrid(); restartPolling();
+  };
+
+  window.toggleLive = function() {
+    livePolling = !livePolling;
+    var btn = document.getElementById("live-btn");
+    btn.textContent = livePolling ? "⏸ Pause Live" : "▶ Resume Live";
+    btn.className = "toggle-btn" + (livePolling ? " live-active" : "");
+    if (livePolling) startPolling(); else stopPolling();
+  };
+
+  window.runSelectedWorkflow = function() {
+    if (!selectedWorkflowId) return;
+    for (var i = 0; i < gridMode; i++) { if (slots[i].imageSource) { slots[i].isRunning = true; slots[i].error = null; } }
+    updateAllPanels();
+    document.getElementById("run-btn").disabled = true;
+    document.getElementById("run-btn").textContent = "Running...";
+
+    apiPost("/workflows/" + selectedWorkflowId + "/run", { returnImageString: true }, function(err, result) {
+      if (err) {
+        for (var i = 0; i < gridMode; i++) { if (slots[i].imageSource) { slots[i].isRunning = false; slots[i].error = err.message; } }
+      } else {
+        var wf = null;
+        for (var w = 0; w < workflows.length; w++) { if (workflows[w].workflowId === selectedWorkflowId) { wf = workflows[w]; break; } }
+        var sid = wf && wf.imageSources && wf.imageSources[0] ? wf.imageSources[0].imageSourceId : null;
+        for (var i = 0; i < gridMode; i++) {
+          if (slots[i].imageSource && slots[i].imageSource.imageSourceId === sid) {
+            slots[i].latestImage = result.image || slots[i].latestImage;
+            slots[i].inferenceResult = result.inferenceResult;
+            slots[i].processingTime = result.processingTime;
+          }
+          slots[i].isRunning = false;
+        }
+      }
+      document.getElementById("run-btn").disabled = false;
+      document.getElementById("run-btn").textContent = "▶ Run Workflow";
+      updateAllPanels();
+    });
+  };
+
+  function runOnSlot(idx) {
+    var slot = slots[idx]; if (!slot.imageSource) return;
+    var matchWf = null;
+    for (var w = 0; w < workflows.length; w++) {
+      var wf = workflows[w];
+      if (wf.imageSources) { for (var s = 0; s < wf.imageSources.length; s++) {
+        if (wf.imageSources[s].imageSourceId === slot.imageSource.imageSourceId) { matchWf = wf; break; }
+      }} if (matchWf) break;
+    }
+    if (!matchWf) { for (var w = 0; w < workflows.length; w++) { if (workflows[w].workflowId === selectedWorkflowId) { matchWf = workflows[w]; break; } } }
+    if (!matchWf) { slots[idx].error = "No matching workflow found"; updatePanel(idx); return; }
+    slots[idx].isRunning = true; slots[idx].error = null; updatePanel(idx);
+    apiPost("/workflows/" + matchWf.workflowId + "/run", { returnImageString: true }, function(err, result) {
+      if (err) { slots[idx].isRunning = false; slots[idx].error = err.message; }
+      else {
+        slots[idx].latestImage = result.image || slots[idx].latestImage;
+        slots[idx].inferenceResult = result.inferenceResult;
+        slots[idx].processingTime = result.processingTime;
+        slots[idx].isRunning = false;
+      }
+      updatePanel(idx);
+    });
+  }
+
+  // ── Polling ─────────────────────────────────────────────────────────
+  function pollTick() {
+    for (var i = 0; i < gridMode; i++) {
+      (function(idx) {
+        if (pollInFlight[idx]) return;
+        if (!slots[idx].imageSource) return;
+        var sourceId = slots[idx].imageSource.imageSourceId;
+        pollInFlight[idx] = true;
+        apiPost("/image-sources/" + sourceId + "/preview", {}, function(err, data) {
+          pollInFlight[idx] = false;
+          if (!err && data && data.image && slots[idx].imageSource &&
+              slots[idx].imageSource.imageSourceId === sourceId) {
+            slots[idx].latestImage = data.image;
+            slots[idx].error = null;
+            updatePanel(idx);
+          }
+        });
+      })(i);
+    }
+  }
+
+  function startPolling() { stopPolling(); if (livePolling) { pollTick(); pollTimer = setInterval(pollTick, POLL_INTERVAL); } }
+  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } pollInFlight = {}; }
+  function restartPolling() { stopPolling(); if (livePolling) startPolling(); }
+
+  function showError(msg) { var b = document.getElementById("error-banner"); b.textContent = msg; b.style.display = "block"; }
+
+  // ── Boot ────────────────────────────────────────────────────────────
+  initConnectScreen();
+})();
+</script>
+</body>
+</html>

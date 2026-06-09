@@ -169,23 +169,33 @@ export default function RoIAnnotationImage({
   ]);
 
   useEffect(() => {
-    let crop = NoCrop;
+    console.log('RoIAnnotationImage: showCroppedImage changed', {
+      showCroppedImage,
+      regionOfInterestAnnotation,
+      imageHorizontalScaling,
+      imageVerticalScaling
+    });
+    
     if (showCroppedImage) {
-      crop = scaleUpRoIAnnotation(
+      // When showing cropped image, apply the crop settings to the preview
+      const crop = scaleUpRoIAnnotation(
         regionOfInterestAnnotation,
         imageHorizontalScaling,
         imageVerticalScaling,
       );
+      console.log('RoIAnnotationImage: Setting crop for preview', crop);
+      setImageCrop(crop);
     } else {
-      // scale up when saving coordinates for submitting to the API
+      // When not showing cropped image, show full image and update annotation
       const upScaledRegionOfInterestAnnotation = scaleUpRoIAnnotation(
         regionOfInterestAnnotation,
         imageHorizontalScaling,
         imageVerticalScaling,
       );
       setImageCropPreview(upScaledRegionOfInterestAnnotation);
+      console.log('RoIAnnotationImage: Setting NoCrop for preview');
+      setImageCrop(NoCrop);
     }
-    setImageCrop(crop);
   }, [imageHorizontalScaling, imageVerticalScaling, regionOfInterestAnnotation, setImageCrop, setImageCropPreview, showCroppedImage]);
 
   useEffect(() => {

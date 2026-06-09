@@ -57,7 +57,10 @@ rm -rf $rootDir/extracted-debs
 mkdir -p $rootDir/cached-debs
 
 # Select Dockerfile based on JetPack version
-if [ "$jetpack" = "5" ]; then
+if [ "$jetpack" = "6" ]; then
+    DOCKERFILE="Dockerfile.jp6"
+    echo "Using JP6 Dockerfile (l4t-jetpack:r36.3.0 base, native build)"
+elif [ "$jetpack" = "5" ]; then
     DOCKERFILE="Dockerfile.jp5"
     echo "Using JP5 Dockerfile (l4t-jetpack:r35.4.1 base, native build)"
 else
