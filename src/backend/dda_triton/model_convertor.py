@@ -345,7 +345,7 @@ def _create_base_model_structure(
 ) -> bool:
     # Base lfv model create config.pbtxt.
     # Use dataset information.
-    model_internal = manifest["dataset"]
+    model_internal = manifest.get("dataset", {})
     # Dynamic input if model does not support anomaly localization.
     input_shape = [-1, -1, -1]
     if _has_pixel_level_classes(manifest):
@@ -417,7 +417,7 @@ def _create_base_model_structure(
 def _create_marshal_model_structure(
     model_repo_dir: str, model_name: str, model_version: str, manifest: dict
 ) -> bool:
-    model_internal = manifest["dataset"]
+    model_internal = manifest.get("dataset", {})
     input_shape = [-1, -1, -1]
     if _has_pixel_level_classes(manifest):
         input_shape = [model_internal["image_height"], model_internal["image_width"], 3]
@@ -462,7 +462,7 @@ def _create_marshal_model_structure(
 def _create_ensemble_model_structure(
     model_repo_dir: str, model_name: str, model_version: str, manifest: dict
 ) -> bool:
-    model_internal = manifest["dataset"]
+    model_internal = manifest.get("dataset", {})
     input_shape = [-1, -1, -1]
     if _has_pixel_level_classes(manifest):
         input_shape = [model_internal["image_height"], model_internal["image_width"], 3]

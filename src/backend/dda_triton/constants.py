@@ -34,6 +34,12 @@ DATASET_MANIFEST_KEY = "dataset"
 DATASET_IMAGE_WIDTH_MANIFEST_KEY = "image_width"
 DATASET_IMAGE_HEIGHT_MANIFEST_KEY = "image_height"
 PIXEL_LEVEL_CLASSES = "pixel_level_classes"
+# Optional manifest task selector. Absent => "anomaly" (full backward compat).
+# "object_detection" routes execute()/packaging through the bounding-box path.
+TASK_MANIFEST_KEY = "task"
+TASK_ANOMALY = "anomaly"
+TASK_OBJECT_DETECTION = "object_detection"
+DETECTION_MANIFEST_KEY = "detection"
 DDA_ROOT_FOLDER="/aws_dda"
 TRITON_MODEL_DIR = DDA_ROOT_FOLDER+ "/dda_triton/triton_model_repo"
 TRITON_INSTALLATION_DIR = "/opt/tritonserver"

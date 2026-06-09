@@ -343,3 +343,63 @@ tensor → `ObjectDetectionResult`s) and emitting boxes through Triton/GStreamer
 - `src/backend/dda_triton/constants.py` (task manifest keys)
 - `src/frontend/src/components/workflow/types.ts` and model views (detection type)
 - `test/backend-test/...` (YOLO decode unit tests)
+
+## 19. Phase B — task-aware serving (implemented)
+
+The on-device serving path now honors the `task` field end to end **without a
+Triton rebuild and without changing the Triton output contract**:
+
+- `lfv_model_template.py` reads `task` from the manifest in `initialize()` and
+  branches `execute()`:
+  - `anomaly` (default): unchanged anomaly tensor emit.
+  - `object_detection`: collects `ObjectDetectionResult`s from the graph result
+    and emits them as a serialized JSON list through the **existing
+    variable-length `anomalies` tensor**; `output` = 1 if any detection,
+    `output_score`/`output_confidence` = top detection confidence, `mask` empty.
+  Reusing the `anomalies` channel means the `base`/`marshal`/`ensemble`
+  `config.pbtxt` and their input/output maps are untouched.
+- `model_convertor.py` reads `manifest["dataset"]` defensively (`.get`) so a BYO
+  detection package without an anomaly-style `dataset` block packages cleanly.
+- No new graph or preprocessor: a detection model uses
+  `single_stage_model_graph` with stage type `yolo_object_detection`.
+  `SingleStageModelGraph` already passes the raw runner output to the
+  post-processor and wraps a returned `list[ObjectDetectionResult]` into
+  `InferenceData`. `BasicPreProcessor` already emits `(1,3,H,W)` float32, which
+  is the YOLO ONNX input — set `image_range_scale: true`, `normalize: false`.
+
+### Detection model package — manifest shape
+
+```json
+{
+  "runtime": "onnx",
+  "runtime_artifact": "model.onnx",
+  "task": "object_detection",
+  "detection": {
+    "num_classes": 80,
+    "score_threshold": 0.25,
+    "iou_threshold": 0.45,
+    "network_input": 640,
+    "class_names": ["person", "bicycle", ...]
+  },
+  "model_graph": {
+    "model_graph_type": "single_stage_model_graph",
+    "stages": [{
+      "stage_type": "yolo_object_detection",
+      "threshold": 0.25,
+      "image_width": 640,
+      "image_height": 640,
+      "image_range_scale": true,
+      "normalize": false,
+      "input_shape": [1, 3, 640, 640]
+    }]
+  }
+}
+```
+
+### Known limitation (Phase C)
+
+`SingleStageModelGraph.predict()` calls the post-processor without
+`src_img_size`, so detection boxes come out in **network-input coordinates**
+(e.g. 0..640), not source-image pixels. The YOLO post-processor supports source
+scaling when `src_img_size` is supplied; wiring that through the graph (and
+drawing boxes on the overlay image in the marshal stage) is Phase C.

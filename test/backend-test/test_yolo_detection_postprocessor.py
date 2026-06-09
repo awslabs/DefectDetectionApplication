@@ -140,3 +140,34 @@ def test_empty_output():
     pp = YoloDetectionPostProcessor({"detection": {}})
     assert pp([]) == []
     assert pp([np.zeros((1, 84, 8400), dtype=np.float32)]) == []
+
+
+def test_detection_emit_json_roundtrip():
+    """The execute() detection path serializes ObjectDetectionResults to a JSON
+    byte tensor (via the existing 'anomalies' channel). Validate that contract:
+    serialize -> uint8 bytes -> decode round-trips losslessly."""
+    import json
+
+    num_classes = 80
+    out = _make_yolo_output(
+        boxes_xywh=[[320.0, 320.0, 64.0, 64.0]],
+        class_scores=[[0.0] * 5 + [0.88] + [0.0] * (num_classes - 6)],
+        num_classes=num_classes,
+    )
+    pp = YoloDetectionPostProcessor(
+        {"detection": {"num_classes": num_classes, "network_input": 640}}
+    )
+    results = pp([out])
+    serialized = [d.serialize() for d in results]
+
+    det_bytes = np.frombuffer(
+        bytes(json.dumps(serialized), encoding="utf-8"), dtype=np.uint8
+    )
+    roundtrip = json.loads(det_bytes.tobytes().decode("utf-8"))
+    assert roundtrip[0]["class"] == "5"
+    assert roundtrip[0]["bounding_box"] == [288.0, 288.0, 352.0, 352.0]
+    assert roundtrip[0]["confidence"] == pytest.approx(0.88, abs=1e-5)
+
+    # top confidence drives output_score/output_confidence in execute()
+    top_conf = max((float(d.confidence) for d in results), default=0.0)
+    assert top_conf == pytest.approx(0.88, abs=1e-5)
