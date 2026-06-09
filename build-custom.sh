@@ -139,6 +139,20 @@ else
   export BACKEND_DOCKERFILE="Dockerfile"
 fi
 echo "Backend Dockerfile: $BACKEND_DOCKERFILE"
+
+# ── GPU ONNX Runtime (JP5/JP6) ─────────────────────────────────────────────
+# The OnnxRunner uses a GPU (CUDA/TensorRT) onnxruntime built from source in the
+# backend image. GPU is enabled by default on JetPack 5 and 6; JetPack 4 stays
+# CPU-only (its native python 3.6 has no compatible build path) and x86 uses the
+# CPU wheel. The source build is long and memory-heavy (~1-2h), so it can be
+# turned off for a fast CPU-only build with ONNXRUNTIME_GPU=0.
+if [ "$IS_JP6" = "1" ] || [ "$IS_JP5" = "1" ]; then
+  export ONNXRUNTIME_GPU="${ONNXRUNTIME_GPU:-1}"
+else
+  export ONNXRUNTIME_GPU=0
+fi
+echo "ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU (1=build GPU onnxruntime from source; JP5/JP6 only. Set 0 for fast CPU-only build)"
+
 echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 # Select profiles by architecture. The `tegra` service targets Jetson
 # (platform linux/arm64/v8) and must NOT be built on x86_64 hosts — doing so
@@ -148,7 +162,9 @@ if [ "$ARCHITECTURE" = "x86_64" ]; then
   docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" --no-cache \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 else
-  docker-compose --profile tegra --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" --no-cache \
+  docker-compose --profile tegra --profile generic -f docker-compose.yaml build \
+    --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
+    --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU --no-cache \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 fi
 cd ..

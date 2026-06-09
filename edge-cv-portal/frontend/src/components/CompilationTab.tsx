@@ -66,7 +66,7 @@ const COMPILATION_TARGETS = [
   {
     id: 'onnx',
     name: 'ONNX Runtime (portable)',
-    description: 'Export the trained model to ONNX (.onnx) for the pluggable ONNX Runtime engine — runs on Jetson/x86 without Neo/DLR. See docs/multi-runtime-inference.md.',
+    description: 'Export the trained model to ONNX (.onnx) for the pluggable ONNX Runtime engine — runs on Jetson/x86 without Neo/DLR. GPU acceleration (CUDA/TensorRT) is available on JetPack 5 and 6; JetPack 4 runs ONNX on CPU only. See docs/multi-runtime-inference.md.',
     recommended: false,
   },
 ];

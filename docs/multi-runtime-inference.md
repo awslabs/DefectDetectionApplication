@@ -154,12 +154,28 @@ sample before implementing.
 
 ## 8. Dependencies
 
-- `onnxruntime-gpu` — Jetson build, **per JetPack** (JP5 CUDA 11.4 vs JP6
-  CUDA 12.2). Mirrors the existing per-JetPack lib provisioning pattern
-  (cf. the libcudart.so.11 staging for JP6).
+- `onnxruntime` — installed in the backend container build (Dockerfile.jp5 /
+  Dockerfile.jp6), NOT in setup_station.sh: the OnnxRunner runs in-container
+  under python3.9, while the station scripts only provision the host python that
+  runs the packaging-only model_convertor.py. Two modes via build-args:
+  - **CPU (default):** prebuilt wheel `onnxruntime==1.16.3` (last release with a
+    cp39 aarch64 manylinux_2_17 wheel; works on JP5 glibc 2.31 and JP6 2.35).
+  - **GPU (`ONNXRUNTIME_GPU=1`, default on for JP5/JP6 in build-custom.sh):**
+    `onnxruntime-gpu` built from source with the CUDA + TensorRT execution
+    providers by `edge_ml1_p_camera_management/install_onnxruntime_gpu.sh`,
+    against the l4t-jetpack base image's CUDA/TRT. JP5 → ORT v1.16.3, CUDA archs
+    `72;87`; JP6 → ORT v1.17.1, arch `87`. This is needed because NVIDIA's
+    prebuilt Jetson GPU wheels target each JetPack's *native* python (3.8 on
+    r35, 3.10 on r36), not the 3.9 the container uses, and PyPI's
+    onnxruntime-gpu is x86_64-only.
+  - **JetPack 4: CPU only.** Its native python is 3.6 (EOL) and there is no
+    compatible cp39 GPU build path; the portal compile UI notes this.
+  OnnxRunner auto-selects TensorRT → CUDA → CPU providers, so the same code path
+  works for either wheel.
 - `torch` — Jetson wheel, **only if PyTorch runtime ships in v1**; gate behind a
   Docker build arg.
-- `dlr==1.10.0` stays as-is.
+- `dlr==1.10.0` stays as-is (pure-python `py3-none-any` wrapper over the
+  model-bundled libdlr.so; version-agnostic).
 - Lazy imports keep optional engines out of images/devices that don't use them.
 
 ## 9. Portal / packaging side (phased)
