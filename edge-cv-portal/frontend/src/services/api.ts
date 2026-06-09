@@ -1481,6 +1481,11 @@ class ApiService {
     num_classes?: number;
     class_names?: string[];
     auto_import?: boolean;
+    // 'pytorch' (legacy .pt/DLR) or 'onnx' (pluggable ONNX Runtime engine).
+    export_format?: string;
+    // Object-detection decode thresholds (only used for object_detection).
+    score_threshold?: number;
+    iou_threshold?: number;
   }): Promise<{
     converted_model_s3_uri: string;
     model_name: string;

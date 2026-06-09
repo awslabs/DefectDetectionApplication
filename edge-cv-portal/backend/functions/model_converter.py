@@ -201,14 +201,28 @@ def generate_dda_package(
     image_height: int,
     num_classes: Optional[int] = None,
     class_names: Optional[List[str]] = None,
-    output_path: str = None
+    output_path: str = None,
+    export_format: str = 'pytorch',
+    score_threshold: float = 0.25,
+    iou_threshold: float = 0.45,
 ) -> str:
     """
-    Generate a DDA-compatible package from a raw .pt file.
+    Generate a DDA-compatible package from a raw model file.
     Creates config.yaml, mochi.json, and manifest.json automatically.
+
+    :param export_format: 'pytorch' (legacy .pt / DLR path) or 'onnx'. For
+        'onnx' the package is written for the pluggable ONNX Runtime engine
+        (manifest runtime="onnx", artifact model.onnx) and, for detection
+        models, the object-detection task path (see
+        docs/multi-runtime-inference.md). 'pytorch' preserves the original
+        behavior.
+    :param score_threshold/iou_threshold: detection decode thresholds (only used
+        for object_detection).
     """
     temp_dir = None
-    
+    is_onnx = str(export_format).lower() == 'onnx'
+    is_detection = model_type == 'object_detection'
+
     try:
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="dda_convert_")
@@ -248,10 +262,11 @@ def generate_dda_package(
             yaml.dump(config, f, default_flow_style=False)
         
         # 2. Create mochi.json
+        mochi_stage_type = "yolo_object_detection" if (is_onnx and is_detection) else model_type
         mochi = {
             'stages': [
                 {
-                    'type': model_type,
+                    'type': mochi_stage_type,
                     'input_shape': input_shape,
                     'output_shape': output_shape
                 }
@@ -271,42 +286,89 @@ def generate_dda_package(
             json.dump(mochi, f, indent=2)
         
         # 3. Create manifest.json
-        pt_filename = f"{model_name}.pt"
-        manifest = {
-            'model_graph': {
-                'stages': [
-                    {
-                        'type': model_type,
-                        'input_shape': input_shape,
-                        'output_shape': output_shape
-                    }
-                ]
-            },
-            'input_shape': input_shape,
-            'compilable_models': [
-                {
-                    'filename': pt_filename,
-                    'data_input_config': {
-                        'input': input_shape
-                    },
-                    'framework': 'PYTORCH'
-                }
-            ],
-            'preprocessing': {
-                'resize': [image_width, image_height],
-                'normalize': {
-                    'mean': [0.485, 0.456, 0.406],
-                    'std': [0.229, 0.224, 0.225]
-                },
-                'channel_order': 'RGB'
+        if is_onnx:
+            # ONNX package for the pluggable ONNX Runtime engine. For detection
+            # models, wire the object-detection task path the device serving
+            # code (Phases B/C) reads.
+            artifact_filename = "model.onnx"
+            # Map the user-facing model_type to the device stage type and graph.
+            stage_type = "yolo_object_detection" if is_detection else model_type
+            stage = {
+                "type": stage_type,
+                "input_shape": input_shape,
+                "output_shape": output_shape,
+                # BasicPreProcessor knobs: YOLO wants 0..1 scaling, no ImageNet
+                # mean/std normalization.
+                "image_width": image_width,
+                "image_height": image_height,
+                "image_range_scale": True,
+                "normalize": False,
+                "threshold": score_threshold,
             }
-        }
+            if num_classes:
+                stage["num_classes"] = num_classes
+            manifest = {
+                "runtime": "onnx",
+                "runtime_artifact": artifact_filename,
+                "model_graph": {
+                    "model_graph_type": "single_stage_model_graph",
+                    "stages": [stage],
+                },
+                "input_shape": input_shape,
+                "preprocessing": {
+                    "resize": [image_width, image_height],
+                    "channel_order": "RGB",
+                },
+            }
+            if is_detection:
+                manifest["task"] = "object_detection"
+                manifest["detection"] = {
+                    "num_classes": num_classes or 80,
+                    "score_threshold": score_threshold,
+                    "iou_threshold": iou_threshold,
+                    "network_input": image_width,
+                }
+                if class_names:
+                    manifest["detection"]["class_names"] = class_names
+        else:
+            # Legacy PyTorch/DLR package (unchanged behavior).
+            pt_filename = f"{model_name}.pt"
+            artifact_filename = pt_filename
+            manifest = {
+                'model_graph': {
+                    'stages': [
+                        {
+                            'type': model_type,
+                            'input_shape': input_shape,
+                            'output_shape': output_shape
+                        }
+                    ]
+                },
+                'input_shape': input_shape,
+                'compilable_models': [
+                    {
+                        'filename': pt_filename,
+                        'data_input_config': {
+                            'input': input_shape
+                        },
+                        'framework': 'PYTORCH'
+                    }
+                ],
+                'preprocessing': {
+                    'resize': [image_width, image_height],
+                    'normalize': {
+                        'mean': [0.485, 0.456, 0.406],
+                        'std': [0.229, 0.224, 0.225]
+                    },
+                    'channel_order': 'RGB'
+                }
+            }
         
         with open(os.path.join(export_dir, 'manifest.json'), 'w') as f:
             json.dump(manifest, f, indent=2)
         
         # 4. Copy the model file
-        shutil.copy(model_path, os.path.join(export_dir, pt_filename))
+        shutil.copy(model_path, os.path.join(export_dir, artifact_filename))
         
         # 5. Create tar.gz archive
         if not output_path:
@@ -370,6 +432,10 @@ def convert_model(event: Dict, context: Any) -> Dict:
         num_classes = body.get('num_classes')
         class_names = body.get('class_names')
         auto_import = body.get('auto_import', False)
+        # 'pytorch' (legacy .pt/DLR) or 'onnx' (pluggable ONNX Runtime engine).
+        export_format = str(body.get('export_format', 'pytorch')).lower()
+        score_threshold = float(body.get('score_threshold', 0.25))
+        iou_threshold = float(body.get('iou_threshold', 0.45))
         
         # Validate model type
         if model_type not in MODEL_TYPES:
@@ -418,14 +484,21 @@ def convert_model(event: Dict, context: Any) -> Dict:
         temp_dir = tempfile.mkdtemp(prefix="model_convert_")
         
         try:
-            # Download the model file
-            local_model = os.path.join(temp_dir, 'model.pt')
+            # Download the model file. Use an extension matching the source so
+            # ONNX packages carry model.onnx and the torch inspector is skipped.
+            is_onnx = export_format == 'onnx'
+            local_name = 'model.onnx' if is_onnx else 'model.pt'
+            local_model = os.path.join(temp_dir, local_name)
             logger.info(f"Downloading model from {model_s3_uri}")
             s3_client.download_file(source_bucket, source_key, local_model)
-            
-            # Inspect the model
-            logger.info("Inspecting model...")
-            model_info = inspect_pytorch_model(local_model)
+
+            # Inspect the model (PyTorch only; ONNX is opaque to the torch
+            # inspector and doesn't need it).
+            if is_onnx:
+                model_info = {'type': 'onnx', 'architecture_hints': ['ONNX model']}
+            else:
+                logger.info("Inspecting model...")
+                model_info = inspect_pytorch_model(local_model)
             
             # Generate DDA package
             logger.info("Generating DDA-compatible package...")
@@ -440,7 +513,10 @@ def convert_model(event: Dict, context: Any) -> Dict:
                 image_height=image_height,
                 num_classes=num_classes,
                 class_names=class_names,
-                output_path=output_tar
+                output_path=output_tar,
+                export_format=export_format,
+                score_threshold=score_threshold,
+                iou_threshold=iou_threshold,
             )
             
             # Upload converted package to S3

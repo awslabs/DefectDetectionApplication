@@ -413,3 +413,34 @@ Triton rebuild and without changing the Triton output contract**:
 - **Frontend type:** `InferenceResultHistory` gains an optional `detections`
   field (`DetectionResult[]`) carrying the structured list for textual display;
   the results API mapping to populate it from the metadata block is a follow-up.
+
+## 20. Portal packaging for ONNX / detection models
+
+The portal can compile, package, and publish an ONNX model end to end:
+
+1. **Compile to ONNX** (`compilation.py`, `target=onnx`): runs a SageMaker
+   training job that `torch.onnx.export`s a trained TorchScript model to
+   `model.onnx` (Neo cannot emit ONNX). Validated end-to-end earlier.
+2. **Package** (`model_converter.py`, Smart Import): `generate_dda_package` now
+   takes `export_format` ('pytorch' default | 'onnx') and, for ONNX, writes a
+   **device-correct manifest** for the pluggable engine:
+   `runtime: "onnx"`, `runtime_artifact: "model.onnx"`,
+   `model_graph.model_graph_type: "single_stage_model_graph"`, and for
+   `model_type=object_detection` the stage `type: "yolo_object_detection"` with
+   `image_range_scale: true`, `normalize: false`, `threshold`, plus a top-level
+   `task: "object_detection"` and a `detection` block (num_classes,
+   score/iou thresholds, network_input, class_names). Bundles `model.onnx`
+   (not a `.pt`).
+3. **Publish** (`greengrass_publish.py`): unchanged — publishes the component.
+
+Frontend: Smart Import (`SmartImport.tsx`) gains a "Runtime / export format"
+selector (PyTorch/Neo vs ONNX Runtime); `api.ts convertModel` carries
+`export_format` / `score_threshold` / `iou_threshold`.
+
+Validated off-device: the generated ONNX-detection manifest matches exactly what
+the device serving code (Phases B/C) reads. The portal frontend type-checks.
+
+Caveat: "compile to ONNX" and "package" are currently two Smart-Import steps
+(export produces model.onnx in S3; package converts it). Auto-chaining the ONNX
+export output directly into packaging is a follow-up. On-device validation
+pending.

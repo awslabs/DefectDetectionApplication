@@ -94,6 +94,9 @@ export default function SmartImport() {
   const [customHeight, setCustomHeight] = useState('');
   const [useCustomDimensions, setUseCustomDimensions] = useState(false);
   const [numClasses, setNumClasses] = useState('');
+  // Export/runtime format: 'pytorch' (legacy .pt/DLR) or 'onnx' (ONNX Runtime
+  // engine; required for the object-detection task path).
+  const [exportFormat, setExportFormat] = useState<string>('pytorch');
   const [autoCompile, setAutoCompile] = useState(true);
   const [compilationTargets, setCompilationTargets] = useState<MultiselectProps.Option[]>([
     { label: 'x86_64 CPU', value: 'x86_64-cpu' }
@@ -190,6 +193,7 @@ export default function SmartImport() {
         image_width: width,
         image_height: height,
         num_classes: numClasses ? parseInt(numClasses) : undefined,
+        export_format: exportFormat,
         auto_import: true,
       });
 
@@ -401,6 +405,28 @@ export default function SmartImport() {
                         value: 'anomaly_detection',
                         label: 'Anomaly Detection',
                         description: 'Detect anomalies/defects',
+                      },
+                    ]}
+                  />
+                </FormField>
+
+                <FormField
+                  label="Runtime / export format"
+                  description="ONNX runs on the pluggable ONNX Runtime engine (GPU on JetPack 5/6). Object detection requires ONNX. PyTorch/Neo uses the legacy DLR path."
+                >
+                  <Tiles
+                    value={exportFormat}
+                    onChange={({ detail }) => setExportFormat(detail.value)}
+                    items={[
+                      {
+                        value: 'pytorch',
+                        label: 'PyTorch / Neo (DLR)',
+                        description: 'Legacy path — compiled with SageMaker Neo to DLR',
+                      },
+                      {
+                        value: 'onnx',
+                        label: 'ONNX Runtime',
+                        description: 'Portable ONNX engine; required for object detection',
                       },
                     ]}
                   />
