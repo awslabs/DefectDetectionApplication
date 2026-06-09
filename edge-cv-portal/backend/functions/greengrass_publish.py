@@ -51,6 +51,7 @@ PLATFORM_DEPENDENCIES = {
 TARGET_TO_LOCAL_SERVER = {
     'jetson-xavier': 'aws.edgeml.dda.LocalServer.arm64',        # JetPack 4
     'jetson-xavier-jp5': 'aws.edgeml.dda.LocalServer.arm64JP5',  # JetPack 5
+    'jetson-xavier-jp6': 'aws.edgeml.dda.LocalServer.arm64JP6',  # JetPack 6
     'arm64-cpu': 'aws.edgeml.dda.LocalServer.arm64',
     'x86_64-cpu': 'aws.edgeml.dda.LocalServer.amd64',
     'x86_64-cuda': 'aws.edgeml.dda.LocalServer.amd64',
@@ -60,6 +61,7 @@ TARGET_TO_LOCAL_SERVER = {
 TARGET_TO_PLATFORM = {
     'jetson-xavier': 'aarch64',
     'jetson-xavier-jp5': 'aarch64',
+    'jetson-xavier-jp6': 'aarch64',
     'arm64-cpu': 'aarch64',
     'x86_64-cpu': 'amd64',
     'x86_64-cuda': 'amd64'

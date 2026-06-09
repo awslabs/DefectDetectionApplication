@@ -35,8 +35,14 @@ const COMPILATION_TARGETS = [
   },
   {
     id: 'jetson-xavier-jp5',
-    name: 'NVIDIA Jetson Xavier (JetPack 5.x)',
-    description: 'ARM64 with NVIDIA GPU acceleration for edge AI inference (CUDA 11.4, TensorRT 8.5.2)',
+    name: 'NVIDIA Jetson Xavier / Orin (JetPack 5.x)',
+    description: 'ARM64 Jetson Xavier or Orin on JetPack 5 — device runtime CUDA 11.4, TensorRT 8.5.2',
+    recommended: false,
+  },
+  {
+    id: 'jetson-xavier-jp6',
+    name: 'NVIDIA Jetson Orin (JetPack 6.x)',
+    description: 'ARM64 Jetson Orin on JetPack 6 — device runtime CUDA 12.2, TensorRT 8.6.2',
     recommended: false,
   },
   {
@@ -738,7 +744,8 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
 function getTargetDescription(target: string): string {
   const descriptions: Record<string, string> = {
     'jetson-xavier': 'NVIDIA Jetson Xavier — JetPack 4.x (ARM64 + GPU)',
-    'jetson-xavier-jp5': 'NVIDIA Jetson Xavier — JetPack 5.x (ARM64 + GPU)',
+    'jetson-xavier-jp5': 'NVIDIA Jetson Xavier / Orin — JetPack 5.x (ARM64 + GPU)',
+    'jetson-xavier-jp6': 'NVIDIA Jetson Orin — JetPack 6.x (ARM64 + GPU)',
     'x86_64-cpu': 'x86_64 CPU only',
     'x86_64-cuda': 'x86_64 with NVIDIA GPU',
     'arm64-cpu': 'ARM64 CPU only',

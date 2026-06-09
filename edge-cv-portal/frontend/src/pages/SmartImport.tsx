@@ -45,7 +45,8 @@ const COMPILATION_TARGETS: MultiselectProps.Option[] = [
   { label: 'x86_64 CUDA', value: 'x86_64-cuda', description: 'NVIDIA GPU on x86_64' },
   { label: 'ARM64 CPU', value: 'arm64-cpu', description: 'ARM 64-bit processors' },
   { label: 'Jetson Xavier (JetPack 4.x)', value: 'jetson-xavier', description: 'NVIDIA Jetson Xavier — CUDA 10.2, TensorRT 8.2.1' },
-  { label: 'Jetson Xavier (JetPack 5.x)', value: 'jetson-xavier-jp5', description: 'NVIDIA Jetson Xavier — CUDA 11.4, TensorRT 8.5.2' },
+  { label: 'Jetson Xavier / Orin (JetPack 5.x)', value: 'jetson-xavier-jp5', description: 'NVIDIA Jetson Xavier or Orin — device runtime CUDA 11.4, TensorRT 8.5.2' },
+  { label: 'Jetson Orin (JetPack 6.x)', value: 'jetson-xavier-jp6', description: 'NVIDIA Jetson Orin — device runtime CUDA 12.2, TensorRT 8.6.2' },
 ];
 
 const COMMON_DIMENSIONS: Record<string, { label: string; value: string }[]> = {

@@ -138,6 +138,14 @@ class GstPipelineExecutor:
         input_file_name = get_input_file_from_pipeline(pipeline_definition)
         logger.info("Clean up processed image file: {}".format(input_file_name))
         captured_images_utils.delete_image(input_file_name)
+        # JP6 file source decodes the JPEG to a temp PNG named
+        # "<original>.jpg.dda_decoded.png" (see GstPipelineBuilder._stage_decoded_png).
+        # In that case the pipeline references the PNG, so also remove the
+        # original source JPEG to avoid the folder workflow reprocessing it.
+        if input_file_name and input_file_name.endswith(".dda_decoded.png"):
+            original = input_file_name[: -len(".dda_decoded.png")]
+            logger.info("Clean up original source image file: {}".format(original))
+            captured_images_utils.delete_image(original)
 
 
     def _reset_digital_output(self, workflow_config: Workflow):

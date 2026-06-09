@@ -58,6 +58,41 @@ COMPILATION_TARGETS = {
         'os': 'LINUX',
         'arch': 'ARM64',
         'accelerator': 'NVIDIA',
+        # JetPack 5 runs on BOTH Jetson Xavier (sm_72) and Orin (sm_87).
+        # The SageMaker Neo NVIDIA/TensorRT artifact bundles its own libdlr.so
+        # that DYNAMICALLY links the CUDA runtime + TensorRT matching the
+        # cuda-ver / trt-ver compile options (verified: a JP5 artifact built
+        # with cuda-ver 11.4 NEEDs libcudart.so.11.0 + libnvinfer.so.8 with
+        # RUNPATH /usr/local/cuda-11.4/...). So the compile options MUST match
+        # the DEVICE runtime, otherwise the model fails to load with
+        # "libcudart.so.X cannot open shared object file". JetPack 5 ships
+        # CUDA 11.4 / TensorRT 8.5.2, so compile against those. gpu-code sm_72
+        # runs natively on Xavier and JIT-forwards (embedded PTX) to Orin, so a
+        # single JP5 component works on either board.
+        'compiler_options': json.dumps({
+            'cuda-ver': '11.4',
+            'gpu-code': 'sm_72',
+            'trt-ver': '8.5.2',
+            'max-workspace-size': '2147483648',
+            'precision-mode': 'fp16',
+            'jetson-platform': 'xavier'
+        })
+    },
+    'jetson-xavier-jp6': {
+        'os': 'LINUX',
+        'arch': 'ARM64',
+        'accelerator': 'NVIDIA',
+        # JetPack 6 is Orin-only and ships CUDA 12.2 / TensorRT 8.6.2. IMPORTANT:
+        # SageMaker Neo's NVIDIA/TensorRT path REJECTS cuda-ver 12.x ("Supported
+        # cuda-ver is 10.x" — its ceiling is actually 11.x), so we CANNOT compile
+        # against the device's native CUDA 12. The highest Neo accepts is 11.4,
+        # so we compile with cuda-ver 11.4 / trt-ver 8.5.2 — identical to JP5.
+        # The Neo artifact's bundled libdlr.so then NEEDs libcudart.so.11.0 +
+        # libnvinfer.so.8. JetPack 6 only ships libcudart.so.12, so the JP6
+        # LocalServer backend image bundles the CUDA 11.4 cudart runtime
+        # (libcudart.so.11.0) to satisfy the loader; libnvinfer.so.8 is provided
+        # natively by JP6's TensorRT 8.6. gpu-code sm_72 runs on Orin via the
+        # embedded PTX (JIT-forwarded at load), matching the proven JP5 artifact.
         'compiler_options': json.dumps({
             'cuda-ver': '11.4',
             'gpu-code': 'sm_72',
@@ -308,6 +343,7 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
             target_name_mapping = {
                 'jetson-xavier': 'jetson',
                 'jetson-xavier-jp5': 'jetsonjp5',
+                'jetson-xavier-jp6': 'jetsonjp6',
                 'x86_64-cpu': 'x86cpu',
                 'x86_64-cuda': 'x86cuda',
                 'arm64-cpu': 'arm64cpu'

@@ -249,6 +249,22 @@ cd DefectDetectionApplication
 ./gdk-component-build-and-publish.sh
 ```
 
+**Selecting the build target.** For ARM64/Jetson builds, pass the architecture
+and JetPack version so the correct base image, recipe, and component name are used:
+
+```bash
+./gdk-component-build-and-publish.sh aarch64 4   # JetPack 4.6 (L4T r32.x) -> aws.edgeml.dda.LocalServer.arm64
+./gdk-component-build-and-publish.sh aarch64 5   # JetPack 5   (L4T r35.x) -> aws.edgeml.dda.LocalServer.arm64JP5
+./gdk-component-build-and-publish.sh aarch64 6   # JetPack 6   (L4T r36.x) -> aws.edgeml.dda.LocalServer.arm64JP6
+./gdk-component-build-and-publish.sh x86_64      # x86_64                  -> aws.edgeml.dda.LocalServer.amd64
+```
+
+Each JetPack target builds against its matching L4T base image (JP5:
+`l4t-jetpack:r35.4.1`, JP6: `l4t-jetpack:r36.3.0`) and is published as a
+distinct component. Deploy the component that matches the device's JetPack
+version, and compile models for the matching compilation target (Jetson JetPack
+4.x / 5.x / 6.x).
+
 **Launch script options:**
 - `--key-name KEY` (required) - SSH key pair name
 - `--subnet-id SUBNET` - Subnet ID for VPC selection

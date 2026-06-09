@@ -33,16 +33,24 @@ IMAGE_VER=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
 # Export as environment variable
 export IMAGE_VER 
 
-# Determine if this is a JP5 (JetPack 5 / Jetson Orin, L4T r35.x) build.
-# JP5 components are named with "JP5" (e.g. aws.edgeml.dda.LocalServer.arm64JP5).
+# Determine the JetPack target from the component name.
+# JP5 components are named with "JP5" (e.g. aws.edgeml.dda.LocalServer.arm64JP5),
+# JP6 components with "JP6" (e.g. aws.edgeml.dda.LocalServer.arm64JP6).
 IS_JP5=0
-if echo "$COMPONENT_NAME" | grep -q "JP5"; then
+IS_JP6=0
+JETPACK_ARG=""
+if echo "$COMPONENT_NAME" | grep -q "JP6"; then
+    IS_JP6=1
+    JETPACK_ARG="6"
+elif echo "$COMPONENT_NAME" | grep -q "JP5"; then
     IS_JP5=1
+    JETPACK_ARG="5"
 fi
 
 echo "Ubuntu version: $IMAGE_VER"
 echo "Architecture: $ARCHITECTURE"
 echo "JetPack 5: $IS_JP5"
+echo "JetPack 6: $IS_JP6"
 # copy recipe to greengrass-build
 cp recipe.yaml ./greengrass-build/recipes
 
@@ -55,8 +63,8 @@ mkdir -p ./custom-build/$COMPONENT_NAME
 cd src
 #edgemlsdk
 cd edgemlsdk/
-if [ "$IS_JP5" = "1" ]; then
-  ./build.sh -p $(uname -m) -u $IMAGE_VER -y 3.9 -j 5
+if [ -n "$JETPACK_ARG" ]; then
+  ./build.sh -p $(uname -m) -u $IMAGE_VER -y 3.9 -j "$JETPACK_ARG"
 else
   ./build.sh -p $(uname -m) -u $IMAGE_VER -y 3.9
 fi
@@ -95,8 +103,10 @@ docker cp $id:/tars/triton_installation_files.tar.gz  $(pwd)/backend/edgemlsdk/
 docker rm -v $id
 echo done copying binaries
 # rest of the application
-# Select the backend Dockerfile: JP5 uses an L4T r35.x base image.
-if [ "$IS_JP5" = "1" ]; then
+# Select the backend Dockerfile: JP5 uses an L4T r35.x base, JP6 an L4T r36.x base.
+if [ "$IS_JP6" = "1" ]; then
+  export BACKEND_DOCKERFILE="Dockerfile.jp6"
+elif [ "$IS_JP5" = "1" ]; then
   export BACKEND_DOCKERFILE="Dockerfile.jp5"
 else
   export BACKEND_DOCKERFILE="Dockerfile"

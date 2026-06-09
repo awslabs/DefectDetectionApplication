@@ -73,7 +73,7 @@ services:
       - "5443"
       - "8000"
       - "8001"
-      - "80002"
+      - "8002"
     volumes:
       - /aws_dda:/aws_dda
       - /tmp:/tmp

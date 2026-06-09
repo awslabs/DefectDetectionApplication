@@ -517,6 +517,33 @@ else
   run_cmd "python3 -m pip install --upgrade pip" || add_warning "Failed to upgrade pip"
   run_cmd "python3 -m pip install requests protobuf" || add_warning "Failed to install Python packages"
 fi
+
+# The model component's Greengrass Startup/Shutdown lifecycle runs
+#   python3 /aws_dda/model_convertor.py ...       (Startup)
+#   python3 /aws_dda/convert_model_cleanup.py ... (Shutdown)
+# on the HOST with the *system* python3 (NOT python3.9). Those scripts need
+# protobuf >= 3.20 (generated model_config_pb2.py imports
+# `google.protobuf.internal.builder`) AND requests (to call the LocalServer
+# API). On JetPack 6 (Ubuntu 22.04) the system python3 is 3.10 and lacks both,
+# so model deploys fail with:
+#   ImportError: cannot import name 'builder' from 'google.protobuf.internal'
+#   ModuleNotFoundError: No module named 'requests'
+# Ensure the system python3 always has both, even when a separate python3.9 is
+# present and used above.
+if ! python3 -c "from google.protobuf.internal import builder" >/dev/null 2>&1; then
+  echo "Installing protobuf>=3.20 for system python3 (model-conversion Startup script)..."
+  run_cmd "python3 -m pip install --upgrade 'protobuf>=3.20,<5'" || \
+    add_warning "Failed to install protobuf for system python3; model deploys may fail with the 'builder' ImportError."
+else
+  echo "✓ system python3 protobuf already supports the model-conversion script"
+fi
+if ! python3 -c "import requests" >/dev/null 2>&1; then
+  echo "Installing requests for system python3 (model-conversion scripts)..."
+  run_cmd "python3 -m pip install --upgrade requests" || \
+    add_warning "Failed to install requests for system python3; model deploys may fail with 'No module named requests'."
+else
+  echo "✓ system python3 already has requests"
+fi
 echo ""
 
 echo "▶ Installing GStreamer..."
@@ -664,6 +691,72 @@ if ! run_cmd "systemctl start docker"; then
     add_error "Failed to start Docker daemon"
 else
     echo "✓ Docker daemon is running"
+fi
+echo ""
+
+# Ensure the iptables kernel modules Docker bridge networking needs are loaded.
+#
+# Newer Docker (as shipped on JetPack 6 / Ubuntu 22.04) sets up bridge networks
+# with a "DIRECT ACCESS FILTERING" DROP rule in the iptables `raw` table. If the
+# iptable_raw (and iptable_nat/iptable_filter) kernel modules aren't loaded,
+# container startup fails with:
+#   "iptables ... can't initialize iptables table `raw': Table does not exist
+#    (do you need to insmod?)"
+# Load them now and persist via /etc/modules-load.d so they survive reboots.
+echo "▶ Ensuring Docker iptables kernel modules are loaded..."
+DOCKER_IPT_MODULES="iptable_raw iptable_nat iptable_filter ip_tables br_netfilter"
+IPT_PERSIST=/etc/modules-load.d/dda-docker-iptables.conf
+RAW_MODULE_OK=0
+: > /tmp/dda-ipt-modules.conf || true
+for mod in $DOCKER_IPT_MODULES; do
+    if run_cmd "modprobe $mod"; then
+        echo "$mod" >> /tmp/dda-ipt-modules.conf
+        echo "   ✓ loaded $mod"
+        [ "$mod" = "iptable_raw" ] && RAW_MODULE_OK=1
+    elif [ "$mod" = "iptable_raw" ]; then
+        # Expected on stock JetPack 6 kernels (built without CONFIG_IP_NF_RAW).
+        echo "   • iptable_raw not available in this kernel (handled below)"
+    else
+        add_warning "Could not load kernel module $mod (Docker bridge networking may fail on this host)."
+    fi
+done
+# Persist for reboots (best-effort).
+if [ -s /tmp/dda-ipt-modules.conf ]; then
+    cp /tmp/dda-ipt-modules.conf "$IPT_PERSIST" 2>/dev/null || \
+        add_warning "Could not write $IPT_PERSIST to persist iptables modules across reboots."
+fi
+rm -f /tmp/dda-ipt-modules.conf 2>/dev/null || true
+# A fresh Docker daemon restart re-evaluates iptables now that modules are present.
+run_cmd "systemctl restart docker" || add_warning "Failed to restart Docker after loading iptables modules"
+echo ""
+
+# Docker bridge-networking compatibility on JetPack 6.
+#
+# Stock JetPack 6 Tegra kernels are built WITHOUT CONFIG_IP_NF_RAW, so the
+# iptables `raw` table does not exist and iptable_raw can't be loaded. Docker
+# 28+ programs a DROP rule in that raw table for bridge networks with port
+# mappings ("DIRECT ACCESS FILTERING"), so the DDA frontend container fails to
+# start. NVIDIA's recommended fix (short of rebuilding the kernel) is to pin
+# Docker to 27.5.1, which does not use the raw-table rule. We only downgrade
+# when the raw table is genuinely unavailable AND Docker is >= 28.
+if [ "$RAW_MODULE_OK" -eq 1 ] || iptables -t raw -L -n >/dev/null 2>&1; then
+    echo "✓ iptables 'raw' table available — Docker bridge networking OK"
+else
+    DOCKER_VER=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "unknown")
+    DOCKER_MAJOR=$(echo "$DOCKER_VER" | cut -d. -f1)
+    if echo "$DOCKER_MAJOR" | grep -qE '^[0-9]+$' && [ "$DOCKER_MAJOR" -ge 28 ]; then
+        echo "▶ iptables 'raw' table unavailable and Docker $DOCKER_VER >= 28 — pinning Docker to 27.5.1 (JetPack 6 fix)..."
+        if run_cmd "apt-get install -y --allow-downgrades docker-ce=5:27.5.1* docker-ce-cli=5:27.5.1*"; then
+            echo "   ✓ Docker downgraded to 27.5.1"
+            run_cmd "apt-mark hold docker-ce docker-ce-cli" || \
+                add_warning "Could not 'apt-mark hold' Docker; a future apt upgrade may bump it back to 28+ and break bridge networking."
+            run_cmd "systemctl restart docker" || add_warning "Failed to restart Docker after downgrade"
+        else
+            add_warning "Failed to pin Docker to 27.5.1. The DDA frontend container may fail to start on this JetPack 6 kernel. Fix manually: sudo apt-get install -y --allow-downgrades docker-ce=5:27.5.1* docker-ce-cli=5:27.5.1*"
+        fi
+    else
+        echo "✓ Docker $DOCKER_VER does not require the iptables 'raw' table — no change needed"
+    fi
 fi
 echo ""
 
