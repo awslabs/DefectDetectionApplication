@@ -121,9 +121,13 @@ if [ -n "${PY_MM}" ]; then
     apt-get install -y --no-install-recommends "libpython${PY_MM}-dev" || \
         echo "WARNING: libpython${PY_MM}-dev not available via apt; relying on Dockerfile-provided dev headers"
 fi
-# onnxruntime's build driver needs a recent CMake; the distro one is often too
-# old. Install via pip into the container python so build.py picks it up on PATH.
-${PYBIN} -m pip install --no-cache-dir "cmake>=3.26" packaging wheel
+# onnxruntime's build driver needs CMake, but NOT CMake 4.x: ORT 1.16/1.17
+# vendor third-party projects (e.g. google_nsync) that declare
+# cmake_minimum_required < 3.5, and CMake 4 removed that compatibility, failing
+# configure with "Compatibility with CMake < 3.5 has been removed". Pin to the
+# 3.x line. (We also pass -DCMAKE_POLICY_VERSION_MINIMUM=3.5 below as a belt-
+# and-suspenders for any sub-project that still trips the deprecation.)
+${PYBIN} -m pip install --no-cache-dir "cmake>=3.26,<4" packaging wheel
 
 WORK_DIR="${WORK_DIR:-/tmp/ort-build}"
 rm -rf "${WORK_DIR}"
@@ -134,6 +138,33 @@ echo "Cloning onnxruntime ${ONNXRUNTIME_VERSION}..."
 git clone --recursive --depth 1 --branch "${ONNXRUNTIME_VERSION}" \
     https://github.com/microsoft/onnxruntime.git
 cd onnxruntime
+
+# ── Fix eigen FetchContent SHA1 drift ──────────────────────────────────────
+# ORT pins a SHA1 for the eigen archive in cmake/deps.txt, but GitLab
+# re-compresses its -/archive/ zips over time, so the served bytes (hence the
+# SHA1) no longer match the pinned value and the build fails with
+# "Hash mismatch, removing... Each download failed!". Rather than hardcode a
+# replacement hash (which drifts again and differs per ORT version), download
+# the pinned URL, recompute its actual SHA1, and rewrite the eigen line in
+# deps.txt to match. Self-correcting across versions/JetPacks.
+if [ -f cmake/deps.txt ]; then
+    # Match the DATA line (starts with "eigen;"), not the explanatory comments
+    # above it that also mention the eigen URL.
+    EIGEN_LINE=$(grep -E '^eigen;' cmake/deps.txt | head -1 || true)
+    if [ -n "${EIGEN_LINE}" ]; then
+        EIGEN_NAME=$(echo "${EIGEN_LINE}" | cut -d';' -f1)
+        EIGEN_URL=$(echo "${EIGEN_LINE}" | cut -d';' -f2)
+        echo "Re-pinning eigen hash from ${EIGEN_URL}"
+        if wget -q -O /tmp/eigen_dep.zip "${EIGEN_URL}"; then
+            EIGEN_SHA=$(sha1sum /tmp/eigen_dep.zip | cut -d' ' -f1)
+            rm -f /tmp/eigen_dep.zip
+            sed -i "s|^${EIGEN_NAME};.*|${EIGEN_NAME};${EIGEN_URL};${EIGEN_SHA}|" cmake/deps.txt
+            echo "eigen re-pinned to SHA1 ${EIGEN_SHA}"
+        else
+            echo "WARNING: could not pre-fetch eigen to re-pin its hash; build may fail." >&2
+        fi
+    fi
+fi
 
 # ── Build: Release wheel with CUDA + TensorRT execution providers ──────────
 # --build_wheel produces a pip-installable .whl tagged for the active python
@@ -146,10 +177,12 @@ echo "Building (this is the long step)..."
     --parallel "${ORT_BUILD_JOBS}" \
     --build_wheel \
     --skip_tests \
+    --allow_running_as_root \
     --use_cuda --cuda_home "${CUDA_HOME}" --cudnn_home "${CUDNN_HOME}" \
     --use_tensorrt --tensorrt_home "${TENSORRT_HOME}" \
     --cmake_extra_defines \
         CMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
+        CMAKE_POLICY_VERSION_MINIMUM=3.5 \
         onnxruntime_BUILD_UNIT_TESTS=OFF
 
 # ── Install the produced wheel into python3.9 ──────────────────────────────
@@ -160,12 +193,21 @@ if [ -z "${WHL}" ]; then
     exit 1
 fi
 echo "Installing ${WHL}"
+# Stage a copy of the built wheel outside the (soon-deleted) build tree so a
+# successful long build is preserved in the image for inspection/reuse.
+mkdir -p /opt/onnxruntime-wheels
+cp "${WHL}" /opt/onnxruntime-wheels/ || true
 # Remove any CPU onnxruntime first so the GPU build is authoritative (the two
 # packages must not coexist).
 ${PYBIN} -m pip uninstall -y onnxruntime onnxruntime-gpu >/dev/null 2>&1 || true
 ${PYBIN} -m pip install --no-cache-dir "${WHL}"
 
 # ── Verify the CUDA/TensorRT providers are present ─────────────────────────
+# Run from a neutral directory: the onnxruntime source tree contains an
+# `onnxruntime/` package dir that would shadow the *installed* package (whose
+# compiled onnxruntime.capi lives in site-packages), causing a spurious
+# "No module named 'onnxruntime.capi'". cd / avoids the shadow.
+cd /
 ${PYBIN} - <<'PYEOF'
 import onnxruntime as ort
 provs = ort.get_available_providers()
