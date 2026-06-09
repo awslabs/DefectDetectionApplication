@@ -225,3 +225,121 @@ sample before implementing.
 - `edge-cv-portal/backend/functions/compilation.py` (Phase 2: ONNX export)
 - Portal frontend import pages (Phase 2: runtime dropdown)
 - Tests under `test/backend-test/dda_triton/`
+
+---
+
+# Object-detection task type (YOLO / bounding boxes)
+
+Status: Design + initial implementation (single-stage ONNX YOLO decode).
+This realizes the §7 "output-contract adapter" for the concrete case of a
+bring-your-own ONNX object-detection model (e.g. YOLOv8) whose raw output is a
+detection tensor, not the anomaly schema the existing pipeline assumes.
+
+## 14. Why a new task type
+
+The whole on-device serving path is currently hardwired to **anomaly
+classification**:
+
+- `model_convertor.py` emits a fixed Triton output contract in every
+  `config.pbtxt`: `output` (is_anomalous, uint8), `output_confidence`,
+  `output_score`, `mask` (= input shape), `anomalies`. The ensemble
+  `input_map`/`output_map` wiring between the `base`, `marshal`, and `ensemble`
+  models is fixed to those names.
+- `lfv_model_template.py.execute()` reads only
+  `inference_output.objects[0].anomaly` and packs the anomaly tensors. It never
+  reads `.bboxes`.
+- The marshal/overlay stage renders an anomaly mask/overlay.
+
+Object detection is a different **output shape and decode**, so it needs an
+explicit selector rather than overloading the anomaly path. The manifest already
+grew a `runtime` field (dlr|onnx|pytorch) that says *how* to run the engine; we
+add an orthogonal **`task`** field that says *what the output means and how to
+decode/emit it*:
+
+```json
+{
+  "runtime": "onnx",
+  "runtime_artifact": "model.onnx",
+  "task": "object_detection",
+  "detection": {
+    "layout": "yolo",          // decoder family
+    "num_classes": 80,
+    "score_threshold": 0.25,
+    "iou_threshold": 0.45,
+    "class_names": ["person", "bicycle", ...]   // optional, for labels
+  }
+}
+```
+
+Absent `task` ⇒ `anomaly` ⇒ **full backward compatibility** with every existing
+model package.
+
+## 15. What already exists (reused, not rebuilt)
+
+The result-level schema for boxes is already present and serialized end to end:
+
+- `ObjectDetectionResult` = `[x_min,y_min,x_max,y_max]` + `obj_class` +
+  `confidence` + `threshold`, JSON-serializable.
+- `AnomalyResult.bboxes: List[ObjectDetectionResult]` is serialized into the
+  inference result JSON and round-trips via `deserialize`.
+- `SingleStageModelGraph` already accepts a post-processor that returns a
+  `list[ObjectDetectionResult]` and wraps them into
+  `InferenceData`/`SingleObjectInferenceData`.
+
+So the detection *result* contract is solved. The work is the decode (raw YOLO
+tensor → `ObjectDetectionResult`s) and emitting boxes through Triton/GStreamer.
+
+## 16. What changes
+
+1. **YOLO decode post-processor (new):** `yolo_detection_postprocessor.py`.
+   Input: raw ONNX output (YOLOv8 `[1, 84, 8400]` = 4 box coords + num_classes
+   scores per anchor; also handles the transposed `[1, 8400, 84]` layout).
+   Steps: transpose to per-anchor rows, split boxes/class-scores, take max class
+   score as confidence, filter by `score_threshold`, class-wise NMS by
+   `iou_threshold`, convert xywh(center)→xyxy, scale from the network input size
+   back to the source image. Output: `list[ObjectDetectionResult]`. Pure
+   numpy — no torch dependency on the hot path. Slots straight into
+   `SingleStageModelGraph` (which already handles a list result).
+
+2. **Triton output contract — `model_convertor.py`:** branch on `task`. For
+   `object_detection`, emit a detection `config.pbtxt` whose `base` model
+   outputs a variable-length `detections` tensor (serialized JSON bytes,
+   `TYPE_UINT8 dims:[-1]`, mirroring how `anomalies` is already carried) instead
+   of the anomaly mask/score tensors, and wire the ensemble/marshal maps to it.
+   `backend: "python"` stays — **no Triton rebuild**.
+
+3. **`execute()` in `lfv_model_template.py`:** branch on `task`. For detection,
+   pull `ObjectDetectionResult`s out of the graph result and pack them into the
+   `detections` JSON tensor; skip the anomaly-specific mask/score packing.
+
+4. **GStreamer pipeline:** the streaming graph (decode → caps → `emltriton`) is
+   unchanged — it is agnostic to what the model computes. The only
+   detection-aware rendering is the **marshal/overlay** stage if boxes are to be
+   drawn on the output image (draw rectangles + labels from the detections
+   tensor). Core flow untouched.
+
+5. **Frontend / workflow type:** surface detection models so the UI can render
+   boxes and the results viewer interprets the `bboxes` field (already present
+   in the result JSON). `FeatureConfigurationType` (currently
+   `LFVModel | TritonModel`) and the workflow model type gain an
+   object-detection task flavor.
+
+## 17. Implementation phasing
+
+- **Phase A (in progress):** the YOLO decode post-processor as a standalone,
+  unit-tested numpy module validated against the real YOLOv8n ONNX output
+  (`[1,84,8400]`). No device-contract changes yet — lowest risk, immediately
+  testable off-device.
+- **Phase B:** `task`-aware `model_convertor.py` detection config + `execute()`
+  emit path; manifest `task` plumbing.
+- **Phase C:** marshal overlay rendering of boxes; frontend detection type +
+  results rendering.
+
+## 18. Files expected to change (object-detection)
+
+- `src/backend/lyra_science_processing_utils/model_processors/yolo_detection_postprocessor.py` (new)
+- `src/backend/dda_triton/model_convertor.py` (task-aware detection config)
+- `src/backend/dda_triton/resources_for_copy/lfv_model_template.py` (task-aware execute)
+- `src/backend/dda_triton/constants.py` (task manifest keys)
+- `src/frontend/src/components/workflow/types.ts` and model views (detection type)
+- `test/backend-test/...` (YOLO decode unit tests)

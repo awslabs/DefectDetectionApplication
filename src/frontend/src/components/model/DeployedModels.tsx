@@ -28,17 +28,22 @@ import { useCollection } from "@cloudscape-design/collection-hooks";
 import { useQuery } from "@tanstack/react-query";
 
 import { ModelDefaultConfigs } from "./types";
-import { modelNameString } from "./helpers";
+import { modelTypeLabel, modelShapeString } from "./helpers";
 import { AppDescriptions } from "config/Interface";
 import { listModels } from "api/FeatureConfigurationAPI";
 
 import EdgeUICollectionPreferences from "components/collection-preferences/EdgeUICollectionPreferences";
 import EmptyTable from "../empty-table/EmptyTable";
-import { FeatureConfiguration } from "components/workflow/types";
+import {
+  FeatureConfiguration,
+  FeatureConfigurationType,
+} from "components/workflow/types";
 
 type ModelTableItem = {
   status: string;
   name: string;
+  type: FeatureConfigurationType | string;
+  shape: string;
   defaultConfiguration: ModelDefaultConfigs;
 };
 
@@ -56,6 +61,8 @@ export default function DeployedModels(): JSX.Element {
           return {
             name: model.modelName,
             status: model.status || "",
+            type: model.type,
+            shape: modelShapeString(model.defaultConfiguration?.modelMetaData),
             defaultConfiguration: model.defaultConfiguration,
           };
         },
@@ -112,6 +119,18 @@ export default function DeployedModels(): JSX.Element {
           header: "Status",
           cell: (item): string => item?.status || "-",
           sortingField: "modelStatus"
+        },
+        {
+          id: "modelType",
+          header: "Type (target)",
+          cell: (item): string => modelTypeLabel(item?.type),
+          sortingField: "type",
+        },
+        {
+          id: "modelShape",
+          header: "Input shape",
+          cell: (item): string => item?.shape || "-",
+          sortingField: "shape",
         },
         {
           id: "name",

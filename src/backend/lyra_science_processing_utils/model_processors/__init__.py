@@ -41,6 +41,8 @@ from lyra_science_processing_utils.model_processors.supervised_multihead_postpro
 from lyra_science_processing_utils.model_processors.supervised_bbox_multihead_postprocessor import \
     SupervisedBBoxMultiHeadPostProcessor
 from lyra_science_processing_utils.model_processors.svdd_postprocessor import SVDDPostProcessor
+from lyra_science_processing_utils.model_processors.yolo_detection_postprocessor import \
+    YoloDetectionPostProcessor
 
 
 MODEL_NAME_MAP: Dict[str, Tuple[str, Type[InferencePostProcessor]]] = {
@@ -52,7 +54,8 @@ MODEL_NAME_MAP: Dict[str, Tuple[str, Type[InferencePostProcessor]]] = {
     "baklava": ("unsupervised_svdd", SVDDPostProcessor),
     "torrone": ("knn_feedback_model", KnnFeedbackPostProcessor),
     "mochi": ("supervised_multi_head_model", SupervisedMultiHeadPostProcessor),
-    "dango": ("supervised_multi_head_model_bbox", SupervisedBBoxMultiHeadPostProcessor)
+    "dango": ("supervised_multi_head_model_bbox", SupervisedBBoxMultiHeadPostProcessor),
+    "taiyaki": ("yolo_object_detection", YoloDetectionPostProcessor)
 }
 
 
