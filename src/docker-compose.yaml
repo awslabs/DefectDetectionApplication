@@ -9,6 +9,7 @@ services:
         OS: ${OS:-20.04}
         PLATFORM: ${PLATFORM:-aarch64}
         PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
+        ONNXRUNTIME_SPEC: ${ONNXRUNTIME_SPEC:-onnxruntime==1.16.3}
     image: flask-app
     platform: linux/arm64/v8
     privileged: true
@@ -78,6 +79,7 @@ services:
         OS: ${OS:-20.04}
         PLATFORM: ${PLATFORM:-x86_64}
         PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
+        ONNXRUNTIME_SPEC: ${ONNXRUNTIME_SPEC:-onnxruntime==1.16.3}
     image: flask-app
     privileged: true
     expose:

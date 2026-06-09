@@ -128,6 +128,17 @@ RUN pip install --no-cache-dir -r ./model_conversion_requirements.txt
 # setuptools<81 cap immediately so the grpc_tools.protoc step below keeps working.
 RUN pip install --no-cache-dir 'setuptools<81'
 
+# ── ONNX Runtime for the pluggable ONNX inference engine ───────────────────
+# The OnnxRunner in dda_triton/resources_for_copy/inference_runtimes.py runs
+# in-container under the DDA python (PYTHON_VERSION, default 3.11). Install the
+# CPU build by default (onnxruntime 1.16.3 ships a cp311 aarch64 manylinux_2_17
+# wheel, which works on this glibc 2.35 base); OnnxRunner falls back to
+# CPUExecutionProvider gracefully. `pip` here targets the PYTHON_VERSION
+# interpreter (the python3 alternative). DLR-only and PyTorch-only models are
+# unaffected (engines are imported lazily per-runner).
+ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
+RUN pip install --no-cache-dir ${ONNXRUNTIME_SPEC}
+
 # Build aravis from source (apt deps already installed above)
 RUN pip install --no-cache-dir meson ninja
 # Downgrade setuptools so g-ir-scanner can find distutils.msvccompiler (removed in setuptools>=71)
