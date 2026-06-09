@@ -385,6 +385,27 @@ def _create_base_model_structure(
     except OSError as e:
         logging.error(f"Unable to copy model.py file error {str(e)}")
         return False
+    # Always copy the pluggable runtime abstraction next to model.py so the
+    # template can dispatch DLR / ONNX / PyTorch engines per the manifest
+    # `runtime` field (see docs/multi-runtime-inference.md). Absent for DLR-only
+    # devices this is harmless; the DLR path is unchanged.
+    runtimes_py_path = os.path.abspath(
+        os.path.join(working_dir, "resources_for_copy", "inference_runtimes.py")
+    )
+    if os.path.exists(runtimes_py_path):
+        try:
+            shutil.copy(
+                runtimes_py_path,
+                os.path.join(base_model_path, model_version, "inference_runtimes.py"),
+            )
+        except OSError as e:
+            logging.error(f"Unable to copy inference_runtimes.py file error {str(e)}")
+            return False
+    else:
+        logging.warning(
+            f"inference_runtimes.py not found at '{runtimes_py_path}'; "
+            f"non-DLR runtimes will be unavailable"
+        )
     # Create symlinks for model folders
     ret = create_sym_links(deployed_model_path, os.path.join(base_model_path, model_version))
     if not ret:

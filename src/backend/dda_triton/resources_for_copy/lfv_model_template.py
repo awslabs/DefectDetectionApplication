@@ -21,7 +21,6 @@ import os
 import logging
 import json
 import typing
-import ctypes
 
 # triton_python_backend_utils is available in every Triton Python model. You
 # need to use this module to create inference requests and responses. It also
@@ -54,64 +53,18 @@ from lyra_science_processing_utils.utils.anomaly_result import AnomalyResult
 from lyra_science_processing_utils.utils.inference_data import InferenceData
 
 log = logging.getLogger(__name__)
-DLR_DEVICE_TYPE_MAP = {
-    1: "cpu",
-    2: "gpu",
-    4: "opencl",
-}
-
-
-def load_lib(lib_path):
-    try:
-        path_backup = os.environ["PATH"].split(os.pathsep)
-    except KeyError:
-        path_backup = []
-
-    try:
-        # needed when the lib is linked with non-system-available dependencies
-        os.environ["PATH"] = os.pathsep.join(path_backup + [os.path.dirname(lib_path)])
-        lib = ctypes.cdll.LoadLibrary(lib_path)
-    except Exception as e:
-        libname = os.path.basename(lib_path)
-        raise OSError(
-            f"Library ({format(libname)}) could not be loaded. Error message(s): {format(e)}"
-        )
-    finally:
-        os.environ["PATH"] = os.pathsep.join(path_backup)
-
-    return lib
-
-
-def dlr_device_type(model_path):
-    # TODO 3rd party import `pip install dlr` from https://pypi.org/project/dlr/
-    from dlr.libpath import find_lib_path
-
-    dlr_lib = load_lib(
-        find_lib_path(
-            model_path,
-            use_default_dlr=False,
-            logger=log,
-        )
-    )
-    dlr_lib.DLRGetLastError.restype = ctypes.c_char_p
-
-    # GetDLRDeviceType is a C++ function in DLR lib. The function extracts device type id from libdlr.so
-    device_type_id = dlr_lib.GetDLRDeviceType(
-        ctypes.c_char_p(model_path.encode()),
-    )
-    if device_type_id == -1:
-        raise RuntimeError(f"Cannot get DLR Device type from the dlr model at: {model_path}.")
-    if device_type_id not in DLR_DEVICE_TYPE_MAP:
-        raise RuntimeError(
-            f"Device type Id: {device_type_id}, got from dlr model, is not supported."
-        )
-
-    return DLR_DEVICE_TYPE_MAP[device_type_id]
 
 
 class _InferenceRunner:  # pragma: no cover
     """
-    Callable class. Implements DLR inference.
+    Callable class. Delegates to a pluggable inference engine selected by the
+    model package manifest's ``runtime`` field (``dlr`` default | ``onnx`` |
+    ``pytorch``). See docs/multi-runtime-inference.md.
+
+    The DLR path is the default and is behaviorally unchanged: when ``runtime``
+    is absent or ``"dlr"`` this loads the model exactly as before. The actual
+    engine implementations live in ``inference_runtimes.py`` (copied next to
+    this file by model_convertor.py).
     """
 
     def __init__(
@@ -119,16 +72,25 @@ class _InferenceRunner:  # pragma: no cover
         model_id: str,
         model_path: str,
         device_id: int = 0,
+        runtime: str = "dlr",
+        runtime_artifact: typing.Optional[str] = None,
+        device: typing.Optional[str] = None,
     ):
         """
-        :model_path: Location of the compiled DLR model on the disk.
-        :device_type: Device where inference should be executed. "cpu" or "gpu". "gpu" is default.
+        :model_id: Unique model+version id, for logging.
+        :model_path: Stage directory holding the engine artifact on disk.
         :device_id: Index of the gpu device. 0 is default.
+        :runtime: Engine identifier from the manifest. Default "dlr".
+        :runtime_artifact: Engine artifact filename within the stage dir.
+        :device: Optional "cpu"/"gpu" override; default auto-detect.
         """
         self.__model = self.__load_model(
             model_id,
             model_path,
             device_id,
+            runtime,
+            runtime_artifact,
+            device,
         )
 
     def __call__(
@@ -141,45 +103,32 @@ class _InferenceRunner:  # pragma: no cover
         :inference_input: Input tensor.
         :return: Output tensor.
         """
-        return self.__model.run(inference_input)
+        return self.__model(inference_input)
 
     @staticmethod
     def __load_model(
         model_id: str,
         model_path: str,
         device_id: int = 0,
+        runtime: str = "dlr",
+        runtime_artifact: typing.Optional[str] = None,
+        device: typing.Optional[str] = None,
     ):
         """
-        Loads compiled DLR model.
+        Builds the inference engine via the runtime factory.
 
-        :model_path: Location of the compiled DLR model on the disk.
-        :device_type: Device where inference should be executed. "cpu" or "gpu".
-        :device_id: Index of the gpu device.
-        :returns: DLR model.
+        :returns: A callable runner honoring runner(input_np) -> list[np.ndarray].
         """
-        # TODO 3rd party import `pip install dlr` from https://pypi.org/project/dlr/
-        import dlr
-        from dlr.counter.phone_home import PhoneHome
+        from inference_runtimes import make_runner
 
-        try:
-            PhoneHome.disable_feature()
-        except OSError as e:
-            log.warning("Failed to disable DLR phone home: %s", e.strerror)
-
-        # dlr_device_type has dependence over dlr
-        device_type = dlr_device_type(model_path)
-
-        log.info(
-            f"{model_path}: Starting loading: dev_type: {device_type}, dev_id: {device_id}, model: {model_id}"
+        return make_runner(
+            runtime,
+            model_id=model_id,
+            model_dir=model_path,
+            device_id=device_id,
+            artifact=runtime_artifact,
+            device=device,
         )
-        model = dlr.DLRModel(
-            model_path,
-            device_type,
-            device_id,
-        )
-        log.info(f"{model_path}: Initialization complete for model {model_id}")
-
-        return model
 
 
 class TritonPythonModel:
@@ -192,6 +141,9 @@ class TritonPythonModel:
     DATASET_MANIFEST_KEY = "dataset"
     DATASET_IMAGE_WIDTH_MANIFEST_KEY = "image_width"
     DATASET_IMAGE_HEIGHT_MANIFEST_KEY = "image_height"
+    RUNTIME_MANIFEST_KEY = "runtime"
+    RUNTIME_ARTIFACT_MANIFEST_KEY = "runtime_artifact"
+    RUNTIME_DEVICE_MANIFEST_KEY = "device"
 
     def initialize(self, args):
         """`initialize` is called only once when the model is being loaded.
@@ -231,6 +183,11 @@ class TritonPythonModel:
 
         self.__anomaly_threshold = self.__model_graph_config.get_threshold()
 
+        # Read the optional pluggable-runtime config from the manifest. Absent
+        # => DLR (full backward compatibility). See multi-runtime design doc.
+        runtime, runtime_artifact, runtime_device = self.__load_runtime_config(self.models_dir)
+        log.info(f"Model {self.__model_id} using inference runtime '{runtime}'.")
+
         inference_runners = []
         for idx in range(self.__model_graph_config.num_stages()):
             stage_type = self.__model_graph_config.get_stage_type(idx)
@@ -241,6 +198,9 @@ class TritonPythonModel:
                         self.models_dir,
                         stage_type,
                     ),
+                    runtime=runtime,
+                    runtime_artifact=runtime_artifact,
+                    device=runtime_device,
                 )
             )
 
@@ -354,6 +314,30 @@ class TritonPythonModel:
         the model to perform any necessary clean ups before exit.
         """
         log.info("Cleaning up...")
+
+    def __load_runtime_config(
+        self,
+        model_dir: str,
+    ) -> typing.Tuple[str, typing.Optional[str], typing.Optional[str]]:
+        """
+        Read the optional pluggable-runtime selector from the manifest.
+
+        :param model_dir: Directory with the unpacked model (holds manifest.json).
+        :returns: (runtime, runtime_artifact, device). Defaults to
+            ("dlr", None, None) when the fields are absent, preserving full
+            backward compatibility for existing DLR model packages.
+        """
+        manifest_path = os.path.join(model_dir, TritonPythonModel.MANIFEST_FILENAME)
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, ValueError) as e:
+            log.warning(f"Could not read runtime config from manifest: {e}; defaulting to dlr")
+            return ("dlr", None, None)
+        runtime = manifest.get(TritonPythonModel.RUNTIME_MANIFEST_KEY, "dlr") or "dlr"
+        runtime_artifact = manifest.get(TritonPythonModel.RUNTIME_ARTIFACT_MANIFEST_KEY)
+        device = manifest.get(TritonPythonModel.RUNTIME_DEVICE_MANIFEST_KEY)
+        return (str(runtime).lower(), runtime_artifact, device)
 
     def __load_model_graph_config(
         self,
