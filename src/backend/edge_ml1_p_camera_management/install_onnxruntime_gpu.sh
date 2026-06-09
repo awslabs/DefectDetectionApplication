@@ -121,6 +121,25 @@ if [ -n "${PY_MM}" ]; then
     apt-get install -y --no-install-recommends "libpython${PY_MM}-dev" || \
         echo "WARNING: libpython${PY_MM}-dev not available via apt; relying on Dockerfile-provided dev headers"
 fi
+
+# ── CUDA host-compiler selection ───────────────────────────────────────────
+# CUDA 11.4's nvcc (JetPack 5) does NOT support GCC 11 as the host compiler:
+# compiling a .cu against GCC 11's libstdc++ fails with
+# "std_function.h: parameter packs not expanded with '...'". The JP5 base image
+# defaults gcc to gcc-11, so for JetPack 5 we install gcc-10 and point nvcc at
+# it via CMAKE_CUDA_HOST_COMPILER, leaving the image's host gcc-11 untouched
+# (only nvcc's host compiler changes). JetPack 6 (CUDA 12.2) supports gcc-11,
+# so it needs no override.
+CUDA_HOST_COMPILER_DEFINE=""
+if [ "${JETPACK_MAJOR}" = "5" ]; then
+    echo "JetPack 5 / CUDA 11.4: installing gcc-10 for nvcc host compiler"
+    apt-get install -y --no-install-recommends gcc-10 g++-10 || {
+        echo "Failed to install gcc-10/g++-10 for the CUDA host compiler" >&2
+        exit 1
+    }
+    CUDA_HOST_COMPILER_DEFINE="CMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-10"
+fi
+
 # onnxruntime's build driver needs CMake, but NOT CMake 4.x: ORT 1.16/1.17
 # vendor third-party projects (e.g. google_nsync) that declare
 # cmake_minimum_required < 3.5, and CMake 4 removed that compatibility, failing
@@ -183,6 +202,7 @@ echo "Building (this is the long step)..."
     --cmake_extra_defines \
         CMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
         CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        ${CUDA_HOST_COMPILER_DEFINE} \
         onnxruntime_BUILD_UNIT_TESTS=OFF
 
 # ── Install the produced wheel into python3.9 ──────────────────────────────
