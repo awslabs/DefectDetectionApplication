@@ -29,6 +29,13 @@ export enum HistoryResultPageType {
   CAPTURE_RESULT = "capture-result",
 };
 
+export interface DetectionResult {
+  // [x_min, y_min, x_max, y_max] in source-image pixels
+  boundingBox: number[];
+  objectClass: string;
+  confidence: number;
+}
+
 export interface InferenceResultHistory {
   confidence?: number | null;
   captureId: string;
@@ -50,6 +57,10 @@ export interface InferenceResultHistory {
   humanClassification?: PredictionType | null;
   humanReviewRequired?: boolean | null;
   captureType?: ImageCaptureResultType;
+  // Object-detection results (task=object_detection). The boxes are also drawn
+  // into the server-rendered overlay image; this carries the structured list
+  // for textual display / downstream use.
+  detections?: DetectionResult[] | null;
 }
 
 export interface FilterColumnConfig {

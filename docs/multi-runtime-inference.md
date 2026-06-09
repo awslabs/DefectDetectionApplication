@@ -396,10 +396,20 @@ Triton rebuild and without changing the Triton output contract**:
 }
 ```
 
-### Known limitation (Phase C)
+### Phase C (implemented)
 
-`SingleStageModelGraph.predict()` calls the post-processor without
-`src_img_size`, so detection boxes come out in **network-input coordinates**
-(e.g. 0..640), not source-image pixels. The YOLO post-processor supports source
-scaling when `src_img_size` is supplied; wiring that through the graph (and
-drawing boxes on the overlay image in the marshal stage) is Phase C.
+- **Source-image box scaling:** `SingleStageModelGraph.predict()` now passes the
+  source image size `(width, height)` to the post-processor as `src_img_size`
+  (harmless to anomaly post-processors — they accept `**kwargs`). The YOLO
+  post-processor uses it to scale network-space boxes (0..network_input) back to
+  source-image pixels.
+- **Marshal overlay box rendering:** `marshal_for_capture_template.py` detects
+  the (reused `anomalies`) payload as a detection list and draws the boxes +
+  `class conf` labels onto the input image to produce the `overlay` JPEG, and
+  emits a `detections` block in the capture metadata
+  (`deviceFleetAuxiliaryOutputs`). Because boxes are rendered server-side into
+  the overlay image, the existing frontend image display shows them with no
+  change.
+- **Frontend type:** `InferenceResultHistory` gains an optional `detections`
+  field (`DetectionResult[]`) carrying the structured list for textual display;
+  the results API mapping to populate it from the metadata block is a follow-up.

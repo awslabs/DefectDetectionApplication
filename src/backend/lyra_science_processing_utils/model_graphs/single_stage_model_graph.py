@@ -93,7 +93,15 @@ class SingleStageModelGraph(ModelGraph):
 
     def predict(self, image: np.ndarray) -> InferenceData:
         LOG.debug(f'Starting predict with image shape: {image.shape}')
-        
+
+        # Source image size (width, height) for detection post-processors that
+        # scale network-space boxes back to the original image. Harmless for
+        # anomaly post-processors (they accept **kwargs and ignore it).
+        src_img_size = None
+        if image is not None and getattr(image, 'ndim', 0) >= 2:
+            src_h, src_w = image.shape[0], image.shape[1]
+            src_img_size = (src_w, src_h)
+
         # preprocess
         preprocess_output = self.pre_processor(image)
 
@@ -102,8 +110,8 @@ class SingleStageModelGraph(ModelGraph):
         model_output = self.model(model_input)
 
         # post-process stage1 with or without transform preprocessing params
-        result = self.post_processor(model_output, preprocess_metad = preprocess_output[1]) \
-            if isinstance(preprocess_output, tuple) else self.post_processor(model_output)
+        result = self.post_processor(model_output, preprocess_metad = preprocess_output[1], src_img_size=src_img_size) \
+            if isinstance(preprocess_output, tuple) else self.post_processor(model_output, src_img_size=src_img_size)
 
         if isinstance(result, list): # bbox detection results when only bbox head is enabled
             if result:

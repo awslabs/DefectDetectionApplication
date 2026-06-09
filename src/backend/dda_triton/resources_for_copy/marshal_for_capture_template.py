@@ -101,6 +101,45 @@ class TritonPythonModel:
         mask[idx_alpha[0], idx_alpha[1], :] = mask[idx_alpha[0], idx_alpha[1], :] * 0.5
         return mask + image
 
+    @staticmethod
+    def _is_detection_list(anomalies) -> bool:
+        """Detect whether the (reused) anomalies payload is actually a list of
+        object-detection results (each carrying a 'bounding_box'), as emitted by
+        the base model for task=object_detection."""
+        return (
+            isinstance(anomalies, list)
+            and len(anomalies) > 0
+            and isinstance(anomalies[0], dict)
+            and "bounding_box" in anomalies[0]
+        )
+
+    def _generate_detection_overlay(self, image, detections):
+        """Draw bounding boxes + labels onto a copy of the input image."""
+        overlay = image.copy()
+        h, w = overlay.shape[0], overlay.shape[1]
+        for det in detections:
+            box = det.get("bounding_box") or []
+            if len(box) != 4:
+                continue
+            x1, y1, x2, y2 = (int(round(v)) for v in box)
+            # Clamp to image bounds.
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w - 1))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h - 1))
+            cls = str(det.get("class", ""))
+            conf = det.get("confidence", 0.0)
+            try:
+                label = f"{cls} {float(conf):.2f}"
+            except (TypeError, ValueError):
+                label = cls
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(
+                overlay, label, (x1, max(0, y1 - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA
+            )
+        return overlay
+
     def _generate_capture_meta_data(
         self,
         capture_meta_data,
@@ -219,28 +258,49 @@ class TritonPythonModel:
                 "observedContentType": "json",
             }
         )
-        # anomaly list
+        # anomaly list (or detection list when task=object_detection)
         anomalies = inference_anomalies
-        d = {}
-        for i, anomaly in enumerate(anomalies):
-            detail = {
-                "class-name": anomaly["name"],
-                "hex-color": anomaly["hex_color"].lower(),
-                "total-percentage-area": anomaly["total_percentage_area"],
-            }
-            d[str(i)] = detail
-
-        if anomalies:
-            anomaly_data = {"anomalies": d}
-            anomaly_str = json.dumps(anomaly_data)
-            anomaly_str_encoded = base64.b64encode(anomaly_str.encode()).decode()
+        if self._is_detection_list(anomalies):
+            # Object-detection payload: emit a detections block instead of the
+            # anomaly/segmentation block, then fall through to eventMetadata.
+            det_map = {}
+            for i, det in enumerate(anomalies):
+                det_map[str(i)] = {
+                    "class": str(det.get("class", "")),
+                    "bounding_box": det.get("bounding_box", []),
+                    "confidence": det.get("confidence", 0.0),
+                }
+            detection_data = {"detections": det_map}
+            detection_str = json.dumps(detection_data)
+            detection_str_encoded = base64.b64encode(detection_str.encode()).decode()
             ret["deviceFleetAuxiliaryOutputs"].append(
                 {
-                    "data": anomaly_str_encoded,
+                    "data": detection_str_encoded,
                     "encoding": "BASE64",
                     "observedContentType": "json_with_base64_encoding",
                 }
             )
+        else:
+            d = {}
+            for i, anomaly in enumerate(anomalies):
+                detail = {
+                    "class-name": anomaly["name"],
+                    "hex-color": anomaly["hex_color"].lower(),
+                    "total-percentage-area": anomaly["total_percentage_area"],
+                }
+                d[str(i)] = detail
+
+            if anomalies:
+                anomaly_data = {"anomalies": d}
+                anomaly_str = json.dumps(anomaly_data)
+                anomaly_str_encoded = base64.b64encode(anomaly_str.encode()).decode()
+                ret["deviceFleetAuxiliaryOutputs"].append(
+                    {
+                        "data": anomaly_str_encoded,
+                        "encoding": "BASE64",
+                        "observedContentType": "json_with_base64_encoding",
+                    }
+                )
 
         # meta data
         ret["eventMetadata"] = {
@@ -361,7 +421,19 @@ class TritonPythonModel:
             mask_tensor = None
             overlay_tensor = None
             encoded_mask = None
-            if self._has_anomaly_mask(inference_mask.as_numpy(), input1.as_numpy()):
+            if self._is_detection_list(inference_anomalies):
+                # task=object_detection: the reused anomalies payload is a list
+                # of detection results. Draw boxes on the input image as the
+                # overlay; emit an empty mask (detection has no pixel mask).
+                detection_overlay = self._generate_detection_overlay(
+                    input1.as_numpy(), inference_anomalies
+                )
+                encoded_overlay = self._encode_overlay(detection_overlay).astype(
+                    self.output_overlay_dtype
+                )
+                overlay_tensor = pb_utils.Tensor("overlay", encoded_overlay)
+                mask_tensor = pb_utils.Tensor("mask", np.array([]).astype(self.output_mask_dtype))
+            elif self._has_anomaly_mask(inference_mask.as_numpy(), input1.as_numpy()):
                 # encode and forward
                 encoded_mask = self._encode_mask(inference_mask.as_numpy()).astype(
                     self.output_mask_dtype
