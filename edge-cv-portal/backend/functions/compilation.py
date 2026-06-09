@@ -5,6 +5,7 @@ Based on DDA_SageMaker_Model_Training_and_Compilation.ipynb Step 8
 """
 import json
 import os
+import re
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -275,16 +276,26 @@ def extract_and_repackage_model(model_s3_uri: str, s3_client) -> tuple:
 # It loads the trained TorchScript model from the `model` input channel and
 # writes model.onnx to /opt/ml/model (captured into the job's OutputDataConfig).
 _ONNX_EXPORT_SCRIPT = '''
-import json, os, glob, sys
+import json, os, glob, sys, tarfile
 import torch
 
 MODEL_DIR = os.environ.get("SM_CHANNEL_MODEL", "/opt/ml/input/data/model")
 OUT_DIR = os.environ.get("SM_MODEL_DIR", "/opt/ml/model")
 os.makedirs(OUT_DIR, exist_ok=True)
 
+# SageMaker training does NOT auto-extract input-channel tarballs, so the
+# `model` channel typically contains the raw model.tar.gz. Extract any
+# archives in place before searching for the TorchScript .pt file.
+for tgz in glob.glob(os.path.join(MODEL_DIR, "**", "*.tar.gz"), recursive=True):
+    print("Extracting model archive:", tgz)
+    with tarfile.open(tgz, "r:gz") as tar:
+        tar.extractall(path=MODEL_DIR)
+
 pt = next(iter(glob.glob(os.path.join(MODEL_DIR, "**", "*.pt"), recursive=True)), None)
 if pt is None:
-    print("ERROR: no .pt model found in", MODEL_DIR); sys.exit(1)
+    print("ERROR: no .pt model found in", MODEL_DIR)
+    print("Contents:", glob.glob(os.path.join(MODEL_DIR, "**", "*"), recursive=True))
+    sys.exit(1)
 print("Loading TorchScript model:", pt)
 
 shape = json.loads(os.environ.get("INPUT_SHAPE", "[1,3,224,224]"))
