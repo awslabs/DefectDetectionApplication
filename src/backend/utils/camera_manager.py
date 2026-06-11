@@ -72,6 +72,22 @@ ADVANCED_DEVICE_FEATURES = [
     ("offsetY", "OffsetY", "integer", "px"),
 ]
 
+# Image-source-config key -> (GenICam feature, kind) for the advanced controls.
+# These are applied inside start_acquisition (acquisition stopped, immediately
+# before the grab) — the same path gain/exposure use — so they reliably affect
+# the captured frame instead of being written out-of-band.
+CONFIG_FEATURE_MAP = {
+    "reverseX": ("ReverseX", "boolean"),
+    "reverseY": ("ReverseY", "boolean"),
+    "balanceWhiteAuto": ("BalanceWhiteAuto", "enumeration"),
+    "pixelFormat": ("PixelFormat", "enumeration"),
+    "width": ("Width", "integer"),
+    "height": ("Height", "integer"),
+    "offsetX": ("OffsetX", "integer"),
+    "offsetY": ("OffsetY", "integer"),
+}
+PAYLOAD_AFFECTING_FEATURES = {"Width", "Height", "OffsetX", "OffsetY", "PixelFormat"}
+
 class Camera():
     def __init__(self,camera_id):
         self.status = None
@@ -322,6 +338,15 @@ class Camera():
             logger.info(f"Camera ID {self.camera_id} : Setup camera")
             device = self.camera.get_device()
 
+            # Write feature changes straight through to the device instead of
+            # only updating Aravis' register cache. Without this, writes such as
+            # ReverseX/ReverseY/PixelFormat can read back as "set" while the
+            # sensor never actually applied them.
+            try:
+                self.camera.set_register_cache_policy(Aravis.RegisterCachePolicy.DISABLE)
+            except Exception as e:
+                logger.warning(f"Camera ID {self.camera_id} : could not disable register cache: {e}")
+
             # TODO: This is ideal settings but didnt work with zebra cameras.
             # device.set_string_feature_value("TriggerMode", "On")
             # device.set_string_feature_value("TriggerSelector", "FrameStart")
@@ -355,6 +380,44 @@ class Camera():
     def set_buffer(self):
         self.stream.push_buffer(Aravis.Buffer.new_allocate(self.payload))
 
+    def _apply_config_features(self, config):
+        """Apply advanced GenICam controls present in the image-source config to
+        the device. Returns True if a payload-affecting feature (ROI / pixel
+        format) changed, so the caller can rebuild the stream. Only writes a
+        feature when its value actually changes, so per-frame previews don't
+        rewrite (and rebuild the stream) every grab. Must be called with
+        self._lock held and acquisition stopped."""
+        if not self.camera or not config:
+            return False
+        applied = getattr(self, "_applied_features", None)
+        if applied is None:
+            applied = {}
+            self._applied_features = applied
+        device = self.camera.get_device()
+        payload_changed = False
+        for key, (feature, kind) in CONFIG_FEATURE_MAP.items():
+            if key not in config or config.get(key) is None:
+                continue
+            value = config.get(key)
+            if applied.get(key) == value:
+                continue  # already applied; skip redundant write / stream rebuild
+            try:
+                if not device.is_feature_available(feature):
+                    continue
+                if kind in ("enumeration", "string"):
+                    device.set_string_feature_value(feature, str(value))
+                elif kind == "boolean":
+                    device.set_boolean_feature_value(feature, bool(value))
+                elif kind == "integer":
+                    device.set_integer_feature_value(feature, int(value))
+                applied[key] = value
+                logger.info(f"Camera ID {self.camera_id} : set {feature}={value}")
+                if feature in PAYLOAD_AFFECTING_FEATURES:
+                    payload_changed = True
+            except Exception as e:
+                logger.error(f"Camera ID {self.camera_id} : failed to set {feature}={value}: {e}")
+        return payload_changed
+
     def start_acquisition(self, image_source_config):
         # Made image_src_cfg optional for camera status check
         self._lock.acquire()
@@ -366,6 +429,16 @@ class Camera():
             self.camera.set_gain(self.gain)
             logger.info(f"setting exposure {self.exposure}")
             self.camera.set_exposure_time(self.exposure)
+            # Apply advanced GenICam controls (flip, white balance, pixel
+            # format, ROI) here, with acquisition stopped, so they actually take
+            # effect on the frame about to be grabbed. Rebuild the stream if a
+            # payload-affecting feature (ROI / pixel format) changed.
+            if self._apply_config_features(image_source_config):
+                self.payload = self.camera.get_payload()
+                if hasattr(self, "stream"):
+                    del self.stream
+                self.stream = self.camera.create_stream(None, None)
+                self.set_buffer()
             logger.info(f"Camera ID {self.camera_id} : camera setup done, start acquisition")
         with Timer(metric_name="CameraStartAcquisitionTime"):
             self.camera.start_acquisition()
