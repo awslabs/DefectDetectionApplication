@@ -49,6 +49,11 @@ from threading import Lock
 
 get_frame_lock = Lock()
 
+# Upper bound for how long to wait for a single frame before giving up, on top
+# of the configured exposure time. Prevents a stalled USB/GenICam transfer from
+# blocking pop_buffer (and thus every preview) indefinitely.
+FRAME_POP_TIMEOUT_MARGIN_US = 5_000_000  # 5s beyond the exposure time
+
 # Tier 2 / Tier 3 GenICam controls surfaced under "Advanced settings".
 # (response_key, GenICam feature name, kind, unit). Each is included only when
 # the connected device actually implements it, so unsupported controls never
@@ -379,7 +384,20 @@ class Camera():
         self._lock.acquire()
         with Timer(metric_name="CameraGetFrameTime"):
             self.camera.software_trigger()
-            arv_buffer = self.stream.pop_buffer()
+            # Bound the wait so a stalled transfer can't hang the request (and,
+            # via get_frame_lock, every subsequent preview) forever.
+            timeout_us = int((getattr(self, "exposure", 0) or 0) + FRAME_POP_TIMEOUT_MARGIN_US)
+            arv_buffer = self.stream.timeout_pop_buffer(timeout_us)
+            if arv_buffer is None:
+                logger.error(
+                    f"Camera ID {self.camera_id} : Timed out after {timeout_us} us waiting for a frame"
+                )
+                self.update_camera_status(
+                    CameraStatusEnum.DISCONNECTED,
+                    "Timed out waiting for a frame from the camera",
+                )
+                self._lock.release()
+                return pickle.dumps(None)
             self.set_buffer()
             if arv_buffer.get_status() != Aravis.BufferStatus.SUCCESS:
                 logger.error(f"Camera ID {self.camera_id} : Failed to get frame")
