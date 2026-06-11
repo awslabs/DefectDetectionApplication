@@ -205,6 +205,7 @@ export default function EditImageSettings(): JSX.Element {
             recheckCameraStatusFn={getQuery.refetch}
             formIsValid={form.formState.isValid}
             settingsBounds={settingsBounds}
+            cameraFeatureBounds={boundsQuery.data}
           />
         </form>
       </FormProvider>

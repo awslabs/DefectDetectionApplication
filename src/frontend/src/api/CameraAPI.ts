@@ -46,9 +46,14 @@ export interface CameraFeatureBound {
   min: number | null;
   max: number | null;
   increment: number | null;
-  current: number | null;
+  current: number | string | boolean | null;
   unit: string | null;
   options: string[];
+  available?: boolean;
+  // True for Tier 2/3 controls that belong under "Advanced settings".
+  advanced?: boolean;
+  // GenICam feature name, echoed back when applying a change.
+  feature?: string;
 }
 
 export interface CameraFeatureBounds {
@@ -65,5 +70,28 @@ export async function getCameraFeatureBounds(
     cameraId,
   );
   const { data } = await axios.get<CameraFeatureBounds>(endpoint);
+  return data;
+}
+
+export interface ApplyCameraFeature {
+  feature: string;
+  type: CameraFeatureBound["type"];
+  value: number | string | boolean;
+}
+
+/**
+ * Apply advanced GenICam feature values (white balance, flip, pixel format,
+ * ROI, ...) to the live camera. Returns the device-accepted values keyed by
+ * GenICam feature name (the device may clamp/coerce them).
+ */
+export async function applyCameraFeatures(
+  cameraId: string,
+  features: ApplyCameraFeature[],
+): Promise<Record<string, number | string | boolean>> {
+  const endpoint = APIList.cameraFeaturesAPI.replace("{camera_id}", cameraId);
+  const { data } = await axios.post<Record<string, number | string | boolean>>(
+    endpoint,
+    { features },
+  );
   return data;
 }

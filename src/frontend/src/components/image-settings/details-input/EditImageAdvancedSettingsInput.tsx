@@ -26,6 +26,8 @@ import {
 import FormTextarea from "../../form/FormTextarea";
 import { PROCESSING_PIPELINE_MAX } from "../constants";
 import { useController, useWatch } from "react-hook-form";
+import { CameraFeatureBounds } from "../../../api/CameraAPI";
+import AdvancedDeviceControls from "./AdvancedDeviceControls";
 
 interface EditImageAdvancedSettingsInputProps {
   /**
@@ -42,6 +44,15 @@ interface EditImageAdvancedSettingsInputProps {
    * @param newPipeline - the new pipeline string
    */
   setGstreamerPipelineToDownload: (newPipeline: string) => void;
+  /**
+   * Connected camera id, used to apply advanced device controls.
+   */
+  cameraId?: string;
+  /**
+   * Device feature ranges/values read from the camera's GenICam feature map.
+   * Drives the optional advanced device controls.
+   */
+  cameraFeatureBounds?: CameraFeatureBounds;
 }
 
 export default function EditImageAdvancedSettingsInput(
@@ -91,6 +102,12 @@ export default function EditImageAdvancedSettingsInput(
             Apply
           </Button>
         </Grid>
+        {props.cameraId ? (
+          <AdvancedDeviceControls
+            cameraId={props.cameraId}
+            bounds={props.cameraFeatureBounds}
+          />
+        ) : null}
       </SpaceBetween>
     </ExpandableSection>
   );

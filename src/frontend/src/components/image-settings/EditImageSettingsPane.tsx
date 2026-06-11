@@ -19,11 +19,14 @@ import { SpaceBetween } from "@cloudscape-design/components";
 import EditImageSettingsInput from "./details-input/EditImageSettingsInput";
 import EditImageAdvancedSettingsInput from "./details-input/EditImageAdvancedSettingsInput";
 import { SettingsBounds } from "./bounds";
+import { CameraFeatureBounds } from "../../api/CameraAPI";
 
 type EditImageSettingsPaneProps = {
   initialPipelineString: string;
   setGstreamerPipelineToDownload: (newPipeline: string) => void;
   settingsBounds: SettingsBounds;
+  cameraId?: string;
+  cameraFeatureBounds?: CameraFeatureBounds;
 };
 export default function EditImageSettingsPane(
   props: EditImageSettingsPaneProps,
@@ -39,6 +42,8 @@ export default function EditImageSettingsPane(
           namePrefix="edit"
           initialPipelineString={props.initialPipelineString}
           setGstreamerPipelineToDownload={props.setGstreamerPipelineToDownload}
+          cameraId={props.cameraId}
+          cameraFeatureBounds={props.cameraFeatureBounds}
         />
       </SpaceBetween>
     </>

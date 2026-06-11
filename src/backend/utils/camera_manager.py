@@ -49,6 +49,24 @@ from threading import Lock
 
 get_frame_lock = Lock()
 
+# Tier 2 / Tier 3 GenICam controls surfaced under "Advanced settings".
+# (response_key, GenICam feature name, kind, unit). Each is included only when
+# the connected device actually implements it, so unsupported controls never
+# appear in the UI.
+ADVANCED_DEVICE_FEATURES = [
+    # Tier 2 — common, conditional
+    ("balanceWhiteAuto", "BalanceWhiteAuto", "enumeration", None),
+    ("reverseX", "ReverseX", "boolean", None),
+    ("reverseY", "ReverseY", "boolean", None),
+    # Tier 3 — supported but pipeline-affecting; the device locks these while
+    # streaming, so applying them rebuilds the stream.
+    ("pixelFormat", "PixelFormat", "enumeration", None),
+    ("width", "Width", "integer", "px"),
+    ("height", "Height", "integer", "px"),
+    ("offsetX", "OffsetX", "integer", "px"),
+    ("offsetY", "OffsetY", "integer", "px"),
+]
+
 class Camera():
     def __init__(self,camera_id):
         self.status = None
@@ -107,44 +125,173 @@ class Camera():
               "increment": <number|None>,
               "current": <value|None>,
               "unit": <str|None>,
-              "options": [<str>, ...]   # enumeration only
+              "options": [<str>, ...],   # enumeration only
+              "available": <bool>,       # supported by this device
+              "advanced": <bool>         # belongs in the "Advanced settings" UI
             }
-        Exposure time is reported in microseconds (Aravis' native unit and the
-        unit stored for USB3Vision cameras).
+        Features the device does not implement are omitted entirely, so the UI
+        can simply render whatever is returned. Exposure time is reported in
+        microseconds (Aravis' native unit and the unit stored for USB3Vision
+        cameras).
         """
         bounds = {}
         if not self.camera:
             return bounds
 
-        # (feature_name, kind, unit) for the controls that are common across
-        # most GenICam (USB3Vision / GigE Vision) devices. Unsupported features
-        # are skipped silently so this works across vendors/models.
-        float_features = [
+        # Primary controls (always shown when supported).
+        for key, feature, unit in [
             ("exposure", "ExposureTime", "us"),
             ("gain", "Gain", None),
-        ]
+        ]:
+            entry = self._read_float_bounds(key, feature, unit)
+            if entry:
+                entry["advanced"] = False
+                bounds[key] = entry
 
-        for key, _feature, unit in float_features:
-            try:
-                if key == "exposure":
-                    fmin, fmax = self.camera.get_exposure_time_bounds()
-                    current = self.camera.get_exposure_time()
-                else:  # gain
-                    fmin, fmax = self.camera.get_gain_bounds()
-                    current = self.camera.get_gain()
-                bounds[key] = {
-                    "type": "float",
-                    "min": fmin,
-                    "max": fmax,
-                    "increment": None,
-                    "current": current,
-                    "unit": unit,
-                    "options": [],
-                }
-            except Exception as e:
-                logger.warning(f"Camera ID {self.camera_id}: unable to read {key} bounds: {e}")
+        # Tier 2 / Tier 3 controls, surfaced under "Advanced settings". These
+        # are common across most GenICam devices but vary by model, so each is
+        # included only when the device actually implements it.
+        for key, feature, kind, unit in ADVANCED_DEVICE_FEATURES:
+            entry = self._read_feature_entry(feature, kind, unit)
+            if entry:
+                entry["advanced"] = True
+                bounds[key] = entry
 
         return bounds
+
+    def _read_float_bounds(self, key, feature, unit):
+        try:
+            if not self.camera.get_device().is_feature_available(feature):
+                return None
+            if key == "exposure":
+                fmin, fmax = self.camera.get_exposure_time_bounds()
+                current = self.camera.get_exposure_time()
+            else:
+                fmin, fmax = self.camera.get_gain_bounds()
+                current = self.camera.get_gain()
+            return {
+                "type": "float", "min": fmin, "max": fmax, "increment": None,
+                "current": current, "unit": unit, "options": [], "available": True,
+                "feature": feature,
+            }
+        except Exception as e:
+            logger.warning(f"Camera ID {self.camera_id}: unable to read {key} bounds: {e}")
+            return None
+
+    def _read_feature_entry(self, feature, kind, unit):
+        """Read a single GenICam feature generically. Returns None if the device
+        does not implement it (or it cannot be read)."""
+        try:
+            device = self.camera.get_device()
+            if not device.is_feature_available(feature):
+                return None
+
+            entry = {
+                "type": kind, "min": None, "max": None, "increment": None,
+                "current": None, "unit": unit, "options": [], "available": True,
+                "feature": feature,
+            }
+            if kind == "enumeration":
+                entry["current"] = device.get_string_feature_value(feature)
+                entry["options"] = list(
+                    device.dup_available_enumeration_feature_values_as_strings(feature) or []
+                )
+            elif kind == "boolean":
+                entry["current"] = device.get_boolean_feature_value(feature)
+            elif kind == "integer":
+                entry["current"] = device.get_integer_feature_value(feature)
+                try:
+                    imin, imax = device.get_integer_feature_bounds(feature)
+                    entry["min"], entry["max"] = imin, imax
+                except Exception:
+                    pass
+            elif kind == "float":
+                entry["current"] = device.get_float_feature_value(feature)
+                try:
+                    fmin, fmax = device.get_float_feature_bounds(feature)
+                    entry["min"], entry["max"] = fmin, fmax
+                except Exception:
+                    pass
+            return entry
+        except Exception as e:
+            logger.warning(f"Camera ID {self.camera_id}: unable to read feature {feature}: {e}")
+            return None
+
+    def apply_device_features(self, features):
+        """
+        Apply a batch of GenICam feature values to the live camera.
+
+        `features` is a list of {"feature": <GenICam name>, "type": <kind>,
+        "value": <value>}. Payload-affecting features (ROI / PixelFormat) cause
+        the stream to be rebuilt so subsequent captures stay consistent. Returns
+        the re-read current values so the UI can reflect what the device
+        actually accepted (values may be coerced/clamped by the device).
+        """
+        applied = {}
+        if not self.camera:
+            return applied
+
+        payload_affecting = {"Width", "Height", "OffsetX", "OffsetY", "PixelFormat"}
+        self._lock.acquire()
+        try:
+            device = self.camera.get_device()
+            # Stop acquisition before touching features that are locked while
+            # streaming (ROI, PixelFormat, etc.). Best-effort.
+            try:
+                self.camera.stop_acquisition()
+            except Exception:
+                pass
+
+            needs_stream_rebuild = False
+            for item in features:
+                feature = item.get("feature")
+                kind = item.get("type")
+                value = item.get("value")
+                if not feature:
+                    continue
+                try:
+                    if kind in ("enumeration", "string"):
+                        device.set_string_feature_value(feature, str(value))
+                    elif kind == "boolean":
+                        device.set_boolean_feature_value(feature, bool(value))
+                    elif kind == "integer":
+                        device.set_integer_feature_value(feature, int(value))
+                    elif kind == "float":
+                        device.set_float_feature_value(feature, float(value))
+                    else:
+                        logger.warning(f"Camera ID {self.camera_id}: unknown feature kind '{kind}' for {feature}")
+                        continue
+                    if feature in payload_affecting:
+                        needs_stream_rebuild = True
+                except Exception as e:
+                    logger.error(f"Camera ID {self.camera_id}: failed to set {feature}={value}: {e}")
+                    raise AravisCameraException(f"Failed to set {feature}: {e}")
+
+            if needs_stream_rebuild:
+                self.payload = self.camera.get_payload()
+                if hasattr(self, "stream"):
+                    del self.stream
+                self.stream = self.camera.create_stream(None, None)
+                self.set_buffer()
+
+            # Re-read so the caller sees the device-accepted values.
+            for item in features:
+                feature = item.get("feature")
+                kind = item.get("type")
+                try:
+                    if kind in ("enumeration", "string"):
+                        applied[feature] = device.get_string_feature_value(feature)
+                    elif kind == "boolean":
+                        applied[feature] = device.get_boolean_feature_value(feature)
+                    elif kind == "integer":
+                        applied[feature] = device.get_integer_feature_value(feature)
+                    elif kind == "float":
+                        applied[feature] = device.get_float_feature_value(feature)
+                except Exception:
+                    pass
+            return applied
+        finally:
+            self._lock.release()
 
     def connect_camera(self):
         logger.info(f"Camera ID {self.camera_id} : Connecting")
@@ -304,6 +451,29 @@ def get_camera_feature_bounds(camera_id):
         raise AravisCameraException(f"Unable to connect camera {camera_id}")
 
     return camera.get_feature_bounds()
+
+
+def apply_camera_features(camera_id, features):
+    """
+    Apply a batch of advanced GenICam feature values to a live camera and return
+    the device-accepted values. Connects on demand if the camera isn't already
+    connected.
+
+    `features` is a list of {"feature", "type", "value"}.
+    """
+    if not camera_id:
+        raise AravisCameraException("Camera ID is required")
+    if not features:
+        return {}
+
+    if camera_id not in camera_objects:
+        connect_camera(camera_id)
+
+    camera = camera_objects.get(camera_id)
+    if camera is None:
+        raise AravisCameraException(f"Unable to connect camera {camera_id}")
+
+    return camera.apply_device_features(features)
 
 def _disconnect_camera(camera_id):
     camera = camera_objects.get(camera_id)

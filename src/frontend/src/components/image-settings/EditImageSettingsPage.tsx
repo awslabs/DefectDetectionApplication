@@ -43,6 +43,7 @@ import ImagePlaceholder from "components/common/ImagePlaceholder";
 import { CameraDisconnectedContent } from "components/common/ImagePlaceholder/PresetPlaceholderContents";
 import useCameraConnection from "components/hook/useCameraConnection";
 import { SettingsBounds } from "./bounds";
+import { CameraFeatureBounds } from "../../api/CameraAPI";
 
 type EditImageSettingsPageProps = {
   id: string;
@@ -55,6 +56,7 @@ type EditImageSettingsPageProps = {
   recheckCameraStatusFn: () => void;
   formIsValid: boolean;
   settingsBounds: SettingsBounds;
+  cameraFeatureBounds?: CameraFeatureBounds;
 };
 
 export default function EditImageSettingsPage(
@@ -195,6 +197,8 @@ export default function EditImageSettingsPage(
                 setGstreamerPipelineToDownload(newPipeline)
               }
               settingsBounds={props.settingsBounds}
+              cameraId={props.isArvisCamera ? props.cameraId : undefined}
+              cameraFeatureBounds={props.cameraFeatureBounds}
             />
             <Container header={<Header variant={"h1"}>Image preview</Header>}>
               {editImageContent}

@@ -28,13 +28,18 @@
 # limitations under the License.
 # Fastapi modules
 from fastapi import APIRouter, Depends
-from typing import List
-from pydantic import RootModel
+from typing import List, Optional
+from pydantic import RootModel, BaseModel
 
 # Custom Modules
 from edge_ml1_p_camera_management import aravis_functions
 from endpoints.route.access_log_router import get_api_router
-from utils.camera_manager import connect_camera, disconnect_camera, get_camera_feature_bounds
+from utils.camera_manager import (
+    connect_camera,
+    disconnect_camera,
+    get_camera_feature_bounds,
+    apply_camera_features,
+)
 
 # Schema and Validation models
 from model.Camera import CameraSchema
@@ -83,3 +88,21 @@ def disconnect_camera_endpoint(cameraId: str):
 @router.get("/cameras/{cameraId}/feature-bounds")
 def get_camera_feature_bounds_endpoint(cameraId: str):
     return get_camera_feature_bounds(cameraId)
+
+
+class ApplyCameraFeature(BaseModel):
+    feature: str
+    type: str
+    value: object
+
+
+class ApplyCameraFeaturesRequest(BaseModel):
+    features: List[ApplyCameraFeature] = []
+
+
+# Applies advanced GenICam feature values (white balance, flip, pixel format,
+# ROI, ...) to the live camera and returns the device-accepted values.
+@router.post("/cameras/{cameraId}/features")
+def apply_camera_features_endpoint(cameraId: str, request: ApplyCameraFeaturesRequest):
+    features = [f.dict() for f in request.features]
+    return apply_camera_features(cameraId, features)
