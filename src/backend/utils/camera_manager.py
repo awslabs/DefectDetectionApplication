@@ -138,24 +138,32 @@ class Camera():
         if not self.camera:
             return bounds
 
-        # Primary controls (always shown when supported).
-        for key, feature, unit in [
-            ("exposure", "ExposureTime", "us"),
-            ("gain", "Gain", None),
-        ]:
-            entry = self._read_float_bounds(key, feature, unit)
-            if entry:
-                entry["advanced"] = False
-                bounds[key] = entry
+        # Serialize with acquisition (start/get_frame/stop all take this lock).
+        # Reading GenICam registers on the shared camera concurrently with a
+        # frame grab corrupts the libaravis/libusb channel and can wedge
+        # pop_buffer, so feature reads must not overlap acquisition.
+        self._lock.acquire()
+        try:
+            # Primary controls (always shown when supported).
+            for key, feature, unit in [
+                ("exposure", "ExposureTime", "us"),
+                ("gain", "Gain", None),
+            ]:
+                entry = self._read_float_bounds(key, feature, unit)
+                if entry:
+                    entry["advanced"] = False
+                    bounds[key] = entry
 
-        # Tier 2 / Tier 3 controls, surfaced under "Advanced settings". These
-        # are common across most GenICam devices but vary by model, so each is
-        # included only when the device actually implements it.
-        for key, feature, kind, unit in ADVANCED_DEVICE_FEATURES:
-            entry = self._read_feature_entry(feature, kind, unit)
-            if entry:
-                entry["advanced"] = True
-                bounds[key] = entry
+            # Tier 2 / Tier 3 controls, surfaced under "Advanced settings". These
+            # are common across most GenICam devices but vary by model, so each is
+            # included only when the device actually implements it.
+            for key, feature, kind, unit in ADVANCED_DEVICE_FEATURES:
+                entry = self._read_feature_entry(feature, kind, unit)
+                if entry:
+                    entry["advanced"] = True
+                    bounds[key] = entry
+        finally:
+            self._lock.release()
 
         return bounds
 
