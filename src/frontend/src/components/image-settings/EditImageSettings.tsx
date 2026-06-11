@@ -36,7 +36,6 @@ import { NoCrop } from "../image-source/roi/RoIAnnotationImage";
 import { isArvisCameraImageSource, setHashValuesInUrl } from "components/utils";
 import { DynamicRouterHashKey } from "components/layout/constants";
 import { DEFAULT_SETTINGS_BOUNDS, toSettingsBounds } from "./bounds";
-import { buildAdvancedConfig } from "./advancedFeatures";
 
 export default function EditImageSettings(): JSX.Element {
   const navigate = useNavigate();
@@ -110,12 +109,16 @@ export default function EditImageSettings(): JSX.Element {
 
   const editMutation = useMutation({
     mutationFn: (values: SchemaType) => {
+      // NOTE: advanced device controls (flip, white balance, pixel format, ROI)
+      // are applied live through the preview/capture config and are not yet
+      // persisted to the image-source profile (the DB has no columns for them;
+      // persistence is a follow-up requiring a migration). Sending them here
+      // would 500 in the persistence layer, so they are intentionally omitted.
       const imageSourceConfiguration: ImageSourceConfiguration = {
         gain: values.editGain,
         exposure: values.editExposure,
         processingPipeline: values.editGstreamerPipeline,
         imageCrop: cropSettings,
-        ...buildAdvancedConfig(boundsQuery.data, form.getValues() as Record<string, any>),
       };
 
       return editImageSource(imageSourceId, {
