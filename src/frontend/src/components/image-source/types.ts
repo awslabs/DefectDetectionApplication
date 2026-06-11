@@ -79,6 +79,16 @@ export interface ImageSourceConfiguration {
   processingPipeline: string;
   imageCrop?: RegionOfInterest;
   creationTime?: number;
+  // Optional advanced GenICam controls, applied to the device on the
+  // acquisition path. Only sent for cameras that support them.
+  reverseX?: boolean;
+  reverseY?: boolean;
+  balanceWhiteAuto?: string;
+  pixelFormat?: string;
+  width?: number;
+  height?: number;
+  offsetX?: number;
+  offsetY?: number;
 }
 
 export type RegionOfInterest = {

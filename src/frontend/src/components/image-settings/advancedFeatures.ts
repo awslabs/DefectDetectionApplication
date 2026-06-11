@@ -71,3 +71,32 @@ export function getSupportedAdvancedFeatures(
   }
   return supported;
 }
+
+// Advanced controls live in the same react-hook-form as gain/exposure under
+// these field names, so the preview/save include them and apply them through
+// the acquisition path (rather than a separate live-apply call).
+export const ADV_FIELD_PREFIX = "adv_";
+
+export function advFieldName(key: string): string {
+  return `${ADV_FIELD_PREFIX}${key}`;
+}
+
+type FeatureValue = string | number | boolean;
+
+/**
+ * Build the advanced portion of an imageSourceConfiguration from current form
+ * values, keyed by the config keys the backend expects (reverseX, pixelFormat,
+ * width, ...). Only includes features the connected camera supports.
+ */
+export function buildAdvancedConfig(
+  bounds: CameraFeatureBounds | undefined,
+  formValues: Record<string, any> | undefined,
+): Record<string, FeatureValue> {
+  const out: Record<string, FeatureValue> = {};
+  if (!bounds || !formValues) return out;
+  for (const f of getSupportedAdvancedFeatures(bounds)) {
+    const v = formValues[advFieldName(f.key)];
+    if (v !== undefined && v !== null && v !== "") out[f.key] = v;
+  }
+  return out;
+}

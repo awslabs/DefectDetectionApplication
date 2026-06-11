@@ -44,6 +44,7 @@ import { CameraDisconnectedContent } from "components/common/ImagePlaceholder/Pr
 import useCameraConnection from "components/hook/useCameraConnection";
 import { SettingsBounds } from "./bounds";
 import { CameraFeatureBounds } from "../../api/CameraAPI";
+import { buildAdvancedConfig } from "./advancedFeatures";
 
 type EditImageSettingsPageProps = {
   id: string;
@@ -110,12 +111,17 @@ export default function EditImageSettingsPage(
         values.editExposure &&
         values.editGstreamerPipeline
       ) {
+        const advancedConfig = buildAdvancedConfig(
+          props.cameraFeatureBounds,
+          values as Record<string, any>,
+        );
         return await getImagePreview(props.id, {
           imageSourceConfiguration: {
             gain: values.editGain,
             exposure: values.editExposure,
             processingPipeline: gstreamerPipelineToDownload,
             imageCrop: props.cropSettings,
+            ...advancedConfig,
           },
         });
       }

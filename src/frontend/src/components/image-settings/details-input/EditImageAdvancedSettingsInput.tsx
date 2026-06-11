@@ -102,11 +102,8 @@ export default function EditImageAdvancedSettingsInput(
             Apply
           </Button>
         </Grid>
-        {props.cameraId ? (
-          <AdvancedDeviceControls
-            cameraId={props.cameraId}
-            bounds={props.cameraFeatureBounds}
-          />
+        {props.cameraFeatureBounds ? (
+          <AdvancedDeviceControls bounds={props.cameraFeatureBounds} />
         ) : null}
       </SpaceBetween>
     </ExpandableSection>

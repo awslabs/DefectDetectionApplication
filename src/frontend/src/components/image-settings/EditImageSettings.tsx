@@ -35,6 +35,7 @@ import { NoCrop } from "../image-source/roi/RoIAnnotationImage";
 import { isArvisCameraImageSource, setHashValuesInUrl } from "components/utils";
 import { DynamicRouterHashKey } from "components/layout/constants";
 import { DEFAULT_SETTINGS_BOUNDS, toSettingsBounds } from "./bounds";
+import { buildAdvancedConfig } from "./advancedFeatures";
 
 export default function EditImageSettings(): JSX.Element {
   const navigate = useNavigate();
@@ -108,6 +109,7 @@ export default function EditImageSettings(): JSX.Element {
         exposure: values.editExposure,
         processingPipeline: values.editGstreamerPipeline,
         imageCrop: cropSettings,
+        ...buildAdvancedConfig(boundsQuery.data, form.getValues() as Record<string, any>),
       };
 
       return editImageSource(imageSourceId, {
