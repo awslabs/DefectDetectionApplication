@@ -53,6 +53,10 @@ interface EditImageAdvancedSettingsInputProps {
    * Drives the optional advanced device controls.
    */
   cameraFeatureBounds?: CameraFeatureBounds;
+  /**
+   * When true the camera isn't connected, so device controls are read-only.
+   */
+  readOnly?: boolean;
 }
 
 export default function EditImageAdvancedSettingsInput(
@@ -103,7 +107,10 @@ export default function EditImageAdvancedSettingsInput(
           </Button>
         </Grid>
         {props.cameraFeatureBounds ? (
-          <AdvancedDeviceControls bounds={props.cameraFeatureBounds} />
+          <AdvancedDeviceControls
+            bounds={props.cameraFeatureBounds}
+            readOnly={props.readOnly}
+          />
         ) : null}
       </SpaceBetween>
     </ExpandableSection>

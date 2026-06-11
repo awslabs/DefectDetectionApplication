@@ -27,6 +27,7 @@ type EditImageSettingsPaneProps = {
   settingsBounds: SettingsBounds;
   cameraId?: string;
   cameraFeatureBounds?: CameraFeatureBounds;
+  readOnly?: boolean;
 };
 export default function EditImageSettingsPane(
   props: EditImageSettingsPaneProps,
@@ -37,6 +38,7 @@ export default function EditImageSettingsPane(
         <EditImageSettingsInput
           namePrefix="edit"
           settingsBounds={props.settingsBounds}
+          readOnly={props.readOnly}
         />
         <EditImageAdvancedSettingsInput
           namePrefix="edit"
@@ -44,6 +46,7 @@ export default function EditImageSettingsPane(
           setGstreamerPipelineToDownload={props.setGstreamerPipelineToDownload}
           cameraId={props.cameraId}
           cameraFeatureBounds={props.cameraFeatureBounds}
+          readOnly={props.readOnly}
         />
       </SpaceBetween>
     </>

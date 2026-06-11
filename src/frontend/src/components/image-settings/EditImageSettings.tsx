@@ -26,6 +26,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { editImageSource, getImageSource } from "../../api/ImageSourceAPI";
 import { getCameraFeatureBounds } from "../../api/CameraAPI";
 import {
+  CameraStatus,
   ImageSourceConfiguration,
   RegionOfInterest,
 } from "../image-source/types";
@@ -54,14 +55,19 @@ export default function EditImageSettings(): JSX.Element {
 
   const isArvisCamera = isArvisCameraImageSource(getQuery.data?.type || "");
   const cameraId = getQuery.data?.cameraId || "";
+  const cameraConnected =
+    getQuery.data?.cameraStatus?.status === CameraStatus.Connected;
 
   // Pull the gain/exposure ranges from the camera's GenICam feature map so the
   // sliders and validation match the actual hardware. Only meaningful for
-  // Aravis (USB3Vision/GigE) cameras; other sources fall back to constants.
+  // Aravis (USB3Vision/GigE) cameras, and only when the camera is already
+  // connected — reading bounds must not claim the camera (that would make a
+  // later connect fail with LIBUSB_ERROR_BUSY). Falls back to constants
+  // otherwise.
   const boundsQuery = useQuery({
     queryKey: ["cameraFeatureBounds", cameraId],
     queryFn: () => getCameraFeatureBounds(cameraId),
-    enabled: isArvisCamera && !!cameraId,
+    enabled: isArvisCamera && !!cameraId && cameraConnected,
     retry: 1,
     staleTime: 5 * 60 * 1000,
   });

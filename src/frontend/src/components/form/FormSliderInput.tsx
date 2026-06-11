@@ -79,6 +79,7 @@ export default function FormSliderInput({
           <Slider
             min={props.min}
             max={props.max}
+            disabled={props.disabled}
             value={sliderValue}
             onChange={(newValue) => {
               onValueChange(newValue as number);

@@ -34,6 +34,7 @@ import {
 
 interface AdvancedDeviceControlsProps {
   bounds?: CameraFeatureBounds;
+  readOnly?: boolean;
 }
 
 /**
@@ -46,6 +47,7 @@ interface AdvancedDeviceControlsProps {
  */
 export default function AdvancedDeviceControls({
   bounds,
+  readOnly,
 }: AdvancedDeviceControlsProps) {
   const { setValue, control } = useFormContext();
   const features = useMemo(
@@ -74,7 +76,12 @@ export default function AdvancedDeviceControls({
       <Box variant="h4">Camera controls</Box>
       {features.map((f) => (
         <FormField key={f.key} label={f.label} description={f.description}>
-          <AdvancedControl feature={f} control={control} setValue={setValue} />
+          <AdvancedControl
+            feature={f}
+            control={control}
+            setValue={setValue}
+            disabled={readOnly}
+          />
         </FormField>
       ))}
     </SpaceBetween>
@@ -85,10 +92,12 @@ function AdvancedControl({
   feature,
   control,
   setValue,
+  disabled,
 }: {
   feature: AdvancedFeature;
   control: any;
   setValue: (name: string, value: any) => void;
+  disabled?: boolean;
 }): JSX.Element {
   const name = advFieldName(feature.key);
   const value = useWatch({ control, name });
@@ -98,6 +107,7 @@ function AdvancedControl({
     return (
       <Toggle
         checked={Boolean(value)}
+        disabled={disabled}
         onChange={({ detail }) => setValue(name, detail.checked)}
       />
     );
@@ -111,6 +121,7 @@ function AdvancedControl({
       <Select
         selectedOption={selectedOption}
         options={options}
+        disabled={disabled}
         onChange={({ detail }) => setValue(name, detail.selectedOption.value)}
       />
     );
@@ -121,6 +132,7 @@ function AdvancedControl({
     <Input
       type="number"
       value={value != null ? `${value}` : ""}
+      disabled={disabled}
       onChange={({ detail }) => {
         const parsed = Number(detail.value);
         if (!Number.isNaN(parsed)) setValue(name, parsed);

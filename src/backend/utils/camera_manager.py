@@ -534,20 +534,18 @@ def connect_camera(camera_id):
 def get_camera_feature_bounds(camera_id):
     """
     Return the adjustable feature ranges for a camera, read from its GenICam
-    feature map. Uses the existing connection if the camera is already
-    connected (e.g. while editing image settings); otherwise connects on demand
-    using the same path as preview/capture.
+    feature map. Reads only from an existing connection — it never opens/claims
+    the camera itself, because doing so makes a subsequent connect (which opens
+    the device to verify it) fail with LIBUSB_ERROR_BUSY. If the camera isn't
+    connected, returns an empty dict so the UI falls back to defaults /
+    read-only until the user connects.
     """
     if not camera_id:
         raise AravisCameraException("Camera ID is required")
 
-    if camera_id not in camera_objects:
-        # Raises AravisCameraException if the camera cannot be reached.
-        connect_camera(camera_id)
-
     camera = camera_objects.get(camera_id)
     if camera is None:
-        raise AravisCameraException(f"Unable to connect camera {camera_id}")
+        return {}
 
     return camera.get_feature_bounds()
 

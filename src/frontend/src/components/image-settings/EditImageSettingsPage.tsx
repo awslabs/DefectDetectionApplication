@@ -18,6 +18,7 @@
 import { useWatch } from "react-hook-form";
 import { useNavigate } from "react-router-dom";
 import {
+  Alert,
   Button,
   Container,
   Form,
@@ -77,6 +78,7 @@ export default function EditImageSettingsPage(
   // For non-Arvis cameras (like Nvidia CSI), only check form validity
   // For Arvis cameras, check both form validity and camera connection status
   const isSaveDisabled = !props.formIsValid || (props.isArvisCamera && props.cameraStatus !== CameraStatus.Connected);
+  const isReadOnly = props.isArvisCamera && props.cameraStatus !== CameraStatus.Connected;
   
   console.log('Save button disabled:', isSaveDisabled, 'Reason:', {
     formInvalid: !props.formIsValid,
@@ -197,15 +199,26 @@ export default function EditImageSettingsPage(
           }
         >
           <Grid gridDefinition={[{ colspan: 3 }, { colspan: 9 }]}>
-            <EditImageSettingsPane
-              initialPipelineString={initialPipelineValue}
-              setGstreamerPipelineToDownload={(newPipeline: string): void =>
-                setGstreamerPipelineToDownload(newPipeline)
-              }
-              settingsBounds={props.settingsBounds}
-              cameraId={props.isArvisCamera ? props.cameraId : undefined}
-              cameraFeatureBounds={props.cameraFeatureBounds}
-            />
+            <SpaceBetween size="m">
+              {isReadOnly ? (
+                <Alert type="info" header="Read-only">
+                  This camera isn't connected, so settings are read-only. It may
+                  be powered off, on a non-SuperSpeed link, or in use by another
+                  station or process. Connect to the camera to preview and save
+                  changes.
+                </Alert>
+              ) : null}
+              <EditImageSettingsPane
+                initialPipelineString={initialPipelineValue}
+                setGstreamerPipelineToDownload={(newPipeline: string): void =>
+                  setGstreamerPipelineToDownload(newPipeline)
+                }
+                settingsBounds={props.settingsBounds}
+                cameraId={props.isArvisCamera ? props.cameraId : undefined}
+                cameraFeatureBounds={props.cameraFeatureBounds}
+                readOnly={isReadOnly}
+              />
+            </SpaceBetween>
             <Container header={<Header variant={"h1"}>Image preview</Header>}>
               {editImageContent}
             </Container>

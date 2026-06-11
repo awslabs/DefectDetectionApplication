@@ -22,6 +22,7 @@ import { SettingsBounds } from "../bounds";
 interface EditImageSettingsInputProps {
   namePrefix: string;
   settingsBounds: SettingsBounds;
+  readOnly?: boolean;
 }
 
 /**
@@ -30,6 +31,7 @@ interface EditImageSettingsInputProps {
 export default function EditImageSettingsInput({
   namePrefix,
   settingsBounds,
+  readOnly,
 }: EditImageSettingsInputProps) {
   const { gainMin, gainMax, exposureMin, exposureMax, exposureUnit } =
     settingsBounds;
@@ -41,6 +43,7 @@ export default function EditImageSettingsInput({
           name={namePrefix + "Gain"}
           min={gainMin}
           max={gainMax}
+          disabled={readOnly}
           label="Gain (Primary Brightness Control)"
           constraintText={`Adjust gain (${gainMin} to ${gainMax}) to control image brightness. Higher values = brighter images.`}
         />
@@ -49,6 +52,7 @@ export default function EditImageSettingsInput({
           name={namePrefix + "Exposure"}
           min={exposureMin}
           max={exposureMax}
+          disabled={readOnly}
           label="Exposure (Secondary Control)"
           constraintText={`Exposure time in ${exposureUnit} (${exposureMin} to ${exposureMax}). Use gain for primary brightness adjustment.`}
         />
