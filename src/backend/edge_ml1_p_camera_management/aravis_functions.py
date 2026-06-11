@@ -47,6 +47,7 @@ import gi
 import numpy as np
 import os
 from string import Template
+import threading
 import time
 import traceback
 import logging
@@ -74,6 +75,11 @@ from model.Camera import Camera
 # Initialize Aravis
 log = logging.getLogger(__name__)
 
+# Serializes full bus rescans so a context teardown (Aravis.shutdown) can never
+# race with a concurrent enumeration in another request thread.
+_rescan_lock = threading.Lock()
+
+
 def getCameras():
     Aravis.enable_interface("Fake")
     Aravis.update_device_list()
@@ -93,6 +99,33 @@ def getCameras():
         camera = Camera(id, model, address, physical_id, protocol, serial, vendor)
         cameras.append(camera)
     return cameras
+
+
+def rescan_cameras():
+    """
+    Force a fresh enumeration of the camera bus and return the discovered
+    cameras.
+
+    The backend runs inside a container that does not receive host udev hotplug
+    events, and Aravis/libusb keeps a cached USB context for the life of the
+    process. Because of this, a camera connected after the server started may
+    not show up from a plain update_device_list(), and the only reliable way to
+    pick it up used to be restarting the container.
+
+    Aravis.shutdown() tears down the cached USB/GenICam context in this
+    enumeration process; the following update_device_list() rebuilds it and
+    reliably discovers devices that were hotplugged after startup. Camera
+    acquisition objects live in a separate manager process with their own
+    Aravis context (see utils.camera_manager), so resetting the context here
+    does not disturb active acquisitions/streams.
+    """
+    with _rescan_lock:
+        try:
+            Aravis.shutdown()
+        except Exception as err:
+            # A failed teardown is non-fatal; the re-init below still runs.
+            log.warning("Aravis.shutdown() during rescan failed, continuing: %s", err)
+        return getCameras()
 
 
 def getCamera(cameraId):

@@ -55,6 +55,17 @@ def getcameras() -> GetCamerasResponse:
     result = schema.dump(cameras)
     return result
 
+# Forces a fresh bus enumeration and returns the cameras.
+# Use this to pick up a camera that was connected after the server started,
+# without restarting the container (the container does not receive host udev
+# hotplug events, so a plain GET /cameras may not see it).
+@router.post("/cameras/rescan")
+def rescan_cameras_endpoint() -> GetCamerasResponse:
+    cameras = aravis_functions.rescan_cameras()
+    schema = CameraSchema(many=True)
+    result = schema.dump(cameras)
+    return result
+
 @router.get("/cameras/{cameraId}/connect")
 def connect_camera_endpoint(cameraId: str):
     # Check if the camera is online, 
