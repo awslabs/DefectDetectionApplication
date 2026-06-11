@@ -42,6 +42,7 @@ import { CameraStatus, RegionOfInterest } from "../image-source/types";
 import ImagePlaceholder from "components/common/ImagePlaceholder";
 import { CameraDisconnectedContent } from "components/common/ImagePlaceholder/PresetPlaceholderContents";
 import useCameraConnection from "components/hook/useCameraConnection";
+import { SettingsBounds } from "./bounds";
 
 type EditImageSettingsPageProps = {
   id: string;
@@ -53,6 +54,7 @@ type EditImageSettingsPageProps = {
   cameraId: string;
   recheckCameraStatusFn: () => void;
   formIsValid: boolean;
+  settingsBounds: SettingsBounds;
 };
 
 export default function EditImageSettingsPage(
@@ -192,6 +194,7 @@ export default function EditImageSettingsPage(
               setGstreamerPipelineToDownload={(newPipeline: string): void =>
                 setGstreamerPipelineToDownload(newPipeline)
               }
+              settingsBounds={props.settingsBounds}
             />
             <Container header={<Header variant={"h1"}>Image preview</Header>}>
               {editImageContent}

@@ -19,11 +19,12 @@ import { FormProvider, useForm } from "react-hook-form";
 import { yupResolver } from "@hookform/resolvers/yup";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Button, ContentLayout, Header } from "@cloudscape-design/components";
-import { schema, SchemaType } from "./edit/schema";
+import { makeSchema, SchemaType } from "./edit/schema";
 import * as React from "react";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { editImageSource, getImageSource } from "../../api/ImageSourceAPI";
+import { getCameraFeatureBounds } from "../../api/CameraAPI";
 import {
   ImageSourceConfiguration,
   RegionOfInterest,
@@ -33,6 +34,7 @@ import EditImageSettingsPage from "./EditImageSettingsPage";
 import { NoCrop } from "../image-source/roi/RoIAnnotationImage";
 import { isArvisCameraImageSource, setHashValuesInUrl } from "components/utils";
 import { DynamicRouterHashKey } from "components/layout/constants";
+import { DEFAULT_SETTINGS_BOUNDS, toSettingsBounds } from "./bounds";
 
 export default function EditImageSettings(): JSX.Element {
   const navigate = useNavigate();
@@ -48,6 +50,41 @@ export default function EditImageSettings(): JSX.Element {
   });
 
   const imgSrcName = getQuery.data?.name || "";
+
+  const isArvisCamera = isArvisCameraImageSource(getQuery.data?.type || "");
+  const cameraId = getQuery.data?.cameraId || "";
+
+  // Pull the gain/exposure ranges from the camera's GenICam feature map so the
+  // sliders and validation match the actual hardware. Only meaningful for
+  // Aravis (USB3Vision/GigE) cameras; other sources fall back to constants.
+  const boundsQuery = useQuery({
+    queryKey: ["cameraFeatureBounds", cameraId],
+    queryFn: () => getCameraFeatureBounds(cameraId),
+    enabled: isArvisCamera && !!cameraId,
+    retry: 1,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const settingsBounds = useMemo(
+    () =>
+      isArvisCamera
+        ? toSettingsBounds(boundsQuery.data)
+        : DEFAULT_SETTINGS_BOUNDS,
+    [isArvisCamera, boundsQuery.data],
+  );
+
+  const resolver = useMemo(
+    () =>
+      yupResolver(
+        makeSchema({
+          gainMin: settingsBounds.gainMin,
+          gainMax: settingsBounds.gainMax,
+          exposureMin: settingsBounds.exposureMin,
+          exposureMax: settingsBounds.exposureMax,
+        }),
+      ),
+    [settingsBounds],
+  );
 
   useEffect(() => {
     const nextHash = setHashValuesInUrl(hash.substring(1), {
@@ -117,7 +154,7 @@ export default function EditImageSettings(): JSX.Element {
   });
 
   const form = useForm({
-    resolver: yupResolver(schema),
+    resolver,
     mode: "onBlur",
     values: {
       editGain: getQuery.data?.imageSourceConfiguration.gain ?? 0,
@@ -126,6 +163,15 @@ export default function EditImageSettings(): JSX.Element {
         getQuery.data?.imageSourceConfiguration.processingPipeline ?? "",
     },
   });
+
+  // When the device bounds arrive after first render, re-run validation so the
+  // form validity reflects the camera's real limits (using the latest resolver).
+  useEffect(() => {
+    if (boundsQuery.data) {
+      form.trigger();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsBounds]);
   const [initialGstreamerPipeline, setInitialGstreamerPipeline] = useState("");
 
   useEffect(() => {
@@ -153,11 +199,12 @@ export default function EditImageSettings(): JSX.Element {
             cropSettings={cropSettings}
             initialPipelineString={initialGstreamerPipeline ?? ""}
             isLoading={getQuery.isLoading}
-            isArvisCamera={isArvisCameraImageSource(getQuery.data?.type || "")}
+            isArvisCamera={isArvisCamera}
             cameraStatus={getQuery.data?.cameraStatus?.status}
-            cameraId={getQuery.data?.cameraId || ""}
+            cameraId={cameraId}
             recheckCameraStatusFn={getQuery.refetch}
             formIsValid={form.formState.isValid}
+            settingsBounds={settingsBounds}
           />
         </form>
       </FormProvider>

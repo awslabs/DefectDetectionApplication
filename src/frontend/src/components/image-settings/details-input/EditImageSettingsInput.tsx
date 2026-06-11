@@ -16,11 +16,12 @@
  *
  */
 import { Container, Header, SpaceBetween } from "@cloudscape-design/components";
-import { EXPOSURE_MAX, EXPOSURE_MIN, GAIN_MAX, GAIN_MIN } from "../constants";
 import FormSliderInput from "../../form/FormSliderInput";
+import { SettingsBounds } from "../bounds";
 
 interface EditImageSettingsInputProps {
   namePrefix: string;
+  settingsBounds: SettingsBounds;
 }
 
 /**
@@ -28,24 +29,28 @@ interface EditImageSettingsInputProps {
  */
 export default function EditImageSettingsInput({
   namePrefix,
+  settingsBounds,
 }: EditImageSettingsInputProps) {
+  const { gainMin, gainMax, exposureMin, exposureMax, exposureUnit } =
+    settingsBounds;
+
   return (
     <Container header={<Header variant="h1">Image settings</Header>}>
       <SpaceBetween direction="vertical" size="l">
         <FormSliderInput
           name={namePrefix + "Gain"}
-          min={GAIN_MIN}
-          max={GAIN_MAX}
+          min={gainMin}
+          max={gainMax}
           label="Gain (Primary Brightness Control)"
-          constraintText="Adjust gain (1.0 to 10.625) to control image brightness. Higher values = brighter images."
+          constraintText={`Adjust gain (${gainMin} to ${gainMax}) to control image brightness. Higher values = brighter images.`}
         />
 
         <FormSliderInput
           name={namePrefix + "Exposure"}
-          min={EXPOSURE_MIN}
-          max={EXPOSURE_MAX}
+          min={exposureMin}
+          max={exposureMax}
           label="Exposure (Secondary Control)"
-          constraintText="Exposure time in nanoseconds (1ms to 30ms). Use gain for primary brightness adjustment."
+          constraintText={`Exposure time in ${exposureUnit} (${exposureMin} to ${exposureMax}). Use gain for primary brightness adjustment.`}
         />
       </SpaceBetween>
     </Container>

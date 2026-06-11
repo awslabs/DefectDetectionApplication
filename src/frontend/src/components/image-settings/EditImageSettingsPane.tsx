@@ -18,10 +18,12 @@
 import { SpaceBetween } from "@cloudscape-design/components";
 import EditImageSettingsInput from "./details-input/EditImageSettingsInput";
 import EditImageAdvancedSettingsInput from "./details-input/EditImageAdvancedSettingsInput";
+import { SettingsBounds } from "./bounds";
 
 type EditImageSettingsPaneProps = {
   initialPipelineString: string;
   setGstreamerPipelineToDownload: (newPipeline: string) => void;
+  settingsBounds: SettingsBounds;
 };
 export default function EditImageSettingsPane(
   props: EditImageSettingsPaneProps,
@@ -29,7 +31,10 @@ export default function EditImageSettingsPane(
   return (
     <>
       <SpaceBetween direction="vertical" size="l">
-        <EditImageSettingsInput namePrefix="edit" />
+        <EditImageSettingsInput
+          namePrefix="edit"
+          settingsBounds={props.settingsBounds}
+        />
         <EditImageAdvancedSettingsInput
           namePrefix="edit"
           initialPipelineString={props.initialPipelineString}

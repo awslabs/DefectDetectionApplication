@@ -35,3 +35,35 @@ export async function disconnectCamera(cameraId: string) {
   const endpoint = `${APIList.camerasAPI}/${cameraId}/disconnect`;
   await axios.get<Camera[]>(endpoint);
 }
+
+/**
+ * A single adjustable camera feature, described generically so new controls
+ * (read from the device's GenICam feature map) can be surfaced without
+ * changing the response shape. Exposure time is reported in microseconds.
+ */
+export interface CameraFeatureBound {
+  type: "float" | "integer" | "enumeration" | "boolean";
+  min: number | null;
+  max: number | null;
+  increment: number | null;
+  current: number | null;
+  unit: string | null;
+  options: string[];
+}
+
+export interface CameraFeatureBounds {
+  gain?: CameraFeatureBound;
+  exposure?: CameraFeatureBound;
+  [feature: string]: CameraFeatureBound | undefined;
+}
+
+export async function getCameraFeatureBounds(
+  cameraId: string,
+): Promise<CameraFeatureBounds> {
+  const endpoint = APIList.cameraFeatureBoundsAPI.replace(
+    "{camera_id}",
+    cameraId,
+  );
+  const { data } = await axios.get<CameraFeatureBounds>(endpoint);
+  return data;
+}

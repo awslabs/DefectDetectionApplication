@@ -34,7 +34,7 @@ from pydantic import RootModel
 # Custom Modules
 from edge_ml1_p_camera_management import aravis_functions
 from endpoints.route.access_log_router import get_api_router
-from utils.camera_manager import connect_camera, disconnect_camera
+from utils.camera_manager import connect_camera, disconnect_camera, get_camera_feature_bounds
 
 # Schema and Validation models
 from model.Camera import CameraSchema
@@ -76,3 +76,10 @@ def connect_camera_endpoint(cameraId: str):
 @router.get("/cameras/{cameraId}/disconnect")
 def disconnect_camera_endpoint(cameraId: str):
     return disconnect_camera(cameraId)
+
+# Returns the adjustable feature ranges (gain, exposure, ...) for a camera,
+# read from the device's GenICam feature map, so the UI can present limits
+# that match the actual hardware instead of hard-coded defaults.
+@router.get("/cameras/{cameraId}/feature-bounds")
+def get_camera_feature_bounds_endpoint(cameraId: str):
+    return get_camera_feature_bounds(cameraId)

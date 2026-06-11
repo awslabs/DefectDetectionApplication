@@ -92,7 +92,60 @@ class Camera():
 
     def get_camera_id(self):
         return self.camera_id
-        
+
+    def get_feature_bounds(self):
+        """
+        Read adjustable feature ranges directly from the camera's GenICam
+        feature map (the device "XML"), so the UI can present limits that match
+        the actual hardware instead of hard-coded defaults.
+
+        Returns a dict keyed by feature name. Each entry describes the feature
+        generically so new controls can be surfaced without changing the shape:
+            {
+              "type": "float" | "integer" | "enumeration" | "boolean",
+              "min": <number|None>, "max": <number|None>,
+              "increment": <number|None>,
+              "current": <value|None>,
+              "unit": <str|None>,
+              "options": [<str>, ...]   # enumeration only
+            }
+        Exposure time is reported in microseconds (Aravis' native unit and the
+        unit stored for USB3Vision cameras).
+        """
+        bounds = {}
+        if not self.camera:
+            return bounds
+
+        # (feature_name, kind, unit) for the controls that are common across
+        # most GenICam (USB3Vision / GigE Vision) devices. Unsupported features
+        # are skipped silently so this works across vendors/models.
+        float_features = [
+            ("exposure", "ExposureTime", "us"),
+            ("gain", "Gain", None),
+        ]
+
+        for key, _feature, unit in float_features:
+            try:
+                if key == "exposure":
+                    fmin, fmax = self.camera.get_exposure_time_bounds()
+                    current = self.camera.get_exposure_time()
+                else:  # gain
+                    fmin, fmax = self.camera.get_gain_bounds()
+                    current = self.camera.get_gain()
+                bounds[key] = {
+                    "type": "float",
+                    "min": fmin,
+                    "max": fmax,
+                    "increment": None,
+                    "current": current,
+                    "unit": unit,
+                    "options": [],
+                }
+            except Exception as e:
+                logger.warning(f"Camera ID {self.camera_id}: unable to read {key} bounds: {e}")
+
+        return bounds
+
     def connect_camera(self):
         logger.info(f"Camera ID {self.camera_id} : Connecting")
         try:
@@ -230,6 +283,27 @@ def connect_camera(camera_id):
     else: # Connection Failed
         disconnect_camera(camera_id)
         raise AravisCameraException(camera_status.error)
+
+
+def get_camera_feature_bounds(camera_id):
+    """
+    Return the adjustable feature ranges for a camera, read from its GenICam
+    feature map. Uses the existing connection if the camera is already
+    connected (e.g. while editing image settings); otherwise connects on demand
+    using the same path as preview/capture.
+    """
+    if not camera_id:
+        raise AravisCameraException("Camera ID is required")
+
+    if camera_id not in camera_objects:
+        # Raises AravisCameraException if the camera cannot be reached.
+        connect_camera(camera_id)
+
+    camera = camera_objects.get(camera_id)
+    if camera is None:
+        raise AravisCameraException(f"Unable to connect camera {camera_id}")
+
+    return camera.get_feature_bounds()
 
 def _disconnect_camera(camera_id):
     camera = camera_objects.get(camera_id)
