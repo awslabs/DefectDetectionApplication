@@ -118,6 +118,41 @@ def get_frame(image_source_dict, image_source_config_override=None):
     camera_id = image_source_dict.get('cameraId')
     return get_camera_frame(camera_id, camera_config)
 
+
+def get_preview_frame(image_source_dict, image_source_config_override=None):
+    # Isolated single-frame override preview path for Aravis (CAMERA) image sources.
+    #
+    # Unlike get_frame (used by the capture path, which goes through
+    # camera_manager.get_camera_frame -> broadcaster.get_inference_frame), the preview
+    # routes through broadcaster.preview_with_override so the per-request override is
+    # isolated from any live preview session (Req 5.4): with an active session it returns
+    # the session's current frame WITHOUT disturbing it (override not applied), and with
+    # no session it opens a dedicated claim and actually applies the override so the
+    # preview reflects it.
+    if image_source_dict.get('type') in [ImageSourceType.ICAM, ImageSourceType.NVIDIA_CSI, ImageSourceType.FOLDER]:
+        raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"The server cannot get frame for {image_source_dict.get('type')} using AravisSDK method.",
+            )
+
+    camera_config = {}
+    if image_source_config_override:
+        camera_config = image_source_config_override
+    else:
+        camera_config = utils.convert_sqlalchemy_object_to_dict(image_source_dict.get("imageSourceConfiguration"))
+    camera_id = image_source_dict.get('cameraId')
+
+    # Lazy import to avoid an import cycle (broadcaster -> backends -> camera_manager),
+    # consistent with camera_manager.get_camera_frame.
+    from utils.streaming.broadcaster import get_broadcaster
+
+    frame_data = get_broadcaster().preview_with_override(camera_id, camera_config)
+    if frame_data is None:
+        # Preserve the legacy error behavior: a missing frame raises so the endpoint
+        # surfaces its HTTP error (the same way get_camera_frame did).
+        raise Exception(f"Unable to get camera frame for camera id: {camera_id}")
+    return frame_data
+
 @router.post("/image-sources/{imageSourceId}/preview")
 def preview_image(imageSourceId, request: GetPreviewImageRequest = GetPreviewImageRequest(), db: Session = Depends(get_db)) -> GetPreviewImageResponse:
     try:
@@ -153,7 +188,7 @@ def preview_image(imageSourceId, request: GetPreviewImageRequest = GetPreviewIma
                 ImageSource(**image_source_dict),
                 image_source_config_override=image_source_config_override,
                 is_preview=True,
-                frame_data=get_frame(image_source_dict, image_source_config_override)
+                frame_data=get_preview_frame(image_source_dict, image_source_config_override)
             )
     except Exception as err:
         raise HTTPException(

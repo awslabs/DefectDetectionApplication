@@ -108,7 +108,8 @@ from endpoints import (
     image_source,
     auth_info,
     download_file,
-    inference_result
+    inference_result,
+    streams
 )
 
 import dao.sqlite_db.models as models
@@ -147,6 +148,7 @@ app.include_router(workflow.router)
 app.include_router(auth_info.router)
 app.include_router(download_file.unauthenticated_router)
 app.include_router(inference_result.router)
+app.include_router(streams.router)
 
 
 def cleanup_workflow_digital_inputs():
