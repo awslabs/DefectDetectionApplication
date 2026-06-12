@@ -48,6 +48,9 @@ class ImageSourceConfiguration(Base):
     imageCrop = Column(JSON)
     device = Column(String)
     deviceName = Column(String)
+    # Persisted advanced GenICam controls (safe set: reverseX, reverseY,
+    # balanceWhiteAuto). Stored as JSON so new controls don't need a migration.
+    advancedSettings = Column(JSON)
 
 
 class InputConfiguration(Base):

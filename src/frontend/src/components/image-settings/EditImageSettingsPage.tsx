@@ -18,6 +18,7 @@
 import { useWatch } from "react-hook-form";
 import { useNavigate } from "react-router-dom";
 import {
+  Alert,
   Button,
   Container,
   Form,
@@ -42,6 +43,10 @@ import { CameraStatus, RegionOfInterest } from "../image-source/types";
 import ImagePlaceholder from "components/common/ImagePlaceholder";
 import { CameraDisconnectedContent } from "components/common/ImagePlaceholder/PresetPlaceholderContents";
 import useCameraConnection from "components/hook/useCameraConnection";
+import { SettingsBounds } from "./bounds";
+import { CameraFeatureBounds } from "../../api/CameraAPI";
+import { AdvancedCameraSettings } from "../image-source/types";
+import { buildAdvancedSettings } from "./advancedFeatures";
 
 type EditImageSettingsPageProps = {
   id: string;
@@ -53,6 +58,9 @@ type EditImageSettingsPageProps = {
   cameraId: string;
   recheckCameraStatusFn: () => void;
   formIsValid: boolean;
+  settingsBounds: SettingsBounds;
+  cameraFeatureBounds?: CameraFeatureBounds;
+  savedAdvanced?: AdvancedCameraSettings;
 };
 
 export default function EditImageSettingsPage(
@@ -72,6 +80,7 @@ export default function EditImageSettingsPage(
   // For non-Arvis cameras (like Nvidia CSI), only check form validity
   // For Arvis cameras, check both form validity and camera connection status
   const isSaveDisabled = !props.formIsValid || (props.isArvisCamera && props.cameraStatus !== CameraStatus.Connected);
+  const isReadOnly = props.isArvisCamera && props.cameraStatus !== CameraStatus.Connected;
   
   console.log('Save button disabled:', isSaveDisabled, 'Reason:', {
     formInvalid: !props.formIsValid,
@@ -106,12 +115,17 @@ export default function EditImageSettingsPage(
         values.editExposure &&
         values.editGstreamerPipeline
       ) {
+        const advancedSettings = buildAdvancedSettings(
+          props.cameraFeatureBounds,
+          values as Record<string, any>,
+        );
         return await getImagePreview(props.id, {
           imageSourceConfiguration: {
             gain: values.editGain,
             exposure: values.editExposure,
             processingPipeline: gstreamerPipelineToDownload,
             imageCrop: props.cropSettings,
+            ...(advancedSettings ? { advancedSettings } : {}),
           },
         });
       }
@@ -187,12 +201,27 @@ export default function EditImageSettingsPage(
           }
         >
           <Grid gridDefinition={[{ colspan: 3 }, { colspan: 9 }]}>
-            <EditImageSettingsPane
-              initialPipelineString={initialPipelineValue}
-              setGstreamerPipelineToDownload={(newPipeline: string): void =>
-                setGstreamerPipelineToDownload(newPipeline)
-              }
-            />
+            <SpaceBetween size="m">
+              {isReadOnly ? (
+                <Alert type="info" header="Read-only">
+                  This camera isn't connected, so settings are read-only. It may
+                  be powered off, on a non-SuperSpeed link, or in use by another
+                  station or process. Connect to the camera to preview and save
+                  changes.
+                </Alert>
+              ) : null}
+              <EditImageSettingsPane
+                initialPipelineString={initialPipelineValue}
+                setGstreamerPipelineToDownload={(newPipeline: string): void =>
+                  setGstreamerPipelineToDownload(newPipeline)
+                }
+                settingsBounds={props.settingsBounds}
+                cameraId={props.isArvisCamera ? props.cameraId : undefined}
+                cameraFeatureBounds={props.cameraFeatureBounds}
+                savedAdvanced={props.savedAdvanced}
+                readOnly={isReadOnly}
+              />
+            </SpaceBetween>
             <Container header={<Header variant={"h1"}>Image preview</Header>}>
               {editImageContent}
             </Container>

@@ -58,6 +58,8 @@ export const Connection = {
 
 export const APIList = {
   camerasAPI: `${Connection.ENDPOINT}/cameras`,
+  cameraFeatureBoundsAPI: `${Connection.ENDPOINT}/cameras/{camera_id}/feature-bounds`,
+  cameraFeaturesAPI: `${Connection.ENDPOINT}/cameras/{camera_id}/features`,
   previewImageAPI: `${Connection.ENDPOINT}/cameras/{camera_id}/preview`,
   executePipelineAPI: `${Connection.ENDPOINT}/cameras/{camera_id}/execute-pipeline`,
   listStreamsAPI: `${Connection.ENDPOINT}/streams`,

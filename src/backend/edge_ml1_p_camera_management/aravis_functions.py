@@ -47,12 +47,14 @@ import gi
 import numpy as np
 import os
 from string import Template
+import threading
 import time
 import traceback
 import logging
 import logging.config
 
 from exceptions.api.aravis_camera_not_found import AravisCameraNotFound
+from exceptions.api.aravis_camera_open_error import AravisCameraOpenError
 
 # LOG LEVELS
 # CRITICAL 50
@@ -72,6 +74,11 @@ from model.Camera import Camera
 
 # Initialize Aravis
 log = logging.getLogger(__name__)
+
+# Serializes full bus rescans so a context teardown (Aravis.shutdown) can never
+# race with a concurrent enumeration in another request thread.
+_rescan_lock = threading.Lock()
+
 
 def getCameras():
     Aravis.enable_interface("Fake")
@@ -94,15 +101,76 @@ def getCameras():
     return cameras
 
 
+def rescan_cameras():
+    """
+    Force a fresh enumeration of the camera bus and return the discovered
+    cameras.
+
+    The backend runs inside a container that does not receive host udev hotplug
+    events, and Aravis/libusb keeps a cached USB context for the life of the
+    process. Because of this, a camera connected after the server started may
+    not show up from a plain update_device_list(), and the only reliable way to
+    pick it up used to be restarting the container.
+
+    Aravis.shutdown() tears down the cached USB/GenICam context in this
+    enumeration process; the following update_device_list() rebuilds it and
+    reliably discovers devices that were hotplugged after startup. Camera
+    acquisition objects live in a separate manager process with their own
+    Aravis context (see utils.camera_manager), so resetting the context here
+    does not disturb active acquisitions/streams.
+    """
+    with _rescan_lock:
+        try:
+            Aravis.shutdown()
+        except Exception as err:
+            # A failed teardown is non-fatal; the re-init below still runs.
+            log.warning("Aravis.shutdown() during rescan failed, continuing: %s", err)
+        return getCameras()
+
+
 def getCamera(cameraId):
+    # Enable Fake camera
+    Aravis.enable_interface("Fake")
+    # Refresh camera list and discover new cameras, if any
+    Aravis.update_device_list()
+
+    # Capture the set of devices currently enumerated on the bus so we can tell
+    # apart two very different failure modes when Aravis.Camera.new() raises:
+    #   1. The camera is not enumerated at all -> genuinely "not found".
+    #   2. The camera is enumerated (it shows up when adding an image source)
+    #      but cannot be opened/bootstrapped -> "detected but unavailable".
+    # The second case is what users hit when a USB3/GenICam camera negotiates
+    # only a USB2 link (non-SuperSpeed cable, USB2 port/hub, low bus power) or
+    # the device is already held open by another process. Aravis reports it as
+    # "Failed to bootstrap USB device ... ", which previously surfaced to the
+    # user as a confusing "not found".
+    discovered_ids = [Aravis.get_device_id(i) for i in range(Aravis.get_n_devices())]
+
     try:
-        # Enable Fake camera
-        Aravis.enable_interface("Fake")
-        # Refresh camera list and discover new cameras, if any
-        Aravis.update_device_list()
         return Aravis.Camera.new(cameraId)
-    except GError:
-        raise AravisCameraNotFound("Error fetching camera details")
+    except GError as err:
+        error_detail = getattr(err, "message", None) or str(err)
+        if cameraId not in discovered_ids:
+            log.error(
+                "Camera '%s' was not found on the bus. Discovered devices: %s. Error: %s",
+                cameraId, discovered_ids, error_detail,
+            )
+            raise AravisCameraNotFound(
+                f"Camera '{cameraId}' was not detected. Make sure it is connected "
+                f"and not already in use by another device."
+            )
+        log.error(
+            "Camera '%s' was detected but could not be opened. Error: %s",
+            cameraId, error_detail,
+        )
+        raise AravisCameraOpenError(
+            f"Camera '{cameraId}' was detected but could not be opened. This often "
+            f"means a USB3 (GenICam) camera negotiated only a USB2 link, a faulty or "
+            f"non-SuperSpeed cable, a USB2 port/hub, insufficient bus power, or the "
+            f"camera is already in use by another process. Reconnect the camera "
+            f"directly to a USB3 (SuperSpeed) port using a certified USB3 cable and "
+            f"try again. Underlying error: {error_detail}"
+        )
 
 
 def get_input_file_from_pipeline(pipelinestr):

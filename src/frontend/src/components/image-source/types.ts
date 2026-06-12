@@ -72,6 +72,12 @@ export interface CameraStatusModel {
   lastUpdatedTime?: number;
 }
 
+export interface AdvancedCameraSettings {
+  reverseX?: boolean;
+  reverseY?: boolean;
+  balanceWhiteAuto?: string;
+}
+
 export interface ImageSourceConfiguration {
   imageSourceConfigurationId?: string;
   gain: number;
@@ -79,6 +85,8 @@ export interface ImageSourceConfiguration {
   processingPipeline: string;
   imageCrop?: RegionOfInterest;
   creationTime?: number;
+  // Persisted safe advanced GenICam controls (flip, white balance).
+  advancedSettings?: AdvancedCameraSettings;
 }
 
 export type RegionOfInterest = {

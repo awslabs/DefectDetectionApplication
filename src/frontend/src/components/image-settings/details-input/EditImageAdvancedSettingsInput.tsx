@@ -26,6 +26,9 @@ import {
 import FormTextarea from "../../form/FormTextarea";
 import { PROCESSING_PIPELINE_MAX } from "../constants";
 import { useController, useWatch } from "react-hook-form";
+import { CameraFeatureBounds } from "../../../api/CameraAPI";
+import { AdvancedCameraSettings } from "../../image-source/types";
+import AdvancedDeviceControls from "./AdvancedDeviceControls";
 
 interface EditImageAdvancedSettingsInputProps {
   /**
@@ -42,6 +45,24 @@ interface EditImageAdvancedSettingsInputProps {
    * @param newPipeline - the new pipeline string
    */
   setGstreamerPipelineToDownload: (newPipeline: string) => void;
+  /**
+   * Connected camera id, used to apply advanced device controls.
+   */
+  cameraId?: string;
+  /**
+   * Device feature ranges/values read from the camera's GenICam feature map.
+   * Drives the optional advanced device controls.
+   */
+  cameraFeatureBounds?: CameraFeatureBounds;
+  /**
+   * When true the camera isn't connected, so device controls are read-only.
+   */
+  readOnly?: boolean;
+  /**
+   * Persisted advanced settings to initialize the controls from (falls back to
+   * the device-reported current values when a control isn't in here).
+   */
+  savedAdvanced?: AdvancedCameraSettings;
 }
 
 export default function EditImageAdvancedSettingsInput(
@@ -91,6 +112,13 @@ export default function EditImageAdvancedSettingsInput(
             Apply
           </Button>
         </Grid>
+        {props.cameraFeatureBounds ? (
+          <AdvancedDeviceControls
+            bounds={props.cameraFeatureBounds}
+            savedAdvanced={props.savedAdvanced}
+            readOnly={props.readOnly}
+          />
+        ) : null}
       </SpaceBetween>
     </ExpandableSection>
   );
