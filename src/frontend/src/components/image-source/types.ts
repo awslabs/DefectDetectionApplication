@@ -72,6 +72,12 @@ export interface CameraStatusModel {
   lastUpdatedTime?: number;
 }
 
+export interface AdvancedCameraSettings {
+  reverseX?: boolean;
+  reverseY?: boolean;
+  balanceWhiteAuto?: string;
+}
+
 export interface ImageSourceConfiguration {
   imageSourceConfigurationId?: string;
   gain: number;
@@ -79,16 +85,8 @@ export interface ImageSourceConfiguration {
   processingPipeline: string;
   imageCrop?: RegionOfInterest;
   creationTime?: number;
-  // Optional advanced GenICam controls, applied to the device on the
-  // acquisition path. Only sent for cameras that support them.
-  reverseX?: boolean;
-  reverseY?: boolean;
-  balanceWhiteAuto?: string;
-  pixelFormat?: string;
-  width?: number;
-  height?: number;
-  offsetX?: number;
-  offsetY?: number;
+  // Persisted safe advanced GenICam controls (flip, white balance).
+  advancedSettings?: AdvancedCameraSettings;
 }
 
 export type RegionOfInterest = {

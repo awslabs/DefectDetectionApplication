@@ -45,7 +45,8 @@ import { CameraDisconnectedContent } from "components/common/ImagePlaceholder/Pr
 import useCameraConnection from "components/hook/useCameraConnection";
 import { SettingsBounds } from "./bounds";
 import { CameraFeatureBounds } from "../../api/CameraAPI";
-import { buildAdvancedConfig } from "./advancedFeatures";
+import { AdvancedCameraSettings } from "../image-source/types";
+import { buildAdvancedSettings } from "./advancedFeatures";
 
 type EditImageSettingsPageProps = {
   id: string;
@@ -59,6 +60,7 @@ type EditImageSettingsPageProps = {
   formIsValid: boolean;
   settingsBounds: SettingsBounds;
   cameraFeatureBounds?: CameraFeatureBounds;
+  savedAdvanced?: AdvancedCameraSettings;
 };
 
 export default function EditImageSettingsPage(
@@ -113,7 +115,7 @@ export default function EditImageSettingsPage(
         values.editExposure &&
         values.editGstreamerPipeline
       ) {
-        const advancedConfig = buildAdvancedConfig(
+        const advancedSettings = buildAdvancedSettings(
           props.cameraFeatureBounds,
           values as Record<string, any>,
         );
@@ -123,7 +125,7 @@ export default function EditImageSettingsPage(
             exposure: values.editExposure,
             processingPipeline: gstreamerPipelineToDownload,
             imageCrop: props.cropSettings,
-            ...advancedConfig,
+            ...(advancedSettings ? { advancedSettings } : {}),
           },
         });
       }
@@ -216,6 +218,7 @@ export default function EditImageSettingsPage(
                 settingsBounds={props.settingsBounds}
                 cameraId={props.isArvisCamera ? props.cameraId : undefined}
                 cameraFeatureBounds={props.cameraFeatureBounds}
+                savedAdvanced={props.savedAdvanced}
                 readOnly={isReadOnly}
               />
             </SpaceBetween>

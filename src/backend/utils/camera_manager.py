@@ -54,38 +54,28 @@ get_frame_lock = Lock()
 # blocking pop_buffer (and thus every preview) indefinitely.
 FRAME_POP_TIMEOUT_MARGIN_US = 5_000_000  # 5s beyond the exposure time
 
-# Tier 2 / Tier 3 GenICam controls surfaced under "Advanced settings".
-# (response_key, GenICam feature name, kind, unit). Each is included only when
-# the connected device actually implements it, so unsupported controls never
-# appear in the UI.
+# Tier 2 GenICam controls surfaced under "Advanced settings". Scoped to the
+# "safe" controls that are persisted and don't affect the stream payload /
+# pipeline. (Pixel format and ROI are intentionally excluded for now: they need
+# the GStreamer caps to track them, so they are a separate follow-up.)
+# (response_key, GenICam feature name, kind, unit).
 ADVANCED_DEVICE_FEATURES = [
-    # Tier 2 — common, conditional
     ("balanceWhiteAuto", "BalanceWhiteAuto", "enumeration", None),
     ("reverseX", "ReverseX", "boolean", None),
     ("reverseY", "ReverseY", "boolean", None),
-    # Tier 3 — supported but pipeline-affecting; the device locks these while
-    # streaming, so applying them rebuilds the stream.
-    ("pixelFormat", "PixelFormat", "enumeration", None),
-    ("width", "Width", "integer", "px"),
-    ("height", "Height", "integer", "px"),
-    ("offsetX", "OffsetX", "integer", "px"),
-    ("offsetY", "OffsetY", "integer", "px"),
 ]
 
-# Image-source-config key -> (GenICam feature, kind) for the advanced controls.
-# These are applied inside start_acquisition (acquisition stopped, immediately
-# before the grab) — the same path gain/exposure use — so they reliably affect
-# the captured frame instead of being written out-of-band.
+# Image-source-config advancedSettings key -> (GenICam feature, kind) for the
+# controls applied inside start_acquisition (the same path gain/exposure use),
+# so they reliably affect the captured frame and the persisted profile applies
+# in preview, capture and workflow alike.
 CONFIG_FEATURE_MAP = {
     "reverseX": ("ReverseX", "boolean"),
     "reverseY": ("ReverseY", "boolean"),
     "balanceWhiteAuto": ("BalanceWhiteAuto", "enumeration"),
-    "pixelFormat": ("PixelFormat", "enumeration"),
-    "width": ("Width", "integer"),
-    "height": ("Height", "integer"),
-    "offsetX": ("OffsetX", "integer"),
-    "offsetY": ("OffsetY", "integer"),
 }
+# None of the currently-supported safe controls change the payload; kept for
+# when pixel format / ROI are added back.
 PAYLOAD_AFFECTING_FEATURES = {"Width", "Height", "OffsetX", "OffsetY", "PixelFormat"}
 
 class Camera():
@@ -381,13 +371,15 @@ class Camera():
         self.stream.push_buffer(Aravis.Buffer.new_allocate(self.payload))
 
     def _apply_config_features(self, config):
-        """Apply advanced GenICam controls present in the image-source config to
-        the device. Returns True if a payload-affecting feature (ROI / pixel
-        format) changed, so the caller can rebuild the stream. Only writes a
-        feature when its value actually changes, so per-frame previews don't
-        rewrite (and rebuild the stream) every grab. Must be called with
-        self._lock held and acquisition stopped."""
+        """Apply advanced GenICam controls from config['advancedSettings'] to the
+        device. Returns True if a payload-affecting feature changed (so the
+        caller can rebuild the stream). Only writes a feature when its value
+        actually changes, so per-frame previews don't rewrite each grab. Must be
+        called with self._lock held and acquisition stopped."""
         if not self.camera or not config:
+            return False
+        advanced = config.get("advancedSettings") or {}
+        if not advanced:
             return False
         applied = getattr(self, "_applied_features", None)
         if applied is None:
@@ -396,9 +388,9 @@ class Camera():
         device = self.camera.get_device()
         payload_changed = False
         for key, (feature, kind) in CONFIG_FEATURE_MAP.items():
-            if key not in config or config.get(key) is None:
+            if key not in advanced or advanced.get(key) is None:
                 continue
-            value = config.get(key)
+            value = advanced.get(key)
             if applied.get(key) == value:
                 continue  # already applied; skip redundant write / stream rebuild
             try:

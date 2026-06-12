@@ -20,6 +20,7 @@ import EditImageSettingsInput from "./details-input/EditImageSettingsInput";
 import EditImageAdvancedSettingsInput from "./details-input/EditImageAdvancedSettingsInput";
 import { SettingsBounds } from "./bounds";
 import { CameraFeatureBounds } from "../../api/CameraAPI";
+import { AdvancedCameraSettings } from "../image-source/types";
 
 type EditImageSettingsPaneProps = {
   initialPipelineString: string;
@@ -27,6 +28,7 @@ type EditImageSettingsPaneProps = {
   settingsBounds: SettingsBounds;
   cameraId?: string;
   cameraFeatureBounds?: CameraFeatureBounds;
+  savedAdvanced?: AdvancedCameraSettings;
   readOnly?: boolean;
 };
 export default function EditImageSettingsPane(
@@ -46,6 +48,7 @@ export default function EditImageSettingsPane(
           setGstreamerPipelineToDownload={props.setGstreamerPipelineToDownload}
           cameraId={props.cameraId}
           cameraFeatureBounds={props.cameraFeatureBounds}
+          savedAdvanced={props.savedAdvanced}
           readOnly={props.readOnly}
         />
       </SpaceBetween>

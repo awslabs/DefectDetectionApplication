@@ -26,6 +26,7 @@ import {
 import { useEffect, useMemo, useRef } from "react";
 import { useFormContext, useWatch } from "react-hook-form";
 import { CameraFeatureBounds } from "../../../api/CameraAPI";
+import { AdvancedCameraSettings } from "../../image-source/types";
 import {
   AdvancedFeature,
   advFieldName,
@@ -34,6 +35,7 @@ import {
 
 interface AdvancedDeviceControlsProps {
   bounds?: CameraFeatureBounds;
+  savedAdvanced?: AdvancedCameraSettings;
   readOnly?: boolean;
 }
 
@@ -47,6 +49,7 @@ interface AdvancedDeviceControlsProps {
  */
 export default function AdvancedDeviceControls({
   bounds,
+  savedAdvanced,
   readOnly,
 }: AdvancedDeviceControlsProps) {
   const { setValue, control } = useFormContext();
@@ -55,19 +58,23 @@ export default function AdvancedDeviceControls({
     [bounds],
   );
 
-  // Seed the form fields from the device-reported current values once per
-  // bounds load, so the controls reflect "what the camera is reporting".
+  // Seed the form fields once per bounds load. Use the persisted value when
+  // present, otherwise the device-reported current value.
   const seededRef = useRef<string>("");
   useEffect(() => {
     const sig = features.map((f) => f.key).join(",");
     if (!features.length || seededRef.current === sig) return;
     for (const f of features) {
-      if (f.bound.current != null) {
-        setValue(advFieldName(f.key), f.bound.current as any);
+      const saved = savedAdvanced
+        ? (savedAdvanced as Record<string, any>)[f.key]
+        : undefined;
+      const initial = saved != null ? saved : f.bound.current;
+      if (initial != null) {
+        setValue(advFieldName(f.key), initial as any);
       }
     }
     seededRef.current = sig;
-  }, [features, setValue]);
+  }, [features, savedAdvanced, setValue]);
 
   if (features.length === 0) return null;
 

@@ -36,6 +36,7 @@ import { NoCrop } from "../image-source/roi/RoIAnnotationImage";
 import { isArvisCameraImageSource, setHashValuesInUrl } from "components/utils";
 import { DynamicRouterHashKey } from "components/layout/constants";
 import { DEFAULT_SETTINGS_BOUNDS, toSettingsBounds } from "./bounds";
+import { buildAdvancedSettings } from "./advancedFeatures";
 
 export default function EditImageSettings(): JSX.Element {
   const navigate = useNavigate();
@@ -109,16 +110,19 @@ export default function EditImageSettings(): JSX.Element {
 
   const editMutation = useMutation({
     mutationFn: (values: SchemaType) => {
-      // NOTE: advanced device controls (flip, white balance, pixel format, ROI)
-      // are applied live through the preview/capture config and are not yet
-      // persisted to the image-source profile (the DB has no columns for them;
-      // persistence is a follow-up requiring a migration). Sending them here
-      // would 500 in the persistence layer, so they are intentionally omitted.
+      // Advanced controls (flip, white balance) are persisted under
+      // advancedSettings and applied on the acquisition path (preview, capture
+      // and workflow). Pixel format / ROI remain out of scope.
+      const advancedSettings = buildAdvancedSettings(
+        boundsQuery.data,
+        form.getValues() as Record<string, any>,
+      );
       const imageSourceConfiguration: ImageSourceConfiguration = {
         gain: values.editGain,
         exposure: values.editExposure,
         processingPipeline: values.editGstreamerPipeline,
         imageCrop: cropSettings,
+        ...(advancedSettings ? { advancedSettings } : {}),
       };
 
       return editImageSource(imageSourceId, {
@@ -217,6 +221,7 @@ export default function EditImageSettings(): JSX.Element {
             formIsValid={form.formState.isValid}
             settingsBounds={settingsBounds}
             cameraFeatureBounds={boundsQuery.data}
+            savedAdvanced={getQuery.data?.imageSourceConfiguration?.advancedSettings}
           />
         </form>
       </FormProvider>

@@ -54,6 +54,7 @@ class ImageSourceConfigurationsOutputModel(BaseModel):
     device: Optional[str] = None
     deviceName: Optional[str] = None
     imageSourceConfigId: str
+    advancedSettings: Optional[dict] = None
 
 
 class ImageSourceCropModel(BaseModel):
@@ -70,6 +71,7 @@ class ImageSourceConfigurationsInputModel(BaseModel):
     imageCrop: Optional[ImageSourceCropModel] = None
     device: Optional[str] = None
     deviceName: Optional[str] = None
+    advancedSettings: Optional[dict] = None
 
 
 class InputConfigurationsModel(BaseModel):

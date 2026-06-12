@@ -37,16 +37,6 @@ const ADVANCED_FEATURE_META: AdvancedFeatureMeta[] = [
   },
   { key: "reverseX", label: "Flip horizontal" },
   { key: "reverseY", label: "Flip vertical" },
-  {
-    key: "pixelFormat",
-    label: "Pixel format",
-    description:
-      "Changing the pixel format can affect the processing pipeline and model input.",
-  },
-  { key: "width", label: "Width (px)" },
-  { key: "height", label: "Height (px)" },
-  { key: "offsetX", label: "Offset X (px)" },
-  { key: "offsetY", label: "Offset Y (px)" },
 ];
 
 export interface AdvancedFeature extends AdvancedFeatureMeta {
@@ -84,19 +74,20 @@ export function advFieldName(key: string): string {
 type FeatureValue = string | number | boolean;
 
 /**
- * Build the advanced portion of an imageSourceConfiguration from current form
- * values, keyed by the config keys the backend expects (reverseX, pixelFormat,
- * width, ...). Only includes features the connected camera supports.
+ * Build the persisted `advancedSettings` object from current form values, keyed
+ * by the config keys the backend expects (reverseX, reverseY,
+ * balanceWhiteAuto). Only includes controls the connected camera supports.
+ * Returns undefined when there is nothing to send.
  */
-export function buildAdvancedConfig(
+export function buildAdvancedSettings(
   bounds: CameraFeatureBounds | undefined,
   formValues: Record<string, any> | undefined,
-): Record<string, FeatureValue> {
+): Record<string, FeatureValue> | undefined {
+  if (!bounds || !formValues) return undefined;
   const out: Record<string, FeatureValue> = {};
-  if (!bounds || !formValues) return out;
   for (const f of getSupportedAdvancedFeatures(bounds)) {
     const v = formValues[advFieldName(f.key)];
     if (v !== undefined && v !== null && v !== "") out[f.key] = v;
   }
-  return out;
+  return Object.keys(out).length ? out : undefined;
 }

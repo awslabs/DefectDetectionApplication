@@ -28,7 +28,7 @@
 from marshmallow import Schema, fields, post_load, EXCLUDE
 
 class ImageSourceConfiguration:
-    def __init__(self, imageSourceConfigId, gain, exposure, processingPipeline, creationTime, imageCrop=None, device=None, deviceName=None):
+    def __init__(self, imageSourceConfigId, gain, exposure, processingPipeline, creationTime, imageCrop=None, device=None, deviceName=None, advancedSettings=None):
         self.imageSourceConfigId = imageSourceConfigId
         self.gain = gain
         self.exposure = exposure
@@ -37,6 +37,9 @@ class ImageSourceConfiguration:
         self.imageCrop = imageCrop
         self.device = device
         self.deviceName = deviceName
+        # Persisted safe advanced GenICam controls (reverseX, reverseY,
+        # balanceWhiteAuto).
+        self.advancedSettings = advancedSettings
 
     def get(self, attr_name, default=None):
         return getattr(self, attr_name, default)
@@ -67,6 +70,7 @@ class ImageSourceConfigurationSchema(Schema):
     imageCrop = fields.Nested(ImageCropConfigSchema(), required=False)
     device = fields.Str(required=False, allow_none=True)
     deviceName = fields.Str(required=False, allow_none=True)
+    advancedSettings = fields.Dict(required=False, allow_none=True)
 
     @post_load
     def make_source(self, data, **kwargs):
