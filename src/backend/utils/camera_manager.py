@@ -599,59 +599,44 @@ def _get_camera_frame(camera_id, camera, camera_config):
         return None
 
 def get_camera_frame(camera_id, camera_config=None):
-    """Return a single inference/capture frame for ``camera_id``.
+    """Return a single inference/capture/preview frame for ``camera_id``.
 
-    Rewired onto the broadcast-model stream stack (task 7.2): instead of opening a
-    private per-request device claim, this routes through
-    ``StreamBroadcaster.get_inference_frame`` so that *all* device access for a
-    camera is mediated by the one process-wide registry that enforces the
-    single-open-claim-per-camera invariant. When a live preview session is already
-    running the broadcaster reuses that claim (no second device open); when none
-    exists it opens exactly one dedicated claim, grabs, and releases it — the same
-    behavior the legacy dedicated grab used to provide here.
+    Uses the cached, persistent ``Camera`` connection model: the camera is opened
+    once via ``connect_camera`` (stored in ``camera_objects``) and **reused** across
+    calls — each call performs a per-request ``start_acquisition`` / ``get_frame`` /
+    ``stop_acquisition`` on that already-claimed device, but does NOT release the USB
+    claim between calls. This is what the live-preview poll (~2 Hz) and the
+    capture/workflow callers depend on.
 
-    The return contract is preserved for existing callers (``digital_input_*``,
-    ``workflow``, and the capture / preview endpoints): on success it returns the
-    same ``{'data', 'height', 'width'}`` dict that the legacy path returned (via
-    ``pickle.loads(camera.get_frame())``), and on no-frame / failure it raises an
-    ``Exception`` exactly as before. ``broadcaster.get_inference_frame`` already
-    returns that unpickled dict (task 7.1) — or ``None`` — so this function only has
-    to translate the ``None`` case back into the historical raised exception.
+    NOTE (regression fix): an earlier revision routed this through
+    ``StreamBroadcaster.get_inference_frame``, whose no-session path opened AND
+    closed a fresh device claim on every call. On real USB3Vision hardware the
+    ~500 ms preview poll then overlapped successive open/close cycles and the device
+    rejected the next claim with ``LIBUSB_ERROR_BUSY``, breaking the live view. The
+    broadcast (``/streams``) stack remains available for the viewer subscribe path,
+    but the preview/capture/inference hot path reuses the single cached connection
+    again to avoid that claim thrash.
 
-    ``get_broadcaster`` is imported lazily inside the function to avoid a circular
-    import at module load: the broadcaster imports the backend adapters, which in
-    turn lazily import this ``camera_manager`` module, so a top-level import here
-    would form an import cycle.
-
-    Args:
-        camera_id: Identifier of the physical camera.
-        camera_config: Optional image-source / per-capture configuration, passed
-            through unchanged to the broadcaster (used only by the dedicated-claim
-            fallback when no live session exists; ignored while a session is active
-            and its already-applied config is reused).
-
-    Returns:
-        The frame as a ``{'data', 'height', 'width'}`` dict.
-
-    Raises:
-        Exception: When no frame is available (broadcaster returned ``None``),
-            preserving the legacy contract relied on by the capture / workflow
-            callers that surface this as an HTTP error.
+    Returns the ``{'data', 'height', 'width'}`` dict produced by the camera, and
+    raises ``Exception`` on no-frame/failure (the contract ``digital_input_*`` /
+    ``workflow`` / capture / preview callers rely on to surface an HTTP error).
     """
-    # Lazy import to avoid a module-load import cycle (broadcaster -> backends ->
-    # camera_manager). A function-level import is safe and cheap after first load.
-    from utils.streaming.broadcaster import get_broadcaster
-
-    # ``get_frame_lock`` is retained so the get_camera_frame entry point keeps its
-    # historical serialization semantics for callers. The broadcaster also guards
-    # device access with its own registry lock, so this outer lock is no longer
-    # strictly required for correctness; it is kept to avoid any behavioral change
-    # for existing concurrent callers of this function.
     get_frame_lock.acquire()
+    if camera_id not in camera_objects:
+        logger.error("Attempting to create camera object")
+        connect_camera(camera_id)
+
+    camera = camera_objects.get(camera_id)
+    if camera is None:
+        logger.error(f"Camera not found for ID {camera_id}")
+        raise Exception(f"Camera not able to connect for ID {camera_id}")
     try:
-        frame = get_broadcaster().get_inference_frame(camera_id, camera_config)
+        frame = _get_camera_frame(camera_id, camera, camera_config)
         if frame is not None:
             return frame
+        else:
+            raise Exception(f"Unable to get camera frame for camera id: {camera_id}")
+    except Exception:
         raise Exception(f"Unable to get camera frame for camera id: {camera_id}")
     finally:
         get_frame_lock.release()

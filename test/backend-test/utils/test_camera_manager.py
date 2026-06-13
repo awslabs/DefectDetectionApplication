@@ -73,42 +73,25 @@ class TestCameraManager(LocalServerBaseTestCase):
 
 
 class TestGetCameraFrameCompatibility(LocalServerBaseTestCase):
-    """Regression tests for ``get_camera_frame`` after it was rewired (task 7.2)
-    onto ``StreamBroadcaster.get_inference_frame`` (task 7.7).
+    """Regression tests for ``get_camera_frame`` after reverting it to the cached,
+    persistent connection model (the production ``LIBUSB_ERROR_BUSY`` fix).
 
-    The existing ``digital_input_*`` / ``workflow`` / capture callers depend on a
-    stable contract for ``get_camera_frame(camera_id, camera_config)``:
+    The earlier broadcaster rewiring (task 7.2) opened AND closed a fresh device
+    claim on every call via the broadcaster's no-session path; on real USB3Vision
+    hardware the ~500 ms preview poll overlapped those open/close cycles and the
+    device rejected the next claim with ``LIBUSB_ERROR_BUSY``, breaking the live
+    view. ``get_camera_frame`` is back to the proven model: open the camera once
+    (``connect_camera`` -> ``camera_objects``) and **reuse** it across calls,
+    performing only a per-request ``start_acquisition``/``get_frame``/
+    ``stop_acquisition`` (in ``_get_camera_frame``) without releasing the claim
+    between calls.
 
-    * the signature is unchanged — ``camera_config`` is positional-or-keyword and
-      defaults to ``None``,
-    * on success it returns the broadcaster's frame dict (``{'data','height','width'}``)
-      verbatim,
-    * on no-frame it raises an ``Exception`` (the capture / workflow endpoints catch
-      this and surface an HTTP error),
-    * ``camera_id`` and ``camera_config`` are forwarded unchanged to the broadcaster.
-
-    These tests pin that contract by patching the broadcaster singleton, so they do
-    not need a real camera / device stack. ``get_camera_frame`` resolves the
-    broadcaster via a function-level ``from utils.streaming.broadcaster import
-    get_broadcaster``, so patching ``utils.streaming.broadcaster.get_broadcaster`` is
-    what the call picks up.
-    _Validates: Requirements 6.1, 6.3_
+    The caller contract (``digital_input_*`` / ``workflow`` / capture / preview) is
+    unchanged: same signature, returns the ``{'data','height','width'}`` dict on
+    success, raises ``Exception`` on no-frame/failure. These tests pin that contract
+    and the no-per-call-reconnect behavior by patching ``camera_objects`` /
+    ``connect_camera`` / ``_get_camera_frame`` so no real device is needed.
     """
-
-    def _patch_broadcaster(self, frame):
-        """Patch the broadcaster singleton so ``get_inference_frame`` returns ``frame``.
-
-        Returns the started patcher (caller stops it) and the stub broadcaster so the
-        test can assert how it was called.
-        """
-        stub = Mock(name="StreamBroadcaster")
-        stub.get_inference_frame.return_value = frame
-        patcher = patch(
-            "utils.streaming.broadcaster.get_broadcaster", return_value=stub
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        return stub
 
     def test_signature_is_unchanged(self):
         """The public signature stays ``get_camera_frame(camera_id, camera_config=None)``
@@ -124,69 +107,53 @@ class TestGetCameraFrameCompatibility(LocalServerBaseTestCase):
             sig.parameters["camera_config"].default, None
         )
 
-    def test_returns_broadcaster_frame_dict_on_success(self):
-        """A successful inference frame is returned verbatim as the legacy dict shape."""
+    def test_reuses_cached_camera_without_reconnecting(self):
+        """When the camera is already cached, get_camera_frame reuses it and does NOT
+        re-open the USB claim (the crux of the LIBUSB_ERROR_BUSY fix)."""
         from utils.camera_manager import get_camera_frame
 
         frame = {"data": b"\x00\x01\x02\x03", "height": 2, "width": 2}
-        stub = self._patch_broadcaster(frame)
+        fake_camera = Mock(name="Camera")
+        with patch("utils.camera_manager.camera_objects", {"Fake_1": fake_camera}), \
+             patch("utils.camera_manager.connect_camera") as mock_connect, \
+             patch("utils.camera_manager._get_camera_frame", return_value=frame) as mock_grab:
+            result = get_camera_frame("Fake_1", {"gain": 5, "exposure": 1000})
 
-        result = get_camera_frame("Fake_1", {"gain": 5, "exposure": 1000})
+        self.assertEqual(result, frame)
+        # Cached connection reused: no re-open/claim per call.
+        mock_connect.assert_not_called()
+        mock_grab.assert_called_once()
+        # camera_config is forwarded to the per-request grab unchanged.
+        self.assertEqual(mock_grab.call_args[0][2], {"gain": 5, "exposure": 1000})
 
-        self.assertIs(result, frame)
-        self.assertEqual(result, {"data": b"\x00\x01\x02\x03", "height": 2, "width": 2})
-        stub.get_inference_frame.assert_called_once_with(
-            "Fake_1", {"gain": 5, "exposure": 1000}
-        )
-
-    def test_forwards_camera_id_and_config_unchanged(self):
-        """``camera_id`` and ``camera_config`` are passed through to the broadcaster
-        untouched, so capture/workflow per-capture config still reaches the device path."""
+    def test_connects_once_when_not_cached(self):
+        """When no cached camera exists, get_camera_frame connects exactly once
+        (then reuse takes over on subsequent calls)."""
         from utils.camera_manager import get_camera_frame
 
-        config = {"type": "Camera", "imageSourceConfiguration": {"gain": 2}}
-        stub = self._patch_broadcaster({"data": b"x", "height": 1, "width": 1})
+        frame = {"data": b"x", "height": 1, "width": 1}
+        cache = {}
+        fake_camera = Mock(name="Camera")
 
-        get_camera_frame("camera-123", config)
+        def _fake_connect(camera_id):
+            cache[camera_id] = fake_camera
 
-        stub.get_inference_frame.assert_called_once_with("camera-123", config)
+        with patch("utils.camera_manager.camera_objects", cache), \
+             patch("utils.camera_manager.connect_camera", side_effect=_fake_connect) as mock_connect, \
+             patch("utils.camera_manager._get_camera_frame", return_value=frame):
+            result = get_camera_frame("Fake_1")
 
-    def test_defaults_camera_config_to_none_for_single_arg_callers(self):
-        """Single-argument callers (``get_camera_frame(camera_id)``) forward ``None``
-        as the config, exercising the broadcaster's no-config path."""
+        self.assertEqual(result, frame)
+        mock_connect.assert_called_once_with("Fake_1")
+
+    def test_raises_when_no_frame(self):
+        """A None grab result raises Exception (capture/workflow surface it as HTTP error)."""
         from utils.camera_manager import get_camera_frame
 
-        stub = self._patch_broadcaster({"data": b"y", "height": 1, "width": 1})
-
-        get_camera_frame("Fake_1")
-
-        stub.get_inference_frame.assert_called_once_with("Fake_1", None)
-
-    def test_raises_when_broadcaster_returns_none(self):
-        """When no frame is available the broadcaster returns ``None``; the legacy
-        contract requires ``get_camera_frame`` to raise so callers surface an error."""
-        from utils.camera_manager import get_camera_frame
-
-        self._patch_broadcaster(None)
-
-        with self.assertRaises(Exception) as ctx:
-            get_camera_frame("Fake_1", {"gain": 1})
+        fake_camera = Mock(name="Camera")
+        with patch("utils.camera_manager.camera_objects", {"Fake_1": fake_camera}), \
+             patch("utils.camera_manager.connect_camera"), \
+             patch("utils.camera_manager._get_camera_frame", return_value=None):
+            with self.assertRaises(Exception) as ctx:
+                get_camera_frame("Fake_1", {"gain": 1})
         self.assertIn("Fake_1", str(ctx.exception))
-
-    def test_capture_caller_surfaces_no_frame_as_exception(self):
-        """End-to-end-ish: the capture helper (``captured_images_utils``) wraps
-        ``get_camera_frame`` in try/except and re-raises as an HTTP error, so a
-        ``None`` from the broadcaster must propagate as a raised exception, not a
-        ``None`` return that would slip past the caller's error handling."""
-        from utils.camera_manager import get_camera_frame
-
-        self._patch_broadcaster(None)
-
-        # The capture path does: try: return get_camera_frame(...) except Exception: raise HTTPException
-        # so confirm the exception is raised (not swallowed / not a None return).
-        raised = False
-        try:
-            get_camera_frame("Fake_1", {})
-        except Exception:
-            raised = True
-        self.assertTrue(raised, "get_camera_frame must raise on no-frame for callers")
