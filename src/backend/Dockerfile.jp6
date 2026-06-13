@@ -1,5 +1,6 @@
 ARG OS
 ARG PLATFORM
+ARG PYTHON_VERSION
 # ── CUDA 11.4 cudart provider (for the Neo/DLR model runtime) ──────────────
 # SageMaker Neo's NVIDIA/TensorRT path maxes out at cuda-ver 11.4, so DDA models
 # are compiled against CUDA 11.4. The Neo artifact bundles its own libdlr.so
@@ -16,6 +17,8 @@ ARG PLATFORM
 # 11.4 cudart works against JetPack 6's GPU driver.
 FROM nvcr.io/nvidia/l4t-cuda:11.4.19-runtime AS cuda114
 FROM nvcr.io/nvidia/l4t-jetpack:r36.3.0
+# Re-declare after FROM so the build arg is available in the build stage.
+ARG PYTHON_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Disable py3compile during apt installs to prevent segfaults in l4t-jetpack base image
@@ -31,7 +34,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends software-properties-common && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && \
-    apt-get install -y --no-install-recommends wget build-essential libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb python3.9 python3.9-dev python3.9-venv python3.9-distutils
+    apt-get install -y --no-install-recommends wget build-essential cmake libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-distutils
 
 RUN apt-get update
 
@@ -83,15 +86,33 @@ RUN apt-get update \
 RUN if [ -f /usr/bin/py3compile.bak ]; then mv /usr/bin/py3compile.bak /usr/bin/py3compile; fi && \
     if [ -f /usr/bin/py3clean.bak ]; then mv /usr/bin/py3clean.bak /usr/bin/py3clean; fi
 
-# NOW switch python3 to 3.9 — all apt installs are done, no more py3compile under 3.9
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1 \
-    && update-alternatives --set python3 /usr/bin/python3.9
-RUN wget -q https://bootstrap.pypa.io/pip/3.9/get-pip.py && python3 get-pip.py && rm get-pip.py
+# NOW switch python3 to 3.11 — all apt installs are done, no more py3compile under 3.11
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}
+RUN wget -q https://bootstrap.pypa.io/get-pip.py && python3 get-pip.py && rm get-pip.py
 
 # Install pip packages (native build, no QEMU workarounds needed)
 RUN pip install --no-cache-dir pycairo==1.23.0
 RUN pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2
 RUN pip install --no-cache-dir psutil==5.9.5
+# Pre-build the PINNED awscrt==0.14.7 (transitive dep of awsiotsdk==1.11.9) so its
+# vendored aws-lc is linked correctly. awscrt 0.14.7 always builds and statically
+# links its own bundled aws-lc (BoringSSL) — it has no flag to opt out — but on
+# this image the system OpenSSL static archive (/usr/lib/<triplet>/libcrypto.a,
+# from libssl-dev) sits EARLIER on the linker search path (-L/usr/lib/<triplet>
+# precedes awscrt's vendored -Lbuild/.../deps/install/lib), so the final
+# `_awscrt*.so` link resolves `-l:libcrypto.a` against system OpenSSL, which lacks
+# the AWS-LC AEAD API. Result at import: `undefined symbol:
+# EVP_aead_aes_128_gcm_tls13`. Temporarily move the system static archive aside
+# (its .so + headers stay in place for every other build) while awscrt compiles so
+# the linker falls through to the vendored aws-lc lib, then restore it. This
+# pre-install satisfies awsiotsdk's pin, so the requirements install below does not
+# rebuild awscrt. The awscrt/awsiotsdk versions are unchanged.
+RUN ARCH_TRIPLET="$(gcc -dumpmachine)" && LC="/usr/lib/${ARCH_TRIPLET}/libcrypto.a" && \
+    if [ -f "$LC" ]; then mv "$LC" "${LC}.bak"; fi && \
+    pip install --no-cache-dir --no-binary :all: awscrt==0.14.7 && \
+    if [ -f "${LC}.bak" ]; then mv "${LC}.bak" "$LC"; fi && \
+    python3 -c "import awscrt.mqtt; print('awscrt vendored aws-lc link OK')"
 RUN pip install --no-cache-dir -r ./requirements.txt
 RUN pip install --no-cache-dir --upgrade requests
 
@@ -101,8 +122,10 @@ RUN pip install --no-cache-dir meson ninja
 RUN pip install --no-cache-dir 'setuptools<71'
 # Fix g-ir-scanner to use the base image's system python (its _giscanner C
 # extension is built for the distro python — 3.10 on the jammy/r36 base — not
-# the 3.9 we switch to). Detect it dynamically rather than hardcoding 3.8.
-RUN SYS_PY=$(ls /usr/bin/python3.1? /usr/bin/python3.8 2>/dev/null | grep -v 3.9 | head -1) && \
+# the 3.11 we switch to). Detect it dynamically rather than hardcoding 3.8.
+# The exclusion grep drops the DDA interpreter (3.11) from the candidates so the
+# distro python (3.10) keeps being selected.
+RUN SYS_PY=$(ls /usr/bin/python3.1? /usr/bin/python3.8 2>/dev/null | grep -v 3.11 | head -1) && \
     SYS_PY=${SYS_PY:-/usr/bin/python3.10} && \
     echo "Using system python for g-ir-scanner: $SYS_PY" && \
     cp /usr/bin/g-ir-scanner /usr/bin/g-ir-scanner.bak && \
@@ -111,11 +134,13 @@ RUN SYS_PY=$(ls /usr/bin/python3.1? /usr/bin/python3.8 2>/dev/null | grep -v 3.9
     chmod +x /usr/bin/g-ir-scanner && \
     head -1 /usr/bin/g-ir-scanner
 RUN ./edge_ml1_p_camera_management/install_aravis.sh
-# Restore latest setuptools after aravis build
-RUN pip install --no-cache-dir --upgrade setuptools
-RUN python3.9 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
+# Restore a modern setuptools after the aravis build, but cap below 81: setuptools
+# 81 removed bundled pkg_resources, which grpc_tools.protoc imports (from-source
+# python has no system pkg_resources fallback).
+RUN pip install --no-cache-dir 'setuptools<81'
+RUN python${PYTHON_VERSION} -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
 
-RUN find / -name "libpython3.9.so.1.0" -print
+RUN find / -name "libpython${PYTHON_VERSION}.so.1.0" -print
 
 RUN apt clean -y
 
@@ -140,14 +165,14 @@ COPY alembic.ini ./
 COPY dda_triton ./dda_triton
 COPY lyra_anomalies_mask_utils ./lyra_anomalies_mask_utils
 COPY lyra_science_processing_utils ./lyra_science_processing_utils
-CMD ["python3.9", "app.py"]
+CMD ["python3.11", "app.py"]
 
 ## TODO: Remove copy edgemlsdk files here. Change to direct build in Docker
 # To test and build - Copy artifacts file to /src/backend/edgemlsdk
 COPY edgemlsdk ./edgemlsdk
 RUN ./edge_ml1_p_camera_management/install_edgemlsdk.sh
 COPY dlr_disable_phone_home.py ./
-RUN python3.9 dlr_disable_phone_home.py
+RUN python${PYTHON_VERSION} dlr_disable_phone_home.py
 
 # Stage the CUDA 11.4 runtime libs from the NGC l4t-cuda image at the exact
 # RUNPATH the Neo-compiled model's bundled libdlr.so expects

@@ -23,6 +23,33 @@ fi
 COMPONENT_NAME=$1
 VERSION=$2
 ARCHITECTURE=`uname -m`
+# Single source of truth for the DDA interpreter version. Threaded to the
+# edgemlsdk build (`-y`) and the docker-compose build args (`PYTHON_VERSION`)
+# so the version is set once. Override via the PYTHON_VERSION env var.
+PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
+export PYTHON_VERSION
+
+# ── Repo-audit guard (spec: python-3-11-security-upgrade) ───────────────────
+# This repo has no separate CI pipeline; build-custom.sh IS the build gate, so
+# the audit is wired in here to fail fast. test/python_version_audit.py scans
+# the scoped build/runtime/provisioning/doc artifacts and exits non-zero
+# (printing the offending lines) if a disallowed end-of-life interpreter (the
+# unsupported 3.9 series) reference is reintroduced. Running it before the
+# (slow) docker builds means a regression aborts the build immediately with a
+# clear message. The preserved distro-python references (g-ir-scanner system
+# python, host model-conversion python3) are intentionally NOT matched by the
+# audit. Set SKIP_PY_AUDIT=1 to bypass (not recommended).
+if [ "${SKIP_PY_AUDIT:-0}" = "1" ]; then
+  echo "SKIP_PY_AUDIT=1 set — skipping interpreter-version audit guard."
+elif command -v python3 >/dev/null 2>&1 && [ -f test/python_version_audit.py ]; then
+  echo "Running interpreter-version audit guard (no disallowed 3.9 references)..."
+  python3 test/python_version_audit.py \
+    || { echo "ERROR: interpreter-version audit failed — a disallowed end-of-life 3.9 interpreter reference reappeared (see hits above). Aborting build."; exit 1; }
+  echo "Interpreter-version audit passed (no disallowed 3.9 references)."
+else
+  echo "WARNING: skipping interpreter-version audit guard (python3 or test/python_version_audit.py not found)."
+fi
+
 # change to 20.04 or 18.04
 IMAGE_VER="18.04"
 #IMAGE_VER="20.04"
@@ -64,9 +91,9 @@ cd src
 #edgemlsdk
 cd edgemlsdk/
 if [ -n "$JETPACK_ARG" ]; then
-  ./build.sh -p $(uname -m) -u $IMAGE_VER -y 3.9 -j "$JETPACK_ARG"
+  ./build.sh -p $(uname -m) -u $IMAGE_VER -y "$PYTHON_VERSION" -j "$JETPACK_ARG"
 else
-  ./build.sh -p $(uname -m) -u $IMAGE_VER -y 3.9
+  ./build.sh -p $(uname -m) -u $IMAGE_VER -y "$PYTHON_VERSION"
 fi
 cd ..
 echo "Current directory: $(pwd)"
@@ -118,10 +145,10 @@ echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 # forces an emulated arm64 build that fails compiling Python from source
 # ("cannot compute sizeof (long double)"). x86_64 uses only `generic`.
 if [ "$ARCHITECTURE" = "x86_64" ]; then
-  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache \
+  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" --no-cache \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 else
-  docker-compose --profile tegra --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --no-cache \
+  docker-compose --profile tegra --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" --no-cache \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 fi
 cd ..
@@ -138,17 +165,22 @@ if [ "${SKIP_BACKEND_TESTS:-0}" = "1" ]; then
 else
   echo "Running backend unit tests inside the flask-app image..."
   REPO_ROOT="$(pwd)"
+  # PYTHON_VERSION is passed into the container via `-e` so the single-quoted
+  # bash -c body stays intact (no fragile quote-breaking in the outer shell);
+  # `python${PYTHON_VERSION}` is then expanded by the container's shell at run
+  # time, resolving to the live 3.11 interpreter inside the image.
   docker run --rm \
     -v "$REPO_ROOT":/repo -w /repo \
+    -e PYTHON_VERSION="$PYTHON_VERSION" \
     --entrypoint bash flask-app -c '
       set -e
-      python3.9 -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures
+      python${PYTHON_VERSION} -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures
       export PYTHONPATH=/repo/src/backend
       # The backend imports the triton/panorama bindings at collection time
       # (via conftest). docker-compose normally provides these loader paths at
       # Run time; replicate them here so libtritonserver.so resolves.
       export LD_LIBRARY_PATH=/opt/tritonserver/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
-      python3.9 -m pytest \
+      python${PYTHON_VERSION} -m pytest \
         test/backend-test/utils/test_auth.py \
         test/backend-test/api-endpoints/test_auth_info_api.py \
         test/backend-test/utils/test_user_group_management_utils.py \

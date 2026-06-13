@@ -27,7 +27,15 @@ _import = __import__
 os.environ["TRITON_INSTALL_DIR"]= "/opt/tritonserver"
 # Needed since triton will look for the correct interpreter to run the python backend with.
 
-os.environ["PYTHONHOME"] = "/usr/bin/python3.9"
+# Derive PYTHONHOME from the live interpreter rather than hard-coding a single
+# layout. Triton uses PYTHONHOME to locate the interpreter that runs its python
+# backend, so it must resolve to the running 3.11 interpreter. The original
+# value was the interpreter executable path; sys.executable is the
+# layout-independent equivalent and preserves that exact form, resolving to
+# /usr/bin/python3.11 on the deadsnakes (JP5/JP6) images and
+# /usr/local/bin/python3.11 on the from-source generic image.
+import sys
+os.environ["PYTHONHOME"] = sys.executable
 def import_mocker(name, *args,**kwargs):
     if name == 'dda_logging.logger':
         return mock_logger

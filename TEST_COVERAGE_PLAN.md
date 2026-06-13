@@ -27,10 +27,10 @@ Two ways:
 2. Manually against an existing flask-app image:
 ```bash
 docker run --rm -v "$PWD":/repo -w /repo --entrypoint bash flask-app -c '
-  python3.9 -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures
+  python3.11 -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures
   export PYTHONPATH=/repo/src/backend
   export LD_LIBRARY_PATH=/opt/tritonserver/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
-  python3.9 -m pytest test/backend-test/... -v
+  python3.11 -m pytest test/backend-test/... -v
 '
 ```
 

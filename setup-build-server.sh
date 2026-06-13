@@ -161,33 +161,33 @@ else
     add_warning "Docker may not be fully accessible (may need to restart or log in again)"
 fi
 
-echo "▶ Installing Python 3.9..."
-if ! command -v python3.9 >/dev/null 2>&1; then
+echo "▶ Installing Python 3.11..."
+if ! command -v python3.11 >/dev/null 2>&1; then
     UBUNTU_VERSION=$(lsb_release -rs)
     if [ "$UBUNTU_VERSION" = "18.04" ]; then
-        echo "  Building Python 3.9 from source (Ubuntu 18.04)..."
+        echo "  Building Python 3.11 from source (Ubuntu 18.04)..."
         run_cmd "sudo apt-get install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget" || add_warning "Failed to install build dependencies"
         
-        if [ ! -d /tmp/Python-3.9.16 ]; then
-            run_cmd "cd /tmp && wget https://www.python.org/ftp/python/3.9.16/Python-3.9.16.tgz" || add_error "Failed to download Python 3.9"
-            run_cmd "cd /tmp && tar -xf Python-3.9.16.tgz" || add_error "Failed to extract Python 3.9"
+        if [ ! -d /tmp/Python-3.11.9 ]; then
+            run_cmd "cd /tmp && wget https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz" || add_error "Failed to download Python 3.11"
+            run_cmd "cd /tmp && tar -xf Python-3.11.9.tgz" || add_error "Failed to extract Python 3.11"
         fi
         
-        run_cmd "cd /tmp/Python-3.9.16 && ./configure --enable-optimizations" || add_error "Failed to configure Python 3.9"
-        run_cmd "cd /tmp/Python-3.9.16 && make -j 8" || add_error "Failed to build Python 3.9"
-        run_cmd "cd /tmp/Python-3.9.16 && sudo make altinstall" || add_error "Failed to install Python 3.9"
+        run_cmd "cd /tmp/Python-3.11.9 && ./configure --enable-optimizations" || add_error "Failed to configure Python 3.11"
+        run_cmd "cd /tmp/Python-3.11.9 && make -j 8" || add_error "Failed to build Python 3.11"
+        run_cmd "cd /tmp/Python-3.11.9 && sudo make altinstall" || add_error "Failed to install Python 3.11"
     else
-        echo "  Installing Python 3.9 from PPA..."
+        echo "  Installing Python 3.11 from PPA..."
         run_cmd "sudo add-apt-repository ppa:deadsnakes/ppa -y" || add_warning "Failed to add deadsnakes PPA"
         run_cmd "sudo apt-get update" || add_warning "Failed to update package manager"
-        run_cmd "sudo apt-get install -y python3.9 python3.9-venv python3.9-dev" || add_error "Failed to install Python 3.9"
+        run_cmd "sudo apt-get install -y python3.11 python3.11-venv python3.11-dev" || add_error "Failed to install Python 3.11"
     fi
     
     # Set as default
-    run_cmd "sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.9 1" || add_warning "Failed to set Python 3.9 as default"
-    echo "✓ Python 3.9 installed"
+    run_cmd "sudo update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.11 1" || add_warning "Failed to set Python 3.11 as default"
+    echo "✓ Python 3.11 installed"
 else
-    echo "✓ Python 3.9 already installed"
+    echo "✓ Python 3.11 already installed"
 fi
 
 echo "▶ Configuring PATH..."

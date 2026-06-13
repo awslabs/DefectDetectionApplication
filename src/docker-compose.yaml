@@ -8,6 +8,7 @@ services:
       args:
         OS: ${OS:-20.04}
         PLATFORM: ${PLATFORM:-aarch64}
+        PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
     image: flask-app
     platform: linux/arm64/v8
     privileged: true
@@ -66,6 +67,7 @@ services:
       args:
         OS: ${OS:-20.04}
         PLATFORM: ${PLATFORM:-x86_64}
+        PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
     image: flask-app
     privileged: true
     expose:

@@ -1,7 +1,7 @@
 # Defect Detection Application (DDA)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
 
 The Defect Detection Application (DDA) is an edge-deployed computer vision solution for quality assurance in discrete manufacturing environments. Originally developed by the AWS EdgeML service team, DDA is now available as an open-source project under the stewardship of the AWS Manufacturing TFC and Auto/Manufacturing IBU.
@@ -205,7 +205,7 @@ DDA consists of several key components:
 
 ### Included Components
 
-- Python 3.9+ runtime
+- Python 3.11+ runtime
 - GStreamer 1.0+ (for video streaming)
 - NVIDIA Triton Inference Server
 - React frontend framework

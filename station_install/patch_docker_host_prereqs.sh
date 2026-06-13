@@ -201,7 +201,7 @@ fi
 # The model component's Greengrass Startup/Shutdown lifecycle runs
 #   python3 /aws_dda/model_convertor.py ...      (Startup)
 #   python3 /aws_dda/convert_model_cleanup.py ...(Shutdown)
-# on the HOST using the *system* python3 (not python3.9). Those scripts need:
+# on the HOST using the *system* python3 (not python3.11). Those scripts need:
 #   - protobuf >= 3.20  (generated model_config_pb2.py imports
 #       `google.protobuf.internal.builder`, added in 3.20), and
 #   - requests          (convert scripts call the LocalServer REST API).
@@ -210,7 +210,7 @@ fi
 #   "ImportError: cannot import name 'builder' from 'google.protobuf.internal'"
 #   "ModuleNotFoundError: No module named 'requests'"
 # Install them for every python interpreter that may run the Startup script
-# (system python3 AND python3.9 if present).
+# (system python3 AND python3.11 if present).
 echo "▶ [4/4] Ensuring host Python deps for the model-conversion scripts..."
 ensure_host_py_deps() {
     local py="$1"
@@ -249,7 +249,7 @@ PYEOF
 # Make sure pip exists for the system python3, then patch all candidates.
 python3 -m pip --version >/dev/null 2>&1 || apt-get install -y python3-pip >/dev/null 2>&1 || true
 ensure_host_py_deps python3
-for cand in /usr/local/bin/python3.9 /usr/bin/python3.9; do
+for cand in /usr/local/bin/python3.11 /usr/bin/python3.11; do
     [ -x "$cand" ] && ensure_host_py_deps "$cand"
 done
 echo ""

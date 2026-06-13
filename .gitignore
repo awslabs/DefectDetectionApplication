@@ -2,6 +2,8 @@
 *.log
 custom-build/
 greengrass-build/
+build-logs/
+.hypothesis/
 .gdk/
 src/backend/edgemlsdk/
 src/edgemlsdk/extracted-debs/
