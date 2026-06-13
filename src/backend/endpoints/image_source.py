@@ -118,6 +118,7 @@ def get_frame(image_source_dict, image_source_config_override=None):
     camera_id = image_source_dict.get('cameraId')
     return get_camera_frame(camera_id, camera_config)
 
+
 @router.post("/image-sources/{imageSourceId}/preview")
 def preview_image(imageSourceId, request: GetPreviewImageRequest = GetPreviewImageRequest(), db: Session = Depends(get_db)) -> GetPreviewImageResponse:
     try:

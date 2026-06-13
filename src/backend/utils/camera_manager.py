@@ -599,6 +599,28 @@ def _get_camera_frame(camera_id, camera, camera_config):
         return None
 
 def get_camera_frame(camera_id, camera_config=None):
+    """Return a single inference/capture/preview frame for ``camera_id``.
+
+    Uses the cached, persistent ``Camera`` connection model: the camera is opened
+    once via ``connect_camera`` (stored in ``camera_objects``) and **reused** across
+    calls — each call performs a per-request ``start_acquisition`` / ``get_frame`` /
+    ``stop_acquisition`` on that already-claimed device, but does NOT release the USB
+    claim between calls. This is what the live-preview poll (~2 Hz) and the
+    capture/workflow callers depend on.
+
+    NOTE (regression fix): an earlier revision routed this through
+    ``StreamBroadcaster.get_inference_frame``, whose no-session path opened AND
+    closed a fresh device claim on every call. On real USB3Vision hardware the
+    ~500 ms preview poll then overlapped successive open/close cycles and the device
+    rejected the next claim with ``LIBUSB_ERROR_BUSY``, breaking the live view. The
+    broadcast (``/streams``) stack remains available for the viewer subscribe path,
+    but the preview/capture/inference hot path reuses the single cached connection
+    again to avoid that claim thrash.
+
+    Returns the ``{'data', 'height', 'width'}`` dict produced by the camera, and
+    raises ``Exception`` on no-frame/failure (the contract ``digital_input_*`` /
+    ``workflow`` / capture / preview callers rely on to surface an HTTP error).
+    """
     get_frame_lock.acquire()
     if camera_id not in camera_objects:
         logger.error("Attempting to create camera object")

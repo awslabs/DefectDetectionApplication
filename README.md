@@ -282,6 +282,14 @@ version, and compile models for the matching compilation target (Jetson JetPack
 
 **Debugging:** `VERBOSE=1 ./gdk-component-build-and-publish.sh`
 
+**Publishing without rebuilding (`publish-ecr-only.sh`).** `gdk-component-build-and-publish.sh` always does a clean rebuild before publishing. If you have already built the images (e.g. the build succeeded but the publish failed because an auth/login session expired), use `publish-ecr-only.sh` to publish the **already-built** images without spending ~15-20 minutes on another build:
+
+```bash
+./publish-ecr-only.sh        # aarch64 JetPack 5 (aws.edgeml.dda.LocalServer.arm64JP5)
+```
+
+It reuses the locally-built `flask-app:latest` / `react-webapp:latest` images and the existing `custom-build/` staging directory, and runs only the ECR + S3 publish path used for >2 GB artifacts: bump to the next patch version, push the images to ECR, upload the small scripts/compose zip to S3, rewrite the recipe to reference the `docker:` + S3 artifacts, register the new component version, and tag it for portal discovery. It fails fast if AWS credentials are invalid or the built images/staging dir are missing (run a build first). It currently targets the arm64 JetPack 5 component; edit `COMPONENT_NAME`/`ARCH` near the top for other targets.
+
 > **Notice**: Stop the EC2 build server after building to avoid unnecessary costs.
 
 <details>
@@ -937,6 +945,7 @@ defect-detection-application/
 ├── datasets/                    # Sample datasets
 ├── build-custom.sh              # Custom build logic
 ├── gdk-component-build-and-publish.sh
+├── publish-ecr-only.sh          # Publish already-built images (no rebuild)
 └── setup-build-server.sh
 ```
 

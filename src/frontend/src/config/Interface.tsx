@@ -64,6 +64,14 @@ export const APIList = {
   executePipelineAPI: `${Connection.ENDPOINT}/cameras/{camera_id}/execute-pipeline`,
   listStreamsAPI: `${Connection.ENDPOINT}/streams`,
   getStreamImageAPI: `${Connection.ENDPOINT}/streams/{stream_id}/images?maxResults=1`,
+  // Broadcast-model live-preview stream lifecycle (concurrent-camera-stream-viewing).
+  // Viewers subscribe on mount, poll the frame endpoint (which doubles as a heartbeat),
+  // and unsubscribe on unmount / tab close.
+  streamSubscribeAPI: `${Connection.ENDPOINT}/streams/{camera_id}/subscribe`,
+  streamFrameAPI: `${Connection.ENDPOINT}/streams/{camera_id}/frame`,
+  streamHeartbeatAPI: `${Connection.ENDPOINT}/streams/{camera_id}/heartbeat`,
+  streamUnsubscribeAPI: `${Connection.ENDPOINT}/streams/{camera_id}/unsubscribe`,
+  streamViewersAPI: `${Connection.ENDPOINT}/streams/{camera_id}/viewers`,
   capturedImageAPI: `${Connection.ENDPOINT}/captured-images`,
   imageSourcesAPI: `${Connection.ENDPOINT}/image-sources`,
   featureConfigurations: `${Connection.ENDPOINT}/feature-configurations`,
