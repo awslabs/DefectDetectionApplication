@@ -29,6 +29,18 @@ import ctypes
 # and converting Triton input/output types to numpy types.
 import triton_python_backend_utils as pb_utils
 
+# The DDA app packages (lyra_anomalies_mask_utils / lyra_science_processing_utils)
+# are installed at the container app root (default "/"). The Triton Python-backend
+# stub does NOT forward the parent process's PYTHONPATH and is launched with a
+# working directory that is not the app root, so those packages are otherwise
+# unresolvable here (ModuleNotFoundError). Ensure the app root is on sys.path
+# regardless of the stub's CWD/environment before importing them.
+import sys
+
+_DDA_APP_ROOT = os.environ.get("DDA_APP_ROOT", "/")
+if _DDA_APP_ROOT and _DDA_APP_ROOT not in sys.path:
+    sys.path.insert(0, _DDA_APP_ROOT)
+
 from lyra_anomalies_mask_utils import (
     DEFAULT_ANOMALY_MASK_PALETTE,
     convert_index_mask_to_color_mask,
