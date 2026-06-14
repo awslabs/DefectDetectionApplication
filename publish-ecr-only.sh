@@ -152,8 +152,13 @@ echo "Creating component version via API..."
 aws greengrassv2 create-component-version --inline-recipe fileb://"$ECR_RECIPE" --region "$PUB_REGION"
 
 echo "Tagging component for portal discovery..."
-COMPONENT_ARN=$(aws greengrassv2 list-components --scope PRIVATE --region "$PUB_REGION" \
-    --query "components[?componentName=='${COMPONENT_NAME}'].arn | [0]" --output text 2>/dev/null || true)
+# --no-paginate (same reason as the version lookup): without it the CLI applies
+# the filter per page and `| [0]` yields one value per page (real ARN on the
+# matching page, "None" on the others), producing a multiline ARN that breaks
+# tag-resource. head -n1 is an extra guard.
+COMPONENT_ARN=$(aws greengrassv2 list-components --scope PRIVATE --region "$PUB_REGION" --no-paginate \
+    --query "components[?componentName=='${COMPONENT_NAME}'].arn | [0]" --output text 2>/dev/null | head -n1)
+COMPONENT_ARN=$(echo "$COMPONENT_ARN" | tr -d '[:space:]')
 if [ -n "$COMPONENT_ARN" ] && [ "$COMPONENT_ARN" != "None" ]; then
     aws greengrassv2 tag-resource --resource-arn "$COMPONENT_ARN" \
         --tags "dda-portal:managed=true" --region "$PUB_REGION" 2>/dev/null \
