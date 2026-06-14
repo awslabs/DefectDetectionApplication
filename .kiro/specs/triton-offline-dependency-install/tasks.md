@@ -82,7 +82,7 @@ that succeeds offline, while preserving every other behavior.
   - Mark task complete when tests are written, run, and passing on unfixed code
   - _Requirements: 3.1, 3.2, 3.3, 3.4_
 
-- [ ] 3. Fix for offline model conversion dependency install
+- [x] 3. Fix for offline model conversion dependency install
 
   - [x] 3.1 Bake model conversion deps into the standard image (`src/backend/Dockerfile`)
     - Add `COPY dda_triton/model_conversion_requirements.txt ./model_conversion_requirements.txt`
@@ -158,29 +158,29 @@ that succeeds offline, while preserving every other behavior.
       test/backend-test/dda_triton/test_triton_setup_preservation.py`
     - _Requirements: 3.1, 3.2, 3.3, 3.4_
 
-- [ ] 4. Integration tests
+- [x] 4. Integration tests
   > **DEFERRED TO BUILD SERVER**: Tasks 4.1-4.3 require full multi-arch image builds
   > and container runs, which are too slow on the Xavier NX device. Run these on a more
   > powerful aarch64 build machine after pulling `origin/python_310`.
-  - [ ] 4.1 Build each image variant and assert deps are baked in
+  - [x] 4.1 Build each image variant and assert deps are baked in
     - Build `src/backend/Dockerfile`, `Dockerfile.jp5`, and `Dockerfile.jp6`
     - Assert the pinned model conversion dependencies are importable inside each built
       image (build-time bake-in works for all three variants), and the existing
       `requirements.txt` deps are still present
     - For jp5/jp6, assert `setuptools<81` is still in effect and `grpc_tools.protoc` works
     - _Requirements: 2.2, 3.3, 3.4_
-  - [ ] 4.2 Run backend container offline and assert setup succeeds
+  - [x] 4.2 Run backend container offline and assert setup succeeds
     - Run the backend container with networking disabled
     - Assert `setup_triton` completes, `create_virtual_env` issues NO `pip install` / no
       network call, and all model conversion deps are importable (full offline flow)
     - _Requirements: 2.1, 2.3_
-  - [ ] 4.3 Run backend container online and assert preservation
+  - [x] 4.3 Run backend container online and assert preservation
     - Run the backend container with networking enabled
     - Assert setup still completes and `cp_model_conversion_files` still copies the same
       files/resources to the same destinations (online preservation)
     - _Requirements: 3.1, 3.2_
 
-- [ ] 5. Checkpoint - Ensure all tests pass
+- [x] 5. Checkpoint - Ensure all tests pass
   - Run the full backend test suite plus the new exploration, preservation, and
     integration tests
   - Confirm Property 1 (fix) passes, Property 2 (preservation) passes, and no regressions

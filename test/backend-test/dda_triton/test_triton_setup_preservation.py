@@ -26,6 +26,7 @@
 # Validates: Requirements 3.1, 3.2, 3.3, 3.4
 
 import os
+import re
 
 import pytest
 from hypothesis import given, settings, HealthCheck, strategies as st
@@ -67,21 +68,30 @@ EXPECTED_RESOURCE_FILE_COPIES = {
     (RESOURCES_SRC + "marshal_for_capture_template.py", RESOURCES_DEST),
 }
 
-# The pinned model conversion dependency versions, the single source of truth being
-# src/backend/dda_triton/model_conversion_requirements.txt. None means the package is
-# present in the file but intentionally unpinned (Req 3.4).
+# The pinned model conversion dependency version specifiers, the single source of
+# truth being src/backend/dda_triton/model_conversion_requirements.txt. The value is
+# the exact version specifier as it appears in the file (e.g. "==1.56.2",
+# ">=1.1.3,<1.2"); None means the package is present but intentionally unpinned
+# (Req 3.4).
+#
+# NOTE: grpcio-tools and scikit-learn were bumped from their original pins
+# (grpcio-tools 1.51.1, scikit-learn ==1.0.2) to Python 3.11-compatible versions
+# with explicit user approval, because the original pins have no cp311 aarch64 wheel
+# and their sdists fail to build under Python 3.11. scikit-learn is capped <1.2 to
+# preserve conversion/inference behavior. This baseline reflects that approved
+# change; the rest of the pins are preserved exactly.
 EXPECTED_PINNED_DEPS = {
     "setuptools": None,
     "wheel": None,
     "meson": None,
-    "grpcio": "1.56.2",
-    "grpcio-tools": "1.51.1",
-    "protobuf": "4.25.8",
-    "requests": "2.32.3",
+    "grpcio": "==1.56.2",
+    "grpcio-tools": "==1.56.2",
+    "protobuf": "==4.25.8",
+    "requests": "==2.32.3",
     "opencv-python": None,
-    "urllib3": "2.2.3",
-    "scikit-learn": "1.0.2",
-    "numpy": "1.24.3",
+    "urllib3": "==2.2.3",
+    "scikit-learn": ">=1.1.3,<1.2",
+    "numpy": "==1.24.3",
 }
 
 
@@ -203,18 +213,27 @@ def _requirements_file_path():
 
 
 def _parse_requirements(path):
-    """Parse a requirements file into {name: pinned_version_or_None}."""
+    """Parse a requirements file into {name: version_specifier_or_None}.
+
+    The version specifier is captured verbatim as it appears after the
+    distribution name (e.g. "==1.56.2", ">=1.1.3,<1.2"); None means the package is
+    listed without any version specifier. Inline comments and blank/comment lines
+    are ignored.
+    """
     parsed = {}
     with open(path) as fh:
         for raw in fh:
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
-            if "==" in line:
-                name, version = line.split("==", 1)
-                parsed[name.strip()] = version.strip()
-            else:
-                parsed[line] = None
+            # Drop any inline comment.
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            m = re.match(r"^([A-Za-z0-9_.\-]+)\s*(.*)$", line)
+            name = m.group(1).strip()
+            spec = m.group(2).strip()
+            parsed[name] = spec if spec else None
     return parsed
 
 
@@ -222,10 +241,12 @@ def test_model_conversion_requirements_pins_match_exactly():
     """Property 2 (Req 3.4): the pinned model conversion versions match the recorded
     baseline exactly, so conversion/inference behaviour is preserved.
 
-    OBSERVED baseline (UNFIXED code) — src/backend/dda_triton/model_conversion_requirements.txt:
-      grpcio==1.56.2, grpcio-tools==1.51.1, protobuf==4.25.8, requests==2.32.3,
-      urllib3==2.2.3, scikit-learn==1.0.2, numpy==1.24.3, plus unpinned
-      setuptools / wheel / meson / opencv-python.
+    Baseline — src/backend/dda_triton/model_conversion_requirements.txt:
+      grpcio==1.56.2, grpcio-tools==1.56.2, protobuf==4.25.8, requests==2.32.3,
+      urllib3==2.2.3, scikit-learn>=1.1.3,<1.2, numpy==1.24.3, plus unpinned
+      setuptools / wheel / meson / opencv-python. (grpcio-tools and scikit-learn
+      were bumped to Python 3.11-compatible versions with user approval; see
+      EXPECTED_PINNED_DEPS.)
 
     Validates: Requirements 3.4
     """
