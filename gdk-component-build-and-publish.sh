@@ -25,6 +25,26 @@ if ! CALLER_IDENTITY=$(aws sts get-caller-identity 2>&1); then
 fi
 echo "✓ AWS credentials valid"
 
+# ── Propagate resolved credentials to GDK ───────────────────────────────────
+# The AWS CLI v2 bundles a modern botocore and can resolve credentials from SSO
+# / login-helper sources (e.g. an `~/.aws/config` with only `region` +
+# `login_session` and no static `~/.aws/credentials`). However, `gdk component
+# publish` runs on its own older botocore (1.26.x under Python 3.6) that cannot
+# read those sources and fails with `NoCredentialsError: Unable to locate
+# credentials` even though `aws` works. Materialize the already-resolved session
+# into standard env vars (highest-priority in every SDK's credential chain) so
+# GDK's old botocore can authenticate. No-op if the running CLI predates
+# `export-credentials`.
+if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null); then
+    eval "$_CREDS_ENV"
+    unset _CREDS_ENV
+    echo "✓ Exported resolved credentials to the environment for GDK"
+else
+    echo "ℹ AWS CLI does not support 'export-credentials'; relying on the ambient"
+    echo "  credential chain. If 'gdk component publish' reports NoCredentialsError,"
+    echo "  export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN manually."
+fi
+
 # Step tracking
 STEP=0
 TOTAL_STEPS=8
