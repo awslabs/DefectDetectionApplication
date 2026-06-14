@@ -27,9 +27,15 @@ DEPLOYMENTS_TABLE = os.environ.get('DEPLOYMENTS_TABLE', 'dda-portal-deployments'
 # If the device's Nucleus is too old, Greengrass will report the conflict.
 MIN_NUCLEUS_VERSION = '2.4.0'  # Reference only — not used in deployment components
 
-# CloudWatch log manager for device logging
-# Version 2.3.9 supports Nucleus >=2.1.0 <2.14.0
-LOG_MANAGER_VERSION = '2.3.9'
+# CloudWatch log manager for device logging.
+# The pinned version's Nucleus ceiling must cover the Nucleus the device runs,
+# since this component is auto-included alongside Nucleus (pinned to the device's
+# running version). LogManager 2.3.9 requires Nucleus <2.15.0, which conflicts
+# with devices on Nucleus >=2.15.0 (e.g. 2.16.1) and yields
+# FAILED_NO_STATE_CHANGE / NoAvailableComponentVersion. 2.3.12 allows Nucleus
+# <2.18.0, matching the ceilings of the other auto-included AWS components
+# (Cli / ShadowManager / DockerApplicationManager).
+LOG_MANAGER_VERSION = '2.3.12'
 
 # Components that require Nucleus to be explicitly included in deployment
 # Model components (model-*) also need Nucleus since they depend on DDA components

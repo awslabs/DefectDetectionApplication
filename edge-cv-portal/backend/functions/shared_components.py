@@ -94,7 +94,7 @@ GREENGRASS_LOG_MANAGER_COMPONENT = {
     'name': 'aws.greengrass.LogManager',
     'description': 'Greengrass built-in component for CloudWatch Logs integration',
     'platforms': ['linux'],  # Works on all platforms
-    'version': '2.3.9'  # Fixed version for log manager
+    'version': '2.3.12'  # Nucleus <2.18.0; covers devices on Nucleus 2.1x (e.g. 2.16.1)
 }
 
 # Cache for discovered component info (refreshed per Lambda invocation)
