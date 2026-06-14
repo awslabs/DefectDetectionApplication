@@ -116,6 +116,18 @@ RUN ARCH_TRIPLET="$(gcc -dumpmachine)" && LC="/usr/lib/${ARCH_TRIPLET}/libcrypto
 RUN pip install --no-cache-dir -r ./requirements.txt
 RUN pip install --no-cache-dir --upgrade requests
 
+# Bake the model conversion dependencies into the image at build time so the runtime
+# Triton/model setup (dda_triton.triton_setup.create_virtual_env) needs no network on
+# offline/air-gapped devices. model_conversion_requirements.txt is the single source of
+# truth for the pinned versions.
+COPY dda_triton/model_conversion_requirements.txt ./model_conversion_requirements.txt
+RUN pip install --no-cache-dir -r ./model_conversion_requirements.txt
+# model_conversion_requirements.txt includes an UNPINNED setuptools, which pulls
+# setuptools>=81 and removes the bundled pkg_resources that grpc_tools.protoc imports
+# (the python3.11 interpreter here has no system pkg_resources fallback). Re-assert the
+# setuptools<81 cap immediately so the grpc_tools.protoc step below keeps working.
+RUN pip install --no-cache-dir 'setuptools<81'
+
 # Build aravis from source (apt deps already installed above)
 RUN pip install --no-cache-dir meson ninja
 # Downgrade setuptools so g-ir-scanner can find distutils.msvccompiler (removed in setuptools>=71)

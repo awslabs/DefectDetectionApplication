@@ -25,6 +25,7 @@ RUN apt-get install --only-upgrade ncurses-base
 RUN apt-get install --only-upgrade ncurses-bin
 RUN apt-get update && apt-get install -y libb64-0d && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
+COPY dda_triton/model_conversion_requirements.txt ./model_conversion_requirements.txt
 
 COPY edge_ml1_p_camera_management ./edge_ml1_p_camera_management
 COPY edgeagent ./edgeagent
@@ -46,6 +47,10 @@ RUN ARCH_TRIPLET="$(gcc -dumpmachine)" && LC="/usr/lib/${ARCH_TRIPLET}/libcrypto
     if [ -f "${LC}.bak" ]; then mv "${LC}.bak" "$LC"; fi && \
     python3 -c "import awscrt.mqtt; print('awscrt vendored aws-lc link OK')"
 RUN ./edge_ml1_p_camera_management/prereqs_install.sh 
+# Bake the pinned model conversion dependencies into the image at build time so they
+# are already present and importable at container startup, removing the need for a
+# network-dependent runtime pip install on offline/air-gapped devices.
+RUN python3.11 -m pip install --no-cache-dir -r ./model_conversion_requirements.txt
 RUN ./edge_ml1_p_camera_management/install_aravis.sh
 RUN python3.11 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
 RUN apt update -y

@@ -29,12 +29,59 @@
 import venv
 import os
 import sys
+import re
 import logging
 import subprocess
+import importlib.metadata
+import importlib.util
 from exceptions.api.triton_exceptions import TritonSetupException
 from dda_triton.constants import DDA_ROOT_FOLDER, DDA_TRITON_FOLDER
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_requirement_names(requirements_file):
+    """Parse the distribution names from a requirements file.
+
+    Strips version specifiers (e.g. ``grpcio==1.56.2`` -> ``grpcio``), extras,
+    environment markers, inline comments and blank lines, returning the bare
+    distribution names (e.g. ``setuptools``, ``scikit-learn``, ``opencv-python``).
+    """
+    names = []
+    with open(requirements_file) as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Drop any inline comment.
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            # Split off the first version specifier / extras / marker character.
+            name = re.split(r"[<>=!~;\[\s]", line, 1)[0].strip()
+            if name:
+                names.append(name)
+    return names
+
+
+def _is_distribution_present(name):
+    """Return True if the given distribution is already installed/locatable.
+
+    Uses ``importlib.metadata.version`` (distribution-name lookup) first, falling
+    back to ``importlib.util.find_spec`` (module lookup). No network access and no
+    installation is performed.
+    """
+    try:
+        importlib.metadata.version(name)
+        return True
+    except importlib.metadata.PackageNotFoundError:
+        try:
+            return importlib.util.find_spec(name) is not None
+        except (ImportError, ValueError):
+            return False
+    except Exception:
+        return False
+
 
 # 082925 - ryanv@ disable venv because install_greengrass.sh installs base OS
 # TODO move all of this init code inside the backend container to avoid dep issues
@@ -44,26 +91,37 @@ def create_virtual_env(
     python_path = "/usr/local/bin/python3",
     requirements_file="/dda_triton/model_conversion_requirements.txt",
 ):
+    # The model conversion dependencies are baked into the backend image at build
+    # time, so they are already present when the container starts. This step
+    # therefore VERIFIES they are importable rather than installing them: no
+    # `pip install` is issued and no network access is required at runtime. A
+    # missing package here indicates a build-time regression, not a runtime
+    # network problem.
     try:
-        #env_path = os.path.join(venv_dir, env_name)
-        #if os.path.exists(env_path):
-        #    logger.info(f"Virtual environment '{env_name}' already exists at {env_path}")
-        #else:
-        #    venv.create(env_path, with_pip=True)
-        #    logger.info(f"Virtual environment '{env_name}' created at {env_path}")
-
         if os.path.exists(requirements_file):
-            #[python_path, "-m", "pip", "install", "-r", requirements_file]
-            installcommand = python_path + " -m pip install -r " + requirements_file
-            print("install command="+str(installcommand),file=sys.stderr)
-            subprocess.check_call(installcommand, shell=True)
-            logger.info(f"Dependencies from '{requirements_file}' installed successfully.")
+            package_names = _parse_requirement_names(requirements_file)
+            missing = [name for name in package_names if not _is_distribution_present(name)]
+            if missing:
+                logger.error(
+                    "Model conversion dependencies are missing from the image: "
+                    f"{', '.join(missing)}. These dependencies are expected to be baked "
+                    f"into the image at build time from '{requirements_file}'. A missing "
+                    "package indicates a build-time regression (the build-time install "
+                    "step did not run or failed), not a runtime network problem. Rebuild "
+                    "the backend image so the dependencies are installed at build time."
+                )
+            else:
+                logger.info(
+                    f"All model conversion dependencies from '{requirements_file}' are "
+                    "already present and importable. Skipping installation (verify-only, "
+                    "no network access required)."
+                )
         else:
             logger.error(
                 f"No model_conversion_requirements.txt file found at {requirements_file}. Skipping dependency installation."
             )
     except Exception as e:
-        logger.error(f"Exception caught while setting up model phython requirements: {e}")
+        logger.error(f"Exception caught while verifying model python requirements: {e}")
 
 
 def cp_model_conversion_files():
