@@ -45,6 +45,47 @@ from shared_utils import (
     get_usecase_region
 )
 
+
+def _version_key(version_str):
+    """Convert a semantic version string to a comparable tuple so versions sort
+    numerically (1.0.115 > 1.0.63), not lexicographically. Non-numeric parts sort
+    last."""
+    parts = []
+    for part in str(version_str).split('.'):
+        try:
+            parts.append((0, int(part)))
+        except ValueError:
+            parts.append((1, part))
+    return tuple(parts)
+
+
+def _resolve_latest_component_version(greengrass, base_arn):
+    """Return the highest semantic version of a component, or None if it has none.
+
+    Pages through every version and selects the max by semver. We deliberately do
+    NOT trust a version embedded in a discovery tag: a stale version-level tag
+    (e.g. an old shared-component mirror at 1.0.63) must never mask the component's
+    true latest version (e.g. 1.0.115)."""
+    versions = []
+    next_token = None
+    try:
+        while True:
+            params = {'arn': base_arn}
+            if next_token:
+                params['nextToken'] = next_token
+            resp = greengrass.list_component_versions(**params)
+            for cv in resp.get('componentVersions', []):
+                v = cv.get('componentVersion')
+                if v:
+                    versions.append(v)
+            next_token = resp.get('nextToken')
+            if not next_token:
+                break
+    except ClientError as e:
+        print(f"Warning: could not list versions for {base_arn}: {e}")
+        return None
+    return max(versions, key=_version_key) if versions else None
+
 def lambda_handler(event, context):
     """
     Handle Greengrass component management requests
@@ -300,96 +341,57 @@ def list_private_components(credentials: Dict, region: str, query_params: Dict) 
         
         print(f"Found {len(tagged_resources)} portal-created component versions via tagging API")
         
-        # Deduplicate by component name, keeping only the latest version
-        # Use a dict to track the latest version per component
-        component_map = {}
-        
+        # Collect the set of portal-managed components. A component may be tagged at
+        # the component level (arn:...:components:name) and/or at specific version
+        # levels (arn:...:components:name:versions:x.y.z). We only use the tags to
+        # discover WHICH components are portal-managed; the latest version is always
+        # resolved from Greengrass below so a stale version-level tag cannot pin the
+        # displayed version to an old release.
+        component_base = {}  # component_name -> {'arn': base_arn, 'tags': {...}}
+
         for resource in tagged_resources:
             component_arn = resource['ResourceARN']
             tags = {tag['Key']: tag['Value'] for tag in resource.get('Tags', [])}
-            
-            # Extract component name and version from ARN
-            # ARN format: arn:aws:greengrass:region:account:components:name:versions:version
-            # Index:      0   1   2          3      4       5          6    7        8
+
+            # ARN format: arn:aws:greengrass:region:account:components:name[:versions:version]
+            # Index:      0   1   2          3      4       5          6    [7]      [8]
             arn_parts = component_arn.split(':')
-            
-            # Debug: print the ARN structure
-            print(f"[DEBUG] Full ARN: {component_arn}")
-            print(f"[DEBUG] ARN parts: {arn_parts}")
-            print(f"[DEBUG] ARN parts count: {len(arn_parts)}")
-            
-            # Handle both formats:
-            # 1. Full ARN with version: arn:aws:greengrass:region:account:components:name:versions:version
-            # 2. Component ARN without version: arn:aws:greengrass:region:account:components:name
-            
-            if len(arn_parts) >= 9 and arn_parts[7] == 'versions':
-                # Full ARN with version
-                component_name = arn_parts[6]
-                version_str = arn_parts[8]
-                print(f"[DEBUG] Parsed as full ARN: component={component_name}, version={version_str}")
-            elif len(arn_parts) >= 7:
-                # Component ARN without version - need to query Greengrass for latest version
-                component_name = arn_parts[6]
-                version_str = '0.0.0'  # Default, will be updated from Greengrass
-                print(f"[DEBUG] Parsed as component ARN without version: component={component_name}")
-            else:
-                print(f"[DEBUG] ERROR: Unexpected ARN format with {len(arn_parts)} parts")
+            if len(arn_parts) < 7:
+                print(f"[DEBUG] ERROR: Unexpected ARN format with {len(arn_parts)} parts: {component_arn}")
                 continue
-            
-            # Parse version for comparison (handle semver like 1.0.62)
-            try:
-                version_parts = [int(x) for x in version_str.split('.')]
-                version_tuple = tuple(version_parts + [0] * (3 - len(version_parts)))  # Pad to 3 parts
-            except ValueError:
-                version_tuple = (0, 0, 0)
-            
-            # Check if this is a newer version than what we have
-            if component_name not in component_map or version_tuple > component_map[component_name]['version_tuple']:
-                component_map[component_name] = {
-                    'arn': component_arn,
-                    'version_str': version_str,
-                    'version_tuple': version_tuple,
-                    'tags': tags
-                }
-                print(f"[DEBUG] Updated component_map[{component_name}] = version {version_str}")
-        
-        # Build component list from deduplicated map
-        # Create Greengrass client to fetch component details
+
+            component_name = arn_parts[6]
+            base_arn = ':'.join(arn_parts[:7])  # strip any ':versions:<v>' suffix
+
+            entry = component_base.setdefault(component_name, {'arn': base_arn, 'tags': {}})
+            entry['arn'] = base_arn
+            entry['tags'].update(tags)  # merge tags across component-/version-level entries
+
+        # Build component list. Create Greengrass client to resolve the latest
+        # version and fetch component details.
         greengrass = create_boto3_client('greengrassv2', credentials, region)
         
         components = []
-        for component_name, comp_data in component_map.items():
+        for component_name, comp_data in component_base.items():
             # Fetch component details to get platforms information
             platforms = []
             description = ''
             creation_timestamp = None
-            final_version = comp_data['version_str']
-            
+            base_arn = comp_data['arn']
+
+            # Always resolve the true latest version from Greengrass (semver-aware),
+            # ignoring any version pinned in a discovery tag.
+            final_version = _resolve_latest_component_version(greengrass, base_arn)
+            print(f"[DEBUG] Resolved latest version for {component_name}: {final_version}")
+
             try:
-                # If version is 0.0.0, we need to query Greengrass for the latest version
-                if final_version == '0.0.0':
-                    print(f"[DEBUG] Version is 0.0.0 for {component_name}, querying Greengrass for latest version")
-                    # List component versions to find the latest
-                    versions_response = greengrass.list_component_versions(
-                        arn=comp_data['arn'],
-                        maxResults=1
-                    )
-                    if versions_response.get('componentVersions'):
-                        latest_version_info = versions_response['componentVersions'][0]
-                        final_version = latest_version_info.get('componentVersion', '0.0.0')
-                        print(f"[DEBUG] Found latest version from Greengrass: {final_version}")
-                
-                # Now describe the component with the correct version
-                # Build the full ARN with version if we have it
-                if final_version != '0.0.0':
-                    # Construct full ARN with version
-                    arn_with_version = f"{comp_data['arn']}:versions:{final_version}"
+                if final_version:
+                    arn_with_version = f"{base_arn}:versions:{final_version}"
                     print(f"[DEBUG] Describing component with full ARN: {arn_with_version}")
                     component_details = greengrass.describe_component(arn=arn_with_version)
                 else:
-                    # Use the ARN as-is
-                    print(f"[DEBUG] Describing component with ARN: {comp_data['arn']}")
-                    component_details = greengrass.describe_component(arn=comp_data['arn'])
+                    print(f"[DEBUG] Describing component with ARN: {base_arn}")
+                    component_details = greengrass.describe_component(arn=base_arn)
                 
                 platforms = component_details.get('platforms', [])
                 description = component_details.get('description', '')
@@ -398,14 +400,14 @@ def list_private_components(credentials: Dict, region: str, query_params: Dict) 
                 print(f"[DEBUG] Successfully described {component_name}: version={final_version}, platforms={len(platforms)}")
                 
             except ClientError as e:
-                print(f"Warning: Could not fetch details for {component_name} with ARN {comp_data['arn']}: {e}")
+                print(f"Warning: Could not fetch details for {component_name} with ARN {base_arn}: {e}")
                 # Continue with empty platforms if describe fails
             
             enriched_component = {
-                'arn': comp_data['arn'],
+                'arn': base_arn,
                 'component_name': component_name,
                 'latest_version': {
-                    'componentVersion': final_version,
+                    'componentVersion': final_version or '0.0.0',
                     'platforms': platforms
                 },
                 'description': description,

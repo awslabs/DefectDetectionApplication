@@ -54,10 +54,25 @@ COMPONENT_BUCKET_PREFIX = os.environ.get('COMPONENT_BUCKET_PREFIX', 'dda-compone
 COMPONENT_BUCKET = os.environ.get('COMPONENT_BUCKET', f'{COMPONENT_BUCKET_PREFIX}-{AWS_REGION}-{PORTAL_ACCOUNT_ID}')
 
 # DDA shared components (versions discovered dynamically from Greengrass)
+# NOTE: the JetPack-specific ARM64 variants (arm64JP5 / arm64JP6) are published by
+# gdk-component-build-and-publish.sh as distinct components. They must be listed
+# here so they are mirrored into usecase accounts; otherwise a JP5/JP6 device has
+# no deployable LocalServer in the portal even though the generic arm64 variant is
+# shared.
 DDA_LOCAL_SERVER_COMPONENTS = {
     'arm64': {
         'name': 'aws.edgeml.dda.LocalServer.arm64',
-        'description': 'DDA LocalServer for ARM64 devices (Jetson, Raspberry Pi)',
+        'description': 'DDA LocalServer for ARM64 Jetson JetPack 4 (L4T r32.x / Ubuntu 18.04)',
+        'platforms': ['linux/arm64']
+    },
+    'arm64JP5': {
+        'name': 'aws.edgeml.dda.LocalServer.arm64JP5',
+        'description': 'DDA LocalServer for ARM64 Jetson JetPack 5 (L4T r35.x / Ubuntu 20.04)',
+        'platforms': ['linux/arm64']
+    },
+    'arm64JP6': {
+        'name': 'aws.edgeml.dda.LocalServer.arm64JP6',
+        'description': 'DDA LocalServer for ARM64 Jetson JetPack 6 (L4T r36.x / Ubuntu 22.04)',
         'platforms': ['linux/arm64']
     },
     'amd64': {
@@ -86,23 +101,64 @@ GREENGRASS_LOG_MANAGER_COMPONENT = {
 _component_cache = {}
 
 
+def _version_key(version_str):
+    """Convert a semantic version string to a comparable tuple so versions sort
+    numerically (1.0.115 > 1.0.63), not lexicographically. Non-numeric parts sort
+    last. Mirrors the comparator in deployments.py."""
+    parts = []
+    for part in str(version_str).split('.'):
+        try:
+            parts.append((0, int(part)))
+        except ValueError:
+            parts.append((1, part))
+    return tuple(parts)
+
+
+def _latest_versions_by_component_name() -> Dict[str, str]:
+    """Map each managed component's name -> its latest discovered version.
+
+    Matching by component name (rather than by a 'platform' key) avoids the
+    mismatch where get_all_component_info() returns 'localserver_<platform>' keys
+    while the shared-components table stores bare platform values.
+    """
+    return {
+        info['name']: info['version']
+        for info in get_all_component_info().values()
+        if info.get('name') and info.get('version')
+    }
+
+
 def get_latest_component_version(component_name: str) -> Optional[str]:
     """
     Query the portal account's Greengrass to get the latest version of a component.
     Returns the latest version string or None if component not found.
+
+    Pages through all versions and selects the maximum by semantic-version order.
+    The API's result ordering is not contractually guaranteed to be semver-sorted,
+    and a string sort would rank "1.0.63" above "1.0.115", so we sort explicitly.
     """
     try:
-        response = greengrass_portal.list_component_versions(
-            arn=f"arn:aws:greengrass:{AWS_REGION}:{PORTAL_ACCOUNT_ID}:components:{component_name}"
-        )
-        
-        versions = response.get('componentVersions', [])
+        arn = f"arn:aws:greengrass:{AWS_REGION}:{PORTAL_ACCOUNT_ID}:components:{component_name}"
+        versions = []
+        next_token = None
+        while True:
+            params = {'arn': arn}
+            if next_token:
+                params['nextToken'] = next_token
+            response = greengrass_portal.list_component_versions(**params)
+            for cv in response.get('componentVersions', []):
+                v = cv.get('componentVersion')
+                if v:
+                    versions.append(v)
+            next_token = response.get('nextToken')
+            if not next_token:
+                break
+
         if versions:
-            # Versions are returned in descending order (latest first)
-            latest = versions[0].get('componentVersion')
+            latest = max(versions, key=_version_key)
             logger.info(f"Found latest version for {component_name}: {latest}")
             return latest
-        
+
         logger.warning(f"No versions found for component {component_name}")
         return None
         
@@ -249,12 +305,18 @@ def share_component_to_usecase(
     3. Read-only tag to indicate it's a shared component
     """
     try:
-        # Determine platform from component name
-        if 'arm64' in component_name.lower():
+        # Determine platform from component name (most specific first, since
+        # 'arm64JP5'/'arm64JP6' also contain the substring 'arm64')
+        name_lower = component_name.lower()
+        if 'arm64jp5' in name_lower:
+            platform = 'arm64JP5'
+        elif 'arm64jp6' in name_lower:
+            platform = 'arm64JP6'
+        elif 'arm64' in name_lower:
             platform = 'arm64'
-        elif 'amd64' in component_name.lower():
+        elif 'amd64' in name_lower:
             platform = 'amd64'
-        elif 'InferenceUploader' in component_name:
+        elif 'inferenceuploader' in name_lower:
             platform = 'all'  # Platform-independent
         else:
             raise ValueError(f"Cannot determine platform from component name: {component_name}")
@@ -943,20 +1005,15 @@ def list_shared_components(event: Dict, user: Dict) -> Dict:
         
         components = response.get('Items', [])
         
-        # Get dynamically discovered component info for version comparison
-        all_component_info = get_all_component_info()
+        # Get latest version per component name for version comparison
+        latest_by_name = _latest_versions_by_component_name()
         default_version = get_default_version()
         
         # Add update_available flag by comparing versions
         for comp in components:
             current_version = comp.get('component_version', '0.0.0')
-            platform = comp.get('platform', 'arm64')
-            
-            # Get latest version for this specific platform
-            platform_info = all_component_info.get(platform, {})
-            latest_version = platform_info.get('version', default_version)
-            
-            comp['update_available'] = current_version != latest_version
+            latest_version = latest_by_name.get(comp.get('component_name'), default_version)
+            comp['update_available'] = _version_key(current_version) < _version_key(latest_version)
             comp['latest_version'] = latest_version
         
         return create_response(200, {
@@ -981,8 +1038,8 @@ def get_update_status(event: Dict, user: Dict) -> Dict:
         if user.get('role') != 'PortalAdmin':
             return create_response(403, {'error': 'Portal admin access required'})
         
-        # Get dynamically discovered component info
-        all_component_info = get_all_component_info()
+        # Get latest version per component name for version comparison
+        latest_by_name = _latest_versions_by_component_name()
         default_version = get_default_version()
         
         # Get all usecases
@@ -1012,13 +1069,9 @@ def get_update_status(event: Dict, user: Dict) -> Dict:
             
             for comp in components:
                 current_version = comp.get('component_version', '0.0.0')
-                platform = comp.get('platform', 'arm64')
+                latest_version = latest_by_name.get(comp.get('component_name'), default_version)
                 
-                # Get latest version for this specific platform
-                platform_info = all_component_info.get(platform, {})
-                latest_version = platform_info.get('version', default_version)
-                
-                update_available = current_version != latest_version
+                update_available = _version_key(current_version) < _version_key(latest_version)
                 if update_available:
                     needs_update = True
                 component_versions.append({
