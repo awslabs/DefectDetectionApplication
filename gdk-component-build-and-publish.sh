@@ -220,6 +220,16 @@ PUBLISH_LOG="/tmp/gdk-publish-$(date +%s).log"
 echo "Publish log: $PUBLISH_LOG"
 echo ""
 
+# The image build above can take far longer than a session token's lifetime, so
+# the credentials exported during pre-flight may now be expired (gdk would fail
+# with "Credentials were refreshed, but the refreshed credentials are still
+# expired"). Re-resolve a fresh session immediately before publishing.
+if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null); then
+    eval "$_CREDS_ENV"
+    unset _CREDS_ENV
+    echo "✓ Refreshed AWS credentials for publish"
+fi
+
 # Resolve account/region up front (needed for the ECR path and tagging).
 PUB_REGION=$(aws configure get region 2>/dev/null || true)
 if [ -z "$PUB_REGION" ]; then
