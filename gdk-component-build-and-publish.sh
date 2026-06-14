@@ -35,7 +35,7 @@ echo "✓ AWS credentials valid"
 # into standard env vars (highest-priority in every SDK's credential chain) so
 # GDK's old botocore can authenticate. No-op if the running CLI predates
 # `export-credentials`.
-if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null); then
+if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null | grep -v AWS_CREDENTIAL_EXPIRATION); then
     eval "$_CREDS_ENV"
     unset _CREDS_ENV
     echo "✓ Exported resolved credentials to the environment for GDK"
@@ -224,7 +224,15 @@ echo ""
 # the credentials exported during pre-flight may now be expired (gdk would fail
 # with "Credentials were refreshed, but the refreshed credentials are still
 # expired"). Re-resolve a fresh session immediately before publishing.
-if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null); then
+#
+# IMPORTANT: strip AWS_CREDENTIAL_EXPIRATION. With it set, gdk's old botocore
+# treats the env credentials as *refreshable* and, when it thinks they're past
+# expiry, "refreshes" by re-reading the same env vars and then raises
+# "refreshed credentials are still expired" — even when the underlying token is
+# actually valid (the export can emit a stale/past expiration for SSO/login
+# credential sources). Without the expiration var, botocore uses the token as a
+# static credential and signs successfully.
+if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null | grep -v AWS_CREDENTIAL_EXPIRATION); then
     eval "$_CREDS_ENV"
     unset _CREDS_ENV
     echo "✓ Refreshed AWS credentials for publish"
