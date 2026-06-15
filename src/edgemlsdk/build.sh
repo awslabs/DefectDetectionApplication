@@ -57,12 +57,17 @@ rm -rf $rootDir/extracted-debs
 mkdir -p $rootDir/cached-debs
 
 # Select Dockerfile based on JetPack version
+ENABLE_TENSORRT_BACKEND=0
 if [ "$jetpack" = "6" ]; then
     DOCKERFILE="Dockerfile.jp6"
     echo "Using JP6 Dockerfile (l4t-jetpack:r36.3.0 base, native build)"
 elif [ "$jetpack" = "5" ]; then
     DOCKERFILE="Dockerfile.jp5"
     echo "Using JP5 Dockerfile (l4t-jetpack:r35.4.1 base, native build)"
+elif [ "$jetpack" = "4" ]; then
+    DOCKERFILE="Dockerfile"            # generic Ubuntu 18.04 aarch64 base — original JP4.6 path
+    ENABLE_TENSORRT_BACKEND=1          # re-enable the Triton tensorrt backend in the source build
+    echo "Using generic Dockerfile with TensorRT backend ENABLED (JP4.6 / L4T r32.7)"
 else
     DOCKERFILE="Dockerfile"
     echo "Using standard Dockerfile (Ubuntu ${ubuntu} base)"
@@ -77,6 +82,7 @@ docker build \
     --build-arg PLATFORM=$platform \
     --build-arg PWSH_ARCH=$pwsh_arch \
     --build-arg PYTHON_VERSION=$python \
+    --build-arg ENABLE_TENSORRT_BACKEND=$ENABLE_TENSORRT_BACKEND \
     -f $DOCKERFILE \
     -t edgemlsdk . || { echo "ERROR: edgemlsdk Docker build failed"; exit 1; }
 

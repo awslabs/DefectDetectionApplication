@@ -24,7 +24,7 @@ device/build-server integration tests.
 
 ## Tasks
 
-- [ ] 1. Write bug condition exploration test (routing/gating)
+- [x] 1. Write bug condition exploration test (routing/gating)
   - **Property 1: Bug Condition** - JetPack 4.6 tokenless-aarch64 build must route to the TensorRT-enabled target
   - 🟢 **CI/this-device-OK** — this property is the pure routing function and runs here.
   - **CRITICAL**: This test MUST FAIL on unfixed code — failure confirms the bug exists.
@@ -46,7 +46,7 @@ device/build-server integration tests.
   - Mark task complete when the routing/gating test is written, run, and its failure is documented.
   - _Requirements: 1.1, 1.2, 1.3_
 
-- [ ] 2. Write preservation property tests (BEFORE implementing the fix)
+- [x] 2. Write preservation property tests (BEFORE implementing the fix)
   - **Property 2: Preservation** - JP5 / JP6 / x86_64 routing and gating are unchanged
   - 🟢 **CI/this-device-OK** — pure routing function; runs here.
   - **IMPORTANT**: Follow the observation-first methodology — capture the routing decisions the UNFIXED code makes for non-bug-condition inputs, then assert those exact decisions.
@@ -69,7 +69,7 @@ device/build-server integration tests.
 
 - [ ] 3. Fix: re-enable the Triton TensorRT backend in the existing from-source compile (Option C, ARG-gated)
 
-  - [ ] 3.1 SPIKE — confirm the L4T r32.7 TensorRT/CUDA dev toolchain and the Triton `build.py`/cmake wiring (DO THIS BEFORE editing the Dockerfile)
+  - [x] 3.1 SPIKE — confirm the L4T r32.7 TensorRT/CUDA dev toolchain and the Triton `build.py`/cmake wiring (DO THIS BEFORE editing the Dockerfile)
     - 🟠 **BUILD-SERVER-ONLY** — requires an L4T r32.7 / aarch64 build environment. **This is the central risk of the fix.**
     - **GOAL**: De-risk the Dockerfile change by confirming, on a real L4T r32.7 aarch64 host, the exact wiring the design left as representative.
     - Confirm how to source the TensorRT 8.2.1 + CUDA 10.2 **dev** packages into an Ubuntu 18.04 aarch64 image: NVIDIA L4T r32.7 apt repo URLs/keys vs. mounting JetPack-provided debs vs. requiring a preconfigured JP4.6 build host.
@@ -81,7 +81,7 @@ device/build-server integration tests.
     - _Expected_Behavior: source-built Triton `v2.45.0` with `--enable-gpu --backend tensorrt` produces an ABI-matched `tensorrt` backend_
     - _Requirements: 2.1, 2.2_
 
-  - [ ] 3.2 Edit `src/edgemlsdk/Dockerfile` — add the `ENABLE_TENSORRT_BACKEND` ARG and the gated TensorRT/CUDA deps, `build.py` flags, and staging move (central change)
+  - [x] 3.2 Edit `src/edgemlsdk/Dockerfile` — add the `ENABLE_TENSORRT_BACKEND` ARG and the gated TensorRT/CUDA deps, `build.py` flags, and staging move (central change)
     - 🟠 **BUILD-SERVER-ONLY for verification** (edit anywhere; the build that exercises it must run on the build server, not this device).
     - Declare `ARG ENABLE_TENSORRT_BACKEND=0` near the top (defaulted off so x86_64 is unchanged).
     - (1a) Before the Triton clone, add a gated `RUN` that installs the L4T r32.7 TensorRT 8.2.1 + CUDA 10.2 dev packages **only when** `ENABLE_TENSORRT_BACKEND=1`, using the repo/package wiring confirmed in 3.1.
@@ -93,7 +93,7 @@ device/build-server integration tests.
     - _Preservation: when `ENABLE_TENSORRT_BACKEND=0` the `build.py` call and staging move are byte-for-byte the originals → x86_64 stays CPU/python-only (Req 3.3)_
     - _Requirements: 2.1, 2.2_
 
-  - [ ] 3.3 Edit `src/edgemlsdk/build.sh` — add the `-j 4` branch
+  - [x] 3.3 Edit `src/edgemlsdk/build.sh` — add the `-j 4` branch
     - 🟢 **CI/this-device-OK to edit and unit-verify** the gating; full image build is 🟠 BUILD-SERVER-ONLY.
     - Initialize `ENABLE_TENSORRT_BACKEND=0`. Add an `elif [ "$jetpack" = "4" ]` branch that keeps `DOCKERFILE="Dockerfile"` (generic Ubuntu 18.04 aarch64 base) and sets `ENABLE_TENSORRT_BACKEND=1`.
     - Thread `--build-arg ENABLE_TENSORRT_BACKEND=$ENABLE_TENSORRT_BACKEND` into the `docker build` invocation.
@@ -103,7 +103,7 @@ device/build-server integration tests.
     - _Preservation: no `-j`, `-j 5`, `-j 6` → `ENABLE_TENSORRT_BACKEND=0` (Req 3.1, 3.2, 3.3)_
     - _Requirements: 2.1_
 
-  - [ ] 3.4 Edit `build-custom.sh` — detect the tokenless aarch64 (JP4.6) target and thread `-j 4`
+  - [x] 3.4 Edit `build-custom.sh` — detect the tokenless aarch64 (JP4.6) target and thread `-j 4`
     - 🟢 **CI/this-device-OK to edit and unit-verify** the routing.
     - Add `IS_JP4=0` and an `elif` after the `JP5` branch: `echo "$COMPONENT_NAME" | grep -q "arm64" && [ "$ARCHITECTURE" != "x86_64" ]` → `IS_JP4=1`, `JETPACK_ARG="4"`. Keep `JP6` and `JP5` branches ahead of it so detection precedence is preserved.
     - `edgemlsdk/build.sh` is already invoked with `-j "$JETPACK_ARG"` when non-empty, so `JETPACK_ARG="4"` threads through automatically.
@@ -115,7 +115,7 @@ device/build-server integration tests.
     - _Preservation: `JP6`→6/`Dockerfile.jp6`, `JP5`→5/`Dockerfile.jp5`, tokenless x86_64→ no `-j`/`ENABLE_TENSORRT_BACKEND=0`/`generic` only; audit guard + unit tests + packaging unchanged (Req 3.1–3.5)_
     - _Requirements: 2.1, 3.3_
 
-  - [ ] 3.5 Verify the bug condition exploration test now passes (fix-checking)
+  - [x] 3.5 Verify the bug condition exploration test now passes (fix-checking)
     - **Property 1: Expected Behavior** - tokenless-aarch64 routes to the TensorRT-enabled target
     - 🟢 **CI/this-device-OK** for the routing/gating property.
     - **IMPORTANT**: Re-run the SAME test from task 1 — do NOT write a new test.
@@ -124,7 +124,7 @@ device/build-server integration tests.
     - 🟠🔴 **Note**: The image-contents assertion (`/opt/tritonserver/backends/tensorrt` present) and the on-device `READY` / inference-completes checks are NOT runnable here — they are covered by the integration tests (task 5) on the build server / JP4.6 device.
     - _Requirements: 2.1, 2.2, 2.3 (Expected Behavior Properties from design Property 1)_
 
-  - [ ] 3.6 Verify the preservation tests still pass (preservation-checking)
+  - [x] 3.6 Verify the preservation tests still pass (preservation-checking)
     - **Property 2: Preservation** - JP5 / JP6 / x86_64 routing and gating unchanged
     - 🟢 **CI/this-device-OK**.
     - **IMPORTANT**: Re-run the SAME tests from task 2 — do NOT write new tests.
@@ -132,7 +132,7 @@ device/build-server integration tests.
     - **EXPECTED OUTCOME**: Tests PASS — JP5/JP6 routing unchanged, every x86_64 input still maps to `ENABLE_TENSORRT_BACKEND=0` (CPU/python-only), audit guard + unit tests + packaging still wired (no regressions).
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5_
 
-- [ ] 4. Checkpoint — all CI-runnable tests pass
+- [x] 4. Checkpoint — all CI-runnable tests pass
   - 🟢 **CI/this-device-OK**.
   - Run the full backend unit-test suite that `build-custom.sh` invokes, including the extended `test/backend-test/host_scripts/test_docker_profile_selection.py` (and any new `test_jetpack4_routing.py`).
   - Confirm Property 1 (routing) now passes and Property 2 (preservation) still passes.
