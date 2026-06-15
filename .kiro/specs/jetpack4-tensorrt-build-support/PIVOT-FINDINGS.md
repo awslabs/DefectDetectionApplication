@@ -55,3 +55,34 @@ fix) is the correct build. The remaining fix is on the JP4.6 device:
 
 The routing/preservation PBT tests and the spike findings from the abandoned approach
 are in git history at commit `bdadb56` if needed for reference.
+
+---
+
+## Device verification (refines the root cause; rules out profile mis-selection)
+
+On-device diagnosis on the JP4.6 Xavier NX (running component `aws.edgeml.dda.LocalServer.arm64` 1.0.116, RUNNING) confirms the runtime-injection hypothesis **and** narrows it: the failure is NOT profile mis-selection — the device is correctly on the `tegra` profile — it is that the NVIDIA Container Runtime CSV injection is not delivering TensorRT into the container.
+
+### Verified facts
+- Profile selection is correct: `/tmp/.dda.env` has `DOCKER_PROFILE=tegra` (host detected as Jetson: `JETSON_L4T=32.7.6`, `JETSON_CUDA=10.2.300`, `JETSON_TENSORRT=8.2.1.9`, `JETSON_NVINFER=8.2.1-1+cuda10.2`). `get_nvidia_libs_versions.sh` correctly set `is_gpu=1`, `arch=aarch64` → `tegra`.
+- The running container is the `tegra` service with the nvidia runtime: `service=backend_tegra_gpu_enabled`, `HostConfig.Runtime=nvidia`.
+- Despite that, TensorRT is absent inside the container: `ldconfig -p | grep nvinfer` → nothing; `find / -name 'libnvinfer.so*'` → nothing; `/usr/lib/aarch64-linux-gnu/libnvinfer.so*` → absent. (`import tensorrt` also fails, but that is irrelevant — the model path is python+DLR/C, not the TensorRT Python bindings.)
+- On the host, `libnvinfer.so{,.8,.8.2.1}` live in `/usr/lib/aarch64-linux-gnu/` — NOT under the `tegra/` subdirectory.
+- `tensorrt.csv` (under `/etc/nvidia-container-runtime/host-files-for-container.d/`) DOES list `libnvinfer.so.8.2.1` (+ plugin/onnxparser libs and symlinks), and `nvidia` is the default docker runtime.
+- The `backend_tegra_gpu_enabled` service sets `runtime: nvidia` but does NOT set `NVIDIA_VISIBLE_DEVICES` or `NVIDIA_DRIVER_CAPABILITIES` (confirmed absent in the container's `Config.Env`).
+
+### Analysis
+Two independent mechanisms deliver host GPU libraries into the container, covering different libs:
+1. **Explicit docker-compose bind mounts** — `/usr/local/cuda` and `/usr/lib/aarch64-linux-gnu/tegra`. These deliver CUDA + the Tegra driver libs.
+2. **NVIDIA Container Runtime CSV injection** (L4T r32 path) — bind-mounts the files listed in `*.csv` (incl. `tensorrt.csv` → `libnvinfer.so.8.2.1`). This is the ONLY mechanism that delivers TensorRT, because `libnvinfer.so*` lives in `/usr/lib/aarch64-linux-gnu/` (not in the `tegra/` subdir that the compose volume mounts).
+
+The CSV injection is not running for this container. The L4T CSV hook only performs its mounts when the container requests GPU capabilities via `NVIDIA_VISIBLE_DEVICES` (+ `NVIDIA_DRIVER_CAPABILITIES`); the `tegra` service does not set these, so the runtime injects nothing from the CSVs. CUDA still works because it arrives via the explicit compose bind mounts — which masks the broken CSV injection. (Secondary contributor: the runtime `mode` could not be confirmed as `csv` — `config.toml` had no matching `mode`/`csv` line — so the runtime may not resolve to csv mode either.)
+
+Consequence: `base_model-...-segmentation` is python-backend + DLR; `libdlr.so` needs `libnvinfer.so.8` at runtime, it is absent → `libnvinfer.so.8: cannot open shared object file` → `base_model` stuck `LOADING` → inference hangs. No Triton `tensorrt` backend is involved.
+
+### Corrected fix direction (device/compose side — no image rebuild)
+- Set `NVIDIA_VISIBLE_DEVICES=all` and `NVIDIA_DRIVER_CAPABILITIES=all` on the `backend_tegra_gpu_enabled` service so the CSV plugin injects `tensorrt.csv` (and cuda/cudnn) libs; confirm `/etc/nvidia-container-runtime/config.toml` has `mode = "csv"`.
+- Fallback: explicitly bind-mount `/usr/lib/aarch64-linux-gnu/libnvinfer.so*` into the container (like the `tegra` dir) so DLR can load it regardless of CSV injection.
+- Verify after the change with `ldconfig -p | grep nvinfer` and `find / -name 'libnvinfer.so.8*'` inside the container, then confirm `base_model` reaches `READY` and inference completes.
+
+### Status of the build-target theory
+Superseded and consistent with the abandonment of Option C above: the model does not use the Triton `tensorrt` backend, so no build/Dockerfile change is required for this defect. The `tegra` vs `generic` *build target* (Dockerfile selection) is unrelated to this runtime-injection failure.
