@@ -1,8 +1,10 @@
-> **⚠️ SUPERSEDED (root cause corrected).** This document hypothesized a missing
-> Triton tensorrt backend. Investigation (see `PIVOT-FINDINGS.md`) proved the
-> backend was never built and the real cause is **runtime TensorRT injection on
-> the JP4.6 device** (`DOCKER_PROFILE`/`tegra`/`runtime: nvidia`/`tensorrt.csv`).
-> Retained for historical context; follow the revised `tasks.md`.
+> **✅ RESOLVED (runtime fix shipped & device-verified).** Not a missing Triton
+> tensorrt backend. Root cause = NVIDIA Container Runtime CSV injection not running
+> for the `tegra` service (missing `NVIDIA_VISIBLE_DEVICES`/`NVIDIA_DRIVER_CAPABILITIES`),
+> so host `libnvinfer.so.8` was never injected and the python+DLR base_model stayed
+> LOADING. Fixed via those two env vars in `docker-compose.yaml`; shipped in
+> **LocalServer.arm64 1.0.117**; device-verified (model READY + inference). See
+> `PIVOT-FINDINGS.md` and `tasks.md`. Retained for historical context.
 
 # Bugfix Requirements Document
 

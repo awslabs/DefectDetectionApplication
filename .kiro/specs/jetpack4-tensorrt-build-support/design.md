@@ -1,10 +1,12 @@
-> **⚠️ SUPERSEDED (root cause corrected).** The "compile the Triton tensorrt
-> backend" design below was implemented, hit a hard CUDA-10.2/C++17 blocker, and
-> was reverted. Git history shows the tensorrt backend was never part of this
-> build. The real issue is **runtime TensorRT injection on the JP4.6 device**
-> (compose `tegra` profile / `runtime: nvidia` / `tensorrt.csv`), not a build
-> artifact. See `PIVOT-FINDINGS.md` and the revised `tasks.md`. This document is
-> retained for historical context only.
+> **✅ RESOLVED (runtime fix shipped & device-verified).** The "compile the Triton
+> tensorrt backend" design below was reverted. Root cause was a runtime CSV-injection
+> gap: the `tegra` compose service ran `runtime: nvidia` without
+> `NVIDIA_VISIBLE_DEVICES`/`NVIDIA_DRIVER_CAPABILITIES`, so the NVIDIA Container
+> Runtime never injected host TensorRT (`libnvinfer.so.8`). Fix = add those two env
+> vars to the `tegra` service in `docker-compose.yaml`; shipped in
+> **LocalServer.arm64 1.0.117**; device-verified (model READY + inference). See
+> `PIVOT-FINDINGS.md` and `tasks.md`. This document is retained for historical
+> context only.
 
 # JetPack 4 TensorRT Build Support Bugfix Design
 

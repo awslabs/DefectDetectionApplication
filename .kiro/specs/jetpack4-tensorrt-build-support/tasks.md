@@ -46,15 +46,15 @@ Execution-environment legend:
   - [x] 4.1 DEVICE-VALIDATED (quick test): added the two env vars to the live 1.0.116 deployed compose, restarted the component via `greengrass-cli component restart`, and confirmed in the new container: `ldconfig -p | grep nvinfer` lists `libnvinfer.so.8` and `/usr/lib/aarch64-linux-gnu/libnvinfer.so* -> libnvinfer.so.8.2.1` are present (fresh mounts). The env-var fix works.
   - [x] 4.2 Durable delivery (build server): republished `aws.edgeml.dda.LocalServer.arm64` **1.0.117** via `./publish-ecr-only.sh` (image reused from 1.0.116 — byte-identical id `221c20480cb7`; only the scripts/compose zip changed). Registered + tagged `dda-portal:managed=true`. **Deploy 1.0.117 from the portal**, then run task 5 against it.
 
-- [ ] 5. 🔴 Verify the fix end-to-end (via the app/Greengrass path, not a bare `docker exec ./tritonserver`)
-  - [ ] 5.1 In-container `libnvinfer.so.8` resolvable (`ldconfig -p | grep nvinfer`).
-  - [ ] 5.2 `base_model-bd-dda-test-segmentation` → `READY`; ensemble `model-bd-dda-test-segmentation` → `READY`; python `marshal_model-...` still `READY`; inference completes (no "waiting for Triton inference" hang).
+- [x] 5. 🔴 Verify the fix end-to-end (via the app/Greengrass path, not a bare `docker exec ./tritonserver`)
+  - [x] 5.1 In-container `libnvinfer.so.8` resolvable (`ldconfig -p | grep nvinfer`). CONFIRMED on device.
+  - [x] 5.2 DEVICE-CONFIRMED: model reached READY and inference executed successfully on the JP4.6 Xavier NX.
 
 - [ ] 6. 🟢/🔴 Fallback if CSV injection still does not deliver TensorRT (only if task 5 fails)
-  - [ ] 6.1 Add an explicit bind mount of the host TensorRT libs to the `tegra` service (e.g. mount `/usr/lib/aarch64-linux-gnu` read-only to a non-shadowing path and add it to `LD_LIBRARY_PATH`, or mount the specific `libnvinfer.so*` files), so DLR can load `libnvinfer.so.8` regardless of CSV injection. Re-verify task 5.
+  - [ ] 6.1 NOT NEEDED — CSV injection via the capability env vars succeeded; the bind-mount fallback was not required.
 
-- [ ] 7. 🟢 Close out
-  - [ ] 7.1 Once verified on-device, finalize `design.md`/`bugfix.md` to the runtime CSV-injection root cause and mark the spec complete (device runtime/config fix; no image change).
+- [x] 7. 🟢 Close out
+  - [x] 7.1 Root cause confirmed = runtime CSV-injection gap (capability env vars), fixed in `src/docker-compose.yaml`, shipped in **1.0.117**, device-verified (model READY + inference). `design.md`/`bugfix.md` banner-updated to RESOLVED. **Spec complete — device runtime/config fix, no image change.**
 
 ## Task Dependency Graph
 

@@ -11,23 +11,17 @@ full context. Newest-relevant first.
 - Portal Lambdas deployed in account 164152369890 (us-east-1): `ComponentsHandler`,
   `SharedComponentsHandler`, `DeploymentsHandler` — all updated and Active.
 
-## Open item (device-side) — JP4.6 TensorRT runtime
-- Symptom: `base_model-...-segmentation` stuck `LOADING`; manual triton run shows
-  `libdlr.so … libnvinfer.so.8: cannot open shared object file`.
-- Root cause (DEVICE-VERIFIED): model is **python-backend + DLR**; `libnvinfer.so.8`
-  must be injected at runtime. The device IS correctly on the `tegra` profile with
-  `runtime: nvidia`, but the `backend_tegra_gpu_enabled` service set no
-  `NVIDIA_VISIBLE_DEVICES` / `NVIDIA_DRIVER_CAPABILITIES`, so the L4T NVIDIA Container
-  Runtime never ran its CSV injection (`tensorrt.csv` → `libnvinfer.so.8.2.1`).
-  `libnvinfer.so*` lives in `/usr/lib/aarch64-linux-gnu/` (outside the bind-mounted
-  `tegra/` dir), so CSV injection is the only delivery path. CUDA worked via explicit
-  mounts, masking the gap.
-- Fix (IMPLEMENTED, repo-side): added `NVIDIA_VISIBLE_DEVICES=all` +
-  `NVIDIA_DRIVER_CAPABILITIES=all` to the `tegra` service in `src/docker-compose.yaml`.
-  This ships in the component scripts artifact (NOT the docker image), so deliver via
-  republish (`publish-ecr-only.sh`) or a device-side compose edit + recreate.
-- **Next steps: follow `tasks.md` (REVISED 2) — confirm config.toml `mode="csv"` (3),
-  deliver the compose change (4), verify READY+inference (5), bind-mount fallback (6).**
+## RESOLVED — JP4.6 TensorRT runtime (device-verified)
+- Fix shipped in **LocalServer.arm64 1.0.117** and **device-verified**: model
+  reaches READY and inference executes on the JP4.6 Xavier NX.
+- Root cause: the `tegra` compose service ran `runtime: nvidia` without
+  `NVIDIA_VISIBLE_DEVICES`/`NVIDIA_DRIVER_CAPABILITIES`, so the NVIDIA Container
+  Runtime skipped CSV injection and host `libnvinfer.so.8` was never mounted →
+  python+DLR `base_model` stuck LOADING. Fix = add those two env vars to
+  `backend_tegra_gpu_enabled` in `src/docker-compose.yaml` (compose-only; no image
+  change; `generic` service untouched). No `config.toml` mode change needed.
+- 1.0.117 reuses the 1.0.116 image (byte-identical); only the scripts/compose zip
+  changed. Spec `jetpack4-tensorrt-build-support` is complete.
 
 ## Fixes already committed/pushed on `python_310` this session
 1. Triton `model.py` lyra import is now CWD-independent (sys.path bootstrap in
