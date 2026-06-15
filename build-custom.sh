@@ -63,7 +63,6 @@ export IMAGE_VER
 # Determine the JetPack target from the component name.
 # JP5 components are named with "JP5" (e.g. aws.edgeml.dda.LocalServer.arm64JP5),
 # JP6 components with "JP6" (e.g. aws.edgeml.dda.LocalServer.arm64JP6).
-IS_JP4=0
 IS_JP5=0
 IS_JP6=0
 JETPACK_ARG=""
@@ -73,10 +72,6 @@ if echo "$COMPONENT_NAME" | grep -q "JP6"; then
 elif echo "$COMPONENT_NAME" | grep -q "JP5"; then
     IS_JP5=1
     JETPACK_ARG="5"
-elif echo "$COMPONENT_NAME" | grep -q "arm64" && [ "$ARCHITECTURE" != "x86_64" ]; then
-    # Plain arm64 component on an aarch64 host == the JetPack 4.6 target.
-    IS_JP4=1
-    JETPACK_ARG="4"
 fi
 
 echo "Ubuntu version: $IMAGE_VER"

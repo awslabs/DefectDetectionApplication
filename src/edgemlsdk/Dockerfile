@@ -2,10 +2,6 @@ ARG OS
 FROM public.ecr.aws/ubuntu/ubuntu:${OS}
 ARG OS
 ARG PLATFORM
-# Gate for re-enabling the Triton tensorrt backend in the from-source build.
-# Default 0 so x86_64 (and any non-JP4 build) is byte-for-byte unchanged.
-# Set to 1 only for the JP4.6 / aarch64 build via edgemlsdk/build.sh -j 4.
-ARG ENABLE_TENSORRT_BACKEND=0
 # Use non-interactive mode to suppress any prompt during installation
 ENV DEBIAN_FRONTEND noninteractive
 
@@ -327,22 +323,6 @@ RUN apt-get install libnuma-dev -y \
 
 RUN apt-get install libarchive-dev -y
 
-# JP4.6 / L4T r32.7 build-time TensorRT 8.2.1 + CUDA 10.2 dev toolchain.
-# Only installed when ENABLE_TENSORRT_BACKEND=1 (the aarch64/JP4 build); a no-op
-# otherwise so x86_64 and the generic build are unchanged. The dev headers/libs
-# resolve entirely within the NVIDIA L4T r32.7 `common` apt repo (no nvidia-l4t-*
-# deps); the runtime libnvinfer.so.8.2.1 is still host-injected via tensorrt.csv.
-RUN if [ "$ENABLE_TENSORRT_BACKEND" = "1" ]; then \
-        wget -qO - https://repo.download.nvidia.com/jetson/jetson-ota-public.asc \
-          | gpg --dearmor | tee /etc/apt/trusted.gpg.d/jetson-ota-public.gpg >/dev/null && \
-        echo "deb https://repo.download.nvidia.com/jetson/common r32.7 main" \
-          > /etc/apt/sources.list.d/nvidia-l4t.list && \
-        apt-get update && \
-        apt-get install -y --no-install-recommends \
-          cuda-nvcc-10-2 cuda-cudart-dev-10-2 cuda-libraries-dev-10-2 \
-          libnvinfer-dev libnvinfer-plugin-dev libnvonnxparsers-dev ; \
-    fi
-
 # Triton checkout tag
 # Current tag 2.45.0 released on April 30,2024.
 # Fixed tag for reproducible build and patching.
@@ -381,16 +361,7 @@ RUN if [ "$OS" = "18.04" ]; then \
 RUN    export PYBIND11_FINDPYTHON=ON && \
     cd /dependencies/server && \ 
     git apply edgeml-triton-server.diff && \
-    TRT_ARGS="" && \
-    if [ "$ENABLE_TENSORRT_BACKEND" = "1" ]; then \
-        export PATH=/usr/local/cuda-10.2/bin:$PATH && \
-        export CUDAToolkit_ROOT=/usr/local/cuda-10.2 && \
-        TRT_ARGS="--enable-gpu --backend tensorrt \
-        --extra-backend-cmake-arg=tensorrt:TRITON_TENSORRT_INCLUDE_PATHS=/usr/include/aarch64-linux-gnu \
-        --extra-backend-cmake-arg=tensorrt:TRITON_TENSORRT_LIB_PATHS=/usr/lib/aarch64-linux-gnu" ; \
-    fi && \
     python3.11 build.py --enable-logging  --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
-    $TRT_ARGS \
     --extra-core-cmake-arg=TRITON_ENABLE_ENSEMBLE=ON \
     --extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON \
     --extra-core-cmake-arg=-DPYBIND11_FINDPYTHON=ON \
@@ -403,10 +374,7 @@ RUN    export PYBIND11_FINDPYTHON=ON && \
     --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/local/include/python3.11 \
     --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.11 \
     --backend python --build-dir=`pwd`/build
-RUN mv /dependencies/server/build/python/install/backends/python /dependencies/server/build/tritonserver/install/backends && \
-    if [ "$ENABLE_TENSORRT_BACKEND" = "1" ]; then \
-        mv /dependencies/server/build/tensorrt/install/backends/tensorrt /dependencies/server/build/tritonserver/install/backends ; \
-    fi
+RUN mv /dependencies/server/build/python/install/backends/python /dependencies/server/build/tritonserver/install/backends
 
 RUN cd /dependencies/server/build/opt/ \
     && tar cvzf triton_installation_files.tar.gz tritonserver/ \
