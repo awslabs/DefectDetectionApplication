@@ -39,12 +39,12 @@ Execution-environment legend:
 - [x] 2. 🟢 Add GPU-capability env to the `tegra` service so CSV injection runs (DONE — implemented)
   - [x] 2.1 In `src/docker-compose.yaml`, add `NVIDIA_VISIBLE_DEVICES=all` and `NVIDIA_DRIVER_CAPABILITIES=all` to `backend_tegra_gpu_enabled`'s `environment` (with an explanatory comment). The `generic` service is intentionally left unchanged.
 
-- [ ] 3. 🔴 Confirm the NVIDIA runtime is in CSV mode on the device
-  - [ ] 3.1 Check `/etc/nvidia-container-runtime/config.toml` for `mode = "csv"` (on-device diagnosis showed no matching line). On JP4/L4T r32 the CSV hook only injects in csv mode. If it is `auto`/unset and injection still doesn't run after task 4, set `mode = "csv"` (or rely on the task 6 fallback).
+- [x] 3. 🔴 Confirm the NVIDIA runtime is in CSV mode on the device
+  - [x] 3.1 DEVICE RESULT: `config.toml` had **no explicit `mode` line**, yet after adding the capability env vars the CSV injection ran and delivered `libnvinfer.so{,.8,.8.2.1}` + plugins — so the default mode resolves to csv on this JP4.6 host. **No `config.toml` change needed.**
 
-- [ ] 4. 🔴 Deliver the compose change to the device and recreate the container
-  - [ ] 4.1 Fast device-side validation (no republish): apply the same two env vars to the deployed `docker-compose.yaml` under the component's `custom-build/.../` dir, then `docker compose --profile tegra ... up --no-build --force-recreate`. Confirm `ldconfig -p | grep nvinfer` now lists `libnvinfer.so.8` in the container.
-  - [ ] 4.2 Durable delivery (build server): republish `aws.edgeml.dda.LocalServer.arm64` so the updated `docker-compose.yaml` ships in the component artifact — via `./publish-ecr-only.sh` (reuses the existing `flask-app` image; repackages the scripts/compose zip; bumps to 1.0.117). NOTE: ensure the staging `custom-build/.../docker-compose.yaml` reflects the repo edit before zipping. Then deploy the new version from the portal.
+- [x] 4. 🔴 Deliver the compose change to the device and recreate the container
+  - [x] 4.1 DEVICE-VALIDATED (quick test): added the two env vars to the live 1.0.116 deployed compose, restarted the component via `greengrass-cli component restart`, and confirmed in the new container: `ldconfig -p | grep nvinfer` lists `libnvinfer.so.8` and `/usr/lib/aarch64-linux-gnu/libnvinfer.so* -> libnvinfer.so.8.2.1` are present (fresh mounts). The env-var fix works.
+  - [x] 4.2 Durable delivery (build server): republished `aws.edgeml.dda.LocalServer.arm64` **1.0.117** via `./publish-ecr-only.sh` (image reused from 1.0.116 — byte-identical id `221c20480cb7`; only the scripts/compose zip changed). Registered + tagged `dda-portal:managed=true`. **Deploy 1.0.117 from the portal**, then run task 5 against it.
 
 - [ ] 5. 🔴 Verify the fix end-to-end (via the app/Greengrass path, not a bare `docker exec ./tritonserver`)
   - [ ] 5.1 In-container `libnvinfer.so.8` resolvable (`ldconfig -p | grep nvinfer`).
