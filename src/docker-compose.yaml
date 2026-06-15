@@ -42,6 +42,16 @@ services:
       - LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH
       - JETSON_CUDA=$JETSON_CUDA
       - JETSON_TENSORRT=$JETSON_TENSORRT
+      # Request GPU capabilities so the L4T NVIDIA Container Runtime performs its
+      # CSV injection (host-files-for-container.d/*.csv, incl. tensorrt.csv ->
+      # libnvinfer.so.8.2.1). Without these, `runtime: nvidia` injects nothing
+      # from the CSVs, so libnvinfer.so* (which lives in /usr/lib/aarch64-linux-gnu,
+      # NOT the tegra/ dir we bind-mount) is absent in the container and the
+      # python+DLR base_model fails: "libnvinfer.so.8: cannot open shared object
+      # file". CUDA still works via the explicit mounts below, which masks the gap.
+      # Requires /etc/nvidia-container-runtime/config.toml mode = "csv" on JP4/L4T r32.
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
       - CUDA_HOME=/usr/local/cuda/
       - LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CUDA_HOME/lib64/:/usr/lib/aarch64-linux-gnu/tegra:/usr/local/cuda/targets/aarch64-linux/lib/
       - GRPC_POLL_STRATEGY=poll
