@@ -1,3 +1,9 @@
+> **⚠️ SUPERSEDED (root cause corrected).** This document hypothesized a missing
+> Triton tensorrt backend. Investigation (see `PIVOT-FINDINGS.md`) proved the
+> backend was never built and the real cause is **runtime TensorRT injection on
+> the JP4.6 device** (`DOCKER_PROFILE`/`tegra`/`runtime: nvidia`/`tensorrt.csv`).
+> Retained for historical context; follow the revised `tasks.md`.
+
 # Bugfix Requirements Document
 
 ## Introduction
