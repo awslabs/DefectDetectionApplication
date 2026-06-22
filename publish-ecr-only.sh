@@ -8,16 +8,21 @@ set -o pipefail
 
 ARCH="aarch64"
 
-# Select the component (and thus staging dir / artifacts) based on the host OS.
-# Ubuntu 18.04 == JetPack 4 (jp4) -> non-JP5 artifacts (no "JP5" suffix).
-# Anything else (e.g. Ubuntu 20.04 / JetPack 5) -> JP5 artifacts.
+# Component selection. An explicit component name may be passed as $1 to publish a
+# pre-built image without rebuilding — required for JP6 (arm64JP6) and useful on a
+# build server whose host OS does not match the target (this box is Ubuntu 18.04 but
+# builds JP5/JP6 images too). With no arg, fall back to host-OS detection:
+#   Ubuntu 18.04 == JetPack 4 -> arm64 (no suffix); anything else -> arm64JP5.
+COMPONENT_BASE="aws.edgeml.dda.LocalServer.arm64"
 OS_VERSION_ID=""
 if [ -r /etc/os-release ]; then
     OS_VERSION_ID=$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-}")
 fi
 
-COMPONENT_BASE="aws.edgeml.dda.LocalServer.arm64"
-if [ "$OS_VERSION_ID" = "18.04" ]; then
+if [ -n "${1:-}" ]; then
+    COMPONENT_NAME="$1"
+    echo "Using explicit component name override: ${COMPONENT_NAME}"
+elif [ "$OS_VERSION_ID" = "18.04" ]; then
     COMPONENT_NAME="${COMPONENT_BASE}"
     echo "Detected Ubuntu 18.04 (JetPack 4): using JP4 artifacts (${COMPONENT_NAME})"
 else
