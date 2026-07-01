@@ -70,8 +70,11 @@ class SKLearnScoreCalibration:
         return out[:, 1]
 
     def get_params(self):
-        a = self._calibrator.calibrated_classifiers_[0].calibrators_[0].a_
-        b = self._calibrator.calibrated_classifiers_[0].calibrators_[0].b_
+        # scikit-learn removed the deprecated `_CalibratedClassifier.calibrators_`
+        # alias in 1.1; `.calibrators` is the supported name (present since 0.24,
+        # so this works on both the legacy 1.0.2 and the current >=1.1.3 pins).
+        a = self._calibrator.calibrated_classifiers_[0].calibrators[0].a_
+        b = self._calibrator.calibrated_classifiers_[0].calibrators[0].b_
         return [a, b]
 
     def set_params(self, params):
@@ -83,5 +86,5 @@ class SKLearnScoreCalibration:
         a[1] = 0.25
         b = [0, 1]
         self._calibrator.fit(a, b)
-        self._calibrator.calibrated_classifiers_[0].calibrators_[0].a_ = params[0]
-        self._calibrator.calibrated_classifiers_[0].calibrators_[0].b_ = params[1]
+        self._calibrator.calibrated_classifiers_[0].calibrators[0].a_ = params[0]
+        self._calibrator.calibrated_classifiers_[0].calibrators[0].b_ = params[1]
