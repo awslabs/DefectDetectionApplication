@@ -39,23 +39,42 @@ RUN wget -O /etc/apt/trusted.gpg.d/kitware.asc https://apt.kitware.com/keys/kitw
     rm -f /etc/apt/sources.list.d/kitware.list /etc/apt/trusted.gpg.d/kitware.asc && \
     rm -rf /var/lib/apt/lists/*
 
-# ── 3. Python 3.9 + pip tooling ───────────────────────────────────────────
+# ── 3. Python 3.11 (built from source) + pip tooling ───────────────────────
+# focal/arm64 has NO apt python3.11: the deadsnakes PPA publishes no arm64
+# binaries for focal and Ubuntu 20.04 itself only goes up to 3.9/3.10. So build
+# CPython 3.11 from source (the same approach as the generic edgemlsdk
+# Dockerfile), installing under /usr/local with a shared libpython that the
+# Triton Python backend links against. update-alternatives manages
+# /usr/local/bin/python3 (PATH-preferred) and leaves /usr/bin/python3 as the
+# distro python so apt/py3compile tooling is undisturbed.
+ARG PYTHON_SRC_VERSION=3.11.9
 RUN rm -f /etc/apt/sources.list.d/*kitware* && \
     sed -i '/kitware/d' /etc/apt/sources.list && \
     apt-get update && \
-    apt-get install -y python${PYTHON_VERSION}-dev libpython${PYTHON_VERSION} \
-    python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python3-pip && \
+    apt-get install -y --no-install-recommends \
+      build-essential wget zlib1g-dev libssl-dev libffi-dev libsqlite3-dev \
+      libbz2-dev libreadline-dev libncursesw5-dev libgdbm-dev liblzma-dev \
+      tk-dev uuid-dev && \
+    cd /tmp && \
+    wget -q https://www.python.org/ftp/python/${PYTHON_SRC_VERSION}/Python-${PYTHON_SRC_VERSION}.tgz && \
+    tar -xzf Python-${PYTHON_SRC_VERSION}.tgz && \
+    cd Python-${PYTHON_SRC_VERSION} && \
+    ./configure --enable-optimizations --enable-shared --with-ensurepip=install && \
+    make -j"$(nproc)" && \
+    make install && \
+    ldconfig && \
+    cd / && rm -rf /tmp/Python-${PYTHON_SRC_VERSION}* && \
     rm -rf /var/lib/apt/lists/* && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
-    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
-    rm -f /usr/bin/python && ln -s /usr/bin/python3.9 /usr/bin/python && \
-    python${PYTHON_VERSION} -m pip install --user --upgrade pip && \
-    python${PYTHON_VERSION} -m pip install --upgrade build
+    update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python${PYTHON_VERSION} 1 && \
+    update-alternatives --set python3 /usr/local/bin/python${PYTHON_VERSION} && \
+    ln -sf /usr/local/bin/python${PYTHON_VERSION} /usr/local/bin/python && \
+    /usr/local/bin/python${PYTHON_VERSION} -m pip install --upgrade pip && \
+    /usr/local/bin/python${PYTHON_VERSION} -m pip install --upgrade build
 
-ENV PYTHON_EXECUTABLE=/usr/bin/python3.9
-ENV Python3_EXECUTABLE=/usr/bin/python3.9
-ENV Python3_INCLUDE_DIR=/usr/include/python3.9
-ENV Python3_LIBRARY=/usr/lib/libpython3.9.so
+ENV PYTHON_EXECUTABLE=/usr/local/bin/python3.11
+ENV Python3_EXECUTABLE=/usr/local/bin/python3.11
+ENV Python3_INCLUDE_DIR=/usr/local/include/python3.11
+ENV Python3_LIBRARY=/usr/local/lib/libpython3.11.so
 
 # ── 4. Python packages ────────────────────────────────────────────────────
 RUN pip3 install --upgrade pip setuptools==64.0.3 wheel build hatchling packaging==24.2 && \
@@ -194,20 +213,20 @@ RUN . /tmp/build-env.sh && \
     export PYBIND11_FINDPYTHON=ON && \
     export MAKEFLAGS="-j$JOBS" && \
     git apply edgeml-triton-server.diff && \
-    python3.9 build.py --enable-logging --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
+    python3.11 build.py --enable-logging --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
         --build-parallel $TRITON_PARALLEL \
         --extra-core-cmake-arg=TRITON_ENABLE_ENSEMBLE=ON \
         --extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON \
         --extra-core-cmake-arg=-DPYBIND11_FINDPYTHON=ON \
         --extra-core-cmake-arg=CMAKE_POLICY_VERSION_MINIMUM=3.5 \
         --extra-core-cmake-arg=TRITON_CORE_ENABLE_TESTS=OFF \
-        --extra-core-cmake-arg=PYTHON_EXECUTABLE=/usr/bin/python3.9 \
-        --extra-core-cmake-arg=-DPYTHON_EXECUTABLE=/usr/bin/python3.9 \
-        --extra-core-cmake-arg=PYTHON_INCLUDE_DIR=/usr/include/python3.9 \
-        --extra-core-cmake-arg=PYTHON_LIBRARY=/usr/lib/libpython3.9.so \
-        --extra-core-cmake-arg=PYTHON_LIBRARIES=/usr/lib/libpython3.9.so \
-        --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/include/python3.9 \
-        --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.9 \
+        --extra-core-cmake-arg=PYTHON_EXECUTABLE=/usr/local/bin/python3.11 \
+        --extra-core-cmake-arg=-DPYTHON_EXECUTABLE=/usr/local/bin/python3.11 \
+        --extra-core-cmake-arg=PYTHON_INCLUDE_DIR=/usr/local/include/python3.11 \
+        --extra-core-cmake-arg=PYTHON_LIBRARY=/usr/local/lib/libpython3.11.so \
+        --extra-core-cmake-arg=PYTHON_LIBRARIES=/usr/local/lib/libpython3.11.so \
+        --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/local/include/python3.11 \
+        --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.11 \
         --backend python --build-dir=$(pwd)/build && \
     mv build/python/install/backends/python build/tritonserver/install/backends && \
     cp -a build/tritonserver/install/backends/python build/python/install/backends/python && \

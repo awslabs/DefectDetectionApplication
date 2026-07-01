@@ -5,6 +5,7 @@ Manages Greengrass deployments to edge devices
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 import boto3
@@ -27,9 +28,15 @@ DEPLOYMENTS_TABLE = os.environ.get('DEPLOYMENTS_TABLE', 'dda-portal-deployments'
 # If the device's Nucleus is too old, Greengrass will report the conflict.
 MIN_NUCLEUS_VERSION = '2.4.0'  # Reference only — not used in deployment components
 
-# CloudWatch log manager for device logging
-# Version 2.3.9 supports Nucleus >=2.1.0 <2.14.0
-LOG_MANAGER_VERSION = '2.3.9'
+# CloudWatch log manager for device logging.
+# The pinned version's Nucleus ceiling must cover the Nucleus the device runs,
+# since this component is auto-included alongside Nucleus (pinned to the device's
+# running version). LogManager 2.3.9 requires Nucleus <2.15.0, which conflicts
+# with devices on Nucleus >=2.15.0 (e.g. 2.16.1) and yields
+# FAILED_NO_STATE_CHANGE / NoAvailableComponentVersion. 2.3.12 allows Nucleus
+# <2.18.0, matching the ceilings of the other auto-included AWS components
+# (Cli / ShadowManager / DockerApplicationManager).
+LOG_MANAGER_VERSION = '2.3.12'
 
 # Components that require Nucleus to be explicitly included in deployment
 # Model components (model-*) also need Nucleus since they depend on DDA components
@@ -127,6 +134,97 @@ def get_latest_nucleus_version(greengrass_client, region):
         logger.info(f"Latest available aws.greengrass.Nucleus version: {latest}")
         return latest
     return None
+
+
+def _nucleus_satisfies(version, requirement):
+    """Return True if a concrete Nucleus version satisfies a Greengrass semver
+    requirement string of space-separated comparators (AND-ed), e.g.
+    '>=2.1.0 <2.18.0' or '=2.16.1'. An empty/unparseable requirement is treated
+    as satisfied (SOFT/best-effort)."""
+    if not requirement:
+        return True
+    v = _version_key(version)
+    for token in requirement.split():
+        token = token.strip()
+        if not token:
+            continue
+        m = re.match(r'^(>=|<=|==|=|>|<)?\s*(.+)$', token)
+        if not m:
+            continue
+        op = m.group(1) or '=='
+        bound = _version_key(m.group(2))
+        if op in ('=', '==') and not (v == bound):
+            return False
+        if op == '>=' and not (v >= bound):
+            return False
+        if op == '<=' and not (v <= bound):
+            return False
+        if op == '>' and not (v > bound):
+            return False
+        if op == '<' and not (v < bound):
+            return False
+    return True
+
+
+def resolve_log_manager_version(greengrass_client, region, running_nucleus):
+    """Return the newest aws.greengrass.LogManager version whose Nucleus
+    dependency is satisfied by the device's running Nucleus.
+
+    LogManager declares a Nucleus VersionRequirement (e.g. '>=2.1.0 <2.15.0').
+    Auto-including a LogManager whose ceiling excludes the device's pinned
+    Nucleus produces FAILED_NO_STATE_CHANGE / NoAvailableComponentVersion. We
+    therefore select the highest LogManager version compatible with
+    `running_nucleus`. Falls back to the static LOG_MANAGER_VERSION when the
+    running Nucleus is unknown or resolution fails (network/permission), so the
+    behavior is never worse than the previous hard-coded pin."""
+    if not running_nucleus:
+        return LOG_MANAGER_VERSION
+
+    lm_arn = f"arn:aws:greengrass:{region}:aws:components:aws.greengrass.LogManager"
+    candidates = []
+    try:
+        paginator = greengrass_client.get_paginator('list_component_versions')
+        for page in paginator.paginate(arn=lm_arn):
+            for cv in page.get('componentVersions', []):
+                v = cv.get('componentVersion')
+                if v:
+                    candidates.append(v)
+    except Exception as e:
+        logger.warning(f"Could not list LogManager versions, using {LOG_MANAGER_VERSION}: {e}")
+        return LOG_MANAGER_VERSION
+
+    # Highest LogManager version first; return the first one compatible with the
+    # device's running Nucleus.
+    for lm_version in sorted(candidates, key=_version_key, reverse=True):
+        try:
+            resp = greengrass_client.get_component(
+                arn=f"{lm_arn}:versions:{lm_version}",
+                recipeOutputFormat='JSON'
+            )
+            recipe_raw = resp.get('recipe')
+            if isinstance(recipe_raw, (bytes, bytearray)):
+                recipe_raw = recipe_raw.decode('utf-8')
+            recipe = json.loads(recipe_raw)
+            nucleus_req = (
+                recipe.get('ComponentDependencies', {})
+                      .get('aws.greengrass.Nucleus', {})
+                      .get('VersionRequirement', '')
+            )
+            if _nucleus_satisfies(running_nucleus, nucleus_req):
+                logger.info(
+                    f"Resolved LogManager {lm_version} (Nucleus requirement "
+                    f"'{nucleus_req}') for running Nucleus {running_nucleus}"
+                )
+                return lm_version
+        except Exception as e:
+            logger.warning(f"Could not inspect LogManager {lm_version}: {e}")
+            continue
+
+    logger.warning(
+        f"No LogManager version found compatible with Nucleus {running_nucleus}; "
+        f"falling back to {LOG_MANAGER_VERSION}"
+    )
+    return LOG_MANAGER_VERSION
 
 
 def handler(event, context):
@@ -642,7 +740,23 @@ def create_deployment(body, user):
         # ("no component of type nucleus was included as target component").
         # Including it as a top-level component authorizes the update.
         auto_included = []
-        
+
+        # Resolve the device's running Nucleus once, up front: BOTH the
+        # auto-included LogManager version and the pinned Nucleus version depend
+        # on it. The iot_client is reused for target resolution below.
+        iot_client = get_usecase_client(
+            'iot',
+            usecase,
+            session_name=f"iot-deploy-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+            region=region
+        )
+        running_nucleus = None
+        if needs_nucleus:
+            running_nucleus = resolve_target_running_nucleus(
+                greengrass_client, iot_client, target_devices,
+                target_thing_group, region, account_id
+            )
+
         # Auto-include CloudWatch log manager for device logging
         if needs_nucleus and 'aws.greengrass.LogManager' not in components_map:
             # Build componentLogsConfigurationMap dynamically from all components in the deployment
@@ -682,18 +796,25 @@ def create_deployment(body, user):
                 }
             }
             
+            # Pick the newest LogManager whose Nucleus dependency covers the
+            # device's running Nucleus (falls back to LOG_MANAGER_VERSION when the
+            # running Nucleus is unknown). This prevents the LogManager<->Nucleus
+            # version conflict as devices move to newer Nucleus releases.
+            log_manager_version = resolve_log_manager_version(
+                greengrass_client, region, running_nucleus
+            )
             components_map['aws.greengrass.LogManager'] = {
-                'componentVersion': LOG_MANAGER_VERSION,
+                'componentVersion': log_manager_version,
                 'configurationUpdate': {
                     'merge': json.dumps(log_manager_config)
                 }
             }
             auto_included.append({
                 'component_name': 'aws.greengrass.LogManager',
-                'component_version': LOG_MANAGER_VERSION,
+                'component_version': log_manager_version,
                 'reason': 'Required for CloudWatch logging from devices'
             })
-            logger.info(f"Auto-included aws.greengrass.LogManager {LOG_MANAGER_VERSION} with logging for components: {list(component_log_config_map.keys())}")
+            logger.info(f"Auto-included aws.greengrass.LogManager {log_manager_version} with logging for components: {list(component_log_config_map.keys())}")
         
         # Auto-include InferenceUploader for automatic S3 upload of inference results
         # Only include if explicitly enabled in UseCase configuration (opt-in)
@@ -732,15 +853,8 @@ def create_deployment(body, user):
         elif not enable_inference_uploader:
             logger.info("InferenceUploader not included - disabled in UseCase configuration")
         
-        # Determine target ARN
+        # Determine target ARN (iot_client and running_nucleus were resolved above)
         # Greengrass deployments must target thing groups, not individual things
-        iot_client = get_usecase_client(
-            'iot',
-            usecase,
-            session_name=f"iot-deploy-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64],
-            region=region
-        )
-        
         if target_thing_group:
             target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{target_thing_group}"
         elif target_devices:
@@ -756,22 +870,16 @@ def create_deployment(body, user):
         # DDA components depend on Nucleus (>=2.4.0). Greengrass refuses to update
         # the Nucleus across minor/major versions unless Nucleus is an explicit
         # top-level target component ("no component of type nucleus was included as
-        # target component"). However, pinning to the LATEST Nucleus breaks other
-        # auto-included components: e.g. aws.greengrass.LogManager requires Nucleus
-        # < 2.15.0, so pinning to 2.17.0 produces a NoAvailableComponentVersion
-        # conflict.
+        # target component").
         #
-        # The safe choice is to pin Nucleus to the version the device is already
-        # running. That version is, by definition, already installed and compatible
-        # with the device, it satisfies the "explicit top-level component"
-        # requirement, and it avoids forcing an incompatible upgrade. We only fall
-        # back to the latest version (or unpinned) if the running version can't be
-        # determined.
+        # We pin Nucleus to the version the device is already running: it is, by
+        # definition, already installed and compatible, satisfies the explicit-
+        # nucleus requirement, and avoids forcing an incompatible upgrade. The
+        # auto-included LogManager version is independently resolved (above) to be
+        # compatible with this same running Nucleus, so the two never conflict. We
+        # only fall back to unpinned if the running version can't be determined.
         if needs_nucleus and 'aws.greengrass.Nucleus' not in components_map:
-            running_nucleus = resolve_target_running_nucleus(
-                greengrass_client, iot_client, target_devices,
-                target_thing_group, region, account_id
-            )
+            # running_nucleus was resolved once up front; reuse it here.
             if running_nucleus:
                 components_map['aws.greengrass.Nucleus'] = {
                     'componentVersion': running_nucleus

@@ -25,6 +25,26 @@ if ! CALLER_IDENTITY=$(aws sts get-caller-identity 2>&1); then
 fi
 echo "✓ AWS credentials valid"
 
+# ── Propagate resolved credentials to GDK ───────────────────────────────────
+# The AWS CLI v2 bundles a modern botocore and can resolve credentials from SSO
+# / login-helper sources (e.g. an `~/.aws/config` with only `region` +
+# `login_session` and no static `~/.aws/credentials`). However, `gdk component
+# publish` runs on its own older botocore (1.26.x under Python 3.6) that cannot
+# read those sources and fails with `NoCredentialsError: Unable to locate
+# credentials` even though `aws` works. Materialize the already-resolved session
+# into standard env vars (highest-priority in every SDK's credential chain) so
+# GDK's old botocore can authenticate. No-op if the running CLI predates
+# `export-credentials`.
+if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null | grep -v AWS_CREDENTIAL_EXPIRATION); then
+    eval "$_CREDS_ENV"
+    unset _CREDS_ENV
+    echo "✓ Exported resolved credentials to the environment for GDK"
+else
+    echo "ℹ AWS CLI does not support 'export-credentials'; relying on the ambient"
+    echo "  credential chain. If 'gdk component publish' reports NoCredentialsError,"
+    echo "  export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN manually."
+fi
+
 # Step tracking
 STEP=0
 TOTAL_STEPS=8
@@ -199,6 +219,24 @@ print_step "Publishing LocalServer component"
 PUBLISH_LOG="/tmp/gdk-publish-$(date +%s).log"
 echo "Publish log: $PUBLISH_LOG"
 echo ""
+
+# The image build above can take far longer than a session token's lifetime, so
+# the credentials exported during pre-flight may now be expired (gdk would fail
+# with "Credentials were refreshed, but the refreshed credentials are still
+# expired"). Re-resolve a fresh session immediately before publishing.
+#
+# IMPORTANT: strip AWS_CREDENTIAL_EXPIRATION. With it set, gdk's old botocore
+# treats the env credentials as *refreshable* and, when it thinks they're past
+# expiry, "refreshes" by re-reading the same env vars and then raises
+# "refreshed credentials are still expired" — even when the underlying token is
+# actually valid (the export can emit a stale/past expiration for SSO/login
+# credential sources). Without the expiration var, botocore uses the token as a
+# static credential and signs successfully.
+if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null | grep -v AWS_CREDENTIAL_EXPIRATION); then
+    eval "$_CREDS_ENV"
+    unset _CREDS_ENV
+    echo "✓ Refreshed AWS credentials for publish"
+fi
 
 # Resolve account/region up front (needed for the ECR path and tagging).
 PUB_REGION=$(aws configure get region 2>/dev/null || true)

@@ -18,7 +18,7 @@
 #
 
 platform=$(uname -m)
-python=3.9
+python=3.11
 ubuntu=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
 jetpack=""
 BUILDKIT_PROGRESS=plain

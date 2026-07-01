@@ -7,7 +7,28 @@ set -o pipefail
 # existing custom-build staging dir. For aarch64 JetPack 5.
 
 ARCH="aarch64"
-COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64JP5"
+
+# Component selection. An explicit component name may be passed as $1 to publish a
+# pre-built image without rebuilding — required for JP6 (arm64JP6) and useful on a
+# build server whose host OS does not match the target (this box is Ubuntu 18.04 but
+# builds JP5/JP6 images too). With no arg, fall back to host-OS detection:
+#   Ubuntu 18.04 == JetPack 4 -> arm64 (no suffix); anything else -> arm64JP5.
+COMPONENT_BASE="aws.edgeml.dda.LocalServer.arm64"
+OS_VERSION_ID=""
+if [ -r /etc/os-release ]; then
+    OS_VERSION_ID=$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-}")
+fi
+
+if [ -n "${1:-}" ]; then
+    COMPONENT_NAME="$1"
+    echo "Using explicit component name override: ${COMPONENT_NAME}"
+elif [ "$OS_VERSION_ID" = "18.04" ]; then
+    COMPONENT_NAME="${COMPONENT_BASE}"
+    echo "Detected Ubuntu 18.04 (JetPack 4): using JP4 artifacts (${COMPONENT_NAME})"
+else
+    COMPONENT_NAME="${COMPONENT_BASE}JP5"
+    echo "Detected Ubuntu ${OS_VERSION_ID:-unknown} (JetPack 5): using JP5 artifacts (${COMPONENT_NAME})"
+fi
 
 echo "Checking AWS credentials..."
 aws sts get-caller-identity >/dev/null || { echo "ERROR: AWS credentials invalid/expired"; exit 1; }
@@ -31,16 +52,29 @@ STAGE_DIR="custom-build/${COMPONENT_NAME}"
 [ -d "$STAGE_DIR" ] || { echo "ERROR: staging dir $STAGE_DIR not found"; exit 1; }
 
 # Next version = bump patch of the latest registered version (start at 1.0.0).
+# NOTE: --no-paginate is required. Without it the AWS CLI auto-paginates and
+# applies the `componentVersions[0]` query to *every* page, returning one value
+# per page (e.g. "1.0.112\n1.0.12"), which corrupts the version parsing below.
+# The first page is newest-first, so [0] is the latest registered version.
 LATEST_VERSION=$(aws greengrassv2 list-component-versions \
     --arn "arn:aws:greengrass:${PUB_REGION}:${PUB_ACCOUNT_ID}:components:${COMPONENT_NAME}" \
-    --query 'componentVersions[0].componentVersion' --output text 2>/dev/null || echo "None")
+    --no-paginate --query 'componentVersions[0].componentVersion' --output text 2>/dev/null | head -n1)
+LATEST_VERSION=$(echo "$LATEST_VERSION" | tr -d '[:space:]')
 if [ "$LATEST_VERSION" = "None" ] || [ -z "$LATEST_VERSION" ]; then
     COMPONENT_VERSION="1.0.0"
 else
     V_MAJOR=$(echo "$LATEST_VERSION" | cut -d. -f1)
     V_MINOR=$(echo "$LATEST_VERSION" | cut -d. -f2)
     V_PATCH=$(echo "$LATEST_VERSION" | cut -d. -f3)
+    if ! [ "$V_MAJOR" -eq "$V_MAJOR" ] 2>/dev/null || \
+       ! [ "$V_MINOR" -eq "$V_MINOR" ] 2>/dev/null || \
+       ! [ "$V_PATCH" -eq "$V_PATCH" ] 2>/dev/null; then
+        echo "ERROR: could not parse latest version '$LATEST_VERSION' into MAJOR.MINOR.PATCH"; exit 1
+    fi
     COMPONENT_VERSION="${V_MAJOR}.${V_MINOR}.$((V_PATCH + 1))"
+fi
+if [ -z "$COMPONENT_VERSION" ]; then
+    echo "ERROR: failed to compute COMPONENT_VERSION (latest='$LATEST_VERSION')"; exit 1
 fi
 echo "Latest registered: ${LATEST_VERSION}; publishing version: $COMPONENT_VERSION"
 
@@ -123,8 +157,13 @@ echo "Creating component version via API..."
 aws greengrassv2 create-component-version --inline-recipe fileb://"$ECR_RECIPE" --region "$PUB_REGION"
 
 echo "Tagging component for portal discovery..."
-COMPONENT_ARN=$(aws greengrassv2 list-components --scope PRIVATE --region "$PUB_REGION" \
-    --query "components[?componentName=='${COMPONENT_NAME}'].arn | [0]" --output text 2>/dev/null || true)
+# --no-paginate (same reason as the version lookup): without it the CLI applies
+# the filter per page and `| [0]` yields one value per page (real ARN on the
+# matching page, "None" on the others), producing a multiline ARN that breaks
+# tag-resource. head -n1 is an extra guard.
+COMPONENT_ARN=$(aws greengrassv2 list-components --scope PRIVATE --region "$PUB_REGION" --no-paginate \
+    --query "components[?componentName=='${COMPONENT_NAME}'].arn | [0]" --output text 2>/dev/null | head -n1)
+COMPONENT_ARN=$(echo "$COMPONENT_ARN" | tr -d '[:space:]')
 if [ -n "$COMPONENT_ARN" ] && [ "$COMPONENT_ARN" != "None" ]; then
     aws greengrassv2 tag-resource --resource-arn "$COMPONENT_ARN" \
         --tags "dda-portal:managed=true" --region "$PUB_REGION" 2>/dev/null \

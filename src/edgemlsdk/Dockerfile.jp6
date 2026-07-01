@@ -46,10 +46,10 @@ RUN CMAKE_VER=3.31.6 && \
     rm -f /tmp/cmake.sh && \
     cmake --version
 
-# ── 3. Python 3.9 + pip tooling ───────────────────────────────────────────
+# ── 3. Python 3.11 + pip tooling ──────────────────────────────────────────
 # The JP6 base is Ubuntu 22.04 (jammy), whose default repos ship Python 3.10,
-# not 3.9. The DDA stack is pinned to 3.9, so add the deadsnakes PPA (which
-# provides python3.9 for jammy) before installing.
+# not 3.11. The DDA stack is pinned to 3.11, so add the deadsnakes PPA (which
+# provides python3.11 for jammy) before installing.
 RUN rm -f /etc/apt/sources.list.d/*kitware* && \
     sed -i '/kitware/d' /etc/apt/sources.list && \
     apt-get update && \
@@ -61,14 +61,14 @@ RUN rm -f /etc/apt/sources.list.d/*kitware* && \
     rm -rf /var/lib/apt/lists/* && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
     update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
-    rm -f /usr/bin/python && ln -s /usr/bin/python3.9 /usr/bin/python && \
+    rm -f /usr/bin/python && ln -s /usr/bin/python${PYTHON_VERSION} /usr/bin/python && \
     python${PYTHON_VERSION} -m pip install --user --upgrade pip && \
     python${PYTHON_VERSION} -m pip install --upgrade build
 
-ENV PYTHON_EXECUTABLE=/usr/bin/python3.9
-ENV Python3_EXECUTABLE=/usr/bin/python3.9
-ENV Python3_INCLUDE_DIR=/usr/include/python3.9
-ENV Python3_LIBRARY=/usr/lib/libpython3.9.so
+ENV PYTHON_EXECUTABLE=/usr/bin/python3.11
+ENV Python3_EXECUTABLE=/usr/bin/python3.11
+ENV Python3_INCLUDE_DIR=/usr/include/python3.11
+ENV Python3_LIBRARY=/usr/lib/aarch64-linux-gnu/libpython3.11.so
 
 # ── 4. Python packages ────────────────────────────────────────────────────
 RUN pip3 install --upgrade pip setuptools==64.0.3 wheel build hatchling packaging==24.2 && \
@@ -207,20 +207,20 @@ RUN . /tmp/build-env.sh && \
     export PYBIND11_FINDPYTHON=ON && \
     export MAKEFLAGS="-j$JOBS" && \
     git apply edgeml-triton-server.diff && \
-    python3.9 build.py --enable-logging --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
+    python3.11 build.py --enable-logging --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
         --build-parallel $TRITON_PARALLEL \
         --extra-core-cmake-arg=TRITON_ENABLE_ENSEMBLE=ON \
         --extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON \
         --extra-core-cmake-arg=-DPYBIND11_FINDPYTHON=ON \
         --extra-core-cmake-arg=CMAKE_POLICY_VERSION_MINIMUM=3.5 \
         --extra-core-cmake-arg=TRITON_CORE_ENABLE_TESTS=OFF \
-        --extra-core-cmake-arg=PYTHON_EXECUTABLE=/usr/bin/python3.9 \
-        --extra-core-cmake-arg=-DPYTHON_EXECUTABLE=/usr/bin/python3.9 \
-        --extra-core-cmake-arg=PYTHON_INCLUDE_DIR=/usr/include/python3.9 \
-        --extra-core-cmake-arg=PYTHON_LIBRARY=/usr/lib/libpython3.9.so \
-        --extra-core-cmake-arg=PYTHON_LIBRARIES=/usr/lib/libpython3.9.so \
-        --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/include/python3.9 \
-        --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.9 \
+        --extra-core-cmake-arg=PYTHON_EXECUTABLE=/usr/bin/python3.11 \
+        --extra-core-cmake-arg=-DPYTHON_EXECUTABLE=/usr/bin/python3.11 \
+        --extra-core-cmake-arg=PYTHON_INCLUDE_DIR=/usr/include/python3.11 \
+        --extra-core-cmake-arg=PYTHON_LIBRARY=/usr/lib/aarch64-linux-gnu/libpython3.11.so \
+        --extra-core-cmake-arg=PYTHON_LIBRARIES=/usr/lib/aarch64-linux-gnu/libpython3.11.so \
+        --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/include/python3.11 \
+        --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.11 \
         --backend python --build-dir=$(pwd)/build && \
     mv build/python/install/backends/python build/tritonserver/install/backends && \
     cp -a build/tritonserver/install/backends/python build/python/install/backends/python && \

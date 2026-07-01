@@ -1,5 +1,5 @@
 #!/bin/bash
-# NOTE: Removed -e flag to allow proper error handling for Python 3.9 build
+# NOTE: Removed -e flag to allow proper error handling for Python 3.11 build
 # We use explicit error checking instead
 
 VERBOSE="${VERBOSE:-0}"
@@ -197,11 +197,11 @@ check_mandatory_deps() {
         echo "✓ AWS CLI found"
     fi
     
-    # Python 3.9
-    if ! check_command python3.9 && ! check_command /usr/local/bin/python3.9; then
-        add_warning "Python 3.9 not found - will attempt to install"
+    # Python 3.11
+    if ! check_command python3.11 && ! check_command /usr/local/bin/python3.11; then
+        add_warning "Python 3.11 not found - will attempt to install"
     else
-        echo "✓ Python 3.9 found"
+        echo "✓ Python 3.11 found"
     fi
 }
 
@@ -221,19 +221,19 @@ check_mandatory_deps
 
 # Function to install from source for Ubuntu 18.04
 install_from_source() {
-  # Check for python3.9 specifically
-  if command -v python3.9 >/dev/null 2>&1; then
-    echo "Python 3.9 already installed, skipping build"
+  # Check for python3.11 specifically
+  if command -v python3.11 >/dev/null 2>&1; then
+    echo "Python 3.11 already installed, skipping build"
     return 0
   fi
   
-  # Also check /usr/local/bin/python3.9 (where altinstall puts it)
-  if [ -x /usr/local/bin/python3.9 ]; then
-    echo "Python 3.9 already installed at /usr/local/bin/python3.9, skipping build"
+  # Also check /usr/local/bin/python3.11 (where altinstall puts it)
+  if [ -x /usr/local/bin/python3.11 ]; then
+    echo "Python 3.11 already installed at /usr/local/bin/python3.11, skipping build"
     return 0
   fi
   
-  echo "Ubuntu version is 18.04. Installing Python 3.9 from source."
+  echo "Ubuntu version is 18.04. Installing Python 3.11 from source."
   echo "This will take approximately 10-15 minutes on ARM64..."
 
   # Install build dependencies
@@ -252,31 +252,31 @@ install_from_source() {
   local current_dir=$(pwd)
   
   # Create temp directory for build
-  local build_dir="/tmp/python39_build"
+  local build_dir="/tmp/python311_build"
   mkdir -p "$build_dir"
   cd "$build_dir"
 
-  # Download Python 3.9 source code
-  if [ ! -f "Python-3.9.18.tgz" ]; then
-    echo "Downloading Python 3.9.18..."
-    if ! run_cmd "wget https://www.python.org/ftp/python/3.9.18/Python-3.9.18.tgz"; then
-      add_error "Failed to download Python 3.9.18"
+  # Download Python 3.11 source code
+  if [ ! -f "Python-3.11.9.tgz" ]; then
+    echo "Downloading Python 3.11.9..."
+    if ! run_cmd "wget https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz"; then
+      add_error "Failed to download Python 3.11.9"
       cd "$current_dir"
       return 1
     fi
   fi
   
   # Extract if not already extracted
-  if [ ! -d "Python-3.9.18" ]; then
+  if [ ! -d "Python-3.11.9" ]; then
     echo "Extracting Python source..."
-    if ! run_cmd "tar -xf Python-3.9.18.tgz"; then
+    if ! run_cmd "tar -xf Python-3.11.9.tgz"; then
       add_error "Failed to extract Python source"
       cd "$current_dir"
       return 1
     fi
   fi
   
-  cd Python-3.9.18
+  cd Python-3.11.9
 
   # Configure, compile, and install
   echo "Configuring Python build..."
@@ -304,18 +304,18 @@ install_from_source() {
   cd "$current_dir"
   
   # Verify installation
-  if [ -x /usr/local/bin/python3.9 ]; then
-    echo "✓ Python 3.9 installed successfully from source."
-    /usr/local/bin/python3.9 --version
+  if [ -x /usr/local/bin/python3.11 ]; then
+    echo "✓ Python 3.11 installed successfully from source."
+    /usr/local/bin/python3.11 --version
   else
-    add_error "Python 3.9 installation failed - binary not found!"
+    add_error "Python 3.11 installation failed - binary not found!"
     return 1
   fi
 }
 
 # Function to install from deadsnakes PPA
 install_from_ppa() {
-  echo "Ubuntu version is not 18.04. Installing Python 3.9 from the deadsnakes PPA."
+  echo "Ubuntu version is not 18.04. Installing Python 3.11 from the deadsnakes PPA."
 
   # Add the deadsnakes PPA
   if ! run_cmd "apt update"; then
@@ -333,20 +333,20 @@ install_from_ppa() {
     return 1
   fi
 
-  # Install Python 3.9
+  # Install Python 3.11
   if ! run_cmd "apt update"; then
     add_error "Failed to update package manager after adding PPA"
     return 1
   fi
   
-  if ! run_cmd "apt install -y python3.9"; then
-    add_error "Failed to install Python 3.9 from PPA"
+  if ! run_cmd "apt install -y python3.11"; then
+    add_error "Failed to install Python 3.11 from PPA"
     return 1
   fi
   
-  run_cmd "apt install python3.9-venv -y" || add_warning "Failed to install python3.9-venv"
+  run_cmd "apt install python3.11-venv -y" || add_warning "Failed to install python3.11-venv"
 
-  echo "✓ Python 3.9 installed successfully from the deadsnakes PPA."
+  echo "✓ Python 3.11 installed successfully from the deadsnakes PPA."
 }
 
 # Check if region parameter is provided
@@ -469,28 +469,28 @@ else
 fi
 echo ""
 
-echo "▶ Installing Python 3.9..."
+echo "▶ Installing Python 3.11..."
 if [ "$UBUNTU_VERSION" = "18.04" ]; then
-  echo "Detected Ubuntu 18.04 - building Python 3.9 from source..."
+  echo "Detected Ubuntu 18.04 - building Python 3.11 from source..."
   if ! install_from_source; then
-    add_error "Python 3.9 installation from source failed"
+    add_error "Python 3.11 installation from source failed"
   fi
   
   # On 18.04, do NOT change the system python3 (3.6) — apt and other system
   # tools depend on it and its C extensions (apt_pkg, etc.).
-  # Just create a python3.9 symlink so DDA components can find it.
-  if [ -x /usr/local/bin/python3.9 ]; then
-    ln -sf /usr/local/bin/python3.9 /usr/bin/python3.9 2>/dev/null || add_warning "Failed to create python3.9 symlink"
-    echo "✓ Python 3.9 available as python3.9 (system python3 left as 3.6)"
+  # Just create a python3.11 symlink so DDA components can find it.
+  if [ -x /usr/local/bin/python3.11 ]; then
+    ln -sf /usr/local/bin/python3.11 /usr/bin/python3.11 2>/dev/null || add_warning "Failed to create python3.11 symlink"
+    echo "✓ Python 3.11 available as python3.11 (system python3 left as 3.6)"
   fi
 else
   if ! install_from_ppa; then
-    add_error "Python 3.9 installation from PPA failed"
+    add_error "Python 3.11 installation from PPA failed"
   fi
   # Do NOT change the system python3 — apt and other OS tools depend on the
   # system Python (3.8 on 20.04, 3.10 on 22.04) and its C extensions (apt_pkg).
-  # Python 3.9 is available as python3.9 via the deadsnakes PPA.
-  echo "✓ Python 3.9 available as python3.9 (system python3 left unchanged)"
+  # Python 3.11 is available as python3.11 via the deadsnakes PPA.
+  echo "✓ Python 3.11 available as python3.11 (system python3 left unchanged)"
 fi
 
 if ! run_cmd "apt-get install python3-pip -y"; then
@@ -499,21 +499,21 @@ else
     echo "✓ pip installed"
 fi
 
-# Find python3.9 location
-PYTHON39=""
-if [ -x /usr/local/bin/python3.9 ]; then
-  PYTHON39="/usr/local/bin/python3.9"
-elif [ -x /usr/bin/python3.9 ]; then
-  PYTHON39="/usr/bin/python3.9"
+# Find python3.11 location
+PYTHON311=""
+if [ -x /usr/local/bin/python3.11 ]; then
+  PYTHON311="/usr/local/bin/python3.11"
+elif [ -x /usr/bin/python3.11 ]; then
+  PYTHON311="/usr/bin/python3.11"
 fi
 
-if [ -n "$PYTHON39" ]; then
-  echo "Using Python at: $PYTHON39"
-  run_cmd "$PYTHON39 -m pip install --upgrade pip" || add_warning "Failed to upgrade pip"
-  run_cmd "$PYTHON39 -m pip install --force-reinstall requests==2.32.3" || add_warning "Failed to install requests"
-  run_cmd "$PYTHON39 -m pip install protobuf" || add_warning "Failed to install protobuf"
+if [ -n "$PYTHON311" ]; then
+  echo "Using Python at: $PYTHON311"
+  run_cmd "$PYTHON311 -m pip install --upgrade pip" || add_warning "Failed to upgrade pip"
+  run_cmd "$PYTHON311 -m pip install --force-reinstall requests==2.32.3" || add_warning "Failed to install requests"
+  run_cmd "$PYTHON311 -m pip install protobuf" || add_warning "Failed to install protobuf"
 else
-  add_warning "python3.9 not found. Using system python3 instead."
+  add_warning "python3.11 not found. Using system python3 instead."
   run_cmd "python3 -m pip install --upgrade pip" || add_warning "Failed to upgrade pip"
   run_cmd "python3 -m pip install requests protobuf" || add_warning "Failed to install Python packages"
 fi
@@ -521,14 +521,14 @@ fi
 # The model component's Greengrass Startup/Shutdown lifecycle runs
 #   python3 /aws_dda/model_convertor.py ...       (Startup)
 #   python3 /aws_dda/convert_model_cleanup.py ... (Shutdown)
-# on the HOST with the *system* python3 (NOT python3.9). Those scripts need
+# on the HOST with the *system* python3 (NOT python3.11). Those scripts need
 # protobuf >= 3.20 (generated model_config_pb2.py imports
 # `google.protobuf.internal.builder`) AND requests (to call the LocalServer
 # API). On JetPack 6 (Ubuntu 22.04) the system python3 is 3.10 and lacks both,
 # so model deploys fail with:
 #   ImportError: cannot import name 'builder' from 'google.protobuf.internal'
 #   ModuleNotFoundError: No module named 'requests'
-# Ensure the system python3 always has both, even when a separate python3.9 is
+# Ensure the system python3 always has both, even when a separate python3.11 is
 # present and used above.
 if ! python3 -c "from google.protobuf.internal import builder" >/dev/null 2>&1; then
   echo "Installing protobuf>=3.20 for system python3 (model-conversion Startup script)..."
@@ -929,13 +929,13 @@ echo "▶ Installing OpenCV for application health reporting..."
 # opencv-python-headless there so the health page reports a version by default
 # instead of "Not found".
 lfv_agent_component="aws.iot.lookoutvision.EdgeAgent"
-lfv_venv_site_packages="${dda_greengrass_root_folder}/work/${lfv_agent_component}/env/lib/python3.9/site-packages"
+lfv_venv_site_packages="${dda_greengrass_root_folder}/work/${lfv_agent_component}/env/lib/python3.11/site-packages"
 
-if [ -z "$PYTHON39" ]; then
-    add_warning "python3.9 not found - skipping OpenCV install for health reporting"
+if [ -z "$PYTHON311" ]; then
+    add_warning "python3.11 not found - skipping OpenCV install for health reporting"
 else
     if run_cmd "mkdir -p ${lfv_venv_site_packages}"; then
-        if run_cmd "$PYTHON39 -m pip install --target ${lfv_venv_site_packages} --upgrade opencv-python-headless"; then
+        if run_cmd "$PYTHON311 -m pip install --target ${lfv_venv_site_packages} --upgrade opencv-python-headless"; then
             echo "✓ OpenCV (opencv-python-headless) installed for health reporting"
             # Make readable by the Greengrass component user that runs the LFV
             # agent / LocalServer (created during provisioning above).
