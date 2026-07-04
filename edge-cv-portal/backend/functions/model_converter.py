@@ -302,16 +302,22 @@ def generate_dda_package(
             artifact_filename = "model.onnx"
             # Map the user-facing model_type to the device stage type and graph.
             stage_type = detection_stage_type if is_detection else model_type
+            # Preprocessing differs by detection architecture:
+            #  - YOLO: 0..1 scaling only (image_range_scale), NO ImageNet
+            #    mean/std normalization.
+            #  - RF-DETR (DETR-family): 0..1 scaling THEN ImageNet mean/std
+            #    normalization, i.e. (pixel/255 - mean)/std. BasicPreProcessor
+            #    applies the ImageNet MEAN/STD when normalize=True, which is
+            #    exactly what RF-DETR expects; omitting it yields garbage boxes.
+            detection_normalize = is_detection and detection_arch == 'rf_detr'
             stage = {
                 "type": stage_type,
                 "input_shape": input_shape,
                 "output_shape": output_shape,
-                # BasicPreProcessor knobs: YOLO wants 0..1 scaling, no ImageNet
-                # mean/std normalization.
                 "image_width": image_width,
                 "image_height": image_height,
                 "image_range_scale": True,
-                "normalize": False,
+                "normalize": detection_normalize,
                 "threshold": score_threshold,
             }
             if num_classes:
