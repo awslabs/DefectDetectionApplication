@@ -331,6 +331,8 @@ export default function SmartImport() {
                           <StatusIndicator type="success">
                             {inspectionResult.suggested_type}
                           </StatusIndicator>
+                        ) : inspectionResult.type === 'onnx' ? (
+                          <StatusIndicator type="success">ONNX</StatusIndicator>
                         ) : (
                           <StatusIndicator type="info">Unknown</StatusIndicator>
                         )}
