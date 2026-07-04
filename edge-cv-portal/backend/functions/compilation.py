@@ -396,6 +396,20 @@ def _start_onnx_export_job(
     }
 
 
+def _is_onnx_import(training_job: Dict) -> bool:
+    """True if this is an imported BYO ONNX model (skips Neo compilation)."""
+    if training_job.get('source') != 'imported':
+        return False
+    meta = training_job.get('metadata') or {}
+    if str(meta.get('framework', '')).upper() == 'ONNX':
+        return True
+    vr = (training_job.get('validation_result') or {}).get('metadata') or {}
+    if str(vr.get('framework', '')).upper() == 'ONNX':
+        return True
+    mf = meta.get('model_file') or meta.get('pt_file') or ''
+    return str(mf).lower().endswith('.onnx')
+
+
 def start_compilation_job(event: Dict, context: Any) -> Dict:
     """
     Start SageMaker Neo compilation job
@@ -441,6 +455,33 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
         if training_job.get('status') != 'Completed':
             return create_response(400, {
                 'error': f"Training job must be completed. Current status: {training_job.get('status')}"
+            })
+
+        # ── ONNX bypass ────────────────────────────────────────────────────
+        # Imported BYO ONNX models run on the ONNX Runtime engine and are
+        # architecture-agnostic — SageMaker Neo neither accepts them (Neo starts
+        # from a TorchScript .pt) nor is needed. Skip compilation and chain
+        # straight to packaging (which has its own ONNX path).
+        if _is_onnx_import(training_job):
+            logger.info(f"Imported ONNX model {training_id}: skipping Neo compilation")
+            table = dynamodb.Table(TRAINING_JOBS_TABLE)
+            table.update_item(
+                Key={'training_id': training_id},
+                UpdateExpression='SET compilation_skipped = :s, updated_at = :u',
+                ExpressionAttributeValues={
+                    ':s': True,
+                    ':u': int(datetime.utcnow().timestamp() * 1000),
+                },
+            )
+            # ONNX needs no compilation; the caller should proceed directly to
+            # packaging (which has its own ONNX path). We don't invoke packaging
+            # here because this Lambda has no packaging invoke permission.
+            return create_response(200, {
+                'training_id': training_id,
+                'compilation_jobs': [],
+                'message': 'ONNX model runs on the ONNX Runtime engine — compilation is '
+                           'not required. Proceed to packaging.',
+                'compilation_skipped': True,
             })
         
         # Get use case details

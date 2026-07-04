@@ -641,7 +641,7 @@ class ApiService {
   }
 
   // Packaging endpoints
-  async startPackaging(trainingId: string, targets?: string[]): Promise<{
+  async startPackaging(trainingId: string, targets?: string[], autoTriggered?: boolean): Promise<{
     training_id: string;
     packaged_components: Array<{
       target: string;
@@ -650,10 +650,12 @@ class ApiService {
       error?: string;
     }>;
     message: string;
+    component_creation_triggered?: boolean;
   }> {
     return this.request(`/training/${trainingId}/package`, {
       method: 'POST',
-      body: JSON.stringify({ targets }),
+      // auto_triggered chains packaging -> greengrass publish (component creation).
+      body: JSON.stringify({ targets, auto_triggered: autoTriggered }),
     });
   }
 

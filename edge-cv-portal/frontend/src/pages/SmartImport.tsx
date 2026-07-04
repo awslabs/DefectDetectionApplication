@@ -243,14 +243,22 @@ export default function SmartImport() {
 
       if (result.training_id) {
         setSuccess(`Model converted and imported successfully! Training ID: ${result.training_id}`);
-        
-        // If auto-compile is enabled, trigger compilation
-        if (autoCompile && compilationTargets.length > 0) {
+
+        const targets = compilationTargets.map(t => t.value!);
+        if (exportFormat === 'onnx') {
+          // ONNX runs on the ONNX Runtime engine — no Neo compilation. Go
+          // straight to packaging (architecture-agnostic) with auto-publish so
+          // a deployable component is created in one step.
           try {
-            await apiService.startCompilation(
-              result.training_id,
-              compilationTargets.map(t => t.value!)
-            );
+            await apiService.startPackaging(result.training_id, targets, true);
+            setSuccess(`Model imported and packaging started (ONNX, no compilation needed)! Training ID: ${result.training_id}`);
+          } catch (pkgErr) {
+            console.error('Packaging trigger failed:', pkgErr);
+          }
+        } else if (autoCompile && targets.length > 0) {
+          // Legacy PyTorch/Neo path: compile first.
+          try {
+            await apiService.startCompilation(result.training_id, targets);
             setSuccess(`Model converted, imported, and compilation started! Training ID: ${result.training_id}`);
           } catch (compileErr) {
             console.error('Compilation trigger failed:', compileErr);
