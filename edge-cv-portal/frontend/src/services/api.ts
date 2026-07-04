@@ -1459,6 +1459,13 @@ class ApiService {
       architecture_hints: string[];
       suggested_type?: string;
       error?: string;
+      // ONNX auto-detected attributes (from graph input/output shapes).
+      detection_arch?: string;
+      input_width?: number | null;
+      input_height?: number | null;
+      num_outputs?: number;
+      input_shapes?: (number | null)[][];
+      output_shapes?: (number | null)[][];
     };
     supported_model_types: Record<string, {
       description: string;
