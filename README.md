@@ -569,6 +569,62 @@ the capture metadata.
 Classification/anomaly ONNX models omit `task` (they default to the anomaly
 output contract) and use their normal stage type.
 
+### Object detection (RF-DETR / DETR-family)
+
+Object detection is **architecture-pluggable** via a `detection.layout`
+selector, so DETR-family models work alongside YOLO. RF-DETR differs from YOLO
+in output shape and decode:
+
+| | YOLO (v5/v8) | RF-DETR (DETR-family) |
+|---|---|---|
+| ONNX outputs | 1 tensor `[1, 4+C, N]` | 2 tensors: boxes `[1, Q, 4]` + logits `[1, Q, C]` |
+| Box encoding | xywh (center), network-pixel scale | cxcywh, normalized 0..1 |
+| Scoring | max class score per anchor | per-query sigmoid (or softmax) |
+| Filtering | score threshold + **NMS** | **NMS-free** top-k over query×class |
+
+The on-device decoder (`rf_detr_object_detection`) identifies the boxes vs
+logits tensors **by shape** (tolerating exporter output-order differences), does
+sigmoid/softmax scoring, a flattened top-k, applies `score_threshold`, converts
+cxcywh→xyxy, and scales normalized boxes back to the source image. It returns
+the same detection result contract as YOLO, so overlay rendering and metadata
+are unchanged.
+
+```json
+{
+  "runtime": "onnx",
+  "runtime_artifact": "model.onnx",
+  "task": "object_detection",
+  "detection": {
+    "layout": "rf_detr",
+    "num_classes": 90,
+    "score_threshold": 0.5,
+    "top_k": 300,
+    "network_input": 560,
+    "class_names": ["person", "bicycle", "..."]
+  },
+  "model_graph": {
+    "model_graph_type": "single_stage_model_graph",
+    "stages": [{
+      "type": "rf_detr_object_detection",
+      "threshold": 0.5,
+      "image_width": 560,
+      "image_height": 560,
+      "image_range_scale": true,
+      "normalize": false
+    }]
+  }
+}
+```
+
+Additional `detection` keys for RF-DETR: `layout: "rf_detr"`, `top_k` (default
+300), `use_softmax` (default false → sigmoid), and `background_class` (optional
+index to drop when using softmax). NMS-only keys (`iou_threshold`) are ignored.
+
+> Note: the RF-DETR decoder is validated against synthetic two-tensor outputs.
+> A real RF-DETR ONNX export/device run is still pending; exact output tensor
+> names and `network_input` vary by exporter (order is handled by shape-based
+> tensor ID).
+
 ### Import via the portal (Smart Import)
 
 1. Put your `model.onnx` in the UseCase account S3 — or use the **ONNX** compile
@@ -576,10 +632,11 @@ output contract) and use their normal stage type.
 2. Portal → **Smart Import (BYOM)**:
    - **Model Type**: Object Detection (or Classification)
    - **Runtime / export format**: **ONNX Runtime**
+   - **Detection architecture** (object detection only): **YOLO** or **RF-DETR**
    - Input image size (e.g. `640`), number of classes, optional class names
    - **Convert & Import** — this writes a device-correct manifest
-     (`runtime: onnx`, and for detection the `task`/`detection` fields) and
-     packages `model.onnx`.
+     (`runtime: onnx`, and for detection the `task`/`detection` fields including
+     `layout`) and packages `model.onnx`.
 3. Compile targets / publish as usual, then **deploy the model component** to
    the device.
 
