@@ -12,6 +12,7 @@ import {
   StatusIndicator,
   ColumnLayout,
   Popover,
+  Tabs,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 
@@ -96,6 +97,39 @@ export default function RemoteAccessTab({ deviceId, usecaseId }: Props) {
       setBusy(false);
     }
   };
+
+  // A preformatted, copyable command block for the connect instructions.
+  const renderCommandBlock = (cmd: string) => (
+    <SpaceBetween size="xs">
+      <pre
+        style={{
+          background: '#f4f4f4',
+          border: '1px solid #d5dbdb',
+          borderRadius: 4,
+          padding: '12px',
+          margin: 0,
+          overflowX: 'auto',
+          fontFamily: 'Monaco, Menlo, "Courier New", monospace',
+          fontSize: 12,
+          lineHeight: 1.5,
+          whiteSpace: 'pre',
+        }}
+      >
+        {cmd}
+      </pre>
+      <Popover
+        dismissButton={false}
+        position="top"
+        size="small"
+        triggerType="custom"
+        content={<StatusIndicator type="success">Copied</StatusIndicator>}
+      >
+        <Button iconName="copy" onClick={() => navigator.clipboard.writeText(cmd)}>
+          Copy commands
+        </Button>
+      </Popover>
+    </SpaceBetween>
+  );
 
   return (
     <SpaceBetween size="l">
@@ -228,17 +262,41 @@ export default function RemoteAccessTab({ deviceId, usecaseId }: Props) {
                 </Popover>
               </SpaceBetween>
             </div>
-            <Box variant="awsui-key-label">Connect (run locally)</Box>
-            <Box variant="code">
-              {`export AWSIOT_TUNNEL_ACCESS_TOKEN=${tunnel.token}\n` +
-                `localproxy -r ${tunnel.region} -s 5555\n` +
-                `# then, in another shell:\n` +
-                `ssh -p 5555 ${osUser}@localhost`}
-            </Box>
+            <Box variant="awsui-key-label">Connect from your computer</Box>
             <Box variant="small" color="text-body-secondary">
-              Requires the AWS IoT local proxy (aws-iot-securetunneling-localproxy).
-              See docs/connect-to-device.md for install + full steps.
+              Requires the AWS IoT local proxy
+              (<a href="https://github.com/aws-samples/aws-iot-securetunneling-localproxy"
+                 target="_blank" rel="noreferrer">aws-iot-securetunneling-localproxy</a>)
+              and an SSH client (built into macOS/Linux and Windows 10+). Pick your OS,
+              copy the block, and run it. Keep the local-proxy window open while
+              connected.
             </Box>
+            <Tabs
+              tabs={[
+                {
+                  id: 'unix',
+                  label: 'macOS / Linux',
+                  content: renderCommandBlock(
+                    `# 1) Start the local proxy (keep this terminal open):\n` +
+                    `export AWSIOT_TUNNEL_ACCESS_TOKEN="${tunnel.token}"\n` +
+                    `localproxy -r ${tunnel.region} -s 5555\n\n` +
+                    `# 2) In a SECOND terminal, SSH to the device:\n` +
+                    `ssh -p 5555 ${osUser}@localhost`
+                  ),
+                },
+                {
+                  id: 'windows',
+                  label: 'Windows (PowerShell)',
+                  content: renderCommandBlock(
+                    `# 1) Start the local proxy (keep this window open):\n` +
+                    `$env:AWSIOT_TUNNEL_ACCESS_TOKEN="${tunnel.token}"\n` +
+                    `.\\localproxy.exe -r ${tunnel.region} -s 5555\n\n` +
+                    `# 2) In a SECOND PowerShell window, SSH to the device:\n` +
+                    `ssh -p 5555 ${osUser}@localhost`
+                  ),
+                },
+              ]}
+            />
           </SpaceBetween>
         </Container>
       )}

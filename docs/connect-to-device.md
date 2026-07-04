@@ -39,16 +39,31 @@ aws iot open-tunnel \
 ```
 
 Then bridge the tunnel to a local port with the AWS IoT **local proxy**
-(`localproxy`), in source mode:
+(`localproxy`), in source mode. Install it from
+https://github.com/aws-samples/aws-iot-securetunneling-localproxy.
 
+**macOS / Linux:**
 ```bash
-# Install the local proxy: https://github.com/aws-samples/aws-iot-securetunneling-localproxy
-export AWSIOT_TUNNEL_ACCESS_TOKEN=<SOURCE_TOKEN>
-localproxy -r us-east-1 -s 5555        # listen locally on 5555 -> device SSH
+# 1) Start the local proxy (keep this terminal open):
+export AWSIOT_TUNNEL_ACCESS_TOKEN="<SOURCE_TOKEN>"
+localproxy -r us-east-1 -s 5555        # listen on localhost:5555 -> device SSH
 
-# In another shell:
+# 2) In a SECOND terminal, SSH to the device:
 ssh -p 5555 ${SSH_USER}@localhost
 ```
+
+**Windows (PowerShell):**
+```powershell
+# 1) Start the local proxy (keep this window open):
+$env:AWSIOT_TUNNEL_ACCESS_TOKEN="<SOURCE_TOKEN>"
+.\localproxy.exe -r us-east-1 -s 5555
+
+# 2) In a SECOND PowerShell window, SSH to the device:
+ssh -p 5555 <SSH_USER>@localhost
+```
+
+The portal's **Remote Access** tab shows these exact commands (with the token and
+region filled in) and a per-OS Copy button after you click "Open SSH session".
 
 Alternatively, use the **AWS IoT console → Manage → Tunnels → Create tunnel**
 (select the thing, SSH service) for a guided, browser-initiated flow, then follow
