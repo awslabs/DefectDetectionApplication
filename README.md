@@ -22,6 +22,7 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
 - [Devices](#devices)
 - [Using the Portal](#using-the-portal)
 - [ML Workflow](#ml-workflow)
+- [Using ONNX Models](#using-onnx-models)
 - [Optional Datasets](#optional-datasets-before-model-training)
 - [Inference Results Upload](#inference-results-upload-optional)
 - [Edge Device Management](#edge-device-management)
@@ -506,6 +507,98 @@ Ground Truth creates manifests with job-specific attribute names. The portal aut
 3. **Compile Model** → Select target architecture
 4. **Deploy to Device** → Via portal Deployments page
 
+## Using ONNX Models
+
+DDA supports **pluggable inference runtimes** so a model can run on the ONNX
+Runtime engine (or native PyTorch) alongside the default SageMaker Neo / DLR
+path — selected **per model**. This lets you bring your own ONNX model (e.g. a
+YOLO object detector) and migrate off Neo/DLR one model at a time, with no
+change to existing DLR models. See
+[docs/multi-runtime-inference.md](docs/multi-runtime-inference.md) for the design.
+
+### Runtime selection
+
+Each model package's `manifest.json` declares which engine loads it via a
+`runtime` field:
+
+| `runtime` | Engine | Artifact |
+|-----------|--------|----------|
+| `dlr` (default when absent) | SageMaker Neo / DLR — full backward compatibility | Neo `compiled.*` + bundled `libdlr.so` |
+| `onnx` | ONNX Runtime | `model.onnx` |
+| `pytorch` | Native PyTorch (TorchScript) | `model.pt` |
+
+GPU acceleration for ONNX (CUDA + TensorRT execution providers) is available on
+**JetPack 5 and 6**; **JetPack 4 runs ONNX on CPU only**. GPU requires a
+LocalServer backend image built with the ONNX GPU runtime (see
+[Build requirement for GPU](#build-requirement-for-gpu) below).
+
+### Object detection (YOLO)
+
+ONNX object-detection models add a `task` field and a `detection` block. The
+raw YOLO output tensor (e.g. `[1, 84, 8400]`) is decoded on-device (threshold →
+class-wise NMS → boxes scaled to the source image). Detections are returned as
+bounding boxes drawn onto the output overlay image plus a `detections` block in
+the capture metadata.
+
+```json
+{
+  "runtime": "onnx",
+  "runtime_artifact": "model.onnx",
+  "task": "object_detection",
+  "detection": {
+    "num_classes": 80,
+    "score_threshold": 0.25,
+    "iou_threshold": 0.45,
+    "network_input": 640,
+    "class_names": ["person", "bicycle", "..."]
+  },
+  "model_graph": {
+    "model_graph_type": "single_stage_model_graph",
+    "stages": [{
+      "type": "yolo_object_detection",
+      "threshold": 0.25,
+      "image_width": 640,
+      "image_height": 640,
+      "image_range_scale": true,
+      "normalize": false
+    }]
+  }
+}
+```
+
+Classification/anomaly ONNX models omit `task` (they default to the anomaly
+output contract) and use their normal stage type.
+
+### Import via the portal (Smart Import)
+
+1. Put your `model.onnx` in the UseCase account S3 — or use the **ONNX** compile
+   target (Compilation page) to export a trained model to `model.onnx`.
+2. Portal → **Smart Import (BYOM)**:
+   - **Model Type**: Object Detection (or Classification)
+   - **Runtime / export format**: **ONNX Runtime**
+   - Input image size (e.g. `640`), number of classes, optional class names
+   - **Convert & Import** — this writes a device-correct manifest
+     (`runtime: onnx`, and for detection the `task`/`detection` fields) and
+     packages `model.onnx`.
+3. Compile targets / publish as usual, then **deploy the model component** to
+   the device.
+
+### Build requirement for GPU
+
+The default LocalServer backend image installs the **CPU** ONNX Runtime. GPU
+(CUDA/TensorRT) needs the from-source GPU runtime, which is built **by default**
+for JetPack 5 and 6 by `gdk-component-build-and-publish.sh`:
+
+```bash
+./gdk-component-build-and-publish.sh aarch64 6   # JP6: onnxruntime-gpu (CUDA 12.2 / TRT 8.6)
+./gdk-component-build-and-publish.sh aarch64 5   # JP5: onnxruntime-gpu (CUDA 11.4 / TRT 8.5)
+```
+
+`build-custom.sh` defaults `ONNXRUNTIME_GPU=1` for JP5/JP6 (the source build adds
+~1–2 h and is memory-heavy). For a fast CPU-only image, set `ONNXRUNTIME_GPU=0`.
+JetPack 4 is CPU-only regardless. The engine auto-selects TensorRT → CUDA → CPU
+providers at load, so the same package runs on either a GPU or CPU image.
+
 ## Optional Datasets (Before Model Training)
 
 Pre-labeled datasets let you train models without creating labeling jobs. Register them in **Data Management** → **Pre-Labeled Datasets**.
@@ -917,6 +1010,39 @@ aws iam list-attached-role-policies --role-name GreengrassV2TokenExchangeRole
 cd edge-cv-portal
 ./deploy-account-role.sh  # Select Option 1 to update trust policy
 ```
+
+### Build Issues
+
+**Parallel builds/publishes clobber each other (wrong image published / staging
+corruption).** Do **not** run two component builds or publishes at the same time
+from the **same working tree**. The build tags a single shared local image
+`flask-app:latest`, pushes to the shared `dda/flask-app` ECR repo (image tag =
+component version), and writes to shared staging dirs (`greengrass-build/`,
+`custom-build/`, `.gdk/`). Running two at once races:
+
+- A second build can overwrite `flask-app:latest` in between the first build
+  finishing and its `docker tag flask-app:latest <ecr>:<version>` step, so the
+  **wrong image gets pushed** for that version.
+- Concurrent runs overwrite each other's `greengrass-build/`/`custom-build/`
+  staging and generated `gdk-config.json`.
+- JetPack targets share the `dda/flask-app` repo with `tag = component version`;
+  if two components land on the same version number, the ECR tag is overwritten.
+
+Guidance:
+- **`gdk-component-build-and-publish.sh` (official publish): run sequentially**
+  — finish JP6, then JP5. It hardcodes `flask-app:latest` and the shared staging
+  dirs, so parallel runs are unsafe even in separate checkouts.
+- **Only** the raw backend image build can be parallelized, and only when each
+  runs in a **separate working tree** (e.g. `git worktree add`) **and** uses a
+  **distinct image name** so it doesn't touch `flask-app:latest`, e.g.:
+  ```bash
+  # in a second worktree, before building:
+  sed -i 's/^    image: flask-app$/    image: flask-app-jp5/' src/docker-compose.yaml
+  # copy the gitignored edgemlsdk staging into the worktree first:
+  cp -r <main-tree>/src/backend/edgemlsdk src/backend/edgemlsdk
+  ```
+  Even then, the shared `dda/flask-app` ECR repo means the **publish** step still
+  must be serialized (or use per-JetPack version numbers that never collide).
 
 ## Project Structure
 
