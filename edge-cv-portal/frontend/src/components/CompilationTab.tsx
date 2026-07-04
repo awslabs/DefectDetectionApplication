@@ -285,7 +285,17 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   const hasPackagedComponents = (trainingJob as any)?.packaged_components && 
     (trainingJob as any).packaged_components.some((c: any) => c.status === 'packaged');
 
-  if (compilationJobs.length === 0) {
+  // Imported BYO ONNX models run on the ONNX Runtime engine — they need NO
+  // SageMaker Neo compilation. So the compilation-centric gating (empty-state
+  // "Start Compilation", and Component Actions gated on completed compilations)
+  // must not hide packaging/publish for them.
+  const tj: any = trainingJob;
+  const isOnnxModel =
+    String(tj?.metadata?.framework || '').toUpperCase() === 'ONNX' ||
+    String(tj?.validation_result?.metadata?.framework || '').toUpperCase() === 'ONNX' ||
+    String(tj?.metadata?.model_file || tj?.metadata?.pt_file || '').toLowerCase().endsWith('.onnx');
+
+  if (compilationJobs.length === 0 && !isOnnxModel) {
     return (
       <SpaceBetween size="l">
         {error ? (
@@ -495,7 +505,7 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
       </Container>
 
       {/* Manual Packaging & Publish Actions */}
-      {hasCompletedCompilations && (
+      {(hasCompletedCompilations || isOnnxModel) && (
         <Container
           header={
             <Header
@@ -510,6 +520,13 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
             {successMessage && (
               <Alert type="success" dismissible onDismiss={() => setSuccessMessage(null)}>
                 {successMessage}
+              </Alert>
+            )}
+            {isOnnxModel && (
+              <Alert type="info">
+                ONNX models run on the pluggable ONNX Runtime engine and don't require
+                SageMaker Neo compilation. Package the model, then publish it as a
+                Greengrass component. One package deploys to all targets (JetPack 5/6, x86).
               </Alert>
             )}
             

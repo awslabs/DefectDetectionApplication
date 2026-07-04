@@ -259,8 +259,14 @@ export default function ModelDetail() {
               <div key={key}>
                 <Box variant="awsui-key-label">{key.replace(/_/g, ' ').toUpperCase()}</Box>
                 <Box variant="h3">
-                  {typeof value === 'number' 
-                    ? (key === 'loss' ? value.toFixed(4) : `${(value * 100).toFixed(2)}%`)
+                  {typeof value === 'number'
+                    ? (key === 'loss'
+                        ? value.toFixed(4)
+                        // Only ratio metrics (0..1) render as percentages;
+                        // raw values like image dimensions render as-is.
+                        : (value >= 0 && value <= 1
+                            ? `${(value * 100).toFixed(2)}%`
+                            : String(value)))
                     : String(value)}
                 </Box>
               </div>
