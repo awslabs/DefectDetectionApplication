@@ -115,6 +115,192 @@ def get_usecase_details(usecase_id: str) -> Dict:
         raise
 
 
+# ── Dependency-free ONNX graph reader ──────────────────────────────────────
+# We only need the input/output tensor shapes to auto-detect model attributes.
+# Rather than ship the heavy onnx/onnxruntime packages in the Lambda, parse the
+# few protobuf fields we need straight from the ModelProto wire format:
+#   ModelProto.graph            = field 7  (message GraphProto)
+#   GraphProto.input            = field 11 (repeated ValueInfoProto)
+#   GraphProto.output           = field 12 (repeated ValueInfoProto)
+#   ValueInfoProto.name         = field 1  (string)
+#   ValueInfoProto.type         = field 2  (TypeProto)
+#   TypeProto.tensor_type       = field 1  (Tensor)
+#   Tensor.elem_type            = field 1  (varint)
+#   Tensor.shape                = field 2  (TensorShapeProto)
+#   TensorShapeProto.dim        = field 1  (repeated Dimension)
+#   Dimension.dim_value         = field 1  (varint int64)
+#   Dimension.dim_param         = field 2  (string; dynamic axis => unknown)
+def _pb_read_varint(buf: bytes, i: int):
+    shift = 0
+    result = 0
+    while True:
+        b = buf[i]
+        i += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return result, i
+        shift += 7
+
+
+def _pb_fields(buf: bytes):
+    """Yield (field_number, wire_type, value) for a protobuf message. value is
+    an int for varint/fixed wire types, or a bytes slice for length-delimited."""
+    i = 0
+    n = len(buf)
+    while i < n:
+        key, i = _pb_read_varint(buf, i)
+        fn, wt = key >> 3, key & 7
+        if wt == 0:      # varint
+            val, i = _pb_read_varint(buf, i)
+            yield fn, wt, val
+        elif wt == 2:    # length-delimited
+            ln, i = _pb_read_varint(buf, i)
+            yield fn, wt, buf[i:i + ln]
+            i += ln
+        elif wt == 1:    # 64-bit
+            yield fn, wt, buf[i:i + 8]
+            i += 8
+        elif wt == 5:    # 32-bit
+            yield fn, wt, buf[i:i + 4]
+            i += 4
+        else:
+            raise ValueError(f"Unsupported protobuf wire type {wt}")
+
+
+def _pb_first(buf: bytes, field: int):
+    for fn, _wt, val in _pb_fields(buf):
+        if fn == field:
+            return val
+    return None
+
+
+def _pb_all(buf: bytes, field: int):
+    return [val for fn, _wt, val in _pb_fields(buf) if fn == field]
+
+
+def _onnx_value_info_shape(vi_bytes: bytes):
+    """Return (name, [dims]) for a ValueInfoProto. A dim is an int (static) or
+    None (dynamic/unknown)."""
+    name = None
+    dims = []
+    name_raw = _pb_first(vi_bytes, 1)
+    if isinstance(name_raw, (bytes, bytearray)):
+        name = name_raw.decode('utf-8', 'replace')
+    type_proto = _pb_first(vi_bytes, 2)
+    if type_proto is None:
+        return name, dims
+    tensor = _pb_first(type_proto, 1)   # TypeProto.tensor_type
+    if tensor is None:
+        return name, dims
+    shape = _pb_first(tensor, 2)        # Tensor.shape
+    if shape is None:
+        return name, dims
+    for dim_bytes in _pb_all(shape, 1):  # repeated Dimension
+        dim_value = None
+        for fn, wt, val in _pb_fields(dim_bytes):
+            if fn == 1 and wt == 0:      # dim_value (static)
+                dim_value = int(val)
+            elif fn == 2:                # dim_param (dynamic axis) => unknown
+                dim_value = None
+        dims.append(dim_value)
+    return name, dims
+
+
+def inspect_onnx_model(model_path: str) -> Dict:
+    """Parse an ONNX model's input/output tensor shapes and infer model
+    attributes (input size, task/architecture, num_classes) for UI pre-fill.
+
+    Detection heuristics from output tensor shapes:
+      * 1 output  -> YOLO detection ([1, 4+C, N] or [1, N, 4+C]); C = the
+        non-anchor dim minus 4.
+      * 2 outputs -> RF-DETR detection (boxes [1,Q,4] + logits [1,Q,C]).
+      * 3 outputs -> RF-DETR instance segmentation (adds a 4-D mask tensor).
+      * 2-D single output [1, C] -> classification (C classes).
+    """
+    info: Dict[str, Any] = {'type': 'onnx', 'architecture_hints': []}
+    try:
+        with open(model_path, 'rb') as f:
+            model_bytes = f.read()
+        graph = _pb_first(model_bytes, 7)  # ModelProto.graph
+        if graph is None:
+            info['architecture_hints'].append('Could not read ONNX graph.')
+            return info
+
+        inputs = [_onnx_value_info_shape(v) for v in _pb_all(graph, 11)]
+        outputs = [_onnx_value_info_shape(v) for v in _pb_all(graph, 12)]
+        # Exclude initializer-backed inputs (weights): real inputs usually the
+        # first entry. Use the first graph input as the data input.
+        in_shapes = [dims for _n, dims in inputs if dims]
+        out_shapes = [dims for _n, dims in outputs if dims]
+        info['input_shapes'] = in_shapes
+        info['output_shapes'] = out_shapes
+        info['num_outputs'] = len(out_shapes)
+
+        # Input NCHW -> channels/H/W (dynamic dims come back as None).
+        if in_shapes:
+            d = in_shapes[0]
+            if len(d) == 4:
+                info['input_channels'] = d[1]
+                info['input_height'] = d[2]
+                info['input_width'] = d[3]
+
+        def last_dim(shape):
+            return shape[-1] if shape else None
+
+        n_out = len(out_shapes)
+        if n_out == 2:
+            # RF-DETR detection: one tensor ends in 4 (boxes), other is logits.
+            boxes = next((s for s in out_shapes if last_dim(s) == 4), None)
+            logits = next((s for s in out_shapes if s is not boxes), None)
+            info['suggested_type'] = 'object_detection'
+            info['detection_arch'] = 'rf_detr'
+            if logits is not None and last_dim(logits):
+                info['num_classes'] = int(last_dim(logits))
+            info['architecture_hints'].append(
+                'RF-DETR-style detection: 2 output tensors (boxes + logits), NMS-free.')
+        elif n_out >= 3:
+            # RF-DETR instance segmentation: boxes + logits + mask tensor(s).
+            logits = next((s for s in out_shapes if s and len(s) == 3 and last_dim(s) != 4), None)
+            info['suggested_type'] = 'segmentation'
+            info['detection_arch'] = 'rf_detr'
+            if logits is not None and last_dim(logits):
+                info['num_classes'] = int(last_dim(logits))
+            info['architecture_hints'].append(
+                'RF-DETR-style instance segmentation: 3 output tensors '
+                '(boxes + logits + masks).')
+        elif n_out == 1:
+            s = out_shapes[0]
+            if s and len(s) == 3:
+                # YOLO detection [1, 4+C, N] or [1, N, 4+C]; anchors is the
+                # larger dim, channels the smaller.
+                a, b = s[1], s[2]
+                if a and b:
+                    ch = min(a, b)
+                    info['suggested_type'] = 'object_detection'
+                    info['detection_arch'] = 'yolo'
+                    info['num_classes'] = int(ch - 4)
+                    info['architecture_hints'].append(
+                        'YOLO-style detection: single output tensor, NMS decode.')
+            elif s and len(s) == 2 and s[1]:
+                info['suggested_type'] = 'classification'
+                info['num_classes'] = int(s[1])
+                info['architecture_hints'].append(
+                    'Classification: single [batch, num_classes] output.')
+
+        if not info['architecture_hints']:
+            info['architecture_hints'].append(
+                'ONNX model — could not infer task from output shapes; set the '
+                'model type manually.')
+        return info
+    except Exception as e:  # noqa: BLE001 - inspection must never hard-fail
+        logger.error(f"Error parsing ONNX model: {str(e)}")
+        return {
+            'type': 'onnx',
+            'architecture_hints': [
+                'ONNX model — shape inspection failed; set attributes manually.'],
+        }
+
+
 def inspect_pytorch_model(model_path: str) -> Dict:
     """
     Inspect a PyTorch model file to extract metadata.
@@ -253,6 +439,9 @@ def generate_dda_package(
     is_onnx = str(export_format).lower() == 'onnx'
     is_detection = model_type == 'object_detection'
     detection_arch = str(detection_arch or 'yolo').lower()
+    # RF-DETR instance-segmentation ONNX -> rendered as a semantic mask through
+    # the existing anomaly-localization path (colored mask + overlay + color map).
+    is_rf_detr_seg = is_onnx and model_type == 'segmentation' and detection_arch == 'rf_detr'
     # Map the detection architecture to the on-device stage type / decoder.
     detection_stage_type = (
         'rf_detr_object_detection' if detection_arch == 'rf_detr'
@@ -328,15 +517,20 @@ def generate_dda_package(
             # code (Phases B/C) reads.
             artifact_filename = "model.onnx"
             # Map the user-facing model_type to the device stage type and graph.
-            stage_type = detection_stage_type if is_detection else model_type
-            # Preprocessing differs by detection architecture:
+            if is_detection:
+                stage_type = detection_stage_type
+            elif is_rf_detr_seg:
+                stage_type = 'rf_detr_semantic_segmentation'
+            else:
+                stage_type = model_type
+            # Preprocessing differs by architecture:
             #  - YOLO: 0..1 scaling only (image_range_scale), NO ImageNet
             #    mean/std normalization.
-            #  - RF-DETR (DETR-family): 0..1 scaling THEN ImageNet mean/std
-            #    normalization, i.e. (pixel/255 - mean)/std. BasicPreProcessor
-            #    applies the ImageNet MEAN/STD when normalize=True, which is
-            #    exactly what RF-DETR expects; omitting it yields garbage boxes.
-            detection_normalize = is_detection and detection_arch == 'rf_detr'
+            #  - RF-DETR (DETR-family, detection AND segmentation): 0..1 scaling
+            #    THEN ImageNet mean/std normalization, i.e. (pixel/255 - mean)/std.
+            #    BasicPreProcessor applies the ImageNet MEAN/STD when
+            #    normalize=True; omitting it yields garbage output.
+            detection_normalize = (is_detection and detection_arch == 'rf_detr') or is_rf_detr_seg
             stage = {
                 "type": stage_type,
                 "input_shape": input_shape,
@@ -362,7 +556,30 @@ def generate_dda_package(
                     "channel_order": "RGB",
                 },
             }
-            if is_detection:
+            if is_rf_detr_seg:
+                # Semantic segmentation via the anomaly-localization path: the
+                # task stays "anomaly" (default) so the base model emits the
+                # colored mask + overlay + per-class color map. pixel_level_classes
+                # (index 0 = background) enables localization and provides the
+                # class name / color-map labels.
+                seg_num_classes = int(num_classes or 91)  # RF-DETR-seg-nano COCO default
+                if class_names and len(class_names) >= seg_num_classes:
+                    class_labels = list(class_names[:seg_num_classes])
+                else:
+                    class_labels = [f"class_{i}" for i in range(seg_num_classes)]
+                manifest["model_graph"]["pixel_level_classes"] = {
+                    "names": ["background"] + class_labels,
+                    "normal_ids": [0],
+                }
+                # Seg decoder config (read from the stage by the post-processor).
+                stage["detection"] = {
+                    "layout": "rf_detr",
+                    "num_classes": seg_num_classes,
+                    "score_threshold": score_threshold,
+                    "mask_threshold": 0.5,
+                    "network_input": image_width,
+                }
+            elif is_detection:
                 manifest["task"] = "object_detection"
                 manifest["detection"] = {
                     "layout": detection_arch,  # 'yolo' | 'rf_detr' (decoder family)
@@ -707,36 +924,28 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
         bucket = parsed.netloc
         key = parsed.path.lstrip('/')
 
-        # ONNX models are opaque to the PyTorch inspector (torch.load). Detect
-        # them by extension and return a clear result instead of the misleading
-        # "Could not inspect model" the torch path produces. Object detection
-        # requires ONNX, so this is the common BYO path.
-        if key.lower().endswith('.onnx'):
-            return create_response(200, {
-                'model_s3_uri': model_s3_uri,
-                'inspection_result': {
-                    'type': 'onnx',
-                    'architecture_hints': [
-                        'ONNX model — inspection skipped (the analyzer is PyTorch-only).',
-                        'Select Runtime = ONNX Runtime and set the model type manually. '
-                        'For detection, choose the detection architecture (YOLO or RF-DETR).'
-                    ],
-                },
-                'supported_model_types': MODEL_TYPES
-            })
-
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_inspect_")
-        
+
+        # ONNX models are opaque to the PyTorch inspector (torch.load). Parse
+        # the ONNX graph's input/output shapes to auto-detect attributes
+        # (input size, task, detection architecture, num_classes) for UI
+        # pre-fill instead of the misleading "Could not inspect model".
+        is_onnx = key.lower().endswith('.onnx')
+
         try:
-            # Download the model file
-            local_model = os.path.join(temp_dir, 'model.pt')
+            # Download the model file (extension-matched so the torch path only
+            # sees real .pt files).
+            local_model = os.path.join(temp_dir, 'model.onnx' if is_onnx else 'model.pt')
             logger.info(f"Downloading model from {model_s3_uri}")
             s3_client.download_file(bucket, key, local_model)
-            
+
             # Inspect the model
-            model_info = inspect_pytorch_model(local_model)
-            
+            if is_onnx:
+                model_info = inspect_onnx_model(local_model)
+            else:
+                model_info = inspect_pytorch_model(local_model)
+
             return create_response(200, {
                 'model_s3_uri': model_s3_uri,
                 'inspection_result': model_info,

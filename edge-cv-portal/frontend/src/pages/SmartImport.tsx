@@ -38,6 +38,13 @@ interface ModelInspectionResult {
   architecture_hints: string[];
   suggested_type?: string;
   error?: string;
+  // ONNX auto-detected attributes (from graph input/output shapes).
+  detection_arch?: string;      // 'yolo' | 'rf_detr'
+  input_width?: number | null;
+  input_height?: number | null;
+  num_outputs?: number;
+  input_shapes?: (number | null)[][];
+  output_shapes?: (number | null)[][];
 }
 
 const COMPILATION_TARGETS: MultiselectProps.Option[] = [
@@ -114,6 +121,16 @@ export default function SmartImport() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
+  // Segmentation is supported on-device only via the RF-DETR ONNX decoder
+  // (instance masks -> semantic overlay). Lock the architecture to RF-DETR and
+  // the runtime to ONNX when the user selects Segmentation.
+  useEffect(() => {
+    if (modelType === 'segmentation') {
+      setDetectionArch('rf_detr');
+      setExportFormat('onnx');
+    }
+  }, [modelType]);
+
   // Load use cases
   useEffect(() => {
     const loadUseCases = async () => {
@@ -145,18 +162,38 @@ export default function SmartImport() {
         model_s3_uri: modelS3Uri,
       });
       
-      setInspectionResult(result.inspection_result);
-      
+      const ir = result.inspection_result;
+      setInspectionResult(ir);
+
+      // ONNX models run on the pluggable ONNX Runtime engine — pre-select it.
+      if (ir.type === 'onnx') {
+        setExportFormat('onnx');
+      }
+
       // Auto-select suggested type if available
-      if (result.inspection_result.suggested_type) {
-        setModelType(result.inspection_result.suggested_type);
+      if (ir.suggested_type) {
+        setModelType(ir.suggested_type);
       }
-      
+
+      // Auto-select the detection architecture (YOLO / RF-DETR) when detected.
+      if (ir.detection_arch) {
+        setDetectionArch(ir.detection_arch);
+      }
+
       // Auto-fill num_classes if detected
-      if (result.inspection_result.num_classes) {
-        setNumClasses(result.inspection_result.num_classes.toString());
+      if (ir.num_classes) {
+        setNumClasses(ir.num_classes.toString());
       }
-      
+
+      // Auto-fill the input size from the model's declared input shape. ONNX
+      // exports carry a fixed square input (e.g. RF-DETR base 560, nano 384),
+      // which is rarely in the preset dropdown — populate the custom W/H boxes.
+      if (ir.input_width && ir.input_height) {
+        setUseCustomDimensions(true);
+        setCustomWidth(String(ir.input_width));
+        setCustomHeight(String(ir.input_height));
+      }
+
       // Move to step 2
       setCurrentStep(2);
       
@@ -197,7 +234,10 @@ export default function SmartImport() {
         image_height: height,
         num_classes: numClasses ? parseInt(numClasses) : undefined,
         export_format: exportFormat,
-        detection_arch: modelType === 'object_detection' ? detectionArch : undefined,
+        detection_arch:
+          modelType === 'object_detection' || modelType === 'segmentation'
+            ? detectionArch
+            : undefined,
         auto_import: true,
       });
 
@@ -456,6 +496,25 @@ export default function SmartImport() {
                           value: 'rf_detr',
                           label: 'RF-DETR',
                           description: 'DETR-family, boxes + logits tensors, NMS-free top-k',
+                        },
+                      ]}
+                    />
+                  </FormField>
+                )}
+
+                {modelType === 'segmentation' && (
+                  <FormField
+                    label="Segmentation architecture"
+                    description="On-device decoder for the ONNX segmentation model. RF-DETR (ONNX Runtime) instance masks are composited into a colored, per-class semantic overlay you can toggle over the source image."
+                  >
+                    <Tiles
+                      value={detectionArch}
+                      onChange={({ detail }) => setDetectionArch(detail.value)}
+                      items={[
+                        {
+                          value: 'rf_detr',
+                          label: 'RF-DETR',
+                          description: 'DETR-family instance segmentation → semantic mask overlay',
                         },
                       ]}
                     />
