@@ -287,14 +287,18 @@ export class ComputeStack extends cdk.Stack {
     // SSH via AWS IoT Secure Tunneling: the devices handler opens tunnels and
     // manages the SecureTunneling component. Greengrass deploy + IoT perms are
     // already on the base role; add the secure-tunneling actions here.
+    // NOTE: AWS IoT Secure Tunneling's API service namespace is
+    // "iotsecuretunneling", but its IAM action prefix is "iot:" (e.g.
+    // iot:OpenTunnel). Using the wrong prefix yields AccessDeniedException.
     devicesHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
-        'iotsecuretunneling:OpenTunnel',
-        'iotsecuretunneling:CloseTunnel',
-        'iotsecuretunneling:DescribeTunnel',
-        'iotsecuretunneling:ListTunnels',
-        'iotsecuretunneling:ListTagsForResource',
+        'iot:OpenTunnel',
+        'iot:CloseTunnel',
+        'iot:DescribeTunnel',
+        'iot:ListTunnels',
+        'iot:ListTagsForResource',
+        'iot:RotateTunnelAccessToken',
       ],
       resources: ['*'],
     }));
