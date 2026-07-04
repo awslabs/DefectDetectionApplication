@@ -706,7 +706,25 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
         parsed = urlparse(model_s3_uri)
         bucket = parsed.netloc
         key = parsed.path.lstrip('/')
-        
+
+        # ONNX models are opaque to the PyTorch inspector (torch.load). Detect
+        # them by extension and return a clear result instead of the misleading
+        # "Could not inspect model" the torch path produces. Object detection
+        # requires ONNX, so this is the common BYO path.
+        if key.lower().endswith('.onnx'):
+            return create_response(200, {
+                'model_s3_uri': model_s3_uri,
+                'inspection_result': {
+                    'type': 'onnx',
+                    'architecture_hints': [
+                        'ONNX model — inspection skipped (the analyzer is PyTorch-only).',
+                        'Select Runtime = ONNX Runtime and set the model type manually. '
+                        'For detection, choose the detection architecture (YOLO or RF-DETR).'
+                    ],
+                },
+                'supported_model_types': MODEL_TYPES
+            })
+
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_inspect_")
         
