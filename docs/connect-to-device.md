@@ -38,32 +38,48 @@ aws iot open-tunnel \
 # Note the tunnelId and the SOURCE access token from the output.
 ```
 
-Then bridge the tunnel to a local port with the AWS IoT **local proxy**
-(`localproxy`), in source mode. Install it from
-https://github.com/aws-samples/aws-iot-securetunneling-localproxy.
+Then bridge the tunnel to a local port with the AWS IoT **local proxy**, in
+source mode.
 
-**macOS / Linux:**
+> **Important:** the device end uses the **Greengrass Secure Tunneling
+> component**, which speaks the **V1** protocol. The current local proxy (v3)
+> must be started in source mode with `--destination-client-type V1`, or the
+> connection will fail.
+
+### Option A — Docker (recommended; no build, works on Windows, WSL, macOS, Linux)
+
+AWS publishes a prebuilt local-proxy image, so there's nothing to compile:
+
 ```bash
+# On Apple Silicon Macs, change amd64-latest -> arm64-latest.
 # 1) Start the local proxy (keep this terminal open):
-export AWSIOT_TUNNEL_ACCESS_TOKEN="<SOURCE_TOKEN>"
-localproxy -r us-east-1 -s 5555        # listen on localhost:5555 -> device SSH
+docker run --rm -it -p 5555:5555 \
+  -e AWSIOT_TUNNEL_ACCESS_TOKEN="<SOURCE_TOKEN>" \
+  public.ecr.aws/aws-iot-securetunneling-localproxy/ubuntu-bin:amd64-latest \
+  --region us-east-1 -s 5555 -b 0.0.0.0 --destination-client-type V1
 
 # 2) In a SECOND terminal, SSH to the device:
 ssh -p 5555 ${SSH_USER}@localhost
 ```
 
-**Windows (PowerShell):**
-```powershell
-# 1) Start the local proxy (keep this window open):
-$env:AWSIOT_TUNNEL_ACCESS_TOKEN="<SOURCE_TOKEN>"
-.\localproxy.exe -r us-east-1 -s 5555
+The exact same `docker run` command works in WSL, PowerShell, macOS, and Linux
+(`-b 0.0.0.0` + `-p 5555:5555` publishes the port so `ssh ...@localhost` reaches it).
 
-# 2) In a SECOND PowerShell window, SSH to the device:
-ssh -p 5555 <SSH_USER>@localhost
+### Option B — Native binary
+
+`localproxy` is not an OS package; build it from source or use the prebuilt
+binary image from
+https://github.com/aws-samples/aws-iot-securetunneling-localproxy (Windows build
+steps: `windows-localproxy-build.md`). Then:
+
+```bash
+export AWSIOT_TUNNEL_ACCESS_TOKEN="<SOURCE_TOKEN>"   # PowerShell: $env:AWSIOT_TUNNEL_ACCESS_TOKEN="<SOURCE_TOKEN>"
+localproxy -r us-east-1 -s 5555 --destination-client-type V1
+ssh -p 5555 ${SSH_USER}@localhost
 ```
 
-The portal's **Remote Access** tab shows these exact commands (with the token and
-region filled in) and a per-OS Copy button after you click "Open SSH session".
+The portal's **Remote Access** tab shows these exact commands with the token and
+region filled in, plus a Copy button, after you click "Open SSH session".
 
 Alternatively, use the **AWS IoT console → Manage → Tunnels → Create tunnel**
 (select the thing, SSH service) for a guided, browser-initiated flow, then follow

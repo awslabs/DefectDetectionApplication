@@ -264,33 +264,51 @@ export default function RemoteAccessTab({ deviceId, usecaseId }: Props) {
             </div>
             <Box variant="awsui-key-label">Connect from your computer</Box>
             <Box variant="small" color="text-body-secondary">
-              Requires the AWS IoT local proxy
-              (<a href="https://github.com/aws-samples/aws-iot-securetunneling-localproxy"
-                 target="_blank" rel="noreferrer">aws-iot-securetunneling-localproxy</a>)
-              and an SSH client (built into macOS/Linux and Windows 10+). Pick your OS,
-              copy the block, and run it. Keep the local-proxy window open while
-              connected.
+              You need the AWS IoT local proxy and an SSH client (built into
+              macOS/Linux, WSL, and Windows 10+). The Docker option below needs no
+              install and works the same on Windows, WSL, macOS, and Linux. Keep the
+              local-proxy running while connected; SSH in from a second terminal.
+              The <code>--destination-client-type V1</code> flag is required
+              because the device uses the Greengrass Secure Tunneling (V1) component.
             </Box>
             <Tabs
               tabs={[
                 {
-                  id: 'unix',
-                  label: 'macOS / Linux',
+                  id: 'docker',
+                  label: 'Docker (recommended — all platforms)',
                   content: renderCommandBlock(
+                    `# Requires Docker. Uses the AWS-published local proxy image (no build).\n` +
+                    `# On Apple Silicon Macs, change amd64-latest to arm64-latest.\n` +
+                    `# 1) Start the local proxy (keep this terminal open):\n` +
+                    `docker run --rm -it -p 5555:5555 \\\n` +
+                    `  -e AWSIOT_TUNNEL_ACCESS_TOKEN="${tunnel.token}" \\\n` +
+                    `  public.ecr.aws/aws-iot-securetunneling-localproxy/ubuntu-bin:amd64-latest \\\n` +
+                    `  --region ${tunnel.region} -s 5555 -b 0.0.0.0 --destination-client-type V1\n\n` +
+                    `# 2) In a SECOND terminal, SSH to the device:\n` +
+                    `ssh -p 5555 ${osUser}@localhost`
+                  ),
+                },
+                {
+                  id: 'unix',
+                  label: 'Native binary — macOS / Linux / WSL',
+                  content: renderCommandBlock(
+                    `# First install localproxy (build from source or prebuilt binary image):\n` +
+                    `#   https://github.com/aws-samples/aws-iot-securetunneling-localproxy\n` +
                     `# 1) Start the local proxy (keep this terminal open):\n` +
                     `export AWSIOT_TUNNEL_ACCESS_TOKEN="${tunnel.token}"\n` +
-                    `localproxy -r ${tunnel.region} -s 5555\n\n` +
+                    `localproxy -r ${tunnel.region} -s 5555 --destination-client-type V1\n\n` +
                     `# 2) In a SECOND terminal, SSH to the device:\n` +
                     `ssh -p 5555 ${osUser}@localhost`
                   ),
                 },
                 {
                   id: 'windows',
-                  label: 'Windows (PowerShell)',
+                  label: 'Native binary — Windows (PowerShell)',
                   content: renderCommandBlock(
+                    `# First build localproxy for Windows (see repo windows-localproxy-build.md).\n` +
                     `# 1) Start the local proxy (keep this window open):\n` +
                     `$env:AWSIOT_TUNNEL_ACCESS_TOKEN="${tunnel.token}"\n` +
-                    `.\\localproxy.exe -r ${tunnel.region} -s 5555\n\n` +
+                    `.\\localproxy.exe -r ${tunnel.region} -s 5555 --destination-client-type V1\n\n` +
                     `# 2) In a SECOND PowerShell window, SSH to the device:\n` +
                     `ssh -p 5555 ${osUser}@localhost`
                   ),
