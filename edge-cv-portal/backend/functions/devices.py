@@ -49,11 +49,22 @@ def handler(event, context):
             }
         
         user = get_user_from_event(event)
-        
-        if http_method == 'GET' and not path_parameters.get('id'):
+        device_id = path_parameters.get('id')
+
+        # SSH tunnel (AWS IoT Secure Tunneling) endpoints — checked before the
+        # generic get_device so the /ssh-tunnel sub-paths route correctly.
+        if device_id and path.endswith('/ssh-tunnel/open') and http_method == 'POST':
+            return open_ssh_tunnel(device_id, user, query_parameters)
+        if device_id and path.endswith('/ssh-tunnel') and http_method == 'POST':
+            body = json.loads(event.get('body') or '{}')
+            return set_ssh_tunnel(device_id, user, query_parameters, body)
+        if device_id and path.endswith('/ssh-tunnel') and http_method == 'GET':
+            return get_ssh_tunnel_status(device_id, user, query_parameters)
+
+        if http_method == 'GET' and not device_id:
             return list_devices(user, query_parameters)
-        elif http_method == 'GET' and path_parameters.get('id'):
-            return get_device(path_parameters['id'], user, query_parameters)
+        elif http_method == 'GET' and device_id:
+            return get_device(device_id, user, query_parameters)
         
         return create_response(404, {'error': 'Not found'})
         
@@ -399,3 +410,198 @@ def get_device_deployments(greengrass_client, thing_name):
     except ClientError as e:
         logger.warning(f"Could not get deployments for {thing_name}: {e}")
         return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SSH via AWS IoT Secure Tunneling
+#
+# Edge devices are typically behind NAT with no routable/inbound port, so we
+# reach them over AWS IoT Secure Tunneling (outbound WebSocket from the device
+# to the AWS IoT endpoint). Because there is NO inbound port on the device,
+# there is nothing for a security group / IP allowlist to filter — access is
+# gated by IAM (who may call OpenTunnel here) plus the short-lived tunnel access
+# tokens. See docs/connect-to-device.md.
+#
+# "Enable" deploys the AWS-managed aws.greengrass.SecureTunneling component to
+# the device (merged into a thing-targeted deployment, preserving existing
+# components). "Open" creates a tunnel for the SSH service and returns the
+# source access token the operator uses with the AWS IoT local proxy.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SECURE_TUNNELING_COMPONENT = 'aws.greengrass.SecureTunneling'
+DEFAULT_OS_USER = 'ggc_user'
+
+
+def _resolve_usecase_context(device_id, user, query_params):
+    """Access-check + resolve (usecase, region, credentials) for a device op.
+    Returns (context_dict, error_response). One of them is None."""
+    usecase_id = query_params.get('usecase_id')
+    if not usecase_id:
+        return None, create_response(400, {'error': 'usecase_id parameter required'})
+    if not is_super_user(user['user_id']) and not check_user_access(user['user_id'], usecase_id):
+        return None, create_response(403, {'error': 'Access denied'})
+    usecase = get_usecase(usecase_id)
+    if not usecase:
+        return None, create_response(404, {'error': 'Use case not found'})
+    credentials = assume_cross_account_role(usecase['cross_account_role_arn'], usecase['external_id'])
+    region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
+    account_id = usecase.get('account_id', '')
+    return {
+        'usecase': usecase, 'usecase_id': usecase_id, 'credentials': credentials,
+        'region': region, 'account_id': account_id,
+    }, None
+
+
+def _latest_secure_tunneling_version(greengrass_client, region):
+    """Resolve the latest version of the AWS-managed SecureTunneling component."""
+    arn = f"arn:aws:greengrass:{region}:aws:components:{SECURE_TUNNELING_COMPONENT}"
+    try:
+        resp = greengrass_client.list_component_versions(arn=arn, maxResults=1)
+        versions = resp.get('componentVersions', [])
+        if versions:
+            return versions[0]['componentVersion']
+    except ClientError as e:
+        logger.warning(f"Could not resolve SecureTunneling version: {e}")
+    # Fallback to a known-good recent version if lookup fails.
+    return '1.0.19'
+
+
+def _thing_target_arn(region, account_id, thing_name):
+    return f"arn:aws:iot:{region}:{account_id}:thing/{thing_name}"
+
+
+def _current_thing_components(greengrass_client, target_arn):
+    """Return the components dict of the latest thing-targeted deployment, in
+    create_deployment shape, or {} if none."""
+    try:
+        resp = greengrass_client.list_deployments(
+            targetArn=target_arn, historyFilter='LATEST_ONLY', maxResults=1)
+        deployments = resp.get('deployments', [])
+        if not deployments:
+            return {}
+        dep = greengrass_client.get_deployment(deploymentId=deployments[0]['deploymentId'])
+        return dep.get('components', {}) or {}
+    except ClientError as e:
+        logger.warning(f"Could not read current deployment for {target_arn}: {e}")
+        return {}
+
+
+def set_ssh_tunnel(device_id, user, query_params, body):
+    """Enable/disable SSH via Secure Tunneling by adding/removing the
+    aws.greengrass.SecureTunneling component on a thing-targeted deployment."""
+    ctx, err = _resolve_usecase_context(device_id, user, query_params)
+    if err:
+        return err
+    enabled = bool(body.get('enabled', True))
+    os_user = str(body.get('osUser') or DEFAULT_OS_USER).strip() or DEFAULT_OS_USER
+    region, account_id = ctx['region'], ctx['account_id']
+
+    greengrass_client = create_boto3_client('greengrassv2', ctx['credentials'], region)
+    target_arn = _thing_target_arn(region, account_id, device_id)
+
+    components = dict(_current_thing_components(greengrass_client, target_arn))
+    if enabled:
+        version = _latest_secure_tunneling_version(greengrass_client, region)
+        components[SECURE_TUNNELING_COMPONENT] = {
+            'componentVersion': version,
+            'configurationUpdate': {'merge': json.dumps({'OSUser': os_user})},
+        }
+    else:
+        components.pop(SECURE_TUNNELING_COMPONENT, None)
+        if not components:
+            # Nothing left to deploy; a thing deployment must have >=1 component.
+            return create_response(200, {
+                'device_id': device_id, 'enabled': False,
+                'message': 'Secure Tunneling was not present in a thing-level deployment.'
+            })
+
+    try:
+        dep = greengrass_client.create_deployment(
+            targetArn=target_arn,
+            deploymentName=f"ssh-tunnel-{'on' if enabled else 'off'}-{device_id}",
+            components=components,
+        )
+    except ClientError as e:
+        logger.error(f"Failed to create SSH-tunnel deployment: {e}")
+        return create_response(500, {'error': f'Failed to update deployment: {str(e)}'})
+
+    log_audit_event(
+        user['user_id'], 'set_ssh_tunnel', 'device', device_id, 'success',
+        {'enabled': enabled, 'os_user': os_user, 'deployment_id': dep.get('deploymentId')})
+
+    return create_response(200, {
+        'device_id': device_id,
+        'enabled': enabled,
+        'os_user': os_user if enabled else None,
+        'deployment_id': dep.get('deploymentId'),
+        'iot_job_id': dep.get('iotJobId'),
+        'message': (
+            'Secure Tunneling enabled. The device will pull the component; then '
+            'use "Open SSH session" to start a tunnel.' if enabled
+            else 'Secure Tunneling disabled.'),
+    })
+
+
+def get_ssh_tunnel_status(device_id, user, query_params):
+    """Report whether the SecureTunneling component is installed on the device."""
+    ctx, err = _resolve_usecase_context(device_id, user, query_params)
+    if err:
+        return err
+    greengrass_client = create_boto3_client('greengrassv2', ctx['credentials'], ctx['region'])
+    installed = False
+    version = None
+    try:
+        paginator = greengrass_client.get_paginator('list_installed_components')
+        for page in paginator.paginate(coreDeviceThingName=device_id):
+            for comp in page.get('installedComponents', []):
+                if comp.get('componentName') == SECURE_TUNNELING_COMPONENT:
+                    installed = True
+                    version = comp.get('componentVersion')
+    except ClientError as e:
+        logger.warning(f"Could not list installed components for {device_id}: {e}")
+    return create_response(200, {
+        'device_id': device_id,
+        'enabled': installed,
+        'component_version': version,
+    })
+
+
+def open_ssh_tunnel(device_id, user, query_params):
+    """Open an AWS IoT Secure Tunnel to the device's SSH service and return the
+    SOURCE access token for use with the AWS IoT local proxy."""
+    ctx, err = _resolve_usecase_context(device_id, user, query_params)
+    if err:
+        return err
+    region = ctx['region']
+    lifetime = 60
+    try:
+        lifetime = max(1, min(720, int(query_params.get('lifetime_minutes', 60))))
+    except (ValueError, TypeError):
+        lifetime = 60
+
+    tunnel_client = create_boto3_client('iotsecuretunneling', ctx['credentials'], region)
+    try:
+        resp = tunnel_client.open_tunnel(
+            destinationConfig={'thingName': device_id, 'services': ['SSH']},
+            timeoutConfig={'maxLifetimeTimeoutMinutes': lifetime},
+            tags=[{'key': 'dda-portal', 'value': 'ssh'}],
+        )
+    except ClientError as e:
+        logger.error(f"Failed to open tunnel for {device_id}: {e}")
+        return create_response(500, {'error': f'Failed to open tunnel: {str(e)}'})
+
+    log_audit_event(
+        user['user_id'], 'open_ssh_tunnel', 'device', device_id, 'success',
+        {'tunnel_id': resp.get('tunnelId'), 'lifetime_minutes': lifetime})
+
+    # NOTE: only the SOURCE token is returned to the operator. The destination
+    # side is handled by the on-device SecureTunneling component automatically.
+    return create_response(200, {
+        'device_id': device_id,
+        'tunnel_id': resp.get('tunnelId'),
+        'region': region,
+        'source_access_token': resp.get('sourceAccessToken'),
+        'lifetime_minutes': lifetime,
+        'message': 'Tunnel opened. Use the source access token with the AWS IoT '
+                   'local proxy, then SSH to localhost. See docs/connect-to-device.md.',
+    })

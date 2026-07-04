@@ -22,6 +22,7 @@ import {
 import { apiService } from '../services/api';
 import { Device, InstalledComponent, DeviceDeployment } from '../types';
 import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
+import RemoteAccessTab from '../components/RemoteAccessTab';
 
 interface LogGroup {
   log_group_name: string;
@@ -736,6 +737,13 @@ export default function DeviceDetail() {
             label: 'AI Diagnostics',
             content: (
               <LogsDiagnosticsTab deviceId={device.device_id} usecaseId={usecaseId || ''} />
+            ),
+          },
+          {
+            id: 'remote-access',
+            label: 'Remote Access',
+            content: (
+              <RemoteAccessTab deviceId={device.device_id} usecaseId={usecaseId || ''} />
             ),
           },
         ]}

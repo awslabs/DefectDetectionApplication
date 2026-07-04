@@ -322,6 +322,22 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
+    // SSH tunnel (AWS IoT Secure Tunneling) — enable/disable + status + open.
+    const sshTunnelResource = deviceResource.addResource('ssh-tunnel');
+    sshTunnelResource.addMethod('POST', devicesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    sshTunnelResource.addMethod('GET', devicesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    const sshTunnelOpenResource = sshTunnelResource.addResource('open');
+    sshTunnelOpenResource.addMethod('POST', devicesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
     const deviceLogsResource = deviceResource.addResource('logs');
     deviceLogsResource.addMethod('GET', deviceLogsIntegration, {
       authorizer,

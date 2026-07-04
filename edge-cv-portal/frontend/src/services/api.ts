@@ -412,6 +412,41 @@ class ApiService {
     );
   }
 
+  // SSH tunnel (AWS IoT Secure Tunneling) endpoints
+  async getSshTunnelStatus(deviceId: string, usecaseId: string): Promise<{
+    device_id: string;
+    enabled: boolean;
+    component_version?: string | null;
+  }> {
+    return this.request(`/devices/${deviceId}/ssh-tunnel?usecase_id=${usecaseId}`);
+  }
+
+  async setSshTunnel(deviceId: string, usecaseId: string, enabled: boolean, osUser?: string): Promise<{
+    device_id: string;
+    enabled: boolean;
+    os_user?: string | null;
+    deployment_id?: string;
+    message: string;
+  }> {
+    return this.request(`/devices/${deviceId}/ssh-tunnel?usecase_id=${usecaseId}`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled, osUser }),
+    });
+  }
+
+  async openSshTunnel(deviceId: string, usecaseId: string, lifetimeMinutes?: number): Promise<{
+    device_id: string;
+    tunnel_id: string;
+    region: string;
+    source_access_token: string;
+    lifetime_minutes: number;
+    message: string;
+  }> {
+    const qs = new URLSearchParams({ usecase_id: usecaseId });
+    if (lifetimeMinutes) qs.set('lifetime_minutes', String(lifetimeMinutes));
+    return this.request(`/devices/${deviceId}/ssh-tunnel/open?${qs}`, { method: 'POST' });
+  }
+
   // Training endpoints
   async listTrainingJobs(usecaseId?: string): Promise<{ jobs: any[]; count: number }> {
     const query = usecaseId ? `?usecase_id=${usecaseId}` : '';

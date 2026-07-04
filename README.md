@@ -23,6 +23,7 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
 - [Using the Portal](#using-the-portal)
 - [ML Workflow](#ml-workflow)
 - [Using ONNX Models](#using-onnx-models)
+- [Remote Device Access (SSH)](#remote-device-access-ssh)
 - [Optional Datasets](#optional-datasets-before-model-training)
 - [Inference Results Upload](#inference-results-upload-optional)
 - [Edge Device Management](#edge-device-management)
@@ -655,6 +656,51 @@ for JetPack 5 and 6 by `gdk-component-build-and-publish.sh`:
 ~1–2 h and is memory-heavy). For a fast CPU-only image, set `ONNXRUNTIME_GPU=0`.
 JetPack 4 is CPU-only regardless. The engine auto-selects TensorRT → CUDA → CPU
 providers at load, so the same package runs on either a GPU or CPU image.
+
+## Remote Device Access (SSH)
+
+You can open an SSH session to an edge device from the portal (Device page →
+**Remote Access** tab) using **AWS IoT Secure Tunneling** — no inbound ports,
+public IP, or VPN required.
+
+### How it works
+
+1. **Enable** on the Remote Access tab deploys the AWS-managed
+   `aws.greengrass.SecureTunneling` component to the device (merged with its
+   existing components). Set the **SSH login user** (`ubuntu` on EC2,
+   `ggc_user` for the Greengrass default, or your device user).
+2. **Open SSH session** creates a short-lived tunnel and returns a **source
+   access token**.
+3. Locally, run the AWS IoT local proxy with that token and SSH to `localhost`:
+   ```bash
+   export AWSIOT_TUNNEL_ACCESS_TOKEN=<token>
+   localproxy -r <region> -s 5555
+   ssh -p 5555 <ssh-user>@localhost
+   ```
+
+Full steps (incl. local-proxy install and on-device log inspection) are in
+[docs/connect-to-device.md](docs/connect-to-device.md).
+
+### Security model (important)
+
+Secure Tunneling reaches the device over an **outbound** WebSocket to AWS IoT —
+there is **no inbound port** on the device. Because nothing listens for inbound
+connections, **a security group / IP allowlist does not apply** and would give a
+false sense of control. Access is instead gated by:
+
+- **IAM** — only principals allowed to call `iotsecuretunneling:OpenTunnel`
+  (the portal's Devices Lambda role, exercised by authenticated portal users)
+  can open a tunnel.
+- **Short-lived tunnel tokens** — each session token expires automatically
+  (default 60 minutes).
+- The device must have an SSH server and a valid login user; disable the
+  component when not in use.
+
+> IP-based allowlisting (a security group) only applies if a device is an EC2
+> instance you SSH to **directly** by IP — a different path than Secure
+> Tunneling. A future portal enhancement (see
+> [docs/device-web-connect-spec.md](docs/device-web-connect-spec.md)) may add a
+> browser terminal.
 
 ## Optional Datasets (Before Model Training)
 

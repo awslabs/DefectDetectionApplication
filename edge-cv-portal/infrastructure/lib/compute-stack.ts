@@ -284,6 +284,21 @@ export class ComputeStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
     });
 
+    // SSH via AWS IoT Secure Tunneling: the devices handler opens tunnels and
+    // manages the SecureTunneling component. Greengrass deploy + IoT perms are
+    // already on the base role; add the secure-tunneling actions here.
+    devicesHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iotsecuretunneling:OpenTunnel',
+        'iotsecuretunneling:CloseTunnel',
+        'iotsecuretunneling:DescribeTunnel',
+        'iotsecuretunneling:ListTunnels',
+        'iotsecuretunneling:ListTagsForResource',
+      ],
+      resources: ['*'],
+    }));
+
     // Device Logs Lambda Handler
     const deviceLogsHandler = new lambda.Function(this, 'DeviceLogsHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,

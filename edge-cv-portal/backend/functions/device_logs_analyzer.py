@@ -359,9 +359,22 @@ def analyze_device_logs(device_id: str, user: Dict, query_params: Dict) -> Dict:
         if not logs_text:
             return create_response(200, {
                 'analysis': {
+                    'device_id': device_id,
+                    'analysis_timestamp': datetime.utcnow().isoformat(),
                     'issues_detected': 0,
+                    'critical_count': 0,
+                    'high_count': 0,
+                    'medium_count': 0,
+                    'low_count': 0,
                     'issues': [],
-                    'message': 'No logs found for the specified time period'
+                    'next_steps': [
+                        'No logs were found for the selected time range.',
+                        'Confirm the device is online and has been active in this window.',
+                        'Ensure CloudWatch logging is enabled (the aws.greengrass.LogManager '
+                        'component must be deployed to stream device logs to CloudWatch).',
+                        'Try a wider time range (e.g. Last 24 hours).',
+                    ],
+                    'message': 'No logs found for the specified time period.',
                 }
             })
         
