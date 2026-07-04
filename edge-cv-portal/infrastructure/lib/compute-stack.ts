@@ -298,6 +298,21 @@ export class ComputeStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(60), // Longer timeout for log fetching
     });
 
+    // Device Logs Analyzer Lambda Handler (AI/pattern-based log analysis).
+    // Serves POST /devices/{id}/logs/analyze.
+    const deviceLogsAnalyzerHandler = new lambda.Function(this, 'DeviceLogsAnalyzerHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'device_logs_analyzer.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('DeviceLogsAnalyzer'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-19-device-logs-analyzer',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(60), // Fetch + analyze logs
+    });
+
     // Deployments Lambda Handler
     const deploymentsHandler = new lambda.Function(this, 'DeploymentsHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
@@ -863,6 +878,7 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       useCasesHandler,
       devicesHandler,
       deviceLogsHandler,
+      deviceLogsAnalyzerHandler,
       deploymentsHandler,
       dataManagementHandler,
       datasetsHandler,

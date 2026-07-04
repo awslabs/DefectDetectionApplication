@@ -14,6 +14,7 @@ export interface ApiGatewayStackProps extends cdk.NestedStackProps {
   useCasesHandler: lambda.Function;
   devicesHandler: lambda.Function;
   deviceLogsHandler: lambda.Function;
+  deviceLogsAnalyzerHandler: lambda.Function;
   deploymentsHandler: lambda.Function;
   dataManagementHandler: lambda.Function;
   datasetsHandler: lambda.Function;
@@ -81,6 +82,7 @@ export class ApiGatewayStack extends cdk.NestedStack {
     const useCasesIntegration = new apigateway.LambdaIntegration(props.useCasesHandler);
     const devicesIntegration = new apigateway.LambdaIntegration(props.devicesHandler);
     const deviceLogsIntegration = new apigateway.LambdaIntegration(props.deviceLogsHandler);
+    const deviceLogsAnalyzerIntegration = new apigateway.LambdaIntegration(props.deviceLogsAnalyzerHandler);
     const deploymentsIntegration = new apigateway.LambdaIntegration(props.deploymentsHandler);
     const dataManagementIntegration = new apigateway.LambdaIntegration(props.dataManagementHandler);
     const datasetsIntegration = new apigateway.LambdaIntegration(props.datasetsHandler);
@@ -322,6 +324,15 @@ export class ApiGatewayStack extends cdk.NestedStack {
 
     const deviceLogsResource = deviceResource.addResource('logs');
     deviceLogsResource.addMethod('GET', deviceLogsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Static 'analyze' resource — POST /devices/{id}/logs/analyze. Defined as a
+    // sibling of the {component} path param; API Gateway prefers the static
+    // segment for exact matches, so this won't shadow GET /logs/{component}.
+    const deviceLogsAnalyzeResource = deviceLogsResource.addResource('analyze');
+    deviceLogsAnalyzeResource.addMethod('POST', deviceLogsAnalyzerIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
