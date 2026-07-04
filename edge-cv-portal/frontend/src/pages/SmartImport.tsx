@@ -97,6 +97,9 @@ export default function SmartImport() {
   // Export/runtime format: 'pytorch' (legacy .pt/DLR) or 'onnx' (ONNX Runtime
   // engine; required for the object-detection task path).
   const [exportFormat, setExportFormat] = useState<string>('pytorch');
+  // Object-detection decoder family: 'yolo' (single tensor + NMS) or 'rf_detr'
+  // (DETR-family, two tensors, NMS-free top-k). Only relevant for detection.
+  const [detectionArch, setDetectionArch] = useState<string>('yolo');
   const [autoCompile, setAutoCompile] = useState(true);
   const [compilationTargets, setCompilationTargets] = useState<MultiselectProps.Option[]>([
     { label: 'x86_64 CPU', value: 'x86_64-cpu' }
@@ -194,6 +197,7 @@ export default function SmartImport() {
         image_height: height,
         num_classes: numClasses ? parseInt(numClasses) : undefined,
         export_format: exportFormat,
+        detection_arch: modelType === 'object_detection' ? detectionArch : undefined,
         auto_import: true,
       });
 
@@ -431,6 +435,30 @@ export default function SmartImport() {
                     ]}
                   />
                 </FormField>
+
+                {modelType === 'object_detection' && (
+                  <FormField
+                    label="Detection architecture"
+                    description="Decoder family for the on-device postprocessor. YOLO = single output tensor with NMS. RF-DETR = DETR-family with two tensors (boxes + logits), NMS-free top-k."
+                  >
+                    <Tiles
+                      value={detectionArch}
+                      onChange={({ detail }) => setDetectionArch(detail.value)}
+                      items={[
+                        {
+                          value: 'yolo',
+                          label: 'YOLO',
+                          description: 'YOLOv5/v8-style single-tensor output, NMS decode',
+                        },
+                        {
+                          value: 'rf_detr',
+                          label: 'RF-DETR',
+                          description: 'DETR-family, boxes + logits tensors, NMS-free top-k',
+                        },
+                      ]}
+                    />
+                  </FormField>
+                )}
 
                 <FormField label="Input Image Size" description="The image dimensions your model expects">
                   <SpaceBetween size="s">

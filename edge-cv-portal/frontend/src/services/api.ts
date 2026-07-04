@@ -1486,6 +1486,10 @@ class ApiService {
     // Object-detection decode thresholds (only used for object_detection).
     score_threshold?: number;
     iou_threshold?: number;
+    // Object-detection decoder family: 'yolo' (single tensor + NMS) or
+    // 'rf_detr' (DETR-family, two tensors, NMS-free top-k). Only used when
+    // model_type === 'object_detection'.
+    detection_arch?: string;
   }): Promise<{
     converted_model_s3_uri: string;
     model_name: string;

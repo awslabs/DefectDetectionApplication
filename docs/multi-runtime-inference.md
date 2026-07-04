@@ -444,3 +444,105 @@ Caveat: "compile to ONNX" and "package" are currently two Smart-Import steps
 (export produces model.onnx in S3; package converts it). Auto-chaining the ONNX
 export output directly into packaging is a follow-up. On-device validation
 pending.
+
+## 21. RF-DETR detection architecture (DETR-family decoder)
+
+YOLO is not the only object-detection export a user may bring. RF-DETR (and the
+broader DETR family) has a fundamentally different ONNX output shape and decode,
+so the detection path is now **architecture-pluggable** via a
+`detection.layout` / `detection_arch` selector rather than assuming YOLO.
+
+### 21.1 How RF-DETR differs from YOLO
+
+| | YOLO (v5/v8) | RF-DETR (DETR-family) |
+|---|---|---|
+| ONNX outputs | 1 tensor `[1, 4+C, N]` (or transposed) | 2 tensors: boxes `[1, Q, 4]` + logits `[1, Q, C]` |
+| Box encoding | xywh (center), **network-pixel** scale | cxcywh, **normalized 0..1** |
+| Scoring | max class score per anchor | per-query sigmoid (or softmax) over logits |
+| Filtering | score threshold + **NMS** (IoU) | **NMS-free** — flattened top-k over query×class |
+| Queries/anchors | ~8400 grid anchors | fixed query slots (e.g. 300) |
+
+Because RF-DETR is set-based, there is **no NMS**; duplicate suppression is
+handled by the model's Hungarian-matched training, so decode is a top-k over the
+flattened (query × class) score matrix followed by a per-detection threshold.
+
+### 21.2 On-device decoder
+
+`src/backend/lyra_science_processing_utils/model_processors/rf_detr_detection_postprocessor.py`
+(`RfDetrDetectionPostProcessor`, registered as `rf_detr_object_detection` /
+codename "canele"):
+
+- **Tensor identification by shape**, not order: the 3-D tensor whose last dim
+  is 4 is boxes; the other is logits. This tolerates exporters that swap output
+  order or name the tensors differently.
+- **Scoring:** sigmoid per (query, class) by default; `use_softmax: true`
+  switches to softmax-over-classes (with an optional `background_class` index to
+  drop). 
+- **Top-k:** flatten the `[Q, C]` score matrix, take the top `top_k` (default
+  300), then apply `score_threshold`. Query index → box, class index → label.
+- **Boxes:** cxcywh → xyxy, then scale **normalized (0..1) → source-image
+  pixels** using `src_img_size` passed by `SingleStageModelGraph` (falls back to
+  `network_input` if absent).
+- **Output:** `list[ObjectDetectionResult]` — the exact same result contract as
+  YOLO, so Phases B/C (reused `anomalies` tensor emit, marshal overlay, frontend
+  `detections`) are unchanged.
+
+Config keys (manifest `detection` block): `layout: "rf_detr"`, `num_classes`,
+`score_threshold`, `top_k`, `use_softmax`, `background_class`, `network_input`,
+`class_names`. Pure numpy — no torch on the hot path.
+
+Unit tests: `test/backend-test/test_rf_detr_detection_postprocessor.py` (8/8
+pass): shape-based tensor ID, sigmoid vs softmax scoring, top-k truncation,
+threshold filtering, cxcywh→xyxy conversion, normalized→source scaling,
+background-class drop, and empty-result handling.
+
+### 21.3 Packaging (`model_converter.py`)
+
+`generate_dda_package` gained a `detection_arch` param (`'yolo'` default |
+`'rf_detr'`). It maps the architecture to the on-device stage type /
+post-processor (`yolo_object_detection` vs `rf_detr_object_detection`) and writes
+the `detection.layout` accordingly. NMS (`iou_threshold`) is written for YOLO;
+`top_k` is written for RF-DETR. The handler parses `detection_arch` from the
+request body and forwards it.
+
+### 21.4 Frontend
+
+Smart Import (`SmartImport.tsx`) shows a **"Detection architecture"**
+selector (YOLO | RF-DETR) only when Model Type = Object Detection;
+`api.ts convertModel` carries `detection_arch`.
+
+### 21.5 Detection model package — RF-DETR manifest shape
+
+```json
+{
+  "runtime": "onnx",
+  "runtime_artifact": "model.onnx",
+  "task": "object_detection",
+  "detection": {
+    "layout": "rf_detr",
+    "num_classes": 90,
+    "score_threshold": 0.5,
+    "top_k": 300,
+    "network_input": 560,
+    "class_names": ["person", "bicycle", ...]
+  },
+  "model_graph": {
+    "model_graph_type": "single_stage_model_graph",
+    "stages": [{
+      "stage_type": "rf_detr_object_detection",
+      "threshold": 0.5,
+      "image_width": 560,
+      "image_height": 560,
+      "image_range_scale": true,
+      "normalize": false,
+      "input_shape": [1, 3, 560, 560]
+    }]
+  }
+}
+```
+
+Caveat: the RF-DETR decoder is verified against synthetic two-tensor outputs
+(unit tests). Exact output tensor **names/order** on a real RF-DETR ONNX export
+vary by exporter — the shape-based tensor ID handles order, but a real
+end-to-end export/device run is still pending. RF-DETR normalized-cxcywh and
+sigmoid scoring are the documented DETR-family conventions.

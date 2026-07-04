@@ -205,6 +205,7 @@ def generate_dda_package(
     export_format: str = 'pytorch',
     score_threshold: float = 0.25,
     iou_threshold: float = 0.45,
+    detection_arch: str = 'yolo',
 ) -> str:
     """
     Generate a DDA-compatible package from a raw model file.
@@ -218,10 +219,18 @@ def generate_dda_package(
         behavior.
     :param score_threshold/iou_threshold: detection decode thresholds (only used
         for object_detection).
+    :param detection_arch: object-detection decoder family — 'yolo' (single
+        tensor, NMS) or 'rf_detr' (DETR-family, two tensors, NMS-free).
     """
     temp_dir = None
     is_onnx = str(export_format).lower() == 'onnx'
     is_detection = model_type == 'object_detection'
+    detection_arch = str(detection_arch or 'yolo').lower()
+    # Map the detection architecture to the on-device stage type / decoder.
+    detection_stage_type = (
+        'rf_detr_object_detection' if detection_arch == 'rf_detr'
+        else 'yolo_object_detection'
+    )
 
     try:
         # Create temp directory
@@ -262,7 +271,7 @@ def generate_dda_package(
             yaml.dump(config, f, default_flow_style=False)
         
         # 2. Create mochi.json
-        mochi_stage_type = "yolo_object_detection" if (is_onnx and is_detection) else model_type
+        mochi_stage_type = detection_stage_type if (is_onnx and is_detection) else model_type
         mochi = {
             'stages': [
                 {
@@ -292,7 +301,7 @@ def generate_dda_package(
             # code (Phases B/C) reads.
             artifact_filename = "model.onnx"
             # Map the user-facing model_type to the device stage type and graph.
-            stage_type = "yolo_object_detection" if is_detection else model_type
+            stage_type = detection_stage_type if is_detection else model_type
             stage = {
                 "type": stage_type,
                 "input_shape": input_shape,
@@ -323,11 +332,16 @@ def generate_dda_package(
             if is_detection:
                 manifest["task"] = "object_detection"
                 manifest["detection"] = {
+                    "layout": detection_arch,  # 'yolo' | 'rf_detr' (decoder family)
                     "num_classes": num_classes or 80,
                     "score_threshold": score_threshold,
-                    "iou_threshold": iou_threshold,
                     "network_input": image_width,
                 }
+                # NMS is YOLO-only; DETR-family is set-based (top-k, no NMS).
+                if detection_arch == 'rf_detr':
+                    manifest["detection"]["top_k"] = 300
+                else:
+                    manifest["detection"]["iou_threshold"] = iou_threshold
                 if class_names:
                     manifest["detection"]["class_names"] = class_names
         else:
@@ -436,6 +450,8 @@ def convert_model(event: Dict, context: Any) -> Dict:
         export_format = str(body.get('export_format', 'pytorch')).lower()
         score_threshold = float(body.get('score_threshold', 0.25))
         iou_threshold = float(body.get('iou_threshold', 0.45))
+        # Detection decoder family: 'yolo' (default) or 'rf_detr'.
+        detection_arch = str(body.get('detection_arch', 'yolo')).lower()
         
         # Validate model type
         if model_type not in MODEL_TYPES:
@@ -517,6 +533,7 @@ def convert_model(event: Dict, context: Any) -> Dict:
                 export_format=export_format,
                 score_threshold=score_threshold,
                 iou_threshold=iou_threshold,
+                detection_arch=detection_arch,
             )
             
             # Upload converted package to S3
