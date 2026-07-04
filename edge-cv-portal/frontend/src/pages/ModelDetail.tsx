@@ -89,10 +89,13 @@ export default function ModelDetail() {
       try {
         const response = await apiService.getModel(modelId);
         setModel(response.model);
-        // Load the underlying training job so the Compilation tab can drive
-        // compilation from here too (model_id === training_id for trained models).
+        // Load the underlying training job so the Compilation / Component
+        // Actions tab can drive packaging + publishing from here. This applies
+        // to both 'trained' models and 'imported' BYO models (incl. ONNX) —
+        // imported models are stored in the training_jobs table too, and ONNX
+        // models package/publish without compilation.
         const trainingId = response.model.training_job_id || response.model.model_id;
-        if (trainingId && response.model.source === 'trained') {
+        if (trainingId && (response.model.source === 'trained' || response.model.source === 'imported')) {
           loadTrainingJob(trainingId);
         }
       } catch (err: any) {
