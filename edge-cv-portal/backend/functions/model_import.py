@@ -46,7 +46,16 @@ REQUIRED_FILES = {
 
 
 def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
-    """Assume cross-account role for UseCase Account access"""
+    """Assume cross-account role for UseCase Account access.
+
+    Single-account setups store the account *root* ARN
+    (arn:aws:iam::ACCOUNT_ID:root), which is not an assumable role — assuming it
+    fails with AccessDenied. In that case use the Lambda's own execution role
+    (same-account access) via the default credential chain.
+    """
+    if role_arn and role_arn.endswith(':root'):
+        logger.info("Single-account setup (root ARN) — using Lambda execution role credentials")
+        return {'is_default_credentials': True}
     try:
         response = sts.assume_role(
             RoleArn=role_arn,
@@ -265,13 +274,17 @@ def validate_model_artifact(model_s3_uri: str, credentials: Dict) -> Dict:
         bucket = parsed.netloc
         key = parsed.path.lstrip('/')
         
-        # Create S3 client with assumed role credentials
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+        # Create S3 client (assumed role for multi-account; Lambda execution
+        # role for single-account setups where the root ARN can't be assumed).
+        if credentials.get('is_default_credentials'):
+            s3_client = boto3.client('s3')
+        else:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=credentials['AccessKeyId'],
+                aws_secret_access_key=credentials['SecretAccessKey'],
+                aws_session_token=credentials['SessionToken']
+            )
         
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_validation_")

@@ -59,7 +59,18 @@ MODEL_TYPES = {
 
 
 def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
-    """Assume cross-account role for UseCase Account access"""
+    """Assume cross-account role for UseCase Account access.
+
+    Single-account setups store the account *root* ARN
+    (arn:aws:iam::ACCOUNT_ID:root) as the "cross_account_role_arn" — that is not
+    an assumable role, so attempting sts:AssumeRole on it fails with
+    AccessDenied. In that case the Lambda's own execution role already has
+    access to the (same-account) UseCase resources, so signal the caller to use
+    the default credential chain instead of assuming a role.
+    """
+    if role_arn and role_arn.endswith(':root'):
+        logger.info("Single-account setup (root ARN) — using Lambda execution role credentials")
+        return {'is_default_credentials': True}
     try:
         response = sts.assume_role(
             RoleArn=role_arn,
@@ -71,6 +82,22 @@ def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> D
     except ClientError as e:
         logger.error(f"Error assuming role {role_arn}: {str(e)}")
         raise
+
+
+def make_usecase_s3_client(credentials: Dict):
+    """Build an S3 client from assume_usecase_role() output.
+
+    For single-account setups (is_default_credentials) use the Lambda's own
+    credentials; otherwise use the assumed-role credentials.
+    """
+    if credentials.get('is_default_credentials'):
+        return boto3.client('s3')
+    return boto3.client(
+        's3',
+        aws_access_key_id=credentials['AccessKeyId'],
+        aws_secret_access_key=credentials['SecretAccessKey'],
+        aws_session_token=credentials['SessionToken'],
+    )
 
 
 def get_usecase_details(usecase_id: str) -> Dict:
@@ -488,14 +515,9 @@ def convert_model(event: Dict, context: Any) -> Dict:
             usecase['external_id'],
             f"convert-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
         )
-        
-        # Create S3 client with assumed role
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+
+        # Create S3 client (assumed role for multi-account, Lambda role for single-account)
+        s3_client = make_usecase_s3_client(credentials)
         
         # Parse S3 URI
         parsed = urlparse(model_s3_uri)
@@ -676,14 +698,9 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
             usecase['external_id'],
             f"inspect-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
         )
-        
-        # Create S3 client
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+
+        # Create S3 client (assumed role for multi-account, Lambda role for single-account)
+        s3_client = make_usecase_s3_client(credentials)
         
         # Parse S3 URI
         parsed = urlparse(model_s3_uri)
