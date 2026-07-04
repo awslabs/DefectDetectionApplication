@@ -31,6 +31,7 @@ import AuditLogs from './pages/AuditLogs';
 import Login from './pages/Login';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
+import GlobalLoadingBar from './components/GlobalLoadingBar';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,6 +48,7 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <UsecaseProvider>
+          <GlobalLoadingBar />
           <Router>
             <Routes>
               <Route path="/login" element={<Login />} />

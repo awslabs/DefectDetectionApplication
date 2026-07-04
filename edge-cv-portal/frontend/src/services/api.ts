@@ -3,6 +3,7 @@
  */
 import { getConfig } from '../config';
 import { UseCase, Device, User, S3Bucket } from '../types';
+import { beginRequest, endRequest } from './loadingBus';
 
 class ApiService {
   private get baseUrl(): string {
@@ -24,6 +25,9 @@ class ApiService {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
+    // Track this request globally so the app-wide activity bar shows while any
+    // API call is in flight.
+    beginRequest();
     try {
       const response = await fetch(`${this.baseUrl}${endpoint}`, {
         ...options,
@@ -64,6 +68,8 @@ class ApiService {
       }
       // Fallback
       throw new Error('Request failed');
+    } finally {
+      endRequest();
     }
   }
 
