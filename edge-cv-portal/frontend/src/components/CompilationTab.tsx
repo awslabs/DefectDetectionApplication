@@ -83,6 +83,15 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   const [selectedTargets, setSelectedTargets] = useState<string[]>(['jetson-xavier', 'x86_64-cpu']);
   const [componentName, setComponentName] = useState(`model-${trainingJob?.model_name?.toLowerCase().replace(/[^a-z0-9-]/g, '-') || 'model'}`);
   const [componentVersion, setComponentVersion] = useState('1.0.0');
+  // Existing published versions for the component being published, so the
+  // dialog can show the latest version, suggest the next one, and reject a
+  // version that already exists (component versions are immutable).
+  const [existingVersions, setExistingVersions] = useState<string[]>([]);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  // Track whether the user has manually edited the version so we don't clobber
+  // their input when the existing-versions lookup resolves.
+  const [versionUserEdited, setVersionUserEdited] = useState(false);
 
   // Refresh compilation status
   const refreshCompilationStatus = async () => {
@@ -247,6 +256,97 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
       setPackagingLoading(false);
     }
   };
+
+  // Semantic-version helpers (X.Y.Z only — matches the backend recipe versioning).
+  const isSemver = (v: string) => /^\d+\.\d+\.\d+$/.test(v.trim());
+  const compareSemverDesc = (a: string, b: string): number => {
+    const pa = a.split('.').map(Number);
+    const pb = b.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      const d = (pb[i] || 0) - (pa[i] || 0);
+      if (d !== 0) return d;
+    }
+    return 0;
+  };
+  const bumpPatch = (v: string): string => {
+    const m = v.trim().match(/^(\d+)\.(\d+)\.(\d+)$/);
+    return m ? `${m[1]}.${m[2]}.${Number(m[3]) + 1}` : v;
+  };
+
+  // Look up the already-published versions of the component being published so
+  // the dialog can surface the latest version, pre-fill the next patch bump,
+  // and validate the entered version against what already exists.
+  const loadExistingVersions = async () => {
+    if (!trainingJob?.usecase_id) return;
+    try {
+      setVersionsLoading(true);
+      const list = await apiService.listComponents({
+        usecase_id: trainingJob.usecase_id,
+        scope: 'PRIVATE',
+      });
+      const match = list.components.find(
+        (c) => c.component_name === componentName || c.component_name.endsWith(componentName)
+      );
+      if (!match) {
+        // First-time publish for this component name — no existing versions.
+        setExistingVersions([]);
+        setLatestVersion(null);
+        return;
+      }
+      let versions: string[] = [];
+      try {
+        const detail = await apiService.getComponent(match.arn, trainingJob.usecase_id);
+        versions = (detail.versions || []).map((v) => v.componentVersion).filter(Boolean);
+      } catch {
+        // Fall back to just the latest version if the detail call fails.
+        if (match.latest_version?.componentVersion) {
+          versions = [match.latest_version.componentVersion];
+        }
+      }
+      const sorted = [...versions].filter(isSemver).sort(compareSemverDesc);
+      const latest = sorted[0] || match.latest_version?.componentVersion || null;
+      setExistingVersions(versions);
+      setLatestVersion(latest);
+      // Suggest the next patch version unless the user has typed their own.
+      if (latest && isSemver(latest) && !versionUserEdited) {
+        setComponentVersion(bumpPatch(latest));
+      }
+    } catch (err) {
+      // Non-fatal: the dialog still works, just without the hint/validation.
+      console.error('Failed to load existing component versions:', err);
+    } finally {
+      setVersionsLoading(false);
+    }
+  };
+
+  // Refresh existing versions whenever the publish modal opens or the target
+  // component name changes while it is open.
+  useEffect(() => {
+    if (showPublishModal) {
+      loadExistingVersions();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPublishModal, componentName]);
+
+  // Reset the "user edited" flag each time the modal is opened so the next
+  // patch version is suggested afresh.
+  useEffect(() => {
+    if (showPublishModal) {
+      setVersionUserEdited(false);
+    }
+  }, [showPublishModal]);
+
+  // Derived version-field validation state.
+  const trimmedVersion = componentVersion.trim();
+  const versionExists = existingVersions.includes(trimmedVersion);
+  const versionError = !trimmedVersion
+    ? undefined
+    : !isSemver(trimmedVersion)
+    ? 'Use semantic version format X.Y.Z (e.g., 1.0.1)'
+    : versionExists
+    ? `Version ${trimmedVersion} already exists — component versions are immutable. ` +
+      `Choose a higher version${latestVersion ? ` (latest is ${latestVersion})` : ''}.`
+    : undefined;
 
   // Handle Greengrass component publish
   const handlePublishComponent = async () => {
@@ -590,7 +690,12 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
                 variant="primary"
                 onClick={handlePublishComponent}
                 loading={publishLoading}
-                disabled={!componentName.startsWith('model-') || !componentVersion}
+                disabled={
+                  !componentName.startsWith('model-') ||
+                  !trimmedVersion ||
+                  !!versionError ||
+                  versionsLoading
+                }
               >
                 Publish Component
               </Button>
@@ -613,11 +718,21 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
           
           <FormField
             label="Component Version"
-            description="Semantic version (e.g., 1.0.0)"
+            description={
+              versionsLoading
+                ? 'Checking existing versions…'
+                : latestVersion
+                ? `Latest published version: ${latestVersion}. Enter a higher semantic version (next suggested: ${bumpPatch(latestVersion)}).`
+                : 'No versions published yet. Use a semantic version (e.g., 1.0.0).'
+            }
+            errorText={versionError}
           >
             <Input
               value={componentVersion}
-              onChange={({ detail }) => setComponentVersion(detail.value)}
+              onChange={({ detail }) => {
+                setVersionUserEdited(true);
+                setComponentVersion(detail.value);
+              }}
               placeholder="1.0.0"
             />
           </FormField>
