@@ -16,7 +16,7 @@ import {
   FormField,
   Input,
 } from '@cloudscape-design/components';
-import { CompilationJob, TrainingJob, GreengrassComponent } from '../types';
+import { CompilationJob, TrainingJob } from '../types';
 import { apiService } from '../services/api';
 
 interface CompilationTabProps {
@@ -371,6 +371,26 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
     ? `Version ${trimmedVersion} already exists — component versions are immutable. ` +
       `Choose a higher version${latestVersion ? ` (latest is ${latestVersion}, next ${bumpMajor(latestVersion)})` : ''}.`
     : undefined;
+
+  // Normalized list of published components for display. Prefer the field the
+  // publish handler actually writes (published_components: {target,
+  // component_version, status:'published'|'failed', ...}); fall back to the
+  // legacy greengrass_components ({target_architecture, status:'active', ...}).
+  const publishedComponents = (
+    trainingJob.published_components && trainingJob.published_components.length > 0
+      ? trainingJob.published_components.map((c) => ({
+          component_name: c.component_name,
+          component_version: c.component_version,
+          target_architecture: c.target || c.platform || '—',
+          ok: c.status === 'published',
+        }))
+      : (trainingJob.greengrass_components || []).map((c) => ({
+          component_name: c.component_name,
+          component_version: c.component_version,
+          target_architecture: c.target_architecture,
+          ok: c.status === 'active',
+        }))
+  );
 
   // Handle Greengrass component publish
   const handlePublishComponent = async () => {
@@ -801,11 +821,20 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
         </Container>
       ) : null}
 
-      {/* Greengrass Components (if available) */}
-      {trainingJob.greengrass_components && trainingJob.greengrass_components.length > 0 ? (
-        <Container header={<Header variant="h2">Greengrass Components</Header>}>
+      {/* Published Greengrass Components (if available).
+          The publish handler writes trainingJob.published_components (one entry
+          per target, all at the latest published version). Prefer that; fall
+          back to the legacy greengrass_components field for older records. */}
+      {publishedComponents.length > 0 ? (
+        <Container
+          header={
+            <Header variant="h2" counter={`(${publishedComponents.length})`}>
+              Published Greengrass Components
+            </Header>
+          }
+        >
           <ColumnLayout columns={1}>
-            {trainingJob.greengrass_components.map((component, index) => (
+            {publishedComponents.map((component, index) => (
               <Container key={index}>
                 <KeyValuePairs
                   columns={2}
@@ -813,8 +842,14 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
                     { label: 'Component Name', value: component.component_name },
                     { label: 'Version', value: component.component_version },
                     { label: 'Target Architecture', value: component.target_architecture },
-                    { label: 'Status', value: getComponentStatusIndicator(component.status) },
-                    { label: 'Deployments', value: `${component.deployment_count} device(s)` },
+                    {
+                      label: 'Status',
+                      value: component.ok ? (
+                        <StatusIndicator type="success">Published</StatusIndicator>
+                      ) : (
+                        <StatusIndicator type="error">Failed</StatusIndicator>
+                      ),
+                    },
                     {
                       label: 'AWS Console',
                       value: (
@@ -914,17 +949,4 @@ function getTargetDescription(target: string): string {
     'onnx': 'ONNX Runtime — portable .onnx export (no Neo/DLR)',
   };
   return descriptions[target] || 'Unknown architecture';
-}
-
-function getComponentStatusIndicator(status: GreengrassComponent['status']) {
-  switch (status) {
-    case 'active':
-      return <StatusIndicator type="success">Active</StatusIndicator>;
-    case 'creating':
-      return <StatusIndicator type="in-progress">Creating</StatusIndicator>;
-    case 'failed':
-      return <StatusIndicator type="error">Failed</StatusIndicator>;
-    default:
-      return <StatusIndicator type="info">{status}</StatusIndicator>;
-  }
 }

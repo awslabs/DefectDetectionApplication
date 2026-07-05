@@ -164,6 +164,19 @@ export interface GreengrassComponent {
   deployment_count: number;
 }
 
+// Shape written by the publish handler (greengrass_publish.publish_component)
+// onto the training job's `published_components` field — one entry per target,
+// all sharing the version of the most recent publish.
+export interface PublishedComponent {
+  target: string;
+  platform?: string;
+  component_name: string;
+  component_version: string;
+  component_arn?: string;
+  status: 'published' | 'failed';
+  error?: string;
+}
+
 export type CompilationStatus = 'not-started' | 'in-progress' | 'completed' | 'failed' | 'partial';
 
 export interface TrainingJob {
@@ -188,6 +201,7 @@ export interface TrainingJob {
   compilation_status?: CompilationStatus;
   packaged_components?: PackagedComponent[];
   greengrass_components?: GreengrassComponent[];
+  published_components?: PublishedComponent[];
 }
 
 export interface LabelingJob {
