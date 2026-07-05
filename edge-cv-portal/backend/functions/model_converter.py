@@ -631,23 +631,13 @@ def generate_dda_package(
         with open(os.path.join(export_dir, 'manifest.json'), 'w') as f:
             json.dump(manifest, f, indent=2)
         
-        # 4. Copy the model file.
-        # The on-device serving code (lfv_model_template.py) loads a stage's
-        # engine artifact from <version_dir>/<stage_type>/<runtime_artifact>,
-        # mirroring the DLR/Neo layout where each stage's compiled artifacts
-        # live in a stage subdir (e.g. mochi/). create_sym_links() in the
-        # on-device model_convertor.py links each top-level entry of the
-        # deployed model dir (this export dir) into the version dir, so the
-        # ONNX artifact must be NESTED under the stage_type dir. A flat copy
-        # lands model.onnx in the version root and OnnxRunner raises
-        # "FileNotFoundError: ONNX artifact not found: .../<stage_type>/model.onnx".
-        # Legacy .pt/DLR packages keep the flat copy (Neo produces the stage dir).
-        if is_onnx:
-            stage_artifact_dir = os.path.join(export_dir, stage_type)
-            os.makedirs(stage_artifact_dir, exist_ok=True)
-            shutil.copy(model_path, os.path.join(stage_artifact_dir, artifact_filename))
-        else:
-            shutil.copy(model_path, os.path.join(export_dir, artifact_filename))
+        # 4. Copy the model file (flat in the export dir). This is the imported
+        # intermediate package; the final on-device stage-subdir layout is
+        # applied later by packaging.package_onnx_component when the deployable
+        # Greengrass component ZIP is built (it nests model.onnx under the
+        # manifest's stage_type). Keeping it flat here lets that consumer locate
+        # the .onnx by a top-level scan.
+        shutil.copy(model_path, os.path.join(export_dir, artifact_filename))
         
         # 5. Create tar.gz archive
         if not output_path:

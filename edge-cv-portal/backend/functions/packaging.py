@@ -203,9 +203,14 @@ def package_onnx_component(trained_model_s3: str, s3_client, usecase: Dict) -> s
     The imported Smart-Import package already carries the device-correct
     manifest (runtime="onnx") + model.onnx. On device the recipe runs
     model_convertor.py against the unarchived package, which reads manifest.json
-    at the package root and symlinks the sibling files (incl. model.onnx) next
-    to the Triton python model, where OnnxRunner loads runtime_artifact. So the
-    component ZIP root must contain manifest.json + model.onnx (flat).
+    at the package root and symlinks each top-level entry (files AND dirs) next
+    to the Triton python model. lfv_model_template.py then loads the stage's
+    ONNX artifact from <version_dir>/<stage_type>/<runtime_artifact>, mirroring
+    the DLR/Neo layout where per-stage artifacts live in a stage subdir. So the
+    component ZIP must contain manifest.json at the root and the ONNX artifact
+    NESTED under the stage_type dir (<stage_type>/model.onnx). A flat model.onnx
+    lands in the version root and OnnxRunner raises
+    "FileNotFoundError: ONNX artifact not found: .../<stage_type>/model.onnx".
 
     The device manifest also needs a top-level ``dataset`` block (image
     width/height) for anomaly-localization / semantic-segmentation input sizing;
@@ -239,12 +244,20 @@ def package_onnx_component(trained_model_s3: str, s3_client, usecase: Dict) -> s
             raise ValueError(
                 f"ONNX packaging invoked but manifest runtime is '{manifest.get('runtime')}'")
 
-        # Locate the .onnx artifact.
+        # Locate the .onnx artifact. Scan recursively so we find it whether the
+        # imported package keeps it flat (export_artifacts/model.onnx) or nested.
         export_artifacts_dir = os.path.join(extract_dir, 'export_artifacts')
-        onnx_file = next(
-            (f for f in os.listdir(export_artifacts_dir) if f.endswith('.onnx')), None)
-        if not onnx_file:
+        onnx_src = None
+        for root, _dirs, files in os.walk(export_artifacts_dir):
+            for f in files:
+                if f.endswith('.onnx'):
+                    onnx_src = os.path.join(root, f)
+                    break
+            if onnx_src:
+                break
+        if not onnx_src:
             raise FileNotFoundError("No .onnx model file found in export_artifacts/")
+        onnx_file = os.path.basename(onnx_src)
 
         # Merge dataset (image dims) from config.yaml into the manifest so the
         # on-device model_convertor can size anomaly/segmentation inputs.
@@ -260,15 +273,28 @@ def package_onnx_component(trained_model_s3: str, s3_client, usecase: Dict) -> s
                         'image_height': ds['image_height'],
                     }
 
-        # Assemble the component payload: manifest.json + model.onnx (flat).
+        # Assemble the component payload: manifest.json at the root and the ONNX
+        # artifact NESTED under the stage_type dir so the on-device OnnxRunner
+        # finds it at <version_dir>/<stage_type>/<runtime_artifact>. The
+        # stage_type is the first model_graph stage's "type" (e.g.
+        # rf_detr_semantic_segmentation, yolo_object_detection, classification).
         payload_dir = os.path.join(temp_dir, 'payload')
         os.makedirs(payload_dir, exist_ok=True)
         with open(os.path.join(payload_dir, 'manifest.json'), 'w') as f:
             json.dump(manifest, f, indent=2)
-        shutil.copy(
-            os.path.join(export_artifacts_dir, onnx_file),
-            os.path.join(payload_dir, onnx_file),
-        )
+
+        stages = (manifest.get('model_graph') or {}).get('stages') or []
+        stage_type = stages[0].get('type') if stages and isinstance(stages[0], dict) else None
+        if stage_type:
+            stage_dir = os.path.join(payload_dir, stage_type)
+            os.makedirs(stage_dir, exist_ok=True)
+            onnx_dest = os.path.join(stage_dir, onnx_file)
+        else:
+            # No stage type in the manifest — fall back to flat (should not
+            # happen for a well-formed ONNX manifest).
+            logger.warning("ONNX manifest has no model_graph stage type; placing model.onnx flat")
+            onnx_dest = os.path.join(payload_dir, onnx_file)
+        shutil.copy(onnx_src, onnx_dest)
 
         component_uuid = str(uuid.uuid4()).split('-')[-1]
         zip_filename = f"{component_uuid}_greengrass_model_component.zip"
