@@ -257,8 +257,11 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
     }
   };
 
-  // Semantic-version helpers (X.Y.Z only — matches the backend recipe versioning).
-  const isSemver = (v: string) => /^\d+\.\d+\.\d+$/.test(v.trim());
+  // Version helpers. Greengrass component versions here follow the backend rule
+  // in greengrass_publish.validate_component_version(): X.0.0 (major bumps only,
+  // e.g. 1.0.0, 2.0.0). isValidPublishVersion mirrors that exact constraint.
+  const isThreePartNumeric = (v: string) => /^\d+\.\d+\.\d+$/.test(v.trim());
+  const isValidPublishVersion = (v: string) => /^\d+\.0+\.0+$/.test(v.trim());
   const compareSemverDesc = (a: string, b: string): number => {
     const pa = a.split('.').map(Number);
     const pb = b.split('.').map(Number);
@@ -268,48 +271,68 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
     }
     return 0;
   };
-  const bumpPatch = (v: string): string => {
-    const m = v.trim().match(/^(\d+)\.(\d+)\.(\d+)$/);
-    return m ? `${m[1]}.${m[2]}.${Number(m[3]) + 1}` : v;
+  const bumpMajor = (v: string): string => {
+    const m = v.trim().match(/^(\d+)\.\d+\.\d+$/);
+    return m ? `${Number(m[1]) + 1}.0.0` : v;
   };
 
   // Look up the already-published versions of the component being published so
-  // the dialog can surface the latest version, pre-fill the next patch bump,
-  // and validate the entered version against what already exists.
+  // the dialog can surface the latest version, pre-fill the next version, and
+  // validate the entered version against what already exists.
+  //
+  // The portal publishes one Greengrass component PER TARGET, named
+  // `${componentName}-${target}` (e.g. model-foo-jetson-xavier-jp6,
+  // model-foo-x86-64-cpu, model-foo-onnx) — see greengrass_publish.publish_component.
+  // All target variants share the same version on a given publish, so we match
+  // every variant of this base name (startsWith `${base}-`, plus an exact match)
+  // and aggregate their versions. A prior endsWith() match never matched the
+  // suffixed names, so the dialog always thought nothing was published.
   const loadExistingVersions = async () => {
     if (!trainingJob?.usecase_id) return;
     try {
       setVersionsLoading(true);
+      const base = componentName.trim();
       const list = await apiService.listComponents({
         usecase_id: trainingJob.usecase_id,
         scope: 'PRIVATE',
       });
-      const match = list.components.find(
-        (c) => c.component_name === componentName || c.component_name.endsWith(componentName)
+      const matches = list.components.filter(
+        (c) => c.component_name === base || c.component_name.startsWith(`${base}-`)
       );
-      if (!match) {
+      if (matches.length === 0) {
         // First-time publish for this component name — no existing versions.
         setExistingVersions([]);
         setLatestVersion(null);
         return;
       }
-      let versions: string[] = [];
-      try {
-        const detail = await apiService.getComponent(match.arn, trainingJob.usecase_id);
-        versions = (detail.versions || []).map((v) => v.componentVersion).filter(Boolean);
-      } catch {
-        // Fall back to just the latest version if the detail call fails.
-        if (match.latest_version?.componentVersion) {
-          versions = [match.latest_version.componentVersion];
+      // Aggregate versions across all target variants. Seed from the cheap
+      // latest_version we already have, then enrich with the full per-variant
+      // version lists in parallel for accurate existence checks.
+      const versionSet = new Set<string>();
+      for (const m of matches) {
+        const lv = m.latest_version?.componentVersion;
+        if (lv && isThreePartNumeric(lv)) versionSet.add(lv);
+      }
+      const details = await Promise.all(
+        matches.map((m) =>
+          apiService.getComponent(m.arn, trainingJob.usecase_id!).catch(() => null)
+        )
+      );
+      for (const d of details) {
+        for (const v of d?.versions || []) {
+          if (v.componentVersion && isThreePartNumeric(v.componentVersion)) {
+            versionSet.add(v.componentVersion);
+          }
         }
       }
-      const sorted = [...versions].filter(isSemver).sort(compareSemverDesc);
-      const latest = sorted[0] || match.latest_version?.componentVersion || null;
+      const versions = Array.from(versionSet);
+      const sorted = [...versions].sort(compareSemverDesc);
+      const latest = sorted[0] || null;
       setExistingVersions(versions);
       setLatestVersion(latest);
-      // Suggest the next patch version unless the user has typed their own.
-      if (latest && isSemver(latest) && !versionUserEdited) {
-        setComponentVersion(bumpPatch(latest));
+      // Suggest the next major version unless the user has typed their own.
+      if (latest && !versionUserEdited) {
+        setComponentVersion(bumpMajor(latest));
       }
     } catch (err) {
       // Non-fatal: the dialog still works, just without the hint/validation.
@@ -336,16 +359,17 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
     }
   }, [showPublishModal]);
 
-  // Derived version-field validation state.
+  // Derived version-field validation state. Publish versions must be X.0.0 and
+  // must not already exist for any target variant of this component.
   const trimmedVersion = componentVersion.trim();
   const versionExists = existingVersions.includes(trimmedVersion);
   const versionError = !trimmedVersion
     ? undefined
-    : !isSemver(trimmedVersion)
-    ? 'Use semantic version format X.Y.Z (e.g., 1.0.1)'
+    : !isValidPublishVersion(trimmedVersion)
+    ? 'Use version format X.0.0 (major only, e.g., 2.0.0)'
     : versionExists
     ? `Version ${trimmedVersion} already exists — component versions are immutable. ` +
-      `Choose a higher version${latestVersion ? ` (latest is ${latestVersion})` : ''}.`
+      `Choose a higher version${latestVersion ? ` (latest is ${latestVersion}, next ${bumpMajor(latestVersion)})` : ''}.`
     : undefined;
 
   // Handle Greengrass component publish
@@ -722,8 +746,8 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
               versionsLoading
                 ? 'Checking existing versions…'
                 : latestVersion
-                ? `Latest published version: ${latestVersion}. Enter a higher semantic version (next suggested: ${bumpPatch(latestVersion)}).`
-                : 'No versions published yet. Use a semantic version (e.g., 1.0.0).'
+                ? `Latest published version: ${latestVersion}. Use format X.0.0 (next suggested: ${bumpMajor(latestVersion)}).`
+                : 'No versions published yet. Use format X.0.0 (e.g., 1.0.0).'
             }
             errorText={versionError}
           >
