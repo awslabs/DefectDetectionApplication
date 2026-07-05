@@ -174,9 +174,22 @@ class OnnxRunner(BaseInferenceRunner):
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"ONNX artifact not found: {model_path}")
 
-        providers = self.__select_providers(ort, device)
+        # Set the thread counts explicitly. In a restricted-cpuset container
+        # (e.g. Greengrass on Jetson) ORT's default global thread pool tries to
+        # pin threads to specific cores and logs
+        #   "pthread_setaffinity_np failed ... error code: 22 (Invalid argument)".
+        # ORT's own guidance is to specify the thread count so affinity is not
+        # set. Non-fatal, but this keeps the logs clean and avoids the pinning.
+        sess_options = ort.SessionOptions()
+        cpu_count = os.cpu_count() or 1
+        sess_options.intra_op_num_threads = cpu_count
+        sess_options.inter_op_num_threads = 1
+
+        providers = self.__select_providers(ort, device, model_dir)
         log.info(f"{model_path}: loading ONNX model {model_id} with providers {providers}")
-        self.__session = ort.InferenceSession(model_path, providers=providers)
+        self.__session = ort.InferenceSession(
+            model_path, sess_options=sess_options, providers=providers
+        )
         self.__input_name = self.__session.get_inputs()[0].name
         self.__input_dtype = self.__numpy_dtype(self.__session.get_inputs()[0].type)
         log.info(
@@ -185,17 +198,43 @@ class OnnxRunner(BaseInferenceRunner):
         )
 
     @staticmethod
-    def __select_providers(ort, device: typing.Optional[str]):
+    def __select_providers(ort, device: typing.Optional[str], model_dir: str):
+        """Build the ORT provider list (TensorRT -> CUDA -> CPU), enabling the
+        TensorRT engine + timing cache so the (slow, ~minutes) engine build is
+        done once and reused across loads/restarts instead of every startup.
+
+        Returns a list where the TensorRT entry is a (name, options) tuple and
+        the rest are plain provider-name strings.
+        """
         available = set(ort.get_available_providers())
         if device == "cpu":
             return ["CPUExecutionProvider"]
-        preferred = [
-            "TensorrtExecutionProvider",
-            "CUDAExecutionProvider",
-            "CPUExecutionProvider",
-        ]
-        chosen = [p for p in preferred if p in available]
-        return chosen or ["CPUExecutionProvider"]
+        chosen: typing.List = []
+        if "TensorrtExecutionProvider" in available:
+            cache_dir = os.path.join(model_dir, "trt_cache")
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+            except OSError:
+                cache_dir = ""
+            trt_opts: typing.Dict = {}
+            if cache_dir:
+                # Persist the built engine + timing cache so subsequent loads skip
+                # the multi-minute TensorRT engine build. (fp16 is intentionally
+                # left at ORT's default to avoid changing inference numerics.)
+                trt_opts.update(
+                    {
+                        "trt_engine_cache_enable": True,
+                        "trt_engine_cache_path": cache_dir,
+                        "trt_timing_cache_enable": True,
+                    }
+                )
+            chosen.append(
+                ("TensorrtExecutionProvider", trt_opts) if trt_opts else "TensorrtExecutionProvider"
+            )
+        if "CUDAExecutionProvider" in available:
+            chosen.append("CUDAExecutionProvider")
+        chosen.append("CPUExecutionProvider")
+        return chosen
 
     @staticmethod
     def __numpy_dtype(onnx_type: str):
