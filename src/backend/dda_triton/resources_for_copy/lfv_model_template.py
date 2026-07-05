@@ -40,6 +40,16 @@ _DDA_APP_ROOT = os.environ.get("DDA_APP_ROOT", "/")
 if _DDA_APP_ROOT and _DDA_APP_ROOT not in sys.path:
     sys.path.insert(0, _DDA_APP_ROOT)
 
+# The pluggable runtime module (inference_runtimes.py) is copied by
+# model_convertor.py into THIS model's version directory, next to this file.
+# The Triton Python-backend stub does not put that directory on sys.path (and
+# its CWD is elsewhere), so a bare `import inference_runtimes` raises
+# ModuleNotFoundError. Add this file's own directory to sys.path so the sibling
+# module resolves regardless of the stub's environment.
+_MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+if _MODEL_DIR and _MODEL_DIR not in sys.path:
+    sys.path.insert(0, _MODEL_DIR)
+
 from lyra_anomalies_mask_utils import (
     DEFAULT_ANOMALY_MASK_PALETTE,
     convert_index_mask_to_color_mask,
