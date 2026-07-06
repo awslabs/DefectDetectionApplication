@@ -194,13 +194,39 @@ class TritonPythonModel:
                 class_label = class_index
             conf = det.get("confidence", 0.0)
             try:
-                label = f"{class_label} {float(conf):.2f}"
+                label = f"{class_label} {float(conf) * 100:.0f}%"
             except (TypeError, ValueError):
                 label = class_label
+
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+            # Draw the label + confidence in the UPPER-RIGHT corner of the box,
+            # on a filled band for readability (green background, black text),
+            # right-aligned to the box's right edge and clamped to the image.
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.5
+            font_thickness = 1
+            (text_w, text_h), baseline = cv2.getTextSize(
+                label, font, font_scale, font_thickness
+            )
+            pad = 3
+            band_h = text_h + baseline + 2 * pad
+            band_x2 = min(w, x2)
+            band_x1 = max(0, band_x2 - text_w - 2 * pad)
+            band_y1 = max(0, y1)
+            band_y2 = min(h, band_y1 + band_h)
+            cv2.rectangle(
+                overlay, (band_x1, band_y1), (band_x2, band_y2), (0, 255, 0), -1
+            )
             cv2.putText(
-                overlay, label, (x1, max(0, y1 - 5)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA
+                overlay,
+                label,
+                (band_x1 + pad, band_y1 + pad + text_h),
+                font,
+                font_scale,
+                (0, 0, 0),
+                font_thickness,
+                cv2.LINE_AA,
             )
         return overlay
 
