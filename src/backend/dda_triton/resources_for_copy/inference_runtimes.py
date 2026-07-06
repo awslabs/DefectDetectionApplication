@@ -199,41 +199,58 @@ class OnnxRunner(BaseInferenceRunner):
 
     @staticmethod
     def __select_providers(ort, device: typing.Optional[str], model_dir: str):
-        """Build the ORT provider list (TensorRT -> CUDA -> CPU), enabling the
-        TensorRT engine + timing cache so the (slow, ~minutes) engine build is
-        done once and reused across loads/restarts instead of every startup.
+        """Build the ORT execution-provider list for the requested device.
 
-        Returns a list where the TensorRT entry is a (name, options) tuple and
-        the rest are plain provider-name strings.
+        Default (device unset / "gpu" / "cuda"): CUDA -> CPU.
+
+        TensorRT is deliberately NOT in the default order. It can mis-execute
+        complex bring-your-own decode graphs — e.g. YOLOv8's in-graph DFL /
+        anchor-grid ops with INT64 weights that TensorRT clamps to INT32 — and
+        silently produce wrong or empty results (all class scores below
+        threshold => no detections), and it adds a multi-minute engine build.
+        The CUDA EP is numerically faithful to the ONNX / CPU reference, so it
+        is the safe default for arbitrary user models. TensorRT remains
+        available opt-in via manifest ``device: "tensorrt"`` for models the user
+        has validated on it.
+
+        Returns a list where a TensorRT entry is a (name, options) tuple and the
+        rest are plain provider-name strings.
         """
         available = set(ort.get_available_providers())
-        if device == "cpu":
+        dev = (device or "").lower()
+
+        if dev == "cpu":
             return ["CPUExecutionProvider"]
-        chosen: typing.List = []
-        if "TensorrtExecutionProvider" in available:
+
+        def _cuda():
+            return ["CUDAExecutionProvider"] if "CUDAExecutionProvider" in available else []
+
+        def _trt():
+            if "TensorrtExecutionProvider" not in available:
+                return []
             cache_dir = os.path.join(model_dir, "trt_cache")
             try:
                 os.makedirs(cache_dir, exist_ok=True)
             except OSError:
                 cache_dir = ""
-            trt_opts: typing.Dict = {}
             if cache_dir:
-                # Persist the built engine + timing cache so subsequent loads skip
-                # the multi-minute TensorRT engine build. (fp16 is intentionally
-                # left at ORT's default to avoid changing inference numerics.)
-                trt_opts.update(
+                # Persist the built engine + timing cache so subsequent loads
+                # skip the multi-minute TensorRT engine build. (fp16 left at
+                # ORT's default to avoid changing inference numerics.)
+                return [(
+                    "TensorrtExecutionProvider",
                     {
                         "trt_engine_cache_enable": True,
                         "trt_engine_cache_path": cache_dir,
                         "trt_timing_cache_enable": True,
-                    }
-                )
-            chosen.append(
-                ("TensorrtExecutionProvider", trt_opts) if trt_opts else "TensorrtExecutionProvider"
-            )
-        if "CUDAExecutionProvider" in available:
-            chosen.append("CUDAExecutionProvider")
-        chosen.append("CPUExecutionProvider")
+                    },
+                )]
+            return ["TensorrtExecutionProvider"]
+
+        if dev in ("tensorrt", "trt"):
+            chosen = _trt() + _cuda() + ["CPUExecutionProvider"]
+        else:  # default, "cuda", "gpu"
+            chosen = _cuda() + ["CPUExecutionProvider"]
         return chosen
 
     @staticmethod

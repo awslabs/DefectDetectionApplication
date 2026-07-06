@@ -122,12 +122,27 @@ class YoloDetectionPostProcessor(InferencePostProcessor):
 
         preds = self._to_anchor_rows(raw)  # shape (num_anchors, 4 + num_classes)
         if preds.size == 0 or preds.shape[1] < 5:
+            LOG.warning("YOLO decode: unusable output shape %s", getattr(preds, "shape", None))
             return []
 
         boxes_xywh = preds[:, :4]
         class_scores = preds[:, 4:]
         class_ids = class_scores.argmax(axis=1)
         confidences = class_scores[np.arange(class_scores.shape[0]), class_ids]
+
+        # Diagnostic: raw output shape + score distribution. An all-low max
+        # confidence here (with a valid COCO image) points at the execution
+        # provider mis-running the graph (e.g. TensorRT on YOLOv8 decode ops)
+        # rather than the decode logic, which is exercised by unit tests.
+        LOG.info(
+            "YOLO decode: raw=%s rows=%s classes=%s max_conf=%.4f thr=%.2f kept=%d",
+            getattr(np.asarray(raw), "shape", None),
+            preds.shape[0],
+            class_scores.shape[1],
+            float(confidences.max()) if confidences.size else -1.0,
+            self.score_threshold,
+            int(np.count_nonzero(confidences >= self.score_threshold)),
+        )
 
         # Threshold.
         keep_mask = confidences >= self.score_threshold
