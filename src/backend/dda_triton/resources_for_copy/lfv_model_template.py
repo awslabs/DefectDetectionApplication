@@ -274,6 +274,22 @@ class TritonPythonModel:
         for request in requests:
             in_0 = pb_utils.get_input_tensor_by_name(request, "input")
             input_np = in_0.as_numpy()
+            # Diagnostic: the exact image tensor the base model receives from
+            # Triton/emltriton. A shape other than (H, W, 3) or a value range
+            # other than 0..255 would corrupt the downstream preprocess/inference
+            # (e.g. yielding no detections) and explains pipeline-vs-standalone
+            # divergence.
+            try:
+                log.info(
+                    "base model input tensor: shape=%s dtype=%s min=%s max=%s task=%s",
+                    getattr(input_np, "shape", None),
+                    getattr(input_np, "dtype", None),
+                    float(input_np.min()) if input_np.size else None,
+                    float(input_np.max()) if input_np.size else None,
+                    self.__task,
+                )
+            except Exception:
+                pass
             inference_output = self.__model_graph.predict(input_np)
 
             if self.__task == TritonPythonModel.TASK_OBJECT_DETECTION:
