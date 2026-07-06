@@ -23,3 +23,6 @@ datasets/**/*_segmentation.manifest
 
 # Portal deploy logs (local build/deploy output, not source)
 .portal*
+
+# Downloaded test assets (fetched on demand by download-test-assets.sh; not committed)
+test-assets/
