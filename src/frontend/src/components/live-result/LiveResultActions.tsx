@@ -31,6 +31,9 @@ interface LiveResultActionsProps {
   isWorkflowRunning: boolean;
   onClickPreview: () => void;
   folderInfo?: FolderInfo;
+  // Label for the overlay toggle. Defaults to the segmentation mask wording;
+  // detection results pass "Show bounding boxes".
+  toggleLabel?: string;
 }
 
 export default function LiveResultActions({
@@ -42,6 +45,7 @@ export default function LiveResultActions({
   imageSourceType,
   onClickPreview,
   folderInfo,
+  toggleLabel = "Show anomaly masks",
 }: LiveResultActionsProps): JSX.Element {
   const isFolderType = imageSourceType === ImageSourceType.Folder;
 
@@ -58,7 +62,7 @@ export default function LiveResultActions({
                 checked={!!anomalyMaskToggleChecked}
                 data-testid={"show-anomaly-mask-togle"}
               >
-                Show anomaly masks
+                {toggleLabel}
               </Toggle>
             )
           }
