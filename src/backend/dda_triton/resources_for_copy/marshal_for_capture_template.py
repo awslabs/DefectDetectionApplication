@@ -96,6 +96,13 @@ class TritonPythonModel:
     def _generate_overlay(self, image, mask):
         # get alpha and find all non-(255,255,255) pixels in mask.
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # The palette-colored mask arrives in RGB order, but the overlay is
+        # JPEG-encoded via cv2.imencode (which treats the array as BGR), and the
+        # image above is channel-swapped to survive that encode. The mask was
+        # NOT swapped, so its colors came out with R and B flipped relative to
+        # the RGB palette / legend hex colors (olive->teal, purple->orange).
+        # Swap the mask to BGR too so overlay colors match the reported legend.
+        mask = cv2.cvtColor(mask, cv2.COLOR_RGB2BGR)
         idx_alpha = np.where(np.any(mask != [255, 255, 255], axis=-1))
         image[idx_alpha[0], idx_alpha[1], :] = image[idx_alpha[0], idx_alpha[1], :] * 0.5
         mask[idx_alpha[0], idx_alpha[1], :] = mask[idx_alpha[0], idx_alpha[1], :] * 0.5
