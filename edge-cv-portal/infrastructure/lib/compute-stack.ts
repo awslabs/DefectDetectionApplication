@@ -401,6 +401,21 @@ export class ComputeStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(60),
     });
 
+    // Captures Lambda Handler
+    // Surfaces on-device inference-results captures (source image, overlay,
+    // mask, and the results `.jsonl` Capture_Metadata) to the frontend,
+    // mirroring the presigned-URL / cross-account-assume-role pattern used by
+    // the Datasets handler (see backend/functions/captures.py).
+    const capturesHandler = new lambda.Function(this, 'CapturesHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'captures.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('Captures'),
+      environment: lambdaEnvironment,
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(60),
+    });
+
     // Pre-Labeled Datasets Lambda Handler
     const preLabeledDatasetsHandler = new lambda.Function(this, 'PreLabeledDatasetsHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
@@ -901,6 +916,7 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       deploymentsHandler,
       dataManagementHandler,
       datasetsHandler,
+      capturesHandler,
       preLabeledDatasetsHandler,
       labelingHandler,
       trainingHandler,

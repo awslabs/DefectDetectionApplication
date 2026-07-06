@@ -71,7 +71,33 @@ class GetInferenceResults():
         if json_line.get("deviceFleetAuxiliaryOutputs") and len(json_line["deviceFleetAuxiliaryOutputs"]) > 0:
             output_list = json_line.get("deviceFleetAuxiliaryOutputs")
             input_list = json_line["deviceFleetAuxiliaryInputs"]
-            if is_segmentation_model_output_result(output_list):
+            if is_detection_model_output_result(output_list):
+                # Object-detection model (task=object_detection). The base model
+                # emits a detections block and the marshal draws the bounding
+                # boxes into the overlay image, so surface the overlay as the
+                # output image (OUTPUT_IMAGE) rather than the bare input image.
+                image_data_file_path = get_data_for_content_type(output_list, constants.INFERENCE_OUTPUT_OVERLAY_CONTENT_TYPE, "data-ref")
+                input_image_file_path = get_data_for_content_type(input_list, constants.INFERENCE_INPUT_IMAGE_CONTENT_TYPE, "data-ref")
+                # Fall back to the input image if the overlay is unavailable
+                # (e.g. overlay encode failed) so the result still renders.
+                if not image_data_file_path:
+                    image_data_file_path = input_image_file_path
+                base64_res = get_data_for_content_type(output_list, constants.INFERENCE_OUTPUT_RES_CONTENT_TYPE, "data")
+                dict_res = json.loads(base64.b64decode(base64_res))
+                base64_det = get_data_for_content_type(output_list, constants.INFERENCE_OUTPUT_RES_LABEL_CONTENT_TYPE, "data")
+                detections_block = json.loads(base64.b64decode(base64_det)) if base64_det else {}
+                infer_res = {
+                    'confidence': self.temp_get_confidence(dict_res),
+                    'inference_result': dict_res["Inference result"],
+                    'anomaly_score': dict_res.get("Anomaly_score"),
+                    'anomaly_threshold': dict_res.get("Anomaly_threshold"),
+                    # Structured detections ({ "0": {class_index, class_label,
+                    # bounding_box, confidence}, ... }); the boxes are already
+                    # drawn into the overlay image surfaced above.
+                    'detections': detections_block.get("detections", {}),
+                    'detection_count': dict_res.get("Detection_count"),
+                }
+            elif is_segmentation_model_output_result(output_list):
                 # Segmentation model
                 image_data_file_path = get_data_for_content_type(output_list, constants.INFERENCE_OUTPUT_IMAGE_CONTENT_TYPE, "data-ref") or \
                                     get_data_for_content_type(output_list, constants.INFERENCE_OUTPUT_OVERLAY_CONTENT_TYPE, "data-ref")
@@ -256,6 +282,34 @@ def is_segmentation_model_output_result(json_output: list):
             output_data["observedContentType"].startswith(constants.INFERENCE_OUTPUT_MASK_CONTENT_TYPE_PREFIX):
             return True
     return False
+
+def is_detection_model_output_result(json_output: list):
+    '''Determine if this inference result is for an object-detection model.
+
+    Detection captures (task=object_detection) carry a bounding-box overlay
+    image plus a base64 "json_with_base64_encoding" block whose decoded payload
+    has a top-level "detections" map (as opposed to the "anomalies" map emitted
+    by segmentation). Identifying detection by the presence of that detections
+    block keeps this independent of the specific inference-result label value.
+    Input: value for key `deviceFleetAuxiliaryOutputs` in result file
+    Output: True -> object detection, False -> not detection
+    '''
+    has_overlay = any(
+        output_data["observedContentType"] == constants.INFERENCE_OUTPUT_OVERLAY_CONTENT_TYPE
+        for output_data in json_output
+    )
+    if not has_overlay:
+        return False
+    base64_block = get_data_for_content_type(
+        json_output, constants.INFERENCE_OUTPUT_RES_LABEL_CONTENT_TYPE, "data"
+    )
+    if not base64_block:
+        return False
+    try:
+        payload = json.loads(base64.b64decode(base64_block))
+    except (ValueError, TypeError):
+        return False
+    return isinstance(payload, dict) and "detections" in payload
 
 def get_data_for_content_type(json_list: list, content_type: str, key: str):
     for data in json_list:

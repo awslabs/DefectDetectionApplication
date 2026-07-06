@@ -18,6 +18,7 @@ export interface ApiGatewayStackProps extends cdk.NestedStackProps {
   deploymentsHandler: lambda.Function;
   dataManagementHandler: lambda.Function;
   datasetsHandler: lambda.Function;
+  capturesHandler: lambda.Function;
   preLabeledDatasetsHandler: lambda.Function;
   labelingHandler: lambda.Function;
   trainingHandler: lambda.Function;
@@ -86,6 +87,7 @@ export class ApiGatewayStack extends cdk.NestedStack {
     const deploymentsIntegration = new apigateway.LambdaIntegration(props.deploymentsHandler);
     const dataManagementIntegration = new apigateway.LambdaIntegration(props.dataManagementHandler);
     const datasetsIntegration = new apigateway.LambdaIntegration(props.datasetsHandler);
+    const capturesIntegration = new apigateway.LambdaIntegration(props.capturesHandler);
     const preLabeledDatasetsIntegration = new apigateway.LambdaIntegration(props.preLabeledDatasetsHandler);
     const labelingIntegration = new apigateway.LambdaIntegration(props.labelingHandler);
     const trainingIntegration = new apigateway.LambdaIntegration(props.trainingHandler);
@@ -269,6 +271,14 @@ export class ApiGatewayStack extends cdk.NestedStack {
 
     const previewResource = datasetsResource.addResource('preview');
     previewResource.addMethod('GET', datasetsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Captures endpoint (inference-results Results_Viewer)
+    // GET /captures?usecase_id&prefix&device_id&limit -> list_captures
+    const capturesResource = this.api.root.addResource('captures');
+    capturesResource.addMethod('GET', capturesIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });

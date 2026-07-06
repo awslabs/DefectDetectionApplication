@@ -1,4 +1,5 @@
-import { defineConfig } from 'vite';
+/// <reference types="vitest/config" />
+import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { execSync } from 'child_process';
@@ -46,5 +47,13 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+  },
+  // Vitest configuration. `environment: 'jsdom'` gives component tests a DOM;
+  // the setup file registers `@testing-library/jest-dom` matchers. Vite's
+  // production build ignores the `test` field, so this does not affect builds.
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test/setup.ts'],
   },
 });

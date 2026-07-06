@@ -3,6 +3,7 @@
  */
 import { getConfig } from '../config';
 import { UseCase, Device, User, S3Bucket } from '../types';
+import type { Capture } from '../components/ResultsViewer';
 import { beginRequest, endRequest } from './loadingBus';
 
 class ApiService {
@@ -161,6 +162,31 @@ class ApiService {
       ...(params.limit && { limit: params.limit.toString() }),
     });
     return this.request(`/datasets/preview?${queryParams}`);
+  }
+
+  // Captures endpoint (inference-results Results_Viewer)
+  // Mirrors getImagePreview: presigned-URL pattern against the inference-results
+  // bucket, returning parsed capture metadata (detection typing + Detections_Block)
+  // and presigned URLs for the source / overlay / mask artifacts.
+  async getCaptures(params: {
+    usecase_id: string;
+    prefix: string;
+    device_id?: string;
+    limit?: number;
+  }): Promise<{
+    captures: Capture[];
+    bucket: string;
+    prefix: string;
+    total_found: number;
+    expires_in_seconds: number;
+  }> {
+    const queryParams = new URLSearchParams({
+      usecase_id: params.usecase_id,
+      prefix: params.prefix,
+      ...(params.device_id && { device_id: params.device_id }),
+      ...(params.limit && { limit: params.limit.toString() }),
+    });
+    return this.request(`/captures?${queryParams}`);
   }
 
   async getUseCase(id: string): Promise<{ usecase: UseCase }> {

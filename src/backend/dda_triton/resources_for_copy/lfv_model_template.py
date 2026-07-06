@@ -60,6 +60,7 @@ from lyra_anomalies_mask_utils import (
 from lyra_science_processing_utils.model_config import ModelConfig
 from lyra_science_processing_utils.model_graph_factory import ModelGraphFactory
 from lyra_science_processing_utils.utils.anomaly_result import AnomalyResult
+from lyra_science_processing_utils.utils.class_label_map import resolve_class_label
 from lyra_science_processing_utils.utils.inference_data import InferenceData
 
 log = logging.getLogger(__name__)
@@ -157,6 +158,7 @@ class TritonPythonModel:
     TASK_MANIFEST_KEY = "task"
     TASK_ANOMALY = "anomaly"
     TASK_OBJECT_DETECTION = "object_detection"
+    CLASS_NAMES_MANIFEST_KEY = "class_names"
 
     def initialize(self, args):
         """`initialize` is called only once when the model is being loaded.
@@ -205,6 +207,11 @@ class TritonPythonModel:
         # compat). object_detection routes execute() through the bbox emit path.
         self.__task = self.__load_task(self.models_dir)
         log.info(f"Model {self.__model_id} task '{self.__task}'.")
+
+        # Read the optional class-name map from the manifest once, so detection
+        # labels can be resolved in __build_detection_tensors. Absent => None
+        # (the shared resolver falls back to the default COCO map / index string).
+        self.__class_names = self.__load_class_names(self.models_dir)
 
         inference_runners = []
         for idx in range(self.__model_graph_config.num_stages()):
@@ -317,14 +324,41 @@ class TritonPythonModel:
             if det is not None:
                 detections.append(det)
 
-        serialized = [d.serialize() for d in detections]
+        # Serialize each detection and embed a human-readable class_label
+        # (resolved from the manifest class-name map, falling back to the
+        # default COCO map / index string) alongside the retained numeric
+        # `class` index. The tensor set/signature is unchanged.
+        serialized = []
+        for d in detections:
+            entry = d.serialize()
+            entry["class_label"] = resolve_class_label(d.obj_class, self.__class_names)
+            serialized.append(entry)
         top_conf = max((float(d.confidence) for d in detections), default=0.0)
         has_detection = np.uint8([1 if detections else 0])
         confidence = np.float32([top_conf])
         score = np.float32([top_conf])
 
+        # When there are no real detections, emit a single zero-object sentinel
+        # entry (carrying an empty `bounding_box`) instead of `[]`. This keeps a
+        # zero-object detection recognizable to the Marshal's `_is_detection_list`
+        # (which requires a non-empty list whose first entry has a `bounding_box`
+        # key), since an empty `[]` is byte-identical to the anomaly "no anomalies"
+        # payload and would otherwise be misrouted. The sentinel carries no
+        # drawable box. `output`/`output_confidence`/`output_score` are unchanged
+        # (has_detection stays 0, top_conf stays 0.0); only the JSON content of the
+        # `anomalies` tensor changes for the empty case.
+        payload = serialized if serialized else [
+            {
+                "bounding_box": [],
+                "class": "",
+                "class_label": "",
+                "confidence": 0.0,
+                "no_objects": True,
+            }
+        ]
+
         detections_bytes = np.frombuffer(
-            bytes(json.dumps(serialized), encoding="utf-8"), dtype=np.uint8
+            bytes(json.dumps(payload), encoding="utf-8"), dtype=np.uint8
         )
         empty_mask = np.zeros(input_np.shape)
 
@@ -432,6 +466,29 @@ class TritonPythonModel:
             return TritonPythonModel.TASK_ANOMALY
         task = manifest.get(TritonPythonModel.TASK_MANIFEST_KEY, TritonPythonModel.TASK_ANOMALY)
         return str(task).lower() if task else TritonPythonModel.TASK_ANOMALY
+
+    def __load_class_names(self, model_dir: str) -> typing.Optional[dict]:
+        """
+        Read the optional class-name map from the manifest.
+
+        :param model_dir: Directory with the unpacked model (holds manifest.json).
+        :returns: The manifest ``class_names`` mapping if present, else the
+            ``dataset.class_names`` mapping if present, else ``None``. On an
+            unreadable/invalid manifest, logs a warning and returns ``None``,
+            preserving backward compatibility (labels fall back to COCO / index).
+        """
+        manifest_path = os.path.join(model_dir, TritonPythonModel.MANIFEST_FILENAME)
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, ValueError) as e:
+            log.warning(f"Could not read class names from manifest: {e}; defaulting to None")
+            return None
+        class_names = manifest.get(TritonPythonModel.CLASS_NAMES_MANIFEST_KEY)
+        if class_names is None:
+            dataset_details = manifest.get(TritonPythonModel.DATASET_MANIFEST_KEY) or {}
+            class_names = dataset_details.get(TritonPythonModel.CLASS_NAMES_MANIFEST_KEY)
+        return class_names
 
     def __load_model_graph_config(
         self,

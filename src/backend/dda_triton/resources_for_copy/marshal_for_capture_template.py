@@ -17,6 +17,7 @@
 import numpy as np
 import time
 import os
+import sys
 import logging
 import time
 import json
@@ -28,6 +29,54 @@ DEFAULT_CONFIDENCE_WATERMARK = 0.6
 DEFAULT_ANOMALY_THRESHOLD = 0.0
 
 log = logging.getLogger(__name__)
+
+# Human-readable class-label resolution for object-detection captures.
+#
+# The shared resolver lives in the DDA app package
+# (lyra_science_processing_utils). The Triton Python-backend stub does NOT
+# forward the parent process's PYTHONPATH and runs with a CWD that is not the
+# app root, so a bare import is otherwise unresolvable here -- exactly the
+# situation lfv_model_template.py handles. Replicate that model's established
+# sys.path setup (app root via DDA_APP_ROOT + this file's own dir) BEFORE
+# importing so the package resolves regardless of the stub's environment.
+_DDA_APP_ROOT = os.environ.get("DDA_APP_ROOT", "/")
+if _DDA_APP_ROOT and _DDA_APP_ROOT not in sys.path:
+    sys.path.insert(0, _DDA_APP_ROOT)
+_MARSHAL_DIR = os.path.dirname(os.path.abspath(__file__))
+if _MARSHAL_DIR and _MARSHAL_DIR not in sys.path:
+    sys.path.insert(0, _MARSHAL_DIR)
+
+# Even with the sys.path setup above, the import is not guaranteed on every
+# hot-patched/mixed-version deployment, so guard it defensively: the marshal
+# must never hard-fail at import time on label resolution. On ImportError fall
+# back to a local resolver that prefers a payload-provided class_label and
+# otherwise returns the class-index string.
+try:
+    from lyra_science_processing_utils.utils.class_label_map import (
+        resolve_class_label,
+    )
+except ImportError:  # pragma: no cover - defensive fallback for restricted envs
+    log.warning(
+        "lyra_science_processing_utils.utils.class_label_map is not importable; "
+        "using local class-label fallback (payload class_label else index string)."
+    )
+
+    def resolve_class_label(class_index, class_map=None):
+        """Local fallback: return the mapped label if present, else the
+        class_index rendered as a string. Never raises."""
+        try:
+            if class_map:
+                if class_index in class_map:
+                    return str(class_map[class_index])
+                try:
+                    key = int(class_index)
+                    if key in class_map:
+                        return str(class_map[key])
+                except (TypeError, ValueError):
+                    pass
+        except Exception:  # noqa: BLE001 - defensive, never raise
+            pass
+        return str(class_index)
 
 
 class TritonPythonModel:
@@ -134,12 +183,20 @@ class TritonPythonModel:
             x2 = max(0, min(x2, w - 1))
             y1 = max(0, min(y1, h - 1))
             y2 = max(0, min(y2, h - 1))
-            cls = str(det.get("class", ""))
+            class_index = str(det.get("class", ""))
+            # Prefer the resolved human-readable label the base model embedded
+            # in the payload; if missing/empty, re-resolve via the shared map,
+            # then finally fall back to the class-index string.
+            class_label = det.get("class_label") or ""
+            if not class_label:
+                class_label = resolve_class_label(class_index, None)
+            if not class_label:
+                class_label = class_index
             conf = det.get("confidence", 0.0)
             try:
-                label = f"{cls} {float(conf):.2f}"
+                label = f"{class_label} {float(conf):.2f}"
             except (TypeError, ValueError):
-                label = cls
+                label = class_label
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(
                 overlay, label, (x1, max(0, y1 - 5)),
@@ -162,6 +219,11 @@ class TritonPythonModel:
         ret["deviceGroundTruthData"] = []
         ret["deviceGroundTruthData"].append({})
         idx = 0
+        # A detection capture is recognized solely by the presence of a
+        # 'bounding_box' field in the reused anomalies payload (incl. the
+        # zero-object sentinel). Detection captures are typed distinctly and
+        # must never be labeled "Anomaly"/"Normal".
+        is_detection = self._is_detection_list(inference_anomalies)
         capture_id = capture_meta_data["capture_id"]
         workflow_id = capture_meta_data["workflow_id"]
         input_file_path = ""
@@ -178,6 +240,11 @@ class TritonPythonModel:
         else:
             ret["deviceGroundTruthData"][idx]["anomaly-label-detected"] = 0
             class_name = "Normal"
+        if is_detection:
+            # Detection form: keep the numeric anomaly-label-detected flag and
+            # existing keys intact for downstream consumers, but use a
+            # detection-appropriate class-name distinct from the anomaly wording.
+            class_name = "Detection"
         label_detected_metadata = {}
         label_detected_metadata["class-name"] = class_name
         label_detected_metadata["creation-date"] = time_str
@@ -232,7 +299,24 @@ class TritonPythonModel:
                     "observedContentType": "mask.png",
                 }
             )
-        if self._has_anomaly_mask(inference_mask, input_image):
+        # Overlay reference relocation: previously the overlay data-ref was
+        # emitted ONLY when an anomaly mask was present, so detection captures
+        # (which carry an empty mask) never received one. Emit it whenever an
+        # overlay is present, i.e. for any detection capture (incl. the
+        # zero-object sentinel case, whose overlay is an unannotated source
+        # copy) OR any anomaly capture that has a mask. The anomaly-mask case
+        # continues to emit the ref exactly as before.
+        #
+        # Division of responsibility: this method only decides whether to
+        # EMIT the overlay data-ref; it does not produce/encode the overlay
+        # bytes. The overlay JPEG is written by the gstreamer capture plugin
+        # from the `overlay` tensor produced in execute(), so encode success
+        # is not observable here. The guarantee that detection captures always
+        # produce a non-empty overlay tensor is handled in execute() (task 6.1),
+        # and best-effort omission on encode failure belongs where the bytes
+        # are produced, not here.
+        overlay_present = is_detection or self._has_anomaly_mask(inference_mask, input_image)
+        if overlay_present:
             overlay_file_path = os.path.join(
                 capture_meta_data["capture_folder"], f"{capture_id}.overlay.jpg"
             )
@@ -247,11 +331,32 @@ class TritonPythonModel:
         # inference result
         inf_result = {}
         inf_result["Inference status"] = "success"
-        if inference_output:
+        if is_detection:
+            # Detection captures set output=1 but must be typed distinctly and
+            # never labeled "Anomaly"/"Normal".
+            inf_result["Inference result"] = "Detection"
+        elif inference_output:
             inf_result["Inference result"] = "Anomaly"
         else:
             inf_result["Inference result"] = "Normal"
-        inf_result["Confidence"] = inference_confidence.astype(float)
+        if is_detection:
+            # Count only VALID detections: entries whose bounding_box is a
+            # list of length 4. The zero-object sentinel carries
+            # bounding_box == [] and therefore counts as 0.
+            valid_confidences = [
+                float(det.get("confidence", 0.0))
+                for det in inference_anomalies
+                if isinstance(det.get("bounding_box"), list)
+                and len(det.get("bounding_box")) == 4
+            ]
+            inf_result["Detection_count"] = len(valid_confidences)
+            # Derive the capture confidence robustly from the detection
+            # entries: max object confidence when there is at least one valid
+            # object, else 0.0 for the zero-object sentinel.
+            inf_result["Confidence"] = max(valid_confidences) if valid_confidences else 0.0
+        else:
+            # Anomaly path is unchanged: report the model's inference confidence.
+            inf_result["Confidence"] = inference_confidence.astype(float)
         inf_result["Anomaly_score"] = inference_score.astype(float)
         # default thershold not used in inference for now.
         inf_result["Anomaly_threshold"] = 1.0
@@ -270,13 +375,35 @@ class TritonPythonModel:
         if self._is_detection_list(anomalies):
             # Object-detection payload: emit a detections block instead of the
             # anomaly/segmentation block, then fall through to eventMetadata.
+            #
+            # Emit ONLY valid detections (a 4-element bounding_box), filtering
+            # out the zero-object sentinel (empty bounding_box) so the block
+            # reflects only real objects, and re-index with contiguous string
+            # keys "0","1",... over the surviving detections. Each entry retains
+            # the original class index (as class_index) alongside a resolved
+            # human-readable class_label.
             det_map = {}
-            for i, det in enumerate(anomalies):
-                det_map[str(i)] = {
-                    "class": str(det.get("class", "")),
-                    "bounding_box": det.get("bounding_box", []),
+            idx = 0
+            for det in anomalies:
+                box = det.get("bounding_box") or []
+                if len(box) != 4:
+                    continue
+                class_index = str(det.get("class", ""))
+                # Prefer the label the base model embedded in the payload; if it
+                # is missing/empty, re-resolve via the shared util and finally
+                # fall back to the class-index string.
+                class_label = det.get("class_label") or ""
+                if not class_label:
+                    class_label = resolve_class_label(class_index, None)
+                if not class_label:
+                    class_label = class_index
+                det_map[str(idx)] = {
+                    "class_index": class_index,
+                    "class_label": class_label,
+                    "bounding_box": box,
                     "confidence": det.get("confidence", 0.0),
                 }
+                idx += 1
             detection_data = {"detections": det_map}
             detection_str = json.dumps(detection_data)
             detection_str_encoded = base64.b64encode(detection_str.encode()).decode()
