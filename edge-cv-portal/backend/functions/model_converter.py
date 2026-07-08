@@ -37,6 +37,57 @@ sts = boto3.client('sts')
 TRAINING_JOBS_TABLE = os.environ.get('TRAINING_JOBS_TABLE')
 USECASES_TABLE = os.environ.get('USECASES_TABLE')
 
+
+# ── Trusted model-source allowlist (#8) ─────────────────────────────────────
+# A user-provided model_s3_uri is untrusted: a malicious .pt could execute
+# arbitrary code during torch.load (torch.load is RCE-capable via its
+# serializer). The primary neutralization is weights_only=True (see
+# inspect_pytorch_model). As defense-in-depth AND to gate
+# the legitimate full-checkpoint weights_only=False fallback, the source S3
+# bucket/account is validated against a CONFIG-DRIVEN allowlist populated from
+# environment variables (comma-separated):
+#   * TRUSTED_MODEL_BUCKETS  — exact bucket names that are trusted.
+#   * TRUSTED_MODEL_ACCOUNTS — account IDs; a bucket whose name embeds one of
+#     these account IDs (a common naming convention) is treated as trusted.
+# The use case's own application-owned s3_bucket is always trusted.
+def _config_trusted_model_buckets() -> set:
+    raw = os.environ.get('TRUSTED_MODEL_BUCKETS', '')
+    return {b.strip() for b in raw.split(',') if b.strip()}
+
+
+def _config_trusted_model_accounts() -> set:
+    raw = os.environ.get('TRUSTED_MODEL_ACCOUNTS', '')
+    return {a.strip() for a in raw.split(',') if a.strip()}
+
+
+def is_trusted_model_source(model_s3_uri: str, usecase: Optional[Dict] = None) -> bool:
+    """Return True iff the model_s3_uri points at a bucket/account on the
+    config-driven trusted allowlist.
+
+    Only allowlisted sources are downloaded/inspected, and only allowlisted
+    sources may use the weights_only=False full-checkpoint fallback. Anything
+    else is rejected (the caller returns a 400)."""
+    try:
+        parsed = urlparse(model_s3_uri)
+    except Exception:
+        return False
+    bucket = parsed.netloc
+    if not bucket:
+        return False
+
+    trusted_buckets = _config_trusted_model_buckets()
+    # The use case's own application-owned bucket is always trusted.
+    if usecase and usecase.get('s3_bucket'):
+        trusted_buckets.add(usecase['s3_bucket'])
+    if bucket in trusted_buckets:
+        return True
+
+    # Account-based allowlisting: a bucket that embeds a trusted account id.
+    for account in _config_trusted_model_accounts():
+        if account and account in bucket:
+            return True
+    return False
+
 # Supported model types
 MODEL_TYPES = {
     'classification': {
@@ -301,17 +352,50 @@ def inspect_onnx_model(model_path: str) -> Dict:
         }
 
 
-def inspect_pytorch_model(model_path: str) -> Dict:
+def inspect_pytorch_model(model_path: str, trusted_source: bool = False) -> Dict:
     """
     Inspect a PyTorch model file to extract metadata.
     Returns detected information about the model.
+
+    Security (#8): the model file may originate from a user-provided S3 URI, so
+    it is loaded with ``weights_only=True`` by default. That restricts loading
+    to tensors/primitives, so a malicious ``.pt`` cannot execute arbitrary code
+    during load (primary neutralization).
+
+    Some legitimate inputs are NOT pure weights — JIT models, full-model objects,
+    and some framework checkpoints — and fail under ``weights_only=True``. For
+    those we retry with ``weights_only=False`` ONLY when ``trusted_source`` is
+    True (the caller has validated the source S3 bucket/account against the
+    config-driven trusted allowlist; see ``is_trusted_model_source``). A
+    non-allowlisted source surfaces the error instead of loading an executable
+    payload, and the broad ``except`` below degrades to the documented
+    "Could not inspect model" contract for callers.
     """
     try:
         import torch
-        
-        # Load the model
-        model_data = torch.load(model_path, map_location='cpu')
-        
+
+        # Primary neutralization: weights_only=True so a malicious .pt cannot
+        # execute code during load.
+        try:
+            model_data = torch.load(model_path, map_location='cpu', weights_only=True)
+        except Exception as weights_only_error:
+            # Legitimate full checkpoints / JIT / full-model objects are not pure
+            # weights and fail weights_only=True. Retry with weights_only=False
+            # ONLY for allowlisted trusted sources; otherwise surface the error
+            # (never load an executable payload from a non-allowlisted source).
+            if not trusted_source:
+                raise
+            # ── allowlisted-trusted-source fallback ──────────────────────────
+            # The source bucket/account was validated against the config-driven
+            # trusted allowlist before this point, so a full-checkpoint load is
+            # permitted here to preserve legitimate non-weights models (Req 3.6).
+            logger.warning(
+                "weights_only=True load failed (%s); retrying with "
+                "weights_only=False for ALLOWLISTED trusted source: %s",
+                weights_only_error, model_path,
+            )
+            model_data = torch.load(model_path, map_location='cpu', weights_only=False)  # nosem: source validated against the trusted-bucket/account allowlist before this allowlisted-trusted-source fallback is reached
+
         info = {
             'type': 'unknown',
             'is_state_dict': False,
@@ -745,7 +829,17 @@ def convert_model(event: Dict, context: Any) -> Dict:
         parsed = urlparse(model_s3_uri)
         source_bucket = parsed.netloc
         source_key = parsed.path.lstrip('/')
-        
+
+        # Restrict the model source to trusted buckets/accounts (#8). A
+        # non-allowlisted source is rejected BEFORE download, narrowing the
+        # attack surface; only an allowlisted source may later use the
+        # weights_only=False full-checkpoint fallback in inspect_pytorch_model.
+        trusted_source = is_trusted_model_source(model_s3_uri, usecase)
+        if not trusted_source:
+            return create_response(400, {
+                'error': 'model_s3_uri source bucket is not on the trusted-source allowlist'
+            })
+
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_convert_")
         
@@ -764,7 +858,9 @@ def convert_model(event: Dict, context: Any) -> Dict:
                 model_info = {'type': 'onnx', 'architecture_hints': ['ONNX model']}
             else:
                 logger.info("Inspecting model...")
-                model_info = inspect_pytorch_model(local_model)
+                # trusted_source is True here (non-allowlisted sources were
+                # rejected above), enabling the full-checkpoint fallback.
+                model_info = inspect_pytorch_model(local_model, trusted_source=trusted_source)
             
             # Generate DDA package
             logger.info("Generating DDA-compatible package...")
@@ -929,6 +1025,14 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
         bucket = parsed.netloc
         key = parsed.path.lstrip('/')
 
+        # Restrict the model source to trusted buckets/accounts (#8): reject a
+        # non-allowlisted source before download.
+        trusted_source = is_trusted_model_source(model_s3_uri, usecase)
+        if not trusted_source:
+            return create_response(400, {
+                'error': 'model_s3_uri source bucket is not on the trusted-source allowlist'
+            })
+
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_inspect_")
 
@@ -949,7 +1053,9 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
             if is_onnx:
                 model_info = inspect_onnx_model(local_model)
             else:
-                model_info = inspect_pytorch_model(local_model)
+                # trusted_source is True here (non-allowlisted sources were
+                # rejected above), enabling the full-checkpoint fallback.
+                model_info = inspect_pytorch_model(local_model, trusted_source=trusted_source)
 
             return create_response(200, {
                 'model_s3_uri': model_s3_uri,

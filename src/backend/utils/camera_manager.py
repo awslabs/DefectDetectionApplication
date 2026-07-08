@@ -36,7 +36,8 @@ import logging
 logger = logging.getLogger(__name__)
 import multiprocessing
 from multiprocessing.managers import BaseManager
-import pickle
+import json
+import struct
 from utils.namespace_lock import NamespaceLock
 import queue
 import concurrent.futures
@@ -53,6 +54,49 @@ get_frame_lock = Lock()
 # of the configured exposure time. Prevents a stalled USB/GenICam transfer from
 # blocking pop_buffer (and thus every preview) indefinitely.
 FRAME_POP_TIMEOUT_MARGIN_US = 5_000_000  # 5s beyond the exposure time
+
+
+# ---------------------------------------------------------------------------
+# Frame transport (security fix #6, Req 2.6)
+#
+# Historically the frame moved across the in-process ``BaseManager``-hosted
+# ``Camera`` via an executable object serializer (dumps/loads of the
+# ``{'data','height','width'}`` dict). Even though the producer and consumer
+# share the same trust domain, an executable-object deserializer is an
+# unnecessary code-execution primitive on a live hot path, so we replace it
+# with a NON-EXECUTABLE serialization that keeps the exact
+# ``{'data','height','width'}`` dict shape (and ``None`` on timeout/failure).
+#
+# Wire format: a 4-byte big-endian length prefix, then a UTF-8 JSON header, then
+# the raw ``data`` bytes.
+#   * frame  -> header {"null": false, "height": <int>, "width": <int>}
+#               followed by the raw image bytes.
+#   * None    -> header {"null": true} with no trailing bytes.
+# ``get_frame`` still returns ``bytes``, so the ``BaseManager`` proxy contract
+# (which transports the return value) is unchanged; only the explicit
+# (de)serializer on this call site is replaced.
+# ---------------------------------------------------------------------------
+def encode_frame(frame):
+    """Serialize a ``{'data','height','width'}`` frame dict (or ``None``) into the
+    non-executable length-prefixed JSON-header + raw-bytes transport."""
+    if frame is None:
+        header = json.dumps({"null": True}).encode("utf-8")
+        return struct.pack(">I", len(header)) + header
+    header = json.dumps(
+        {"null": False, "height": frame["height"], "width": frame["width"]}
+    ).encode("utf-8")
+    return struct.pack(">I", len(header)) + header + bytes(frame["data"])
+
+
+def decode_frame(buf):
+    """Inverse of :func:`encode_frame`. Returns the identical
+    ``{'data','height','width'}`` dict, or ``None`` for the null/timeout frame."""
+    (hlen,) = struct.unpack(">I", buf[:4])
+    header = json.loads(buf[4:4 + hlen].decode("utf-8"))
+    if header.get("null"):
+        return None
+    data = buf[4 + hlen:]
+    return {"data": data, "height": header["height"], "width": header["width"]}
 
 # Tier 2 GenICam controls surfaced under "Advanced settings". Scoped to the
 # "safe" controls that are persisted and don't affect the stream payload /
@@ -462,13 +506,13 @@ class Camera():
                     "Timed out waiting for a frame from the camera",
                 )
                 self._lock.release()
-                return pickle.dumps(None)
+                return encode_frame(None)
             self.set_buffer()
             if arv_buffer.get_status() != Aravis.BufferStatus.SUCCESS:
                 logger.error(f"Camera ID {self.camera_id} : Failed to get frame")
                 self.update_camera_status(CameraStatusEnum.DISCONNECTED, "Failed to get frame")
                 self._lock.release()
-                return pickle.dumps(None)
+                return encode_frame(None)
             else:
                 data = arv_buffer.get_data()
                 wd = arv_buffer.get_image_width()
@@ -476,9 +520,9 @@ class Camera():
                 #update camera connection status 
                 self.update_camera_status(CameraStatusEnum.CONNECTED)
                 data_dict = {'data': data, 'height': ht, 'width': wd}
-                pickled_data = pickle.dumps(data_dict)
+                encoded_data = encode_frame(data_dict)
                 self._lock.release()
-                return pickled_data
+                return encoded_data
 
 ################
 # Camera Manager
@@ -590,7 +634,7 @@ def disconnect_all_cameras():
 def _get_camera_frame(camera_id, camera, camera_config):
     try:
         camera.start_acquisition(camera_config)
-        camera_frame = pickle.loads(camera.get_frame())
+        camera_frame = decode_frame(camera.get_frame())
         camera.stop_acquisition()
         return camera_frame
     except Exception as err:

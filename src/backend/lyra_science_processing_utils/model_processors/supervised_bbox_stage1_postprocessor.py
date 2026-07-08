@@ -30,13 +30,17 @@ import os
 import numpy as np
 import cv2
 from typing import Dict, List
-import dill
 
 from lyra_science_processing_utils.inference_postprocessor import InferencePostProcessor
 from lyra_science_processing_utils.utils import get_pmax_confidence
 from lyra_science_processing_utils.utils.anomaly_result import AnomalyResult
 from lyra_science_processing_utils.utils.score_calibrator import SKLearnScoreCalibration
 from lyra_science_processing_utils.model_processors.basic_preprocessor import BasicPreProcessor
+from lyra_science_processing_utils.model_processors.reference_image_map_io import (
+    load_safe_reference_image_map,
+    safe_format_exists,
+    derive_safe_paths,
+)
 from lyra_science_processing_utils.utils import load_image_from_file_as_numpy_uint8
 from lyra_science_processing_utils.model_processors.distance_based_classifier_postprocessor import DistanceBasedClassifierPostProcessor
 from lyra_science_processing_utils.utils.image_alignment import get_affine_aligned_image
@@ -50,15 +54,28 @@ class SupervisedBBoxStage1PostProcessor(InferencePostProcessor):
         reference_image_map_file = config1['reference_image_map_file']
         self.affine_align = config1['affine_align']
 
-        with open(reference_image_map_file, 'rb') as handle:
-            data = dill.load(handle)
-        image_index = data['image_index']
-        train_feature_gallery = []
-        self.reference_image_paths = []
-        for path, feature in image_index.items():
-            train_feature_gallery.append(feature)
-            self.reference_image_paths.append(path)
-        self.train_feature_gallery = np.vstack(train_feature_gallery)
+        # Security fix (#5, Req 2.5): the reference-image map is config-driven and
+        # may be externally supplied, so it must NOT be deserialized with a
+        # code-executing deserializer at inference time. The runtime
+        # load path reads ONLY the safe, non-executable format (JSON paths
+        # sidecar + a NumPy allow_pickle=False feature matrix) produced by the
+        # offline ``reference_image_map_migration`` utility. This reconstructs the
+        # exact ordered ``reference_image_paths`` and ``np.vstack`` gallery the
+        # legacy loader produced (Req 3.5) with no code-execution risk.
+        if not safe_format_exists(reference_image_map_file):
+            paths_json_file, features_npy_file = derive_safe_paths(reference_image_map_file)
+            raise FileNotFoundError(
+                "Safe-format reference-image map not found for "
+                f"'{reference_image_map_file}'. Expected '{paths_json_file}' and "
+                f"'{features_npy_file}'. Convert the legacy map ONCE with the "
+                "offline utility: python -m "
+                "lyra_science_processing_utils.model_processors."
+                "reference_image_map_migration <legacy_map_file>. The runtime "
+                "load path uses only the safe format."
+            )
+        self.reference_image_paths, self.train_feature_gallery = (
+            load_safe_reference_image_map(reference_image_map_file)
+        )
         self.pre_processor = BasicPreProcessor(config2)
         
     def __call__(self, input_image: np.ndarray, model_output: List[np.ndarray], *args, **kwargs):

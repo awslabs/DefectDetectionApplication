@@ -29,7 +29,8 @@ import traceback
 from multiprocessing import active_children, Process, Event, shared_memory
 import signal
 import time
-import pickle
+import json
+import struct
 
 from gstreamer.gst_pipeline_executor import GstPipelineExecutor
 
@@ -62,6 +63,12 @@ from metrics.collector import Timer
 SHARED_MEMORY_NAME_PREFIX = "dda_dio_mem_block_process_"
 SHARED_MEMORY_DEFAULT_SIZE_IN_BYTES = 1024 * 1024 # 1 MB
 HEALTH_REPORT_CUTOFF_DURATION_IN_SECONDS = 60
+# Framing for the health message written into the shared-memory buffer: a
+# fixed 4-byte big-endian unsigned length header followed by exactly that many
+# bytes of UTF-8 JSON. The header lets the reader parse precisely the bytes
+# that were written out of the fixed-size (1 MB) buffer.
+HEALTH_MESSAGE_LENGTH_HEADER_FORMAT = ">I"
+HEALTH_MESSAGE_LENGTH_HEADER_SIZE = struct.calcsize(HEALTH_MESSAGE_LENGTH_HEADER_FORMAT)
 
 logger = logging.getLogger(__name__)
 
@@ -273,13 +280,23 @@ class DigitalInputProcess(Process):
         '''
         try:
             existing_shm = get_shm_object(self.workflow_id)
-            message = {
-                "status" : status,
-                "error_type" : error,
-                "last_updated" : time.time()
+            # Trust boundary (defense-in-depth): the buffer
+            # `dda_dio_mem_block_process_<workflow_id>` is a process-local
+            # shared-memory region written and read only by this component, so
+            # no external actor can substitute its bytes. Even so we serialize
+            # with a non-executable, framed-JSON format (no code-bearing
+            # deserializer) so a corrupted/substituted buffer can never trigger
+            # arbitrary code execution on read. Encode the enum as its name, the
+            # error as its string form, and the timestamp as a float, then write
+            # a 4-byte length header followed by the UTF-8 JSON body.
+            payload = {
+                "status": status.name,
+                "error_type": None if error is None else str(error),
+                "last_updated": time.time(),
             }
-            pickled_message = pickle.dumps(message, protocol=pickle.HIGHEST_PROTOCOL)
-            existing_shm.buf[:len(pickled_message)] = pickled_message
+            body = json.dumps(payload).encode("utf-8")
+            framed_message = struct.pack(HEALTH_MESSAGE_LENGTH_HEADER_FORMAT, len(body)) + body
+            existing_shm.buf[:len(framed_message)] = framed_message
             existing_shm.close()
         except Exception as err:
             logger.error(f"Error while updating health status for {self.workflow_id}: {err}")
@@ -388,7 +405,24 @@ def is_process_running(workflow_id):
 def get_dio_process_health_report(workflow_id: str):
     try:
         __shm = get_shm_object(workflow_id)
-        message = pickle.loads(__shm.buf)
+        # Read the framed JSON written by __update_health_status: a 4-byte
+        # length header followed by exactly that many bytes of UTF-8 JSON.
+        # json.loads cannot execute code, so this path is safe even though the
+        # process-local shared-memory buffer is already an in-process trust
+        # boundary (see __update_health_status). Reconstruct the identical dict
+        # shape callers depend on, mapping `status` back to the enum member.
+        buf = bytes(__shm.buf)
+        (body_length,) = struct.unpack(
+            HEALTH_MESSAGE_LENGTH_HEADER_FORMAT,
+            buf[:HEALTH_MESSAGE_LENGTH_HEADER_SIZE],
+        )
+        body = buf[HEALTH_MESSAGE_LENGTH_HEADER_SIZE:HEALTH_MESSAGE_LENGTH_HEADER_SIZE + body_length]
+        payload = json.loads(body.decode("utf-8"))
+        message = {
+            "status": DIOProcessHealthStatusEnum[payload["status"]],
+            "error_type": payload["error_type"],
+            "last_updated": payload["last_updated"],
+        }
         logger.info(f"Fetching health status for workflow_id: {workflow_id} message: {message}")
         return message
     except Exception as err:

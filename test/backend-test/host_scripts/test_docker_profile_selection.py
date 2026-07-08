@@ -55,7 +55,8 @@ def _run_profile_decision(is_gpu, arch):
     block = match.group(1).replace(">> /tmp/.dda.env", "")  # echo to stdout instead
 
     snippet = f'is_gpu={is_gpu}\narch="{arch}"\n{block}\n'
-    result = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True)
+    # nosem: python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit -- test-only: `snippet` is built from STATIC, in-repo `.sh` content (regex-extracted from the checked-in get_nvidia_libs_versions.sh) plus fixed is_gpu/arch literals; no untrusted/external input reaches this bash -c invocation.
+    result = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True)  # nosem: python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit
     assert result.returncode == 0, f"decision block failed: {result.stderr}"
 
     m = re.search(r"DOCKER_PROFILE=(\w+)", result.stdout)
