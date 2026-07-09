@@ -190,7 +190,7 @@ else
     -e PYTHON_VERSION="$PYTHON_VERSION" \
     --entrypoint bash flask-app -c '
       set -e
-      python${PYTHON_VERSION} -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures
+      python${PYTHON_VERSION} -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures hypothesis
       export PYTHONPATH=/repo/src/backend
       # The backend imports the triton/panorama bindings at collection time
       # (via conftest). docker-compose normally provides these loader paths at
@@ -202,7 +202,27 @@ else
         test/backend-test/utils/test_user_group_management_utils.py \
         test/backend-test/utils/test_dda_user_management_utils.py \
         test/backend-test/host_scripts/test_docker_profile_selection.py -v
-    ' || { echo "ERROR: backend unit tests failed"; exit 1; }
+
+      # ── Security injection / deserialization gate ─────────────────────────
+      # (spec: security-injection-deserialization-fixes). A single green gate:
+      #   1. repo_audit.py — pattern gate; exits non-zero if a disallowed
+      #      subprocess-interpolation / unsafe-deserializer pattern reappears in
+      #      in-scope application code (minus documented # nosem exceptions).
+      #   2. Fix-checking suite — every injection/deserialization vector stays
+      #      neutralized.
+      #   3. Preservation suite — F(X) == F'\''(X) for legitimate inputs
+      #      (--noconftest is required: this suite is self-contained and must
+      #      not load the backend conftest).
+      # set -e above makes any failure here fail the build.
+      echo "Running security injection/deserialization audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/repo_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_bug_condition_exploration.py -v
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/preservation \
+        -p no:cacheprovider --noconftest -v
+      echo "Security audit gate passed."
+    ' || { echo "ERROR: backend unit tests / security audit gate failed"; exit 1; }
   echo "Backend unit tests passed."
 fi
 

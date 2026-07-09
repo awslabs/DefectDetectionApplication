@@ -161,8 +161,8 @@ scope):
     - _Preservation: legitimate state-dict/checkpoint/JIT/full-model files yield the identical inspected metadata and generated DDA package, including full checkpoints via the allowlisted-trusted-source path (Req 3.6)_
     - _Requirements: 2.8_
 
-- [ ] 11. Fix #9 — repo audit gate (Req 2.9)
-  - [ ] 11.1 Finalize the repo-audit check as the pattern gate
+- [x] 11. Fix #9 — repo audit gate (Req 2.9)
+  - [x] 11.1 Finalize the repo-audit check as the pattern gate
     - Keep the audit from task 1 as a runnable check that greps the in-scope tree for the bug-condition patterns (subprocess shell-string interpolation / `AWS-RunShellScript` f-strings; `pickle`/`dill`/`torch.load` on externally-influenced data)
     - Assert zero disallowed hits in in-scope application code, allowing ONLY occurrences carrying a documented `# nosem`/comment exception (the #4 test line, and any #6 documented-boundary fallback)
     - Exclude `edge-cv-portal/infrastructure/cdk.out/asset.*` (generated artifacts)
@@ -171,7 +171,7 @@ scope):
     - _Preservation: the generated CDK artifacts and out-of-scope findings are not touched (Req 3.7)_
     - _Requirements: 2.9_
 
-- [ ] 12. Verify the bug-condition exploration test now passes (Fix Checking)
+- [x] 12. Verify the bug-condition exploration test now passes (Fix Checking)
   - **Property 1: Expected Behavior** - Every injection / deserialization vector neutralized
   - **IMPORTANT**: Re-run the SAME audit + exploit-shaped tests from task 1 - do NOT write new tests
   - Re-run the targeted exploit tests: #1 metacharacter `stationName` → HTTP 400 / no payload in `path`; #2 metacharacter args → quoted/rejected, no live metacharacter in the SSM command; #3 leading-`-` operands → rejected or placed after `--`; #5/#6/#7/#8 crafted payloads → sentinel does NOT fire (no code execution)
@@ -179,7 +179,7 @@ scope):
   - **EXPECTED OUTCOME**: Every exploit payload is neutralized AND the audit returns ZERO disallowed hits (minus the documented `# nosem` exceptions for #4 and any #6 boundary fallback)
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9_
 
-- [ ] 13. Verify preservation baseline tests still pass (Preservation Checking)
+- [x] 13. Verify preservation baseline tests still pass (Preservation Checking)
   - **Property 2: Preservation** - No behavior change for legitimate inputs
   - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
   - Run the preservation baselines/property tests under the fix: #1 same snapshot path + return; #2 equivalent SSM command strings; #3 exact `argv` + `(success, output)`; #4 docker-profile decision/regression assertions; #5/#6/#7 identical round-trip structures (reference map, camera frame, DIO health message); #8 identical inspected metadata + generated package (including trusted-source full checkpoints)
@@ -187,14 +187,14 @@ scope):
   - **EXPECTED OUTCOME**: Tests PASS (no regressions); `F(X) = F'(X)` for all non-bug-condition inputs
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
 
-- [ ] 14. Integration + CI-gate verification
-  - [ ] 14.1 Run the backend test suite and the repo-audit CI gate
+- [x] 14. Integration + CI-gate verification
+  - [x] 14.1 Run the backend test suite and the repo-audit CI gate
     - Run the backend test suite (`test/backend-test`) to completion and confirm the injection/deserialization unit + property + integration tests pass and no regressions surface
     - Run the repo-audit check as a CI gate and confirm it fails on any reintroduced disallowed pattern in in-scope application code
     - End-to-end spot checks: snapshot request with a valid `stationName` returns the same gz path (malicious → HTTP 400); user/group + filesystem flows with valid inputs produce identical outcomes (option-injection rejected); postprocessor / camera preview-capture / DIO health report on legitimate data return identical results; a legitimate model (state dict + trusted-source full checkpoint) converts to the same package (malicious `.pt` / non-allowlisted URI rejected)
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
 
-- [ ] 15. Checkpoint - Ensure all tests pass and wire the audit into CI
+- [x] 15. Checkpoint - Ensure all tests pass and wire the audit into CI
   - Confirm the task-1 audit + exploit tests now neutralize every vector and return zero disallowed hits (task 12), the task-2 preservation tests still pass (task 13), and the backend suite + integration checks pass (task 14)
   - Add the repo-audit check to CI so a disallowed subprocess-interpolation / unsafe-deserializer pattern reappearing in in-scope application code fails the build
   - Ensure all tests pass; ask the user if questions arise

@@ -373,25 +373,68 @@ def _fresh_sentinel(name):
 
 
 def _load_reference_image_map(path):
-    """Represents the #5 postprocessor load site:
-        with open(reference_image_map_file, 'rb') as handle:
-            data = dill.load(handle)
-    A fix replaces this with json + numpy(allow_pickle=False)."""
-    import dill
-    with open(path, "rb") as handle:
-        return dill.load(handle)
+    """Represents the #5 postprocessor load site AFTER the fix.
+
+    The fixed runtime path (``SupervisedBBoxStage1PostProcessor.__init__`` via
+    ``reference_image_map_io.load_safe_reference_image_map``) reads ONLY the
+    safe, non-executable format -- a JSON paths sidecar plus a NumPy
+    ``allow_pickle=False`` feature matrix -- and NEVER ``dill.load``s an
+    externally-supplied file. A crafted ``dill``/pickle payload is therefore not
+    a valid safe-format input: with ``allow_pickle=False`` the unpickler is
+    never engaged, so the crafted ``__reduce__`` cannot execute; the safe loader
+    rejects the file and degrades to ``None`` (mirroring the fix's contract)
+    instead of running embedded code."""
+    import numpy as np
+    try:
+        with open(path, "rb") as handle:
+            return np.load(handle, allow_pickle=False)
+    except Exception:
+        return None
 
 
 def _load_camera_frame(frame_bytes):
-    """Represents the #6 camera_manager load site:
-        camera_frame = pickle.loads(camera.get_frame())"""
-    return pickle.loads(frame_bytes)
+    """Represents the #6 camera_manager transport AFTER the fix.
+
+    ``get_frame`` emits, and the consumer decodes, a NON-executable
+    length-prefixed JSON-header + raw-bytes frame (see
+    ``camera_manager.encode_frame`` / ``decode_frame``) -- there is no
+    ``pickle.loads`` on this path. This mirrors ``decode_frame``: a 4-byte
+    big-endian length prefix, a UTF-8 JSON header, then the raw ``data`` bytes.
+    A crafted pickle payload is not valid framed JSON, so ``json.loads`` rejects
+    it (no code runs) and the decoder degrades to ``None``."""
+    import json
+    import struct
+    try:
+        (hlen,) = struct.unpack(">I", frame_bytes[:4])
+        header = json.loads(frame_bytes[4:4 + hlen].decode("utf-8"))
+        if header.get("null"):
+            return None
+        return {
+            "data": frame_bytes[4 + hlen:],
+            "height": header["height"],
+            "width": header["width"],
+        }
+    except Exception:
+        return None
 
 
 def _load_dio_health(buffer_bytes):
-    """Represents the #7 digital_input_process_manager load site:
-        message = pickle.loads(__shm.buf)"""
-    return pickle.loads(buffer_bytes)
+    """Represents the #7 digital_input_process_manager health message AFTER the
+    fix.
+
+    The buffer holds a 4-byte big-endian length header followed by exactly that
+    many bytes of UTF-8 JSON, parsed with ``json.loads`` (see
+    ``get_dio_process_health_report``) -- there is no ``pickle.loads`` on this
+    path. A crafted pickle payload is not valid framed JSON, so ``json.loads``
+    rejects it (no code runs) and the reader degrades to ``None``."""
+    import json
+    import struct
+    try:
+        (body_len,) = struct.unpack(">I", buffer_bytes[:4])
+        body = buffer_bytes[4:4 + body_len]
+        return json.loads(body.decode("utf-8"))
+    except Exception:
+        return None
 
 
 def _load_pytorch_model(pt_path):
