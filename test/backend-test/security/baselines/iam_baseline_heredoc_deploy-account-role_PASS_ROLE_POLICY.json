@@ -1,0 +1,15 @@
+{
+  "Statement": [
+    {
+      "Action": "iam:PassRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "sagemaker.amazonaws.com"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "arn:aws:iam::123456789012:role/DDASageMakerExecutionRole"
+    }
+  ],
+  "Version": "2012-10-17"
+}

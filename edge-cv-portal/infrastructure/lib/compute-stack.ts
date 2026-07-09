@@ -33,6 +33,15 @@ export interface ComputeStackProps extends cdk.StackProps {
    * Used to configure CORS on Data Account buckets during UseCase onboarding.
    */
   cloudFrontDomain?: string;
+  /**
+   * Trusted UseCase account IDs the portal Lambdas are allowed to assume
+   * `DDAPortalAccessRole` into. Sourced from CDK context
+   * (`-c trustedUseCaseAccountIds=111111111111,222222222222`) or a
+   * deployment-time SSM parameter (`/dda-portal/trusted-usecase-account-ids`).
+   * Must be non-empty — an empty list is a synth-time error (coupled to
+   * I1/I5); the design DOES NOT fall back to a wildcard account.
+   */
+  trustedUseCaseAccountIds: string[];
 }
 
 export class ComputeStack extends cdk.Stack {
@@ -41,6 +50,19 @@ export class ComputeStack extends cdk.Stack {
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
+
+    // Validate the trusted UseCase account list at synth time. An empty list
+    // would otherwise produce an empty sts:AssumeRole resource list; the
+    // design requires an explicit failure rather than any fallback to a
+    // wildcard account (coupled to I1/I5).
+    if (!props.trustedUseCaseAccountIds || props.trustedUseCaseAccountIds.length === 0) {
+      throw new Error(
+        'ComputeStack requires a non-empty trustedUseCaseAccountIds list ' +
+          '(pass -c trustedUseCaseAccountIds=<id>,<id> or the SSM parameter ' +
+          '/dda-portal/trusted-usecase-account-ids). Refusing to synth an ' +
+          'sts:AssumeRole grant on a wildcard account.'
+      );
+    }
 
     // Lambda Layer for shared utilities
     const sharedLayer = new lambda.LayerVersion(this, 'SharedLayer', {
@@ -83,7 +105,13 @@ export class ComputeStack extends cdk.Stack {
       // Grant S3 permissions for portal artifacts bucket
       props.portalArtifactsBucket.grantReadWrite(role);
 
-      // Grant SageMaker, Greengrass, CloudWatch Logs, STS, and API Gateway permissions
+      // Grant SageMaker, Greengrass, CloudWatch Logs, STS, and API Gateway
+      // permissions. Previously a single combined statement on
+      // resources: ['*']; split per-service so each grant is scoped to the
+      // committed dda-* / dda/* naming conventions (I1). The union of actions
+      // across the split statements is identical to the original combined list.
+
+      // SageMaker (scopable) — portal-created jobs/models use the dda-* prefix.
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
@@ -97,9 +125,33 @@ export class ComputeStack extends cdk.Stack {
           'sagemaker:DescribeLabelingJob',
           'sagemaker:ListLabelingJobs',
           'sagemaker:StopLabelingJob',
-          'sagemaker:ListWorkteams',
           'sagemaker:DescribeWorkteam',
           'sagemaker:AddTags',
+        ],
+        resources: [
+          'arn:aws:sagemaker:*:*:training-job/dda-*',
+          'arn:aws:sagemaker:*:*:compilation-job/dda-*',
+          'arn:aws:sagemaker:*:*:labeling-job/dda-*',
+          'arn:aws:sagemaker:*:*:model/dda-*',
+          'arn:aws:sagemaker:*:*:workteam/*',
+        ],
+      }));
+
+      // SageMaker (unscopable): sagemaker:ListWorkteams does not support
+      // resource-level permissions per the AWS IAM reference.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sagemaker:ListWorkteams'],
+        resources: ['*'],
+      }));
+
+      // Greengrass v2 (scopable to the service resource ARNs). Resource-tag
+      // conditions on the Greengrass v2 API are limited, so no tag Condition is
+      // applied here — the grant is bounded to the components / coreDevices /
+      // deployments resource types the portal operates on.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
           'greengrass:CreateComponentVersion',
           'greengrass:DescribeComponent',
           'greengrass:GetComponent',
@@ -115,8 +167,20 @@ export class ComputeStack extends cdk.Stack {
           'greengrass:GetDeployment',
           'greengrass:CreateDeployment',
           'greengrass:CancelDeployment',
+        ],
+        resources: [
+          'arn:aws:greengrass:*:*:components:*',
+          'arn:aws:greengrass:*:*:coreDevices:*',
+          'arn:aws:greengrass:*:*:deployments:*',
+        ],
+      }));
+
+      // IoT (scopable) — portal-created things use thing/dda-*, topics use
+      // topic/dda/*, jobs and thing-groups are portal-scoped by resource type.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
           'iot:DescribeThing',
-          'iot:DescribeEndpoint',
           'iot:DescribeThingGroup',
           'iot:GetThingType',
           'iot:ListThings',
@@ -134,23 +198,77 @@ export class ComputeStack extends cdk.Stack {
           'iot:GetThingShadow',
           'iot:UpdateThingShadow',
           'iot:DeleteThingShadow',
+        ],
+        resources: [
+          'arn:aws:iot:*:*:thing/dda-*',
+          'arn:aws:iot:*:*:topic/dda/*',
+          'arn:aws:iot:*:*:job/*',
+          'arn:aws:iot:*:*:thinggroup/*',
+        ],
+      }));
+
+      // IoT (unscopable): iot:DescribeEndpoint does not support resource-level
+      // permissions.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['iot:DescribeEndpoint'],
+        resources: ['*'],
+      }));
+
+      // CloudWatch Logs read (unscopable-ish): logs:DescribeLogGroups and the
+      // Filter/Get log-events reads do not usefully scope by log-group ARN when
+      // the portal must query arbitrary Greengrass log groups.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
           'logs:GetLogEvents',
           'logs:DescribeLogStreams',
           'logs:DescribeLogGroups',
           'logs:FilterLogEvents',
-          'sts:AssumeRole',
-          'execute-api:Invoke',
-          's3:GetBucketCors',
-          's3:PutBucketCors',
         ],
         resources: ['*'],
       }));
 
-      // Grant IAM PassRole permission for SageMaker execution role
+      // STS: scope AssumeRole to the fixed DDAPortalAccessRole role name. The
+      // arn:aws:iam::*:role/ account wildcard is now bounded to the trusted
+      // UseCase account list at synth time (matching I5/I6); the role name
+      // DDAPortalAccessRole stays fixed and only the account portion is scoped.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sts:AssumeRole'],
+        resources: props.trustedUseCaseAccountIds.map(
+          (id) => `arn:aws:iam::${id}:role/DDAPortalAccessRole`
+        ),
+      }));
+
+      // execute-api: scope Invoke to this portal account's API Gateway. The
+      // portal REST API is created after this role in the same stack, so the
+      // concrete API id is not resolvable at createLambdaRole time; fall back to
+      // a portal-account-scoped ARN rather than a global '*'.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['execute-api:Invoke'],
+        resources: [`arn:aws:execute-api:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:*/*`],
+      }));
+
+      // S3 CORS on the portal artifacts bucket. Cross-account CORS on Data
+      // Account buckets is separately granted via the assumed role (unchanged).
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          's3:GetBucketCors',
+          's3:PutBucketCors',
+        ],
+        resources: [props.portalArtifactsBucket.bucketArn],
+      }));
+
+      // Grant IAM PassRole permission for SageMaker execution role. Scoped to
+      // DDA*-named roles (DDAPortalAccessRole, DDASageMakerExecutionRole,
+      // DDAPortalDataAccessRole, …); the PassedToService condition is preserved.
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['iam:PassRole'],
-        resources: ['*'],
+        resources: ['arn:aws:iam::*:role/DDA*Role'],
         conditions: {
           StringEquals: {
             'iam:PassedToService': 'sagemaker.amazonaws.com',
@@ -172,20 +290,53 @@ export class ComputeStack extends cdk.Stack {
         }));
       }
 
-      // Grant S3 permissions for model artifact processing
-      // Note: Cross-account S3 access is handled via assumed role
+      // Grant S3 permissions for model artifact processing (I2).
+      // Access is now enforced at BOTH ends: this portal-account grant is
+      // scoped to the portal artifacts bucket (below) plus dda-portal:managed
+      // tagged buckets; cross-account S3 access still goes through the assumed
+      // DDAPortalAccessRole in the UseCase Account.
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
           's3:GetObject',
           's3:PutObject',
           's3:ListBucket',
-          's3:ListAllMyBuckets',
           's3:CreateBucket',
           's3:GetBucketLocation',
           's3:GetBucketTagging',
         ],
-        resources: ['*'], // Restricted by assumed role in UseCase Account
+        resources: [
+          props.portalArtifactsBucket.bucketArn,
+          `${props.portalArtifactsBucket.bucketArn}/*`,
+        ],
+      }));
+
+      // Tag-conditioned access to any bucket carrying dda-portal:managed=true.
+      // The wildcard resource is safe because the Condition gates it to
+      // portal-managed buckets only.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          's3:GetObject',
+          's3:PutObject',
+          's3:ListBucket',
+          's3:GetBucketLocation',
+          's3:GetBucketTagging',
+        ],
+        resources: ['arn:aws:s3:::*'],
+        conditions: {
+          StringEquals: {
+            'aws:ResourceTag/dda-portal:managed': 'true',
+          },
+        },
+      }));
+
+      // s3:ListAllMyBuckets does not support resource-level permissions per the
+      // AWS IAM reference; this statement is intentionally on '*'.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:ListAllMyBuckets'],
+        resources: ['*'],
       }));
 
       // Grant Resource Groups Tagging API permissions for finding tagged buckets
@@ -300,6 +451,12 @@ export class ComputeStack extends cdk.Stack {
         'iot:ListTagsForResource',
         'iot:RotateTunnelAccessToken',
       ],
+      // nosec: iam-resource-wildcard — AWS IoT Secure Tunneling OpenTunnel does
+      // not support resource-level permissions (the tunnel does not yet exist
+      // when OpenTunnel is called), and iot:ListTunnels is an account-scoped
+      // list operation; both must remain on '*'. The remaining Close/Describe/
+      // RotateTunnelAccessToken actions are bundled with them in this single
+      // grant. This statement is NOT one of the I1–I17 scanner findings.
       resources: ['*'],
     }));
 

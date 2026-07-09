@@ -1,0 +1,19 @@
+{
+  "cdk_out_representative": {
+    "edge-cv-portal/infrastructure/cdk.out/asset.059ba3c3f5e38ab1b92a54c9676715959ad324a82455d4730fad64a53d4c586a/audit_logs.py": "6d35b01067e9caa86d74a6913a189d974472fcbfd0dd5212c1c80ed4efb127b3"
+  },
+  "missing_at_capture": [],
+  "note": "Out-of-scope preservation guard for security-iam-authorization-fixes (Req 3.18). These files belong to sibling specs / generated build artifacts and MUST remain byte-for-byte unchanged by this spec.",
+  "sibling_spec_files": {
+    "edge-cv-portal/backend/functions/components.py": "5d93a01b6c0803696240b3be189d2afe4ca64781001397ef2370d6172227cdcd",
+    "edge-cv-portal/backend/functions/jwt_authorizer.py": "a6346ca76c243e2c9978ee757d770f0cf2a180756a05bfc99f8abf58dceef876",
+    "edge-cv-portal/backend/functions/model_converter.py": "1acab7c119908377dc6d315685126492075be0165c8dea51b5594762b2dc2738",
+    "edge-cv-portal/backend/functions/packaging.py": "79684d1a88847c5dd5cbc9ea07b1d75e4f2719ae5ce607fc6687156d420fd9a6",
+    "src/backend/app.py": "b737cda1746ef9200f9d2ce1aec33b3eda09286f1b67250e751395f9f9ebe904",
+    "src/backend/snapshot/Snapshotter.py": "a99ffc761450606da95ccea51ddd2e78dbe300997673a556b419ca3fdd8ffd2b",
+    "src/backend/utils/camera_manager.py": "d88b1f3fc1f95b8ddc098a6a7eb4edf10fc7da82d5d356f14c7c31dc0b7cac59",
+    "src/backend/utils/digital_input_process_manager.py": "5a0980f9661ffd90ff965bc4d2f7f16775fed7c7b4b3c5c65d0a99218c457aab",
+    "src/backend/utils/utils.py": "f3c30fd15cb653c53db0c58793333fbeabcef287674c32042b0217072b9f1103",
+    "src/edgemlsdk/src/test/longevity/deploy.py": "22d243bcb436894cf24cab1553a6ce4af53a70a08a04f45e9023fbdd50b34cfb"
+  }
+}

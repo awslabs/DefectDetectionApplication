@@ -16,6 +16,15 @@ export interface TrainingWorkflowStackProps extends cdk.StackProps {
   compilationHandler: lambda.Function;
   packagingHandler: lambda.Function;
   greengrassPublishHandler: lambda.Function;
+  /**
+   * Trusted UseCase account IDs the assume-role Lambda is allowed to assume
+   * `DDAPortalAccessRole` into. Sourced from CDK context
+   * (`-c trustedUseCaseAccountIds=111111111111,222222222222`) or a
+   * deployment-time SSM parameter (`/dda-portal/trusted-usecase-account-ids`).
+   * Must be non-empty — an empty list is a synth-time error (I6); the design
+   * DOES NOT fall back to a wildcard account.
+   */
+  trustedUseCaseAccountIds: string[];
 }
 
 export class TrainingWorkflowStack extends cdk.Stack {
@@ -23,6 +32,19 @@ export class TrainingWorkflowStack extends cdk.Stack {
 
   constructor(scope: Construct, id: string, props: TrainingWorkflowStackProps) {
     super(scope, id, props);
+
+    // Validate the trusted UseCase account list at synth time. An empty list
+    // would otherwise produce an empty sts:AssumeRole resource list; the
+    // design requires an explicit failure rather than any fallback to a
+    // wildcard account (I6).
+    if (!props.trustedUseCaseAccountIds || props.trustedUseCaseAccountIds.length === 0) {
+      throw new Error(
+        'TrainingWorkflowStack requires a non-empty trustedUseCaseAccountIds list ' +
+          '(pass -c trustedUseCaseAccountIds=<id>,<id> or the SSM parameter ' +
+          '/dda-portal/trusted-usecase-account-ids). Refusing to synth an ' +
+          'sts:AssumeRole grant on a wildcard account.'
+      );
+    }
 
     // SNS Topic for notifications
     const alertTopic = new sns.Topic(this, 'TrainingAlertTopic', {
@@ -64,9 +86,15 @@ def handler(event, context):
       timeout: cdk.Duration.seconds(30),
     });
 
+    // Account scoping is now enforced at synth time via the trusted UseCase
+    // account list (role name DDAPortalAccessRole stays fixed); the runtime
+    // ExternalId check performed by handler() below remains as defense in
+    // depth (I6).
     assumeRoleFunction.addToRolePolicy(new iam.PolicyStatement({
       actions: ['sts:AssumeRole'],
-      resources: ['*'], // Will be scoped to specific roles with ExternalId
+      resources: props.trustedUseCaseAccountIds.map(
+        (id) => `arn:aws:iam::${id}:role/DDAPortalAccessRole`
+      ),
     }));
 
     const startTrainingFunction = new lambda.Function(this, 'StartTraining', {

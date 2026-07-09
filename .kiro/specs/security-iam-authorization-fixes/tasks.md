@@ -54,7 +54,7 @@ duplicate under a build tree are generated / vendored and out of scope):
 
 ## Tasks
 
-- [ ] 1. Write bug-condition exploration test (IAM audit + targeted CDK / JSON-AST / README inspections)
+- [x] 1. Write bug-condition exploration test (IAM audit + targeted CDK / JSON-AST / README inspections)
   - **Property 1: Bug Condition** - An IAM policy statement in an in-scope file grants privileges wider than the calling code path uses — a scopable action on `resources: ['*']` / `"Resource": "*"`, a `service:*` action wildcard over an enumerable subset, `sts:AssumeRole` on `resources: ['*']` / `arn:aws:iam::*:role/...` (wildcard account), or a tag-based restriction declared in a code comment but not enforced by a `Condition` — across seventeen in-scope sites
   - **CRITICAL**: This test MUST FAIL (surface non-empty hits / observe the wildcard at each site) on the unfixed tree - the hits ARE the counterexamples that confirm the bug exists
   - **DO NOT attempt to fix any infrastructure source code in this task** - this task only writes tests and documents the counterexamples
@@ -91,7 +91,7 @@ duplicate under a build tree are generated / vendored and out of scope):
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 1.10, 1.11, 1.12, 1.13, 1.14, 1.15, 1.16, 1.17, 1.18_
 
 
-- [ ] 2. Write preservation baseline tests on the UNFIXED code (BEFORE implementing any fix)
+- [x] 2. Write preservation baseline tests on the UNFIXED code (BEFORE implementing any fix)
   - **Property 2: Preservation** - No behavior change for legitimate (non-bug-condition) inputs
   - **IMPORTANT**: Follow observation-first methodology - capture `F(X)` baselines on the UNFIXED tree, then (in task 9) assert the fixed code `F'(X)` matches exactly
   - **Emphasize property-based tests** (Hypothesis, already vendored under `.hypothesis/`) wherever the input domain is generatable — I1 DDA-vs-non-DDA ARNs, I3/I4 tagged-vs-untagged buckets, I5/I6 trusted-vs-untrusted accounts, IoT enumerable action subset; place the tests under `test/backend-test/security/preservation/` alongside the sibling suite
@@ -112,10 +112,10 @@ duplicate under a build tree are generated / vendored and out of scope):
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, 3.16, 3.17, 3.18_
 
 
-- [ ] 3. Wave 1 — README example policies FIRST (I16, I17) — documentation-only, zero runtime blast radius
+- [x] 3. Wave 1 — README example policies FIRST (I16, I17) — documentation-only, zero runtime blast radius
   - **Property 1: Fix Checking** - The two README example JSONs match the narrowed shape used by the shell installers; the surrounding prose is byte-for-byte identical
 
-  - [ ] 3.1 I16 — `README_main.md` `dda-build-policy` example (~line 230)
+  - [x] 3.1 I16 — `README_main.md` `dda-build-policy` example (~line 230)
     - Replace the JSON body inside the `dda-build-policy` code fence with the same narrowed shape used by `launch-arm64-build-server.sh` after I13 / I14: `IoTPermissions` split by resource type (thing ops on `arn:aws:iot:*:*:thing/dda-*`, `iot:DescribeJob` on `arn:aws:iot:*:*:job/*`, `iot:DescribeEndpoint` isolated on `"*"` with a JSON-adjacent comment); specific Greengrass v2 edge-device actions on the broad service ARN; `S3Permissions` scoped to `arn:aws:s3:::dda-component-*`, `arn:aws:s3:::dda-component-*/*`, `arn:aws:s3:::dda-inference-results-*`, `arn:aws:s3:::dda-inference-results-*/*`; `s3:ListAllMyBuckets` in its own statement with `"Resource": "*"` and a `"//": "unscopable — reason"` sibling key; preserve the `EC2Permissions`, `CloudWatchLogsPermissions`, `CloudWatchMetricsPermissions`, and `ECRPermissions` sids the installer emits
     - Preserve the surrounding prose byte-for-byte — the paragraph describing the policy purpose, the "replace `[AWS account id]` with your account ID" instruction, and the numbered step context (`1.` heading, follow-up `2.` / `3.` steps)
     - _Bug_Condition: isBugCondition(X) where X = README example `dda-build-policy` JSON with `greengrass:*` / `iot:*` / S3 on `"Resource": "*"` (I16)_
@@ -123,7 +123,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: the surrounding README prose is byte-for-byte identical; only the JSON code fence content changes (Req 3.16)_
     - _Requirements: 2.16_
 
-  - [ ] 3.2 I17 — `README_main.md` `dda-greengrass-policy` example (~line 256)
+  - [x] 3.2 I17 — `README_main.md` `dda-greengrass-policy` example (~line 256)
     - Replace the JSON body inside the `dda-greengrass-policy` code fence with the same narrowed shape used by `create-edge-device-iam-role.sh` after I10 / I11 / I12 and by `edge-device-iam-policy.json` after I15: specific Greengrass v2 edge-device actions (`GetComponentVersionArtifact`, `ResolveComponentCandidates`, `GetDeployment`, `GetCoreDevice`, `UpdateConnectivityInfo`, `ListComponents`, …) on the broad service ARN; IoT actions split by resource type (`iot:Connect` on `arn:aws:iot:*:*:client/dda-*`; `iot:Publish` / `Subscribe` / `Receive` on `arn:aws:iot:*:*:topic/dda/*` / `topicfilter/dda/*`; thing-shadow + `DescribeThing` on `arn:aws:iot:*:*:thing/dda-*`; `iot:DescribeEndpoint` isolated on `"*"`); S3 scoped to `arn:aws:s3:::dda-component-*`, `arn:aws:s3:::dda-component-*/*`, `arn:aws:s3:::dda-inference-results-*`, `arn:aws:s3:::dda-inference-results-*/*`; keep the CloudWatch Logs statement on `arn:aws:logs:*:*:*` as-is
     - Preserve the surrounding prose byte-for-byte — the paragraph describing when to attach the policy and the "Attach S3 permissions for component downloads" note
     - _Bug_Condition: isBugCondition(X) where X = README example `dda-greengrass-policy` JSON with `greengrass:*`, S3 `arn:aws:s3:::*` / `arn:aws:s3:::*/*` wildcards, and multiple IoT actions on `"Resource": "*"` (I17)_
@@ -132,10 +132,10 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Requirements: 2.17_
 
 
-- [ ] 4. Wave 2 — Standalone JSON policy template (I15) — applied at edge-device provisioning time
+- [x] 4. Wave 2 — Standalone JSON policy template (I15) — applied at edge-device provisioning time
   - **Property 1: Fix Checking** - The `IoTDataPlane` sid is split by IoT resource type; the four preserved sids are byte-for-byte identical
 
-  - [ ] 4.1 I15 — `station_install/edge-device-iam-policy.json` `IoTDataPlane` sid (~line 34)
+  - [x] 4.1 I15 — `station_install/edge-device-iam-policy.json` `IoTDataPlane` sid (~line 34)
     - Replace the single `IoTDataPlane` sid with four resource-type-split statements (or one statement with four `(Action, Resource)` correlations; the design's preferred readable shape is four separate sids): `iot:Connect` on `arn:aws:iot:*:*:client/dda-*`; `iot:Publish` on `arn:aws:iot:*:*:topic/dda/*`; `iot:Subscribe` on `arn:aws:iot:*:*:topicfilter/dda/*`; `iot:Receive` on `arn:aws:iot:*:*:topic/dda/*`
     - Preserve the `GreengrassComponentDownload`, `CloudWatchLogsUpload`, `AssumeDataAccountRole`, and `GreengrassConnectivity` sids byte-for-byte
     - The impact radius is future edge-device provisions only; existing devices are unaffected until they re-run `attach-role-policy`
@@ -145,10 +145,10 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Requirements: 2.15_
 
 
-- [ ] 5. Wave 3 — Shell installers (I7, I8, I9, I10, I11, I12, I13, I14) — inline JSON heredocs in customer-run scripts
+- [x] 5. Wave 3 — Shell installers (I7, I8, I9, I10, I11, I12, I13, I14) — inline JSON heredocs in customer-run scripts
   - **Property 1: Fix Checking** - Every modified heredoc's resource ARNs match the naming-convention patterns and every remaining wildcard is isolated with a documented comment; every non-modified sid / heredoc is byte-for-byte identical
 
-  - [ ] 5.1 I7 — `edge-cv-portal/deploy-account-role.sh` `S3_POLICY` first statement (~line 211)
+  - [x] 5.1 I7 — `edge-cv-portal/deploy-account-role.sh` `S3_POLICY` first statement (~line 211)
     - Narrow the first statement's `Resource` list from `["arn:aws:s3:::*", "arn:aws:s3:::*/*"]` to `["arn:aws:s3:::dda-*", "arn:aws:s3:::dda-*/*", "arn:aws:s3:::sagemaker-*", "arn:aws:s3:::sagemaker-*/*"]`
     - Preserve the second statement (the already-scoped `sagemaker-*` read allowlist) byte-for-byte, and the surrounding `LOGS_POLICY`, `SAGEMAKER_POLICY`, `PASS_ROLE_POLICY`, `ECR_POLICY` heredocs and the `aws iam put-role-policy` invocations
     - Add a shell comment above the heredoc recording the naming conventions and why the union of `dda-*` and `sagemaker-*` is the correct scope
@@ -157,7 +157,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: the second (already-scoped) `sagemaker-*` statement and the other heredocs (`LOGS_POLICY`, `SAGEMAKER_POLICY`, `PASS_ROLE_POLICY`, `ECR_POLICY`) are byte-for-byte identical (Req 3.7)_
     - _Requirements: 2.7_
 
-  - [ ] 5.2 I8 — `edge-cv-portal/deploy-account-role.sh` `SAGEMAKER_POLICY` (~line 281)
+  - [x] 5.2 I8 — `edge-cv-portal/deploy-account-role.sh` `SAGEMAKER_POLICY` (~line 281)
     - Narrow the first statement's `Resource` from `"*"` to `["arn:aws:sagemaker:*:${CURRENT_ACCOUNT}:training-job/dda-*", "arn:aws:sagemaker:*:${CURRENT_ACCOUNT}:compilation-job/dda-*", "arn:aws:sagemaker:*:${CURRENT_ACCOUNT}:labeling-job/dda-*", "arn:aws:sagemaker:*:${CURRENT_ACCOUNT}:model/dda-*"]`
     - Preserve the sibling `iam:PassRole` / `iam:GetRole` statement byte-for-byte (already scoped to `arn:aws:iam::*:role/DDASageMakerExecutionRole`)
     - `sagemaker:ListWorkteams` is NOT in this heredoc's action list, so no unscopable-action isolation is required
@@ -166,7 +166,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: the sibling `iam:PassRole` / `iam:GetRole` statement is byte-for-byte identical (Req 3.8)_
     - _Requirements: 2.8_
 
-  - [ ] 5.3 I9 — `edge-cv-portal/deploy-account-role.sh` `GREENGRASS_POLICY` `AllowDDABucketPatternAccess` sid (~line 378)
+  - [x] 5.3 I9 — `edge-cv-portal/deploy-account-role.sh` `GREENGRASS_POLICY` `AllowDDABucketPatternAccess` sid (~line 378)
     - Narrow the `Resource` list from `["arn:aws:s3:::dda-*", "arn:aws:s3:::dda-*/*", "arn:aws:s3:::*-dda-*", "arn:aws:s3:::*-dda-*/*"]` to `["arn:aws:s3:::dda-*", "arn:aws:s3:::dda-*/*"]` — remove the two substring-match entries
     - Preserve the `AllowPortalComponentBucketAccess`, `AllowInferenceResultsUpload`, `AllowEcrAuthToken`, and `AllowEcrImagePull` sids byte-for-byte
     - _Bug_Condition: isBugCondition(X) where X = `AllowDDABucketPatternAccess` sid `Resource` list containing `arn:aws:s3:::*-dda-*` substring-match entries (I9)_
@@ -174,7 +174,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: the `AllowPortalComponentBucketAccess`, `AllowInferenceResultsUpload`, `AllowEcrAuthToken`, `AllowEcrImagePull` sids are byte-for-byte identical (Req 3.9)_
     - _Requirements: 2.9_
 
-  - [ ] 5.4 I10 — `station_install/create-edge-device-iam-role.sh` `GreengrassPermissions` sid (~line 114)
+  - [x] 5.4 I10 — `station_install/create-edge-device-iam-role.sh` `GreengrassPermissions` sid (~line 114)
     - Replace `["greengrass:*", "greengrassv2:*"]` with the enumerable subset the edge device uses: `greengrass:GetComponentVersionArtifact`, `greengrass:ResolveComponentCandidates`, `greengrass:GetDeploymentConfiguration`, `greengrassv2:GetDeployment`, `greengrassv2:GetCoreDevice`, `greengrassv2:UpdateConnectivityInfo`, `greengrassv2:ListComponents`, `greengrassv2:GetComponentVersionArtifact`, `greengrassv2:ResolveComponentCandidates`
     - Keep `"Resource": "*"` with an adjacent shell comment recording that Greengrass v1 API resource support is limited and action-scoping is the primary defense on customer edge devices
     - Preserve the sibling sids (`IoTPermissions` — modified in 5.5; `S3Permissions` — modified in 5.6; `CloudWatchLogsPermissions`, `CloudWatchMetricsPermissions`, `ECRPermissions`, `STSPermissions`) byte-for-byte
@@ -183,7 +183,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: the sibling sids and the other heredocs are byte-for-byte identical (Req 3.10)_
     - _Requirements: 2.10_
 
-  - [ ] 5.5 I11 — `station_install/create-edge-device-iam-role.sh` `IoTPermissions` sid (~line 122)
+  - [x] 5.5 I11 — `station_install/create-edge-device-iam-role.sh` `IoTPermissions` sid (~line 122)
     - Split into four statements and drop the `iot:*` wildcard: (a) `iot:Connect` on `arn:aws:iot:*:*:client/dda-*`; (b) `iot:Publish`, `iot:Subscribe`, `iot:Receive` on `["arn:aws:iot:*:*:topic/dda/*", "arn:aws:iot:*:*:topicfilter/dda/*"]`; (c) `iot:GetThingShadow`, `iot:UpdateThingShadow`, `iot:DescribeThing` on `arn:aws:iot:*:*:thing/dda-*`; (d) `iot:DescribeEndpoint` on `"*"` with an adjacent shell comment recording the action is unscopable
     - Preserve the sibling sids byte-for-byte
     - _Bug_Condition: isBugCondition(X) where X = `IoTPermissions` sid granting `iot:*` on `"Resource": "*"` (I11)_
@@ -191,7 +191,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: the sibling sids and the other heredocs are byte-for-byte identical (Req 3.11)_
     - _Requirements: 2.11_
 
-  - [ ] 5.6 I12 — `station_install/create-edge-device-iam-role.sh` `S3Permissions` sid (~line 130)
+  - [x] 5.6 I12 — `station_install/create-edge-device-iam-role.sh` `S3Permissions` sid (~line 130)
     - Replace `"Resource": "*"` with `["arn:aws:s3:::dda-component-*", "arn:aws:s3:::dda-component-*/*", "arn:aws:s3:::dda-inference-results-*", "arn:aws:s3:::dda-inference-results-*/*"]`
     - Preserve the `Action` list byte-for-byte (`s3:GetObject`, `PutObject`, `ListBucket`, `GetBucketLocation`, `GetBucketVersioning`, `ListBucketVersions`)
     - Preserve the sibling sids byte-for-byte
@@ -200,7 +200,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: the `Action` list is unchanged; the sibling sids and other heredocs are byte-for-byte identical (Req 3.12)_
     - _Requirements: 2.12_
 
-  - [ ] 5.7 I13 — `edge-cv-portal/launch-arm64-build-server.sh` `IoTPermissions` sid (~line 155)
+  - [x] 5.7 I13 — `edge-cv-portal/launch-arm64-build-server.sh` `IoTPermissions` sid (~line 155)
     - Split into three statements and drop the `iot:*` wildcard: (a) thing ops (`iot:DescribeThing`, `iot:CreateThing`, `iot:UpdateThingShadow`, `iot:AttachPolicy`) on `arn:aws:iot:*:*:thing/dda-*`; (b) job ops (`iot:DescribeJob`) on `arn:aws:iot:*:*:job/*`; (c) `iot:DescribeEndpoint` on `"*"` with an adjacent shell comment recording the reason
     - Preserve the sibling sids (`GreengrassPermissions` — already enumerated; `S3Permissions` — modified in 5.8; `EC2Permissions`, `CloudWatchLogsPermissions`, `CloudWatchMetricsPermissions`, `ECRPermissions`) byte-for-byte
     - _Bug_Condition: isBugCondition(X) where X = build-server `IoTPermissions` sid granting `iot:*` on `"Resource": "*"` (I13)_
@@ -208,7 +208,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: the sibling sids and other heredocs are byte-for-byte identical (Req 3.13)_
     - _Requirements: 2.13_
 
-  - [ ] 5.8 I14 — `edge-cv-portal/launch-arm64-build-server.sh` `S3Permissions` sid (~line 161)
+  - [x] 5.8 I14 — `edge-cv-portal/launch-arm64-build-server.sh` `S3Permissions` sid (~line 161)
     - Split into two statements: (a) scoped bucket ops (every action currently in the sid EXCEPT `s3:ListAllMyBuckets` — `CreateBucket`, `GetBucketLocation`, `PutBucketVersioning`, `GetObject`, `PutObject`, `ListBucket`, `DeleteObject`, `GetBucketVersioning`, `ListBucketVersions`, `GetBucketPolicy`, `PutBucketPolicy`, `GetBucketAcl`, `PutBucketAcl`, `GetBucketTagging`, `PutBucketTagging`) on `["arn:aws:s3:::dda-component-*", "arn:aws:s3:::dda-component-*/*", "arn:aws:s3:::dda-inference-results-*", "arn:aws:s3:::dda-inference-results-*/*"]`; (b) `s3:ListAllMyBuckets` isolated on `"Resource": "*"` with an adjacent shell comment recording the action is unscopable
     - Preserve the sibling sids byte-for-byte
     - _Bug_Condition: isBugCondition(X) where X = build-server `S3Permissions` sid with mixed scopable + unscopable actions on `"Resource": "*"` (I14)_
@@ -217,10 +217,10 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Requirements: 2.14_
 
 
-- [ ] 6. Wave 4 — CDK non-`sts:AssumeRole` fixes (I1, I2, I3, I4) — synth-diff-verifiable `PolicyStatement` changes
+- [x] 6. Wave 4 — CDK non-`sts:AssumeRole` fixes (I1, I2, I3, I4) — synth-diff-verifiable `PolicyStatement` changes
   - **Property 1: Fix Checking** - Every modified `PolicyStatement` grants the narrowest privilege set; every non-modified statement in the four stacks is byte-for-byte identical in the emitted CloudFormation
 
-  - [ ] 6.1 I1 — `edge-cv-portal/infrastructure/lib/compute-stack.ts` `createLambdaRole` combined statement (~line 146) + sibling `iam:PassRole`
+  - [x] 6.1 I1 — `edge-cv-portal/infrastructure/lib/compute-stack.ts` `createLambdaRole` combined statement (~line 146) + sibling `iam:PassRole`
     - Split the single combined `PolicyStatement` into eight per-service statements, dropping the umbrella `resources: ['*']`:
       1. **SageMaker (scopable)**: `CreateTrainingJob`, `DescribeTrainingJob`, `ListTrainingJobs`, `CreateCompilationJob`, `DescribeCompilationJob`, `ListCompilationJobs`, `CreateLabelingJob`, `DescribeLabelingJob`, `ListLabelingJobs`, `StopLabelingJob`, `DescribeWorkteam`, `AddTags` on `arn:aws:sagemaker:*:*:training-job/dda-*`, `compilation-job/dda-*`, `labeling-job/dda-*`, `model/dda-*`, `workteam/*`
       2. **SageMaker (unscopable)**: `sagemaker:ListWorkteams` on `resources: ['*']` with a `//` code comment recording the AWS IAM reference
@@ -239,7 +239,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: every non-modified `PolicyStatement` in `compute-stack.ts` is byte-for-byte identical in the emitted CloudFormation (Req 3.1)_
     - _Requirements: 2.1_
 
-  - [ ] 6.2 I2 — `edge-cv-portal/infrastructure/lib/compute-stack.ts` portal Lambda S3 grant (~line 183)
+  - [x] 6.2 I2 — `edge-cv-portal/infrastructure/lib/compute-stack.ts` portal Lambda S3 grant (~line 183)
     - Replace `resources: ['*']` with `[props.portalArtifactsBucket.bucketArn, `${props.portalArtifactsBucket.bucketArn}/*`]` (bucket + object levels), keeping the same actions list except `s3:ListAllMyBuckets`
     - Add a tag-conditioned wildcard statement for `dda-portal:managed=true` buckets: `role.addToPolicy(new iam.PolicyStatement({ effect: iam.Effect.ALLOW, actions: ['s3:GetObject', 's3:PutObject', 's3:ListBucket', 's3:GetBucketLocation', 's3:GetBucketTagging'], resources: ['arn:aws:s3:::*'], conditions: { StringEquals: { 'aws:ResourceTag/dda-portal:managed': 'true' } } }))`
     - Isolate `s3:ListAllMyBuckets` into its own statement on `resources: ['*']` with a `//` code comment recording the action is unscopable per the AWS IAM reference
@@ -250,7 +250,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: every non-modified statement in `compute-stack.ts` is byte-for-byte identical (Req 3.2)_
     - _Requirements: 2.2_
 
-  - [ ] 6.3 I3 — `edge-cv-portal/infrastructure/lib/usecase-account-stack.ts` Ground Truth S3 grant (~line 197)
+  - [x] 6.3 I3 — `edge-cv-portal/infrastructure/lib/usecase-account-stack.ts` Ground Truth S3 grant (~line 197)
     - Split the `groundTruthRole.addToPolicy(...)` block into two statements:
       1. **Tag-conditioned**: same actions (`s3:GetObject`, `PutObject`, `DeleteObject`, `ListBucket`, `GetBucketLocation`, `GetBucketCors`, `PutBucketCors`) on `arn:aws:s3:::*` and `arn:aws:s3:::*/*` with `conditions: { StringEquals: { 'aws:ResourceTag/dda-portal:managed': 'true' } }`; add a `//` code comment recording that Ground Truth input/output buckets MUST carry the tag
       2. **Unconditional `sagemaker-*` allowlist**: same actions on `arn:aws:s3:::sagemaker-*` and `arn:aws:s3:::sagemaker-*/*` (mirrors the `S3SageMakerAccess` sid)
@@ -260,7 +260,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: every sibling statement in `usecase-account-stack.ts` is byte-for-byte identical (Req 3.3)_
     - _Requirements: 2.3_
 
-  - [ ] 6.4 I4 — `edge-cv-portal/infrastructure/lib/usecase-account-stack.ts` `DDAPortalAccessRole` `S3BucketAccess` + `S3ObjectAccess` sids (~line 425)
+  - [x] 6.4 I4 — `edge-cv-portal/infrastructure/lib/usecase-account-stack.ts` `DDAPortalAccessRole` `S3BucketAccess` + `S3ObjectAccess` sids (~line 425)
     - Add `conditions: { StringEquals: { 'aws:ResourceTag/dda-portal:managed': 'true' } }` to the `S3BucketAccess` `PolicyStatement` (bucket-level actions on `arn:aws:s3:::*`); the in-code comment above the block ("Tag-based access for flexibility. Buckets must be tagged with `'dda-portal:managed' = 'true'`") remains — the comment now accurately describes the enforced behavior
     - Add the same `Condition` to the `S3ObjectAccess` `PolicyStatement` (object-level actions on `arn:aws:s3:::*/*`)
     - Preserve every sibling statement byte-for-byte — `SageMakerTraining`, `SageMakerCompilation`, `SageMakerAlgorithm`, `GroundTruthLabelingV2`, `GroundTruthWorkteams`, `ResourceTaggingAccess`, `S3SageMakerAccess`, `CloudWatchLogs`, and every other sid — verified by the same `cdk synth` snapshot diff as I3
@@ -271,10 +271,10 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Requirements: 2.4_
 
 
-- [ ] 7. Wave 5 — CDK `sts:AssumeRole` fixes (I5, I6) + audit gate (I18) LAST — highest blast radius
+- [x] 7. Wave 5 — CDK `sts:AssumeRole` fixes (I5, I6) + audit gate (I18) LAST — highest blast radius
   - **Property 1: Fix Checking** - `sts:AssumeRole` resources reference specific account IDs from `props.trustedUseCaseAccountIds`; the audit gate returns zero disallowed hits
 
-  - [ ] 7.1 I5 — `edge-cv-portal/infrastructure/lib/labeling-workflow-stack.ts` `LabelingMonitorFunction` `sts:AssumeRole` (~line 44)
+  - [x] 7.1 I5 — `edge-cv-portal/infrastructure/lib/labeling-workflow-stack.ts` `LabelingMonitorFunction` `sts:AssumeRole` (~line 44)
     - Add `trustedUseCaseAccountIds: string[]` to `LabelingWorkflowStackProps` as a required prop; the constructor validates it is non-empty at synth time (empty array throws — the design DOES NOT fall back to a wildcard account); the value is sourced from CDK context (`this.node.tryGetContext('trustedUseCaseAccountIds')`) or a documented SSM parameter (`/dda-portal/trusted-usecase-account-ids`) as the default fallback
     - Replace the wildcard-account resource with the mapped list: `resources: props.trustedUseCaseAccountIds.map(id => \`arn:aws:iam::${id}:role/DDAPortalAccessRole\`)` — the role name `DDAPortalAccessRole` stays fixed; only the account portion is scoped
     - Update the app entry (`bin/*.ts`) to pass `trustedUseCaseAccountIds` to `new LabelingWorkflowStack(...)`, sourced from CDK context (`-c trustedUseCaseAccountIds=111111111111,222222222222`) or the SSM parameter at synth time
@@ -284,7 +284,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: every sibling construct in `labeling-workflow-stack.ts` is byte-for-byte identical in the emitted CloudFormation; the monitor Lambda still succeeds against accounts in the trusted list (Req 3.5)_
     - _Requirements: 2.5_
 
-  - [ ] 7.2 I6 — `edge-cv-portal/infrastructure/lib/training-workflow-stack.ts` `assumeRoleFunction` `sts:AssumeRole` (~line 67)
+  - [x] 7.2 I6 — `edge-cv-portal/infrastructure/lib/training-workflow-stack.ts` `assumeRoleFunction` `sts:AssumeRole` (~line 67)
     - Add `trustedUseCaseAccountIds: string[]` to `TrainingWorkflowStackProps` as a required prop (same pattern as I5)
     - Replace `resources: ['*']` with the mapped list: `resources: props.trustedUseCaseAccountIds.map(id => \`arn:aws:iam::${id}:role/DDAPortalAccessRole\`)`
     - Update the "Will be scoped to specific roles with ExternalId" comment to record that account scoping is now at synth time via the trusted list while the runtime `ExternalId` check remains in the inline handler (or remove the comment — the scoping is now in place)
@@ -296,7 +296,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Preservation: every sibling function / Step Function state in `training-workflow-stack.ts` is byte-for-byte identical in the emitted CloudFormation; the inline handler's `ExternalId` check is unchanged (Req 3.6)_
     - _Requirements: 2.6_
 
-  - [ ] 7.3 I18 — repo-audit gate finalize (Req 2.18)
+  - [x] 7.3 I18 — repo-audit gate finalize (Req 2.18)
     - Keep the audit from task 1 as a runnable check that greps the twelve in-scope files for the four bug-condition categories (`cdk_wildcard_resource`, `json_resource_wildcard`, `service_wildcard_action`, `assume_role_wildcard_account`)
     - Assert `iam_audit.disallowed_hits()` returns zero across `IN_SCOPE_FILES`, allowing ONLY occurrences carrying a documented `// nosec` / `# nosec` / JSON-adjacent-comment exception (the isolated `s3:ListAllMyBuckets`, `sagemaker:ListWorkteams`, `iot:DescribeEndpoint`, `logs:DescribeLogGroups`-class, `sts:GetCallerIdentity`, `cloudwatch:PutMetricData`, `ecr:GetAuthorizationToken`, `tag:GetResources`, `resourcegroupstaggingapi:GetResources` statements)
     - Enforce precise in-scope scoping: exclude `edge-cv-portal/infrastructure/cdk.out/asset.*`, any vendored duplicate under a build tree, and the security test files' own pattern strings; the gate must still FAIL if a wildcard resource on a scopable action, a `service:*` action wildcard, a wildcard-account `sts:AssumeRole`, or an unenforced-tag `PolicyStatement` is reintroduced into any real in-scope source file
@@ -306,7 +306,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - _Requirements: 2.18_
 
 
-- [ ] 8. Verify the bug-condition exploration test now passes (Fix Checking)
+- [x] 8. Verify the bug-condition exploration test now passes (Fix Checking)
   - **Property 1: Expected Behavior** - Every wildcard scoped / service-wildcard enumerated / wildcard-account bounded / tag condition enforced / unscopable action documented
   - **IMPORTANT**: Re-run the SAME audit + targeted tests from task 1 - do NOT write new tests
   - Re-run the targeted tests on the fixed tree: I1 — eight per-service statements each with ARNs matching the naming-convention patterns and `iam:PassRole` scoped to `arn:aws:iam::*:role/DDA*Role`; I2 — portal S3 scoped to `props.portalArtifactsBucket.bucketArn` + tag-conditioned wildcard, `ListAllMyBuckets` isolated with a code comment; I3 — Ground Truth S3 split into tag-conditioned + `sagemaker-*` allowlist; I4 — `S3BucketAccess` + `S3ObjectAccess` both carry the tag `Condition`; I5, I6 — `sts:AssumeRole` resources reference the mapped `trustedUseCaseAccountIds` list (no `iam::*` wildcard, no `resources: ['*']`); I7–I9 — `deploy-account-role.sh` heredocs narrow to `dda-*` / `sagemaker-*` prefixes with the `*-dda-*` substring entries gone; I10–I12 — `create-edge-device-iam-role.sh` heredocs enumerate the Greengrass v2 / IoT actions and scope S3 to `dda-component-*` / `dda-inference-results-*`; I13, I14 — `launch-arm64-build-server.sh` heredocs split IoT by resource type and isolate `ListAllMyBuckets`; I15 — `edge-device-iam-policy.json` `IoTDataPlane` sid split by resource type; I16, I17 — `README_main.md` example JSONs match the narrowed shape
@@ -315,7 +315,7 @@ duplicate under a build tree are generated / vendored and out of scope):
   - **EXPECTED OUTCOME**: No wildcard is observed at any site AND the audit returns ZERO disallowed hits (minus the documented `// nosec` / `# nosec` / JSON-adjacent-comment exceptions for the unscopable subset) AND every property-based test's invariant holds
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 2.10, 2.11, 2.12, 2.13, 2.14, 2.15, 2.16, 2.17, 2.18_
 
-- [ ] 9. Verify preservation baseline tests still pass (Preservation Checking)
+- [x] 9. Verify preservation baseline tests still pass (Preservation Checking)
   - **Property 2: Preservation** - No behavior change for legitimate inputs
   - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
   - Run the preservation baselines/property tests under the fix:
@@ -332,8 +332,8 @@ duplicate under a build tree are generated / vendored and out of scope):
   - **EXPECTED OUTCOME**: Tests PASS (no regressions); `F(X) = F'(X)` for all non-bug-condition inputs (every legitimate portal / cross-account / edge-device / build-server / Ground Truth flow succeeds identically)
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, 3.16, 3.17, 3.18_
 
-- [ ] 10. Integration + CI-gate verification
-  - [ ] 10.1 Run the backend security suites and wire `iam_audit.py` into `build-custom.sh`
+- [x] 10. Integration + CI-gate verification
+  - [x] 10.1 Run the backend security suites and wire `iam_audit.py` into `build-custom.sh`
     - Run the backend security suites to completion — `iam_audit.py`, `test_iam_bug_condition_exploration.py`, `test_iam_cdk_synth_preservation.py`, and the `security/preservation` suite — and confirm the IAM / authorization unit + property tests pass with no regressions
     - Wire the new gate into `build-custom.sh`'s existing security-audit gate block (next to the Group-1 injection/deserialization gate and the Group-3 secrets/credentials/JWT gate, under `set -e`, ~lines 236–241):
       - `python${PYTHON_VERSION} test/backend-test/security/iam_audit.py`
@@ -346,7 +346,7 @@ duplicate under a build tree are generated / vendored and out of scope):
     - Edge-device provisioning (I15): apply the narrowed `edge-device-iam-policy.json` to a provisioned edge device; assert IoT connect / publish / subscribe / receive succeed on `dda-*` clients / `dda/*` topics; assert a non-DDA client id fails
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 2.10, 2.11, 2.12, 2.13, 2.14, 2.15, 2.16, 2.17, 2.18, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, 3.16, 3.17, 3.18_
 
-- [ ] 11. Checkpoint - Ensure all tests pass and the CI gate is wired
+- [x] 11. Checkpoint - Ensure all tests pass and the CI gate is wired
   - Confirm the task-1 audit + targeted tests now observe no disallowed wildcard at any site and `iam_audit.disallowed_hits()` returns zero (task 8), the task-2 preservation baselines still pass — `cdk synth` diff clean for the four stacks, heredoc JSON goldens match, JSON template preserved sids match, README prose byte-for-byte identical, PBTs 1–4 invariants hold (task 9), and the backend security suites + integration checks pass (task 10)
   - Confirm the `iam_audit.py` gate (plus the exploration and preservation suites) is wired into `build-custom.sh` so a disallowed wildcard-resource / service-wildcard / wildcard-account / unenforced-tag pattern reappearing in in-scope infrastructure code fails the build
   - Confirm the deployment-time gate items — the `dda-portal:managed=true` tag has been applied to every currently-working legitimate customer bucket BEFORE the I4 fix lands, and `trustedUseCaseAccountIds` is correctly sourced at synth time for every environment

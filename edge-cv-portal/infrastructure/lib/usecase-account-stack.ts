@@ -193,7 +193,11 @@ export class UseCaseAccountStack extends cdk.Stack {
       assumedBy: new iam.ServicePrincipal('sagemaker.amazonaws.com'),
     });
 
-    // Ground Truth S3 access - allow all buckets for flexibility
+    // Ground Truth S3 access - tag-conditioned for flexibility
+    // Ground Truth input/output buckets have customer-chosen names, so the
+    // wildcard resource is gated by the 'dda-portal:managed' = 'true' tag:
+    // operators MUST tag every Ground Truth input/output bucket with
+    // dda-portal:managed=true for this role to access it.
     this.groundTruthRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -209,6 +213,34 @@ export class UseCaseAccountStack extends cdk.Stack {
         resources: [
           'arn:aws:s3:::*',
           'arn:aws:s3:::*/*',
+        ],
+        conditions: {
+          StringEquals: {
+            'aws:ResourceTag/dda-portal:managed': 'true',
+          },
+        },
+      })
+    );
+
+    // SageMaker-managed buckets (always allowed, unconditional) - mirrors the
+    // S3SageMakerAccess sid on the DDAPortalAccessRole. SageMaker's own
+    // sagemaker-* buckets are not customer-tagged, so they are allowlisted
+    // by prefix rather than by the dda-portal:managed tag condition above.
+    this.groundTruthRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          's3:GetObject',
+          's3:PutObject',
+          's3:DeleteObject',
+          's3:ListBucket',
+          's3:GetBucketLocation',
+          's3:GetBucketCors',
+          's3:PutBucketCors',
+        ],
+        resources: [
+          'arn:aws:s3:::sagemaker-*',
+          'arn:aws:s3:::sagemaker-*/*',
         ],
       })
     );
@@ -252,6 +284,13 @@ export class UseCaseAccountStack extends cdk.Stack {
           'sagemaker:DeleteModel',
           'sagemaker:ListModels',
         ],
+        // nosec: iam-resource-wildcard — this is the Ground Truth execution
+        // role's SageMaker job/model grant, NOT one of the I1–I17 scanner
+        // findings (the scoped SageMaker finding is I8 on the
+        // DDASageMakerExecutionRole in deploy-account-role.sh). These
+        // create/describe/stop/list actions span dynamically-named training,
+        // compilation, labeling jobs and models and are left on '*' here to
+        // preserve existing Ground Truth behavior byte-for-byte.
         resources: ['*'],
       })
     );
@@ -399,6 +438,10 @@ export class UseCaseAccountStack extends cdk.Stack {
         sid: 'GroundTruthWorkteams',
         effect: iam.Effect.ALLOW,
         actions: ['sagemaker:ListWorkteams', 'sagemaker:DescribeWorkteam'],
+        // nosec: iam-resource-wildcard — sagemaker:ListWorkteams does not
+        // support resource-level permissions; sagemaker:DescribeWorkteam is
+        // bundled here to describe the workteam(s) returned by that list call.
+        // NOT one of the I1–I17 scanner findings; left on '*'.
         resources: ['*'],
       })
     );
@@ -438,6 +481,11 @@ export class UseCaseAccountStack extends cdk.Stack {
           's3:PutBucketTagging',
         ],
         resources: ['arn:aws:s3:::*'],
+        conditions: {
+          StringEquals: {
+            'aws:ResourceTag/dda-portal:managed': 'true',
+          },
+        },
       })
     );
 
@@ -452,6 +500,11 @@ export class UseCaseAccountStack extends cdk.Stack {
           's3:DeleteObject',
         ],
         resources: ['arn:aws:s3:::*/*'],
+        conditions: {
+          StringEquals: {
+            'aws:ResourceTag/dda-portal:managed': 'true',
+          },
+        },
       })
     );
 
@@ -562,6 +615,12 @@ export class UseCaseAccountStack extends cdk.Stack {
           'greengrass:TagResource',
           'greengrass:UntagResource',
         ],
+        // nosec: iam-resource-wildcard — Greengrass v2 deployment actions have
+        // limited resource-level support (deployment ARNs are not known at
+        // policy-authoring time and CreateDeployment/ListDeployments do not
+        // scope to a specific deployment). The grant is already bounded by an
+        // aws:ResourceAccount Condition below. NOT one of the I1–I17 scanner
+        // findings.
         resources: ['*'],
         conditions: {
           StringEquals: {
@@ -583,6 +642,11 @@ export class UseCaseAccountStack extends cdk.Stack {
           'greengrass:ListEffectiveDeployments',
           'greengrass:ListTagsForResource',
         ],
+        // nosec: iam-resource-wildcard — Greengrass v2 core-device actions have
+        // limited resource-level support (ListCoreDevices is an account-scoped
+        // list op; GetCoreDevice/ListInstalledComponents target devices whose
+        // ARNs are not known at policy-authoring time). NOT one of the I1–I17
+        // scanner findings; left on '*'.
         resources: ['*'],
       })
     );

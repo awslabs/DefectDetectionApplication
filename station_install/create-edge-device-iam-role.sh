@@ -104,6 +104,11 @@ else
 fi
 
 # Create inline policy with Greengrass, IoT, S3, CloudWatch, and ECR permissions
+# NOTE (I10): GreengrassPermissions keeps "Resource": "*" because the Greengrass v1
+# API has limited resource-level permission support. On customer edge devices,
+# action-scoping (the enumerated edge-device action subset below) is the primary
+# defense; the service-wildcard actions (greengrass:*, greengrassv2:*) have been
+# removed in favor of only the actions the edge device actually exercises.
 INLINE_POLICY=$(cat <<'EOF'
 {
   "Version": "2012-10-17",
@@ -112,16 +117,54 @@ INLINE_POLICY=$(cat <<'EOF'
       "Sid": "GreengrassPermissions",
       "Effect": "Allow",
       "Action": [
-        "greengrass:*",
-        "greengrassv2:*"
+        "greengrass:GetComponentVersionArtifact",
+        "greengrass:ResolveComponentCandidates",
+        "greengrass:GetDeploymentConfiguration",
+        "greengrassv2:GetDeployment",
+        "greengrassv2:GetCoreDevice",
+        "greengrassv2:UpdateConnectivityInfo",
+        "greengrassv2:ListComponents",
+        "greengrassv2:GetComponentVersionArtifact",
+        "greengrassv2:ResolveComponentCandidates"
       ],
       "Resource": "*"
     },
     {
-      "Sid": "IoTPermissions",
+      "Sid": "IoTConnect",
       "Effect": "Allow",
       "Action": [
-        "iot:*"
+        "iot:Connect"
+      ],
+      "Resource": "arn:aws:iot:*:*:client/dda-*"
+    },
+    {
+      "Sid": "IoTDataPlane",
+      "Effect": "Allow",
+      "Action": [
+        "iot:Publish",
+        "iot:Subscribe",
+        "iot:Receive"
+      ],
+      "Resource": [
+        "arn:aws:iot:*:*:topic/dda/*",
+        "arn:aws:iot:*:*:topicfilter/dda/*"
+      ]
+    },
+    {
+      "Sid": "IoTThingShadow",
+      "Effect": "Allow",
+      "Action": [
+        "iot:GetThingShadow",
+        "iot:UpdateThingShadow",
+        "iot:DescribeThing"
+      ],
+      "Resource": "arn:aws:iot:*:*:thing/dda-*"
+    },
+    {
+      "Sid": "IoTDescribeEndpoint",
+      "Effect": "Allow",
+      "Action": [
+        "iot:DescribeEndpoint"
       ],
       "Resource": "*"
     },
@@ -136,7 +179,12 @@ INLINE_POLICY=$(cat <<'EOF'
         "s3:GetBucketVersioning",
         "s3:ListBucketVersions"
       ],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:s3:::dda-component-*",
+        "arn:aws:s3:::dda-component-*/*",
+        "arn:aws:s3:::dda-inference-results-*",
+        "arn:aws:s3:::dda-inference-results-*/*"
+      ]
     },
     {
       "Sid": "CloudWatchLogsPermissions",

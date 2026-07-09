@@ -1,0 +1,97 @@
+{
+  "full": {
+    "Statement": [
+      {
+        "Action": [
+          "s3:GetObject",
+          "s3:GetObjectVersion"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::dda-component-*/*",
+          "arn:aws:s3:::greengrass-component-artifacts-*/*"
+        ],
+        "Sid": "GreengrassComponentDownload"
+      },
+      {
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
+        ],
+        "Effect": "Allow",
+        "Resource": "arn:aws:logs:*:*:log-group:/aws/greengrass/*",
+        "Sid": "CloudWatchLogsUpload"
+      },
+      {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Resource": "arn:aws:iam::*:role/dda-cross-account-role",
+        "Sid": "AssumeDataAccountRole"
+      },
+      {
+        "Action": [
+          "iot:Connect",
+          "iot:Publish",
+          "iot:Subscribe",
+          "iot:Receive"
+        ],
+        "Effect": "Allow",
+        "Resource": "*",
+        "Sid": "IoTDataPlane"
+      },
+      {
+        "Action": [
+          "greengrass:GetDeploymentStatus",
+          "greengrass:GetConnectivityInfo"
+        ],
+        "Effect": "Allow",
+        "Resource": "*",
+        "Sid": "GreengrassConnectivity"
+      }
+    ],
+    "Version": "2012-10-17"
+  },
+  "preserved_sids": {
+    "AssumeDataAccountRole": {
+      "Action": "sts:AssumeRole",
+      "Effect": "Allow",
+      "Resource": "arn:aws:iam::*:role/dda-cross-account-role",
+      "Sid": "AssumeDataAccountRole"
+    },
+    "CloudWatchLogsUpload": {
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:logs:*:*:log-group:/aws/greengrass/*",
+      "Sid": "CloudWatchLogsUpload"
+    },
+    "GreengrassComponentDownload": {
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:s3:::dda-component-*/*",
+        "arn:aws:s3:::greengrass-component-artifacts-*/*"
+      ],
+      "Sid": "GreengrassComponentDownload"
+    },
+    "GreengrassConnectivity": {
+      "Action": [
+        "greengrass:GetDeploymentStatus",
+        "greengrass:GetConnectivityInfo"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "GreengrassConnectivity"
+    }
+  },
+  "sha256": "047862810f579922302c416effbe1a6b41e991271560259e87f966b157b5fe77"
+}

@@ -123,7 +123,13 @@ if ! aws iam get-role --role-name "$IAM_PROFILE" &>/dev/null; then
         --role-name "$IAM_PROFILE" \
         --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
     
-    # Attach inline policy for build permissions
+    # Attach inline policy for build permissions.
+    # Least-privilege note: IoT and S3 actions are scoped by resource where the
+    # AWS IAM reference supports it (thing/dda-*, job/*, dda-component-* and
+    # dda-inference-results-* buckets). Two actions cannot be scoped by resource
+    # and are therefore isolated into their own statements on "Resource": "*":
+    #   - IoTEndpointDiscovery  (iot:DescribeEndpoint)  -- unscopable per IAM ref
+    #   - S3ListAllBuckets      (s3:ListAllMyBuckets)   -- unscopable per IAM ref
     aws iam put-role-policy \
         --role-name "$IAM_PROFILE" \
         --policy-name DDABuildPolicy \
@@ -152,9 +158,26 @@ if ! aws iam get-role --role-name "$IAM_PROFILE" &>/dev/null; then
                     "Resource": "*"
                 },
                 {
-                    "Sid": "IoTPermissions",
+                    "Sid": "IoTThingPermissions",
                     "Effect": "Allow",
-                    "Action": ["iot:*"],
+                    "Action": [
+                        "iot:DescribeThing",
+                        "iot:CreateThing",
+                        "iot:UpdateThingShadow",
+                        "iot:AttachPolicy"
+                    ],
+                    "Resource": "arn:aws:iot:*:*:thing/dda-*"
+                },
+                {
+                    "Sid": "IoTJobPermissions",
+                    "Effect": "Allow",
+                    "Action": ["iot:DescribeJob"],
+                    "Resource": "arn:aws:iot:*:*:job/*"
+                },
+                {
+                    "Sid": "IoTEndpointDiscovery",
+                    "Effect": "Allow",
+                    "Action": ["iot:DescribeEndpoint"],
                     "Resource": "*"
                 },
                 {
@@ -175,9 +198,19 @@ if ! aws iam get-role --role-name "$IAM_PROFILE" &>/dev/null; then
                         "s3:GetBucketAcl",
                         "s3:PutBucketAcl",
                         "s3:GetBucketTagging",
-                        "s3:PutBucketTagging",
-                        "s3:ListAllMyBuckets"
+                        "s3:PutBucketTagging"
                     ],
+                    "Resource": [
+                        "arn:aws:s3:::dda-component-*",
+                        "arn:aws:s3:::dda-component-*/*",
+                        "arn:aws:s3:::dda-inference-results-*",
+                        "arn:aws:s3:::dda-inference-results-*/*"
+                    ]
+                },
+                {
+                    "Sid": "S3ListAllBuckets",
+                    "Effect": "Allow",
+                    "Action": ["s3:ListAllMyBuckets"],
                     "Resource": "*"
                 },
                 {

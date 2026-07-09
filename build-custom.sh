@@ -238,6 +238,24 @@ else
       python${PYTHON_VERSION} -m pytest \
         test/backend-test/security/test_secrets_bug_condition_exploration.py -v
       echo "Security secrets/credentials/JWT audit gate passed."
+
+      # ── Security IAM / authorization audit gate ───────────────────────────
+      # (spec: security-iam-authorization-fixes). A gate covering the IAM
+      # least-privilege batch:
+      #   1. iam_audit.py — pattern gate; exits non-zero if a disallowed
+      #      wildcard-resource-on-scopable-action / service:* action wildcard /
+      #      wildcard-account sts:AssumeRole / unenforced-tag PolicyStatement
+      #      reappears in in-scope infrastructure code (minus documented
+      #      # nosec exceptions).
+      #   2. Fix-checking suite — every IAM/authorization vector stays
+      #      neutralized (scoped ARNs / tag Conditions / bounded accounts).
+      # The security/preservation suite (run by the Group-1 gate above) already
+      # covers the IAM preservation baselines (test_preservation_iam_*).
+      echo "Running security IAM/authorization audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/iam_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_iam_bug_condition_exploration.py -v
+      echo "Security IAM/authorization audit gate passed."
     ' || { echo "ERROR: backend unit tests / security audit gate failed"; exit 1; }
   echo "Backend unit tests passed."
 fi

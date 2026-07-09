@@ -208,6 +208,13 @@ EOF
     echo "Attaching policies..."
     
     # S3 Policy
+    # Scope: DDA-managed buckets follow the committed naming conventions
+    # (dda-* prefix for portal-managed buckets); SageMaker's own managed
+    # buckets use the sagemaker-* prefix. The first statement is narrowed to
+    # the union of dda-* and sagemaker-* at both the bucket and object levels
+    # so this execution role can only touch DDA/SageMaker resources, not every
+    # bucket in the account. The second statement (sagemaker-* read allowlist)
+    # remains unchanged.
     S3_POLICY=$(cat <<EOF
 {
   "Version": "2012-10-17",
@@ -224,8 +231,10 @@ EOF
         "s3:PutBucketCors"
       ],
       "Resource": [
-        "arn:aws:s3:::*",
-        "arn:aws:s3:::*/*"
+        "arn:aws:s3:::dda-*",
+        "arn:aws:s3:::dda-*/*",
+        "arn:aws:s3:::sagemaker-*",
+        "arn:aws:s3:::sagemaker-*/*"
       ]
     },
     {
@@ -301,7 +310,12 @@ EOF
         "sagemaker:DeleteModel",
         "sagemaker:ListModels"
       ],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:sagemaker:*:${CURRENT_ACCOUNT}:training-job/dda-*",
+        "arn:aws:sagemaker:*:${CURRENT_ACCOUNT}:compilation-job/dda-*",
+        "arn:aws:sagemaker:*:${CURRENT_ACCOUNT}:labeling-job/dda-*",
+        "arn:aws:sagemaker:*:${CURRENT_ACCOUNT}:model/dda-*"
+      ]
     },
     {
       "Effect": "Allow",
@@ -401,9 +415,7 @@ EOF
       ],
       "Resource": [
         "arn:aws:s3:::dda-*",
-        "arn:aws:s3:::dda-*/*",
-        "arn:aws:s3:::*-dda-*",
-        "arn:aws:s3:::*-dda-*/*"
+        "arn:aws:s3:::dda-*/*"
       ]
     },
     {

@@ -31,15 +31,28 @@
       "Resource": "arn:aws:iam::*:role/dda-cross-account-role"
     },
     {
-      "Sid": "IoTDataPlane",
+      "Sid": "IoTConnect",
       "Effect": "Allow",
-      "Action": [
-        "iot:Connect",
-        "iot:Publish",
-        "iot:Subscribe",
-        "iot:Receive"
-      ],
-      "Resource": "*"
+      "Action": "iot:Connect",
+      "Resource": "arn:aws:iot:*:*:client/dda-*"
+    },
+    {
+      "Sid": "IoTPublish",
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": "arn:aws:iot:*:*:topic/dda/*"
+    },
+    {
+      "Sid": "IoTSubscribe",
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": "arn:aws:iot:*:*:topicfilter/dda/*"
+    },
+    {
+      "Sid": "IoTReceive",
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": "arn:aws:iot:*:*:topic/dda/*"
     },
     {
       "Sid": "GreengrassConnectivity",

@@ -33,6 +33,14 @@ const storageStack = new StorageStack(app, 'EdgeCVPortalStorageStack', {
 // Note: cloudFrontDomain is optional and can be set after initial deployment
 // to enable automatic CORS configuration on Data Account buckets
 const cloudFrontDomain = app.node.tryGetContext('cloudFrontDomain');
+// Trusted UseCase account IDs that portal Lambdas may assume DDAPortalAccessRole
+// into. Comma-separated CDK context value; absence yields an empty list, which
+// the ComputeStack constructor rejects at synth time (safe default — no
+// wildcard-account fallback).
+const trustedUseCaseAccountIds: string[] = (app.node.tryGetContext('trustedUseCaseAccountIds') || '')
+  .split(',')
+  .map((id: string) => id.trim())
+  .filter((id: string) => id.length > 0);
 const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   env,
   description: 'Compute and API infrastructure for Edge CV Portal',
@@ -52,6 +60,7 @@ const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   dataAccountsTable: storageStack.dataAccountsTable,
   portalArtifactsBucket: storageStack.portalArtifactsBucket,
   cloudFrontDomain,
+  trustedUseCaseAccountIds,
 });
 
 // Frontend Stack (CloudFront, S3)
