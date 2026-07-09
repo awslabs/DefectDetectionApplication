@@ -222,6 +222,22 @@ else
         test/backend-test/security/preservation \
         -p no:cacheprovider --noconftest -v
       echo "Security audit gate passed."
+
+      # ── Security secrets/credentials/JWT audit gate ───────────────────────
+      # (spec: security-secrets-credentials-jwt-fixes). A second gate covering
+      # the secrets/credentials/JWT batch:
+      #   1. secrets_audit.py — pattern gate; exits non-zero if a disallowed
+      #      json.dumps(event) log / access_key|secret_key interpolation /
+      #      un-annotated verify_signature=False reappears in in-scope source.
+      #   2. Fix-checking suite — every secrets/credentials/JWT vector stays
+      #      neutralized.
+      # Preservation suite is already run by the Group-1 gate above (it covers
+      # both specs'\'' baselines).
+      echo "Running security secrets/credentials/JWT audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/secrets_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_secrets_bug_condition_exploration.py -v
+      echo "Security secrets/credentials/JWT audit gate passed."
     ' || { echo "ERROR: backend unit tests / security audit gate failed"; exit 1; }
   echo "Backend unit tests passed."
 fi

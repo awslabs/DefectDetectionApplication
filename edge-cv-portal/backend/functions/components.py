@@ -302,7 +302,7 @@ def list_private_components(credentials: Dict, region: str, query_params: Dict) 
         # Create Resource Groups Tagging API client with assumed role (or default credentials for single-account)
         tagging_client = create_boto3_client('resourcegroupstaggingapi', credentials, region)
         
-        pagination_token = ''
+        pagination_token = ''  # nosec B105 — empty pagination cursor, not a secret.
         tagged_resources = []
         
         print(f"[DEBUG] Listing private components with credentials: is_default={credentials.get('is_default_credentials')}")

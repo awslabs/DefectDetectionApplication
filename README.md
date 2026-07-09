@@ -206,7 +206,7 @@ USER_POOL_ID=$(aws cloudformation describe-stacks \
 aws cognito-idp admin-set-user-password \
   --user-pool-id $USER_POOL_ID \
   --username admin \
-  --password YourSecurePassword1234! \
+  --password <YOUR_SECURE_PASSWORD> \
   --permanent \
   --region $REGION
 

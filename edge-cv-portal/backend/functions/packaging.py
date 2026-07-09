@@ -437,7 +437,7 @@ def _trigger_component_creation(training_id: str, training_job: Dict) -> None:
             }),
             'requestContext': {
                 'authorizer': {'claims': {
-                    'sub': 'system', 'email': 'system@edgecv.com', 'cognito:username': 'system'
+                    'sub': 'system', 'email': 'system@example.com', 'cognito:username': 'system'
                 }}
             }
         }

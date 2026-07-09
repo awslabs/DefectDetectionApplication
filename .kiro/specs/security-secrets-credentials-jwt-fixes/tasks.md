@@ -39,7 +39,7 @@ vendored and out of scope):
 
 ## Tasks
 
-- [ ] 1. Write bug-condition exploration test (secrets/credentials/JWT audit + targeted exploit-shaped tests)
+- [x] 1. Write bug-condition exploration test (secrets/credentials/JWT audit + targeted exploit-shaped tests)
   - **Property 1: Bug Condition** - A secret value reaches a log / command sink, a real-looking credential sits in copy-pasteable text, or a scanner-flagged pattern lacks a documented exception across nine application-code sites
   - **CRITICAL**: This test MUST FAIL (surface non-empty hits / observe the secret at the sink) on the unfixed tree - the hits ARE the counterexamples that confirm the bug exists
   - **DO NOT attempt to fix any application source code in this task** - this task only writes tests and documents the counterexamples
@@ -65,7 +65,7 @@ vendored and out of scope):
   - Mark task complete when the audit + targeted tests are written, run, and the counterexamples are documented
   - _Requirements: 1.1, 1.2, 1.5, 1.10_
 
-- [ ] 2. Write preservation baseline tests on the UNFIXED code (BEFORE implementing any fix)
+- [x] 2. Write preservation baseline tests on the UNFIXED code (BEFORE implementing any fix)
   - **Property 2: Preservation** - No behavior change for legitimate (non-bug-condition) inputs
   - **IMPORTANT**: Follow observation-first methodology - capture `F(X)` baselines on the UNFIXED tree, then (in task 8) assert the fixed code `F'(X)` matches exactly
   - **Emphasize property-based tests** (Hypothesis, already vendored under `.hypothesis/`) wherever the input domain is generatable; place the tests under `test/backend-test/security/preservation/` alongside the sibling suite
@@ -87,10 +87,10 @@ vendored and out of scope):
   - Mark task complete when tests are written, run, and passing on unfixed code
   - _Requirements: 3.1, 3.2, 3.3, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10_
 
-- [ ] 3. Doc / `# nosem`-only fixes FIRST (S3, S4, S5, S6, S7, S8, S9) — zero runtime risk
+- [x] 3. Doc / `# nosem`-only fixes FIRST (S3, S4, S5, S6, S7, S8, S9) — zero runtime risk
   - **Property 1: Fix Checking** - Real-looking credentials neutralized and each intentional scanner-flagged pattern documented (comment / literal-text edits only, no control-flow change)
 
-  - [ ] 3.1 S3 — `packaging.py`: RFC 2606 reserved domain
+  - [x] 3.1 S3 — `packaging.py`: RFC 2606 reserved domain
     - Change the synthetic-identity email literal (in the auto-triggered `greengrass_event` `requestContext.authorizer.claims`) from `'email': 'system@edgecv.com'` to `'email': 'system@example.com'`
     - No other value changes
     - _Bug_Condition: isBugCondition(X) where X = real registrable domain in copy-pasteable synthetic-identity text (S3)_
@@ -98,14 +98,14 @@ vendored and out of scope):
     - _Preservation: all other packaging behavior is byte-for-byte identical (Req 3.3)_
     - _Requirements: 2.3_
 
-  - [ ] 3.2 S4 — `README.md`: placeholder password (doc-only)
+  - [x] 3.2 S4 — `README.md`: placeholder password (doc-only)
     - In the Cognito admin setup command, replace `  --password YourSecurePassword1234! \` with `  --password <YOUR_SECURE_PASSWORD> \`
     - _Bug_Condition: isBugCondition(X) where X = real-looking password literal in a copy-pasteable doc command (S4)_
     - _Expected_Behavior: the password is an obvious, non-copyable placeholder (`<YOUR_SECURE_PASSWORD>`)_
     - _Preservation: the command flags and structure are otherwise unchanged (Req 3.4)_
     - _Requirements: 2.4_
 
-  - [ ] 3.3 S5 — `jwt_authorizer.py`: documented unverified pre-parse (line 131)
+  - [x] 3.3 S5 — `jwt_authorizer.py`: documented unverified pre-parse (line 131)
     - Add a documented `# nosem` marker (using the exact Semgrep rule id reported for the finding) + a comment on the `jwt.decode(token, options={"verify_signature": False})` line recording that the unverified read obtains `kid`/`iss` ONLY for JWKS-key selection and that a full RS256 signature-verified decode (`verify_exp`/`verify_aud`/`verify_iss`) is enforced afterward at ~line 178 before any claim is used
     - No control-flow change; the two-stage decode is unchanged
     - Include the tampered-token-rejected assertion in the accompanying test (a tampered token is still rejected by the verified decode)
@@ -114,7 +114,7 @@ vendored and out of scope):
     - _Preservation: the two-stage decode is unchanged — a valid token still validates, a tampered token is still rejected; the annotation changes no control flow (Req 3.5)_
     - _Requirements: 2.5_
 
-  - [ ] 3.4 S6 — `app.py`: documented LAN-UI bind (lines 271, 274)
+  - [x] 3.4 S6 — `app.py`: documented LAN-UI bind (lines 271, 274)
     - Add a `# nosem`/`# nosec B104` marker + rationale on BOTH `uvicorn.Config(app, host="0.0.0.0", ...)` lines: the 5443 line noting it is TLS-protected AND gated by station authorization; the 5000 line noting it is the auth-disabled-only plaintext path, intentional for an on-device edge appliance serving the LAN UI
     - No bind behavior changes
     - _Bug_Condition: isBugCondition(X) where X = intentional `0.0.0.0` LAN-UI bind with no documented exception (S6)_
@@ -122,7 +122,7 @@ vendored and out of scope):
     - _Preservation: the same host (`0.0.0.0`) and ports (5443 TLS when auth enabled, 5000 plaintext when disabled) with the same uvicorn config (Req 3.6)_
     - _Requirements: 2.6_
 
-  - [ ] 3.5 S7 — `components.py`: B105 false positive (line 305)
+  - [x] 3.5 S7 — `components.py`: B105 false positive (line 305)
     - On the `pagination_token = ''` line add `# nosec B105` + a one-line rationale, e.g. `# nosec B105 — empty pagination cursor, not a secret.`
     - Value and pagination behavior unchanged
     - _Bug_Condition: isBugCondition(X) where X = empty-string pagination cursor flagged B105 with no documented exception (S7)_
@@ -130,7 +130,7 @@ vendored and out of scope):
     - _Preservation: the empty `pagination_token` cursor initializes and pages exactly as before (Req 3.7)_
     - _Requirements: 2.7_
 
-  - [ ] 3.6 S8 — `deploy.py`: B105 false positive (~lines 59, 207)
+  - [x] 3.6 S8 — `deploy.py`: B105 false positive (~lines 59, 207)
     - On the `secret_name = "edgeml-sdk-longevity-tests"` line (~59) add `# nosec B105 — Secrets Manager secret name / S3 bucket name, not a password.`; apply the same annotation to the `bucket_name = 'edgeml-sdk-longevity-tests'` literal in `main` (~line 207)
     - Values and their S3 / Secrets Manager operations unchanged
     - _Bug_Condition: isBugCondition(X) where X = non-secret bucket/secret name flagged B105 with no documented exception (S8)_
@@ -138,7 +138,7 @@ vendored and out of scope):
     - _Preservation: the same `'edgeml-sdk-longevity-tests'` value is used for the same S3 / Secrets Manager operations (Req 3.8)_
     - _Requirements: 2.8_
 
-  - [ ] 3.7 S9 — `test_auth.py`: B106 false positives (lines 47, 60, 71, 83, 95, 106)
+  - [x] 3.7 S9 — `test_auth.py`: B106 false positives (lines 47, 60, 71, 83, 95, 106)
     - On each of the six `token=` argument lines (the `token=""`, `token="good-token"`, `token="inactive-token"`, `token="some-token"` fixtures) add a `# nosec B106` + rationale, e.g. `# nosec B106 — test-only fixture, not a real credential.`
     - Test inputs, assertions, and outcomes unchanged; the suite still passes
     - _Bug_Condition: isBugCondition(X) where X = test-only token literals flagged B106 with no documented exception (S9)_
@@ -146,8 +146,8 @@ vendored and out of scope):
     - _Preservation: the same scenarios with the same fixtures and assertions; all tests still pass (Req 3.9)_
     - _Requirements: 2.9_
 
-- [ ] 4. S1 — `jwt_authorizer.py`: redact the invocation log (substantive, after the doc-only changes)
-  - [ ] 4.1 Add `_safe_event_metadata` and replace the full-event log
+- [x] 4. S1 — `jwt_authorizer.py`: redact the invocation log (substantive, after the doc-only changes)
+  - [x] 4.1 Add `_safe_event_metadata` and replace the full-event log
     - **Property 1: Fix Checking** - The JWT authorizer invocation log never receives a bearer token
     - Add a `_safe_event_metadata(event)` helper near the top of the module that returns ONLY non-sensitive fields — `{"methodArn": event.get("methodArn")}` plus `requestId` when `requestContext.requestId` is present — and NEVER `authorizationToken` or `headers`
     - Replace the sink line `logger.info(f"JWT Authorizer invoked with event: {json.dumps(event, default=str)}")` (line 272) with a redacted log of the small metadata dict only, e.g. `logger.info("JWT Authorizer invoked: %s", _safe_event_metadata(event))`
@@ -157,8 +157,8 @@ vendored and out of scope):
     - _Preservation: the authorizer emits the same allow/deny IAM policy (`principalId`, `Effect`, `Resource`, `context`) for the same event; only the log-line content changes (Req 3.1)_
     - _Requirements: 2.1_
 
-- [ ] 5. S2 — `deploy.py`: remove the embedded AWS credentials (LAST / highest risk)
-  - [ ] 5.1 Remove the credential-export entries and the `-a`/`-s` fragment
+- [x] 5. S2 — `deploy.py`: remove the embedded AWS credentials (LAST / highest risk)
+  - [x] 5.1 Remove the credential-export entries and the `-a`/`-s` fragment
     - **Property 1: Fix Checking** - The SSM command strings contain no `access_key`/`secret_key` value
     - Delete the two credential-export list elements from `download_edgemlsdk_release_artifacts` (`f"export AWS_ACCESS_KEY_ID={credentials.access_key}"` and `f"export AWS_SECRET_ACCESS_KEY={credentials.secret_key}"`, ~lines 230–231); keep the adjacent `f"export AWS_DEFAULT_REGION={q_region}"` line
     - Delete exactly ` -a {credentials.access_key} -s {credentials.secret_key}` from the mqtt `run_mqtt_longevity` command string (~line 250); preserve every other byte, including the sibling spec's `shlex.quote`'d `-l {q_longevity_hours} -r {q_region} -m {q_mqtt_endpoint} -n {q_payload_size}` fragments
@@ -170,7 +170,7 @@ vendored and out of scope):
     - _Preservation: the SSM commands perform the same actions using instance-profile credentials; the rest of the command strings — including the sibling spec's `shlex.quote`'d args — are preserved byte-for-byte except for the removed fragments; the boto3 client kwargs still receive `credentials` (Req 3.2)_
     - _Requirements: 2.2_
 
-  - [ ] 5.2 S2b — guard `run_mqtt_longevity.sh` `aws configure set` on non-empty values (companion follow-up)
+  - [x] 5.2 S2b — guard `run_mqtt_longevity.sh` `aws configure set` on non-empty values (companion follow-up)
     - **Property 1: Fix Checking** - The containerized CLI falls back to the IMDS instance role instead of writing empty static credentials
     - In `src/edgemlsdk/src/test/longevity/mqtt/run_mqtt_longevity.sh`, guard the `aws configure set aws_access_key_id` / `aws_secret_access_key` calls so they run ONLY when a non-empty value is provided, e.g. `[ -n "${aws_access_key_id}" ] && aws configure set aws_access_key_id "${aws_access_key_id}"` (same for the secret key)
     - Keep `aws configure set region ${aws_region}` unchanged (region is not a secret)
@@ -181,8 +181,8 @@ vendored and out of scope):
     - _Preservation: with legitimate deploy args the mqtt longevity path still runs, sourcing credentials from the instance role (Req 3.2)_
     - _Requirements: 2.2_
 
-- [ ] 6. S10 — repo-audit gate finalize (Req 2.10)
-  - [ ] 6.1 Make `secrets_audit.disallowed_hits()` return zero on the fixed tree
+- [x] 6. S10 — repo-audit gate finalize (Req 2.10)
+  - [x] 6.1 Make `secrets_audit.disallowed_hits()` return zero on the fixed tree
     - Keep the audit from task 1 as a runnable check that greps the in-scope tree for the three bug-condition sinks (`log_event_dump`, `cred_in_command`, `unverified_jwt`)
     - Assert zero disallowed hits across `IN_SCOPE_FILES`, allowing ONLY occurrences carrying a documented `# nosem`/`# nosec` exception (the S5 pre-parse line, and the S6–S9 documented markers)
     - Enforce precise in-scope scoping: exclude `cdk.out/asset.*`, the vendored `src/backend/edgemlsdk/edgemlsdk/` duplicate of `deploy.py`, and the security test files' own pattern strings; the gate must still FAIL if a full-event log, an interpolated credential, or an un-annotated `verify_signature=False` is reintroduced into any real in-scope source file
@@ -191,7 +191,7 @@ vendored and out of scope):
     - _Preservation: the generated CDK artifacts, the vendored duplicate, and out-of-scope findings are not touched (Req 3.10)_
     - _Requirements: 2.10_
 
-- [ ] 7. Verify the bug-condition exploration test now passes (Fix Checking)
+- [x] 7. Verify the bug-condition exploration test now passes (Fix Checking)
   - **Property 1: Expected Behavior** - Every secret sink closed / pattern documented
   - **IMPORTANT**: Re-run the SAME audit + targeted tests from task 1 - do NOT write new tests
   - Re-run the targeted tests on the fixed tree: S1 — the handler log line contains `methodArn`/`requestId` and NEVER the token or headers; S2 — the constructed command strings contain NO `access_key`/`secret_key`/`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`-a`/`-s` fragment; S5 — a tampered token is still rejected AND the pre-parse line carries the documented `# nosem`
@@ -199,7 +199,7 @@ vendored and out of scope):
   - **EXPECTED OUTCOME**: No secret is observed at any sink AND the audit returns ZERO disallowed hits (minus the documented `# nosem`/`# nosec` exceptions for S5–S9)
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 2.10_
 
-- [ ] 8. Verify preservation baseline tests still pass (Preservation Checking)
+- [x] 8. Verify preservation baseline tests still pass (Preservation Checking)
   - **Property 2: Preservation** - No behavior change for legitimate inputs
   - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
   - Run the preservation baselines/property tests under the fix: S1 — identical allow/deny IAM policy for the same (mocked-decode) event; S2 — command strings equal the baseline **minus exactly** the removed credential fragments (byte-for-byte, including the sibling spec's `shlex.quote`'d args); S5 — valid token validates, tampered token rejected; S6 — same bind config; S7 — same pagination; S8 — same bucket/secret value and operations; S9 — the `test_auth.py` suite passes unchanged
@@ -207,8 +207,8 @@ vendored and out of scope):
   - **EXPECTED OUTCOME**: Tests PASS (no regressions); `F(X) = F'(X)` for all non-bug-condition inputs
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10_
 
-- [ ] 9. Integration + CI-gate verification
-  - [ ] 9.1 Run the backend security suites and wire the audit into `build-custom.sh`
+- [x] 9. Integration + CI-gate verification
+  - [x] 9.1 Run the backend security suites and wire the audit into `build-custom.sh`
     - Run the backend security suites to completion — `secrets_audit.py`, `test_secrets_bug_condition_exploration.py`, and the `security/preservation` suite — and confirm the secrets/credentials/JWT unit + property tests pass with no regressions
     - Wire the new gate into `build-custom.sh`'s existing security-audit gate block (~lines 207–225, under `set -e`), next to the Group-1 gate:
       - `python${PYTHON_VERSION} test/backend-test/security/secrets_audit.py`
@@ -218,7 +218,7 @@ vendored and out of scope):
     - End-to-end spot checks: invoke the authorizer with a valid token → same allow policy, log line free of the token; with an invalid token → deny policy, no token logged; `deploy.py` with valid args builds command strings free of any key
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 2.10, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10_
 
-- [ ] 10. Checkpoint - Ensure all tests pass and the CI gate is wired
+- [x] 10. Checkpoint - Ensure all tests pass and the CI gate is wired
   - Confirm the task-1 audit + targeted tests now observe no secret at any sink and `disallowed_hits()` returns zero (task 7), the task-2 preservation tests still pass (task 8), and the backend security suites + integration checks pass (task 9)
   - Confirm the `secrets_audit.py` gate (plus the exploration and preservation suites) is wired into `build-custom.sh` so a disallowed full-event log / credential interpolation / un-annotated `verify_signature=False` reappearing in in-scope application code fails the build
   - Ensure all tests pass; ask the user if questions arise

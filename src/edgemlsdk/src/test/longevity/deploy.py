@@ -56,7 +56,7 @@ def _validate_deploy_args(args):
 
 
 aws_region = ""
-secret_name = "edgeml-sdk-longevity-tests"
+secret_name = "edgeml-sdk-longevity-tests"  # nosec B105 — Secrets Manager secret name / S3 bucket name, not a password.
 # EC2 instance parameters
 ec2_instance_type = 't4g.2xlarge'
 ec2_image_id = 'ami-073614ec1eee63d19' # Amazon Linux 2023 AMI 2023.1.20230912.0 arm64 HVM kernel-6.1
@@ -204,7 +204,7 @@ def main(args):
     if args.mqtt:
         source_folder = 'mqtt/'
         destination_prefix = 'mqtt'
-    bucket_name = 'edgeml-sdk-longevity-tests'
+    bucket_name = 'edgeml-sdk-longevity-tests'  # nosec B105 — Secrets Manager secret name / S3 bucket name, not a password.
     
     upload_folder_to_s3(s3_client, source_folder, bucket_name, destination_prefix)
     graph_json_path = os.path.join(os.getcwd(), 'longevity.json')
@@ -222,13 +222,15 @@ def main(args):
     q_ubuntu_version = shlex.quote(str(args.ubuntu_version))
     q_python_version = shlex.quote(str(args.python_version))
 
+    # AWS credentials for the deployed instance come from the EC2 IAM instance
+    # profile (already passed as ``iam_instance_profile_arn`` to
+    # ``create_instance``) via IMDSv2, so the container's aws CLI / SDK resolves
+    # credentials automatically. No static keys are embedded in the SSM commands.
     download_edgemlsdk_release_artifacts = [
         "sudo yum update",
         "sudo yum install docker -y",
         "sudo service docker start",
         "sudo service docker status",
-        f"export AWS_ACCESS_KEY_ID={credentials.access_key}",
-        f"export AWS_SECRET_ACCESS_KEY={credentials.secret_key}",
         f"export AWS_DEFAULT_REGION={q_region}",
         "sudo mkdir -p /edgemlsdk",
         f"sudo mkdir -p /edgemlsdk/{source_folder}",
@@ -247,7 +249,7 @@ def main(args):
         q_payload_size = shlex.quote(str(args.payload_size))
         run_mqtt_longevity = [f"docker run -v /edgemlsdk:/edgemlsdk -idt --log-driver=awslogs --log-opt awslogs-region=us-west-2 --log-opt awslogs-group=edgemlsdk-{q_ubuntu_version}-{q_platform}-{q_python_version}-{q_mqtt} --log-opt awslogs-create-group=true \
             ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/edgemlsdk:{q_ubuntu_version}-{q_platform}-{q_python_version}-latest \
-            bash -c '''cd /edgemlsdk; dpkg -i Panorama_1.0.{q_release_date}.deb;apt-get install tmux -y; python3 -m pip install panorama-1.0-py3-none-any.whl; bash /edgemlsdk/mqtt/run_mqtt_longevity.sh -l {q_longevity_hours} -r {q_region} -m {q_mqtt_endpoint} -n {q_payload_size} -a {credentials.access_key} -s {credentials.secret_key}'''"]
+            bash -c '''cd /edgemlsdk; dpkg -i Panorama_1.0.{q_release_date}.deb;apt-get install tmux -y; python3 -m pip install panorama-1.0-py3-none-any.whl; bash /edgemlsdk/mqtt/run_mqtt_longevity.sh -l {q_longevity_hours} -r {q_region} -m {q_mqtt_endpoint} -n {q_payload_size}'''"]
     task = DeployLongevity("ec2")
     instance_id = task.create_instance(
         credentials, iam_instance_profile_arn

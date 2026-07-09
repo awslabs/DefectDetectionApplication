@@ -23,6 +23,13 @@ clean tokens (``aarch64``, ``22.04``, ``3.11``, ``us-west-2``, an 8-digit date,
 numeric sizes), the constructed command strings for LEGITIMATE args must be
 identical before and after the fix.
 
+NOTE (re-pinned by security-secrets-credentials-jwt-fixes S2 / Req 2.2, task 5):
+that sibling spec REMOVED the two ``export AWS_ACCESS_KEY_ID`` /
+``AWS_SECRET_ACCESS_KEY`` entries and the trailing `` -a {access_key} -s
+{secret_key}`` mqtt fragment from the constructed commands. The reference
+templates below have therefore been re-pinned to the post-S2 shape; every other
+byte of the injection-spec baseline is preserved.
+
 Methodology: run the REAL ``deploy.py`` ``main()`` with boto3 stubbed and the AWS
 side effects patched out, capturing the exact ``commands`` lists handed to SSM.
 The baseline is the ``reference_*`` template (the verbatim f-string shape); the
@@ -114,14 +121,17 @@ def _capture_ssm_commands(args):
 # valid args.
 # --------------------------------------------------------------------------- #
 def reference_download(args, access_key, secret_key):
+    # NOTE: the two ``export AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``
+    # entries were removed by security-secrets-credentials-jwt-fixes S2/Req 2.2
+    # (task 5); the ``access_key``/``secret_key`` params are kept in the
+    # signature for backward compatibility with existing callers/tests but are
+    # no longer interpolated.
     source_folder = "mqtt/" if args.mqtt else ""
     return [
         "sudo yum update",
         "sudo yum install docker -y",
         "sudo service docker start",
         "sudo service docker status",
-        f"export AWS_ACCESS_KEY_ID={access_key}",
-        f"export AWS_SECRET_ACCESS_KEY={secret_key}",
         f"export AWS_DEFAULT_REGION={args.region}",
         "sudo mkdir -p /edgemlsdk",
         f"sudo mkdir -p /edgemlsdk/{source_folder}",
@@ -135,10 +145,15 @@ def reference_download(args, access_key, secret_key):
 
 
 def reference_run_mqtt(args, access_key, secret_key):
+    # NOTE: the trailing `` -a {access_key} -s {secret_key}`` fragment was
+    # removed by security-secrets-credentials-jwt-fixes S2/Req 2.2 (task 5);
+    # the ``access_key``/``secret_key`` params are kept in the signature for
+    # backward compatibility with existing callers/tests but are no longer
+    # interpolated.
     return [
         f"docker run -v /edgemlsdk:/edgemlsdk -idt --log-driver=awslogs --log-opt awslogs-region=us-west-2 --log-opt awslogs-group=edgemlsdk-{args.ubuntu_version}-{args.platform}-{args.python_version}-{args.mqtt} --log-opt awslogs-create-group=true \
             ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/edgemlsdk:{args.ubuntu_version}-{args.platform}-{args.python_version}-latest \
-            bash -c '''cd /edgemlsdk; dpkg -i Panorama_1.0.{args.release_date}.deb;apt-get install tmux -y; python3 -m pip install panorama-1.0-py3-none-any.whl; bash /edgemlsdk/mqtt/run_mqtt_longevity.sh -l {args.longevity_hours} -r {args.region} -m {args.mqtt_endpoint} -n {args.payload_size} -a {access_key} -s {secret_key}'''"
+            bash -c '''cd /edgemlsdk; dpkg -i Panorama_1.0.{args.release_date}.deb;apt-get install tmux -y; python3 -m pip install panorama-1.0-py3-none-any.whl; bash /edgemlsdk/mqtt/run_mqtt_longevity.sh -l {args.longevity_hours} -r {args.region} -m {args.mqtt_endpoint} -n {args.payload_size}'''"
     ]
 
 

@@ -25,6 +25,23 @@ ISSUER_WHITELIST = os.environ.get('ISSUER_WHITELIST', '').split(',')
 JWKS_CACHE_TTL = 3600
 
 
+def _safe_event_metadata(event: Dict) -> Dict[str, Any]:
+    """Return only non-sensitive authorizer-event fields for logging.
+
+    An API Gateway authorizer event carries the bearer token in
+    ``authorizationToken`` and/or ``headers.Authorization``. Logging the whole
+    event writes the token verbatim into CloudWatch Logs, so this helper
+    extracts ONLY the non-sensitive fields — ``methodArn`` (always) and
+    ``requestContext.requestId`` when present — and NEVER references
+    ``authorizationToken``, ``headers``, or any other token-bearing field.
+    """
+    metadata: Dict[str, Any] = {"methodArn": event.get("methodArn")}
+    request_context = event.get("requestContext")
+    if isinstance(request_context, dict) and request_context.get("requestId"):
+        metadata["requestId"] = request_context["requestId"]
+    return metadata
+
+
 class AuthorizationError(Exception):
     """Custom exception for authorization errors"""
     pass
@@ -126,9 +143,14 @@ def validate_jwt_token(token: str) -> Dict[str, Any]:
         AuthorizationError: If token validation fails
     """
     try:
-        # Decode header without verification to get key ID and issuer info
+        # Decode header without verification to get key ID and issuer info.
+        # The unverified pre-parse below reads `kid`/`iss` ONLY to select the
+        # JWKS key. The token is NOT trusted at this point — a full RS256
+        # signature-verified decode (verify_exp / verify_aud / verify_iss) is
+        # enforced afterward at the `jwt.decode(token, public_key,
+        # algorithms=['RS256'], ...)` call below, before any claim is used.
         unverified_header = jwt.get_unverified_header(token)
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})
+        unverified_payload = jwt.decode(token, options={"verify_signature": False})  # nosem: python.jwt.security.unverified-jwt-decode
         
         kid = unverified_header.get('kid')
         if not kid:
@@ -269,7 +291,7 @@ def handler(event, lambda_context):
         IAM policy allowing or denying access
     """
     try:
-        logger.info(f"JWT Authorizer invoked with event: {json.dumps(event, default=str)}")
+        logger.info("JWT Authorizer invoked: %s", _safe_event_metadata(event))
         
         # Extract token from event
         token = extract_token_from_event(event)

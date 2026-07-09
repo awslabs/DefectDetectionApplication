@@ -44,7 +44,7 @@ class TestValidateToken(LocalServerBaseTestCase):
 
         with patch("utils.utils.is_authorization_enabled_on_station", return_value=True):
             with self.assertRaises(HTTPException) as ctx:
-                auth.validate_token(token="")
+                auth.validate_token(token="")  # nosec B106 — test-only fixture, not a real credential.
 
         self.assertEqual(ctx.exception.status_code, HTTP_401_UNAUTHORIZED)
         self.assertEqual(ctx.exception.detail, "Not authenticated")
@@ -57,7 +57,7 @@ class TestValidateToken(LocalServerBaseTestCase):
                 patch("utils.utils.get_authorization_settings_from_file", return_value=dict(AUTH_SETTINGS)), \
                 patch("utils.auth.validate_remotely", return_value=_introspection_response(200, True)):
             # Should not raise for a valid, active token.
-            result = auth.validate_token(token="good-token")
+            result = auth.validate_token(token="good-token")  # nosec B106 — test-only fixture, not a real credential.
 
         self.assertIsNone(result)
 
@@ -68,7 +68,7 @@ class TestValidateToken(LocalServerBaseTestCase):
                 patch("utils.utils.get_authorization_settings_from_file", return_value=dict(AUTH_SETTINGS)), \
                 patch("utils.auth.validate_remotely", return_value=_introspection_response(200, False)):
             with self.assertRaises(HTTPException) as ctx:
-                auth.validate_token(token="inactive-token")
+                auth.validate_token(token="inactive-token")  # nosec B106 — test-only fixture, not a real credential.
 
         self.assertEqual(ctx.exception.status_code, HTTP_401_UNAUTHORIZED)
         self.assertEqual(ctx.exception.detail, "Access Denied")
@@ -80,7 +80,7 @@ class TestValidateToken(LocalServerBaseTestCase):
                 patch("utils.utils.get_authorization_settings_from_file", return_value=dict(AUTH_SETTINGS)), \
                 patch("utils.auth.validate_remotely", return_value=_introspection_response(403, True)):
             with self.assertRaises(HTTPException) as ctx:
-                auth.validate_token(token="some-token")
+                auth.validate_token(token="some-token")  # nosec B106 — test-only fixture, not a real credential.
 
         self.assertEqual(ctx.exception.status_code, HTTP_401_UNAUTHORIZED)
         self.assertEqual(ctx.exception.detail, "Access Denied")
@@ -92,7 +92,7 @@ class TestValidateToken(LocalServerBaseTestCase):
                 patch("utils.utils.get_authorization_settings_from_file", return_value=dict(AUTH_SETTINGS)), \
                 patch("utils.auth.validate_remotely", return_value=None):
             with self.assertRaises(HTTPException) as ctx:
-                auth.validate_token(token="some-token")
+                auth.validate_token(token="some-token")  # nosec B106 — test-only fixture, not a real credential.
 
         self.assertEqual(ctx.exception.status_code, HTTP_401_UNAUTHORIZED)
         self.assertEqual(ctx.exception.detail, "Access Denied")
@@ -103,7 +103,7 @@ class TestValidateToken(LocalServerBaseTestCase):
         with patch("utils.utils.is_authorization_enabled_on_station", return_value=True), \
                 patch("utils.utils.get_authorization_settings_from_file", return_value=dict(AUTH_SETTINGS)), \
                 patch("utils.auth.validate_remotely", return_value=_introspection_response(200, True)) as mock_remote:
-            auth.validate_token(token="good-token")
+            auth.validate_token(token="good-token")  # nosec B106 — test-only fixture, not a real credential.
 
         mock_remote.assert_called_once_with(
             "good-token",

@@ -17,18 +17,20 @@ Spec: security-injection-deserialization-fixes — Property 2: Preservation.
 
 The generated CDK build artifacts under
 ``edge-cv-portal/infrastructure/cdk.out/asset.*`` and the AWS credentials
-embedded in ``deploy.py``'s SSM commands are handled by SEPARATE remediation
+embedded in ``deploy.py``'s SSM commands were handled by SEPARATE remediation
 groups and MUST NOT be modified by this spec's fix.
 
 Recorded baselines:
   * ``cdk_out_baseline.json`` — the exact sha256 of every ``cdk.out/asset.*``
     copy of the in-scope source files (the 11 generated ``model_converter.py``
     duplicates). Task 13 re-runs this and asserts the bytes are unchanged.
-  * The embedded-credential handling in ``deploy.py`` (the ``credentials.access_
-    key`` / ``credentials.secret_key`` interpolations and the
-    ``edgeml-sdk-longevity-tests`` secret name) is still present — the fix may
-    ``shlex.quote`` these but must not remove or otherwise alter the credential
-    handling.
+  * The embedded-credential handling in ``deploy.py`` — the successor spec
+    ``security-secrets-credentials-jwt-fixes`` (S2 / Req 2.2, task 5) has now
+    landed and has REMOVED the two ``export AWS_*`` list entries and the
+    trailing ``-a {access_key} -s {secret_key}`` mqtt fragment. The legitimate
+    boto3-client credential kwargs (``credentials.access_key`` /
+    ``credentials.secret_key``) and the ``edgeml-sdk-longevity-tests`` secret
+    name remain in place. The assertion below is re-pinned accordingly.
 
 **Validates: Requirements 3.7**
 
@@ -108,24 +110,39 @@ def test_cdk_out_baseline_covers_all_current_copies():
 
 
 # --------------------------------------------------------------------------- #
-# deploy.py embedded-credential handling is left in place (separate group)
+# deploy.py embedded-credential handling: removed by the group-2 successor spec
 # --------------------------------------------------------------------------- #
 # Validates: Requirements 3.7
-def test_deploy_embedded_credentials_still_present():
-    """The embedded-credential handling in deploy.py is not removed/altered by
-    this spec (it belongs to a separate remediation group)."""
+def test_deploy_embedded_credentials_removed_by_group2_spec():
+    """The embedded AWS credentials in ``deploy.py``'s SSM command strings were
+    the responsibility of a separate remediation group. That successor spec
+    (``security-secrets-credentials-jwt-fixes`` S2 / Req 2.2, task 5) has now
+    landed and has REMOVED the two ``export AWS_*`` list entries and the
+    trailing ``-a {credentials.access_key} -s {credentials.secret_key}`` mqtt
+    fragment. The legitimate boto3-client credential kwargs and the
+    ``edgeml-sdk-longevity-tests`` secret name remain in place — those are
+    valid uses this spec never touched."""
     src = read_repo_file(DEPLOY_REL)
 
-    # The secret name and the credential references are still present.
+    # The secret name and the boto3 client credential kwargs are still present
+    # (these are legitimate control-plane SDK uses, not a command-string sink).
     assert 'secret_name = "edgeml-sdk-longevity-tests"' in src
     assert "credentials.access_key" in src
     assert "credentials.secret_key" in src
+
+    # The env-var *names* remain (they are used as Secrets Manager keys and set
+    # via os.environ inside set_aws_access_keys_from_secrets_manager) — the fix
+    # removed only the SSM command-string exports.
     assert "AWS_ACCESS_KEY_ID" in src
     assert "AWS_SECRET_ACCESS_KEY" in src
 
-    # The SSM commands still export the credentials (fix may shlex.quote the
-    # value but must keep exporting it).
-    assert "export AWS_ACCESS_KEY_ID=" in src
-    assert "export AWS_SECRET_ACCESS_KEY=" in src
-    # The mqtt run still passes -a/-s credential flags.
-    assert "-a " in src and "-s " in src
+    # The S2 fix REMOVED the two credential export entries from the constructed
+    # SSM command list.
+    assert "export AWS_ACCESS_KEY_ID=" not in src
+    assert "export AWS_SECRET_ACCESS_KEY=" not in src
+
+    # The S2 fix REMOVED the trailing ``-a {credentials.access_key} -s
+    # {credentials.secret_key}`` fragment from the mqtt run command. Do NOT
+    # assert bare ``-a``/``-s`` are absent — those tokens still appear in the
+    # file (getopts flag string in a comment, argparse flags for other args).
+    assert "-a {credentials.access_key} -s {credentials.secret_key}" not in src
