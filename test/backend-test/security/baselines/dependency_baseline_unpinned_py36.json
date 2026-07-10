@@ -1,0 +1,23 @@
+{
+  "entries": [
+    {
+      "file": "station_install/setup_station.sh",
+      "has_version_pin": false,
+      "lineno": 518,
+      "text": "  run_cmd \"python3 -m pip install requests protobuf\" || add_warning \"Failed to install Python packages\""
+    },
+    {
+      "file": "station_install/setup_station.sh",
+      "has_version_pin": false,
+      "lineno": 542,
+      "text": "  run_cmd \"python3 -m pip install --upgrade requests\" || \\"
+    },
+    {
+      "file": "station_install/patch_docker_host_prereqs.sh",
+      "has_version_pin": false,
+      "lineno": 242,
+      "text": "        if \"$py\" -m pip install --upgrade requests >/dev/null 2>&1; then"
+    }
+  ],
+  "note": "CRITICAL Python-3.6 constraint: these system-python3 installs MUST stay UNPINNED (no ==) so pip resolves a 3.6-compatible requests on Ubuntu 18.04. requests==2.32.4 requires Python 3.8+, so the bump applies ONLY to the two Python-3.11 pin sites, never here."
+}

@@ -297,6 +297,27 @@ else
         test/backend-test/security/test_docker_base_image_bug_condition_exploration.py \
         test/backend-test/security/test_docker_audit_gate_negative_fixture.py -v
       echo "Security Docker non-ECR base image audit gate passed."
+
+      # ── Security dependency / supply-chain CVE audit gate ─────────────────
+      # (spec: security-dependency-cve-fixes). A gate covering the dependency /
+      # supply-chain CVE + weak-hash batch (F1-F4):
+      #   1. dependency_audit.py — pattern gate; exits non-zero if an in-scope
+      #      pinned requests version < 2.32.4 (CVE-2024-47081) reappears at
+      #      station_install/setup_station.sh or src/backend/requirements.txt
+      #      (the two Python-3.11 pin sites), or if the documented B324
+      #      RFC-2617 digest-auth allowlist drifts. Unpinned system-python3.6
+      #      installs and out-of-scope pins are never flagged.
+      #   2. Fix-checking + negative-fixture suite — the in-scope pins stay
+      #      >= 2.32.4, the B324 accepted false positive stays documented, and a
+      #      bare unpinned requests / out-of-scope pin is never flagged.
+      # The security/preservation suite (run by the Group-1 gate above) already
+      # covers the dependency preservation baselines (test_preservation_dependency_*).
+      echo "Running security dependency/supply-chain CVE audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/dependency_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_dependency_bug_condition_exploration.py \
+        test/backend-test/security/test_dependency_audit_gate_negative_fixture.py -v
+      echo "Security dependency/supply-chain CVE audit gate passed."
     ' || { echo "ERROR: backend unit tests / security audit gate failed"; exit 1; }
   echo "Backend unit tests passed."
 fi
