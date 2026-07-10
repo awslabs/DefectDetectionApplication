@@ -1,0 +1,20 @@
+{
+  "backend_jp6_cuda114_block": [
+    "COPY --from=cuda114 /usr/local/cuda-11.4/targets/aarch64-linux/lib/ \\",
+    "     /usr/local/cuda-11.4/targets/aarch64-linux/lib/",
+    "RUN echo \"/usr/local/cuda-11.4/targets/aarch64-linux/lib\" > /etc/ld.so.conf.d/cuda-11-4.conf && \\",
+    "    ldconfig && \\",
+    "    ldconfig -p | grep -i \"libcudart.so.11\" || \\",
+    "    (echo \"ERROR: libcudart.so.11 not staged\" && ls -l /usr/local/cuda-11.4/targets/aarch64-linux/lib/ && exit 1)"
+  ],
+  "backend_jp6_stages": [
+    "cuda114",
+    null
+  ],
+  "edgemlsdk_jp5_stages": [
+    "builder"
+  ],
+  "edgemlsdk_jp6_stages": [
+    "builder"
+  ]
+}

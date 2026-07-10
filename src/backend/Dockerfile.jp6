@@ -1,6 +1,7 @@
 ARG OS
 ARG PLATFORM
 ARG PYTHON_VERSION
+ARG BASE_REGISTRY=nvcr.io
 # ── CUDA 11.4 cudart provider (for the Neo/DLR model runtime) ──────────────
 # SageMaker Neo's NVIDIA/TensorRT path maxes out at cuda-ver 11.4, so DDA models
 # are compiled against CUDA 11.4. The Neo artifact bundles its own libdlr.so
@@ -15,8 +16,8 @@ ARG PYTHON_VERSION
 # not /usr/local/cuda-11.4), so it resolves without disturbing the host CUDA 12.
 # A CUDA 12.2 driver is backward-compatible with the CUDA 11.x runtime, so the
 # 11.4 cudart works against JetPack 6's GPU driver.
-FROM nvcr.io/nvidia/l4t-cuda:11.4.19-runtime AS cuda114
-FROM nvcr.io/nvidia/l4t-jetpack:r36.3.0
+FROM ${BASE_REGISTRY}/nvidia/l4t-cuda:11.4.19-runtime@sha256:fb22ff080631990dda403fd768acb384dc3745a7e516f5ed1dc4c4944898da78 AS cuda114
+FROM ${BASE_REGISTRY}/nvidia/l4t-jetpack:r36.3.0@sha256:b3bbd7e3f3a0879a6672adc64aef7742ba12f9baaf1451c91215942c46e4e2fa
 # Re-declare after FROM so the build arg is available in the build stage.
 ARG PYTHON_VERSION
 ENV DEBIAN_FRONTEND=noninteractive

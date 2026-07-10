@@ -277,6 +277,26 @@ else
         test/backend-test/security/test_s3_squat_bug_condition_exploration.py \
         test/backend-test/security/test_s3_squat_gate_negative_fixture.py -v
       echo "Security S3 bucket-squatting audit gate passed."
+
+      # ── Security Docker non-ECR base image audit gate ─────────────────────
+      # (spec: security-docker-non-ecr-base-image-fixes). A gate covering the
+      # Docker non-ECR base-image batch (D1-D6):
+      #   1. docker_base_image_audit.py — pattern gate; exits non-zero if an
+      #      in-scope Jetson Dockerfile FROM (src/backend/Dockerfile.jp5|jp6,
+      #      src/edgemlsdk/Dockerfile.jp5|jp6) pulls from a non-ECR registry
+      #      (nvcr.io) without being both ${BASE_REGISTRY}-parameterized and
+      #      @sha256-digest-pinned (per-FROM, not file-global).
+      #   2. Fix-checking + negative-fixture suite — every in-scope base image
+      #      stays registry-parameterized + digest-pinned and the gate cannot be
+      #      satisfied by a file-global ${BASE_REGISTRY}/nvcr.io presence check.
+      # The security/preservation suite (run by the Group-1 gate above) already
+      # covers the Docker preservation baselines (test_preservation_docker_*).
+      echo "Running security Docker non-ECR base image audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/docker_base_image_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_docker_base_image_bug_condition_exploration.py \
+        test/backend-test/security/test_docker_audit_gate_negative_fixture.py -v
+      echo "Security Docker non-ECR base image audit gate passed."
     ' || { echo "ERROR: backend unit tests / security audit gate failed"; exit 1; }
   echo "Backend unit tests passed."
 fi

@@ -1,8 +1,20 @@
 ARG OS
 ARG PLATFORM
 ARG PYTHON_VERSION
-ARG BASE_REGISTRY=nvcr.io
-FROM ${BASE_REGISTRY}/nvidia/l4t-jetpack:r35.4.1@sha256:d1c8e971ab994235840eacc31c4ef4173bf9156317b1bf8aabe7e01eb21b2a0e
+# ── CUDA 11.4 cudart provider (for the Neo/DLR model runtime) ──────────────
+# SageMaker Neo's NVIDIA/TensorRT path maxes out at cuda-ver 11.4, so DDA models
+# are compiled against CUDA 11.4. The Neo artifact bundles its own libdlr.so
+# which dynamically links libcudart.so.11.0 (RUNPATH
+# /usr/local/cuda-11.4/targets/aarch64-linux/lib). JetPack 6 only ships CUDA
+# 12.2 (libcudart.so.12), so the model would fail to load with
+# "libcudart.so.11.0: cannot open shared object file". We pull just the CUDA
+# 11.4 runtime lib from NVIDIA's official NGC l4t-cuda image at BUILD time
+# (nothing is committed to the repo) and stage it at the exact RUNPATH the
+# bundled libdlr.so expects. That path is NOT shadowed by the runtime
+# `-v /usr/local/cuda:/usr/local/cuda` host mount (which mounts /usr/local/cuda,
+# not /usr/local/cuda-11.4), so it resolves without disturbing the host CUDA 12.
+# A CUDA 12.2 driver is backward-compatible with the CUDA 11.x runtime, so the
+# 11.4 cudart works against JetPack 6's GPU driver.
 # Re-declare after FROM so the build arg is available in the build stage.
 ARG PYTHON_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
@@ -13,22 +25,20 @@ RUN if [ -f /usr/bin/py3compile ]; then mv /usr/bin/py3compile /usr/bin/py3compi
     if [ -f /usr/bin/py3clean ]; then mv /usr/bin/py3clean /usr/bin/py3clean.bak && \
     echo '#!/bin/sh' > /usr/bin/py3clean && chmod +x /usr/bin/py3clean; fi
 
-# Purge the base image's half-configured python3 apt packages, then install the
-# toolchain + the dev libraries needed to compile CPython 3.11 from source later
-# (focal/arm64 has no apt python3.11). python3 stays the distro python through the
-# apt phase below to avoid l4t py3compile segfaults.
 RUN apt-get update && \
     dpkg --configure -a || true && \
     apt-get install -f -y || true && \
-    dpkg --purge --force-depends python3-distro-info unattended-upgrades python3-urllib3 python3-requests python3-requests-unixsocket python3-six software-properties-common python3-software-properties || true && \
-    apt-get install -y --no-install-recommends wget build-essential cmake gdb \
-      zlib1g-dev libssl-dev libffi-dev libsqlite3-dev libbz2-dev libreadline-dev \
-      libncursesw5-dev libgdbm-dev liblzma-dev tk-dev uuid-dev
+    dpkg --purge --force-depends python3-distro-info unattended-upgrades python3-urllib3 python3-requests python3-requests-unixsocket python3-six python3-software-properties || true && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends wget build-essential cmake libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-distutils
 
 RUN apt-get update
 
-# Add toolchain PPA directly to avoid add-apt-repository Python issues
-RUN echo "deb https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu focal main" > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list && \
+# Add toolchain PPA directly to avoid add-apt-repository Python issues.
+# The JP6 base is Ubuntu 22.04 (jammy), so use the jammy toolchain PPA.
+RUN echo "deb https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main" > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list && \
     apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 1E9377A2BA9EF27F && \
     apt-get update && \
     apt install gcc-11 g++-11 -y && \
@@ -60,7 +70,7 @@ RUN apt-get update -y && \
 
 # Install remaining apt packages before switching python3
 RUN apt update -y && \
-    apt-get install -y libssl1.1 libexif12 libcurl4 libarchive13 \
+    apt-get install -y libssl3 libexif12 libcurl4 libarchive13 \
     gstreamer1.0-tools gstreamer1.0-libav ffmpeg
 
 # CVE fixes - also before python3 switch
@@ -74,25 +84,9 @@ RUN apt-get update \
 RUN if [ -f /usr/bin/py3compile.bak ]; then mv /usr/bin/py3compile.bak /usr/bin/py3compile; fi && \
     if [ -f /usr/bin/py3clean.bak ]; then mv /usr/bin/py3clean.bak /usr/bin/py3clean; fi
 
-# NOW build Python 3.11 from source and select it — all apt installs are done, so
-# py3compile no longer runs. focal/arm64 has no apt python3.11 (deadsnakes ships
-# no arm64 focal binaries; Ubuntu 20.04 stops at 3.9/3.10), so compile CPython
-# from source under /usr/local (shared libpython for the Triton backend), then
-# point python3 at it. Building AFTER the apt phase keeps the earlier apt installs
-# on the distro python, avoiding the l4t py3compile segfaults.
-ARG PYTHON_SRC_VERSION=3.11.9
-RUN cd /tmp && \
-    wget -q https://www.python.org/ftp/python/${PYTHON_SRC_VERSION}/Python-${PYTHON_SRC_VERSION}.tgz && \
-    tar -xzf Python-${PYTHON_SRC_VERSION}.tgz && \
-    cd Python-${PYTHON_SRC_VERSION} && \
-    ./configure --enable-optimizations --enable-shared --with-ensurepip=install && \
-    make -j"$(nproc)" && \
-    make install && \
-    ldconfig && \
-    cd / && rm -rf /tmp/Python-${PYTHON_SRC_VERSION}* && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python${PYTHON_VERSION} 1 && \
-    update-alternatives --set python3 /usr/local/bin/python${PYTHON_VERSION} && \
-    rm -f /usr/bin/python && ln -s /usr/local/bin/python${PYTHON_VERSION} /usr/bin/python
+# NOW switch python3 to 3.11 — all apt installs are done, no more py3compile under 3.11
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}
 RUN wget -q https://bootstrap.pypa.io/get-pip.py && python3 get-pip.py && rm get-pip.py
 
 # Install pip packages (native build, no QEMU workarounds needed)
@@ -128,8 +122,8 @@ COPY dda_triton/model_conversion_requirements.txt ./model_conversion_requirement
 RUN pip install --no-cache-dir -r ./model_conversion_requirements.txt
 # model_conversion_requirements.txt includes an UNPINNED setuptools, which pulls
 # setuptools>=81 and removes the bundled pkg_resources that grpc_tools.protoc imports
-# (from-source python has no system pkg_resources fallback). Re-assert the setuptools<81
-# cap immediately so the grpc_tools.protoc step below keeps working.
+# (the python3.11 interpreter here has no system pkg_resources fallback). Re-assert the
+# setuptools<81 cap immediately so the grpc_tools.protoc step below keeps working.
 RUN pip install --no-cache-dir 'setuptools<81'
 
 # ── ONNX Runtime for the pluggable ONNX inference engine ───────────────────
@@ -137,11 +131,11 @@ RUN pip install --no-cache-dir 'setuptools<81'
 # in-container under the DDA python (PYTHON_VERSION, default 3.11). Two modes,
 # selected by build-args:
 #   * Default (CPU): prebuilt CPU wheel (onnxruntime 1.16.3 ships a cp311 aarch64
-#     manylinux_2_17 wheel, works on this glibc 2.31 base). Fast.
+#     manylinux_2_17 wheel, works on this glibc 2.35 base). Fast.
 #   * GPU (ONNXRUNTIME_GPU=1): build onnxruntime-gpu from source with the CUDA +
-#     TensorRT execution providers against the base image's CUDA 11.4 / TRT 8.5,
+#     TensorRT execution providers against the base image's CUDA 12.2 / TRT 8.6,
 #     for the PYTHON_VERSION interpreter. NVIDIA's prebuilt Jetson GPU wheels
-#     target the JetPack's native python (3.8 on r35), not ours, so a GPU build
+#     target the JetPack's native python (3.10 on r36), not ours, so a GPU build
 #     must be compiled here. This is a long, memory-heavy build, hence opt-in.
 # `pip` targets the PYTHON_VERSION interpreter (the python3 alternative).
 # OnnxRunner prefers TensorRT -> CUDA -> CPU providers automatically, so the
@@ -150,7 +144,7 @@ RUN pip install --no-cache-dir 'setuptools<81'
 ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
 ARG ONNXRUNTIME_GPU=0
 RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
-        JETPACK_MAJOR=5 ./edge_ml1_p_camera_management/install_onnxruntime_gpu.sh; \
+        JETPACK_MAJOR=6 ./edge_ml1_p_camera_management/install_onnxruntime_gpu.sh; \
     else \
         pip install --no-cache-dir ${ONNXRUNTIME_SPEC}; \
     fi
@@ -159,9 +153,16 @@ RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
 RUN pip install --no-cache-dir meson ninja
 # Downgrade setuptools so g-ir-scanner can find distutils.msvccompiler (removed in setuptools>=71)
 RUN pip install --no-cache-dir 'setuptools<71'
-# Fix g-ir-scanner to use python3.8 (its _giscanner C extension is built for 3.8)
-RUN cp /usr/bin/g-ir-scanner /usr/bin/g-ir-scanner.bak && \
-    echo '#!/usr/bin/python3.8' > /usr/bin/g-ir-scanner && \
+# Fix g-ir-scanner to use the base image's system python (its _giscanner C
+# extension is built for the distro python — 3.10 on the jammy/r36 base — not
+# the 3.11 we switch to). Detect it dynamically rather than hardcoding 3.8.
+# The exclusion grep drops the DDA interpreter (3.11) from the candidates so the
+# distro python (3.10) keeps being selected.
+RUN SYS_PY=$(ls /usr/bin/python3.1? /usr/bin/python3.8 2>/dev/null | grep -v 3.11 | head -1) && \
+    SYS_PY=${SYS_PY:-/usr/bin/python3.10} && \
+    echo "Using system python for g-ir-scanner: $SYS_PY" && \
+    cp /usr/bin/g-ir-scanner /usr/bin/g-ir-scanner.bak && \
+    echo "#!$SYS_PY" > /usr/bin/g-ir-scanner && \
     tail -n +2 /usr/bin/g-ir-scanner.bak >> /usr/bin/g-ir-scanner && \
     chmod +x /usr/bin/g-ir-scanner && \
     head -1 /usr/bin/g-ir-scanner
@@ -205,6 +206,20 @@ COPY edgemlsdk ./edgemlsdk
 RUN ./edge_ml1_p_camera_management/install_edgemlsdk.sh
 COPY dlr_disable_phone_home.py ./
 RUN python${PYTHON_VERSION} dlr_disable_phone_home.py
+
+# Stage the CUDA 11.4 runtime libs from the NGC l4t-cuda image at the exact
+# RUNPATH the Neo-compiled model's bundled libdlr.so expects
+# (/usr/local/cuda-11.4/targets/aarch64-linux/lib). Copy the whole versioned
+# lib directory (standard Jetson CUDA layout) rather than a single glob so the
+# build doesn't fail on a path mismatch and so any transitive CUDA runtime deps
+# are present. Then register the dir with the dynamic linker and verify
+# libcudart.so.11 resolved.
+COPY --from=cuda114 /usr/local/cuda-11.4/targets/aarch64-linux/lib/ \
+     /usr/local/cuda-11.4/targets/aarch64-linux/lib/
+RUN echo "/usr/local/cuda-11.4/targets/aarch64-linux/lib" > /etc/ld.so.conf.d/cuda-11-4.conf && \
+    ldconfig && \
+    ldconfig -p | grep -i "libcudart.so.11" || \
+    (echo "ERROR: libcudart.so.11 not staged" && ls -l /usr/local/cuda-11.4/targets/aarch64-linux/lib/ && exit 1)
 
 #TODO:change to user to scope the permission. Currently needed to persist the TinyDB data
 USER root

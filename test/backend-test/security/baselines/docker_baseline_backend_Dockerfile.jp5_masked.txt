@@ -1,8 +1,6 @@
 ARG OS
 ARG PLATFORM
 ARG PYTHON_VERSION
-ARG BASE_REGISTRY=nvcr.io
-FROM ${BASE_REGISTRY}/nvidia/l4t-jetpack:r35.4.1@sha256:d1c8e971ab994235840eacc31c4ef4173bf9156317b1bf8aabe7e01eb21b2a0e
 # Re-declare after FROM so the build arg is available in the build stage.
 ARG PYTHON_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
