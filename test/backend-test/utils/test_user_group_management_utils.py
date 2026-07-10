@@ -79,13 +79,18 @@ class TestUserGroupCommandConstruction(LocalServerBaseTestCase):
         from utils import user_group_management_utils as ug
         with patch(RUN_CMD, return_value=OK) as run:
             ug.delete_user("alice")
-        run.assert_called_once_with(["userdel", "alice"])
+        # The "--" end-of-options separator is an argument-injection hardening
+        # (security batch #1-#8) so a login name starting with "-" cannot be
+        # parsed as an option by userdel.
+        run.assert_called_once_with(["userdel", "--", "alice"])
 
     def test_delete_group_command(self):
         from utils import user_group_management_utils as ug
         with patch(RUN_CMD, return_value=OK) as run:
             ug.delete_group("staff")
-        run.assert_called_once_with(["groupdel", "staff"])
+        # "--" end-of-options separator: hardened so a group name starting with
+        # "-" cannot be parsed as an option by groupdel.
+        run.assert_called_once_with(["groupdel", "--", "staff"])
 
     def test_add_user_to_group_command(self):
         from utils import user_group_management_utils as ug
@@ -173,7 +178,7 @@ class TestCreateDeleteUserAndGroup(LocalServerBaseTestCase):
                 patch(RUN_CMD, return_value=FAIL) as run:
             is_success, output = ug.delete_user_and_group("alice", "staff")
         self.assertFalse(is_success)
-        run.assert_called_once_with(["userdel", "alice"])
+        run.assert_called_once_with(["userdel", "--", "alice"])
 
 
 class TestGroupMembership(LocalServerBaseTestCase):
