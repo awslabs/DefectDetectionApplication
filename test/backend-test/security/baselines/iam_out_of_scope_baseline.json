@@ -14,6 +14,6 @@
     "src/backend/utils/camera_manager.py": "d88b1f3fc1f95b8ddc098a6a7eb4edf10fc7da82d5d356f14c7c31dc0b7cac59",
     "src/backend/utils/digital_input_process_manager.py": "5a0980f9661ffd90ff965bc4d2f7f16775fed7c7b4b3c5c65d0a99218c457aab",
     "src/backend/utils/utils.py": "f3c30fd15cb653c53db0c58793333fbeabcef287674c32042b0217072b9f1103",
-    "src/edgemlsdk/src/test/longevity/deploy.py": "22d243bcb436894cf24cab1553a6ce4af53a70a08a04f45e9023fbdd50b34cfb"
+    "src/edgemlsdk/src/test/longevity/deploy.py": "8cd2616bbffb250cf3b7097438cb4e5b8aed1803a9a833ad11536fff715c7ddf"
   }
 }

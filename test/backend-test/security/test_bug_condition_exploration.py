@@ -521,8 +521,15 @@ def test_pytorch_model_load_does_not_execute_code():
     """#8 (Req 1.8): loading a crafted ``.pt`` must NOT execute embedded code.
     UNFIXED-TREE EXPECTATION: FAILS (``torch.load`` without weights_only=True
     runs the payload; sentinel fires). Also asserts the source omits
-    weights_only=True."""
-    import torch
+    weights_only=True.
+
+    ``torch`` is a cloud-portal / model-conversion dependency and is NOT
+    installed in the runtime flask-app image where build-custom.sh runs this
+    gate, so skip cleanly when it is unavailable (mirrors
+    test_preservation_model_converter.py). The static source coverage of the
+    model_converter torch.load site is additionally provided by repo_audit.py's
+    pattern gate."""
+    torch = pytest.importorskip("torch")
     sentinel = _fresh_sentinel("torch")
     pt_path = os.path.join(tempfile.gettempdir(), f"dda_malicious_{os.getpid()}.pt")
     torch.save({"model": _Exploit(sentinel)}, pt_path)

@@ -171,7 +171,13 @@ def reference_download_skeleton(args):
         f"export AWS_DEFAULT_REGION={args.region}",
         "sudo mkdir -p /edgemlsdk",
         f"sudo mkdir -p /edgemlsdk/{source_folder}",
+        # NOTE (re-pinned by security-s3-bucket-squatting-fixes B1): the S3
+        # bucket-squatting batch PREPENDED two ``aws s3api head-bucket
+        # --expected-bucket-owner`` preflight entries. They carry no credential
+        # fragments, so they belong in the preserved skeleton unchanged.
+        f"aws s3api head-bucket --bucket panorama-sdk-v2-artifacts --expected-bucket-owner {args.artifacts_bucket_owner}",
         f"aws s3 sync s3://panorama-sdk-v2-artifacts/release/1.0.{args.release_date}/{args.platform}/{args.ubuntu_version}/3.8.0/ /edgemlsdk",
+        f"aws s3api head-bucket --bucket edgeml-sdk-longevity-tests --expected-bucket-owner {args.longevity_bucket_owner}",
         "aws s3 cp s3://edgeml-sdk-longevity-tests/longevity.json /edgemlsdk/",
         "aws s3 cp s3://edgeml-sdk-longevity-tests/delegates.json /edgemlsdk/",
         f"aws s3 sync s3://edgeml-sdk-longevity-tests/{source_folder} /edgemlsdk/{source_folder}",
@@ -194,6 +200,12 @@ def _canonical_args():
         python_version="3.11", region="us-west-2",
         mqtt_endpoint="a5h6960s3xow6-ats.iot.us-west-2.amazonaws.com",
         release_date="20230918", longevity_hours=72, payload_size=50,
+        # Owner args added by the S3 bucket-squatting batch (B1). Explicit
+        # values so head-bucket owner resolution short-circuits (the stubbed
+        # boto3 session has no real ``sts`` get_caller_identity). These
+        # preflight entries carry no credential fragments.
+        artifacts_bucket_owner="123456789012",
+        longevity_bucket_owner="123456789012",
     )
 
 
@@ -252,6 +264,8 @@ def test_s2_valid_args_preserve_non_credential_command_bytes_property(
         python_version=python_version, region=region,
         mqtt_endpoint=mqtt_endpoint, release_date=release_date,
         longevity_hours=longevity_hours, payload_size=payload_size,
+        artifacts_bucket_owner="123456789012",
+        longevity_bucket_owner="123456789012",
     )
     captured = _capture_ssm_commands(args)
     assert _strip_credential_fragments(captured[0]) == reference_download_skeleton(args)

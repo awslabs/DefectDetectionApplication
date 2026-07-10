@@ -331,11 +331,19 @@ def _capture_deploy_ssm_commands(args):
 
 
 def _canonical_deploy_args():
+    # artifacts_bucket_owner / longevity_bucket_owner were added to deploy.main
+    # by the S3 bucket-squatting batch (B1). Supply explicit values so
+    # resolution short-circuits (the stubbed boto3 session has no real `sts`
+    # client). The resulting `head-bucket --expected-bucket-owner <acct>`
+    # preflight entries carry no credentials, so these secrets assertions still
+    # hold.
     return Namespace(
         mqtt="mqtt", platform="aarch64", ubuntu_version="22.04",
         python_version="3.11", region="us-west-2",
         mqtt_endpoint="a.iot.us-west-2.amazonaws.com", release_date="20230918",
         longevity_hours=72, payload_size=50,
+        artifacts_bucket_owner="123456789012",
+        longevity_bucket_owner="123456789012",
     )
 
 

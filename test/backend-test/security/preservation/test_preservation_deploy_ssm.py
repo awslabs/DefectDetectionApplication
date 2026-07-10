@@ -135,7 +135,14 @@ def reference_download(args, access_key, secret_key):
         f"export AWS_DEFAULT_REGION={args.region}",
         "sudo mkdir -p /edgemlsdk",
         f"sudo mkdir -p /edgemlsdk/{source_folder}",
+        # NOTE (re-pinned by security-s3-bucket-squatting-fixes B1): the S3
+        # bucket-squatting batch PREPENDED two ``aws s3api head-bucket
+        # --expected-bucket-owner`` preflight entries (one before the panorama
+        # artifact sync, one before the longevity accesses). They carry no
+        # credentials and leave every existing entry byte-for-byte identical.
+        f"aws s3api head-bucket --bucket panorama-sdk-v2-artifacts --expected-bucket-owner {args.artifacts_bucket_owner}",
         f"aws s3 sync s3://panorama-sdk-v2-artifacts/release/1.0.{args.release_date}/{args.platform}/{args.ubuntu_version}/3.8.0/ /edgemlsdk",
+        f"aws s3api head-bucket --bucket edgeml-sdk-longevity-tests --expected-bucket-owner {args.longevity_bucket_owner}",
         "aws s3 cp s3://edgeml-sdk-longevity-tests/longevity.json /edgemlsdk/",
         "aws s3 cp s3://edgeml-sdk-longevity-tests/delegates.json /edgemlsdk/",
         f"aws s3 sync s3://edgeml-sdk-longevity-tests/{source_folder} /edgemlsdk/{source_folder}",
@@ -163,6 +170,11 @@ def _canonical_args():
         python_version="3.11", region="us-west-2",
         mqtt_endpoint="a5h6960s3xow6-ats.iot.us-west-2.amazonaws.com",
         release_date="20230918", longevity_hours=72, payload_size=50,
+        # Owner args added by the S3 bucket-squatting batch (B1). Explicit
+        # values so head-bucket owner resolution short-circuits (the stubbed
+        # boto3 session has no real ``sts`` get_caller_identity).
+        artifacts_bucket_owner="123456789012",
+        longevity_bucket_owner="123456789012",
     )
 
 
@@ -215,6 +227,8 @@ def test_valid_args_preserve_ssm_command_strings_property(
         python_version=python_version, region=region,
         mqtt_endpoint=mqtt_endpoint, release_date=release_date,
         longevity_hours=longevity_hours, payload_size=payload_size,
+        artifacts_bucket_owner="123456789012",
+        longevity_bucket_owner="123456789012",
     )
     captured = _capture_ssm_commands(args)
     assert captured[0] == reference_download(args, FAKE_ACCESS_KEY, FAKE_SECRET_KEY)

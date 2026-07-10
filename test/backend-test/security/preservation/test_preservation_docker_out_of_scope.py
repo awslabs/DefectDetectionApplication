@@ -60,7 +60,14 @@ COMPOSE_FILES = (
     "src/docker-compose.yaml",
 )
 
-ALL_OUT_OF_SCOPE = ECR_DOCKERFILES + VENDORED_DUPLICATES + COMPOSE_FILES
+# NOTE (cross-batch reconcile): the vendored ``src/backend/edgemlsdk/edgemlsdk/**``
+# Dockerfiles are GITIGNORED, untracked build artifacts — ``build-custom.sh``
+# regenerates them via ``cp -r edgemlsdk backend/edgemlsdk`` from the maintained
+# source, so their bytes track the (now-fixed) regenerated source and cannot be a
+# stable byte-for-byte golden across builds. They are excluded from the hash
+# guard (still shape-checked by test_vendored_duplicates_are_under_vendored_subtree);
+# the committed ECR Dockerfiles and compose file remain guarded.
+ALL_OUT_OF_SCOPE = ECR_DOCKERFILES + COMPOSE_FILES
 
 
 def _sha256(rel):
