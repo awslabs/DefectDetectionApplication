@@ -1,0 +1,43 @@
+{
+  "description": "B1 deploy.py download_edgemlsdk_release_artifacts SSM list golden (Req 3.1). Captured by running the REAL deploy.main with boto3 stubbed, for a fixed legitimate arg tuple. Reconciled to the FIXED tree (Task 8): the list is the pre-fix baseline PLUS exactly the two aws s3api head-bucket --expected-bucket-owner preflight entries (one before the panorama-sdk-v2-artifacts sync, one before the three edgeml-sdk-longevity-tests accesses); every pre-existing cp/sync string + # nosec B105 line is byte-for-byte identical.",
+  "canonical_args": {
+    "mqtt": "mqtt",
+    "platform": "aarch64",
+    "ubuntu_version": "22.04",
+    "python_version": "3.11",
+    "region": "us-west-2",
+    "release_date": "20230918"
+  },
+  "download_list": [
+    "sudo yum update",
+    "sudo yum install docker -y",
+    "sudo service docker start",
+    "sudo service docker status",
+    "export AWS_DEFAULT_REGION=us-west-2",
+    "sudo mkdir -p /edgemlsdk",
+    "sudo mkdir -p /edgemlsdk/mqtt/",
+    "aws s3api head-bucket --bucket panorama-sdk-v2-artifacts --expected-bucket-owner REPLACE_WITH_PANORAMA_SDK_DISTRIBUTION_ACCOUNT_ID",
+    "aws s3 sync s3://panorama-sdk-v2-artifacts/release/1.0.20230918/aarch64/22.04/3.8.0/ /edgemlsdk",
+    "aws s3api head-bucket --bucket edgeml-sdk-longevity-tests --expected-bucket-owner 123456789012",
+    "aws s3 cp s3://edgeml-sdk-longevity-tests/longevity.json /edgemlsdk/",
+    "aws s3 cp s3://edgeml-sdk-longevity-tests/delegates.json /edgemlsdk/",
+    "aws s3 sync s3://edgeml-sdk-longevity-tests/mqtt/ /edgemlsdk/mqtt/",
+    "aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com",
+    "docker pull ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/edgemlsdk:22.04-aarch64-3.11-latest"
+  ],
+  "nosec_b105_lines": [
+    "secret_name = \"edgeml-sdk-longevity-tests\"  # nosec B105 — Secrets Manager secret name / S3 bucket name, not a password.",
+    "    bucket_name = 'edgeml-sdk-longevity-tests'  # nosec B105 — Secrets Manager secret name / S3 bucket name, not a password."
+  ],
+  "shlex_quote_lines": [
+    "    q_region = shlex.quote(str(args.region))",
+    "    q_release_date = shlex.quote(str(args.release_date))",
+    "    q_platform = shlex.quote(str(args.platform))",
+    "    q_ubuntu_version = shlex.quote(str(args.ubuntu_version))",
+    "    q_python_version = shlex.quote(str(args.python_version))",
+    "        q_mqtt = shlex.quote(str(args.mqtt))",
+    "        q_longevity_hours = shlex.quote(str(args.longevity_hours))",
+    "        q_mqtt_endpoint = shlex.quote(str(args.mqtt_endpoint))",
+    "        q_payload_size = shlex.quote(str(args.payload_size))"
+  ]
+}

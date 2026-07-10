@@ -1,0 +1,14 @@
+{
+  "description": "Out-of-scope guard (Req 3.7). sha256 of the vendored src/backend/edgemlsdk/edgemlsdk/... duplicate copies and of sibling-spec-owned files that this spec must not modify.",
+  "vendored_duplicates": {
+    "src/backend/edgemlsdk/edgemlsdk/src/test/longevity/deploy.py": "e2a2da95ed542ae0a1a09866cad635ee14541da1ba797d6030bd085a35522a55",
+    "src/backend/edgemlsdk/edgemlsdk/src/utilities/publish.sh": "e9844f4e8fbb84f42df79e2363f7d6bbfef3f0308c06e267e86bea14fd608f0c",
+    "src/backend/edgemlsdk/edgemlsdk/src/docs/source/index.rst": "461aad1a9d409dfc60a0745b221a60f41af3ccb42317911b1ba2f598b060d8f3",
+    "src/backend/edgemlsdk/edgemlsdk/src/docs/source/components/message_broker/s3.rst": "1b1777d65535d8240a999334f234a892e06ea4ad86b3d30b7627b7438c211cb7"
+  },
+  "sibling_spec_files": {
+    "test/backend-test/security/repo_audit.py": "69e869631650c6a8bc20fc3369e759d0969c158ce7803f4ab95d18d6f3c62f3a",
+    "test/backend-test/security/secrets_audit.py": "90f3f30937b16ae72898f0fae50923f897f793d3143fa27bacb1066b8284de46",
+    "test/backend-test/security/iam_audit.py": "b1cf00120efc89fe223110debbe7e066623ccafb58d95f0b10484cbe4d65be6a"
+  }
+}

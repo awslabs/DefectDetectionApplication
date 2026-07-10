@@ -8,6 +8,13 @@ import re
 import shlex
 from botocore.exceptions import ClientError
 
+# The AWS-managed Panorama SDK distribution bucket (panorama-sdk-v2-artifacts)
+# is owned by an AWS service account, NOT the deployer. Fill in the documented
+# Panorama SDK distribution account ID here (or pass --artifacts-bucket-owner /
+# set ARTIFACTS_BUCKET_OWNER at deploy time). Left as a placeholder so the
+# head-bucket preflight fails CLOSED until an operator supplies the real value.
+PANORAMA_SDK_DISTRIBUTION_ACCOUNT = "REPLACE_WITH_PANORAMA_SDK_DISTRIBUTION_ACCOUNT_ID"
+
 # Allowlist patterns for argparse args that are interpolated into the
 # AWS-RunShellScript SSM commands. Any value carrying a shell metacharacter
 # (; | & ` $ ( ) < > whitespace, ...) fails these patterns and is rejected
@@ -199,6 +206,27 @@ def main(args):
     aws_region = session.region_name
     credentials = session.get_credentials()
     s3_client = session.client('s3', region_name=aws_region)
+
+    # Expected S3 bucket owners for the squatting preflight (Group 5 / B1).
+    # panorama-sdk-v2-artifacts is the AWS-managed Panorama SDK distribution
+    # bucket -> its owner account differs from the deployer, so it MUST be
+    # supplied explicitly (arg/env), defaulting to the documented Panorama SDK
+    # distribution account constant. edgeml-sdk-longevity-tests is team-owned by
+    # the deployer's account, so it defaults to the caller identity (a no-op
+    # preflight for the legitimate deployer).
+    artifacts_bucket_owner = (
+        args.artifacts_bucket_owner
+        or os.environ.get("ARTIFACTS_BUCKET_OWNER")
+        or PANORAMA_SDK_DISTRIBUTION_ACCOUNT
+    )
+    longevity_bucket_owner = (
+        args.longevity_bucket_owner
+        or os.environ.get("LONGEVITY_BUCKET_OWNER")
+        or session.client("sts", region_name=aws_region).get_caller_identity()["Account"]
+    )
+    q_artifacts_owner = shlex.quote(str(artifacts_bucket_owner))
+    q_longevity_owner = shlex.quote(str(longevity_bucket_owner))
+
     source_folder = ''
     destination_prefix = ''
     if args.mqtt:
@@ -234,7 +262,9 @@ def main(args):
         f"export AWS_DEFAULT_REGION={q_region}",
         "sudo mkdir -p /edgemlsdk",
         f"sudo mkdir -p /edgemlsdk/{source_folder}",
+        f"aws s3api head-bucket --bucket panorama-sdk-v2-artifacts --expected-bucket-owner {q_artifacts_owner}",
         f"aws s3 sync s3://panorama-sdk-v2-artifacts/release/1.0.{q_release_date}/{q_platform}/{q_ubuntu_version}/3.8.0/ /edgemlsdk",
+        f"aws s3api head-bucket --bucket edgeml-sdk-longevity-tests --expected-bucket-owner {q_longevity_owner}",
         "aws s3 cp s3://edgeml-sdk-longevity-tests/longevity.json /edgemlsdk/",
         "aws s3 cp s3://edgeml-sdk-longevity-tests/delegates.json /edgemlsdk/",
         f"aws s3 sync s3://edgeml-sdk-longevity-tests/{source_folder} /edgemlsdk/{source_folder}",
@@ -292,6 +322,22 @@ if __name__ == "__main__":
         type=str,
         default="20230918",
         help="Sets relase date folder(YYYYMMDD) for downloading edgemlsdk artifacts",
+    )
+    parser.add_argument(
+        "--artifacts-bucket-owner",
+        type=str,
+        default=None,
+        help="expected AWS account ID that owns panorama-sdk-v2-artifacts "
+             "(head-bucket preflight); defaults to ARTIFACTS_BUCKET_OWNER env "
+             "var or the documented Panorama SDK distribution account constant",
+    )
+    parser.add_argument(
+        "--longevity-bucket-owner",
+        type=str,
+        default=None,
+        help="expected AWS account ID that owns edgeml-sdk-longevity-tests "
+             "(head-bucket preflight); defaults to LONGEVITY_BUCKET_OWNER env "
+             "var or the deployer's sts get-caller-identity account",
     )
 
     parser.add_argument(

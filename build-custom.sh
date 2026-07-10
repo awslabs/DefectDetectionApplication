@@ -256,6 +256,27 @@ else
       python${PYTHON_VERSION} -m pytest \
         test/backend-test/security/test_iam_bug_condition_exploration.py -v
       echo "Security IAM/authorization audit gate passed."
+
+      # ── Security S3 bucket-squatting audit gate ───────────────────────────
+      # (spec: security-s3-bucket-squatting-fixes). A gate covering the S3
+      # bucket-squatting batch (B1-B6):
+      #   1. s3_squat_audit.py — pattern gate; exits non-zero if a predictable
+      #      S3 bucket access (aws s3 cp/sync against a hardcoded literal, an
+      #      s3:// download URI, or a "bucket" config value) reappears in
+      #      in-scope source without an adjacent head-bucket
+      #      --expected-bucket-owner preflight, env-var parameterization, or
+      #      placeholder / ownership note (per-bucket preflight association).
+      #   2. Fix-checking + negative-fixture suite — every S3 access stays
+      #      squatting-resistant and the gate cannot be satisfied by a
+      #      file-global preflight presence check.
+      # The security/preservation suite (run by the Group-1 gate above) already
+      # covers the S3 preservation baselines (test_preservation_s3_*).
+      echo "Running security S3 bucket-squatting audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/s3_squat_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_s3_squat_bug_condition_exploration.py \
+        test/backend-test/security/test_s3_squat_gate_negative_fixture.py -v
+      echo "Security S3 bucket-squatting audit gate passed."
     ' || { echo "ERROR: backend unit tests / security audit gate failed"; exit 1; }
   echo "Backend unit tests passed."
 fi

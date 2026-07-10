@@ -1,0 +1,20 @@
+{
+  "description": "B2/B3 publish.sh resolved targets golden (Req 3.2, 3.3). Reconciled to the FIXED tree (Task 8): the buckets are parameterized as ARTIFACT_BUCKET/DOCS_BUCKET with :-defaults, so with the env vars UNSET the resolved cp/sync target literals + versioned/latest + docs path are byte-for-byte identical to the pre-fix values (F(X)=F'(X)); full_text reflects the added env-var indirection + head-bucket preflights.",
+  "artifact_bucket": "panorama-sdk-v2-artifacts",
+  "docs_bucket": "edgeml-sdk-docs",
+  "cp_lines": [
+    "aws s3 cp *.deb s3://panorama-sdk-v2-artifacts/release/$version/$(uname -m)/$ubuntu_version/$python_version/",
+    "aws s3 cp *.deb s3://panorama-sdk-v2-artifacts/release/latest/$(uname -m)/$ubuntu_version/$python_version/PanoramaSDK.deb",
+    "aws s3 cp ./lib/python_package/dist/*.whl s3://panorama-sdk-v2-artifacts/release/$version/$(uname -m)/$ubuntu_version/$python_version/",
+    "aws s3 cp ./lib/python_package/dist/*.whl s3://panorama-sdk-v2-artifacts/release/latest/$(uname -m)/$ubuntu_version/$python_version/"
+  ],
+  "sync_lines": [
+    "aws s3 sync ./sphinx s3://edgeml-sdk-docs/edgeml-sdk/v1/$major_minor/"
+  ],
+  "docs_sync_line": "aws s3 sync ./sphinx s3://edgeml-sdk-docs/edgeml-sdk/v1/$major_minor/",
+  "docs_path": "edgeml-sdk/v1/$major_minor/",
+  "guard_lines": [
+    "if [ -d \"./sphinx\" ]; then"
+  ],
+  "full_text": "#!/bin/bash\n#\n#\n# Copyright 2025 Amazon Web Services, Inc.\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n#  You may obtain a copy of the License at\n#\n#      http://www.apache.org/licenses/LICENSE-2.0\n#\n#  Unless required by applicable law or agreed to in writing, software\n#  distributed under the License is distributed on an \"AS IS\" BASIS,\n#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\n#\n#\n\nversion=$(<\"version\")\npython_version=$(python3 --version 2>&1 | awk '{print $2}')\nubuntu_version=$(lsb_release -rs)\nARTIFACT_BUCKET=\"${ARTIFACT_BUCKET:-panorama-sdk-v2-artifacts}\"   # set an account-scoped name to fail closed on squatting\nDOCS_BUCKET=\"${DOCS_BUCKET:-edgeml-sdk-docs}\"\nEXPECTED_BUCKET_OWNER=\"${EXPECTED_BUCKET_OWNER:-$(aws sts get-caller-identity --query Account --output text)}\"\n\naws s3api head-bucket --bucket \"$ARTIFACT_BUCKET\" --expected-bucket-owner \"$EXPECTED_BUCKET_OWNER\" || { echo \"ERROR: $ARTIFACT_BUCKET is not owned by $EXPECTED_BUCKET_OWNER (possible bucket squatting); aborting publish.\" >&2; exit 1; }\naws s3 cp *.deb s3://${ARTIFACT_BUCKET}/release/$version/$(uname -m)/$ubuntu_version/$python_version/\naws s3 cp *.deb s3://${ARTIFACT_BUCKET}/release/latest/$(uname -m)/$ubuntu_version/$python_version/PanoramaSDK.deb\n\naws s3 cp ./lib/python_package/dist/*.whl s3://${ARTIFACT_BUCKET}/release/$version/$(uname -m)/$ubuntu_version/$python_version/\naws s3 cp ./lib/python_package/dist/*.whl s3://${ARTIFACT_BUCKET}/release/latest/$(uname -m)/$ubuntu_version/$python_version/\n\nif [ -d \"./sphinx\" ]; then\n    major_minor=$(echo \"$version\" | cut -d'.' -f1,2)\n    aws s3api head-bucket --bucket \"$DOCS_BUCKET\" --expected-bucket-owner \"$EXPECTED_BUCKET_OWNER\" || { echo \"ERROR: $DOCS_BUCKET is not owned by $EXPECTED_BUCKET_OWNER (possible bucket squatting); aborting docs upload.\" >&2; exit 1; }\n    aws s3 sync ./sphinx s3://${DOCS_BUCKET}/edgeml-sdk/v1/$major_minor/\nfi"
+}

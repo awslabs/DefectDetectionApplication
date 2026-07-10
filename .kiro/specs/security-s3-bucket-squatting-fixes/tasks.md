@@ -54,7 +54,7 @@ vendored and out of scope):
 
 ## Tasks
 
-- [ ] 1. Write bug-condition exploration test (S3-squatting audit + targeted B1–B6 counterexample inspections)
+- [x] 1. Write bug-condition exploration test (S3-squatting audit + targeted B1–B6 counterexample inspections)
   - **Property 1: Bug Condition** - An S3 access in an in-scope file targets a hardcoded, predictable bucket literal (`panorama-sdk-v2-artifacts`, `edgeml-sdk-docs`, `edgeml-sdk-longevity-tests`, `lookoutvision-*`) on a read-then-install / build-output-write / copy-pasteable-example path with NO adjacent `--expected-bucket-owner` / `head-bucket` preflight, NO env-var parameterization (team-owned writes), and NO placeholder / ownership note (docs / notebook) — across six in-scope sites (B1–B6)
   - **CRITICAL**: This test MUST FAIL (surface non-empty hits / observe the unverified access at each site) on the unfixed tree - the hits ARE the counterexamples that confirm the bug exists
   - **DO NOT attempt to fix any source / doc / notebook in this task** - this task only writes tests and documents the counterexamples
@@ -86,7 +86,7 @@ vendored and out of scope):
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7_
 
 
-- [ ] 2. Write preservation baseline tests on the UNFIXED code (BEFORE implementing any fix)
+- [x] 2. Write preservation baseline tests on the UNFIXED code (BEFORE implementing any fix)
   - **Property 2: Preservation** - No behavior change for legitimate (non-bug-condition) inputs
   - **IMPORTANT**: Follow observation-first methodology - capture `F(X)` baselines on the UNFIXED tree, then (in task 8) assert the fixed code `F'(X)` matches exactly
   - **Emphasize property-based tests** (Hypothesis, already vendored under `.hypothesis/`) wherever the input domain is generatable — owner-match vs owner-mismatch accounts, env-var set vs unset, notebook manifest-rewrite inputs; place the tests under `test/backend-test/security/preservation/` as `test_preservation_s3_*` so they run under the shared `security/preservation` suite already wired into the Group-1 gate
@@ -107,10 +107,10 @@ vendored and out of scope):
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
 
 
-- [ ] 3. Wave 1 — Docs + notebook FIRST (B4, B5, B6) — documentation / notebook only, zero runtime blast radius
+- [x] 3. Wave 1 — Docs + notebook FIRST (B4, B5, B6) — documentation / notebook only, zero runtime blast radius
   - **Property 1: Fix Checking** - The two Sphinx docs carry an ownership note / placeholder and the notebook parameterizes its prefix; all surrounding prose / config structure / notebook logic is byte-for-byte identical and the notebook JSON stays valid
 
-  - [ ] 3.1 B4 — `src/edgemlsdk/src/docs/source/index.rst` install instructions (~line 42)
+  - [x] 3.1 B4 — `src/edgemlsdk/src/docs/source/index.rst` install instructions (~line 42)
     - Add a preceding `.. note::` stating the commands pull from the AWS-managed Panorama SDK distribution bucket and that users should verify bucket ownership / artifact integrity before `dpkg -i` / `pip install`
     - Add a documented `aws s3api head-bucket --bucket panorama-sdk-v2-artifacts --expected-bucket-owner <PANORAMA_SDK_ACCOUNT>` preflight line shown BEFORE the dependency `aws s3 cp` block and the `PanoramaSDK.deb` / `panorama-1.0-py3-none-any.whl` release-download block (do NOT append `--expected-bucket-owner` to the `aws s3 cp` lines themselves — that flag is rejected by the high-level command and would teach a broken invocation)
     - Preserve the installation prose, the four `dpkg -i` steps, the `pip install` step, the `:caption:` directives, and the toctree byte-for-byte
@@ -119,7 +119,7 @@ vendored and out of scope):
     - _Preservation: `index.rst`'s installation prose, the four `dpkg -i` steps, the `pip install` step, the `code-block` captions, and the toctree are byte-for-byte identical; only the note / preflight line are added (Req 3.4)_
     - _Requirements: 2.4_
 
-  - [ ] 3.2 B5 — `src/edgemlsdk/src/docs/source/components/message_broker/s3.rst` config sample (~line 87)
+  - [x] 3.2 B5 — `src/edgemlsdk/src/docs/source/components/message_broker/s3.rst` config sample (~line 87)
     - Replace the message-broker config sample's `"bucket": "panorama-sdk-v2-artifacts"` value with the obvious placeholder `"bucket": "<your-bucket-name>"`
     - Add a prerequisite `.. note::` instructing users to create / own the bucket they publish to before using the config
     - Preserve the rest of the sample structure byte-for-byte — the `"region"` / `"key"` / `"overwrite"` keys, the target-parameter descriptions, the C++/Python `literalinclude` samples, and every other section
@@ -128,7 +128,7 @@ vendored and out of scope):
     - _Preservation: `s3.rst`'s `"region"`/`"key"`/`"overwrite"` keys, target-parameter descriptions, `literalinclude` samples, and every other section are byte-for-byte identical; only the `bucket` value becomes a placeholder and a `.. note::` is added (Req 3.5)_
     - _Requirements: 2.5_
 
-  - [ ] 3.3 B6 — `DDA_SageMaker_Model_Training_and_Compilation.ipynb` segmentation-manifest cell (~line 141)
+  - [x] 3.3 B6 — `DDA_SageMaker_Model_Training_and_Compilation.ipynb` segmentation-manifest cell (~line 141)
     - Replace the bare `old_prefix = 's3://lookoutvision-us-east-1-0e205be246/getting-started/'` literal with a single-source `sample_data_bucket = "lookoutvision-us-east-1-0e205be246"  # AWS-owned L4V sample bucket; replace with your own` variable and `old_prefix = f's3://{sample_data_bucket}/getting-started/'`
     - Add a preceding prerequisite markdown cell (with a unique cell `id`) instructing users to create their own bucket / verify the AWS-owned sample bucket before running the cell
     - Preserve `update_manifest_paths`'s rewrite logic, the `wget` of the GitHub manifest, the upload/cleanup steps, and every other cell byte-for-byte; keep the notebook JSON valid (`nbformat` / `json.load` parseable)
@@ -138,10 +138,10 @@ vendored and out of scope):
     - _Requirements: 2.6_
 
 
-- [ ] 4. Wave 2 — publish.sh write path (B2, B3) — env-var parameterization + head-bucket preflight
+- [x] 4. Wave 2 — publish.sh write path (B2, B3) — env-var parameterization + head-bucket preflight
   - **Property 1: Fix Checking** - Each upload group reads its bucket from an env var defaulting to the current literal and is preceded by an `aws s3api head-bucket --expected-bucket-owner` preflight with `|| exit 1`; the versioned + `latest` upload layout, the `edgeml-sdk/v1/$major_minor/` docs path, and the `if [ -d "./sphinx" ]` guard are preserved
 
-  - [ ] 4.1 B2 — `src/edgemlsdk/src/utilities/publish.sh` `.deb`/`.whl` uploads (~line 23)
+  - [x] 4.1 B2 — `src/edgemlsdk/src/utilities/publish.sh` `.deb`/`.whl` uploads (~line 23)
     - Add `ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-panorama-sdk-v2-artifacts}"` (with a comment guiding users to set an account-scoped name) and `EXPECTED_BUCKET_OWNER="${EXPECTED_BUCKET_OWNER:-$(aws sts get-caller-identity --query Account --output text)}"`
     - Emit an `aws s3api head-bucket --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$EXPECTED_BUCKET_OWNER" || exit 1` preflight BEFORE the four `.deb`/`.whl` uploads, so a squatted bucket fails closed before any build output is published
     - Change the four uploads to target `s3://${ARTIFACT_BUCKET}/release/…`, preserving the versioned + `latest` dual-upload semantics and the release-path layout byte-for-byte
@@ -150,7 +150,7 @@ vendored and out of scope):
     - _Preservation: run without `ARTIFACT_BUCKET` set, the bucket resolves to `panorama-sdk-v2-artifacts` and the versioned + `latest` `.deb`/`.whl` uploads land at the same release paths; the preflight is a `200` no-op against a correctly-owned bucket (Req 3.2)_
     - _Requirements: 2.2_
 
-  - [ ] 4.2 B3 — `src/edgemlsdk/src/utilities/publish.sh` docs sync (~line 31)
+  - [x] 4.2 B3 — `src/edgemlsdk/src/utilities/publish.sh` docs sync (~line 31)
     - Add `DOCS_BUCKET="${DOCS_BUCKET:-edgeml-sdk-docs}"` and, INSIDE the `if [ -d "./sphinx" ]` guard, emit an `aws s3api head-bucket --bucket "$DOCS_BUCKET" --expected-bucket-owner "$EXPECTED_BUCKET_OWNER" || exit 1` preflight before the sync
     - Change the sync to target `s3://${DOCS_BUCKET}/edgeml-sdk/v1/$major_minor/`, preserving the `edgeml-sdk/v1/$major_minor/` path layout and the `if [ -d "./sphinx" ]` guard byte-for-byte
     - _Bug_Condition: isBugCondition(X) where X = `aws s3 sync ./sphinx s3://edgeml-sdk-docs/edgeml-sdk/v1/…` with no env var / owner assertion (B3)_
@@ -159,10 +159,10 @@ vendored and out of scope):
     - _Requirements: 2.3_
 
 
-- [ ] 5. Wave 3 — deploy.py read path (B1) LAST — highest blast radius; head-bucket preflight in the SSM list
+- [x] 5. Wave 3 — deploy.py read path (B1) LAST — highest blast radius; head-bucket preflight in the SSM list
   - **Property 1: Fix Checking** - The `download_edgemlsdk_release_artifacts` SSM list has an `aws s3api head-bucket --expected-bucket-owner` entry before the `panorama-sdk-v2-artifacts` sync and before the three `edgeml-sdk-longevity-tests` accesses, with `shlex.quote`'d owner values; the four existing `aws s3 cp`/`aws s3 sync` strings and the `# nosec B105` line are byte-for-byte identical
 
-  - [ ] 5.1 B1 — `src/edgemlsdk/src/test/longevity/deploy.py` `main(args)` SSM list (~line 157)
+  - [x] 5.1 B1 — `src/edgemlsdk/src/test/longevity/deploy.py` `main(args)` SSM list (~line 157)
     - Source the two expected owner account IDs near the top of `main` (alongside the existing `session`/`aws_region` setup): `artifacts_bucket_owner = args.artifacts_bucket_owner or os.environ.get("ARTIFACTS_BUCKET_OWNER") or PANORAMA_SDK_DISTRIBUTION_ACCOUNT` (documented module constant, the AWS-managed Panorama distribution account, filled at impl time) and `longevity_bucket_owner = args.longevity_bucket_owner or os.environ.get("LONGEVITY_BUCKET_OWNER") or session.client("sts", region_name=aws_region).get_caller_identity()["Account"]` (team-owned → defaults to the deployer's caller identity, a no-op preflight for the legitimate deployer)
     - Add two argparse args mirroring the existing `--platform`/`--region` pattern: `--artifacts-bucket-owner` and `--longevity-bucket-owner`, both `type=str, default=None`, so resolution falls through to env / caller-identity / documented-constant
     - Prepend two `aws s3api head-bucket` preflight entries into the `download_edgemlsdk_release_artifacts` list using `shlex.quote` on the interpolated owner values (bucket names stay bare literals exactly as the `s3://…` literals already are): `f"aws s3api head-bucket --bucket panorama-sdk-v2-artifacts --expected-bucket-owner {shlex.quote(str(artifacts_bucket_owner))}"` immediately before the `panorama-sdk-v2-artifacts` `aws s3 sync` entry, and `f"aws s3api head-bucket --bucket edgeml-sdk-longevity-tests --expected-bucket-owner {shlex.quote(str(longevity_bucket_owner))}"` immediately before the three `edgeml-sdk-longevity-tests` `aws s3 cp`/`sync` entries (AWS-RunShellScript runs the list sequentially and aborts on a non-zero exit, so a `403` fails the batch closed before `dpkg -i` / `pip install`)
@@ -173,7 +173,7 @@ vendored and out of scope):
     - _Requirements: 2.1_
 
 
-- [ ] 6. B7 — Finalize the S3-squatting audit gate (Req 2.7)
+- [x] 6. B7 — Finalize the S3-squatting audit gate (Req 2.7)
   - **Property 1: Fix Checking** - `s3_squat_audit.disallowed_hits()` returns `[]` on the fixed tree with per-bucket preflight-association semantics, and still fails on a reintroduced unverified access
   - Finalize `test/backend-test/security/s3_squat_audit.py` (created in task 1) so `disallowed_hits()` returns `0` on the fixed tree: the `unverified_s3_access` rule clears each `deploy.py` SSM access via the nearest preceding same-bucket `head-bucket` preflight and each `publish.sh` upload group via its preflight; `unverified_config_reference` clears `s3.rst` via the `<your-bucket-name>` placeholder and the notebook via the `sample_data_bucket` variable; `undocumented_doc_command` clears `index.rst` via the ownership `.. note::` + documented preflight
     - Verify the **per-bucket preflight-association** semantics hold: dropping the `head-bucket` preflight for `panorama-sdk-v2-artifacts` while keeping the `edgeml-sdk-longevity-tests` one (or vice-versa) still produces a disallowed hit — assert this with a negative fixture so the gate cannot be satisfied by a file-global preflight presence
@@ -184,7 +184,7 @@ vendored and out of scope):
     - _Requirements: 2.7_
 
 
-- [ ] 7. Verify the bug-condition exploration test now passes (Fix Checking)
+- [x] 7. Verify the bug-condition exploration test now passes (Fix Checking)
   - **Property 1: Expected Behavior** - Every in-scope S3 access is squatting-resistant: read/write sites carry a `head-bucket --expected-bucket-owner` preflight, team-owned writes read from an env var, docs / notebook references are placeholders or owner-noted, and the audit returns zero disallowed hits
   - **IMPORTANT**: Re-run the SAME audit + targeted tests from task 1 - do NOT write new tests
   - Re-run `s3_squat_audit.run_audit()` / `disallowed_hits()` and `test_s3_squat_bug_condition_exploration.py` on the FIXED tree
@@ -192,7 +192,7 @@ vendored and out of scope):
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7_
 
 
-- [ ] 8. Verify preservation baseline tests still pass (Preservation Checking)
+- [x] 8. Verify preservation baseline tests still pass (Preservation Checking)
   - **Property 2: Preservation** - No behavior change for legitimate inputs — `F(X) = F'(X)`
   - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
   - Re-run the `test_preservation_s3_*` suite (goldens + PBTs 1–4) on the FIXED tree
@@ -200,8 +200,8 @@ vendored and out of scope):
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
 
 
-- [ ] 9. Integration + CI-gate verification
-  - [ ] 9.1 Run the backend security suites and wire `s3_squat_audit.py` into `build-custom.sh`
+- [x] 9. Integration + CI-gate verification
+  - [x] 9.1 Run the backend security suites and wire `s3_squat_audit.py` into `build-custom.sh`
     - Run the backend security suites to completion — `s3_squat_audit.py`, `test_s3_squat_bug_condition_exploration.py`, and the `security/preservation` suite (`test_preservation_s3_*`) — and confirm the S3-squatting unit + property tests pass with no regressions
     - Wire the new gate as a **fourth** security block in `build-custom.sh` (the "Security … audit gate" region, after the IAM gate at ~line 254–258), under the same `set -e`-guarded backend-test block so a non-zero exit fails the build:
       ```sh
@@ -216,7 +216,7 @@ vendored and out of scope):
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
 
 
-- [ ] 10. Checkpoint - Ensure all tests pass and the CI gate is wired
+- [x] 10. Checkpoint - Ensure all tests pass and the CI gate is wired
   - Ensure the exploration test passes on fixed code (task 7), the preservation goldens are byte-for-byte identical and PBTs 1–4 invariants hold (task 8), and the backend security suites + integration checks pass (task 9)
   - Confirm the `s3_squat_audit.py` gate (plus the exploration and preservation suites) is wired into `build-custom.sh` so a predictable-bucket access without a `head-bucket --expected-bucket-owner` preflight / placeholder / ownership note reappearing in in-scope source fails the build
   - Confirm the deployment-time gate items — the `ARTIFACTS_BUCKET_OWNER` / `LONGEVITY_BUCKET_OWNER` (B1) and `EXPECTED_BUCKET_OWNER` (B2/B3) account values are correctly sourced per environment (a wrong value fails the deploy/publish closed at the preflight), and the deployment runbook records the correct Panorama SDK distribution account for `PANORAMA_SDK_DISTRIBUTION_ACCOUNT`
