@@ -58,6 +58,13 @@ from hypothesis import strategies as st
 
 from _preservation_support import load_module_from_path
 
+# jwt_authorizer.py imports PyJWT (`import jwt`), a cloud-portal Lambda
+# dependency that is NOT installed in the edge runtime flask-app image where
+# build-custom.sh runs this gate (present on the JP6 image but not JP5). Skip
+# this whole module cleanly when PyJWT is unavailable; the cloud-portal Lambda
+# runtime provides it. secrets_audit.py still statically guards jwt_authorizer.py.
+pytest.importorskip("jwt")
+
 JWT_AUTHORIZER_REL = "edge-cv-portal/backend/functions/jwt_authorizer.py"
 
 

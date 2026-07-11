@@ -132,6 +132,11 @@ _JWT_AUTHORIZER_REL = os.path.join(
 
 
 def _load_jwt_authorizer():
+    # jwt_authorizer.py imports PyJWT (`import jwt`), a cloud-portal Lambda dep
+    # not installed in the edge runtime flask-app image (present on JP6 but not
+    # JP5). Skip the jwt_authorizer-dependent tests cleanly when PyJWT is
+    # unavailable; secrets_audit.py still statically guards this source.
+    pytest.importorskip("jwt")
     return _load_module_from_path("jwt_authorizer_under_test", _JWT_AUTHORIZER_REL)
 
 
