@@ -41,6 +41,14 @@ const trustedUseCaseAccountIds: string[] = (app.node.tryGetContext('trustedUseCa
   .split(',')
   .map((id: string) => id.trim())
   .filter((id: string) => id.length > 0);
+// Optional allowlist of data buckets the portal Lambda roles may access on the
+// S3 data plane. Comma-separated bucket names or ARNs via CDK context
+// (`-c dataBucketAllowlist=bucket-a,bucket-b`). Empty/unset => all buckets
+// (arn:aws:s3:::*) on the data plane (default; control-plane never granted).
+const dataBucketAllowlist: string[] = (app.node.tryGetContext('dataBucketAllowlist') || '')
+  .split(',')
+  .map((b: string) => b.trim())
+  .filter((b: string) => b.length > 0);
 const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   env,
   description: 'Compute and API infrastructure for Edge CV Portal',
@@ -61,6 +69,7 @@ const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   portalArtifactsBucket: storageStack.portalArtifactsBucket,
   cloudFrontDomain,
   trustedUseCaseAccountIds,
+  dataBucketAllowlist,
 });
 
 // Frontend Stack (CloudFront, S3)

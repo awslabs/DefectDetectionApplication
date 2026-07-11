@@ -43,14 +43,21 @@ TRUSTED="${TRUSTED_USECASE_ACCOUNT_IDS:-$ACCOUNT}"
 # Which stacks to deploy (default: all).
 CDK_STACKS="${CDK_STACKS:---all}"
 
+# Optional data-bucket allowlist (comma-separated bucket names or ARNs) that the
+# portal Lambda roles may access on the S3 data plane. Empty/unset => all
+# buckets (arn:aws:s3:::*) on the data plane (default).
+DATA_BUCKET_ALLOWLIST="${DATA_BUCKET_ALLOWLIST:-}"
+
 echo "=== $(date -u '+%FT%TZ') portal deploy start ==="
 echo "  account=$ACCOUNT region=$REGION"
 echo "  trustedUseCaseAccountIds=$TRUSTED"
+echo "  dataBucketAllowlist=${DATA_BUCKET_ALLOWLIST:-<all buckets (default)>}"
 echo "  stacks=$CDK_STACKS"
 
 npx cdk deploy $CDK_STACKS \
   --require-approval never \
-  -c "trustedUseCaseAccountIds=$TRUSTED"
+  -c "trustedUseCaseAccountIds=$TRUSTED" \
+  -c "dataBucketAllowlist=$DATA_BUCKET_ALLOWLIST"
 rc=$?
 echo "=== $(date -u '+%FT%TZ') portal deploy END exit=$rc ==="
 exit $rc
