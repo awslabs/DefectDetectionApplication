@@ -185,34 +185,51 @@ cat > gdk-config.json << EOF
 EOF
 echo "✓ GDK configuration created"
 
-print_step "Cleaning build directories"
-# Clean GDK cache and build directories
-rm -rf greengrass-build/
-rm -rf .gdk/
-echo "✓ Build directories cleaned"
-
-print_step "Building LocalServer component"
-# Build and publish component
-BUILD_LOG="/tmp/gdk-build-$(date +%s).log"
-echo "Build log: $BUILD_LOG"
-echo ""
-
-# Run build with real-time output and log capture
-if gdk component build 2>&1 | tee "$BUILD_LOG"; then
-    echo ""
-    echo "✓ Component built successfully"
+# SKIP_BUILD=1 re-uses the already-built artifacts in greengrass-build/ and the
+# locally-tagged flask-app/react-webapp images, skipping the (long) clean +
+# `gdk component build`. Use it to re-run ONLY the publish step — e.g. when a
+# build succeeded but publish failed on a transient credential expiry — without
+# a full ~1h rebuild. Default (unset) preserves the original clean+build+publish.
+if [ "${SKIP_BUILD:-0}" = "1" ]; then
+    print_step "Reusing existing build (SKIP_BUILD=1)"
+    echo "⏭  SKIP_BUILD=1 — skipping clean + gdk component build; publishing the"
+    echo "   already-built artifacts in greengrass-build/ and the local images."
+    if ! ls greengrass-build/artifacts/"${COMPONENT_NAME}"/NEXT_PATCH/*.zip >/dev/null 2>&1; then
+        echo "✗ SKIP_BUILD=1 but no built artifact found at"
+        echo "  greengrass-build/artifacts/${COMPONENT_NAME}/NEXT_PATCH/*.zip — run a full build first."
+        exit 1
+    fi
+    echo "✓ Found existing artifact for ${COMPONENT_NAME}"
 else
-    BUILD_EXIT_CODE=${PIPESTATUS[0]}
+    print_step "Cleaning build directories"
+    # Clean GDK cache and build directories
+    rm -rf greengrass-build/
+    rm -rf .gdk/
+    echo "✓ Build directories cleaned"
+
+    print_step "Building LocalServer component"
+    # Build and publish component
+    BUILD_LOG="/tmp/gdk-build-$(date +%s).log"
+    echo "Build log: $BUILD_LOG"
     echo ""
-    echo "✗ Component build failed (exit code: $BUILD_EXIT_CODE)"
-    echo ""
-    echo "Last 50 lines of build log:"
-    echo "---"
-    tail -50 "$BUILD_LOG"
-    echo "---"
-    echo ""
-    echo "Full log saved to: $BUILD_LOG"
-    exit 1
+
+    # Run build with real-time output and log capture
+    if gdk component build 2>&1 | tee "$BUILD_LOG"; then
+        echo ""
+        echo "✓ Component built successfully"
+    else
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        echo ""
+        echo "✗ Component build failed (exit code: $BUILD_EXIT_CODE)"
+        echo ""
+        echo "Last 50 lines of build log:"
+        echo "---"
+        tail -50 "$BUILD_LOG"
+        echo "---"
+        echo ""
+        echo "Full log saved to: $BUILD_LOG"
+        exit 1
+    fi
 fi
 
 print_step "Publishing LocalServer component"
