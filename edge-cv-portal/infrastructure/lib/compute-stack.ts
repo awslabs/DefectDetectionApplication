@@ -192,8 +192,16 @@ export class ComputeStack extends cdk.Stack {
         ],
       }));
 
-      // IoT (scopable) — portal-created things use thing/dda-*, topics use
-      // topic/dda/*, jobs and thing-groups are portal-scoped by resource type.
+      // IoT (scopable) — thing-level actions are scoped to all things in the
+      // account (thing/*), NOT thing/dda-*: edge devices are provisioned by
+      // setup_station.sh with operator-chosen thing names (e.g.
+      // "jp5-mic730ai-ryvanlabhome"), which never carry a dda- prefix. Scoping
+      // to thing/dda-* broke Greengrass CreateDeployment, which internally
+      // calls iot:DescribeThing on the target thing (AccessDeniedException).
+      // This matches the cross-account DDAPortalAccessRole in
+      // usecase-account-stack.ts, which already scopes IoT things to thing/*.
+      // The account is the real security boundary here. Topics/jobs/thing-
+      // groups remain scoped by resource type.
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
@@ -217,7 +225,7 @@ export class ComputeStack extends cdk.Stack {
           'iot:DeleteThingShadow',
         ],
         resources: [
-          'arn:aws:iot:*:*:thing/dda-*',
+          'arn:aws:iot:*:*:thing/*',
           'arn:aws:iot:*:*:topic/dda/*',
           'arn:aws:iot:*:*:job/*',
           'arn:aws:iot:*:*:thinggroup/*',
