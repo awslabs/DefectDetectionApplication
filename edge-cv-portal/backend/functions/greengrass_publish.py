@@ -123,7 +123,47 @@ def generate_component_recipe(
     
     # Determine DDA LocalServer dependency based on target (JP4 vs JP5) / platform
     local_server_component = resolve_local_server_component(target, platform)
-    
+
+    # Model Startup readiness gate.
+    #
+    # The HARD ComponentDependency on LocalServer below only guarantees that
+    # LocalServer's lifecycle has STARTED, not that it is functionally ready.
+    # LocalServer uses a `Run` lifecycle (foreground `docker compose up`), and
+    # Greengrass reports a Run component as RUNNING the moment its script
+    # launches -- seconds before the backend container boots and runs
+    # cp_model_conversion_files(), which is what copies model_convertor.py /
+    # convert_model_cleanup.py / resources_for_copy onto the host /aws_dda.
+    # Without a gate, a first-time deployment (LocalServer + model together on a
+    # fresh device) races: the model Startup runs `python3 /aws_dda/model_convertor.py`
+    # before that file exists, exits 2, goes BROKEN, and rolls back the whole
+    # deployment. Poll (bounded) for the seed to appear before invoking it.
+    convertor_cmd = (
+        f'python3 /aws_dda/model_convertor.py '
+        f'--unarchived_model_path {{artifacts:decompressedPath}}/{model_unarchived_path}/ '
+        f'--model_version {component_version} --model_name {component_name}'
+    )
+    startup_script = (
+        '#!/bin/bash\n'
+        '# Wait for the LocalServer backend to seed the host model-conversion\n'
+        '# scripts onto /aws_dda (cp_model_conversion_files) before running them.\n'
+        'seed_timeout=600\n'
+        'waited=0\n'
+        'while [ ! -f /aws_dda/model_convertor.py ] || '
+        '[ ! -f /aws_dda/convert_model_cleanup.py ] || '
+        '[ ! -d /aws_dda/resources_for_copy ]; do\n'
+        '  if [ "$waited" -ge "$seed_timeout" ]; then\n'
+        '    echo "ERROR: LocalServer did not seed /aws_dda within ${seed_timeout}s '
+        '(model_convertor.py absent). Is the LocalServer backend container running? '
+        'Failing model startup." >&2\n'
+        '    exit 1\n'
+        '  fi\n'
+        '  echo "Waiting for LocalServer to seed /aws_dda (${waited}s/${seed_timeout}s)..."\n'
+        '  sleep 5\n'
+        '  waited=$((waited + 5))\n'
+        'done\n'
+        f'{convertor_cmd}\n'
+    )
+
     recipe = {
         'RecipeFormatVersion': '2020-01-25',
         'ComponentName': component_name,
@@ -151,8 +191,11 @@ def generate_component_recipe(
                 },
                 'Lifecycle': {
                     'Startup': {
-                        'Script': f'python3 /aws_dda/model_convertor.py --unarchived_model_path {{artifacts:decompressedPath}}/{model_unarchived_path}/ --model_version {component_version} --model_name {component_name}',
-                        'Timeout': 900,
+                        'Script': startup_script,
+                        # Bumped from 900 -> 1800 so the bounded seed-wait (up to
+                        # 600s) plus the model conversion both fit within the
+                        # Startup timeout.
+                        'Timeout': 1800,
                         'requiresPrivilege': True,
                         'runWith': {
                             'posixUser': 'root'
