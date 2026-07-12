@@ -3,13 +3,13 @@
     {
       "file": "station_install/setup_station.sh",
       "has_version_pin": false,
-      "lineno": 518,
+      "lineno": 593,
       "text": "  run_cmd \"python3 -m pip install requests protobuf\" || add_warning \"Failed to install Python packages\""
     },
     {
       "file": "station_install/setup_station.sh",
       "has_version_pin": false,
-      "lineno": 542,
+      "lineno": 617,
       "text": "  run_cmd \"python3 -m pip install --upgrade requests\" || \\"
     },
     {
