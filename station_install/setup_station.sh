@@ -386,8 +386,17 @@ install_from_ppa() {
   echo "✓ Python 3.11 installed successfully from the deadsnakes PPA."
 }
 
-# Check if region parameter is provided
-if [ $# -eq 0 ]; then
+# Returns 0 if the argument looks like an AWS region (e.g. us-east-1,
+# eu-west-2, ap-southeast-1, us-gov-west-1, cn-north-1). Used to catch the
+# common mistake of passing the args in the wrong order — a bogus --aws-region
+# makes Greengrass provisioning fail in confusing ways ("Unable to load
+# credentials" / region errors) that look like an auth problem but aren't.
+looks_like_region() {
+    echo "$1" | grep -qE '^[a-z]{2}(-gov|-iso[a-z]?)?-[a-z]+-[0-9]+$'
+}
+
+# Require both arguments.
+if [ $# -lt 2 ]; then
     echo "Usage: $0 <aws-region> <thing_name>"
     echo "Example: $0 us-east-1 dda_thing_1"
     exit 1
@@ -397,6 +406,24 @@ SETUP_STARTED=1
 
 aws_region="$1"
 thing_name="$2"
+
+# Guard against swapped arguments. The script signature is
+# "<aws-region> <thing_name>", but operators frequently invoke it as
+# "<thing_name> <aws-region>". Detect and correct that: if arg1 is not a valid
+# region but arg2 is, swap them (with a warning); if neither is a region, stop
+# with a clear error rather than sending a garbage --aws-region to Greengrass.
+if ! looks_like_region "$aws_region"; then
+    if looks_like_region "$thing_name"; then
+        add_warning "Arguments appear swapped: '$aws_region' is not a valid AWS region but '$thing_name' is. Auto-correcting to <region> <thing_name>. Correct order is: $0 <aws-region> <thing_name>"
+        local_tmp="$aws_region"
+        aws_region="$thing_name"
+        thing_name="$local_tmp"
+    else
+        add_error "'$aws_region' does not look like an AWS region (expected e.g. us-east-1). Usage: $0 <aws-region> <thing_name>"
+        exit 1
+    fi
+fi
+
 echo "Using AWS region: $aws_region"
 echo "Using thing name: $thing_name"
 echo ""
