@@ -128,7 +128,16 @@ export class ComputeStack extends cdk.Stack {
       // committed dda-* / dda/* naming conventions (I1). The union of actions
       // across the split statements is identical to the original combined list.
 
-      // SageMaker (scopable) — portal-created jobs/models use the dda-* prefix.
+      // SageMaker (scopable to resource type, NOT to a dda-* name prefix).
+      // Portal training/compilation/labeling jobs are named after the use case
+      // and model (e.g. "cookies-binary-jetson-<ts>"), NOT "dda-*". Scoping to
+      // *-job/dda-* denied CreateCompilationJob and, more visibly,
+      // DescribeCompilationJob on the real job names, so compilation jobs
+      // completed in SageMaker but the portal marked them ERROR (it could not
+      // read their status). Scope to the job/model resource types (the account
+      // is the security boundary), matching the cross-account DDAPortalAccessRole
+      // in usecase-account-stack.ts which already uses training-job/*,
+      // compilation-job/*, labeling-job/*.
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
@@ -146,10 +155,10 @@ export class ComputeStack extends cdk.Stack {
           'sagemaker:AddTags',
         ],
         resources: [
-          'arn:aws:sagemaker:*:*:training-job/dda-*',
-          'arn:aws:sagemaker:*:*:compilation-job/dda-*',
-          'arn:aws:sagemaker:*:*:labeling-job/dda-*',
-          'arn:aws:sagemaker:*:*:model/dda-*',
+          'arn:aws:sagemaker:*:*:training-job/*',
+          'arn:aws:sagemaker:*:*:compilation-job/*',
+          'arn:aws:sagemaker:*:*:labeling-job/*',
+          'arn:aws:sagemaker:*:*:model/*',
           'arn:aws:sagemaker:*:*:workteam/*',
         ],
       }));
