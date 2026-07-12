@@ -133,10 +133,12 @@ export default function LogsDiagnosticsTab({ deviceId, usecaseId }: LogsDiagnost
           {/* Summary Stats */}
           <Container header={<Header>Analysis Summary</Header>}>
             <SpaceBetween size="m">
-              <Box>
-                <Box variant="awsui-key-label">Analysis Time</Box>
-                <Box>{new Date(analysis.analysis_timestamp).toLocaleString()}</Box>
-              </Box>
+              {analysis.analysis_timestamp && (
+                <Box>
+                  <Box variant="awsui-key-label">Analysis Time</Box>
+                  <Box>{new Date(analysis.analysis_timestamp).toLocaleString()}</Box>
+                </Box>
+              )}
 
               {/* Issue Counts */}
               <Box>
@@ -170,12 +172,20 @@ export default function LogsDiagnosticsTab({ deviceId, usecaseId }: LogsDiagnost
                 </SpaceBetween>
               </Box>
 
+              {/* Optional message (e.g. no logs found) */}
+              {(analysis as any).message && (
+                <Box>
+                  <Box variant="awsui-key-label">Note</Box>
+                  <Box>{(analysis as any).message}</Box>
+                </Box>
+              )}
+
               {/* Next Steps */}
-              {analysis.next_steps.length > 0 && (
+              {(analysis.next_steps?.length ?? 0) > 0 && (
                 <Box>
                   <Box variant="awsui-key-label">Next Steps</Box>
                   <ul style={{ margin: '8px 0', paddingLeft: '20px' }}>
-                    {analysis.next_steps.map((step, idx) => (
+                    {(analysis.next_steps ?? []).map((step, idx) => (
                       <li key={idx} style={{ marginBottom: '4px' }}>
                         {step}
                       </li>
@@ -192,7 +202,7 @@ export default function LogsDiagnosticsTab({ deviceId, usecaseId }: LogsDiagnost
               <Tabs
                 activeTabId={activeTabId}
                 onChange={({ detail }) => setActiveTabId(detail.activeTabId)}
-                tabs={analysis.issues.map((issue) => ({
+                tabs={(analysis.issues ?? []).map((issue) => ({
                   id: issue.issue_id,
                   label: (
                     <SpaceBetween direction="horizontal" size="xs">

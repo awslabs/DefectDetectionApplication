@@ -41,6 +41,10 @@ export enum CameraStatus {
 export enum PredictionType {
   Normal = "Normal",
   Anomaly = "Anomaly",
+  // Object-detection result type (task=object_detection). Emitted by the
+  // marshal for detection captures; distinct from the anomaly-classification
+  // values so the UI can surface the bounding-box overlay.
+  Detection = "Detection",
 }
 
 export enum WorkflowTriggerType {

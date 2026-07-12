@@ -4,10 +4,66 @@ import argparse
 import argparse
 import os
 import json
+import re
+import shlex
 from botocore.exceptions import ClientError
 
+# The AWS-managed Panorama SDK distribution bucket (panorama-sdk-v2-artifacts)
+# is owned by an AWS service account, NOT the deployer. Fill in the documented
+# Panorama SDK distribution account ID here (or pass --artifacts-bucket-owner /
+# set ARTIFACTS_BUCKET_OWNER at deploy time). Left as a placeholder so the
+# head-bucket preflight fails CLOSED until an operator supplies the real value.
+PANORAMA_SDK_DISTRIBUTION_ACCOUNT = "REPLACE_WITH_PANORAMA_SDK_DISTRIBUTION_ACCOUNT_ID"
+
+# Allowlist patterns for argparse args that are interpolated into the
+# AWS-RunShellScript SSM commands. Any value carrying a shell metacharacter
+# (; | & ` $ ( ) < > whitespace, ...) fails these patterns and is rejected
+# before it can reach the shell. shlex.quote (applied at command-build time) is
+# additionally a no-op on these clean tokens, so legitimate args are unchanged.
+_ALLOWED_ARG = re.compile(r"^[A-Za-z0-9._:-]+$")
+_ALLOWED_RELEASE_DATE = re.compile(r"^\d{8}$")
+
+
+def _validate_deploy_args(args):
+    """Allowlist-validate the argparse args as they are read, before any value is
+    interpolated into an SSM shell command. Rejects on mismatch with a
+    ``ValueError`` so a metacharacter-bearing arg never reaches AWS-RunShellScript.
+    Only fields that are present on ``args`` are checked (the mqtt-only args
+    ``region``/``mqtt_endpoint``/``payload_size`` are absent unless the ``mqtt``
+    subcommand is used)."""
+    token_fields = [
+        "platform",
+        "ubuntu_version",
+        "python_version",
+        "region",
+        "mqtt_endpoint",
+    ]
+    for field in token_fields:
+        if hasattr(args, field) and getattr(args, field) is not None:
+            value = getattr(args, field)
+            if not _ALLOWED_ARG.match(str(value)):
+                raise ValueError(
+                    f"Invalid value for --{field}: {value!r} "
+                    f"(must match {_ALLOWED_ARG.pattern})"
+                )
+    if hasattr(args, "release_date") and args.release_date is not None:
+        if not _ALLOWED_RELEASE_DATE.match(str(args.release_date)):
+            raise ValueError(
+                f"Invalid value for --release_date: {args.release_date!r} "
+                f"(must be an 8-digit date YYYYMMDD)"
+            )
+    for field in ["longevity_hours", "payload_size"]:
+        if hasattr(args, field) and getattr(args, field) is not None:
+            value = getattr(args, field)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"Invalid value for --{field}: {value!r} (must be an int)"
+                )
+    return args
+
+
 aws_region = ""
-secret_name = "edgeml-sdk-longevity-tests"
+secret_name = "edgeml-sdk-longevity-tests"  # nosec B105 — Secrets Manager secret name / S3 bucket name, not a password.
 # EC2 instance parameters
 ec2_instance_type = 't4g.2xlarge'
 ec2_image_id = 'ami-073614ec1eee63d19' # Amazon Linux 2023 AMI 2023.1.20230912.0 arm64 HVM kernel-6.1
@@ -143,18 +199,40 @@ def set_aws_access_keys_from_secrets_manager():
     os.environ["AWS_SESSION_TOKEN"]=""
     
 def main(args):
+    _validate_deploy_args(args)
     set_aws_access_keys_from_secrets_manager()
     session = boto3.Session()
     global aws_region
     aws_region = session.region_name
     credentials = session.get_credentials()
     s3_client = session.client('s3', region_name=aws_region)
+
+    # Expected S3 bucket owners for the squatting preflight (Group 5 / B1).
+    # panorama-sdk-v2-artifacts is the AWS-managed Panorama SDK distribution
+    # bucket -> its owner account differs from the deployer, so it MUST be
+    # supplied explicitly (arg/env), defaulting to the documented Panorama SDK
+    # distribution account constant. edgeml-sdk-longevity-tests is team-owned by
+    # the deployer's account, so it defaults to the caller identity (a no-op
+    # preflight for the legitimate deployer).
+    artifacts_bucket_owner = (
+        args.artifacts_bucket_owner
+        or os.environ.get("ARTIFACTS_BUCKET_OWNER")
+        or PANORAMA_SDK_DISTRIBUTION_ACCOUNT
+    )
+    longevity_bucket_owner = (
+        args.longevity_bucket_owner
+        or os.environ.get("LONGEVITY_BUCKET_OWNER")
+        or session.client("sts", region_name=aws_region).get_caller_identity()["Account"]
+    )
+    q_artifacts_owner = shlex.quote(str(artifacts_bucket_owner))
+    q_longevity_owner = shlex.quote(str(longevity_bucket_owner))
+
     source_folder = ''
     destination_prefix = ''
     if args.mqtt:
         source_folder = 'mqtt/'
         destination_prefix = 'mqtt'
-    bucket_name = 'edgeml-sdk-longevity-tests'
+    bucket_name = 'edgeml-sdk-longevity-tests'  # nosec B105 — Secrets Manager secret name / S3 bucket name, not a password.
     
     upload_folder_to_s3(s3_client, source_folder, bucket_name, destination_prefix)
     graph_json_path = os.path.join(os.getcwd(), 'longevity.json')
@@ -162,28 +240,46 @@ def main(args):
     upload_file_to_s3(s3_client,graph_json_path, bucket_name, "longevity.json")
     upload_file_to_s3(s3_client,delegates_json_path, bucket_name, "delegates.json")
     
+    # Allowlist-validated above; additionally shlex.quote every interpolated arg
+    # so no shell metacharacter can survive into the AWS-RunShellScript command.
+    # shlex.quote is a no-op on the clean allowlisted tokens, so legitimate args
+    # produce byte-identical command strings.
+    q_region = shlex.quote(str(args.region))
+    q_release_date = shlex.quote(str(args.release_date))
+    q_platform = shlex.quote(str(args.platform))
+    q_ubuntu_version = shlex.quote(str(args.ubuntu_version))
+    q_python_version = shlex.quote(str(args.python_version))
+
+    # AWS credentials for the deployed instance come from the EC2 IAM instance
+    # profile (already passed as ``iam_instance_profile_arn`` to
+    # ``create_instance``) via IMDSv2, so the container's aws CLI / SDK resolves
+    # credentials automatically. No static keys are embedded in the SSM commands.
     download_edgemlsdk_release_artifacts = [
         "sudo yum update",
         "sudo yum install docker -y",
         "sudo service docker start",
         "sudo service docker status",
-        f"export AWS_ACCESS_KEY_ID={credentials.access_key}",
-        f"export AWS_SECRET_ACCESS_KEY={credentials.secret_key}",
-        f"export AWS_DEFAULT_REGION={args.region}",
+        f"export AWS_DEFAULT_REGION={q_region}",
         "sudo mkdir -p /edgemlsdk",
         f"sudo mkdir -p /edgemlsdk/{source_folder}",
-        f"aws s3 sync s3://panorama-sdk-v2-artifacts/release/1.0.{args.release_date}/{args.platform}/{args.ubuntu_version}/3.8.0/ /edgemlsdk",
+        f"aws s3api head-bucket --bucket panorama-sdk-v2-artifacts --expected-bucket-owner {q_artifacts_owner}",
+        f"aws s3 sync s3://panorama-sdk-v2-artifacts/release/1.0.{q_release_date}/{q_platform}/{q_ubuntu_version}/3.8.0/ /edgemlsdk",
+        f"aws s3api head-bucket --bucket edgeml-sdk-longevity-tests --expected-bucket-owner {q_longevity_owner}",
         "aws s3 cp s3://edgeml-sdk-longevity-tests/longevity.json /edgemlsdk/",
         "aws s3 cp s3://edgeml-sdk-longevity-tests/delegates.json /edgemlsdk/",
         f"aws s3 sync s3://edgeml-sdk-longevity-tests/{source_folder} /edgemlsdk/{source_folder}",
         "aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com",
-        f"docker pull ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/edgemlsdk:{args.ubuntu_version}-{args.platform}-{args.python_version}-latest",
+        f"docker pull ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/edgemlsdk:{q_ubuntu_version}-{q_platform}-{q_python_version}-latest",
     ]
 
     if args.mqtt:
-        run_mqtt_longevity = [f"docker run -v /edgemlsdk:/edgemlsdk -idt --log-driver=awslogs --log-opt awslogs-region=us-west-2 --log-opt awslogs-group=edgemlsdk-{args.ubuntu_version}-{args.platform}-{args.python_version}-{args.mqtt} --log-opt awslogs-create-group=true \
-            ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/edgemlsdk:{args.ubuntu_version}-{args.platform}-{args.python_version}-latest \
-            bash -c '''cd /edgemlsdk; dpkg -i Panorama_1.0.{args.release_date}.deb;apt-get install tmux -y; python3 -m pip install panorama-1.0-py3-none-any.whl; bash /edgemlsdk/mqtt/run_mqtt_longevity.sh -l {args.longevity_hours} -r {args.region} -m {args.mqtt_endpoint} -n {args.payload_size} -a {credentials.access_key} -s {credentials.secret_key}'''"]
+        q_mqtt = shlex.quote(str(args.mqtt))
+        q_longevity_hours = shlex.quote(str(args.longevity_hours))
+        q_mqtt_endpoint = shlex.quote(str(args.mqtt_endpoint))
+        q_payload_size = shlex.quote(str(args.payload_size))
+        run_mqtt_longevity = [f"docker run -v /edgemlsdk:/edgemlsdk -idt --log-driver=awslogs --log-opt awslogs-region=us-west-2 --log-opt awslogs-group=edgemlsdk-{q_ubuntu_version}-{q_platform}-{q_python_version}-{q_mqtt} --log-opt awslogs-create-group=true \
+            ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/edgemlsdk:{q_ubuntu_version}-{q_platform}-{q_python_version}-latest \
+            bash -c '''cd /edgemlsdk; dpkg -i Panorama_1.0.{q_release_date}.deb;apt-get install tmux -y; python3 -m pip install panorama-1.0-py3-none-any.whl; bash /edgemlsdk/mqtt/run_mqtt_longevity.sh -l {q_longevity_hours} -r {q_region} -m {q_mqtt_endpoint} -n {q_payload_size}'''"]
     task = DeployLongevity("ec2")
     instance_id = task.create_instance(
         credentials, iam_instance_profile_arn
@@ -226,6 +322,22 @@ if __name__ == "__main__":
         type=str,
         default="20230918",
         help="Sets relase date folder(YYYYMMDD) for downloading edgemlsdk artifacts",
+    )
+    parser.add_argument(
+        "--artifacts-bucket-owner",
+        type=str,
+        default=None,
+        help="expected AWS account ID that owns panorama-sdk-v2-artifacts "
+             "(head-bucket preflight); defaults to ARTIFACTS_BUCKET_OWNER env "
+             "var or the documented Panorama SDK distribution account constant",
+    )
+    parser.add_argument(
+        "--longevity-bucket-owner",
+        type=str,
+        default=None,
+        help="expected AWS account ID that owns edgeml-sdk-longevity-tests "
+             "(head-bucket preflight); defaults to LONGEVITY_BUCKET_OWNER env "
+             "var or the deployer's sts get-caller-identity account",
     )
 
     parser.add_argument(

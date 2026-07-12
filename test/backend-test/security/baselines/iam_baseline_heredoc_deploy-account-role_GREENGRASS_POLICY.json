@@ -1,0 +1,66 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "s3:GetObject",
+        "s3:GetBucketLocation"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:s3:::dda-component-*",
+        "arn:aws:s3:::dda-component-*/*"
+      ],
+      "Sid": "AllowPortalComponentBucketAccess"
+    },
+    {
+      "Action": [
+        "s3:GetObject",
+        "s3:GetBucketLocation",
+        "s3:HeadObject"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:s3:::dda-*",
+        "arn:aws:s3:::dda-*/*",
+        "arn:aws:s3:::*-dda-*",
+        "arn:aws:s3:::*-dda-*/*"
+      ],
+      "Sid": "AllowDDABucketPatternAccess"
+    },
+    {
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectTagging",
+        "s3:GetObject",
+        "s3:GetBucketLocation"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:s3:::dda-inference-results-*",
+        "arn:aws:s3:::dda-inference-results-*/*"
+      ],
+      "Sid": "AllowInferenceResultsUpload"
+    },
+    {
+      "Action": [
+        "ecr:GetAuthorizationToken"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "AllowEcrAuthToken"
+    },
+    {
+      "Action": [
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchCheckLayerAvailability"
+      ],
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:ecr:*:123456789012:repository/dda/*"
+      ],
+      "Sid": "AllowEcrImagePull"
+    }
+  ],
+  "Version": "2012-10-17"
+}

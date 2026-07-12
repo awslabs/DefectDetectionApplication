@@ -38,6 +38,13 @@ interface ModelInspectionResult {
   architecture_hints: string[];
   suggested_type?: string;
   error?: string;
+  // ONNX auto-detected attributes (from graph input/output shapes).
+  detection_arch?: string;      // 'yolo' | 'rf_detr'
+  input_width?: number | null;
+  input_height?: number | null;
+  num_outputs?: number;
+  input_shapes?: (number | null)[][];
+  output_shapes?: (number | null)[][];
 }
 
 const COMPILATION_TARGETS: MultiselectProps.Option[] = [
@@ -94,6 +101,12 @@ export default function SmartImport() {
   const [customHeight, setCustomHeight] = useState('');
   const [useCustomDimensions, setUseCustomDimensions] = useState(false);
   const [numClasses, setNumClasses] = useState('');
+  // Export/runtime format: 'pytorch' (legacy .pt/DLR) or 'onnx' (ONNX Runtime
+  // engine; required for the object-detection task path).
+  const [exportFormat, setExportFormat] = useState<string>('pytorch');
+  // Object-detection decoder family: 'yolo' (single tensor + NMS) or 'rf_detr'
+  // (DETR-family, two tensors, NMS-free top-k). Only relevant for detection.
+  const [detectionArch, setDetectionArch] = useState<string>('yolo');
   const [autoCompile, setAutoCompile] = useState(true);
   const [compilationTargets, setCompilationTargets] = useState<MultiselectProps.Option[]>([
     { label: 'x86_64 CPU', value: 'x86_64-cpu' }
@@ -107,6 +120,16 @@ export default function SmartImport() {
   const [converting, setConverting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  // Segmentation is supported on-device only via the RF-DETR ONNX decoder
+  // (instance masks -> semantic overlay). Lock the architecture to RF-DETR and
+  // the runtime to ONNX when the user selects Segmentation.
+  useEffect(() => {
+    if (modelType === 'segmentation') {
+      setDetectionArch('rf_detr');
+      setExportFormat('onnx');
+    }
+  }, [modelType]);
 
   // Load use cases
   useEffect(() => {
@@ -139,18 +162,38 @@ export default function SmartImport() {
         model_s3_uri: modelS3Uri,
       });
       
-      setInspectionResult(result.inspection_result);
-      
+      const ir = result.inspection_result;
+      setInspectionResult(ir);
+
+      // ONNX models run on the pluggable ONNX Runtime engine — pre-select it.
+      if (ir.type === 'onnx') {
+        setExportFormat('onnx');
+      }
+
       // Auto-select suggested type if available
-      if (result.inspection_result.suggested_type) {
-        setModelType(result.inspection_result.suggested_type);
+      if (ir.suggested_type) {
+        setModelType(ir.suggested_type);
       }
-      
+
+      // Auto-select the detection architecture (YOLO / RF-DETR) when detected.
+      if (ir.detection_arch) {
+        setDetectionArch(ir.detection_arch);
+      }
+
       // Auto-fill num_classes if detected
-      if (result.inspection_result.num_classes) {
-        setNumClasses(result.inspection_result.num_classes.toString());
+      if (ir.num_classes) {
+        setNumClasses(ir.num_classes.toString());
       }
-      
+
+      // Auto-fill the input size from the model's declared input shape. ONNX
+      // exports carry a fixed square input (e.g. RF-DETR base 560, nano 384),
+      // which is rarely in the preset dropdown — populate the custom W/H boxes.
+      if (ir.input_width && ir.input_height) {
+        setUseCustomDimensions(true);
+        setCustomWidth(String(ir.input_width));
+        setCustomHeight(String(ir.input_height));
+      }
+
       // Move to step 2
       setCurrentStep(2);
       
@@ -190,19 +233,32 @@ export default function SmartImport() {
         image_width: width,
         image_height: height,
         num_classes: numClasses ? parseInt(numClasses) : undefined,
+        export_format: exportFormat,
+        detection_arch:
+          modelType === 'object_detection' || modelType === 'segmentation'
+            ? detectionArch
+            : undefined,
         auto_import: true,
       });
 
       if (result.training_id) {
         setSuccess(`Model converted and imported successfully! Training ID: ${result.training_id}`);
-        
-        // If auto-compile is enabled, trigger compilation
-        if (autoCompile && compilationTargets.length > 0) {
+
+        const targets = compilationTargets.map(t => t.value!);
+        if (exportFormat === 'onnx') {
+          // ONNX runs on the ONNX Runtime engine — no Neo compilation. Go
+          // straight to packaging (architecture-agnostic) with auto-publish so
+          // a deployable component is created in one step.
           try {
-            await apiService.startCompilation(
-              result.training_id,
-              compilationTargets.map(t => t.value!)
-            );
+            await apiService.startPackaging(result.training_id, targets, true);
+            setSuccess(`Model imported and packaging started (ONNX, no compilation needed)! Training ID: ${result.training_id}`);
+          } catch (pkgErr) {
+            console.error('Packaging trigger failed:', pkgErr);
+          }
+        } else if (autoCompile && targets.length > 0) {
+          // Legacy PyTorch/Neo path: compile first.
+          try {
+            await apiService.startCompilation(result.training_id, targets);
             setSuccess(`Model converted, imported, and compilation started! Training ID: ${result.training_id}`);
           } catch (compileErr) {
             console.error('Compilation trigger failed:', compileErr);
@@ -323,6 +379,8 @@ export default function SmartImport() {
                           <StatusIndicator type="success">
                             {inspectionResult.suggested_type}
                           </StatusIndicator>
+                        ) : inspectionResult.type === 'onnx' ? (
+                          <StatusIndicator type="success">ONNX</StatusIndicator>
                         ) : (
                           <StatusIndicator type="info">Unknown</StatusIndicator>
                         )}
@@ -405,6 +463,71 @@ export default function SmartImport() {
                     ]}
                   />
                 </FormField>
+
+                <FormField
+                  label="Runtime / export format"
+                  description="ONNX runs on the pluggable ONNX Runtime engine (GPU on JetPack 5/6). Object detection requires ONNX. PyTorch/Neo uses the legacy DLR path."
+                >
+                  <Tiles
+                    value={exportFormat}
+                    onChange={({ detail }) => setExportFormat(detail.value)}
+                    items={[
+                      {
+                        value: 'pytorch',
+                        label: 'PyTorch / Neo (DLR)',
+                        description: 'Legacy path — compiled with SageMaker Neo to DLR',
+                      },
+                      {
+                        value: 'onnx',
+                        label: 'ONNX Runtime',
+                        description: 'Portable ONNX engine; required for object detection',
+                      },
+                    ]}
+                  />
+                </FormField>
+
+                {modelType === 'object_detection' && (
+                  <FormField
+                    label="Detection architecture"
+                    description="Decoder family for the on-device postprocessor. YOLO = single output tensor with NMS. RF-DETR = DETR-family with two tensors (boxes + logits), NMS-free top-k."
+                  >
+                    <Tiles
+                      value={detectionArch}
+                      onChange={({ detail }) => setDetectionArch(detail.value)}
+                      items={[
+                        {
+                          value: 'yolo',
+                          label: 'YOLO',
+                          description: 'YOLOv5/v8-style single-tensor output, NMS decode',
+                        },
+                        {
+                          value: 'rf_detr',
+                          label: 'RF-DETR',
+                          description: 'DETR-family, boxes + logits tensors, NMS-free top-k',
+                        },
+                      ]}
+                    />
+                  </FormField>
+                )}
+
+                {modelType === 'segmentation' && (
+                  <FormField
+                    label="Segmentation architecture"
+                    description="On-device decoder for the ONNX segmentation model. RF-DETR (ONNX Runtime) instance masks are composited into a colored, per-class semantic overlay you can toggle over the source image."
+                  >
+                    <Tiles
+                      value={detectionArch}
+                      onChange={({ detail }) => setDetectionArch(detail.value)}
+                      items={[
+                        {
+                          value: 'rf_detr',
+                          label: 'RF-DETR',
+                          description: 'DETR-family instance segmentation → semantic mask overlay',
+                        },
+                      ]}
+                    />
+                  </FormField>
+                )}
 
                 <FormField label="Input Image Size" description="The image dimensions your model expects">
                   <SpaceBetween size="s">

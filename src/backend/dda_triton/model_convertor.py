@@ -171,6 +171,37 @@ def _has_pixel_level_classes(manifest: dict) -> bool:
     return bool(len(names))
 
 
+def _resolve_base_input_shape(manifest: dict) -> list:
+    """Resolve the Triton "input" tensor dims shared by the base/marshal/ensemble
+    configs.
+
+    The GStreamer pipeline feeds the RAW source image (native resolution) to
+    Triton with no videoscale (see pipeline_builder._add_pre_processing_plugins),
+    so the emltriton element requires the incoming GstBuffer to exactly match the
+    model's input tensor size. Two cases:
+
+    * DLR/Neo models: the input size is baked into the compiled model, and
+      anomaly-localization (pixel_level_classes) models declare a fixed
+      [H, W, 3] input so the mask output can mirror it. Source images are already
+      that size, so a fixed tensor is correct.
+    * ONNX-runtime models: the Triton python model (lfv_model_template) resizes
+      the incoming image internally to the network input (per manifest
+      ``preprocessing.resize``) before running onnxruntime, and the returned mask
+      is sized to the source image. Forcing a fixed [H, W, 3] input here makes
+      emltriton reject any source image whose size differs from the manifest
+      dataset dims ("Incoming GstBuffer is not the same size as the input
+      tensor"). So ONNX models MUST use a dynamic [-1, -1, -1] input regardless
+      of pixel_level_classes.
+    """
+    runtime = str(manifest.get("runtime", "dlr")).lower()
+    if runtime == "onnx":
+        return [-1, -1, -1]
+    model_internal = manifest.get("dataset", {})
+    if _has_pixel_level_classes(manifest):
+        return [model_internal["image_height"], model_internal["image_width"], 3]
+    return [-1, -1, -1]
+
+
 def _create_marshal_model_config_pbtxt(model_name: str, input_shape: list) -> str:
     global triton_model_config
     marshal_model_input = triton_model_config.ModelInput()
@@ -345,11 +376,10 @@ def _create_base_model_structure(
 ) -> bool:
     # Base lfv model create config.pbtxt.
     # Use dataset information.
-    model_internal = manifest["dataset"]
-    # Dynamic input if model does not support anomaly localization.
-    input_shape = [-1, -1, -1]
-    if _has_pixel_level_classes(manifest):
-        input_shape = [model_internal["image_height"], model_internal["image_width"], 3]
+    # Dynamic input if the model does not support anomaly localization, OR if it
+    # runs on the ONNX runtime (which resizes internally). See
+    # _resolve_base_input_shape.
+    input_shape = _resolve_base_input_shape(manifest)
     base_model_config_pbtxt = _create_base_model_config_pbtxt(model_name, input_shape)
     # create directories
     base_model_path = os.path.join(model_repo_dir, f"base_{model_name}")
@@ -385,6 +415,27 @@ def _create_base_model_structure(
     except OSError as e:
         logging.error(f"Unable to copy model.py file error {str(e)}")
         return False
+    # Always copy the pluggable runtime abstraction next to model.py so the
+    # template can dispatch DLR / ONNX / PyTorch engines per the manifest
+    # `runtime` field (see docs/multi-runtime-inference.md). Absent for DLR-only
+    # devices this is harmless; the DLR path is unchanged.
+    runtimes_py_path = os.path.abspath(
+        os.path.join(working_dir, "resources_for_copy", "inference_runtimes.py")
+    )
+    if os.path.exists(runtimes_py_path):
+        try:
+            shutil.copy(
+                runtimes_py_path,
+                os.path.join(base_model_path, model_version, "inference_runtimes.py"),
+            )
+        except OSError as e:
+            logging.error(f"Unable to copy inference_runtimes.py file error {str(e)}")
+            return False
+    else:
+        logging.warning(
+            f"inference_runtimes.py not found at '{runtimes_py_path}'; "
+            f"non-DLR runtimes will be unavailable"
+        )
     # Create symlinks for model folders
     ret = create_sym_links(deployed_model_path, os.path.join(base_model_path, model_version))
     if not ret:
@@ -396,10 +447,7 @@ def _create_base_model_structure(
 def _create_marshal_model_structure(
     model_repo_dir: str, model_name: str, model_version: str, manifest: dict
 ) -> bool:
-    model_internal = manifest["dataset"]
-    input_shape = [-1, -1, -1]
-    if _has_pixel_level_classes(manifest):
-        input_shape = [model_internal["image_height"], model_internal["image_width"], 3]
+    input_shape = _resolve_base_input_shape(manifest)
     marshal_model_config_pbtxt = _create_marshal_model_config_pbtxt(model_name, input_shape)
     # create directories
     marshal_model_path = os.path.join(model_repo_dir, f"marshal_{model_name}")
@@ -441,10 +489,7 @@ def _create_marshal_model_structure(
 def _create_ensemble_model_structure(
     model_repo_dir: str, model_name: str, model_version: str, manifest: dict
 ) -> bool:
-    model_internal = manifest["dataset"]
-    input_shape = [-1, -1, -1]
-    if _has_pixel_level_classes(manifest):
-        input_shape = [model_internal["image_height"], model_internal["image_width"], 3]
+    input_shape = _resolve_base_input_shape(manifest)
     ensemble_model_config_pbtxt = _create_ensemble_model_config_pbtxt(model_name, input_shape)
     # create directories
     ensemble_model_path = os.path.join(model_repo_dir, model_name)

@@ -25,6 +25,8 @@ interface RefreshDisplayActionsProps {
   anomalyMaskToggleChecked?: boolean;
   showFlagForReviewToggle?: boolean;
   flagForReviewToggleChecked?: boolean;
+  // Label for the overlay toggle (mask vs bounding boxes).
+  toggleLabel?: string;
 }
 
 export default function RefreshDisplayActions({
@@ -33,6 +35,7 @@ export default function RefreshDisplayActions({
   anomalyMaskToggleChecked,
   showFlagForReviewToggle,
   flagForReviewToggleChecked,
+  toggleLabel = "Show anomaly masks",
 }: RefreshDisplayActionsProps): JSX.Element {
   return (
     <Box float="right">
@@ -46,7 +49,7 @@ export default function RefreshDisplayActions({
               checked={!!anomalyMaskToggleChecked}
               data-testid="refresh-display-show-anomaly-masks-toggle"
             >
-              Show anomaly masks
+              {toggleLabel}
             </Toggle>
           )}
         </div>

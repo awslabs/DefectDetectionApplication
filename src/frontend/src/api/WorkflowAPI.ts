@@ -107,6 +107,22 @@ export interface InferenceResult {
   inference_result: PredictionType;
   mask_background: MaskBackground | null;
   mask_image: string | null;
+  // Object-detection results (task=object_detection). `detections` is a map
+  // keyed by string index ("0","1",...); the boxes are also drawn into the
+  // server-rendered overlay image.
+  detections?: Detections;
+  detection_count?: number;
+}
+
+export interface DetectionObject {
+  class_index?: string;
+  class_label?: string;
+  // [x_min, y_min, x_max, y_max] in source-image pixels.
+  bounding_box?: number[];
+  confidence?: number;
+}
+export interface Detections {
+  [index: string]: DetectionObject;
 }
 export enum PredictionResult {
   ANOMALY = "Anomaly",

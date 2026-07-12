@@ -10,3 +10,9 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+// Build-time constants injected by vite.config.ts `define` for the version banner.
+declare const __APP_VERSION__: string;
+declare const __APP_GIT_SHA__: string;
+declare const __APP_BUILD_TIME__: string;
+

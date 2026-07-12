@@ -33,7 +33,11 @@ if tmux has-session -t mysession 2>/dev/null; then
 fi
 tmux new-session -d -s mysession
 # Split the terminal and start MockDevice
-tmux send-keys -t mysession:0 "aws configure set aws_access_key_id ${aws_access_key_id}; aws configure set aws_secret_access_key ${aws_secret_access_key}; aws configure set region ${aws_region}; MockPanoramaDevice -c /edgemlsdk/longevity.json" C-m
+# Guard the static-credential writes on non-empty values. Writing an empty
+# static credential would take precedence over and break the IMDS instance-role
+# chain; with an empty value the container falls back to the instance-role
+# credential provider via 169.254.169.254 (IMDSv2).
+tmux send-keys -t mysession:0 "[ -n \"${aws_access_key_id}\" ] && aws configure set aws_access_key_id \"${aws_access_key_id}\"; [ -n \"${aws_secret_access_key}\" ] && aws configure set aws_secret_access_key \"${aws_secret_access_key}\"; aws configure set region ${aws_region}; MockPanoramaDevice -c /edgemlsdk/longevity.json" C-m
 
 # Wait for a moment to allow mock device to start
 sleep 5 

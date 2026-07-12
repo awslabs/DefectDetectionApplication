@@ -175,6 +175,149 @@ def create_dda_manifest(trained_model_s3: str, model_type: str, s3_client) -> Tu
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def is_onnx_import(training_job: Dict) -> bool:
+    """True if this is an imported BYO ONNX model (no Neo compilation needed).
+
+    ONNX models run on the pluggable ONNX Runtime engine and are
+    architecture-agnostic (the engine auto-selects TensorRT/CUDA/CPU at load),
+    so they skip SageMaker Neo compilation and the per-target compiled-artifact
+    packaging entirely — the imported package already IS the device layout.
+    """
+    if training_job.get('source') != 'imported':
+        return False
+    meta = training_job.get('metadata') or {}
+    if str(meta.get('framework', '')).upper() == 'ONNX':
+        return True
+    vr = (training_job.get('validation_result') or {}).get('metadata') or {}
+    if str(vr.get('framework', '')).upper() == 'ONNX':
+        return True
+    # Fall back to the artifact filename.
+    mf = meta.get('model_file') or meta.get('pt_file') or ''
+    return str(mf).lower().endswith('.onnx')
+
+
+def package_onnx_component(trained_model_s3: str, s3_client, usecase: Dict) -> str:
+    """Build a Greengrass model-component ZIP directly from an imported ONNX
+    package — no Neo compilation, one architecture-agnostic artifact.
+
+    The imported Smart-Import package already carries the device-correct
+    manifest (runtime="onnx") + model.onnx. On device the recipe runs
+    model_convertor.py against the unarchived package, which reads manifest.json
+    at the package root and symlinks each top-level entry (files AND dirs) next
+    to the Triton python model. lfv_model_template.py then loads the stage's
+    ONNX artifact from <version_dir>/<stage_type>/<runtime_artifact>, mirroring
+    the DLR/Neo layout where per-stage artifacts live in a stage subdir. So the
+    component ZIP must contain manifest.json at the root and the ONNX artifact
+    NESTED under the stage_type dir (<stage_type>/model.onnx). A flat model.onnx
+    lands in the version root and OnnxRunner raises
+    "FileNotFoundError: ONNX artifact not found: .../<stage_type>/model.onnx".
+
+    The device manifest also needs a top-level ``dataset`` block (image
+    width/height) for anomaly-localization / semantic-segmentation input sizing;
+    the Smart-Import manifest keeps that in config.yaml, so we merge it in here.
+    """
+    temp_dir = None
+    try:
+        parsed = urlparse(trained_model_s3)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip('/')
+
+        temp_dir = tempfile.mkdtemp(prefix="dda_onnx_pkg_")
+        local_tar = os.path.join(temp_dir, 'model.tar.gz')
+        logger.info(f"Downloading imported ONNX package from {trained_model_s3}")
+        s3_client.download_file(bucket, key, local_tar)
+
+        extract_dir = os.path.join(temp_dir, 'extracted')
+        os.makedirs(extract_dir, exist_ok=True)
+        with tarfile.open(local_tar, 'r:gz') as tar:
+            tar.extractall(extract_dir)
+        os.remove(local_tar)
+
+        # Device manifest lives at export_artifacts/manifest.json.
+        manifest_path = os.path.join(extract_dir, 'export_artifacts', 'manifest.json')
+        if not os.path.exists(manifest_path):
+            raise FileNotFoundError("export_artifacts/manifest.json not found in ONNX package")
+        with open(manifest_path, 'r') as f:
+            manifest = json.load(f)
+
+        if str(manifest.get('runtime', '')).lower() != 'onnx':
+            raise ValueError(
+                f"ONNX packaging invoked but manifest runtime is '{manifest.get('runtime')}'")
+
+        # Locate the .onnx artifact. Scan recursively so we find it whether the
+        # imported package keeps it flat (export_artifacts/model.onnx) or nested.
+        export_artifacts_dir = os.path.join(extract_dir, 'export_artifacts')
+        onnx_src = None
+        for root, _dirs, files in os.walk(export_artifacts_dir):
+            for f in files:
+                if f.endswith('.onnx'):
+                    onnx_src = os.path.join(root, f)
+                    break
+            if onnx_src:
+                break
+        if not onnx_src:
+            raise FileNotFoundError("No .onnx model file found in export_artifacts/")
+        onnx_file = os.path.basename(onnx_src)
+
+        # Merge dataset (image dims) from config.yaml into the manifest so the
+        # on-device model_convertor can size anomaly/segmentation inputs.
+        if 'dataset' not in manifest:
+            config_path = os.path.join(extract_dir, 'config.yaml')
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    cfg = yaml.safe_load(f) or {}
+                ds = cfg.get('dataset', {}) if isinstance(cfg, dict) else {}
+                if ds.get('image_width') and ds.get('image_height'):
+                    manifest['dataset'] = {
+                        'image_width': ds['image_width'],
+                        'image_height': ds['image_height'],
+                    }
+
+        # Assemble the component payload: manifest.json at the root and the ONNX
+        # artifact NESTED under the stage_type dir so the on-device OnnxRunner
+        # finds it at <version_dir>/<stage_type>/<runtime_artifact>. The
+        # stage_type is the first model_graph stage's "type" (e.g.
+        # rf_detr_semantic_segmentation, yolo_object_detection, classification).
+        payload_dir = os.path.join(temp_dir, 'payload')
+        os.makedirs(payload_dir, exist_ok=True)
+        with open(os.path.join(payload_dir, 'manifest.json'), 'w') as f:
+            json.dump(manifest, f, indent=2)
+
+        stages = (manifest.get('model_graph') or {}).get('stages') or []
+        stage_type = stages[0].get('type') if stages and isinstance(stages[0], dict) else None
+        if stage_type:
+            stage_dir = os.path.join(payload_dir, stage_type)
+            os.makedirs(stage_dir, exist_ok=True)
+            onnx_dest = os.path.join(stage_dir, onnx_file)
+        else:
+            # No stage type in the manifest — fall back to flat (should not
+            # happen for a well-formed ONNX manifest).
+            logger.warning("ONNX manifest has no model_graph stage type; placing model.onnx flat")
+            onnx_dest = os.path.join(payload_dir, onnx_file)
+        shutil.copy(onnx_src, onnx_dest)
+
+        component_uuid = str(uuid.uuid4()).split('-')[-1]
+        zip_filename = f"{component_uuid}_greengrass_model_component.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _dirs, files in os.walk(payload_dir):
+                for file in files:
+                    fp = os.path.join(root, file)
+                    zipf.write(fp, os.path.relpath(fp, payload_dir))
+
+        s3_key = f"model_artifacts/model-{component_uuid}/{zip_filename}"
+        s3_uri = f"s3://{usecase['s3_bucket']}/{s3_key}"
+        logger.info(f"Uploading ONNX component package to {s3_uri}")
+        s3_client.upload_file(zip_path, usecase['s3_bucket'], s3_key)
+        return s3_uri
+    except Exception as e:
+        logger.error(f"Error packaging ONNX component: {str(e)}")
+        raise
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def package_component(training_id: str, target: str, compiled_model_s3: str, 
                      dda_manifest: Dict, s3_client, usecase: Dict) -> str:
     """
@@ -269,6 +412,45 @@ def package_component(training_id: str, target: str, compiled_model_s3: str,
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def _trigger_component_creation(training_id: str, training_job: Dict) -> None:
+    """Asynchronously invoke greengrass_publish to auto-create the component
+    after successful packaging. Best-effort — never fails the caller."""
+    try:
+        logger.info("Packaging succeeded; triggering automatic component creation")
+        lambda_client = boto3.client('lambda')
+        greengrass_function_name = os.environ.get('GREENGRASS_PUBLISH_FUNCTION_NAME')
+        if not greengrass_function_name:
+            logger.warning("GREENGRASS_PUBLISH_FUNCTION_NAME not set, skipping auto component creation")
+            return
+        model_name = training_job.get('model_name', 'model')
+        safe_model_name = re.sub(r'[^a-zA-Z0-9-]', '-', model_name.lower())
+        component_name = f"model-{safe_model_name}"
+        greengrass_event = {
+            'httpMethod': 'POST',
+            'path': f'/api/v1/training/{training_id}/publish',
+            'pathParameters': {'id': training_id},
+            'body': json.dumps({
+                'component_name': component_name,
+                'component_version': "1.0.0",
+                'friendly_name': model_name,
+                'auto_triggered': True
+            }),
+            'requestContext': {
+                'authorizer': {'claims': {
+                    'sub': 'system', 'email': 'system@example.com', 'cognito:username': 'system'
+                }}
+            }
+        }
+        lambda_client.invoke(
+            FunctionName=greengrass_function_name,
+            InvocationType='Event',
+            Payload=json.dumps(greengrass_event)
+        )
+        logger.info(f"Triggered automatic component creation for training job {training_id}")
+    except Exception as e:
+        logger.error(f"Error triggering automatic component creation: {str(e)}")
+
+
 def package_components(event: Dict, context: Any) -> Dict:
     """
     Package compiled models as Greengrass components
@@ -301,7 +483,56 @@ def package_components(event: Dict, context: Any) -> Dict:
         # Allow 'system' user for auto-triggered packaging
         if user_id != 'system' and not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
-        
+
+        # ── ONNX bypass ────────────────────────────────────────────────────
+        # Imported ONNX models need no Neo compilation and no per-target
+        # compiled artifact: one architecture-agnostic package deploys to every
+        # target. Build the component ZIP directly and emit one packaged entry
+        # per requested target (the recipe differs only by LocalServer
+        # dependency / platform at publish time).
+        if is_onnx_import(training_job):
+            trained_model_s3 = training_job.get('artifact_s3')
+            if not trained_model_s3:
+                return create_response(400, {'error': 'Training job has no model artifact'})
+            usecase = get_usecase(usecase_id)
+            s3_usecase = get_usecase_client(
+                's3', usecase,
+                session_name=f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64])
+
+            onnx_targets = requested_targets or ['jetson-xavier-jp5', 'jetson-xavier-jp6', 'x86_64-cpu']
+            logger.info(f"ONNX import: packaging one artifact for targets {onnx_targets}")
+            try:
+                component_s3_uri = package_onnx_component(trained_model_s3, s3_usecase, usecase)
+            except Exception as e:
+                logger.error(f"ONNX component packaging failed: {str(e)}")
+                return create_response(500, {'error': f"Failed to package ONNX component: {str(e)}"})
+
+            packaged_components = [
+                {'target': t, 'component_package_s3': component_s3_uri, 'status': 'packaged'}
+                for t in onnx_targets
+            ]
+            table = dynamodb.Table(TRAINING_JOBS_TABLE)
+            timestamp = int(datetime.utcnow().timestamp() * 1000)
+            table.update_item(
+                Key={'training_id': training_id},
+                UpdateExpression='SET packaged_components = :components, updated_at = :updated',
+                ExpressionAttributeValues={':components': packaged_components, ':updated': timestamp},
+            )
+            log_audit_event(
+                user_id=user_id, action='package_components', resource_type='training_job',
+                resource_id=training_id, result='success',
+                details={'targets': onnx_targets, 'packaged_count': len(onnx_targets), 'runtime': 'onnx'},
+            )
+            auto_triggered = body.get('auto_triggered', False)
+            if auto_triggered:
+                _trigger_component_creation(training_id, training_job)
+            return create_response(200, {
+                'training_id': training_id,
+                'packaged_components': packaged_components,
+                'message': f'Packaged ONNX component for {len(onnx_targets)} target(s)',
+                'component_creation_triggered': auto_triggered,
+            })
+
         # Check compilation jobs exist
         compilation_jobs = training_job.get('compilation_jobs', [])
         if not compilation_jobs:
@@ -415,56 +646,7 @@ def package_components(event: Dict, context: Any) -> Dict:
         # Trigger automatic component creation if packaging was successful and auto-triggered
         auto_triggered = body.get('auto_triggered', False)
         if success_count > 0 and auto_triggered:
-            try:
-                logger.info(f"Packaging completed successfully, triggering automatic component creation")
-                
-                # Trigger component creation by invoking the greengrass_publish Lambda
-                lambda_client = boto3.client('lambda')
-                greengrass_function_name = os.environ.get('GREENGRASS_PUBLISH_FUNCTION_NAME')
-                
-                if greengrass_function_name:
-                    # Generate a component name and version based on the training job
-                    model_name = training_job.get('model_name', 'model')
-                    safe_model_name = re.sub(r'[^a-zA-Z0-9-]', '-', model_name.lower())
-                    component_name = f"model-{safe_model_name}"
-                    component_version = "1.0.0"  # Default version
-                    
-                    # Create a mock API Gateway event for the greengrass publish handler
-                    greengrass_event = {
-                        'httpMethod': 'POST',
-                        'path': f'/api/v1/training/{training_id}/publish',
-                        'pathParameters': {'id': training_id},
-                        'body': json.dumps({
-                            'component_name': component_name,
-                            'component_version': component_version,
-                            'friendly_name': model_name,
-                            'auto_triggered': True
-                        }),
-                        'requestContext': {
-                            'authorizer': {
-                                'claims': {
-                                    'sub': 'system',
-                                    'email': 'system@edgecv.com',
-                                    'cognito:username': 'system'
-                                }
-                            }
-                        }
-                    }
-                    
-                    # Invoke greengrass publish Lambda asynchronously
-                    lambda_client.invoke(
-                        FunctionName=greengrass_function_name,
-                        InvocationType='Event',  # Async invocation
-                        Payload=json.dumps(greengrass_event)
-                    )
-                    
-                    logger.info(f"Triggered automatic component creation for training job {training_id}")
-                else:
-                    logger.warning("GREENGRASS_PUBLISH_FUNCTION_NAME not set, skipping automatic component creation")
-                    
-            except Exception as e:
-                logger.error(f"Error triggering automatic component creation: {str(e)}")
-                # Don't fail the packaging response if component creation trigger fails
+            _trigger_component_creation(training_id, training_job)
         
         return create_response(200, {
             'training_id': training_id,

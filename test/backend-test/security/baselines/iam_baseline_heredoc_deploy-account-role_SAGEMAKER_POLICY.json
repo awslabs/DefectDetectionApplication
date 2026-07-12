@@ -1,0 +1,34 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "sagemaker:CreateTrainingJob",
+        "sagemaker:DescribeTrainingJob",
+        "sagemaker:StopTrainingJob",
+        "sagemaker:ListTrainingJobs",
+        "sagemaker:CreateCompilationJob",
+        "sagemaker:DescribeCompilationJob",
+        "sagemaker:StopCompilationJob",
+        "sagemaker:ListCompilationJobs",
+        "sagemaker:CreateLabelingJob",
+        "sagemaker:DescribeLabelingJob",
+        "sagemaker:ListLabelingJobs",
+        "sagemaker:CreateModel",
+        "sagemaker:DescribeModel",
+        "sagemaker:DeleteModel",
+        "sagemaker:ListModels"
+      ],
+      "Effect": "Allow",
+      "Resource": "*"
+    },
+    {
+      "Action": [
+        "iam:PassRole",
+        "iam:GetRole"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:iam::*:role/DDASageMakerExecutionRole"
+    }
+  ],
+  "Version": "2012-10-17"
+}

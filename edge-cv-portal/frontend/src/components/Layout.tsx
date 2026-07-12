@@ -14,7 +14,7 @@ import {
   Alert,
 } from '@cloudscape-design/components';
 import { useAuth } from '../contexts/AuthContext';
-import { getConfig } from '../config';
+import { getConfig, getBuildInfo } from '../config';
 
 export default function Layout() {
   const navigate = useNavigate();
@@ -22,6 +22,7 @@ export default function Layout() {
   const { user, logout, changePassword } = useAuth();
   const config = getConfig();
   const branding = config.branding;
+  const build = getBuildInfo();
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -138,6 +139,37 @@ export default function Layout() {
         toolsHide
         navigationWidth={200}
       />
+
+      {/* Bottom version banner — shows the exact portal build that is running.
+          Fixed to the viewport bottom so it persists across all pages. */}
+      <div
+        style={{
+          position: 'fixed',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          zIndex: 1000,
+          background: '#232f3e',
+          color: '#d1d5db',
+          fontSize: '12px',
+          lineHeight: '24px',
+          height: '24px',
+          padding: '0 12px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          fontFamily: 'monospace',
+          borderTop: '1px solid #414d5c',
+        }}
+        title={`Build time: ${build.buildTime || 'unknown'}`}
+      >
+        <span>{branding.applicationName}</span>
+        <span>
+          {`v${build.version}`}
+          {build.gitSha && build.gitSha !== 'unknown' ? ` · ${build.gitSha}` : ''}
+          {build.buildTime ? ` · built ${build.buildTime.slice(0, 10)}` : ''}
+        </span>
+      </div>
 
       <Modal
         visible={showChangePassword}

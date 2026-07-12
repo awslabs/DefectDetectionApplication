@@ -20,3 +20,9 @@ datasets/**/*.manifest
 datasets/**/*_class.manifest
 datasets/**/*_segmentation.manifest
 .vscode/**
+
+# Portal deploy logs (local build/deploy output, not source)
+.portal*
+
+# Downloaded test assets (fetched on demand by download-test-assets.sh; not committed)
+test-assets/

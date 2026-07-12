@@ -1,7 +1,8 @@
 ARG OS
 ARG PLATFORM
 ARG PYTHON_VERSION
-FROM nvcr.io/nvidia/l4t-jetpack:r35.4.1
+ARG BASE_REGISTRY=nvcr.io
+FROM ${BASE_REGISTRY}/nvidia/l4t-jetpack:r35.4.1@sha256:d1c8e971ab994235840eacc31c4ef4173bf9156317b1bf8aabe7e01eb21b2a0e
 # Re-declare after FROM so the build arg is available in the build stage.
 ARG PYTHON_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
@@ -130,6 +131,29 @@ RUN pip install --no-cache-dir -r ./model_conversion_requirements.txt
 # (from-source python has no system pkg_resources fallback). Re-assert the setuptools<81
 # cap immediately so the grpc_tools.protoc step below keeps working.
 RUN pip install --no-cache-dir 'setuptools<81'
+
+# ── ONNX Runtime for the pluggable ONNX inference engine ───────────────────
+# The OnnxRunner in dda_triton/resources_for_copy/inference_runtimes.py runs
+# in-container under the DDA python (PYTHON_VERSION, default 3.11). Two modes,
+# selected by build-args:
+#   * Default (CPU): prebuilt CPU wheel (onnxruntime 1.16.3 ships a cp311 aarch64
+#     manylinux_2_17 wheel, works on this glibc 2.31 base). Fast.
+#   * GPU (ONNXRUNTIME_GPU=1): build onnxruntime-gpu from source with the CUDA +
+#     TensorRT execution providers against the base image's CUDA 11.4 / TRT 8.5,
+#     for the PYTHON_VERSION interpreter. NVIDIA's prebuilt Jetson GPU wheels
+#     target the JetPack's native python (3.8 on r35), not ours, so a GPU build
+#     must be compiled here. This is a long, memory-heavy build, hence opt-in.
+# `pip` targets the PYTHON_VERSION interpreter (the python3 alternative).
+# OnnxRunner prefers TensorRT -> CUDA -> CPU providers automatically, so the
+# same code path works for either wheel. DLR-only / PyTorch-only models are
+# unaffected (engines are imported lazily per-runner).
+ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
+ARG ONNXRUNTIME_GPU=0
+RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
+        JETPACK_MAJOR=5 ./edge_ml1_p_camera_management/install_onnxruntime_gpu.sh; \
+    else \
+        pip install --no-cache-dir ${ONNXRUNTIME_SPEC}; \
+    fi
 
 # Build aravis from source (apt deps already installed above)
 RUN pip install --no-cache-dir meson ninja

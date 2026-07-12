@@ -5,6 +5,7 @@ Based on DDA_SageMaker_Model_Training_and_Compilation.ipynb Step 8
 """
 import json
 import os
+import re
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -125,8 +126,31 @@ COMPILATION_TARGETS = {
         'arch': 'ARM64',
         'accelerator': None,
         'compiler_options': None
+    },
+    # ONNX is NOT a SageMaker Neo target — Neo compiles *to* DLR, not to ONNX.
+    # Instead this target runs a SageMaker training job that loads the trained
+    # TorchScript model and runs torch.onnx.export, producing a portable
+    # model.onnx for the pluggable ONNX Runtime engine (see
+    # docs/multi-runtime-inference.md). Flagged with 'export_format' so
+    # start_compilation_job dispatches it to the ONNX export path rather than
+    # create_compilation_job.
+    'onnx': {
+        'os': 'LINUX',
+        'arch': 'ANY',
+        'accelerator': None,
+        'compiler_options': None,
+        'export_format': 'onnx',
     }
 }
+
+# AWS Deep Learning Container (PyTorch) used to run the ONNX export job.
+# Region-specific account is 763104351884 for the standard DLCs.
+ONNX_EXPORT_IMAGE = os.environ.get(
+    'ONNX_EXPORT_IMAGE',
+    '763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-training:1.13.1-cpu-py39'
+)
+# Default ONNX opset for export; overridable via env without a code change.
+ONNX_OPSET = int(os.environ.get('ONNX_OPSET', '17'))
 
 
 def derive_compilation_status(compilation_jobs):
@@ -248,6 +272,144 @@ def extract_and_repackage_model(model_s3_uri: str, s3_client) -> tuple:
         raise
 
 
+# Inline ONNX export script staged to S3 and run by the SageMaker PyTorch DLC.
+# It loads the trained TorchScript model from the `model` input channel and
+# writes model.onnx to /opt/ml/model (captured into the job's OutputDataConfig).
+_ONNX_EXPORT_SCRIPT = '''
+import json, os, glob, sys, tarfile
+import torch
+
+MODEL_DIR = os.environ.get("SM_CHANNEL_MODEL", "/opt/ml/input/data/model")
+OUT_DIR = os.environ.get("SM_MODEL_DIR", "/opt/ml/model")
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# SageMaker training does NOT auto-extract input-channel tarballs, so the
+# `model` channel typically contains the raw model.tar.gz. Extract any
+# archives in place before searching for the TorchScript .pt file.
+for tgz in glob.glob(os.path.join(MODEL_DIR, "**", "*.tar.gz"), recursive=True):
+    print("Extracting model archive:", tgz)
+    with tarfile.open(tgz, "r:gz") as tar:
+        tar.extractall(path=MODEL_DIR)
+
+pt = next(iter(glob.glob(os.path.join(MODEL_DIR, "**", "*.pt"), recursive=True)), None)
+if pt is None:
+    print("ERROR: no .pt model found in", MODEL_DIR)
+    print("Contents:", glob.glob(os.path.join(MODEL_DIR, "**", "*"), recursive=True))
+    sys.exit(1)
+print("Loading TorchScript model:", pt)
+
+shape = json.loads(os.environ.get("INPUT_SHAPE", "[1,3,224,224]"))
+opset = int(os.environ.get("ONNX_OPSET", "17"))
+
+model = torch.jit.load(pt, map_location="cpu")
+model.eval()
+dummy = torch.randn(*shape)
+out_path = os.path.join(OUT_DIR, "model.onnx")
+torch.onnx.export(
+    model, dummy, out_path,
+    input_names=["input"], output_names=["output"],
+    opset_version=opset,
+    dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
+)
+print("Wrote", out_path)
+'''
+
+
+def _start_onnx_export_job(
+    sagemaker_usecase,
+    s3_usecase,
+    usecase: Dict,
+    model_artifact_s3: str,
+    data_input_config: str,
+    safe_model_name: str,
+    path_builder,
+) -> Dict:
+    """Launch a SageMaker training job that exports the trained TorchScript
+    model to ONNX via torch.onnx.export (Neo cannot emit ONNX). Returns a
+    compilation_jobs entry shaped like the Neo path so the UI/status code is
+    unchanged.
+    """
+    bucket = usecase['s3_bucket']
+    account_id = usecase['account_id']
+    role_arn = f"arn:aws:iam::{account_id}:role/DDASageMakerExecutionRole"
+
+    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+    job_name = re.sub(r'-+', '-', f"{safe_model_name}-onnx-{timestamp}").strip('-')[:63]
+
+    # Stage the export entrypoint to S3 (SageMaker Training Toolkit picks it up
+    # via sagemaker_program + sagemaker_submit_directory).
+    import tarfile, tempfile, io
+    with tempfile.TemporaryDirectory() as td:
+        src_dir = os.path.join(td, 'src')
+        os.makedirs(src_dir, exist_ok=True)
+        with open(os.path.join(src_dir, 'onnx_export.py'), 'w') as f:
+            f.write(_ONNX_EXPORT_SCRIPT)
+        source_tar = os.path.join(td, 'sourcedir.tar.gz')
+        with tarfile.open(source_tar, 'w:gz') as tar:
+            tar.add(os.path.join(src_dir, 'onnx_export.py'), arcname='onnx_export.py')
+        code_key = f"models/onnx-export/{job_name}/sourcedir.tar.gz"
+        s3_usecase.upload_file(source_tar, bucket, code_key)
+    code_s3 = f"s3://{bucket}/{code_key}"
+
+    output_s3 = path_builder.get_compilation_output_uri(job_name, 'onnx')
+    try:
+        input_shape = json.loads(data_input_config).get('input_shape', [1, 3, 224, 224])
+    except Exception:
+        input_shape = [1, 3, 224, 224]
+
+    logger.info(f"Starting ONNX export training job: {job_name} (image={ONNX_EXPORT_IMAGE})")
+    resp = sagemaker_usecase.create_training_job(
+        TrainingJobName=job_name,
+        RoleArn=role_arn,
+        AlgorithmSpecification={
+            'TrainingImage': ONNX_EXPORT_IMAGE,
+            'TrainingInputMode': 'File',
+        },
+        HyperParameters={
+            'sagemaker_program': 'onnx_export.py',
+            'sagemaker_submit_directory': code_s3,
+            'INPUT_SHAPE': json.dumps(input_shape),
+            'ONNX_OPSET': str(ONNX_OPSET),
+        },
+        Environment={
+            'INPUT_SHAPE': json.dumps(input_shape),
+            'ONNX_OPSET': str(ONNX_OPSET),
+        },
+        InputDataConfig=[{
+            'ChannelName': 'model',
+            'DataSource': {'S3DataSource': {
+                'S3DataType': 'S3Prefix',
+                'S3Uri': model_artifact_s3,
+                'S3DataDistributionType': 'FullyReplicated',
+            }},
+        }],
+        OutputDataConfig={'S3OutputPath': output_s3},
+        ResourceConfig={'InstanceType': 'ml.m5.large', 'InstanceCount': 1, 'VolumeSizeInGB': 20},
+        StoppingCondition={'MaxRuntimeInSeconds': 1800},
+    )
+    return {
+        'target': 'onnx',
+        'compilation_job_name': job_name,
+        'compilation_job_arn': resp['TrainingJobArn'],
+        'status': 'InProgress',
+        'export_format': 'onnx',
+    }
+
+
+def _is_onnx_import(training_job: Dict) -> bool:
+    """True if this is an imported BYO ONNX model (skips Neo compilation)."""
+    if training_job.get('source') != 'imported':
+        return False
+    meta = training_job.get('metadata') or {}
+    if str(meta.get('framework', '')).upper() == 'ONNX':
+        return True
+    vr = (training_job.get('validation_result') or {}).get('metadata') or {}
+    if str(vr.get('framework', '')).upper() == 'ONNX':
+        return True
+    mf = meta.get('model_file') or meta.get('pt_file') or ''
+    return str(mf).lower().endswith('.onnx')
+
+
 def start_compilation_job(event: Dict, context: Any) -> Dict:
     """
     Start SageMaker Neo compilation job
@@ -293,6 +455,33 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
         if training_job.get('status') != 'Completed':
             return create_response(400, {
                 'error': f"Training job must be completed. Current status: {training_job.get('status')}"
+            })
+
+        # ── ONNX bypass ────────────────────────────────────────────────────
+        # Imported BYO ONNX models run on the ONNX Runtime engine and are
+        # architecture-agnostic — SageMaker Neo neither accepts them (Neo starts
+        # from a TorchScript .pt) nor is needed. Skip compilation and chain
+        # straight to packaging (which has its own ONNX path).
+        if _is_onnx_import(training_job):
+            logger.info(f"Imported ONNX model {training_id}: skipping Neo compilation")
+            table = dynamodb.Table(TRAINING_JOBS_TABLE)
+            table.update_item(
+                Key={'training_id': training_id},
+                UpdateExpression='SET compilation_skipped = :s, updated_at = :u',
+                ExpressionAttributeValues={
+                    ':s': True,
+                    ':u': int(datetime.utcnow().timestamp() * 1000),
+                },
+            )
+            # ONNX needs no compilation; the caller should proceed directly to
+            # packaging (which has its own ONNX path). We don't invoke packaging
+            # here because this Lambda has no packaging invoke permission.
+            return create_response(200, {
+                'training_id': training_id,
+                'compilation_jobs': [],
+                'message': 'ONNX model runs on the ONNX Runtime engine — compilation is '
+                           'not required. Proceed to packaging.',
+                'compilation_skipped': True,
             })
         
         # Get use case details
@@ -346,10 +535,35 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
                 'jetson-xavier-jp6': 'jetsonjp6',
                 'x86_64-cpu': 'x86cpu',
                 'x86_64-cuda': 'x86cuda',
-                'arm64-cpu': 'arm64cpu'
+                'arm64-cpu': 'arm64cpu',
+                'onnx': 'onnx'
             }
             safe_target = target_name_mapping.get(target, target.replace('_', '').replace('-', ''))
-            
+
+            # ONNX target: run an export training job (torch.onnx.export) instead
+            # of a SageMaker Neo compilation job. Neo cannot emit ONNX.
+            if target_config.get('export_format') == 'onnx':
+                try:
+                    export_job = _start_onnx_export_job(
+                        sagemaker_usecase=sagemaker_usecase,
+                        s3_usecase=s3_usecase,
+                        usecase=usecase,
+                        model_artifact_s3=model_artifact_s3,
+                        data_input_config=data_input_config,
+                        safe_model_name=safe_model_name,
+                        path_builder=path_builder,
+                    )
+                    compilation_jobs.append(export_job)
+                except Exception as e:
+                    logger.error(f"Failed to start ONNX export job: {str(e)}")
+                    compilation_jobs.append({
+                        'target': 'onnx',
+                        'compilation_job_name': f"{safe_model_name}-onnx-failed",
+                        'status': 'Failed',
+                        'error': str(e),
+                    })
+                continue
+
             timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')  # Remove hyphens from timestamp
             compilation_job_name = f"{safe_model_name}-{safe_target}-{timestamp}"
             
@@ -538,6 +752,23 @@ def get_compilation_status(event: Dict, context: Any) -> Dict:
         updated_jobs = []
         for job in compilation_jobs:
             try:
+                # ONNX export jobs are SageMaker *training* jobs, not Neo
+                # compilation jobs, so they're polled with describe_training_job.
+                if job.get('export_format') == 'onnx':
+                    response = sagemaker_usecase.describe_training_job(
+                        TrainingJobName=job['compilation_job_name']
+                    )
+                    job_status = response['TrainingJobStatus']  # InProgress|Completed|Failed|Stopped...
+                    job['status'] = job_status
+                    if job_status == 'Completed':
+                        arts = response.get('ModelArtifacts', {})
+                        if arts.get('S3ModelArtifacts'):
+                            job['compiled_model_s3'] = arts['S3ModelArtifacts']
+                    elif job_status == 'Failed':
+                        job['failure_reason'] = response.get('FailureReason', 'Unknown')
+                    updated_jobs.append(job)
+                    continue
+
                 response = sagemaker_usecase.describe_compilation_job(
                     CompilationJobName=job['compilation_job_name']
                 )

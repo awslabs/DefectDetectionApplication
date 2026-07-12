@@ -1,0 +1,657 @@
+{
+ "Description": "IAM role for DDA Portal to access UseCase Account resources (v2 - with device management)",
+ "Resources": {
+  "DDAGreengrassDevicePolicyC3487411": {
+   "Type": "AWS::IAM::ManagedPolicy",
+   "Properties": {
+    "Description": "Allows Greengrass devices to download DDA component artifacts from Portal and UseCase S3 buckets, and pull Docker component images from ECR",
+    "ManagedPolicyName": "DDAPortalComponentAccessPolicy",
+    "Path": "/",
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "s3:GetObject",
+        "s3:GetBucketLocation"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:s3:::dda-component-us-east-1-111111111111",
+        "arn:aws:s3:::dda-component-us-east-1-111111111111/*"
+       ],
+       "Sid": "AllowPortalComponentBucketAccess"
+      },
+      {
+       "Action": [
+        "s3:GetObject",
+        "s3:GetBucketLocation",
+        "s3:HeadObject"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:s3:::dda-*",
+        "arn:aws:s3:::dda-*/*",
+        "arn:aws:s3:::*-dda-*",
+        "arn:aws:s3:::*-dda-*/*"
+       ],
+       "Sid": "AllowDDABucketPatternAccess"
+      },
+      {
+       "Action": [
+        "s3:PutObject",
+        "s3:PutObjectTagging",
+        "s3:GetObject",
+        "s3:GetBucketLocation"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:s3:::dda-inference-results-*",
+        "arn:aws:s3:::dda-inference-results-*/*"
+       ],
+       "Sid": "AllowInferenceResultsUpload"
+      },
+      {
+       "Action": "ecr:GetAuthorizationToken",
+       "Effect": "Allow",
+       "Resource": "*",
+       "Sid": "AllowEcrAuthToken"
+      },
+      {
+       "Action": [
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchCheckLayerAvailability"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:ecr:*:",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":repository/dda/*"
+         ]
+        ]
+       },
+       "Sid": "AllowEcrImagePull"
+      }
+     ],
+     "Version": "2012-10-17"
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DDAPortalUseCaseAccountStack/DDAGreengrassDevicePolicy/Resource"
+   }
+  },
+  "DDASageMakerExecutionRole59394153": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "sagemaker.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "Description": "Execution role for SageMaker training, compilation, and labeling jobs",
+    "RoleName": "DDASageMakerExecutionRole"
+   },
+   "Metadata": {
+    "aws:cdk:path": "DDAPortalUseCaseAccountStack/DDASageMakerExecutionRole/Resource"
+   }
+  },
+  "DDASageMakerExecutionRoleDefaultPolicyAABC5DB6": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketCors",
+        "s3:PutBucketCors"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:s3:::*",
+        "arn:aws:s3:::*/*"
+       ]
+      },
+      {
+       "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketCors",
+        "s3:PutBucketCors"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:s3:::sagemaker-*",
+        "arn:aws:s3:::sagemaker-*/*"
+       ]
+      },
+      {
+       "Action": [
+        "cloudwatch:PutMetricData",
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+       ],
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": [
+        "sagemaker:CreateTrainingJob",
+        "sagemaker:DescribeTrainingJob",
+        "sagemaker:StopTrainingJob",
+        "sagemaker:ListTrainingJobs",
+        "sagemaker:CreateCompilationJob",
+        "sagemaker:DescribeCompilationJob",
+        "sagemaker:StopCompilationJob",
+        "sagemaker:ListCompilationJobs",
+        "sagemaker:DescribeLabelingJob",
+        "sagemaker:ListLabelingJobs",
+        "sagemaker:CreateModel",
+        "sagemaker:DescribeModel",
+        "sagemaker:DeleteModel",
+        "sagemaker:ListModels"
+       ],
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+       ],
+       "Effect": "Allow",
+       "Resource": "*"
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "DDASageMakerExecutionRoleDefaultPolicyAABC5DB6",
+    "Roles": [
+     {
+      "Ref": "DDASageMakerExecutionRole59394153"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "DDAPortalUseCaseAccountStack/DDASageMakerExecutionRole/DefaultPolicy/Resource"
+   }
+  },
+  "DDAPortalAccessRoleCF5664B1": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Condition": {
+        "StringEquals": {
+         "sts:ExternalId": "fixture-eid"
+        }
+       },
+       "Effect": "Allow",
+       "Principal": {
+        "AWS": "arn:aws:iam::111111111111:root"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "Description": "Role for Defect Detection Application (DDA) to access UseCase Account resources",
+    "MaxSessionDuration": 43200,
+    "RoleName": "DDAPortalAccessRole"
+   },
+   "Metadata": {
+    "aws:cdk:path": "DDAPortalUseCaseAccountStack/DDAPortalAccessRole/Resource"
+   }
+  },
+  "DDAPortalAccessRoleDefaultPolicy17CD7960": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "sagemaker:CreateTrainingJob",
+        "sagemaker:DescribeTrainingJob",
+        "sagemaker:StopTrainingJob",
+        "sagemaker:ListTrainingJobs",
+        "sagemaker:AddTags"
+       ],
+       "Effect": "Allow",
+       "Resource": "arn:aws:sagemaker:*:111111111111:training-job/*",
+       "Sid": "SageMakerTraining"
+      },
+      {
+       "Action": [
+        "sagemaker:CreateCompilationJob",
+        "sagemaker:DescribeCompilationJob",
+        "sagemaker:ListCompilationJobs",
+        "sagemaker:StopCompilationJob"
+       ],
+       "Effect": "Allow",
+       "Resource": "arn:aws:sagemaker:*:111111111111:compilation-job/*",
+       "Sid": "SageMakerCompilation"
+      },
+      {
+       "Action": "sagemaker:DescribeAlgorithm",
+       "Effect": "Allow",
+       "Resource": "arn:aws:sagemaker:*:865070037744:algorithm/computer-vision-defect-detection",
+       "Sid": "SageMakerAlgorithm"
+      },
+      {
+       "Action": [
+        "sagemaker:AddTags",
+        "sagemaker:CreateLabelingJob",
+        "sagemaker:DescribeLabelingJob",
+        "sagemaker:ListLabelingJobs",
+        "sagemaker:StopLabelingJob",
+        "sagemaker:ListWorkteams"
+       ],
+       "Effect": "Allow",
+       "Resource": "arn:aws:sagemaker:*:111111111111:labeling-job/*",
+       "Sid": "GroundTruthLabelingV2"
+      },
+      {
+       "Action": [
+        "sagemaker:ListWorkteams",
+        "sagemaker:DescribeWorkteam"
+       ],
+       "Effect": "Allow",
+       "Resource": "*",
+       "Sid": "GroundTruthWorkteams"
+      },
+      {
+       "Action": [
+        "tag:GetResources",
+        "tag:GetTagKeys",
+        "tag:GetTagValues",
+        "resourcegroupstaggingapi:GetResources",
+        "resourcegroupstaggingapi:GetTagKeys",
+        "resourcegroupstaggingapi:GetTagValues"
+       ],
+       "Effect": "Allow",
+       "Resource": "*",
+       "Sid": "ResourceTaggingAccess"
+      },
+      {
+       "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketTagging",
+        "s3:CreateBucket",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketEncryption",
+        "s3:PutBucketTagging"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*",
+       "Sid": "S3BucketAccess"
+      },
+      {
+       "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*/*",
+       "Sid": "S3ObjectAccess"
+      },
+      {
+       "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:s3:::sagemaker-*",
+        "arn:aws:s3:::sagemaker-*/*"
+       ],
+       "Sid": "S3SageMakerAccess"
+      },
+      {
+       "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:GetLogEvents",
+        "logs:DescribeLogStreams",
+        "logs:FilterLogEvents"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:logs:*:111111111111:log-group:/aws/sagemaker/*",
+        "arn:aws:logs:*:111111111111:log-group:/aws/lambda/*"
+       ],
+       "Sid": "CloudWatchLogs"
+      },
+      {
+       "Action": [
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents"
+       ],
+       "Effect": "Allow",
+       "Resource": "*",
+       "Sid": "CloudWatchLogsGreengrass"
+      },
+      {
+       "Action": [
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:s3:::dda-inference-results-111111111111",
+        "arn:aws:s3:::dda-inference-results-111111111111/*"
+       ],
+       "Sid": "InferenceResultsAccess"
+      },
+      {
+       "Action": [
+        "greengrass:CreateComponentVersion",
+        "greengrass:DescribeComponent",
+        "greengrass:DeleteComponent",
+        "greengrass:ListComponents",
+        "greengrass:ListComponentVersions",
+        "greengrass:GetComponent",
+        "greengrass:GetComponentVersionArtifact",
+        "greengrass:TagResource",
+        "greengrass:UntagResource",
+        "greengrass:ListTagsForResource"
+       ],
+       "Effect": "Allow",
+       "Resource": "arn:aws:greengrass:*:111111111111:components:*",
+       "Sid": "GreengrassComponents"
+      },
+      {
+       "Action": [
+        "greengrass:CreateDeployment",
+        "greengrass:GetDeployment",
+        "greengrass:ListDeployments",
+        "greengrass:CancelDeployment",
+        "greengrass:TagResource",
+        "greengrass:UntagResource"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceAccount": "111111111111"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "*",
+       "Sid": "GreengrassDeploymentsV4"
+      },
+      {
+       "Action": [
+        "greengrass:ListCoreDevices",
+        "greengrass:GetCoreDevice",
+        "greengrass:ListInstalledComponents",
+        "greengrass:ListEffectiveDeployments",
+        "greengrass:ListTagsForResource"
+       ],
+       "Effect": "Allow",
+       "Resource": "*",
+       "Sid": "GreengrassCoreDevices"
+      },
+      {
+       "Action": [
+        "iot:DescribeThing",
+        "iot:ListThings",
+        "iot:UpdateThing",
+        "iot:ListThingGroupsForThing",
+        "iot:AddThingToThingGroup",
+        "iot:RemoveThingFromThingGroup",
+        "iot:ListTagsForResource"
+       ],
+       "Effect": "Allow",
+       "Resource": "arn:aws:iot:*:111111111111:thing/*",
+       "Sid": "IoTThings"
+      },
+      {
+       "Action": [
+        "iot:CreateThingGroup",
+        "iot:DescribeThingGroup",
+        "iot:UpdateThingGroup",
+        "iot:DeleteThingGroup",
+        "iot:ListThingGroups",
+        "iot:ListThingsInThingGroup",
+        "iot:AddThingToThingGroup",
+        "iot:RemoveThingFromThingGroup",
+        "iot:ListTagsForResource",
+        "iot:TagResource",
+        "iot:UntagResource"
+       ],
+       "Effect": "Allow",
+       "Resource": "arn:aws:iot:*:111111111111:thinggroup/*",
+       "Sid": "IoTThingGroups"
+      },
+      {
+       "Action": [
+        "iot:GetThingShadow",
+        "iot:UpdateThingShadow",
+        "iot:DeleteThingShadow"
+       ],
+       "Effect": "Allow",
+       "Resource": "arn:aws:iot:*:111111111111:thing/*",
+       "Sid": "IoTShadows"
+      },
+      {
+       "Action": [
+        "iot:CreateJob",
+        "iot:DescribeJob",
+        "iot:UpdateJob",
+        "iot:CancelJob",
+        "iot:ListJobs"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:iot:*:111111111111:job/*",
+        "arn:aws:iot:*:111111111111:thing/*",
+        "arn:aws:iot:*:111111111111:thinggroup/*"
+       ],
+       "Sid": "IoTJobs"
+      },
+      {
+       "Action": "iot:DescribeEndpoint",
+       "Effect": "Allow",
+       "Resource": "*",
+       "Sid": "IoTEndpoint"
+      },
+      {
+       "Action": "iam:PassRole",
+       "Condition": {
+        "StringEquals": {
+         "iam:PassedToService": [
+          "sagemaker.amazonaws.com",
+          "greengrass.amazonaws.com"
+         ]
+        }
+       },
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:iam::111111111111:role/*SageMaker*",
+        "arn:aws:iam::111111111111:role/*Greengrass*",
+        "arn:aws:iam::111111111111:role/*GroundTruth*",
+        "arn:aws:iam::111111111111:role/DDASageMakerExecutionRole"
+       ],
+       "Sid": "IAMPassRole"
+      },
+      {
+       "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+       ],
+       "Effect": "Allow",
+       "Resource": "*",
+       "Sid": "ECRAccess"
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "DDAPortalAccessRoleDefaultPolicy17CD7960",
+    "Roles": [
+     {
+      "Ref": "DDAPortalAccessRoleCF5664B1"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "DDAPortalUseCaseAccountStack/DDAPortalAccessRole/DefaultPolicy/Resource"
+   }
+  },
+  "CDKMetadata": {
+   "Type": "AWS::CDK::Metadata",
+   "Properties": {
+    "Analytics": "v2:deflate64:H4sIAAAAAAAA/zPSMzKy1DNUTCwv1k1OydbNyUzSqw4uSUzO1kksL47PTMzVq/ZNzEtMT00JyM/JTK7UcU7LQxUIys9JBYmCaYQiCKtWJyi1OL+0KBmsxL+0pKC0pFYnLz8lVS+rWL/MyEAPhBSzijMzdYtK80oyc1P1giA0AG/4sB2bAAAA"
+   },
+   "Metadata": {
+    "aws:cdk:path": "DDAPortalUseCaseAccountStack/CDKMetadata/Default"
+   }
+  }
+ },
+ "Outputs": {
+  "RoleArn": {
+   "Description": "ARN of the DDA Portal access role",
+   "Value": {
+    "Fn::GetAtt": [
+     "DDAPortalAccessRoleCF5664B1",
+     "Arn"
+    ]
+   },
+   "Export": {
+    "Name": "DDAPortalAccessRoleArn"
+   }
+  },
+  "RoleName": {
+   "Description": "Name of the DDA Portal access role",
+   "Value": {
+    "Ref": "DDAPortalAccessRoleCF5664B1"
+   }
+  },
+  "ExternalId": {
+   "Description": "External ID for assuming the role",
+   "Value": "fixture-eid"
+  },
+  "PortalAccountId": {
+   "Description": "Portal Account ID that can assume this role",
+   "Value": "111111111111"
+  },
+  "SageMakerExecutionRoleArn": {
+   "Description": "ARN of the SageMaker execution role",
+   "Value": {
+    "Fn::GetAtt": [
+     "DDASageMakerExecutionRole59394153",
+     "Arn"
+    ]
+   },
+   "Export": {
+    "Name": "DDASageMakerExecutionRoleArn"
+   }
+  },
+  "GreengrassDevicePolicyArn": {
+   "Description": "ARN of the policy to attach to GreengrassV2TokenExchangeRole during device provisioning",
+   "Value": {
+    "Ref": "DDAGreengrassDevicePolicyC3487411"
+   },
+   "Export": {
+    "Name": "DDAGreengrassDevicePolicyArn"
+   }
+  },
+  "ComponentBucketName": {
+   "Description": "Portal Account S3 bucket containing shared component artifacts",
+   "Value": "dda-component-us-east-1-111111111111"
+  },
+  "ModelArtifactsBucketAccess": {
+   "Description": "S3 buckets Greengrass devices can access for model artifacts",
+   "Value": "dda-* and *-dda-* patterns"
+  },
+  "StackVersion": {
+   "Description": "Version of the UseCase Account stack",
+   "Value": "1.4.0",
+   "Export": {
+    "Name": "DDAUseCaseStackVersion"
+   }
+  }
+ },
+ "Parameters": {
+  "BootstrapVersion": {
+   "Type": "AWS::SSM::Parameter::Value<String>",
+   "Default": "/cdk-bootstrap/hnb659fds/version",
+   "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]"
+  }
+ },
+ "Rules": {
+  "CheckBootstrapVersion": {
+   "Assertions": [
+    {
+     "Assert": {
+      "Fn::Not": [
+       {
+        "Fn::Contains": [
+         [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5"
+         ],
+         {
+          "Ref": "BootstrapVersion"
+         }
+        ]
+       }
+      ]
+     },
+     "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI."
+    }
+   ]
+  }
+ }
+}

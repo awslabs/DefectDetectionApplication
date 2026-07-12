@@ -268,10 +268,16 @@ async def main():
 
     if utils.is_authorization_enabled_on_station():
         logger.info("Local server starting up using SSL...")
-        config = uvicorn.Config(app, host="0.0.0.0", port=5443, loop="asyncio", log_config="dda_logging/uvicorn_disable_logging.json", ssl_certfile=constants.DDA_LOCAL_SERVER_SSL_CERT, ssl_keyfile=constants.DDA_LOCAL_SERVER_SSL_KEY)
+        # nosec B104 — intentional LAN bind for an on-device edge appliance operator UI.
+        # Port 5443 is TLS-protected AND gated by station authorization; no plaintext
+        # traffic reaches this listener and only authorized callers may proceed.
+        config = uvicorn.Config(app, host="0.0.0.0", port=5443, loop="asyncio", log_config="dda_logging/uvicorn_disable_logging.json", ssl_certfile=constants.DDA_LOCAL_SERVER_SSL_CERT, ssl_keyfile=constants.DDA_LOCAL_SERVER_SSL_KEY)  # nosec B104
     else:
         logger.info("Local server starting up...")
-        config = uvicorn.Config(app, host="0.0.0.0", port=5000, loop="asyncio", log_config="dda_logging/uvicorn_disable_logging.json")
+        # nosec B104 — intentional LAN bind for an on-device edge appliance operator UI.
+        # This plaintext path is reachable ONLY when station authorization is disabled;
+        # it is intentional for an on-device edge appliance serving the LAN UI.
+        config = uvicorn.Config(app, host="0.0.0.0", port=5000, loop="asyncio", log_config="dda_logging/uvicorn_disable_logging.json")  # nosec B104
     server = uvicorn.Server(config)
     loop.create_task(server.serve())
 

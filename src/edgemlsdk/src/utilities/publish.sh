@@ -20,13 +20,19 @@
 version=$(<"version")
 python_version=$(python3 --version 2>&1 | awk '{print $2}')
 ubuntu_version=$(lsb_release -rs)
-aws s3 cp *.deb s3://panorama-sdk-v2-artifacts/release/$version/$(uname -m)/$ubuntu_version/$python_version/
-aws s3 cp *.deb s3://panorama-sdk-v2-artifacts/release/latest/$(uname -m)/$ubuntu_version/$python_version/PanoramaSDK.deb
+ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-panorama-sdk-v2-artifacts}"   # set an account-scoped name to fail closed on squatting
+DOCS_BUCKET="${DOCS_BUCKET:-edgeml-sdk-docs}"
+EXPECTED_BUCKET_OWNER="${EXPECTED_BUCKET_OWNER:-$(aws sts get-caller-identity --query Account --output text)}"
 
-aws s3 cp ./lib/python_package/dist/*.whl s3://panorama-sdk-v2-artifacts/release/$version/$(uname -m)/$ubuntu_version/$python_version/
-aws s3 cp ./lib/python_package/dist/*.whl s3://panorama-sdk-v2-artifacts/release/latest/$(uname -m)/$ubuntu_version/$python_version/
+aws s3api head-bucket --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$EXPECTED_BUCKET_OWNER" || { echo "ERROR: $ARTIFACT_BUCKET is not owned by $EXPECTED_BUCKET_OWNER (possible bucket squatting); aborting publish." >&2; exit 1; }
+aws s3 cp *.deb s3://${ARTIFACT_BUCKET}/release/$version/$(uname -m)/$ubuntu_version/$python_version/
+aws s3 cp *.deb s3://${ARTIFACT_BUCKET}/release/latest/$(uname -m)/$ubuntu_version/$python_version/PanoramaSDK.deb
+
+aws s3 cp ./lib/python_package/dist/*.whl s3://${ARTIFACT_BUCKET}/release/$version/$(uname -m)/$ubuntu_version/$python_version/
+aws s3 cp ./lib/python_package/dist/*.whl s3://${ARTIFACT_BUCKET}/release/latest/$(uname -m)/$ubuntu_version/$python_version/
 
 if [ -d "./sphinx" ]; then
     major_minor=$(echo "$version" | cut -d'.' -f1,2)
-    aws s3 sync ./sphinx s3://edgeml-sdk-docs/edgeml-sdk/v1/$major_minor/
+    aws s3api head-bucket --bucket "$DOCS_BUCKET" --expected-bucket-owner "$EXPECTED_BUCKET_OWNER" || { echo "ERROR: $DOCS_BUCKET is not owned by $EXPECTED_BUCKET_OWNER (possible bucket squatting); aborting docs upload." >&2; exit 1; }
+    aws s3 sync ./sphinx s3://${DOCS_BUCKET}/edgeml-sdk/v1/$major_minor/
 fi

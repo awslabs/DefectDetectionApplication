@@ -14,9 +14,11 @@ export interface ApiGatewayStackProps extends cdk.NestedStackProps {
   useCasesHandler: lambda.Function;
   devicesHandler: lambda.Function;
   deviceLogsHandler: lambda.Function;
+  deviceLogsAnalyzerHandler: lambda.Function;
   deploymentsHandler: lambda.Function;
   dataManagementHandler: lambda.Function;
   datasetsHandler: lambda.Function;
+  capturesHandler: lambda.Function;
   preLabeledDatasetsHandler: lambda.Function;
   labelingHandler: lambda.Function;
   trainingHandler: lambda.Function;
@@ -81,9 +83,11 @@ export class ApiGatewayStack extends cdk.NestedStack {
     const useCasesIntegration = new apigateway.LambdaIntegration(props.useCasesHandler);
     const devicesIntegration = new apigateway.LambdaIntegration(props.devicesHandler);
     const deviceLogsIntegration = new apigateway.LambdaIntegration(props.deviceLogsHandler);
+    const deviceLogsAnalyzerIntegration = new apigateway.LambdaIntegration(props.deviceLogsAnalyzerHandler);
     const deploymentsIntegration = new apigateway.LambdaIntegration(props.deploymentsHandler);
     const dataManagementIntegration = new apigateway.LambdaIntegration(props.dataManagementHandler);
     const datasetsIntegration = new apigateway.LambdaIntegration(props.datasetsHandler);
+    const capturesIntegration = new apigateway.LambdaIntegration(props.capturesHandler);
     const preLabeledDatasetsIntegration = new apigateway.LambdaIntegration(props.preLabeledDatasetsHandler);
     const labelingIntegration = new apigateway.LambdaIntegration(props.labelingHandler);
     const trainingIntegration = new apigateway.LambdaIntegration(props.trainingHandler);
@@ -271,6 +275,14 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
+    // Captures endpoint (inference-results Results_Viewer)
+    // GET /captures?usecase_id&prefix&device_id&limit -> list_captures
+    const capturesResource = this.api.root.addResource('captures');
+    capturesResource.addMethod('GET', capturesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
     // Workteams endpoint
     const workteamsResource = this.api.root.addResource('workteams');
     workteamsResource.addMethod('GET', labelingIntegration, {
@@ -320,8 +332,33 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
+    // SSH tunnel (AWS IoT Secure Tunneling) — enable/disable + status + open.
+    const sshTunnelResource = deviceResource.addResource('ssh-tunnel');
+    sshTunnelResource.addMethod('POST', devicesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    sshTunnelResource.addMethod('GET', devicesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    const sshTunnelOpenResource = sshTunnelResource.addResource('open');
+    sshTunnelOpenResource.addMethod('POST', devicesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
     const deviceLogsResource = deviceResource.addResource('logs');
     deviceLogsResource.addMethod('GET', deviceLogsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Static 'analyze' resource — POST /devices/{id}/logs/analyze. Defined as a
+    // sibling of the {component} path param; API Gateway prefers the static
+    // segment for exact matches, so this won't shadow GET /logs/{component}.
+    const deviceLogsAnalyzeResource = deviceLogsResource.addResource('analyze');
+    deviceLogsAnalyzeResource.addMethod('POST', deviceLogsAnalyzerIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });

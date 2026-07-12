@@ -32,6 +32,7 @@ import AnomalyLabels from "./AnomalyLabels";
 import { Workflow } from "components/workflow/types";
 import {
   formatInferenceTime,
+  formatPercent,
   formatProcessingTime,
   getFeedbackRequiredValue,
 } from "./helpers";
@@ -56,13 +57,17 @@ export default function LiveResultCard({
     featureConfigurations[0]?.modelName
     : "";
   const modelVersion = featureConfigurations?.[0]?.defaultConfiguration?.modelVersion || "";
-  const { inference_result, anomalies } = inferenceResult || {};
+  const { inference_result, anomalies, detections } = inferenceResult || {};
   const prediction = inference_result;
   let predictionType: StatusIndicatorProps.Type | undefined;
   if (!!prediction) {
     predictionType = prediction === PredictionType.Normal ? "success" : "error";
   }
   const labelInfoList = Object.values(anomalies ?? []);
+  // Object-detection results list each detected object (label + confidence)
+  // under "Objects detected" instead of the anomaly-label section.
+  const isDetection = prediction === PredictionType.Detection;
+  const detectionList = Object.values(detections ?? {});
 
   return (
     <SpaceBetween size="l">
@@ -76,15 +81,29 @@ export default function LiveResultCard({
       <ValueWithLabel label="Feedback required">
         {getFeedbackRequiredValue(humanReviewRequired)}
       </ValueWithLabel>
-      <ValueWithLabel label="Anomaly labels">
-        {labelInfoList?.length > 0
-          ? labelInfoList.map((label: AnomalyLabel) => {
-            return (
-              <AnomalyLabels key={label["hex-color"]} labelInfo={label} />
-            );
-          })
-          : "-"}
-      </ValueWithLabel>
+      {isDetection ? (
+        <ValueWithLabel label="Objects detected">
+          {detectionList.length > 0
+            ? detectionList.map((det, index) => (
+              <div key={`${det.class_label ?? det.class_index ?? "object"}-${index}`}>
+                {(det.class_label || det.class_index || "object")}
+                {" — "}
+                {formatPercent(det.confidence)}
+              </div>
+            ))
+            : "None"}
+        </ValueWithLabel>
+      ) : (
+        <ValueWithLabel label="Anomaly labels">
+          {labelInfoList?.length > 0
+            ? labelInfoList.map((label: AnomalyLabel) => {
+              return (
+                <AnomalyLabels key={label["hex-color"]} labelInfo={label} />
+              );
+            })
+            : "-"}
+        </ValueWithLabel>
+      )}
       <ValueWithLabel label="Result date">
         {formatInferenceTime(creationTime)}
       </ValueWithLabel>

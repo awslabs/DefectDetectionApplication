@@ -1,0 +1,47 @@
+{
+  "D1": {
+    "default_pull_reference": "nvcr.io/nvidia/l4t-jetpack:r35.4.1",
+    "file": "src/backend/Dockerfile.jp5",
+    "fixed_default_reference": "nvcr.io/nvidia/l4t-jetpack:r35.4.1@sha256:d1c8e971ab994235840eacc31c4ef4173bf9156317b1bf8aabe7e01eb21b2a0e",
+    "image": "l4t-jetpack",
+    "line": 5,
+    "stage": null,
+    "tag": "r35.4.1"
+  },
+  "D2": {
+    "default_pull_reference": "nvcr.io/nvidia/l4t-jetpack:r35.4.1",
+    "file": "src/edgemlsdk/Dockerfile.jp5",
+    "fixed_default_reference": "nvcr.io/nvidia/l4t-jetpack:r35.4.1@sha256:d1c8e971ab994235840eacc31c4ef4173bf9156317b1bf8aabe7e01eb21b2a0e",
+    "image": "l4t-jetpack",
+    "line": 2,
+    "stage": "builder",
+    "tag": "r35.4.1"
+  },
+  "D3": {
+    "default_pull_reference": "nvcr.io/nvidia/l4t-cuda:11.4.19-runtime",
+    "file": "src/backend/Dockerfile.jp6",
+    "fixed_default_reference": "nvcr.io/nvidia/l4t-cuda:11.4.19-runtime@sha256:fb22ff080631990dda403fd768acb384dc3745a7e516f5ed1dc4c4944898da78",
+    "image": "l4t-cuda",
+    "line": 19,
+    "stage": "cuda114",
+    "tag": "11.4.19-runtime"
+  },
+  "D4": {
+    "default_pull_reference": "nvcr.io/nvidia/l4t-jetpack:r36.3.0",
+    "file": "src/backend/Dockerfile.jp6",
+    "fixed_default_reference": "nvcr.io/nvidia/l4t-jetpack:r36.3.0@sha256:b3bbd7e3f3a0879a6672adc64aef7742ba12f9baaf1451c91215942c46e4e2fa",
+    "image": "l4t-jetpack",
+    "line": 20,
+    "stage": null,
+    "tag": "r36.3.0"
+  },
+  "D5": {
+    "default_pull_reference": "nvcr.io/nvidia/l4t-jetpack:r36.3.0",
+    "file": "src/edgemlsdk/Dockerfile.jp6",
+    "fixed_default_reference": "nvcr.io/nvidia/l4t-jetpack:r36.3.0@sha256:b3bbd7e3f3a0879a6672adc64aef7742ba12f9baaf1451c91215942c46e4e2fa",
+    "image": "l4t-jetpack",
+    "line": 2,
+    "stage": "builder",
+    "tag": "r36.3.0"
+  }
+}

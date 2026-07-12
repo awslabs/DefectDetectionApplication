@@ -139,6 +139,20 @@ else
   export BACKEND_DOCKERFILE="Dockerfile"
 fi
 echo "Backend Dockerfile: $BACKEND_DOCKERFILE"
+
+# ── GPU ONNX Runtime (JP5/JP6) ─────────────────────────────────────────────
+# The OnnxRunner uses a GPU (CUDA/TensorRT) onnxruntime built from source in the
+# backend image. GPU is enabled by default on JetPack 5 and 6; JetPack 4 stays
+# CPU-only (its native python 3.6 has no compatible build path) and x86 uses the
+# CPU wheel. The source build is long and memory-heavy (~1-2h), so it can be
+# turned off for a fast CPU-only build with ONNXRUNTIME_GPU=0.
+if [ "$IS_JP6" = "1" ] || [ "$IS_JP5" = "1" ]; then
+  export ONNXRUNTIME_GPU="${ONNXRUNTIME_GPU:-1}"
+else
+  export ONNXRUNTIME_GPU=0
+fi
+echo "ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU (1=build GPU onnxruntime from source; JP5/JP6 only. Set 0 for fast CPU-only build)"
+
 echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 # Select profiles by architecture. The `tegra` service targets Jetson
 # (platform linux/arm64/v8) and must NOT be built on x86_64 hosts — doing so
@@ -148,7 +162,9 @@ if [ "$ARCHITECTURE" = "x86_64" ]; then
   docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" --no-cache \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 else
-  docker-compose --profile tegra --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" --no-cache \
+  docker-compose --profile tegra --profile generic -f docker-compose.yaml build \
+    --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
+    --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU --no-cache \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 fi
 cd ..
@@ -174,7 +190,7 @@ else
     -e PYTHON_VERSION="$PYTHON_VERSION" \
     --entrypoint bash flask-app -c '
       set -e
-      python${PYTHON_VERSION} -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures
+      python${PYTHON_VERSION} -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures hypothesis
       export PYTHONPATH=/repo/src/backend
       # The backend imports the triton/panorama bindings at collection time
       # (via conftest). docker-compose normally provides these loader paths at
@@ -186,7 +202,123 @@ else
         test/backend-test/utils/test_user_group_management_utils.py \
         test/backend-test/utils/test_dda_user_management_utils.py \
         test/backend-test/host_scripts/test_docker_profile_selection.py -v
-    ' || { echo "ERROR: backend unit tests failed"; exit 1; }
+
+      # ── Security injection / deserialization gate ─────────────────────────
+      # (spec: security-injection-deserialization-fixes). A single green gate:
+      #   1. repo_audit.py — pattern gate; exits non-zero if a disallowed
+      #      subprocess-interpolation / unsafe-deserializer pattern reappears in
+      #      in-scope application code (minus documented # nosem exceptions).
+      #   2. Fix-checking suite — every injection/deserialization vector stays
+      #      neutralized.
+      #   3. Preservation suite — F(X) == F'\''(X) for legitimate inputs
+      #      (--noconftest is required: this suite is self-contained and must
+      #      not load the backend conftest).
+      # set -e above makes any failure here fail the build.
+      echo "Running security injection/deserialization audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/repo_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_bug_condition_exploration.py -v
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/preservation \
+        -p no:cacheprovider --noconftest -v
+      echo "Security audit gate passed."
+
+      # ── Security secrets/credentials/JWT audit gate ───────────────────────
+      # (spec: security-secrets-credentials-jwt-fixes). A second gate covering
+      # the secrets/credentials/JWT batch:
+      #   1. secrets_audit.py — pattern gate; exits non-zero if a disallowed
+      #      json.dumps(event) log / access_key|secret_key interpolation /
+      #      un-annotated verify_signature=False reappears in in-scope source.
+      #   2. Fix-checking suite — every secrets/credentials/JWT vector stays
+      #      neutralized.
+      # Preservation suite is already run by the Group-1 gate above (it covers
+      # both specs'\'' baselines).
+      echo "Running security secrets/credentials/JWT audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/secrets_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_secrets_bug_condition_exploration.py -v
+      echo "Security secrets/credentials/JWT audit gate passed."
+
+      # ── Security IAM / authorization audit gate ───────────────────────────
+      # (spec: security-iam-authorization-fixes). A gate covering the IAM
+      # least-privilege batch:
+      #   1. iam_audit.py — pattern gate; exits non-zero if a disallowed
+      #      wildcard-resource-on-scopable-action / service:* action wildcard /
+      #      wildcard-account sts:AssumeRole / unenforced-tag PolicyStatement
+      #      reappears in in-scope infrastructure code (minus documented
+      #      # nosec exceptions).
+      #   2. Fix-checking suite — every IAM/authorization vector stays
+      #      neutralized (scoped ARNs / tag Conditions / bounded accounts).
+      # The security/preservation suite (run by the Group-1 gate above) already
+      # covers the IAM preservation baselines (test_preservation_iam_*).
+      echo "Running security IAM/authorization audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/iam_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_iam_bug_condition_exploration.py -v
+      echo "Security IAM/authorization audit gate passed."
+
+      # ── Security S3 bucket-squatting audit gate ───────────────────────────
+      # (spec: security-s3-bucket-squatting-fixes). A gate covering the S3
+      # bucket-squatting batch (B1-B6):
+      #   1. s3_squat_audit.py — pattern gate; exits non-zero if a predictable
+      #      S3 bucket access (aws s3 cp/sync against a hardcoded literal, an
+      #      s3:// download URI, or a "bucket" config value) reappears in
+      #      in-scope source without an adjacent head-bucket
+      #      --expected-bucket-owner preflight, env-var parameterization, or
+      #      placeholder / ownership note (per-bucket preflight association).
+      #   2. Fix-checking + negative-fixture suite — every S3 access stays
+      #      squatting-resistant and the gate cannot be satisfied by a
+      #      file-global preflight presence check.
+      # The security/preservation suite (run by the Group-1 gate above) already
+      # covers the S3 preservation baselines (test_preservation_s3_*).
+      echo "Running security S3 bucket-squatting audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/s3_squat_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_s3_squat_bug_condition_exploration.py \
+        test/backend-test/security/test_s3_squat_gate_negative_fixture.py -v
+      echo "Security S3 bucket-squatting audit gate passed."
+
+      # ── Security Docker non-ECR base image audit gate ─────────────────────
+      # (spec: security-docker-non-ecr-base-image-fixes). A gate covering the
+      # Docker non-ECR base-image batch (D1-D6):
+      #   1. docker_base_image_audit.py — pattern gate; exits non-zero if an
+      #      in-scope Jetson Dockerfile FROM (src/backend/Dockerfile.jp5|jp6,
+      #      src/edgemlsdk/Dockerfile.jp5|jp6) pulls from a non-ECR registry
+      #      (nvcr.io) without being both ${BASE_REGISTRY}-parameterized and
+      #      @sha256-digest-pinned (per-FROM, not file-global).
+      #   2. Fix-checking + negative-fixture suite — every in-scope base image
+      #      stays registry-parameterized + digest-pinned and the gate cannot be
+      #      satisfied by a file-global ${BASE_REGISTRY}/nvcr.io presence check.
+      # The security/preservation suite (run by the Group-1 gate above) already
+      # covers the Docker preservation baselines (test_preservation_docker_*).
+      echo "Running security Docker non-ECR base image audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/docker_base_image_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_docker_base_image_bug_condition_exploration.py \
+        test/backend-test/security/test_docker_audit_gate_negative_fixture.py -v
+      echo "Security Docker non-ECR base image audit gate passed."
+
+      # ── Security dependency / supply-chain CVE audit gate ─────────────────
+      # (spec: security-dependency-cve-fixes). A gate covering the dependency /
+      # supply-chain CVE + weak-hash batch (F1-F4):
+      #   1. dependency_audit.py — pattern gate; exits non-zero if an in-scope
+      #      pinned requests version < 2.32.4 (CVE-2024-47081) reappears at
+      #      station_install/setup_station.sh or src/backend/requirements.txt
+      #      (the two Python-3.11 pin sites), or if the documented B324
+      #      RFC-2617 digest-auth allowlist drifts. Unpinned system-python3.6
+      #      installs and out-of-scope pins are never flagged.
+      #   2. Fix-checking + negative-fixture suite — the in-scope pins stay
+      #      >= 2.32.4, the B324 accepted false positive stays documented, and a
+      #      bare unpinned requests / out-of-scope pin is never flagged.
+      # The security/preservation suite (run by the Group-1 gate above) already
+      # covers the dependency preservation baselines (test_preservation_dependency_*).
+      echo "Running security dependency/supply-chain CVE audit gate..."
+      python${PYTHON_VERSION} test/backend-test/security/dependency_audit.py
+      python${PYTHON_VERSION} -m pytest \
+        test/backend-test/security/test_dependency_bug_condition_exploration.py \
+        test/backend-test/security/test_dependency_audit_gate_negative_fixture.py -v
+      echo "Security dependency/supply-chain CVE audit gate passed."
+    ' || { echo "ERROR: backend unit tests / security audit gate failed"; exit 1; }
   echo "Backend unit tests passed."
 fi
 

@@ -46,7 +46,16 @@ REQUIRED_FILES = {
 
 
 def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
-    """Assume cross-account role for UseCase Account access"""
+    """Assume cross-account role for UseCase Account access.
+
+    Single-account setups store the account *root* ARN
+    (arn:aws:iam::ACCOUNT_ID:root), which is not an assumable role — assuming it
+    fails with AccessDenied. In that case use the Lambda's own execution role
+    (same-account access) via the default credential chain.
+    """
+    if role_arn and role_arn.endswith(':root'):
+        logger.info("Single-account setup (root ARN) — using Lambda execution role credentials")
+        return {'is_default_credentials': True}
     try:
         response = sts.assume_role(
             RoleArn=role_arn,
@@ -207,27 +216,37 @@ def validate_manifest_json(manifest_path: str) -> Dict:
         raise ModelValidationError(f"Invalid JSON in manifest.json: {str(e)}")
 
 
-def find_pt_model_file(export_artifacts_dir: str) -> str:
+def find_model_artifact_file(export_artifacts_dir: str) -> Tuple[str, str]:
     """
-    Find .pt model file in export_artifacts directory
-    Returns: filename of the .pt file
+    Find the model weight file in export_artifacts. Accepts a PyTorch model
+    (.pt, legacy DLR/Neo path) or an ONNX model (.onnx, pluggable ONNX Runtime
+    engine — used for BYO detection/segmentation models).
+
+    Returns: (filename, framework) where framework is 'PYTORCH' or 'ONNX'.
     """
     pt_files = []
-    
+    onnx_files = []
+
     for file in os.listdir(export_artifacts_dir):
         if file.endswith('.pt'):
             pt_files.append(file)
-    
-    if not pt_files:
-        raise ModelValidationError(
-            "No .pt model file found in export_artifacts/. "
-            "Model must include a PyTorch model file (.pt extension)."
-        )
-    
-    if len(pt_files) > 1:
-        logger.warning(f"Multiple .pt files found: {pt_files}. Using first one: {pt_files[0]}")
-    
-    return pt_files[0]
+        elif file.endswith('.onnx'):
+            onnx_files.append(file)
+
+    # Prefer .pt (legacy path); fall back to .onnx.
+    if pt_files:
+        if len(pt_files) > 1:
+            logger.warning(f"Multiple .pt files found: {pt_files}. Using first: {pt_files[0]}")
+        return pt_files[0], 'PYTORCH'
+    if onnx_files:
+        if len(onnx_files) > 1:
+            logger.warning(f"Multiple .onnx files found: {onnx_files}. Using first: {onnx_files[0]}")
+        return onnx_files[0], 'ONNX'
+
+    raise ModelValidationError(
+        "No model weight file found in export_artifacts/. "
+        "Model must include a PyTorch (.pt) or ONNX (.onnx) model file."
+    )
 
 
 def validate_dimensions_match(
@@ -265,13 +284,17 @@ def validate_model_artifact(model_s3_uri: str, credentials: Dict) -> Dict:
         bucket = parsed.netloc
         key = parsed.path.lstrip('/')
         
-        # Create S3 client with assumed role credentials
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=credentials['AccessKeyId'],
-            aws_secret_access_key=credentials['SecretAccessKey'],
-            aws_session_token=credentials['SessionToken']
-        )
+        # Create S3 client (assumed role for multi-account; Lambda execution
+        # role for single-account setups where the root ARN can't be assumed).
+        if credentials.get('is_default_credentials'):
+            s3_client = boto3.client('s3')
+        else:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=credentials['AccessKeyId'],
+                aws_secret_access_key=credentials['SecretAccessKey'],
+                aws_session_token=credentials['SessionToken']
+            )
         
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_validation_")
@@ -336,8 +359,8 @@ def validate_model_artifact(model_s3_uri: str, credentials: Dict) -> Dict:
         # Validate manifest.json
         manifest = validate_manifest_json(manifest_path)
         
-        # Find .pt model file
-        pt_file = find_pt_model_file(export_artifacts_dir)
+        # Find the model weight file (.pt PyTorch or .onnx ONNX Runtime)
+        model_file, framework = find_model_artifact_file(export_artifacts_dir)
         
         # Validate dimensions match
         validate_dimensions_match(image_width, image_height, input_shape)
@@ -351,11 +374,12 @@ def validate_model_artifact(model_s3_uri: str, credentials: Dict) -> Dict:
                 'image_height': image_height,
                 'input_shape': input_shape,
                 'model_type': model_type,
-                'pt_file': pt_file,
-                'framework': 'PYTORCH',
-                'framework_version': '1.8'
+                'pt_file': model_file,
+                'model_file': model_file,
+                'framework': framework,
+                'framework_version': '1.8' if framework == 'PYTORCH' else 'onnx'
             },
-            'files_found': list(REQUIRED_FILES.keys()) + [f'export_artifacts/{pt_file}'],
+            'files_found': list(REQUIRED_FILES.keys()) + [f'export_artifacts/{model_file}'],
             'warnings': validation_warnings
         }
         
@@ -704,7 +728,8 @@ def get_model_format_spec(event: Dict, context: Any) -> Dict:
             'jetson-xavier-jp6',
             'x86_64-cpu',
             'x86_64-cuda',
-            'arm64-cpu'
+            'arm64-cpu',
+            'onnx'
         ]
     }
     

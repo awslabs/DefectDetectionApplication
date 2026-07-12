@@ -89,10 +89,13 @@ export default function ModelDetail() {
       try {
         const response = await apiService.getModel(modelId);
         setModel(response.model);
-        // Load the underlying training job so the Compilation tab can drive
-        // compilation from here too (model_id === training_id for trained models).
+        // Load the underlying training job so the Compilation / Component
+        // Actions tab can drive packaging + publishing from here. This applies
+        // to both 'trained' models and 'imported' BYO models (incl. ONNX) —
+        // imported models are stored in the training_jobs table too, and ONNX
+        // models package/publish without compilation.
         const trainingId = response.model.training_job_id || response.model.model_id;
-        if (trainingId && response.model.source === 'trained') {
+        if (trainingId && (response.model.source === 'trained' || response.model.source === 'imported')) {
           loadTrainingJob(trainingId);
         }
       } catch (err: any) {
@@ -259,8 +262,14 @@ export default function ModelDetail() {
               <div key={key}>
                 <Box variant="awsui-key-label">{key.replace(/_/g, ' ').toUpperCase()}</Box>
                 <Box variant="h3">
-                  {typeof value === 'number' 
-                    ? (key === 'loss' ? value.toFixed(4) : `${(value * 100).toFixed(2)}%`)
+                  {typeof value === 'number'
+                    ? (key === 'loss'
+                        ? value.toFixed(4)
+                        // Only ratio metrics (0..1) render as percentages;
+                        // raw values like image dimensions render as-is.
+                        : (value >= 0 && value <= 1
+                            ? `${(value * 100).toFixed(2)}%`
+                            : String(value)))
                     : String(value)}
                 </Box>
               </div>

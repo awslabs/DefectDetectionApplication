@@ -21,7 +21,6 @@ import os
 import logging
 import json
 import typing
-import ctypes
 
 # triton_python_backend_utils is available in every Triton Python model. You
 # need to use this module to create inference requests and responses. It also
@@ -41,6 +40,16 @@ _DDA_APP_ROOT = os.environ.get("DDA_APP_ROOT", "/")
 if _DDA_APP_ROOT and _DDA_APP_ROOT not in sys.path:
     sys.path.insert(0, _DDA_APP_ROOT)
 
+# The pluggable runtime module (inference_runtimes.py) is copied by
+# model_convertor.py into THIS model's version directory, next to this file.
+# The Triton Python-backend stub does not put that directory on sys.path (and
+# its CWD is elsewhere), so a bare `import inference_runtimes` raises
+# ModuleNotFoundError. Add this file's own directory to sys.path so the sibling
+# module resolves regardless of the stub's environment.
+_MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+if _MODEL_DIR and _MODEL_DIR not in sys.path:
+    sys.path.insert(0, _MODEL_DIR)
+
 from lyra_anomalies_mask_utils import (
     DEFAULT_ANOMALY_MASK_PALETTE,
     convert_index_mask_to_color_mask,
@@ -51,67 +60,22 @@ from lyra_anomalies_mask_utils import (
 from lyra_science_processing_utils.model_config import ModelConfig
 from lyra_science_processing_utils.model_graph_factory import ModelGraphFactory
 from lyra_science_processing_utils.utils.anomaly_result import AnomalyResult
+from lyra_science_processing_utils.utils.class_label_map import resolve_class_label
 from lyra_science_processing_utils.utils.inference_data import InferenceData
 
 log = logging.getLogger(__name__)
-DLR_DEVICE_TYPE_MAP = {
-    1: "cpu",
-    2: "gpu",
-    4: "opencl",
-}
-
-
-def load_lib(lib_path):
-    try:
-        path_backup = os.environ["PATH"].split(os.pathsep)
-    except KeyError:
-        path_backup = []
-
-    try:
-        # needed when the lib is linked with non-system-available dependencies
-        os.environ["PATH"] = os.pathsep.join(path_backup + [os.path.dirname(lib_path)])
-        lib = ctypes.cdll.LoadLibrary(lib_path)
-    except Exception as e:
-        libname = os.path.basename(lib_path)
-        raise OSError(
-            f"Library ({format(libname)}) could not be loaded. Error message(s): {format(e)}"
-        )
-    finally:
-        os.environ["PATH"] = os.pathsep.join(path_backup)
-
-    return lib
-
-
-def dlr_device_type(model_path):
-    # TODO 3rd party import `pip install dlr` from https://pypi.org/project/dlr/
-    from dlr.libpath import find_lib_path
-
-    dlr_lib = load_lib(
-        find_lib_path(
-            model_path,
-            use_default_dlr=False,
-            logger=log,
-        )
-    )
-    dlr_lib.DLRGetLastError.restype = ctypes.c_char_p
-
-    # GetDLRDeviceType is a C++ function in DLR lib. The function extracts device type id from libdlr.so
-    device_type_id = dlr_lib.GetDLRDeviceType(
-        ctypes.c_char_p(model_path.encode()),
-    )
-    if device_type_id == -1:
-        raise RuntimeError(f"Cannot get DLR Device type from the dlr model at: {model_path}.")
-    if device_type_id not in DLR_DEVICE_TYPE_MAP:
-        raise RuntimeError(
-            f"Device type Id: {device_type_id}, got from dlr model, is not supported."
-        )
-
-    return DLR_DEVICE_TYPE_MAP[device_type_id]
 
 
 class _InferenceRunner:  # pragma: no cover
     """
-    Callable class. Implements DLR inference.
+    Callable class. Delegates to a pluggable inference engine selected by the
+    model package manifest's ``runtime`` field (``dlr`` default | ``onnx`` |
+    ``pytorch``). See docs/multi-runtime-inference.md.
+
+    The DLR path is the default and is behaviorally unchanged: when ``runtime``
+    is absent or ``"dlr"`` this loads the model exactly as before. The actual
+    engine implementations live in ``inference_runtimes.py`` (copied next to
+    this file by model_convertor.py).
     """
 
     def __init__(
@@ -119,16 +83,25 @@ class _InferenceRunner:  # pragma: no cover
         model_id: str,
         model_path: str,
         device_id: int = 0,
+        runtime: str = "dlr",
+        runtime_artifact: typing.Optional[str] = None,
+        device: typing.Optional[str] = None,
     ):
         """
-        :model_path: Location of the compiled DLR model on the disk.
-        :device_type: Device where inference should be executed. "cpu" or "gpu". "gpu" is default.
+        :model_id: Unique model+version id, for logging.
+        :model_path: Stage directory holding the engine artifact on disk.
         :device_id: Index of the gpu device. 0 is default.
+        :runtime: Engine identifier from the manifest. Default "dlr".
+        :runtime_artifact: Engine artifact filename within the stage dir.
+        :device: Optional "cpu"/"gpu" override; default auto-detect.
         """
         self.__model = self.__load_model(
             model_id,
             model_path,
             device_id,
+            runtime,
+            runtime_artifact,
+            device,
         )
 
     def __call__(
@@ -141,45 +114,32 @@ class _InferenceRunner:  # pragma: no cover
         :inference_input: Input tensor.
         :return: Output tensor.
         """
-        return self.__model.run(inference_input)
+        return self.__model(inference_input)
 
     @staticmethod
     def __load_model(
         model_id: str,
         model_path: str,
         device_id: int = 0,
+        runtime: str = "dlr",
+        runtime_artifact: typing.Optional[str] = None,
+        device: typing.Optional[str] = None,
     ):
         """
-        Loads compiled DLR model.
+        Builds the inference engine via the runtime factory.
 
-        :model_path: Location of the compiled DLR model on the disk.
-        :device_type: Device where inference should be executed. "cpu" or "gpu".
-        :device_id: Index of the gpu device.
-        :returns: DLR model.
+        :returns: A callable runner honoring runner(input_np) -> list[np.ndarray].
         """
-        # TODO 3rd party import `pip install dlr` from https://pypi.org/project/dlr/
-        import dlr
-        from dlr.counter.phone_home import PhoneHome
+        from inference_runtimes import make_runner
 
-        try:
-            PhoneHome.disable_feature()
-        except OSError as e:
-            log.warning("Failed to disable DLR phone home: %s", e.strerror)
-
-        # dlr_device_type has dependence over dlr
-        device_type = dlr_device_type(model_path)
-
-        log.info(
-            f"{model_path}: Starting loading: dev_type: {device_type}, dev_id: {device_id}, model: {model_id}"
+        return make_runner(
+            runtime,
+            model_id=model_id,
+            model_dir=model_path,
+            device_id=device_id,
+            artifact=runtime_artifact,
+            device=device,
         )
-        model = dlr.DLRModel(
-            model_path,
-            device_type,
-            device_id,
-        )
-        log.info(f"{model_path}: Initialization complete for model {model_id}")
-
-        return model
 
 
 class TritonPythonModel:
@@ -192,6 +152,13 @@ class TritonPythonModel:
     DATASET_MANIFEST_KEY = "dataset"
     DATASET_IMAGE_WIDTH_MANIFEST_KEY = "image_width"
     DATASET_IMAGE_HEIGHT_MANIFEST_KEY = "image_height"
+    RUNTIME_MANIFEST_KEY = "runtime"
+    RUNTIME_ARTIFACT_MANIFEST_KEY = "runtime_artifact"
+    RUNTIME_DEVICE_MANIFEST_KEY = "device"
+    TASK_MANIFEST_KEY = "task"
+    TASK_ANOMALY = "anomaly"
+    TASK_OBJECT_DETECTION = "object_detection"
+    CLASS_NAMES_MANIFEST_KEY = "class_names"
 
     def initialize(self, args):
         """`initialize` is called only once when the model is being loaded.
@@ -231,6 +198,21 @@ class TritonPythonModel:
 
         self.__anomaly_threshold = self.__model_graph_config.get_threshold()
 
+        # Read the optional pluggable-runtime config from the manifest. Absent
+        # => DLR (full backward compatibility). See multi-runtime design doc.
+        runtime, runtime_artifact, runtime_device = self.__load_runtime_config(self.models_dir)
+        log.info(f"Model {self.__model_id} using inference runtime '{runtime}'.")
+
+        # Read the optional task selector. Absent => anomaly (full backward
+        # compat). object_detection routes execute() through the bbox emit path.
+        self.__task = self.__load_task(self.models_dir)
+        log.info(f"Model {self.__model_id} task '{self.__task}'.")
+
+        # Read the optional class-name map from the manifest once, so detection
+        # labels can be resolved in __build_detection_tensors. Absent => None
+        # (the shared resolver falls back to the default COCO map / index string).
+        self.__class_names = self.__load_class_names(self.models_dir)
+
         inference_runners = []
         for idx in range(self.__model_graph_config.num_stages()):
             stage_type = self.__model_graph_config.get_stage_type(idx)
@@ -241,6 +223,9 @@ class TritonPythonModel:
                         self.models_dir,
                         stage_type,
                     ),
+                    runtime=runtime,
+                    runtime_artifact=runtime_artifact,
+                    device=runtime_device,
                 )
             )
 
@@ -296,57 +281,143 @@ class TritonPythonModel:
         for request in requests:
             in_0 = pb_utils.get_input_tensor_by_name(request, "input")
             input_np = in_0.as_numpy()
-            inference_output = self.__model_graph.predict(input_np)
-            anomaly_result: AnomalyResult = inference_output.objects[0].anomaly  # type: ignore
-            is_anomalous = anomaly_result.label.lower() == "anomaly"  # type: ignore
-            is_anomalous = np.uint8([is_anomalous])
-            anomaly_mask = None
-            anomalies = None
-            confidence = np.float32([anomaly_result.confidence])
-            score = np.float32([anomaly_result.score])
-            output_tensors = []
-            out_tensor_1 = pb_utils.Tensor("output", is_anomalous.astype(self.output_dtype))
-            out_tensor_3 = pb_utils.Tensor(
-                "output_confidence", confidence.astype(self.confidence_dtype)
-            )
-            out_tensor_4 = pb_utils.Tensor("output_score", score.astype(self.score_dtype))
-            output_tensors.append(out_tensor_1)
-            output_tensors.append(out_tensor_3)
-            output_tensors.append(out_tensor_4)
-
-            if anomaly_result.mask is not None and self.__model_supports_anomaly_localization:
-                # Outputting anomaly mask only if it was generated by the model and configuration contains pixel level classes.
-                rgb_mask = convert_index_mask_to_color_mask(anomaly_result.mask)
-                pixel_classes_names = self.__model_graph_config.get_pixel_level_classes()
-                pixel_classes_areas = get_classes_areas(anomaly_result.mask)
-                anomalies = [
-                    {
-                        "name": pixel_classes_names[class_index],
-                        "total_percentage_area": class_area,
-                        "hex_color": hex_color_string(
-                            DEFAULT_ANOMALY_MASK_PALETTE[class_index].tolist(),
-                        ),
-                    }
-                    for class_index, class_area in pixel_classes_areas
-                ]
-                anomalies = np.frombuffer(
-                    bytes(json.dumps(anomalies), encoding="utf-8"), dtype=np.uint8
+            # Diagnostic: the exact image tensor the base model receives from
+            # Triton/emltriton. A shape other than (H, W, 3) or a value range
+            # other than 0..255 would corrupt the downstream preprocess/inference
+            # (e.g. yielding no detections) and explains pipeline-vs-standalone
+            # divergence.
+            try:
+                log.info(
+                    "base model input tensor: shape=%s dtype=%s min=%s max=%s task=%s",
+                    getattr(input_np, "shape", None),
+                    getattr(input_np, "dtype", None),
+                    float(input_np.min()) if input_np.size else None,
+                    float(input_np.max()) if input_np.size else None,
+                    self.__task,
                 )
-                out_tensor_2 = pb_utils.Tensor("mask", rgb_mask.astype(self.mask_dtype))
-                out_tensor_5 = pb_utils.Tensor("anomalies", anomalies.astype(self.anomalies_dtype))
-                output_tensors.append(out_tensor_2)
-                output_tensors.append(out_tensor_5)
+            except Exception:
+                pass
+            inference_output = self.__model_graph.predict(input_np)
+
+            if self.__task == TritonPythonModel.TASK_OBJECT_DETECTION:
+                output_tensors = self.__build_detection_tensors(inference_output, input_np)
             else:
-                temp = np.zeros(input_np.shape)
-                out_tensor_2 = pb_utils.Tensor("mask", temp.astype(self.mask_dtype))
-                anomalies = np.frombuffer(bytes(json.dumps([]), encoding="utf-8"), dtype=np.uint8)
-                out_tensor_5 = pb_utils.Tensor("anomalies", anomalies.astype(self.anomalies_dtype))
-                output_tensors.append(out_tensor_2)
-                output_tensors.append(out_tensor_5)
+                output_tensors = self.__build_anomaly_tensors(inference_output, input_np)
 
             inference_response = pb_utils.InferenceResponse(output_tensors=output_tensors)
             responses.append(inference_response)
         return responses
+
+    def __build_detection_tensors(self, inference_output, input_np):
+        """Emit object-detection results through the existing output contract.
+
+        To avoid a Triton rebuild or ensemble rewiring, detections ride through
+        the existing variable-length ``anomalies`` tensor as a serialized JSON
+        list of ObjectDetectionResults; ``output`` is set to 1 when any
+        detection is present and ``output_score``/``output_confidence`` carry the
+        top detection's confidence. ``mask`` is emitted empty.
+        """
+        # Collect ObjectDetectionResults from the per-object inference data.
+        detections = []
+        for obj in getattr(inference_output, "objects", []) or []:
+            det = getattr(obj, "object_detection", None)
+            if det is not None:
+                detections.append(det)
+
+        # Serialize each detection and embed a human-readable class_label
+        # (resolved from the manifest class-name map, falling back to the
+        # default COCO map / index string) alongside the retained numeric
+        # `class` index. The tensor set/signature is unchanged.
+        serialized = []
+        for d in detections:
+            entry = d.serialize()
+            entry["class_label"] = resolve_class_label(d.obj_class, self.__class_names)
+            serialized.append(entry)
+        top_conf = max((float(d.confidence) for d in detections), default=0.0)
+        has_detection = np.uint8([1 if detections else 0])
+        confidence = np.float32([top_conf])
+        score = np.float32([top_conf])
+
+        # When there are no real detections, emit a single zero-object sentinel
+        # entry (carrying an empty `bounding_box`) instead of `[]`. This keeps a
+        # zero-object detection recognizable to the Marshal's `_is_detection_list`
+        # (which requires a non-empty list whose first entry has a `bounding_box`
+        # key), since an empty `[]` is byte-identical to the anomaly "no anomalies"
+        # payload and would otherwise be misrouted. The sentinel carries no
+        # drawable box. `output`/`output_confidence`/`output_score` are unchanged
+        # (has_detection stays 0, top_conf stays 0.0); only the JSON content of the
+        # `anomalies` tensor changes for the empty case.
+        payload = serialized if serialized else [
+            {
+                "bounding_box": [],
+                "class": "",
+                "class_label": "",
+                "confidence": 0.0,
+                "no_objects": True,
+            }
+        ]
+
+        detections_bytes = np.frombuffer(
+            bytes(json.dumps(payload), encoding="utf-8"), dtype=np.uint8
+        )
+        empty_mask = np.zeros(input_np.shape)
+
+        return [
+            pb_utils.Tensor("output", has_detection.astype(self.output_dtype)),
+            pb_utils.Tensor("output_confidence", confidence.astype(self.confidence_dtype)),
+            pb_utils.Tensor("output_score", score.astype(self.score_dtype)),
+            pb_utils.Tensor("mask", empty_mask.astype(self.mask_dtype)),
+            pb_utils.Tensor("anomalies", detections_bytes.astype(self.anomalies_dtype)),
+        ]
+
+    def __build_anomaly_tensors(self, inference_output, input_np):
+        """Emit anomaly-classification results (the original output contract)."""
+        anomaly_result: AnomalyResult = inference_output.objects[0].anomaly  # type: ignore
+        is_anomalous = anomaly_result.label.lower() == "anomaly"  # type: ignore
+        is_anomalous = np.uint8([is_anomalous])
+        anomalies = None
+        confidence = np.float32([anomaly_result.confidence])
+        score = np.float32([anomaly_result.score])
+        output_tensors = []
+        out_tensor_1 = pb_utils.Tensor("output", is_anomalous.astype(self.output_dtype))
+        out_tensor_3 = pb_utils.Tensor(
+            "output_confidence", confidence.astype(self.confidence_dtype)
+        )
+        out_tensor_4 = pb_utils.Tensor("output_score", score.astype(self.score_dtype))
+        output_tensors.append(out_tensor_1)
+        output_tensors.append(out_tensor_3)
+        output_tensors.append(out_tensor_4)
+
+        if anomaly_result.mask is not None and self.__model_supports_anomaly_localization:
+            # Outputting anomaly mask only if it was generated by the model and configuration contains pixel level classes.
+            rgb_mask = convert_index_mask_to_color_mask(anomaly_result.mask)
+            pixel_classes_names = self.__model_graph_config.get_pixel_level_classes()
+            pixel_classes_areas = get_classes_areas(anomaly_result.mask)
+            anomalies = [
+                {
+                    "name": pixel_classes_names[class_index],
+                    "total_percentage_area": class_area,
+                    "hex_color": hex_color_string(
+                        DEFAULT_ANOMALY_MASK_PALETTE[class_index].tolist(),
+                    ),
+                }
+                for class_index, class_area in pixel_classes_areas
+            ]
+            anomalies = np.frombuffer(
+                bytes(json.dumps(anomalies), encoding="utf-8"), dtype=np.uint8
+            )
+            out_tensor_2 = pb_utils.Tensor("mask", rgb_mask.astype(self.mask_dtype))
+            out_tensor_5 = pb_utils.Tensor("anomalies", anomalies.astype(self.anomalies_dtype))
+            output_tensors.append(out_tensor_2)
+            output_tensors.append(out_tensor_5)
+        else:
+            temp = np.zeros(input_np.shape)
+            out_tensor_2 = pb_utils.Tensor("mask", temp.astype(self.mask_dtype))
+            anomalies = np.frombuffer(bytes(json.dumps([]), encoding="utf-8"), dtype=np.uint8)
+            out_tensor_5 = pb_utils.Tensor("anomalies", anomalies.astype(self.anomalies_dtype))
+            output_tensors.append(out_tensor_2)
+            output_tensors.append(out_tensor_5)
+        return output_tensors
 
     def finalize(self):
         """`finalize` is called only once when the model is being unloaded.
@@ -354,6 +425,70 @@ class TritonPythonModel:
         the model to perform any necessary clean ups before exit.
         """
         log.info("Cleaning up...")
+
+    def __load_runtime_config(
+        self,
+        model_dir: str,
+    ) -> typing.Tuple[str, typing.Optional[str], typing.Optional[str]]:
+        """
+        Read the optional pluggable-runtime selector from the manifest.
+
+        :param model_dir: Directory with the unpacked model (holds manifest.json).
+        :returns: (runtime, runtime_artifact, device). Defaults to
+            ("dlr", None, None) when the fields are absent, preserving full
+            backward compatibility for existing DLR model packages.
+        """
+        manifest_path = os.path.join(model_dir, TritonPythonModel.MANIFEST_FILENAME)
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, ValueError) as e:
+            log.warning(f"Could not read runtime config from manifest: {e}; defaulting to dlr")
+            return ("dlr", None, None)
+        runtime = manifest.get(TritonPythonModel.RUNTIME_MANIFEST_KEY, "dlr") or "dlr"
+        runtime_artifact = manifest.get(TritonPythonModel.RUNTIME_ARTIFACT_MANIFEST_KEY)
+        device = manifest.get(TritonPythonModel.RUNTIME_DEVICE_MANIFEST_KEY)
+        return (str(runtime).lower(), runtime_artifact, device)
+
+    def __load_task(self, model_dir: str) -> str:
+        """
+        Read the optional task selector from the manifest.
+
+        :returns: "anomaly" (default) or "object_detection". Defaults to anomaly
+            when absent/unreadable, preserving backward compatibility.
+        """
+        manifest_path = os.path.join(model_dir, TritonPythonModel.MANIFEST_FILENAME)
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, ValueError) as e:
+            log.warning(f"Could not read task from manifest: {e}; defaulting to anomaly")
+            return TritonPythonModel.TASK_ANOMALY
+        task = manifest.get(TritonPythonModel.TASK_MANIFEST_KEY, TritonPythonModel.TASK_ANOMALY)
+        return str(task).lower() if task else TritonPythonModel.TASK_ANOMALY
+
+    def __load_class_names(self, model_dir: str) -> typing.Optional[dict]:
+        """
+        Read the optional class-name map from the manifest.
+
+        :param model_dir: Directory with the unpacked model (holds manifest.json).
+        :returns: The manifest ``class_names`` mapping if present, else the
+            ``dataset.class_names`` mapping if present, else ``None``. On an
+            unreadable/invalid manifest, logs a warning and returns ``None``,
+            preserving backward compatibility (labels fall back to COCO / index).
+        """
+        manifest_path = os.path.join(model_dir, TritonPythonModel.MANIFEST_FILENAME)
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, ValueError) as e:
+            log.warning(f"Could not read class names from manifest: {e}; defaulting to None")
+            return None
+        class_names = manifest.get(TritonPythonModel.CLASS_NAMES_MANIFEST_KEY)
+        if class_names is None:
+            dataset_details = manifest.get(TritonPythonModel.DATASET_MANIFEST_KEY) or {}
+            class_names = dataset_details.get(TritonPythonModel.CLASS_NAMES_MANIFEST_KEY)
+        return class_names
 
     def __load_model_graph_config(
         self,

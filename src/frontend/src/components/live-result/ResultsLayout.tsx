@@ -21,6 +21,7 @@ import { RunWorkflowResponse } from "api/WorkflowAPI";
 import { Workflow } from "components/workflow/types";
 import { APIList } from "config/Interface";
 import { captureImageType } from "./types";
+import { PredictionType } from "components/image-source/types";
 import { LiveResultContext } from "components/live-result/LiveResults";
 import InteractableImage from "components/live-result/InteractableImage";
 import LiveResultActions from "components/live-result/LiveResultActions";
@@ -75,8 +76,22 @@ export default function ResultsLayout({
     .replace("{workflow_id}", workflow.workflowId)
     .replace("{capture_id}", captureId);
 
+  // Object-detection results have their bounding boxes drawn into the
+  // server-rendered overlay (OUTPUT_IMAGE); anomaly/classification results show
+  // the input image (with the segmentation mask overlaid client-side, if any).
+  const isDetection =
+    workflowRun.inferenceResult.inference_result === PredictionType.Detection;
+
+  // For detection results the bounding boxes are baked into OUTPUT_IMAGE
+  // (the server-rendered overlay). Reuse the same toggle the segmentation flow
+  // uses for the mask: when on (default) show the overlay with boxes, when off
+  // show the raw input image with no boxes.
   const getImageSrc = (): string => {
-    return `${getCaptureAPI}/${captureImageType.INPUT_IMAGE}${authEnabled ? `?token=${encodeURIComponent(token)}` : ""}`;
+    const imageType =
+      isDetection && showMask
+        ? captureImageType.OUTPUT_IMAGE
+        : captureImageType.INPUT_IMAGE;
+    return `${getCaptureAPI}/${imageType}${authEnabled ? `?token=${encodeURIComponent(token)}` : ""}`;
   };
 
   const imageSrc = getImageSrc();
@@ -102,9 +117,19 @@ export default function ResultsLayout({
 
   // API trigger workflow -> manualTriggerConfig
   // Digital input trigger workflow -> digitalInputConfig goes to refresh layout
+  // The overlay toggle is shown for segmentation captures (mask) and for
+  // detection captures (bounding boxes). The label reflects which overlay it
+  // controls; the underlying state (showMask) is reused for both.
+  const showOverlayToggle =
+    isDetection || checkAnomalyLabel(workflowRun?.inferenceResult);
+  const overlayToggleLabel = isDetection
+    ? "Show bounding boxes"
+    : "Show anomaly masks";
+
   const extraActionForLiveResult = !!manualTriggerConfig ? (
     <LiveResultActions
-      showAnomalyMaskToggle={checkAnomalyLabel(workflowRun?.inferenceResult)}
+      showAnomalyMaskToggle={showOverlayToggle}
+      toggleLabel={overlayToggleLabel}
       onClickAnomalyMaskToggle={manualTriggerConfig.onClickAnomalyMaskToggle}
       onTriggerWorkflow={manualTriggerConfig.onTriggerWorkflow}
       anomalyMaskToggleChecked={!!showMask}
@@ -115,7 +140,8 @@ export default function ResultsLayout({
     />
   ) : !!digitalInputConfig ? (
     <RefreshDisplayActions
-      showAnomalyMaskToggle={checkAnomalyLabel(workflowRun?.inferenceResult)}
+      showAnomalyMaskToggle={showOverlayToggle}
+      toggleLabel={overlayToggleLabel}
       onClickAnomalyMaskToggle={digitalInputConfig.onClickAnomalyMaskToggle}
       anomalyMaskToggleChecked={!!showMask}
     />

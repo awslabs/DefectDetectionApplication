@@ -3,6 +3,8 @@
  */
 import { getConfig } from '../config';
 import { UseCase, Device, User, S3Bucket } from '../types';
+import type { Capture } from '../components/ResultsViewer';
+import { beginRequest, endRequest } from './loadingBus';
 
 class ApiService {
   private get baseUrl(): string {
@@ -24,6 +26,9 @@ class ApiService {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
+    // Track this request globally so the app-wide activity bar shows while any
+    // API call is in flight.
+    beginRequest();
     try {
       const response = await fetch(`${this.baseUrl}${endpoint}`, {
         ...options,
@@ -64,6 +69,8 @@ class ApiService {
       }
       // Fallback
       throw new Error('Request failed');
+    } finally {
+      endRequest();
     }
   }
 
@@ -155,6 +162,31 @@ class ApiService {
       ...(params.limit && { limit: params.limit.toString() }),
     });
     return this.request(`/datasets/preview?${queryParams}`);
+  }
+
+  // Captures endpoint (inference-results Results_Viewer)
+  // Mirrors getImagePreview: presigned-URL pattern against the inference-results
+  // bucket, returning parsed capture metadata (detection typing + Detections_Block)
+  // and presigned URLs for the source / overlay / mask artifacts.
+  async getCaptures(params: {
+    usecase_id: string;
+    prefix: string;
+    device_id?: string;
+    limit?: number;
+  }): Promise<{
+    captures: Capture[];
+    bucket: string;
+    prefix: string;
+    total_found: number;
+    expires_in_seconds: number;
+  }> {
+    const queryParams = new URLSearchParams({
+      usecase_id: params.usecase_id,
+      prefix: params.prefix,
+      ...(params.device_id && { device_id: params.device_id }),
+      ...(params.limit && { limit: params.limit.toString() }),
+    });
+    return this.request(`/captures?${queryParams}`);
   }
 
   async getUseCase(id: string): Promise<{ usecase: UseCase }> {
@@ -406,6 +438,41 @@ class ApiService {
     );
   }
 
+  // SSH tunnel (AWS IoT Secure Tunneling) endpoints
+  async getSshTunnelStatus(deviceId: string, usecaseId: string): Promise<{
+    device_id: string;
+    enabled: boolean;
+    component_version?: string | null;
+  }> {
+    return this.request(`/devices/${deviceId}/ssh-tunnel?usecase_id=${usecaseId}`);
+  }
+
+  async setSshTunnel(deviceId: string, usecaseId: string, enabled: boolean, osUser?: string): Promise<{
+    device_id: string;
+    enabled: boolean;
+    os_user?: string | null;
+    deployment_id?: string;
+    message: string;
+  }> {
+    return this.request(`/devices/${deviceId}/ssh-tunnel?usecase_id=${usecaseId}`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled, osUser }),
+    });
+  }
+
+  async openSshTunnel(deviceId: string, usecaseId: string, lifetimeMinutes?: number): Promise<{
+    device_id: string;
+    tunnel_id: string;
+    region: string;
+    source_access_token: string;
+    lifetime_minutes: number;
+    message: string;
+  }> {
+    const qs = new URLSearchParams({ usecase_id: usecaseId });
+    if (lifetimeMinutes) qs.set('lifetime_minutes', String(lifetimeMinutes));
+    return this.request(`/devices/${deviceId}/ssh-tunnel/open?${qs}`, { method: 'POST' });
+  }
+
   // Training endpoints
   async listTrainingJobs(usecaseId?: string): Promise<{ jobs: any[]; count: number }> {
     const query = usecaseId ? `?usecase_id=${usecaseId}` : '';
@@ -641,7 +708,7 @@ class ApiService {
   }
 
   // Packaging endpoints
-  async startPackaging(trainingId: string, targets?: string[]): Promise<{
+  async startPackaging(trainingId: string, targets?: string[], autoTriggered?: boolean): Promise<{
     training_id: string;
     packaged_components: Array<{
       target: string;
@@ -650,10 +717,12 @@ class ApiService {
       error?: string;
     }>;
     message: string;
+    component_creation_triggered?: boolean;
   }> {
     return this.request(`/training/${trainingId}/package`, {
       method: 'POST',
-      body: JSON.stringify({ targets }),
+      // auto_triggered chains packaging -> greengrass publish (component creation).
+      body: JSON.stringify({ targets, auto_triggered: autoTriggered }),
     });
   }
 
@@ -1459,6 +1528,13 @@ class ApiService {
       architecture_hints: string[];
       suggested_type?: string;
       error?: string;
+      // ONNX auto-detected attributes (from graph input/output shapes).
+      detection_arch?: string;
+      input_width?: number | null;
+      input_height?: number | null;
+      num_outputs?: number;
+      input_shapes?: (number | null)[][];
+      output_shapes?: (number | null)[][];
     };
     supported_model_types: Record<string, {
       description: string;
@@ -1481,6 +1557,15 @@ class ApiService {
     num_classes?: number;
     class_names?: string[];
     auto_import?: boolean;
+    // 'pytorch' (legacy .pt/DLR) or 'onnx' (pluggable ONNX Runtime engine).
+    export_format?: string;
+    // Object-detection decode thresholds (only used for object_detection).
+    score_threshold?: number;
+    iou_threshold?: number;
+    // Object-detection decoder family: 'yolo' (single tensor + NMS) or
+    // 'rf_detr' (DETR-family, two tensors, NMS-free top-k). Only used when
+    // model_type === 'object_detection'.
+    detection_arch?: string;
   }): Promise<{
     converted_model_s3_uri: string;
     model_name: string;

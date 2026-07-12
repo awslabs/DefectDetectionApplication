@@ -53,4 +53,34 @@ export const loadConfig = async (): Promise<AppConfig> => {
 
 export const getConfig = (): AppConfig => config;
 
+/**
+ * Build metadata baked in at build time (see vite.config.ts `define`).
+ * Used by the bottom version banner so users can see exactly which portal
+ * build is running. Wrapped in try/catch so a dev server without the defines
+ * still renders sensible fallbacks.
+ */
+export interface BuildInfo {
+  version: string;
+  gitSha: string;
+  buildTime: string;
+}
+
+export const getBuildInfo = (): BuildInfo => {
+  const safe = (v: unknown, fallback: string) =>
+    typeof v === 'string' && v.length > 0 ? v : fallback;
+  let version = 'dev';
+  let gitSha = 'unknown';
+  let buildTime = '';
+  try {
+    version = safe(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : undefined, 'dev');
+  } catch { /* not defined in this context */ }
+  try {
+    gitSha = safe(typeof __APP_GIT_SHA__ !== 'undefined' ? __APP_GIT_SHA__ : undefined, 'unknown');
+  } catch { /* not defined */ }
+  try {
+    buildTime = safe(typeof __APP_BUILD_TIME__ !== 'undefined' ? __APP_BUILD_TIME__ : undefined, '');
+  } catch { /* not defined */ }
+  return { version, gitSha, buildTime };
+};
+
 export default config;

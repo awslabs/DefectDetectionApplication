@@ -137,11 +137,11 @@ def cp_model_conversion_files():
             "model_autostart_utils.py",
         ]
 
-        files_to_copy_resources = [
-           "ensemble_model",
-           "lfv_model_template.py",
-           "marshal_for_capture_template.py",
-        ] 
+        # NOTE: The subsequent-setup path used to re-copy a hand-maintained
+        # allowlist (ensemble_model, lfv_model_template.py,
+        # marshal_for_capture_template.py). That allowlist drifted out of sync
+        # with the source resources_for_copy tree and omitted
+        # inference_runtimes.py, so it has been replaced by a full re-sync below.
         files_to_copy_to_aws_dda = ["model_convertor.py", "convert_model_cleanup.py","model_conversion_requirements.txt",]
         if not os.path.exists(destination_folder_dda_triton):
             os.makedirs(destination_folder_dda_triton)
@@ -156,10 +156,17 @@ def cp_model_conversion_files():
             shutil.copytree(source_folder + "resources_for_copy/", "/aws_dda/resources_for_copy")
             logger.info("Resources copied successfully.")
         else:
-            logger.info("/aws_dda/resources_for_copy does exist, just copy files")
-            for file in files_to_copy_resources:
-                shutil.copy2(source_folder + "resources_for_copy/"+file, "/aws_dda/resources_for_copy")
-                logger.info("copied file "+str(file))
+            logger.info("/aws_dda/resources_for_copy does exist, re-syncing full resources_for_copy tree")
+            # Drift-proof full re-sync: copy the entire source resources_for_copy
+            # tree so every resource file (e.g. inference_runtimes.py) and any
+            # future resource is always delivered, instead of a hand-maintained
+            # allowlist that silently omits newly added files. dirs_exist_ok=True
+            # (Python 3.8+) merges/updates subtrees such as ensemble_model in place.
+            shutil.copytree(
+                source_folder + "resources_for_copy/",
+                "/aws_dda/resources_for_copy",
+                dirs_exist_ok=True,
+            )
             logger.info("Resources copied successfully.")
 
     except Exception as e:

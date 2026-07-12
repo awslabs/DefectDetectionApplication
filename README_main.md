@@ -233,16 +233,88 @@ DDA consists of several key components:
        "Version": "2012-10-17",
        "Statement": [
            {
+               "Sid": "GreengrassPermissions",
+               "//": "Greengrass v1 API resource-level permissions are limited, so action-scoping is the primary control and Resource stays a wildcard.",
                "Effect": "Allow",
                "Action": [
-                   "greengrass:*",
-                   "iot:*",
+                   "greengrass:CreateComponentVersion",
+                   "greengrass:DescribeComponent",
+                   "greengrass:GetComponent",
+                   "greengrass:ListComponents",
+                   "greengrass:ListComponentVersions",
+                   "greengrass:ListCoreDevices",
+                   "greengrass:GetCoreDevice",
+                   "greengrass:ListInstalledComponents",
+                   "greengrass:ListTagsForResource",
+                   "greengrass:TagResource",
+                   "greengrass:ListDeployments",
+                   "greengrass:GetDeployment",
+                   "greengrass:CreateDeployment",
+                   "greengrass:CancelDeployment"
+               ],
+               "Resource": "*"
+           },
+           {
+               "Sid": "IoTThingPermissions",
+               "Effect": "Allow",
+               "Action": [
+                   "iot:DescribeThing",
+                   "iot:CreateThing",
+                   "iot:UpdateThingShadow",
+                   "iot:AttachPolicy"
+               ],
+               "Resource": "arn:aws:iot:*:*:thing/dda-*"
+           },
+           {
+               "Sid": "IoTJobPermissions",
+               "Effect": "Allow",
+               "Action": [
+                   "iot:DescribeJob"
+               ],
+               "Resource": "arn:aws:iot:*:*:job/*"
+           },
+           {
+               "Sid": "IoTEndpointPermissions",
+               "//": "iot:DescribeEndpoint does not support resource-level scoping.",
+               "Effect": "Allow",
+               "Action": [
+                   "iot:DescribeEndpoint"
+               ],
+               "Resource": "*"
+           },
+           {
+               "Sid": "S3Permissions",
+               "Effect": "Allow",
+               "Action": [
                    "s3:CreateBucket",
                    "s3:GetBucketLocation",
                    "s3:PutBucketVersioning",
                    "s3:GetObject",
                    "s3:PutObject",
-                   "s3:ListBucket"
+                   "s3:ListBucket",
+                   "s3:DeleteObject",
+                   "s3:GetBucketVersioning",
+                   "s3:ListBucketVersions",
+                   "s3:GetBucketPolicy",
+                   "s3:PutBucketPolicy",
+                   "s3:GetBucketAcl",
+                   "s3:PutBucketAcl",
+                   "s3:GetBucketTagging",
+                   "s3:PutBucketTagging"
+               ],
+               "Resource": [
+                   "arn:aws:s3:::dda-component-*",
+                   "arn:aws:s3:::dda-component-*/*",
+                   "arn:aws:s3:::dda-inference-results-*",
+                   "arn:aws:s3:::dda-inference-results-*/*"
+               ]
+           },
+           {
+               "Sid": "S3ListAllBuckets",
+               "//": "s3:ListAllMyBuckets is unscopable (no resource-level support), so it is isolated in its own statement on Resource \"*\".",
+               "Effect": "Allow",
+               "Action": [
+                   "s3:ListAllMyBuckets"
                ],
                "Resource": "*"
            }
@@ -257,21 +329,80 @@ DDA consists of several key components:
     "Version": "2012-10-17",
     "Statement": [
         {
+            "Sid": "GreengrassPermissions",
+            "//": "Greengrass component-pull APIs have limited resource-level support, so action-scoping is the primary control and Resource stays a wildcard.",
             "Effect": "Allow",
             "Action": [
-                "greengrass:*"
+                "greengrass:GetComponentVersionArtifact",
+                "greengrass:ResolveComponentCandidates",
+                "greengrass:GetDeploymentConfiguration",
+                "greengrassv2:GetDeployment",
+                "greengrassv2:GetCoreDevice",
+                "greengrassv2:UpdateConnectivityInfo",
+                "greengrassv2:ListComponents",
+                "greengrassv2:GetComponentVersionArtifact",
+                "greengrassv2:ResolveComponentCandidates"
             ],
             "Resource": "*"
         },
         {
+            "Sid": "IoTConnect",
+            "Effect": "Allow",
+            "Action": [
+                "iot:Connect"
+            ],
+            "Resource": "arn:aws:iot:*:*:client/dda-*"
+        },
+        {
+            "Sid": "IoTPublishReceive",
+            "Effect": "Allow",
+            "Action": [
+                "iot:Publish",
+                "iot:Receive"
+            ],
+            "Resource": "arn:aws:iot:*:*:topic/dda/*"
+        },
+        {
+            "Sid": "IoTSubscribe",
+            "Effect": "Allow",
+            "Action": [
+                "iot:Subscribe"
+            ],
+            "Resource": "arn:aws:iot:*:*:topicfilter/dda/*"
+        },
+        {
+            "Sid": "IoTThingShadow",
+            "Effect": "Allow",
+            "Action": [
+                "iot:DescribeThing",
+                "iot:GetThingShadow",
+                "iot:UpdateThingShadow",
+                "iot:DeleteThingShadow"
+            ],
+            "Resource": "arn:aws:iot:*:*:thing/dda-*"
+        },
+        {
+            "Sid": "IoTEndpoint",
+            "//": "iot:DescribeEndpoint does not support resource-level scoping.",
+            "Effect": "Allow",
+            "Action": [
+                "iot:DescribeEndpoint"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "S3ComponentAccess",
             "Effect": "Allow",
             "Action": [
                 "s3:GetObject",
-                "s3:ListBucket"
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
             ],
             "Resource": [
-                "arn:aws:s3:::*/*",
-                "arn:aws:s3:::*"
+                "arn:aws:s3:::dda-component-*",
+                "arn:aws:s3:::dda-component-*/*",
+                "arn:aws:s3:::dda-inference-results-*",
+                "arn:aws:s3:::dda-inference-results-*/*"
             ]
         },
         {
@@ -283,20 +414,6 @@ DDA consists of several key components:
                 "logs:DescribeLogStreams"
             ],
             "Resource": "arn:aws:logs:*:*:*"
-        },
-        {
-            "Effect": "Allow",
-            "Action": [
-                "iot:Connect",
-                "iot:Publish",
-                "iot:Subscribe",
-                "iot:Receive",
-                "iot:DescribeThing",
-                "iot:GetThingShadow",
-                "iot:UpdateThingShadow",
-                "iot:DeleteThingShadow"
-            ],
-            "Resource": "*"
         }
     ]
 }

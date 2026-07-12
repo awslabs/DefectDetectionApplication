@@ -51,6 +51,19 @@ RUN ./edge_ml1_p_camera_management/prereqs_install.sh
 # are already present and importable at container startup, removing the need for a
 # network-dependent runtime pip install on offline/air-gapped devices.
 RUN python3.11 -m pip install --no-cache-dir -r ./model_conversion_requirements.txt
+# ── ONNX Runtime (CPU) for the pluggable ONNX inference engine ─────────────
+# The OnnxRunner in dda_triton/resources_for_copy/inference_runtimes.py imports
+# onnxruntime lazily when a model's manifest declares runtime="onnx" (YOLO /
+# RF-DETR object-detection + segmentation models). Without it those models fail
+# to initialize in the Triton python stub with "ModuleNotFoundError: No module
+# named 'onnxruntime'" and sit in LOADING forever (DLR/Neo models are
+# unaffected — engines import lazily per-runner). JP5/JP6 install this too; JP4
+# was the only target missing it. JetPack 4 (CUDA 10.2, L4T r32) has no
+# supported GPU onnxruntime build path, so this is CPU-only: the onnxruntime
+# 1.16.3 cp311 aarch64 manylinux_2_17 wheel installs on this glibc 2.27
+# (Ubuntu 18.04) base, and OnnxRunner falls back to the CPU provider.
+ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
+RUN python3.11 -m pip install --no-cache-dir ${ONNXRUNTIME_SPEC}
 RUN ./edge_ml1_p_camera_management/install_aravis.sh
 RUN python3.11 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
 RUN apt update -y

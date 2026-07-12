@@ -143,6 +143,16 @@ def gen_uuid():
     return uuid
 
 
+# nosem: dangerous-subprocess-use-audit
+# run_command NEVER uses a shell: it always receives an already-tokenized
+# argument list (argv) and invokes it with subprocess.run(..., shell is not
+# set, so it defaults to False). Because there is no shell, shell metacharacters
+# in an operand cannot be interpreted as syntax. Operand safety (option
+# injection via a leading '-', and identity/mode validity) is enforced at the
+# CALLERS in user_group_management_utils.py and filesystem_management_utils.py,
+# which allowlist-validate user-influenced identity/mode operands and place
+# trailing operands after a POSIX '--' end-of-options sentinel where the invoked
+# tool supports it. Do NOT add shell=True or pass a pre-joined command string.
 def run_command(command):
     output = subprocess.run(command, capture_output=True)
     if output.returncode == 0:

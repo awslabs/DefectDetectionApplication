@@ -16,7 +16,7 @@ import {
   FormField,
   Input,
 } from '@cloudscape-design/components';
-import { CompilationJob, TrainingJob, GreengrassComponent } from '../types';
+import { CompilationJob, TrainingJob } from '../types';
 import { apiService } from '../services/api';
 
 interface CompilationTabProps {
@@ -63,6 +63,12 @@ const COMPILATION_TARGETS = [
     description: 'ARM 64-bit CPU-only inference (e.g., AWS Graviton)',
     recommended: false,
   },
+  {
+    id: 'onnx',
+    name: 'ONNX Runtime (portable)',
+    description: 'Export the trained model to ONNX (.onnx) for the pluggable ONNX Runtime engine — runs on Jetson/x86 without Neo/DLR. GPU acceleration (CUDA/TensorRT) is available on JetPack 5 and 6; JetPack 4 runs ONNX on CPU only. See docs/multi-runtime-inference.md.',
+    recommended: false,
+  },
 ];
 
 export default function CompilationTab({ trainingId, trainingJob, onRefresh }: CompilationTabProps) {
@@ -77,6 +83,15 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   const [selectedTargets, setSelectedTargets] = useState<string[]>(['jetson-xavier', 'x86_64-cpu']);
   const [componentName, setComponentName] = useState(`model-${trainingJob?.model_name?.toLowerCase().replace(/[^a-z0-9-]/g, '-') || 'model'}`);
   const [componentVersion, setComponentVersion] = useState('1.0.0');
+  // Existing published versions for the component being published, so the
+  // dialog can show the latest version, suggest the next one, and reject a
+  // version that already exists (component versions are immutable).
+  const [existingVersions, setExistingVersions] = useState<string[]>([]);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  // Track whether the user has manually edited the version so we don't clobber
+  // their input when the existing-versions lookup resolves.
+  const [versionUserEdited, setVersionUserEdited] = useState(false);
 
   // Refresh compilation status
   const refreshCompilationStatus = async () => {
@@ -242,6 +257,141 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
     }
   };
 
+  // Version helpers. Greengrass component versions here follow the backend rule
+  // in greengrass_publish.validate_component_version(): X.0.0 (major bumps only,
+  // e.g. 1.0.0, 2.0.0). isValidPublishVersion mirrors that exact constraint.
+  const isThreePartNumeric = (v: string) => /^\d+\.\d+\.\d+$/.test(v.trim());
+  const isValidPublishVersion = (v: string) => /^\d+\.0+\.0+$/.test(v.trim());
+  const compareSemverDesc = (a: string, b: string): number => {
+    const pa = a.split('.').map(Number);
+    const pb = b.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      const d = (pb[i] || 0) - (pa[i] || 0);
+      if (d !== 0) return d;
+    }
+    return 0;
+  };
+  const bumpMajor = (v: string): string => {
+    const m = v.trim().match(/^(\d+)\.\d+\.\d+$/);
+    return m ? `${Number(m[1]) + 1}.0.0` : v;
+  };
+
+  // Look up the already-published versions of the component being published so
+  // the dialog can surface the latest version, pre-fill the next version, and
+  // validate the entered version against what already exists.
+  //
+  // The portal publishes one Greengrass component PER TARGET, named
+  // `${componentName}-${target}` (e.g. model-foo-jetson-xavier-jp6,
+  // model-foo-x86-64-cpu, model-foo-onnx) — see greengrass_publish.publish_component.
+  // All target variants share the same version on a given publish, so we match
+  // every variant of this base name (startsWith `${base}-`, plus an exact match)
+  // and aggregate their versions. A prior endsWith() match never matched the
+  // suffixed names, so the dialog always thought nothing was published.
+  const loadExistingVersions = async () => {
+    if (!trainingJob?.usecase_id) return;
+    try {
+      setVersionsLoading(true);
+      const base = componentName.trim();
+      const list = await apiService.listComponents({
+        usecase_id: trainingJob.usecase_id,
+        scope: 'PRIVATE',
+      });
+      const matches = list.components.filter(
+        (c) => c.component_name === base || c.component_name.startsWith(`${base}-`)
+      );
+      if (matches.length === 0) {
+        // First-time publish for this component name — no existing versions.
+        setExistingVersions([]);
+        setLatestVersion(null);
+        return;
+      }
+      // Aggregate versions across all target variants. Seed from the cheap
+      // latest_version we already have, then enrich with the full per-variant
+      // version lists in parallel for accurate existence checks.
+      const versionSet = new Set<string>();
+      for (const m of matches) {
+        const lv = m.latest_version?.componentVersion;
+        if (lv && isThreePartNumeric(lv)) versionSet.add(lv);
+      }
+      const details = await Promise.all(
+        matches.map((m) =>
+          apiService.getComponent(m.arn, trainingJob.usecase_id!).catch(() => null)
+        )
+      );
+      for (const d of details) {
+        for (const v of d?.versions || []) {
+          if (v.componentVersion && isThreePartNumeric(v.componentVersion)) {
+            versionSet.add(v.componentVersion);
+          }
+        }
+      }
+      const versions = Array.from(versionSet);
+      const sorted = [...versions].sort(compareSemverDesc);
+      const latest = sorted[0] || null;
+      setExistingVersions(versions);
+      setLatestVersion(latest);
+      // Suggest the next major version unless the user has typed their own.
+      if (latest && !versionUserEdited) {
+        setComponentVersion(bumpMajor(latest));
+      }
+    } catch (err) {
+      // Non-fatal: the dialog still works, just without the hint/validation.
+      console.error('Failed to load existing component versions:', err);
+    } finally {
+      setVersionsLoading(false);
+    }
+  };
+
+  // Refresh existing versions whenever the publish modal opens or the target
+  // component name changes while it is open.
+  useEffect(() => {
+    if (showPublishModal) {
+      loadExistingVersions();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPublishModal, componentName]);
+
+  // Reset the "user edited" flag each time the modal is opened so the next
+  // patch version is suggested afresh.
+  useEffect(() => {
+    if (showPublishModal) {
+      setVersionUserEdited(false);
+    }
+  }, [showPublishModal]);
+
+  // Derived version-field validation state. Publish versions must be X.0.0 and
+  // must not already exist for any target variant of this component.
+  const trimmedVersion = componentVersion.trim();
+  const versionExists = existingVersions.includes(trimmedVersion);
+  const versionError = !trimmedVersion
+    ? undefined
+    : !isValidPublishVersion(trimmedVersion)
+    ? 'Use version format X.0.0 (major only, e.g., 2.0.0)'
+    : versionExists
+    ? `Version ${trimmedVersion} already exists — component versions are immutable. ` +
+      `Choose a higher version${latestVersion ? ` (latest is ${latestVersion}, next ${bumpMajor(latestVersion)})` : ''}.`
+    : undefined;
+
+  // Normalized list of published components for display. Prefer the field the
+  // publish handler actually writes (published_components: {target,
+  // component_version, status:'published'|'failed', ...}); fall back to the
+  // legacy greengrass_components ({target_architecture, status:'active', ...}).
+  const publishedComponents = (
+    trainingJob.published_components && trainingJob.published_components.length > 0
+      ? trainingJob.published_components.map((c) => ({
+          component_name: c.component_name,
+          component_version: c.component_version,
+          target_architecture: c.target || c.platform || '—',
+          ok: c.status === 'published',
+        }))
+      : (trainingJob.greengrass_components || []).map((c) => ({
+          component_name: c.component_name,
+          component_version: c.component_version,
+          target_architecture: c.target_architecture,
+          ok: c.status === 'active',
+        }))
+  );
+
   // Handle Greengrass component publish
   const handlePublishComponent = async () => {
     try {
@@ -279,7 +429,17 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   const hasPackagedComponents = (trainingJob as any)?.packaged_components && 
     (trainingJob as any).packaged_components.some((c: any) => c.status === 'packaged');
 
-  if (compilationJobs.length === 0) {
+  // Imported BYO ONNX models run on the ONNX Runtime engine — they need NO
+  // SageMaker Neo compilation. So the compilation-centric gating (empty-state
+  // "Start Compilation", and Component Actions gated on completed compilations)
+  // must not hide packaging/publish for them.
+  const tj: any = trainingJob;
+  const isOnnxModel =
+    String(tj?.metadata?.framework || '').toUpperCase() === 'ONNX' ||
+    String(tj?.validation_result?.metadata?.framework || '').toUpperCase() === 'ONNX' ||
+    String(tj?.metadata?.model_file || tj?.metadata?.pt_file || '').toLowerCase().endsWith('.onnx');
+
+  if (compilationJobs.length === 0 && !isOnnxModel) {
     return (
       <SpaceBetween size="l">
         {error ? (
@@ -489,7 +649,7 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
       </Container>
 
       {/* Manual Packaging & Publish Actions */}
-      {hasCompletedCompilations && (
+      {(hasCompletedCompilations || isOnnxModel) && (
         <Container
           header={
             <Header
@@ -504,6 +664,13 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
             {successMessage && (
               <Alert type="success" dismissible onDismiss={() => setSuccessMessage(null)}>
                 {successMessage}
+              </Alert>
+            )}
+            {isOnnxModel && (
+              <Alert type="info">
+                ONNX models run on the pluggable ONNX Runtime engine and don't require
+                SageMaker Neo compilation. Package the model, then publish it as a
+                Greengrass component. One package deploys to all targets (JetPack 5/6, x86).
               </Alert>
             )}
             
@@ -567,7 +734,12 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
                 variant="primary"
                 onClick={handlePublishComponent}
                 loading={publishLoading}
-                disabled={!componentName.startsWith('model-') || !componentVersion}
+                disabled={
+                  !componentName.startsWith('model-') ||
+                  !trimmedVersion ||
+                  !!versionError ||
+                  versionsLoading
+                }
               >
                 Publish Component
               </Button>
@@ -590,11 +762,21 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
           
           <FormField
             label="Component Version"
-            description="Semantic version (e.g., 1.0.0)"
+            description={
+              versionsLoading
+                ? 'Checking existing versions…'
+                : latestVersion
+                ? `Latest published version: ${latestVersion}. Use format X.0.0 (next suggested: ${bumpMajor(latestVersion)}).`
+                : 'No versions published yet. Use format X.0.0 (e.g., 1.0.0).'
+            }
+            errorText={versionError}
           >
             <Input
               value={componentVersion}
-              onChange={({ detail }) => setComponentVersion(detail.value)}
+              onChange={({ detail }) => {
+                setVersionUserEdited(true);
+                setComponentVersion(detail.value);
+              }}
               placeholder="1.0.0"
             />
           </FormField>
@@ -639,11 +821,20 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
         </Container>
       ) : null}
 
-      {/* Greengrass Components (if available) */}
-      {trainingJob.greengrass_components && trainingJob.greengrass_components.length > 0 ? (
-        <Container header={<Header variant="h2">Greengrass Components</Header>}>
+      {/* Published Greengrass Components (if available).
+          The publish handler writes trainingJob.published_components (one entry
+          per target, all at the latest published version). Prefer that; fall
+          back to the legacy greengrass_components field for older records. */}
+      {publishedComponents.length > 0 ? (
+        <Container
+          header={
+            <Header variant="h2" counter={`(${publishedComponents.length})`}>
+              Published Greengrass Components
+            </Header>
+          }
+        >
           <ColumnLayout columns={1}>
-            {trainingJob.greengrass_components.map((component, index) => (
+            {publishedComponents.map((component, index) => (
               <Container key={index}>
                 <KeyValuePairs
                   columns={2}
@@ -651,8 +842,14 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
                     { label: 'Component Name', value: component.component_name },
                     { label: 'Version', value: component.component_version },
                     { label: 'Target Architecture', value: component.target_architecture },
-                    { label: 'Status', value: getComponentStatusIndicator(component.status) },
-                    { label: 'Deployments', value: `${component.deployment_count} device(s)` },
+                    {
+                      label: 'Status',
+                      value: component.ok ? (
+                        <StatusIndicator type="success">Published</StatusIndicator>
+                      ) : (
+                        <StatusIndicator type="error">Failed</StatusIndicator>
+                      ),
+                    },
                     {
                       label: 'AWS Console',
                       value: (
@@ -749,19 +946,7 @@ function getTargetDescription(target: string): string {
     'x86_64-cpu': 'x86_64 CPU only',
     'x86_64-cuda': 'x86_64 with NVIDIA GPU',
     'arm64-cpu': 'ARM64 CPU only',
+    'onnx': 'ONNX Runtime — portable .onnx export (no Neo/DLR)',
   };
   return descriptions[target] || 'Unknown architecture';
-}
-
-function getComponentStatusIndicator(status: GreengrassComponent['status']) {
-  switch (status) {
-    case 'active':
-      return <StatusIndicator type="success">Active</StatusIndicator>;
-    case 'creating':
-      return <StatusIndicator type="in-progress">Creating</StatusIndicator>;
-    case 'failed':
-      return <StatusIndicator type="error">Failed</StatusIndicator>;
-    default:
-      return <StatusIndicator type="info">{status}</StatusIndicator>;
-  }
 }

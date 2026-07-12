@@ -1,0 +1,72 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "greengrass:*",
+        "greengrassv2:*"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "GreengrassPermissions"
+    },
+    {
+      "Action": [
+        "iot:*"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "IoTPermissions"
+    },
+    {
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning",
+        "s3:ListBucketVersions"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "S3Permissions"
+    },
+    {
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:logs:*:*:*",
+      "Sid": "CloudWatchLogsPermissions"
+    },
+    {
+      "Action": [
+        "cloudwatch:PutMetricData"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "CloudWatchMetricsPermissions"
+    },
+    {
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "ECRPermissions"
+    },
+    {
+      "Action": [
+        "sts:AssumeRole"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:iam::*:role/GreengrassV2TokenExchangeRole*",
+      "Sid": "STSPermissions"
+    }
+  ],
+  "Version": "2012-10-17"
+}

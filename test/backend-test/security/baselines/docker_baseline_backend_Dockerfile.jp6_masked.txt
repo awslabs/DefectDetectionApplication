@@ -1,0 +1,225 @@
+ARG OS
+ARG PLATFORM
+ARG PYTHON_VERSION
+# ── CUDA 11.4 cudart provider (for the Neo/DLR model runtime) ──────────────
+# SageMaker Neo's NVIDIA/TensorRT path maxes out at cuda-ver 11.4, so DDA models
+# are compiled against CUDA 11.4. The Neo artifact bundles its own libdlr.so
+# which dynamically links libcudart.so.11.0 (RUNPATH
+# /usr/local/cuda-11.4/targets/aarch64-linux/lib). JetPack 6 only ships CUDA
+# 12.2 (libcudart.so.12), so the model would fail to load with
+# "libcudart.so.11.0: cannot open shared object file". We pull just the CUDA
+# 11.4 runtime lib from NVIDIA's official NGC l4t-cuda image at BUILD time
+# (nothing is committed to the repo) and stage it at the exact RUNPATH the
+# bundled libdlr.so expects. That path is NOT shadowed by the runtime
+# `-v /usr/local/cuda:/usr/local/cuda` host mount (which mounts /usr/local/cuda,
+# not /usr/local/cuda-11.4), so it resolves without disturbing the host CUDA 12.
+# A CUDA 12.2 driver is backward-compatible with the CUDA 11.x runtime, so the
+# 11.4 cudart works against JetPack 6's GPU driver.
+# Re-declare after FROM so the build arg is available in the build stage.
+ARG PYTHON_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Disable py3compile during apt installs to prevent segfaults in l4t-jetpack base image
+RUN if [ -f /usr/bin/py3compile ]; then mv /usr/bin/py3compile /usr/bin/py3compile.bak && \
+    echo '#!/bin/sh' > /usr/bin/py3compile && chmod +x /usr/bin/py3compile; fi && \
+    if [ -f /usr/bin/py3clean ]; then mv /usr/bin/py3clean /usr/bin/py3clean.bak && \
+    echo '#!/bin/sh' > /usr/bin/py3clean && chmod +x /usr/bin/py3clean; fi
+
+RUN apt-get update && \
+    dpkg --configure -a || true && \
+    apt-get install -f -y || true && \
+    dpkg --purge --force-depends python3-distro-info unattended-upgrades python3-urllib3 python3-requests python3-requests-unixsocket python3-six python3-software-properties || true && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends wget build-essential cmake libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-distutils
+
+RUN apt-get update
+
+# Add toolchain PPA directly to avoid add-apt-repository Python issues.
+# The JP6 base is Ubuntu 22.04 (jammy), so use the jammy toolchain PPA.
+RUN echo "deb https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main" > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list && \
+    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 1E9377A2BA9EF27F && \
+    apt-get update && \
+    apt install gcc-11 g++-11 -y && \
+    rm /usr/bin/gcc && \
+    rm /usr/bin/g++ && \
+    ln -s /usr/bin/gcc-11 /usr/bin/gcc && \
+    ln -s /usr/bin/g++-11 /usr/bin/g++
+
+RUN apt-get install --only-upgrade ncurses-base
+RUN apt-get install --only-upgrade ncurses-bin
+RUN apt-get update && apt-get install -y libb64-0d && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt ./
+
+COPY edge_ml1_p_camera_management ./edge_ml1_p_camera_management
+COPY edgeagent ./edgeagent
+
+# Run apt installs from prereqs while python3 is still 3.8 (avoids py3compile segfault)
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    pkgconf libcairo2-dev libgirepository1.0-dev libgl1-mesa-glx libsm6 libxext6
+
+# Install aravis apt dependencies before switching python3 (avoids py3compile segfault)
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends wget build-essential ninja-build \
+    gstreamer1.0-plugins-bad libxml2-dev libglib2.0-dev libusb-1.0-0-dev gobject-introspection \
+    libgtk-3-dev gtk-doc-tools xsltproc libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good \
+    libgirepository1.0-dev gettext pkg-config libcairo2-dev
+
+# Install remaining apt packages before switching python3
+RUN apt update -y && \
+    apt-get install -y libssl3 libexif12 libcurl4 libarchive13 \
+    gstreamer1.0-tools gstreamer1.0-libav ffmpeg
+
+# CVE fixes - also before python3 switch
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    libgnutls28-dev libuv1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Restore py3compile/py3clean now that all apt installs are done
+RUN if [ -f /usr/bin/py3compile.bak ]; then mv /usr/bin/py3compile.bak /usr/bin/py3compile; fi && \
+    if [ -f /usr/bin/py3clean.bak ]; then mv /usr/bin/py3clean.bak /usr/bin/py3clean; fi
+
+# NOW switch python3 to 3.11 — all apt installs are done, no more py3compile under 3.11
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}
+RUN wget -q https://bootstrap.pypa.io/get-pip.py && python3 get-pip.py && rm get-pip.py
+
+# Install pip packages (native build, no QEMU workarounds needed)
+RUN pip install --no-cache-dir pycairo==1.23.0
+RUN pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2
+RUN pip install --no-cache-dir psutil==5.9.5
+# Pre-build the PINNED awscrt==0.14.7 (transitive dep of awsiotsdk==1.11.9) so its
+# vendored aws-lc is linked correctly. awscrt 0.14.7 always builds and statically
+# links its own bundled aws-lc (BoringSSL) — it has no flag to opt out — but on
+# this image the system OpenSSL static archive (/usr/lib/<triplet>/libcrypto.a,
+# from libssl-dev) sits EARLIER on the linker search path (-L/usr/lib/<triplet>
+# precedes awscrt's vendored -Lbuild/.../deps/install/lib), so the final
+# `_awscrt*.so` link resolves `-l:libcrypto.a` against system OpenSSL, which lacks
+# the AWS-LC AEAD API. Result at import: `undefined symbol:
+# EVP_aead_aes_128_gcm_tls13`. Temporarily move the system static archive aside
+# (its .so + headers stay in place for every other build) while awscrt compiles so
+# the linker falls through to the vendored aws-lc lib, then restore it. This
+# pre-install satisfies awsiotsdk's pin, so the requirements install below does not
+# rebuild awscrt. The awscrt/awsiotsdk versions are unchanged.
+RUN ARCH_TRIPLET="$(gcc -dumpmachine)" && LC="/usr/lib/${ARCH_TRIPLET}/libcrypto.a" && \
+    if [ -f "$LC" ]; then mv "$LC" "${LC}.bak"; fi && \
+    pip install --no-cache-dir --no-binary :all: awscrt==0.14.7 && \
+    if [ -f "${LC}.bak" ]; then mv "${LC}.bak" "$LC"; fi && \
+    python3 -c "import awscrt.mqtt; print('awscrt vendored aws-lc link OK')"
+RUN pip install --no-cache-dir -r ./requirements.txt
+RUN pip install --no-cache-dir --upgrade requests
+
+# Bake the model conversion dependencies into the image at build time so the runtime
+# Triton/model setup (dda_triton.triton_setup.create_virtual_env) needs no network on
+# offline/air-gapped devices. model_conversion_requirements.txt is the single source of
+# truth for the pinned versions.
+COPY dda_triton/model_conversion_requirements.txt ./model_conversion_requirements.txt
+RUN pip install --no-cache-dir -r ./model_conversion_requirements.txt
+# model_conversion_requirements.txt includes an UNPINNED setuptools, which pulls
+# setuptools>=81 and removes the bundled pkg_resources that grpc_tools.protoc imports
+# (the python3.11 interpreter here has no system pkg_resources fallback). Re-assert the
+# setuptools<81 cap immediately so the grpc_tools.protoc step below keeps working.
+RUN pip install --no-cache-dir 'setuptools<81'
+
+# ── ONNX Runtime for the pluggable ONNX inference engine ───────────────────
+# The OnnxRunner in dda_triton/resources_for_copy/inference_runtimes.py runs
+# in-container under the DDA python (PYTHON_VERSION, default 3.11). Two modes,
+# selected by build-args:
+#   * Default (CPU): prebuilt CPU wheel (onnxruntime 1.16.3 ships a cp311 aarch64
+#     manylinux_2_17 wheel, works on this glibc 2.35 base). Fast.
+#   * GPU (ONNXRUNTIME_GPU=1): build onnxruntime-gpu from source with the CUDA +
+#     TensorRT execution providers against the base image's CUDA 12.2 / TRT 8.6,
+#     for the PYTHON_VERSION interpreter. NVIDIA's prebuilt Jetson GPU wheels
+#     target the JetPack's native python (3.10 on r36), not ours, so a GPU build
+#     must be compiled here. This is a long, memory-heavy build, hence opt-in.
+# `pip` targets the PYTHON_VERSION interpreter (the python3 alternative).
+# OnnxRunner prefers TensorRT -> CUDA -> CPU providers automatically, so the
+# same code path works for either wheel. DLR-only / PyTorch-only models are
+# unaffected (engines are imported lazily per-runner).
+ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
+ARG ONNXRUNTIME_GPU=0
+RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
+        JETPACK_MAJOR=6 ./edge_ml1_p_camera_management/install_onnxruntime_gpu.sh; \
+    else \
+        pip install --no-cache-dir ${ONNXRUNTIME_SPEC}; \
+    fi
+
+# Build aravis from source (apt deps already installed above)
+RUN pip install --no-cache-dir meson ninja
+# Downgrade setuptools so g-ir-scanner can find distutils.msvccompiler (removed in setuptools>=71)
+RUN pip install --no-cache-dir 'setuptools<71'
+# Fix g-ir-scanner to use the base image's system python (its _giscanner C
+# extension is built for the distro python — 3.10 on the jammy/r36 base — not
+# the 3.11 we switch to). Detect it dynamically rather than hardcoding 3.8.
+# The exclusion grep drops the DDA interpreter (3.11) from the candidates so the
+# distro python (3.10) keeps being selected.
+RUN SYS_PY=$(ls /usr/bin/python3.1? /usr/bin/python3.8 2>/dev/null | grep -v 3.11 | head -1) && \
+    SYS_PY=${SYS_PY:-/usr/bin/python3.10} && \
+    echo "Using system python for g-ir-scanner: $SYS_PY" && \
+    cp /usr/bin/g-ir-scanner /usr/bin/g-ir-scanner.bak && \
+    echo "#!$SYS_PY" > /usr/bin/g-ir-scanner && \
+    tail -n +2 /usr/bin/g-ir-scanner.bak >> /usr/bin/g-ir-scanner && \
+    chmod +x /usr/bin/g-ir-scanner && \
+    head -1 /usr/bin/g-ir-scanner
+RUN ./edge_ml1_p_camera_management/install_aravis.sh
+# Restore a modern setuptools after the aravis build, but cap below 81: setuptools
+# 81 removed bundled pkg_resources, which grpc_tools.protoc imports (from-source
+# python has no system pkg_resources fallback).
+RUN pip install --no-cache-dir 'setuptools<81'
+RUN python${PYTHON_VERSION} -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
+
+RUN find / -name "libpython${PYTHON_VERSION}.so.1.0" -print
+
+RUN apt clean -y
+
+COPY app.py ./
+COPY logging.conf ./
+COPY dao ./dao
+COPY utils ./utils
+COPY metrics ./metrics
+COPY model ./model
+COPY mqtt ./mqtt
+COPY resources ./resources
+COPY gstreamer ./gstreamer
+COPY triggers ./triggers
+COPY exceptions ./exceptions
+COPY snapshot ./snapshot
+COPY defect_detection_config ./defect_detection_config
+COPY dda_logging ./dda_logging
+COPY endpoints ./endpoints
+COPY data_models ./data_models
+COPY alembic ./alembic
+COPY alembic.ini ./
+COPY dda_triton ./dda_triton
+COPY lyra_anomalies_mask_utils ./lyra_anomalies_mask_utils
+COPY lyra_science_processing_utils ./lyra_science_processing_utils
+CMD ["python3.11", "app.py"]
+
+## TODO: Remove copy edgemlsdk files here. Change to direct build in Docker
+# To test and build - Copy artifacts file to /src/backend/edgemlsdk
+COPY edgemlsdk ./edgemlsdk
+RUN ./edge_ml1_p_camera_management/install_edgemlsdk.sh
+COPY dlr_disable_phone_home.py ./
+RUN python${PYTHON_VERSION} dlr_disable_phone_home.py
+
+# Stage the CUDA 11.4 runtime libs from the NGC l4t-cuda image at the exact
+# RUNPATH the Neo-compiled model's bundled libdlr.so expects
+# (/usr/local/cuda-11.4/targets/aarch64-linux/lib). Copy the whole versioned
+# lib directory (standard Jetson CUDA layout) rather than a single glob so the
+# build doesn't fail on a path mismatch and so any transitive CUDA runtime deps
+# are present. Then register the dir with the dynamic linker and verify
+# libcudart.so.11 resolved.
+COPY --from=cuda114 /usr/local/cuda-11.4/targets/aarch64-linux/lib/ \
+     /usr/local/cuda-11.4/targets/aarch64-linux/lib/
+RUN echo "/usr/local/cuda-11.4/targets/aarch64-linux/lib" > /etc/ld.so.conf.d/cuda-11-4.conf && \
+    ldconfig && \
+    ldconfig -p | grep -i "libcudart.so.11" || \
+    (echo "ERROR: libcudart.so.11 not staged" && ls -l /usr/local/cuda-11.4/targets/aarch64-linux/lib/ && exit 1)
+
+#TODO:change to user to scope the permission. Currently needed to persist the TinyDB data
+USER root

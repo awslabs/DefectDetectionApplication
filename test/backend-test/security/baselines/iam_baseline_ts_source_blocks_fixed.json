@@ -1,0 +1,4 @@
+{
+  "I5_labeling_assumerole": "new iam.PolicyStatement({\n        effect: iam.Effect.ALLOW,\n        actions: ['sts:AssumeRole'],\n        resources: props.trustedUseCaseAccountIds.map(\n          (id) => `arn:aws:iam::${id}:role/DDAPortalAccessRole`\n        ),\n      }",
+  "I6_training_assumerole": "new iam.PolicyStatement({\n      actions: ['sts:AssumeRole'],\n      resources: props.trustedUseCaseAccountIds.map(\n        (id) => `arn:aws:iam::${id}:role/DDAPortalAccessRole`\n      ),\n    }"
+}
