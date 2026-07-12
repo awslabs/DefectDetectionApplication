@@ -59,14 +59,25 @@ def test_f1_setup_station_line_513_pins_vulnerable_requests():
     ``==2.32.4`` pin and that the vulnerable ``==2.32.3`` shape is gone. The
     ``run_cmd`` / ``--force-reinstall`` / ``$PYTHON311`` / ``|| add_warning`` tail
     are asserted present (they were preserved byte-for-byte by the fix)."""
-    line = _lines(audit.SETUP_STATION_REL)[513 - 1]
-    print(f"\n[F1 fixed] setup_station.sh:513 == {line!r}")
+    # Locate the F1 pin by CONTENT, not a hardcoded line number: setup_station.sh
+    # legitimately grows over time (py3.11 source-build / arg-guard additions),
+    # which shifts the pin's absolute line. The F1 site is the unique
+    # ``$PYTHON311 ... --force-reinstall requests==`` line.
+    _pin_substring = "$PYTHON311 -m pip install --force-reinstall requests=="
+    _matches = [(i + 1, ln) for i, ln in enumerate(_lines(audit.SETUP_STATION_REL))
+                if _pin_substring in ln]
+    assert len(_matches) == 1, (
+        f"expected exactly one F1 pin line matching {_pin_substring!r}, "
+        f"found {len(_matches)}: {_matches!r}"
+    )
+    lineno, line = _matches[0]
+    print(f"\n[F1 fixed] setup_station.sh:{lineno} == {line!r}")
 
     assert "requests==2.32.4" in line, (
-        f"expected the fixed requests==2.32.4 pin on line 513, got {line!r}"
+        f"expected the fixed requests==2.32.4 pin on line {lineno}, got {line!r}"
     )
     assert "requests==2.32.3" not in line, (
-        f"the vulnerable requests==2.32.3 pin must be gone from line 513, got {line!r}"
+        f"the vulnerable requests==2.32.3 pin must be gone from line {lineno}, got {line!r}"
     )
     # The fixed version is no longer classified as a disallowed (< 2.32.4) pin.
     assert not audit._pin_is_disallowed("2.32.4"), (
