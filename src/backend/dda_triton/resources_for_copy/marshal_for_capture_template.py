@@ -171,7 +171,14 @@ class TritonPythonModel:
 
     def _generate_detection_overlay(self, image, detections):
         """Draw bounding boxes + labels onto a copy of the input image."""
-        overlay = image.copy()
+        # The overlay is JPEG-encoded via cv2.imencode, which treats the array
+        # as BGR. The input image arrives in RGB order (same as the anomaly
+        # path in _generate_overlay), so swap R<->B here before drawing/encoding
+        # or the encoded overlay comes out with red and blue flipped (e.g. skin
+        # tones render blue). The box/label colors below are green (0,255,0) and
+        # black (0,0,0), both symmetric under an R<->B swap, so they are drawn in
+        # the swapped space unchanged.
+        overlay = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h, w = overlay.shape[0], overlay.shape[1]
         for det in detections:
             box = det.get("bounding_box") or []

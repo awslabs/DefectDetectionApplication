@@ -52,6 +52,7 @@ import os
 import sys
 import types
 
+import cv2
 import numpy as np
 import pytest
 
@@ -138,6 +139,38 @@ def test_single_box_is_drawn_on_overlay():
     # (2) Something was actually drawn: the overlay differs from the untouched
     # input for a case with a valid box.
     assert not np.array_equal(overlay, image)
+
+
+# ---------------------------------------------------------------------------
+# Regression: the detection overlay must apply the same encode-compensating
+# channel handling as the anomaly overlay so encoded colors are not R<->B
+# flipped (bug: skin tones rendered blue on the boxes-on image).
+# ---------------------------------------------------------------------------
+
+
+def test_detection_overlay_colors_survive_jpeg_encode_roundtrip():
+    """A pixel the source saw as RED (RGB order, as delivered on the input
+    tensor) must still decode as RED after _generate_detection_overlay +
+    _encode_overlay. Regression for the R<->B swap where cv2.imencode (which
+    treats the array as BGR) flipped red and blue because the detection path
+    skipped the channel swap the anomaly path applies."""
+    instance = _make_marshal_instance()
+    instance.output_overlay_dtype = np.uint8  # normally set in initialize()
+    # Input tensor arrives in RGB order: a solid pure-red image.
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    image[:, :, 0] = 255  # R channel (RGB order)
+
+    # No boxes so we isolate the underlying image color handling.
+    overlay = instance._generate_detection_overlay(image, [])
+    encoded = instance._encode_overlay(overlay)
+
+    # Decode as cv2 does (BGR array). A correctly-colored red JPEG has its red
+    # in the BGR red channel (index 2); a flipped overlay would put 255 in the
+    # blue channel (index 0) instead.
+    decoded = cv2.imdecode(np.frombuffer(bytes(encoded), np.uint8), cv2.IMREAD_COLOR)
+    cy, cx = 20, 20
+    assert decoded[cy, cx, 2] > 200, "expected red preserved (BGR red channel)"
+    assert decoded[cy, cx, 0] < 50, "blue channel must stay low (no R<->B flip)"
 
 
 # ---------------------------------------------------------------------------
