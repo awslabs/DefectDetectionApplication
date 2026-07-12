@@ -6,7 +6,12 @@ ComponentDescription: DDA Local Web Server App - AMD64
 ComponentPublisher: Amazon
 ComponentDependencies:
   aws.greengrass.Nucleus:
-    VersionRequirement: ">=2.13.0"
+    # Align with the arm64/JP5/JP6 recipes (>=2.4.0). Devices are provisioned
+    # with Nucleus 2.12.0 by setup_station.sh, so a >=2.13.0 pin here made the
+    # amd64 deployment unsatisfiable (thing pinned =2.12.0 vs component >=2.13.0)
+    # and Greengrass rejected it with FAILED_NO_STATE_CHANGE. There is no amd64-
+    # specific feature that requires a newer Nucleus than the other targets.
+    VersionRequirement: ">=2.4.0"
   aws.greengrass.ShadowManager:
     VersionRequirement: ">=2.2.0"
   aws.greengrass.Cli:
