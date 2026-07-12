@@ -36,6 +36,43 @@ add_warning() {
     echo "⚠️  $1" | tee -a "$LOG_FILE"
 }
 
+# Resolve AWS credentials into this shell's environment for tools that use the
+# AWS SDK default provider chain (the Greengrass Java provisioner, and every
+# `aws` CLI call below). Handles the two failure modes seen with AWS CLI v2:
+#   1. `aws login --remote` / `aws sso login` sessions: the resolved session
+#      lives in the CLI's token cache, not in static env vars, so materialize it
+#      with `aws configure export-credentials`.
+#   2. Running under sudo: this script requires root, but the operator usually
+#      runs `aws login --remote` as their normal user, leaving root's ~/.aws
+#      empty ("Unable to locate credentials"). Fall back to the invoking user's
+#      context ($SUDO_USER) when root has no credentials.
+# Drops AWS_CREDENTIAL_EXPIRATION so downstream SDKs treat the values as static
+# (avoids the "refreshed credentials are still expired" botocore path). Returns
+# 0 and exports AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN on success, 1 otherwise.
+resolve_aws_credentials() {
+    # Already provided in the environment (e.g. exported before invoking).
+    if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
+        return 0
+    fi
+    local creds=""
+    # Try the current (root, under sudo) context first.
+    creds=$(aws configure export-credentials --format env 2>/dev/null | grep -v AWS_CREDENTIAL_EXPIRATION)
+    # Fall back to the invoking user's context — they likely hold the
+    # `aws login --remote` session while root's ~/.aws is empty.
+    if [ -z "$creds" ] && [ -n "${SUDO_USER:-}" ]; then
+        creds=$(sudo -u "$SUDO_USER" -H aws configure export-credentials --format env 2>/dev/null | grep -v AWS_CREDENTIAL_EXPIRATION)
+        if [ -n "$creds" ]; then
+            echo "Resolved AWS credentials from invoking user '$SUDO_USER' (sudo context)."
+        fi
+    fi
+    if [ -n "$creds" ]; then
+        eval "$creds"
+        export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+        return 0
+    fi
+    return 1
+}
+
 # Check if command exists
 check_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -233,7 +270,7 @@ install_from_source() {
     return 0
   fi
   
-  echo "Ubuntu version is 18.04. Installing Python 3.11 from source."
+  echo "Installing Python 3.11 from source (no prebuilt deadsnakes package for this Ubuntu release/arch)."
   echo "This will take approximately 10-15 minutes on ARM64..."
 
   # Install build dependencies
@@ -470,28 +507,39 @@ fi
 echo ""
 
 echo "▶ Installing Python 3.11..."
-if [ "$UBUNTU_VERSION" = "18.04" ]; then
-  echo "Detected Ubuntu 18.04 - building Python 3.11 from source..."
-  if ! install_from_source; then
-    add_error "Python 3.11 installation from source failed"
-  fi
-  
-  # On 18.04, do NOT change the system python3 (3.6) — apt and other system
-  # tools depend on it and its C extensions (apt_pkg, etc.).
-  # Just create a python3.11 symlink so DDA components can find it.
-  if [ -x /usr/local/bin/python3.11 ]; then
-    ln -sf /usr/local/bin/python3.11 /usr/bin/python3.11 2>/dev/null || add_warning "Failed to create python3.11 symlink"
-    echo "✓ Python 3.11 available as python3.11 (system python3 left as 3.6)"
-  fi
-else
-  if ! install_from_ppa; then
-    add_error "Python 3.11 installation from PPA failed"
-  fi
-  # Do NOT change the system python3 — apt and other OS tools depend on the
-  # system Python (3.8 on 20.04, 3.10 on 22.04) and its C extensions (apt_pkg).
-  # Python 3.11 is available as python3.11 via the deadsnakes PPA.
-  echo "✓ Python 3.11 available as python3.11 (system python3 left unchanged)"
+# The deadsnakes PPA has NO prebuilt python3.11 for Ubuntu 18.04 (bionic, JP4)
+# or 20.04 (focal, JP5) on arm64 (Jetson) — it only ships arm64 packages for
+# 22.04 (jammy, JP6). So build from source on 18.04/20.04 and use the PPA only
+# on 22.04+ (with a source-build fallback if the PPA install fails, e.g. on an
+# unexpected arch/release). In every case the SYSTEM python3 is left unchanged —
+# apt and other OS tools depend on it and its C extensions (apt_pkg, etc.);
+# python3.11 is installed alongside it.
+case "$UBUNTU_VERSION" in
+  18.04|20.04)
+    echo "Detected Ubuntu $UBUNTU_VERSION - building Python 3.11 from source (deadsnakes has no prebuilt 3.11 for this release/arch)..."
+    if ! install_from_source; then
+      add_error "Python 3.11 installation from source failed"
+    fi
+    ;;
+  *)
+    echo "Detected Ubuntu $UBUNTU_VERSION - installing Python 3.11 from the deadsnakes PPA..."
+    if ! install_from_ppa; then
+      add_warning "deadsnakes PPA install failed - falling back to building Python 3.11 from source..."
+      if ! install_from_source; then
+        add_error "Python 3.11 installation failed (deadsnakes PPA and source build)"
+      fi
+    fi
+    ;;
+esac
+
+# A source build (make altinstall) installs to /usr/local/bin/python3.11. Expose
+# it at /usr/bin/python3.11 (on PATH for DDA components) if it isn't already
+# there. The deadsnakes package already installs /usr/bin/python3.11. Never
+# touch the system python3.
+if [ -x /usr/local/bin/python3.11 ] && [ ! -e /usr/bin/python3.11 ]; then
+  ln -sf /usr/local/bin/python3.11 /usr/bin/python3.11 2>/dev/null || add_warning "Failed to create python3.11 symlink"
 fi
+echo "✓ Python 3.11 available as python3.11 (system python3 left unchanged)"
 
 if ! run_cmd "apt-get install python3-pip -y"; then
     add_error "Failed to install pip"
@@ -851,18 +899,20 @@ echo "▶ Provisioning Greengrass Core Device..."
 # Materialize the active credentials via the CLI and pass them to Java both as
 # environment variables and as -Daws.* system properties so the SDK always sees
 # them. (Fix ported from the jp5v2 branch; lost during the merge/rebase.)
-if [ -z "$AWS_ACCESS_KEY_ID" ]; then
-    eval "$(aws configure export-credentials --format env 2>/dev/null)" || true
-fi
+# Resolve credentials (handles `aws login --remote` sessions and the sudo/root
+# context mismatch) and export them so BOTH the Java provisioner and every
+# subsequent `aws` CLI call in this script (account id lookup, tagging, role
+# policy updates) can authenticate.
+resolve_aws_credentials || true
 
 JAVA_CRED_PROPS=""
-if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
     JAVA_CRED_PROPS="-Daws.accessKeyId=$AWS_ACCESS_KEY_ID -Daws.secretAccessKey=$AWS_SECRET_ACCESS_KEY"
-    if [ -n "$AWS_SESSION_TOKEN" ]; then
+    if [ -n "${AWS_SESSION_TOKEN:-}" ]; then
         JAVA_CRED_PROPS="$JAVA_CRED_PROPS -Daws.sessionToken=$AWS_SESSION_TOKEN"
     fi
 else
-    add_warning "No AWS credentials resolved for Greengrass provisioning - provisioning will likely fail. Ensure 'aws sts get-caller-identity' works first."
+    add_warning "No AWS credentials resolved for Greengrass provisioning - provisioning will likely fail. Authenticate first (e.g. 'aws login --remote' or 'aws sso login'), then verify with 'aws sts get-caller-identity'. NOTE: this script runs as root via sudo; if you authenticated as your normal user, credentials are read from that user (\$SUDO_USER) automatically, but only if 'sudo -u <you> aws sts get-caller-identity' works."
 fi
 
 if ! AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
