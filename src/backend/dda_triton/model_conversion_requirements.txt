@@ -7,7 +7,7 @@ grpcio==1.56.2
 # Sharing grpcio's version uses the working prebuilt cp311 aarch64 wheel.
 grpcio-tools==1.56.2
 protobuf==4.25.8
-requests==2.32.3
+requests==2.33.0
 opencv-python
 urllib3==2.2.3
 # Bumped from 1.0.2: scikit-learn 1.0.2 has no cp311 aarch64 wheel and its sdist
