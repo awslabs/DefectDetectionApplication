@@ -23,7 +23,6 @@ The Custom Node Designer extends the Workflow Manager (spec: workflow-manager) w
 - **DeepStream_Plugin**: A GStreamer_Plugin built against the NVIDIA DeepStream SDK, executable only on device architectures with a matching DeepStream runtime (Jetson JetPack 4, 5, or 6).
 - **Plugin_Importer**: The Portal backend component that retrieves plugin source or binaries from a user-specified public repository or from the Module_Listing, records provenance, and submits the plugin for building.
 - **Module_Listing**: The official GStreamer module index published at https://gstreamer.freedesktop.org/modules/, from which the Portal offers a selectable list of well-known public GStreamer modules.
-- **Quality_Tier**: The risk classification of a public GStreamer plugin module, following the official GStreamer plugin-set naming: good (well-maintained, approved licenses), bad (quality, testing, or maintenance not up to par), ugly (working code with licensing or distribution concerns), or unknown (a source that maps to no official module set, carrying unvetted provenance). Displayed wherever public plugins are listed so users know the risk of what they are importing.
 - **Plugin_Set_Classification**: The upstream GStreamer quality taxonomy for a plugin's official plugin set: good (gst-plugins-good: well-maintained, well-tested, properly licensed), bad (gst-plugins-bad: lacking review, testing, or active maintenance), ugly (gst-plugins-ugly: good quality but with licensing or distribution concerns), or unclassified (not part of an official GStreamer plugin set).
 - **Plugin_Build_Service**: The Portal backend component that compiles plugin source into Plugin_Artifacts for each selected Target_Architecture within an isolated build environment and signs the resulting artifacts.
 - **Plugin_Artifact**: A built plugin binary (.so shared library) for one Target_Architecture, stored in the Plugin_Library with an integrity checksum and a signature produced by the Plugin_Build_Service.
@@ -32,7 +31,8 @@ The Custom Node Designer extends the Workflow Manager (spec: workflow-manager) w
 - **Plugin_Simulator**: The Portal capability that executes a plugin's x86_64 Plugin_Artifact in a sandboxed cloud environment against user-selected sample inputs and displays the input frames, output frames, and emitted metadata for comparison.
 - **Lifecycle_State**: The state of a Plugin_Record version within the dev → test → prod progression. dev: under development, usable only inside the Node_Designer and Plugin_Simulator. test: available in the Node_Palette for building and cloud test runs, deployable only to Test_Devices. prod: fully released, deployable to any device.
 - **Test_Device**: An edge device designated by a UseCaseAdmin within a Use_Case as a non-production device for evaluating workflows and custom nodes.
-- **Target_Architecture**: A device architecture a plugin can be built for: x86_64, arm64 JetPack 4 (arm64_jp4), arm64 JetPack 5 (arm64_jp5), or arm64 JetPack 6 (arm64_jp6). The cloud test sandbox and the Plugin_Simulator execute x86_64 builds.
+- **Target_Architecture**: A device architecture a plugin can be built for: x86_64 (amd64), x86_64 with NVIDIA GPU runtime (x86_64_nvidia), arm64 JetPack 4 (arm64_jp4), arm64 JetPack 5 (arm64_jp5), or arm64 JetPack 6 (arm64_jp6). The cloud test sandbox and the Plugin_Simulator execute x86_64 builds.
+- **Plugin_Component**: The versioned Greengrass component automatically produced from a Plugin_Record's built Plugin_Artifacts, carrying one platform manifest per successfully built Target_Architecture. Plugin_Components appear on the deployment screen and are the unit Workflow_Components declare Greengrass dependencies on.
 - **Workflow_Compiler**: The Workflow Manager component that translates a valid Workflow_Definition into a GStreamer pipeline configuration, including the list of plugin dependencies beyond those bundled with LocalServer.
 - **Component_Packager**: The Portal backend component that packages a compiled workflow and its plugin dependencies into a versioned Greengrass component (Workflow_Component).
 - **Workflow_Component**: The Greengrass component produced by the Component_Packager for a specific workflow version.
@@ -97,8 +97,7 @@ The Custom Node Designer extends the Workflow Manager (spec: workflow-manager) w
 4. IF the repository is unreachable or the specified revision does not exist, THEN THE Plugin_Importer SHALL display an error identifying the failure and SHALL create no Plugin_Record.
 5. IF the retrieved source does not contain a buildable GStreamer_Plugin, THEN THE Plugin_Importer SHALL report the finding to the user and SHALL mark the Plugin_Record as failed.
 6. WHEN an imported plugin's builds succeed for at least one Target_Architecture, THE Node_Designer SHALL prompt the user to declare the Custom_Node_Type details for the plugin's element as specified in Requirement 8.
-7. WHEN plugin source is retrieved from a repository that corresponds to an official GStreamer plugin module, THE Plugin_Importer SHALL record the module's Quality_Tier on the Plugin_Record; WHEN the repository corresponds to no official GStreamer plugin module, THE Plugin_Importer SHALL record the Quality_Tier as unknown.
-8. WHEN a Plugin_Record with a Quality_Tier is displayed in the Node_Designer or the plugin library listing, THE Portal SHALL display the Quality_Tier together with its risk description as specified in Requirement 6.
+
 
 ### Requirement 5: Import an NVIDIA DeepStream Plugin
 
@@ -121,9 +120,6 @@ The Custom Node Designer extends the Workflow Manager (spec: workflow-manager) w
 2. WHEN a user selects a module from the list, THE Plugin_Importer SHALL use the selected module's published repository location as the import source and proceed as specified in Requirement 4.
 3. IF the Module_Listing is unreachable or returns an unparseable response, THEN THE Portal SHALL display an error identifying the failure and SHALL offer manual repository URL entry as specified in Requirement 4 as the alternative import path.
 4. WHEN the module index is retrieved, THE Portal SHALL cache the retrieved index and reuse the cached index for subsequent module import views for at most 24 hours before retrieving a fresh index.
-5. WHEN the module list is presented, THE Portal SHALL display each module's Quality_Tier (good, bad, ugly, or unknown) beside the module name.
-6. WHEN a module's Quality_Tier is displayed, THE Portal SHALL display the tier's risk description with it: good as well-maintained code under approved licenses, bad as code whose quality, testing, or maintenance is not up to par and may be unreliable, ugly as working code with licensing or distribution concerns, and unknown as unvetted provenance carrying the highest risk.
-7. WHEN a user selects a module whose Quality_Tier is bad, ugly, or unknown, THE Portal SHALL require the user to acknowledge the displayed risk description before the import proceeds.
 
 ### Requirement 7: Visual Plugin Simulator
 
@@ -242,3 +238,18 @@ The Custom Node Designer extends the Workflow Manager (spec: workflow-manager) w
 4. WHEN a plugin is imported from a public repository that is not part of an official GStreamer plugin set, THE Plugin_Importer SHALL assign the Plugin_Set_Classification unclassified to the plugin.
 5. WHEN the Plugin_Importer creates a Plugin_Record for an imported plugin, THE Plugin_Importer SHALL record the plugin's Plugin_Set_Classification in the Plugin_Record provenance.
 6. WHEN a PortalAdmin reviews a pending Plugin_Record as specified in Requirement 10, THE Portal SHALL display the Plugin_Record's recorded Plugin_Set_Classification alongside the other provenance details.
+7. WHEN a user confirms an import of a plugin whose Plugin_Set_Classification is bad, ugly, or unclassified, THE Portal SHALL require the user to acknowledge the displayed classification explanation before the import proceeds.
+
+### Requirement 16: Automatic Plugin Component Packaging and Deployment
+
+**User Story:** As an operator, I want built plugins automatically packaged per architecture as deployable components that appear on the deployment screen, and workflows that use them to carry the right Greengrass dependencies, so that deploying a workflow always delivers the plugins its custom nodes need.
+
+#### Acceptance Criteria
+
+1. WHEN a Plugin_Record's builds complete, THE Component_Packager SHALL automatically package the successfully built Plugin_Artifacts into a versioned Plugin_Component whose Greengrass recipe carries one platform manifest per successfully built Target_Architecture (x86_64, x86_64_nvidia, arm64_jp4, arm64_jp5, and arm64_jp6).
+2. WHEN a Plugin_Component version is registered, THE Portal SHALL list the Plugin_Component on the deployment screen with its name, version, Lifecycle_State, and the Target_Architectures it supports.
+3. WHILE a Plugin_Component's backing Plugin_Record is in the test Lifecycle_State, THE Deployment_Service SHALL permit deploying that Plugin_Component only to Test_Devices; WHILE the backing Plugin_Record is in the prod Lifecycle_State, THE Deployment_Service SHALL permit deploying it to any device in the Use_Case.
+4. WHEN a workflow containing Custom_Node_Types is packaged, THE Component_Packager SHALL declare a Greengrass component dependency in the Workflow_Component recipe on each required Plugin_Component at a version compatible with the Custom_Node_Type versions recorded in the workflow.
+5. WHEN a Workflow_Component with Plugin_Component dependencies is deployed, THE Deployment_Service SHALL include the depended-on Plugin_Component versions in the Greengrass deployment so the device installs the plugins together with the workflow.
+6. IF a Workflow_Component is deployed to a device whose Target_Architecture has no published Plugin_Artifact in a depended-on Plugin_Component version, THEN THE Deployment_Service SHALL reject the deployment and identify the Plugin_Component and the unsupported Target_Architecture.
+7. WHEN a Plugin_Record is rebuilt or its source changes, THE Component_Packager SHALL publish the resulting artifacts as a new Plugin_Component version and SHALL leave previously published Plugin_Component versions unchanged.
