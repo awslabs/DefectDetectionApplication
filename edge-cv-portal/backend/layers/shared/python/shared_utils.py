@@ -202,6 +202,17 @@ class Permission(Enum):
     VIEW_DEVICE_LOGS = "view_device_logs"
     UPDATE_DEVICE_CONFIG = "update_device_config"
     
+    # Workflow Manager
+    WORKFLOW_READ = "workflow:read"
+    WORKFLOW_CREATE = "workflow:create"
+    WORKFLOW_EDIT = "workflow:edit"
+    WORKFLOW_SAVE = "workflow:save"
+    WORKFLOW_DELETE = "workflow:delete"
+    WORKFLOW_TEST = "workflow:test"
+    WORKFLOW_PACKAGE = "workflow:package"
+    WORKFLOW_DEPLOY = "workflow:deploy"
+    BEDROCK_CONFIG_WRITE = "bedrock-config:write"
+    
     # System Administration
     VIEW_AUDIT_LOGS = "view_audit_logs"
     MANAGE_SETTINGS = "manage_settings"
@@ -239,6 +250,8 @@ class RBACManager:
                 Permission.VIEW_DEPLOYMENTS,
                 Permission.VIEW_DEVICES,
                 Permission.VIEW_DEVICE_LOGS,
+                # Workflow Manager: read-only view of workflows and deployment status
+                Permission.WORKFLOW_READ,
             },
             
             Role.OPERATOR: {
@@ -260,6 +273,10 @@ class RBACManager:
                 Permission.REBOOT_DEVICES,
                 Permission.BROWSE_DEVICE_FILES,
                 Permission.UPDATE_DEVICE_CONFIG,
+                # Workflow Manager: Operators package and deploy workflows
+                Permission.WORKFLOW_READ,
+                Permission.WORKFLOW_PACKAGE,
+                Permission.WORKFLOW_DEPLOY,
             },
             
             Role.DATA_SCIENTIST: {
@@ -281,6 +298,13 @@ class RBACManager:
                 Permission.MANAGE_TRAINING_JOBS,
                 Permission.PROMOTE_MODELS,
                 Permission.DELETE_MODELS,
+                # Workflow Manager: DataScientists create, edit, save, delete, and test workflows
+                Permission.WORKFLOW_READ,
+                Permission.WORKFLOW_CREATE,
+                Permission.WORKFLOW_EDIT,
+                Permission.WORKFLOW_SAVE,
+                Permission.WORKFLOW_DELETE,
+                Permission.WORKFLOW_TEST,
             },
             
             Role.USECASE_ADMIN: {
@@ -309,6 +333,18 @@ class RBACManager:
                 Permission.REBOOT_DEVICES,
                 Permission.BROWSE_DEVICE_FILES,
                 Permission.UPDATE_DEVICE_CONFIG,
+                # Workflow Manager: UseCaseAdmins hold all workflow permissions
+                # (create/edit/save/delete/test like DataScientist, plus
+                # package/deploy like Operator). bedrock-config:write remains
+                # PortalAdmin-only.
+                Permission.WORKFLOW_READ,
+                Permission.WORKFLOW_CREATE,
+                Permission.WORKFLOW_EDIT,
+                Permission.WORKFLOW_SAVE,
+                Permission.WORKFLOW_DELETE,
+                Permission.WORKFLOW_TEST,
+                Permission.WORKFLOW_PACKAGE,
+                Permission.WORKFLOW_DEPLOY,
                 # Add UseCaseAdmin-specific permissions
                 Permission.UPDATE_USECASES,
                 Permission.DELETE_USECASES,

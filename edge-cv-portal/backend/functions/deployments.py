@@ -8,19 +8,48 @@ import os
 import re
 import uuid
 from datetime import datetime
+from decimal import Decimal
 import boto3
 from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, is_super_user, get_usecase,
-    get_usecase_client, get_usecase_region
+    get_usecase_client, get_usecase_region,
+    rbac_manager, Permission
 )
+# Deployment guard for Workflow_Components (Requirements 4.7, 4.10):
+# a workflow version may only be deployed when it has a recorded
+# passed-validation run with zero error findings. workflow_guards does
+# not need the workflow_core layer, so it is importable here.
+import workflow_guards
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource('dynamodb')
 DEPLOYMENTS_TABLE = os.environ.get('DEPLOYMENTS_TABLE', 'dda-portal-deployments')
+WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
+
+# ---------------------------------------------------------------------------
+# Workflow_Component deployment constants (Workflow Manager, Requirement 8)
+# ---------------------------------------------------------------------------
+
+# Greengrass component naming assigned by the Component_Packager
+# (workflow_packaging.py): dda.workflow.{workflowId} v{workflowVersion}.0.0
+WORKFLOW_COMPONENT_PREFIX = 'dda.workflow.'
+
+# LocalServer Greengrass components are named aws.edgeml.dda.LocalServer.<arch>
+LOCAL_SERVER_COMPONENT_PREFIX = 'aws.edgeml.dda.LocalServer'
+
+# Minimum LocalServer component version a Workflow_Component requires
+# (Requirement 8.4). The Component_Packager writes this same value into each
+# packaged component's manifest.json (minLocalServerVersion) from the same
+# environment configuration, so resolving it here matches the packaged
+# manifests. A per-version override recorded on the WorkflowVersions item
+# (min_local_server_version) takes precedence when present.
+WORKFLOW_MIN_LOCAL_SERVER_VERSION = os.environ.get(
+    'WORKFLOW_MIN_LOCAL_SERVER_VERSION',
+    os.environ.get('DDA_LOCAL_SERVER_VERSION', '1.0.0'))
 
 # Minimum Greengrass Nucleus version required for DDA components
 # Nucleus is already installed on the device — we don't pin versions in deployments.
@@ -232,8 +261,12 @@ def handler(event, context):
     Handle deployment management requests
     
     GET /api/v1/deployments              - List deployments
+                                           (?workflow_id=... lists workflow
+                                           deployments with per-device status)
     GET /api/v1/deployments/{id}         - Get deployment details
     POST /api/v1/deployments             - Create deployment
+                                           (component_type: workflow deploys a
+                                           packaged Workflow_Component)
     DELETE /api/v1/deployments/{id}      - Cancel deployment
     """
     try:
@@ -254,11 +287,19 @@ def handler(event, context):
             # Sub-resource: look up the existing deployment for a specific target
             if path.endswith('/target-deployment') or query_parameters.get('target_device') or query_parameters.get('target_thing_group'):
                 return get_target_deployment(user, query_parameters)
+            # Workflow page: workflow deployment associations with per-device
+            # Greengrass status (Requirements 8.2, 8.3)
+            if query_parameters.get('workflow_id'):
+                return list_workflow_deployments(user, query_parameters)
             return list_deployments(user, query_parameters)
         elif http_method == 'GET' and path_parameters.get('id'):
             return get_deployment(path_parameters['id'], user, query_parameters)
         elif http_method == 'POST':
             body = json.loads(event.get('body') or '{}')
+            # Workflow_Component deployments carry component_type: workflow
+            # (Requirements 8.1-8.5, 11.5)
+            if body.get('component_type') == 'workflow' or body.get('workflow_id'):
+                return create_workflow_deployment(body, user)
             return create_deployment(body, user)
         elif http_method == 'DELETE' and path_parameters.get('id'):
             return cancel_deployment(path_parameters['id'], user, query_parameters)
@@ -1070,3 +1111,610 @@ def list_public_components(greengrass_client):
     except ClientError as e:
         logger.warning(f"Could not list public components: {e}")
         return []
+
+
+# ===========================================================================
+# Workflow_Component deployments (Workflow Manager)
+#
+# Deployment_Service extension (design section 7): adds the workflow
+# component type with device/thing-group targeting within the Use_Case
+# (Requirement 8.1), records workflow version -> deployment -> devices
+# associations in the Deployments table with component_type: workflow
+# (Requirement 8.2), surfaces per-device Greengrass deployment status for
+# the workflow page (Requirement 8.3), performs the pre-submit LocalServer
+# compatibility check (Requirement 8.4), relies on Greengrass revision
+# semantics for version replacement (Requirement 8.5), and writes audit
+# log entries for deploy operations (Requirement 11.5).
+#
+# The association record shape matches what workflows.py's delete flow
+# scans for: component_type == 'workflow' plus workflow_id (Requirement 5.6).
+# ===========================================================================
+
+
+def _workflow_error(status_code, code, message, details=None):
+    """Workflow Manager error envelope: {error: {code, message, details}}"""
+    return create_response(status_code, {
+        'error': {
+            'code': code,
+            'message': message,
+            'details': details or {}
+        }
+    })
+
+
+def _decimal_to_native(obj):
+    """Convert Decimal objects from DynamoDB to native Python types"""
+    if isinstance(obj, Decimal):
+        return float(obj) if obj % 1 else int(obj)
+    elif isinstance(obj, dict):
+        return {k: _decimal_to_native(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_decimal_to_native(i) for i in obj]
+    return obj
+
+
+def has_workflow_permission(user, usecase_id, permission):
+    """Check a workflow permission for the acting user on a Use_Case"""
+    if is_super_user(user['user_id']):
+        return True
+    return rbac_manager.has_permission(user['user_id'], usecase_id, permission,
+                                       user_info=user)
+
+
+def get_workflow_metadata(workflow_id):
+    """Fetch a Workflows-table metadata item, or None"""
+    if not WORKFLOWS_TABLE:
+        return None
+    try:
+        response = dynamodb.Table(WORKFLOWS_TABLE).get_item(
+            Key={'workflow_id': workflow_id})
+    except ClientError as e:
+        logger.error(f"Error reading workflow {workflow_id}: {str(e)}")
+        return None
+    item = response.get('Item')
+    return _decimal_to_native(item) if item else None
+
+
+def workflow_component_name(workflow_id):
+    """Greengrass component name assigned by the Component_Packager"""
+    return f"{WORKFLOW_COMPONENT_PREFIX}{workflow_id}"
+
+
+def workflow_component_version(workflow_version):
+    """Component version derived from the workflow version"""
+    return f"{int(workflow_version)}.0.0"
+
+
+def resolve_target_thing_names(iot_client, target_devices, target_thing_group):
+    """
+    The individual device thing names a deployment targets: the explicit
+    device list, or the current members of the targeted thing group.
+    """
+    if target_devices:
+        return list(target_devices)
+    thing_names = []
+    if target_thing_group:
+        try:
+            paginator = iot_client.get_paginator('list_things_in_thing_group')
+            for page in paginator.paginate(thingGroupName=target_thing_group,
+                                           maxResults=100):
+                thing_names.extend(page.get('things', []))
+        except ClientError as e:
+            logger.warning(
+                f"Could not list things in group {target_thing_group}: {e}")
+    return thing_names
+
+
+def get_device_local_server_version(greengrass_client, thing_name):
+    """
+    The LocalServer component version installed on a core device
+    (components are named aws.edgeml.dda.LocalServer.<arch>), or None when
+    no LocalServer component is reported installed.
+
+    Raises ClientError when the installed components cannot be listed, so
+    the caller can distinguish "no LocalServer" from "could not determine".
+    """
+    paginator = greengrass_client.get_paginator('list_installed_components')
+    for page in paginator.paginate(coreDeviceThingName=thing_name):
+        for comp in page.get('installedComponents', []):
+            name = comp.get('componentName', '')
+            if name.startswith(LOCAL_SERVER_COMPONENT_PREFIX):
+                return comp.get('componentVersion')
+    return None
+
+
+def check_local_server_compatibility(greengrass_client, thing_names,
+                                     min_local_server_version):
+    """
+    Pre-submit compatibility check (Requirement 8.4): compare each target
+    device's installed LocalServer component version against the
+    Workflow_Component's minLocalServerVersion. Returns the list of
+    incompatible devices, each with a clear reason; an empty list means
+    every checked device is compatible.
+    """
+    incompatible = []
+    min_key = _version_key(min_local_server_version)
+    for thing_name in thing_names:
+        try:
+            installed = get_device_local_server_version(greengrass_client, thing_name)
+        except ClientError as e:
+            logger.warning(
+                f"Could not read installed components for {thing_name}: {e}")
+            incompatible.append({
+                'device': thing_name,
+                'local_server_version': None,
+                'min_local_server_version': min_local_server_version,
+                'reason': ('The installed LocalServer version could not be '
+                           'determined for this device')
+            })
+            continue
+        if installed is None:
+            incompatible.append({
+                'device': thing_name,
+                'local_server_version': None,
+                'min_local_server_version': min_local_server_version,
+                'reason': 'No LocalServer component is installed on this device'
+            })
+        elif _version_key(installed) < min_key:
+            incompatible.append({
+                'device': thing_name,
+                'local_server_version': installed,
+                'min_local_server_version': min_local_server_version,
+                'reason': (f'Installed LocalServer version {installed} is older '
+                           f'than the required minimum {min_local_server_version}')
+            })
+    return incompatible
+
+
+def record_workflow_deployment(deployment_id, usecase_id, workflow_id,
+                               workflow_version, target_arn, target_devices,
+                               target_thing_group, is_revision,
+                               superseded_deployment_id, user):
+    """
+    Record the workflow version -> deployment -> devices association in the
+    Deployments table (Requirement 8.2). component_type: 'workflow' plus
+    workflow_id is the shape workflows.py's delete flow matches on (5.6).
+    """
+    timestamp = int(datetime.utcnow().timestamp() * 1000)
+    item = {
+        'deployment_id': deployment_id,
+        'usecase_id': usecase_id,
+        'component_type': 'workflow',
+        'workflow_id': workflow_id,
+        'workflow_version': int(workflow_version),
+        'component_name': workflow_component_name(workflow_id),
+        'component_version': workflow_component_version(workflow_version),
+        'target_arn': target_arn,
+        'target_devices': target_devices,
+        'target_thing_group': target_thing_group or None,
+        # 'status' feeds the status-index GSI; 'deployment_status' is what
+        # workflows.py's active-deployment check reads.
+        'status': 'IN_PROGRESS',
+        'deployment_status': 'IN_PROGRESS',
+        'is_revision': is_revision,
+        'superseded_deployment_id': superseded_deployment_id,
+        'created_by': user['user_id'],
+        'created_at': timestamp,
+        'updated_at': timestamp
+    }
+    dynamodb.Table(DEPLOYMENTS_TABLE).put_item(Item=item)
+    return item
+
+
+def create_workflow_deployment(body, user):
+    """
+    Deploy a packaged Workflow_Component to devices or thing groups within
+    the Use_Case (Requirements 8.1, 8.2, 8.4, 8.5, 11.5).
+
+    Body: {
+        "component_type": "workflow",
+        "usecase_id": "...",
+        "workflow_id": "...",
+        "workflow_version": N,              # defaults to the latest version
+        "target_devices": ["thing", ...]    # or
+        "target_thing_group": "group",
+        "deployment_name": "..."?,          # optional
+        "rollout_config": {...}?            # optional, same as create_deployment
+    }
+    """
+    try:
+        usecase_id = body.get('usecase_id')
+        workflow_id = body.get('workflow_id')
+        target_devices = body.get('target_devices', [])
+        target_thing_group = body.get('target_thing_group')
+        deployment_name = body.get('deployment_name', '')
+
+        if not usecase_id:
+            return _workflow_error(400, 'MISSING_FIELDS', 'usecase_id required')
+        if not workflow_id:
+            return _workflow_error(400, 'MISSING_FIELDS', 'workflow_id required')
+        if not target_devices and not target_thing_group:
+            return _workflow_error(
+                400, 'MISSING_FIELDS',
+                'Either target_devices or target_thing_group required')
+
+        # RBAC: workflow deployments require workflow:deploy
+        # (Operator, UseCaseAdmin, PortalAdmin — Requirements 11.2, 11.4)
+        if not has_workflow_permission(user, usecase_id, Permission.WORKFLOW_DEPLOY):
+            log_audit_event(
+                user['user_id'], 'unauthorized_access', 'workflow', workflow_id,
+                'denied', {
+                    'required_permissions': [Permission.WORKFLOW_DEPLOY.value],
+                    'usecase_id': usecase_id,
+                    'operation': 'deploy_workflow'
+                }
+            )
+            return _workflow_error(403, 'FORBIDDEN', 'Insufficient permissions', {
+                'required_permissions': [Permission.WORKFLOW_DEPLOY.value],
+                'usecase_id': usecase_id
+            })
+
+        # The workflow must exist and belong to the Use_Case being deployed
+        # into (device/thing-group targeting stays within the Use_Case, 8.1).
+        workflow_item = get_workflow_metadata(workflow_id)
+        if not workflow_item or workflow_item.get('usecase_id') != usecase_id:
+            return _workflow_error(404, 'WORKFLOW_NOT_FOUND', 'Workflow not found')
+
+        version_param = body.get('workflow_version',
+                                 workflow_item.get('latest_version', 1))
+        try:
+            workflow_version = int(version_param)
+        except (TypeError, ValueError):
+            return _workflow_error(400, 'INVALID_VERSION',
+                                   'workflow_version must be an integer')
+
+        # Deployment guard: only versions with a recorded passed-validation
+        # run and zero error findings may be deployed (Requirements 4.7, 4.10)
+        guard_failure = workflow_guards.check_workflow_version_validated(
+            workflow_id, workflow_version)
+        if guard_failure:
+            return _workflow_error(
+                guard_failure['status_code'], guard_failure['code'],
+                guard_failure['message'], guard_failure['details'])
+
+        # The version must have been packaged as a Greengrass component
+        version_item = workflow_guards.get_version_item(workflow_id, workflow_version)
+        if not version_item or not version_item.get('component_arn'):
+            return _workflow_error(
+                409, 'WORKFLOW_NOT_PACKAGED',
+                'Workflow version has not been packaged as a Greengrass '
+                'component; package it before deploying',
+                {'workflow_id': workflow_id, 'version': workflow_version})
+
+        usecase = get_usecase(usecase_id)
+        if not usecase:
+            return _workflow_error(404, 'USECASE_NOT_FOUND', 'Use case not found')
+
+        region = get_usecase_region(usecase)
+        account_id = usecase.get('account_id', '')
+        session_name = f"gg-wf-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64]
+        greengrass_client = get_usecase_client(
+            'greengrassv2', usecase, session_name=session_name, region=region)
+        iot_client = get_usecase_client(
+            'iot', usecase, session_name=session_name, region=region)
+
+        # Pre-submit LocalServer compatibility check (Requirement 8.4):
+        # every target device's installed LocalServer version must satisfy
+        # the component's minLocalServerVersion. The Component_Packager
+        # writes the same resolved value into the packaged manifest.json.
+        min_local_server = (version_item.get('min_local_server_version')
+                            or WORKFLOW_MIN_LOCAL_SERVER_VERSION)
+        resolved_devices = resolve_target_thing_names(
+            iot_client, target_devices, target_thing_group)
+        incompatible = check_local_server_compatibility(
+            greengrass_client, resolved_devices, min_local_server)
+        if incompatible:
+            return _workflow_error(
+                409, 'INCOMPATIBLE_LOCAL_SERVER',
+                'One or more target devices do not have a LocalServer '
+                'component version compatible with this workflow component; '
+                'the deployment was not submitted',
+                {
+                    'workflow_id': workflow_id,
+                    'workflow_version': workflow_version,
+                    'min_local_server_version': min_local_server,
+                    'incompatible_devices': incompatible
+                })
+
+        if target_thing_group:
+            target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{target_thing_group}"
+        else:
+            target_arn = f"arn:aws:iot:{region}:{account_id}:thing/{target_devices[0]}"
+
+        # Greengrass revision semantics (Requirement 8.5): deployments are
+        # immutable and per-target — creating a new deployment for the same
+        # target ARN revises the existing one, replacing any older
+        # Workflow_Component version. We merge with the target's current
+        # component set so revising never drops LocalServer or other
+        # components already on the device (Requirement 13.3).
+        existing_deployment = find_latest_deployment_for_target(
+            greengrass_client, target_arn)
+        is_revision = existing_deployment is not None
+
+        components_map = {}
+        if is_revision:
+            try:
+                detail = greengrass_client.get_deployment(
+                    deploymentId=existing_deployment['deploymentId'])
+                components_map = dict(detail.get('components', {}) or {})
+            except ClientError as e:
+                logger.warning(
+                    f"Could not read components of existing deployment "
+                    f"{existing_deployment.get('deploymentId')}: {e}")
+
+        component_name = workflow_component_name(workflow_id)
+        component_version = workflow_component_version(workflow_version)
+        # Setting the entry (re)places the workflow component at the new
+        # version; Greengrass replaces the older version on the device (8.5).
+        components_map[component_name] = {'componentVersion': component_version}
+
+        if not deployment_name:
+            if is_revision and existing_deployment.get('deploymentName'):
+                deployment_name = existing_deployment['deploymentName']
+            else:
+                timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+                deployment_name = f"portal-deployment-{timestamp}"
+
+        deployment_params = {
+            'targetArn': target_arn,
+            'deploymentName': deployment_name,
+            'components': components_map,
+            'tags': {
+                'dda-portal:managed': 'true',
+                'dda-portal:usecase-id': usecase_id,
+                'dda-portal:workflow-id': workflow_id,
+                'dda-portal:workflow-version': str(workflow_version),
+                'dda-portal:created-by': user['user_id']
+            }
+        }
+        rollout_config = body.get('rollout_config', {})
+        if rollout_config:
+            deployment_params['deploymentPolicies'] = {
+                'failureHandlingPolicy': 'ROLLBACK' if rollout_config.get('auto_rollback', True) else 'DO_NOTHING',
+                'componentUpdatePolicy': {
+                    'timeoutInSeconds': rollout_config.get('timeout_seconds', 60),
+                    'action': 'NOTIFY_COMPONENTS'
+                }
+            }
+
+        response = greengrass_client.create_deployment(**deployment_params)
+        deployment_id = response.get('deploymentId')
+
+        # Association record: workflow version -> deployment -> devices (8.2)
+        superseded_id = existing_deployment.get('deploymentId') if is_revision else None
+        record_workflow_deployment(
+            deployment_id, usecase_id, workflow_id, workflow_version,
+            target_arn, resolved_devices, target_thing_group,
+            is_revision, superseded_id, user)
+
+        # Audit log entry for deploy (Requirement 11.5)
+        log_audit_event(
+            user['user_id'], 'deploy_workflow', 'workflow', workflow_id,
+            'success', {
+                'usecase_id': usecase_id,
+                'workflow_version': workflow_version,
+                'deployment_id': deployment_id,
+                'component_name': component_name,
+                'component_version': component_version,
+                'target_arn': target_arn,
+                'target_devices': resolved_devices,
+                'target_thing_group': target_thing_group,
+                'is_revision': is_revision,
+                'superseded_deployment_id': superseded_id
+            }
+        )
+
+        logger.info(
+            f"{'Revised' if is_revision else 'Created'} workflow deployment "
+            f"{deployment_id} for workflow {workflow_id} v{workflow_version}")
+
+        return create_response(201, {
+            'deployment_id': deployment_id,
+            'iot_job_id': response.get('iotJobId', ''),
+            'iot_job_arn': response.get('iotJobArn', ''),
+            'workflow_id': workflow_id,
+            'workflow_version': workflow_version,
+            'component_name': component_name,
+            'component_version': component_version,
+            'target_arn': target_arn,
+            'target_devices': resolved_devices,
+            'target_thing_group': target_thing_group,
+            'is_revision': is_revision,
+            'superseded_deployment_id': superseded_id,
+            'message': ('Workflow deployment updated successfully' if is_revision
+                        else 'Workflow deployment created successfully')
+        })
+
+    except ClientError as e:
+        logger.error(f"AWS error creating workflow deployment: {str(e)}")
+        return _workflow_error(500, 'DEPLOYMENT_FAILED',
+                               f'Failed to create workflow deployment: {str(e)}')
+    except Exception as e:
+        logger.error(f"Error creating workflow deployment: {str(e)}", exc_info=True)
+        return _workflow_error(500, 'INTERNAL_ERROR',
+                               'Failed to create workflow deployment')
+
+
+def get_device_workflow_deployment_status(greengrass_client, thing_name,
+                                          deployment_id):
+    """
+    Per-device Greengrass status of one deployment via the device's
+    effective deployments (Requirement 8.3). Returns a status dict, or a
+    PENDING placeholder when the deployment has not reached the device yet.
+    """
+    try:
+        response = greengrass_client.list_effective_deployments(
+            coreDeviceThingName=thing_name)
+        for eff_dep in response.get('effectiveDeployments', []):
+            if eff_dep.get('deploymentId') != deployment_id:
+                continue
+            modified_ts = eff_dep.get('modifiedTimestamp')
+            if modified_ts and hasattr(modified_ts, 'isoformat'):
+                modified_ts = modified_ts.isoformat()
+            return {
+                'device': thing_name,
+                'deployment_status': eff_dep.get('coreDeviceExecutionStatus', 'UNKNOWN'),
+                'reason': eff_dep.get('reason', ''),
+                'description': eff_dep.get('description', ''),
+                'modified_timestamp': modified_ts
+            }
+    except ClientError as e:
+        logger.warning(f"Could not get effective deployments for {thing_name}: {e}")
+        return {
+            'device': thing_name,
+            'deployment_status': 'UNKNOWN',
+            'reason': 'Could not read the device deployment status',
+            'description': '',
+            'modified_timestamp': None
+        }
+    return {
+        'device': thing_name,
+        'deployment_status': 'PENDING',
+        'reason': 'Deployment has not been reported by this device yet',
+        'description': '',
+        'modified_timestamp': None
+    }
+
+
+def query_workflow_deployment_records(usecase_id, workflow_id):
+    """
+    Workflow association records (component_type: workflow) of one workflow
+    from the Deployments table via the usecase-deployments-index GSI.
+    """
+    records = []
+    table = dynamodb.Table(DEPLOYMENTS_TABLE)
+    kwargs = {
+        'IndexName': 'usecase-deployments-index',
+        'KeyConditionExpression': 'usecase_id = :uid',
+        'FilterExpression': 'component_type = :ct AND workflow_id = :wid',
+        'ExpressionAttributeValues': {
+            ':uid': usecase_id,
+            ':ct': 'workflow',
+            ':wid': workflow_id
+        }
+    }
+    while True:
+        response = table.query(**kwargs)
+        records.extend(response.get('Items', []))
+        last_key = response.get('LastEvaluatedKey')
+        if not last_key:
+            break
+        kwargs['ExclusiveStartKey'] = last_key
+    return [_decimal_to_native(r) for r in records]
+
+
+def refresh_workflow_deployment_status(deployment_id, overall_status):
+    """Best-effort sync of the association record with the latest overall
+    Greengrass deployment status (keeps 5.6 active-deployment checks fresh)"""
+    try:
+        dynamodb.Table(DEPLOYMENTS_TABLE).update_item(
+            Key={'deployment_id': deployment_id},
+            UpdateExpression='SET #s = :s, deployment_status = :s, updated_at = :t',
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues={
+                ':s': overall_status,
+                ':t': int(datetime.utcnow().timestamp() * 1000)
+            }
+        )
+    except ClientError as e:
+        logger.warning(f"Could not refresh status of deployment {deployment_id}: {e}")
+
+
+def list_workflow_deployments(user, query_params):
+    """
+    GET /deployments?usecase_id=...&workflow_id=...[&workflow_version=N]
+
+    Workflow deployment associations with per-device Greengrass deployment
+    status for the workflow page (Requirements 8.2, 8.3). Viewers may read
+    deployment status (Requirement 11.3), so this requires workflow:read.
+    """
+    try:
+        usecase_id = query_params.get('usecase_id')
+        workflow_id = query_params.get('workflow_id')
+
+        if not usecase_id:
+            return _workflow_error(400, 'MISSING_FIELDS',
+                                   'usecase_id parameter required')
+
+        if not has_workflow_permission(user, usecase_id, Permission.WORKFLOW_READ):
+            return _workflow_error(403, 'FORBIDDEN', 'Insufficient permissions', {
+                'required_permissions': [Permission.WORKFLOW_READ.value],
+                'usecase_id': usecase_id
+            })
+
+        usecase = get_usecase(usecase_id)
+        if not usecase:
+            return _workflow_error(404, 'USECASE_NOT_FOUND', 'Use case not found')
+
+        records = query_workflow_deployment_records(usecase_id, workflow_id)
+
+        version_filter = query_params.get('workflow_version')
+        if version_filter is not None:
+            try:
+                version_filter = int(version_filter)
+                records = [r for r in records
+                           if int(r.get('workflow_version', -1)) == version_filter]
+            except (TypeError, ValueError):
+                return _workflow_error(400, 'INVALID_VERSION',
+                                       'workflow_version must be an integer')
+
+        region = get_usecase_region(usecase)
+        session_name = f"gg-wfls-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64]
+        greengrass_client = get_usecase_client(
+            'greengrassv2', usecase, session_name=session_name, region=region)
+
+        deployments = []
+        for record in sorted(records, key=lambda r: r.get('created_at', 0),
+                             reverse=True):
+            deployment_id = record.get('deployment_id')
+
+            # Overall Greengrass deployment status
+            overall_status = record.get('deployment_status', 'UNKNOWN')
+            try:
+                detail = greengrass_client.get_deployment(deploymentId=deployment_id)
+                latest = detail.get('deploymentStatus')
+                if latest and latest != overall_status:
+                    overall_status = latest
+                    refresh_workflow_deployment_status(deployment_id, latest)
+            except ClientError as e:
+                logger.warning(f"Could not get deployment {deployment_id}: {e}")
+
+            # Per-device Greengrass deployment status (Requirement 8.3)
+            device_statuses = [
+                get_device_workflow_deployment_status(
+                    greengrass_client, thing_name, deployment_id)
+                for thing_name in record.get('target_devices', []) or []
+            ]
+
+            deployments.append({
+                'deployment_id': deployment_id,
+                'usecase_id': usecase_id,
+                'component_type': 'workflow',
+                'workflow_id': record.get('workflow_id'),
+                'workflow_version': record.get('workflow_version'),
+                'component_name': record.get('component_name'),
+                'component_version': record.get('component_version'),
+                'target_arn': record.get('target_arn'),
+                'target_devices': record.get('target_devices', []),
+                'target_thing_group': record.get('target_thing_group'),
+                'deployment_status': overall_status,
+                'device_statuses': device_statuses,
+                'is_revision': record.get('is_revision', False),
+                'created_by': record.get('created_by'),
+                'created_at': record.get('created_at'),
+                'updated_at': record.get('updated_at')
+            })
+
+        return create_response(200, {
+            'deployments': deployments,
+            'count': len(deployments)
+        })
+
+    except ClientError as e:
+        logger.error(f"AWS error listing workflow deployments: {str(e)}")
+        return _workflow_error(500, 'LIST_FAILED',
+                               f'Failed to list workflow deployments: {str(e)}')
+    except Exception as e:
+        logger.error(f"Error listing workflow deployments: {str(e)}", exc_info=True)
+        return _workflow_error(500, 'INTERNAL_ERROR',
+                               'Failed to list workflow deployments')

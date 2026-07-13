@@ -4,7 +4,38 @@
 import { getConfig } from '../config';
 import { UseCase, Device, User, S3Bucket } from '../types';
 import type { Capture } from '../components/ResultsViewer';
+import type {
+  NodeTypeDescriptor,
+  TestDataset,
+  TestDatasetCompletedFile,
+  TestDatasetUploadInitiation,
+  WorkflowDefinition,
+  WorkflowGenerationResult,
+  WorkflowSummary,
+  WorkflowTestRun,
+  WorkflowTestRunDetail,
+  WorkflowValidationRun,
+  WorkflowValidationStatus,
+} from '../pages/workflows/types';
 import { beginRequest, endRequest } from './loadingBus';
+
+/**
+ * Error thrown for API failures. Workflow Manager endpoints use the
+ * structured error envelope {error: {code, message, details}}; `code`
+ * and `details` are carried through so callers can act on them (e.g.
+ * the deployment ids of a rejected workflow delete, Requirement 5.6).
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status?: number,
+    public readonly code?: string,
+    public readonly details?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 
 class ApiService {
   private get baseUrl(): string {
@@ -47,11 +78,24 @@ class ApiService {
         }
         
         const error = await response.json().catch(() => ({ error: 'Request failed' }));
+        // Structured error envelope: {error: {code, message, details}}
+        if (error.error && typeof error.error === 'object') {
+          throw new ApiError(
+            error.error.message || `HTTP ${response.status}`,
+            response.status,
+            error.error.code,
+            error.error.details
+          );
+        }
         throw new Error(error.error || `HTTP ${response.status}`);
       }
 
       return response.json();
     } catch (err: any) {
+      // Structured API errors carry code/details; re-throw untouched.
+      if (err instanceof ApiError) {
+        throw err;
+      }
       // Handle Amplify/AWS errors that have a complex structure
       if (err && typeof err === 'object' && 'message' in err) {
         if (typeof err.message === 'string') {
@@ -1729,6 +1773,61 @@ class ApiService {
     });
   }
 
+  // Bedrock_Configuration endpoints (workflow-manager Requirement 10.6).
+  // No dedicated settings route exists in API Gateway, so the configuration
+  // rides the PortalAdmin-only /data-accounts/{id} routes with the reserved
+  // id 'bedrock-configuration' (handled by the data_accounts Lambda).
+  async getBedrockConfiguration(): Promise<{
+    bedrock_configuration: {
+      model_id: string;
+      region: string;
+      max_tokens: number;
+      temperature: number;
+      top_p: number;
+      timeout_seconds: number;
+    };
+    defaults: Record<string, string | number>;
+    max_timeout_seconds: number;
+  }> {
+    return this.request('/data-accounts/bedrock-configuration');
+  }
+
+  // Invokable model options (inference profiles + on-demand foundation
+  // models) for the settings-page model dropdown. An empty list with a
+  // 'permissions' hint means the backend lacks the bedrock list
+  // permissions and the UI should fall back to free-text entry.
+  async getBedrockModels(): Promise<{
+    models: { id: string; label: string }[];
+    region: string;
+    permissions?: string;
+  }> {
+    return this.request('/data-accounts/bedrock-configuration/models');
+  }
+
+  async updateBedrockConfiguration(config: {
+    model_id?: string;
+    region?: string;
+    max_tokens?: number;
+    temperature?: number;
+    top_p?: number;
+    timeout_seconds?: number;
+  }): Promise<{
+    message: string;
+    bedrock_configuration: {
+      model_id: string;
+      region: string;
+      max_tokens: number;
+      temperature: number;
+      top_p: number;
+      timeout_seconds: number;
+    };
+  }> {
+    return this.request('/data-accounts/bedrock-configuration', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    });
+  }
+
   // Component Configuration endpoints
   async getComponentConfigurationSchema(componentName: string): Promise<{
     component_name: string;
@@ -1768,6 +1867,192 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // Workflow Manager endpoints
+  // Node type catalog for the Workflow_Builder Node_Palette (camelCase
+  // wire form of workflow_core.catalog, Requirement 2.8).
+  async getWorkflowNodeCatalog(): Promise<{ nodeTypes: NodeTypeDescriptor[] }> {
+    return this.request('/workflows/node-catalog');
+  }
+
+  // Workflow_Store API (workflows.py): CRUD, versioning, duplication
+  // (Requirements 5.1, 5.2, 5.4, 5.5, 5.7).
+  async listWorkflows(usecaseId?: string): Promise<{ workflows: WorkflowSummary[]; count: number }> {
+    const query = usecaseId ? `?usecase_id=${encodeURIComponent(usecaseId)}` : '';
+    return this.request(`/workflows${query}`);
+  }
+
+  // Create a workflow as version 1 (Requirement 5.1).
+  async createWorkflow(data: {
+    usecase_id: string;
+    name: string;
+    definition: WorkflowDefinition;
+    description?: string;
+  }): Promise<{ workflow: WorkflowSummary; version: number }> {
+    return this.request('/workflows', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Open/load a stored definition, latest version by default (Requirement 5.4).
+  async getWorkflow(
+    workflowId: string,
+    version?: number
+  ): Promise<{
+    workflow: WorkflowSummary;
+    version: number;
+    validation_status?: WorkflowValidationStatus;
+    definition: WorkflowDefinition;
+  }> {
+    const query = version !== undefined ? `?version=${version}` : '';
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}${query}`);
+  }
+
+  // Save changes as a new version; prior versions are retained (Requirement 5.2).
+  async updateWorkflow(
+    workflowId: string,
+    data: { definition: WorkflowDefinition; name?: string; description?: string }
+  ): Promise<{ workflow: WorkflowSummary; version: number }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Delete a workflow and its versions; rejected with 409 and the
+  // referencing deployment ids when active deployments exist (5.5, 5.6).
+  async deleteWorkflow(workflowId: string): Promise<{ workflow_id: string; message: string }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  // Duplicate under a new name (Requirement 5.7).
+  async duplicateWorkflow(
+    workflowId: string,
+    data: { name?: string; description?: string } = {}
+  ): Promise<{ workflow: WorkflowSummary; version: number }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/duplicate`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Version history, newest first (Requirement 5.2).
+  async listWorkflowVersions(workflowId: string): Promise<{
+    workflow_id: string;
+    latest_version: number;
+    versions: Array<{
+      version: number;
+      created_at?: number;
+      created_by?: string;
+      validation_status?: WorkflowValidationStatus;
+      component_arn?: string | null;
+    }>;
+    count: number;
+  }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/versions`);
+  }
+
+  // Run all backend Workflow_Validator checks on a stored version and
+  // return the complete findings list (Requirements 4.8, 4.9).
+  async validateWorkflow(workflowId: string, version?: number): Promise<WorkflowValidationRun> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/validate`, {
+      method: 'POST',
+      body: JSON.stringify(version !== undefined ? { version } : {}),
+    });
+  }
+
+  // Prompt-based workflow generation via the configured Bedrock model
+  // (workflow_generator.py, Requirements 10.2, 10.3, 10.5, 10.7).
+  // `session_id` continues an existing chat session; `current_definition`
+  // is the canvas snapshot so follow-up prompts modify rather than
+  // regenerate. Failures raise ApiError with the structured envelope
+  // codes (e.g. GENERATION_TIMEOUT, BEDROCK_*, GENERATED_DEFINITION_INVALID).
+  // `temperature` (0..1) overrides the configured model temperature for
+  // this invocation only; omitted = use the configured value.
+  async generateWorkflow(data: {
+    usecase_id: string;
+    prompt: string;
+    session_id?: string;
+    current_definition?: WorkflowDefinition;
+    temperature?: number;
+  }): Promise<WorkflowGenerationResult> {
+    return this.request('/workflows/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Workflow_Test_Runner endpoints (workflow_testing.py, Requirement 12)
+  // Test_Datasets scoped to the Use_Case (Requirement 12.2).
+  async listTestDatasets(usecaseId?: string): Promise<{ datasets: TestDataset[]; count: number }> {
+    const query = usecaseId ? `?usecase_id=${encodeURIComponent(usecaseId)}` : '';
+    return this.request(`/test-datasets${query}`);
+  }
+
+  // Initiate a dataset upload: declares the file set and returns presigned
+  // multipart upload URLs. No dataset record is written until finalize
+  // verifies the uploaded content (Requirements 12.3, 12.11).
+  async createTestDataset(data: {
+    usecase_id: string;
+    name: string;
+    description?: string;
+    files: Array<{ name: string; size: number; content_type?: string }>;
+  }): Promise<TestDatasetUploadInitiation> {
+    return this.request('/test-datasets', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'initiate', ...data }),
+    });
+  }
+
+  // Finalize a dataset upload: completes the multipart uploads and commits
+  // the Test_Dataset record after server-side verification (12.3, 12.11).
+  async finalizeTestDataset(data: {
+    usecase_id: string;
+    dataset_id: string;
+    name: string;
+    description?: string;
+    files: TestDatasetCompletedFile[];
+  }): Promise<{ dataset: TestDataset }> {
+    return this.request('/test-datasets', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'finalize', ...data }),
+    });
+  }
+
+  // Start a test run of a stored workflow version against a Test_Dataset
+  // (Requirement 12.4; latest version when omitted). `simulated_inference`
+  // configures the outcome injected for simulation-stubbed model
+  // inference nodes — the model itself is not executed in the cloud
+  // sandbox (Requirement 12.6); the backend defaults it when omitted.
+  async startTestRun(
+    workflowId: string,
+    data: {
+      dataset_id: string;
+      version?: number;
+      simulated_inference?: { is_anomalous: boolean; confidence: number };
+    }
+  ): Promise<{ test_run: WorkflowTestRun }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/test-runs`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Test runs of one workflow, newest first.
+  async listTestRuns(
+    workflowId: string
+  ): Promise<{ test_runs: WorkflowTestRun[]; count: number }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/test-runs`);
+  }
+
+  // Test run status plus the per-node results {nodeId, status, outputs,
+  // stubActivity, error} produced so far (Requirements 12.7, 12.10).
+  async getTestRun(testRunId: string): Promise<WorkflowTestRunDetail> {
+    return this.request(`/test-runs/${encodeURIComponent(testRunId)}`);
   }
 
   // Manifest Validator endpoints

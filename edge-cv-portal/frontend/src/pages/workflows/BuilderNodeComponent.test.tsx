@@ -1,0 +1,167 @@
+/**
+ * Component tests for the canvas node widget: the inline validation
+ * badge (Requirements 1.9, 1.10) — a warning badge is rendered when
+ * `data.validationMessages` is non-empty (with the messages as its
+ * tooltip) and absent when the messages are cleared —, the delete
+ * affordance (a small trash button wired to the canvas deletion path,
+ * Requirement 1.5), and multi-output rendering (the conditional node's
+ * two labeled, typed output handles).
+ */
+
+import { describe, expect, it } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import { ReactFlowProvider, type NodeProps } from '@xyflow/react';
+import { BuilderNodeComponent } from './BuilderNodeComponent';
+import { WORKFLOW_NODE_TYPE, type BuilderNode } from './builderGraph';
+import type { NodeTypeDescriptor } from './types';
+
+const CAMERA: NodeTypeDescriptor = {
+  typeId: 'camera_source',
+  category: 'input',
+  displayName: 'Camera source',
+  inputs: [],
+  outputs: [{ name: 'out', portType: 'VideoFrames' }],
+  parameters: [
+    { name: 'device', paramType: 'string', required: true, default: null, constraints: {} },
+  ],
+  mappings: [],
+  hardwareDependent: true,
+};
+
+const CONDITIONAL: NodeTypeDescriptor = {
+  typeId: 'conditional',
+  category: 'post_processing',
+  displayName: 'Conditional',
+  inputs: [{ name: 'in', portType: 'InferenceMeta' }],
+  outputs: [
+    { name: 'true', portType: 'InferenceMeta' },
+    { name: 'false', portType: 'InferenceMeta' },
+  ],
+  parameters: [
+    { name: 'condition', paramType: 'string', required: true, default: null, constraints: {} },
+  ],
+  mappings: [],
+  hardwareDependent: false,
+};
+
+function nodeProps(
+  validationMessages: string[],
+  descriptor: NodeTypeDescriptor = CAMERA,
+  id = 'cam',
+  selected = false
+): NodeProps<BuilderNode> {
+  return {
+    id,
+    type: WORKFLOW_NODE_TYPE,
+    data: { descriptor, parameters: {}, validationMessages },
+    selected,
+    dragging: false,
+    draggable: true,
+    selectable: true,
+    deletable: true,
+    isConnectable: true,
+    zIndex: 0,
+    positionAbsoluteX: 0,
+    positionAbsoluteY: 0,
+  };
+}
+
+function renderNode(
+  validationMessages: string[],
+  descriptor: NodeTypeDescriptor = CAMERA,
+  id = 'cam',
+  selected = false
+) {
+  return render(
+    <ReactFlowProvider>
+      <BuilderNodeComponent {...nodeProps(validationMessages, descriptor, id, selected)} />
+    </ReactFlowProvider>
+  );
+}
+
+describe('BuilderNodeComponent validation badge', () => {
+  it('shows a warning badge with the messages when validation messages are present (Requirement 1.9)', () => {
+    const messages = ["Node 'cam': Required parameter 'device' has no value"];
+    renderNode(messages);
+
+    const badge = screen.getByRole('img', { name: 'Validation warnings on cam' });
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute('title', messages[0]);
+  });
+
+  it('renders no badge when the validation messages are cleared (Requirement 1.10)', () => {
+    renderNode([]);
+    expect(screen.queryByRole('img', { name: 'Validation warnings on cam' })).toBeNull();
+  });
+});
+
+describe('BuilderNodeComponent delete affordance (Requirement 1.5)', () => {
+  it('renders a keyboard-accessible "Delete node" button in the header', () => {
+    renderNode([]);
+    const button = screen.getByRole('button', { name: 'Delete node' });
+    expect(button).toBeInTheDocument();
+    expect(button).toHaveAttribute('title', 'Delete node');
+    // Hidden until hover/selection/focus, but always present and
+    // clickable when shown (never display:none).
+    expect(button).toHaveStyle({ opacity: '0' });
+  });
+
+  it('reveals the delete button while the node is selected', () => {
+    renderNode([], CAMERA, 'cam', true);
+    expect(screen.getByRole('button', { name: 'Delete node' })).toHaveStyle({ opacity: '1' });
+  });
+});
+
+describe('BuilderNodeComponent multi-output rendering (conditional node)', () => {
+  it('renders both output handles labeled with their port names and types', () => {
+    const { container } = renderNode([], CONDITIONAL, 'cond');
+
+    // Two distinguishable source handles, one per output port.
+    const trueHandle = container.querySelector('[data-handleid="true"]');
+    const falseHandle = container.querySelector('[data-handleid="false"]');
+    expect(trueHandle).not.toBeNull();
+    expect(falseHandle).not.toBeNull();
+    expect(trueHandle!.getAttribute('aria-label')).toBe('cond output port true (InferenceMeta)');
+    expect(falseHandle!.getAttribute('aria-label')).toBe('cond output port false (InferenceMeta)');
+
+    // The port names render as visible row labels beside the handles.
+    expect(screen.getByText('true')).toBeInTheDocument();
+    expect(screen.getByText('false')).toBeInTheDocument();
+  });
+});
+
+describe('BuilderNodeComponent conditional output handles', () => {
+  const CONDITIONAL: NodeTypeDescriptor = {
+    typeId: 'conditional',
+    category: 'post_processing',
+    displayName: 'Conditional',
+    inputs: [{ name: 'in', portType: 'InferenceMeta' }],
+    outputs: [
+      { name: 'true', portType: 'InferenceMeta' },
+      { name: 'false', portType: 'InferenceMeta' },
+    ],
+    parameters: [
+      { name: 'condition', paramType: 'string', required: true, default: null, constraints: {} },
+    ],
+    mappings: [],
+    hardwareDependent: false,
+  };
+
+  it('renders both output port handles from the catalog descriptor', () => {
+    render(
+      <ReactFlowProvider>
+        <BuilderNodeComponent
+          {...{
+            ...nodeProps([]),
+            id: 'br',
+            data: { descriptor: CONDITIONAL, parameters: {}, validationMessages: [] },
+          }}
+        />
+      </ReactFlowProvider>
+    );
+
+    expect(screen.getByLabelText('br input port in (InferenceMeta)')).toBeInTheDocument();
+    expect(screen.getByLabelText('br output port true (InferenceMeta)')).toBeInTheDocument();
+    expect(screen.getByLabelText('br output port false (InferenceMeta)')).toBeInTheDocument();
+  });
+});

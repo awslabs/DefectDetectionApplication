@@ -6,6 +6,7 @@
     "@cloudscape-design/components": "^3.0.0",
     "@cloudscape-design/global-styles": "^1.0.0",
     "@tanstack/react-query": "^5.0.0",
+    "@xyflow/react": "12.11.2",
     "aws-amplify": "^6.0.25",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

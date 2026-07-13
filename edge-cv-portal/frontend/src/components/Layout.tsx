@@ -23,6 +23,16 @@ export default function Layout() {
   const config = getConfig();
   const branding = config.branding;
   const build = getBuildInfo();
+
+  // The workflow builder needs the full horizontal space, so the side
+  // navigation is collapsed by default on that route. The route only
+  // provides the default: once the user toggles the navigation the
+  // explicit choice wins for the rest of the session, whatever page
+  // they navigate to.
+  const isBuilderRoute = location.pathname.startsWith('/workflows/builder');
+  const [navigationOverride, setNavigationOverride] = useState<boolean | null>(null);
+  const navigationOpen = navigationOverride ?? !isBuilderRoute;
+
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -41,6 +51,7 @@ export default function Layout() {
     { type: 'link' as const, text: 'Training', href: '/training' },
     { type: 'link' as const, text: 'Models', href: '/models' },
     { type: 'divider' as const },
+    { type: 'link' as const, text: 'Workflows', href: '/workflows/builder' },
     { type: 'link' as const, text: 'Components', href: '/components' },
     { type: 'link' as const, text: 'Deployments', href: '/deployments' },
     { type: 'link' as const, text: 'Devices', href: '/devices' },
@@ -97,7 +108,9 @@ export default function Layout() {
               {
                 id: 'settings',
                 text: 'Settings',
-                disabled: true,
+                // The settings page is PortalAdmin-only (same rule as the
+                // sidebar link); other roles see the item disabled.
+                disabled: !isPortalAdmin,
               },
               {
                 id: 'change-password',
@@ -112,6 +125,8 @@ export default function Layout() {
               if (detail.id === 'logout') {
                 await logout();
                 navigate('/login');
+              } else if (detail.id === 'settings') {
+                navigate('/settings');
               } else if (detail.id === 'change-password') {
                 setShowChangePassword(true);
                 setChangePwError('');
@@ -125,6 +140,16 @@ export default function Layout() {
         ]}
       />
       <AppLayout
+        // The workflow builder canvas needs the full content width: drop
+        // the AppLayout content gutters and its default max content width
+        // (the dead space between the side navigation and the node
+        // palette) on the builder route only; the builder page applies
+        // its own minimal internal padding. Every other page keeps the
+        // default Cloudscape content paddings and width.
+        disableContentPaddings={isBuilderRoute}
+        maxContentWidth={isBuilderRoute ? Number.MAX_VALUE : undefined}
+        navigationOpen={navigationOpen}
+        onNavigationChange={({ detail }) => setNavigationOverride(detail.open)}
         navigation={
           <SideNavigation
             activeHref={location.pathname}

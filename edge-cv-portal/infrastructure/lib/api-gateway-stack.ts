@@ -32,6 +32,11 @@ export interface ApiGatewayStackProps extends cdk.NestedStackProps {
   sharedComponentsHandler: lambda.Function;
   dataAccountsHandler: lambda.Function;
   auditLogsHandler: lambda.Function;
+  workflowsHandler: lambda.Function;
+  workflowValidationHandler: lambda.Function;
+  workflowPackagingHandler: lambda.Function;
+  workflowGeneratorHandler: lambda.Function;
+  workflowTestingHandler: lambda.Function;
   lambdaEnvironment: { [key: string]: string };
   createLambdaRole: (name: string) => iam.Role;
   sharedLayer: lambda.LayerVersion;
@@ -70,6 +75,29 @@ export class ApiGatewayStack extends cdk.NestedStack {
       },
     });
 
+    // Gateway-generated error responses (401 expired/missing token, 403,
+    // 5xx) do not pass through the Lambda handlers and therefore carry no
+    // CORS headers by default — browsers then surface an opaque
+    // "NetworkError" instead of the real status. Attach CORS headers to
+    // the gateway responses so the frontend can show meaningful errors
+    // (e.g. session expired) and trigger re-authentication.
+    this.api.addGatewayResponse('Default4xxWithCors', {
+      type: apigateway.ResponseType.DEFAULT_4XX,
+      responseHeaders: {
+        'Access-Control-Allow-Origin': "'*'",
+        'Access-Control-Allow-Headers':
+          "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
+      },
+    });
+    this.api.addGatewayResponse('Default5xxWithCors', {
+      type: apigateway.ResponseType.DEFAULT_5XX,
+      responseHeaders: {
+        'Access-Control-Allow-Origin': "'*'",
+        'Access-Control-Allow-Headers':
+          "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
+      },
+    });
+
     // Cognito Authorizer
     const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'CognitoAuthorizer', {
       cognitoUserPools: [props.userPool],
@@ -101,6 +129,15 @@ export class ApiGatewayStack extends cdk.NestedStack {
     const sharedComponentsIntegration = new apigateway.LambdaIntegration(props.sharedComponentsHandler);
     const dataAccountsIntegration = new apigateway.LambdaIntegration(props.dataAccountsHandler);
     const auditLogsIntegration = new apigateway.LambdaIntegration(props.auditLogsHandler);
+    // Workflow Manager integrations disable the API Gateway console test-invoke
+    // permission (allowTestInvoke: false). Each test-invoke grant is an extra
+    // AWS::Lambda::Permission per method, and this nested stack is close to the
+    // CloudFormation 500-resource limit; production invocation is unaffected.
+    const workflowsIntegration = new apigateway.LambdaIntegration(props.workflowsHandler, { allowTestInvoke: false });
+    const workflowValidationIntegration = new apigateway.LambdaIntegration(props.workflowValidationHandler, { allowTestInvoke: false });
+    const workflowPackagingIntegration = new apigateway.LambdaIntegration(props.workflowPackagingHandler, { allowTestInvoke: false });
+    const workflowGeneratorIntegration = new apigateway.LambdaIntegration(props.workflowGeneratorHandler, { allowTestInvoke: false });
+    const workflowTestingIntegration = new apigateway.LambdaIntegration(props.workflowTestingHandler, { allowTestInvoke: false });
 
     // Auth endpoints
     const authResource = this.api.root.addResource('auth');
@@ -619,6 +656,119 @@ export class ApiGatewayStack extends cdk.NestedStack {
 
     const testConnectionResource = dataAccountIdResource.addResource('test');
     testConnectionResource.addMethod('POST', dataAccountsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Invokable Bedrock model options for the settings-page model dropdown;
+    // served on the reserved 'bedrock-configuration' id:
+    // GET /data-accounts/bedrock-configuration/models
+    const dataAccountModelsResource = dataAccountIdResource.addResource('models');
+    dataAccountModelsResource.addMethod('GET', dataAccountsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Workflow Manager endpoints
+    const workflowsResource = this.api.root.addResource('workflows');
+    workflowsResource.addMethod('GET', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    workflowsResource.addMethod('POST', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Static 'node-catalog' resource — sibling of the {id} path param; API
+    // Gateway prefers static segments for exact matches (same pattern as
+    // /devices/{id}/logs/analyze above).
+    const nodeCatalogResource = workflowsResource.addResource('node-catalog');
+    nodeCatalogResource.addMethod('GET', workflowValidationIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Prompt-based workflow generation (Bedrock chat sessions)
+    const workflowGenerateResource = workflowsResource.addResource('generate');
+    workflowGenerateResource.addMethod('POST', workflowGeneratorIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowResource = workflowsResource.addResource('{id}');
+    workflowResource.addMethod('GET', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    workflowResource.addMethod('PUT', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    workflowResource.addMethod('DELETE', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowDuplicateResource = workflowResource.addResource('duplicate');
+    workflowDuplicateResource.addMethod('POST', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowVersionsResource = workflowResource.addResource('versions');
+    workflowVersionsResource.addMethod('GET', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowValidateResource = workflowResource.addResource('validate');
+    workflowValidateResource.addMethod('POST', workflowValidationIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowPackageResource = workflowResource.addResource('package');
+    workflowPackageResource.addMethod('POST', workflowPackagingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowTestRunsResource = workflowResource.addResource('test-runs');
+    workflowTestRunsResource.addMethod('POST', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    workflowTestRunsResource.addMethod('GET', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Test datasets (canned sample inputs for workflow test runs)
+    const testDatasetsResource = this.api.root.addResource('test-datasets');
+    testDatasetsResource.addMethod('GET', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    testDatasetsResource.addMethod('POST', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const testDatasetResource = testDatasetsResource.addResource('{id}');
+    testDatasetResource.addMethod('GET', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    testDatasetResource.addMethod('DELETE', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Test runs (status and per-node results)
+    const testRunsResource = this.api.root.addResource('test-runs');
+    const testRunResource = testRunsResource.addResource('{id}');
+    testRunResource.addMethod('GET', workflowTestingIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });

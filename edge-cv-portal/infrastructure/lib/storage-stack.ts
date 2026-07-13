@@ -17,6 +17,11 @@ export class StorageStack extends cdk.Stack {
   public readonly componentsTable: dynamodb.Table;
   public readonly sharedComponentsTable: dynamodb.Table;
   public readonly dataAccountsTable: dynamodb.Table;
+  public readonly workflowsTable: dynamodb.Table;
+  public readonly workflowVersionsTable: dynamodb.Table;
+  public readonly testDatasetsTable: dynamodb.Table;
+  public readonly testRunsTable: dynamodb.Table;
+  public readonly workflowChatSessionsTable: dynamodb.Table;
   public readonly portalArtifactsBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -445,16 +450,151 @@ export class StorageStack extends cdk.Stack {
       },
     });
 
+    // Workflows Table - Workflow Manager workflow metadata (Workflow_Store)
+    this.workflowsTable = new dynamodb.Table(this, 'WorkflowsTable', {
+      tableName: 'dda-portal-workflows',
+      partitionKey: {
+        name: 'workflow_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    this.workflowsTable.addGlobalSecondaryIndex({
+      indexName: 'usecase-workflows-index',
+      partitionKey: {
+        name: 'usecase_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'created_at',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+    });
+
+    // WorkflowVersions Table - immutable per-save workflow versions
+    this.workflowVersionsTable = new dynamodb.Table(this, 'WorkflowVersionsTable', {
+      tableName: 'dda-portal-workflow-versions',
+      partitionKey: {
+        name: 'workflow_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'version',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // TestDatasets Table - canned sample-input datasets for workflow test runs
+    this.testDatasetsTable = new dynamodb.Table(this, 'TestDatasetsTable', {
+      tableName: 'dda-portal-test-datasets',
+      partitionKey: {
+        name: 'dataset_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    this.testDatasetsTable.addGlobalSecondaryIndex({
+      indexName: 'usecase-datasets-index',
+      partitionKey: {
+        name: 'usecase_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'created_at',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+    });
+
+    // TestRuns Table - Workflow_Test_Runner execution records
+    this.testRunsTable = new dynamodb.Table(this, 'TestRunsTable', {
+      tableName: 'dda-portal-test-runs',
+      partitionKey: {
+        name: 'test_run_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    this.testRunsTable.addGlobalSecondaryIndex({
+      indexName: 'workflow-runs-index',
+      partitionKey: {
+        name: 'workflow_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'started_at',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+    });
+
+    // WorkflowChatSessions Table - prompt-based generation chat sessions (TTL'd)
+    this.workflowChatSessionsTable = new dynamodb.Table(this, 'WorkflowChatSessionsTable', {
+      tableName: 'dda-portal-workflow-chat-sessions',
+      partitionKey: {
+        name: 'session_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     // Portal Artifacts Bucket - stores shared component artifacts (dda-LocalServer)
     // Note: For cross-account Greengrass component access, we use the GDK component bucket
     // (dda-component-{region}-{account}) which is configured with cross-account access
     // via the gdk-component-build-and-publish.sh script.
+    // Browser-based test-dataset uploads (Workflow_Test_Runner) go directly
+    // to this bucket via presigned multipart URLs, so the bucket needs CORS
+    // for the portal origin. The CloudFront domain is passed via the same
+    // `cloudFrontDomain` CDK context the compute stack uses; before the
+    // first frontend deployment (domain unknown) any origin is allowed —
+    // access is still gated by the presigned URLs themselves.
+    const corsCloudFrontDomain = this.node.tryGetContext('cloudFrontDomain');
     this.portalArtifactsBucket = new s3.Bucket(this, 'PortalArtifactsBucket', {
       bucketName: `dda-portal-artifacts-${this.account}-${this.region}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       versioned: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      cors: [
+        {
+          allowedOrigins: corsCloudFrontDomain
+            ? [`https://${corsCloudFrontDomain}`]
+            : ['*'],
+          allowedMethods: [
+            s3.HttpMethods.GET,
+            s3.HttpMethods.PUT,
+            s3.HttpMethods.POST,
+            s3.HttpMethods.HEAD,
+          ],
+          allowedHeaders: ['*'],
+          // Multipart uploads read each part's ETag from the response.
+          exposedHeaders: ['ETag'],
+          maxAge: 3600,
+        },
+      ],
     });
 
     // Outputs
@@ -521,6 +661,31 @@ export class StorageStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DataAccountsTableName', {
       value: this.dataAccountsTable.tableName,
       description: 'DataAccounts DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'WorkflowsTableName', {
+      value: this.workflowsTable.tableName,
+      description: 'Workflows DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'WorkflowVersionsTableName', {
+      value: this.workflowVersionsTable.tableName,
+      description: 'WorkflowVersions DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'TestDatasetsTableName', {
+      value: this.testDatasetsTable.tableName,
+      description: 'TestDatasets DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'TestRunsTableName', {
+      value: this.testRunsTable.tableName,
+      description: 'TestRuns DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'WorkflowChatSessionsTableName', {
+      value: this.workflowChatSessionsTable.tableName,
+      description: 'WorkflowChatSessions DynamoDB Table Name',
     });
 
     new cdk.CfnOutput(this, 'PortalArtifactsBucketName', {

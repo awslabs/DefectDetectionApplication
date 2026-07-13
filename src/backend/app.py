@@ -112,6 +112,10 @@ from endpoints import (
     streams
 )
 
+# Workflow Manager engine (additive subsystem, Requirement 13)
+from workflow_engine import api as workflow_engine_api
+from workflow_engine import runtime as workflow_engine_runtime
+
 import dao.sqlite_db.models as models
 from dao.sqlite_db.sqlite_db_operations import SessionLocal, engine
 from utils.camera_manager import disconnect_all_cameras, connect_camera
@@ -139,6 +143,12 @@ app.add_exception_handler(CapturedImageException, captured_image_exception_handl
 app.add_exception_handler(ImageNotFoundException, image_not_found_exception_handler)
 app.add_exception_handler(GrpcException, grpc_exception_handler)
 app.add_exception_handler(AravisCameraException, aravis_camera_exception_handler)
+
+# Registered before the legacy routers so the workflow engine's fixed
+# /workflows/registrations and /workflows/executions paths take precedence
+# over the legacy /workflows/{workflowId} parameter route; behavior of the
+# existing endpoints for real workflow ids is unchanged (Requirement 13.6).
+app.include_router(workflow_engine_api.router)
 
 app.include_router(image_source.router)
 app.include_router(camera.router)
@@ -296,6 +306,11 @@ if __name__ == "__main__":  # pragma: no cover
     # add cleanup shutdown code to this function
     logger.info("Local server init.")
     on_startup()
+
+    # Start the Workflow Manager watcher (own daemon thread). Failures are
+    # contained inside start_workflow_engine: LocalServer and every
+    # Pipeline_Configuration continue exactly as before (Requirement 13.6).
+    workflow_engine_runtime.start_workflow_engine()
 
     # The event loop should start running continously after both FastAPI server and capture task manager
     loop = asyncio.get_event_loop()

@@ -8,6 +8,7 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import { ApiGatewayStack } from './api-gateway-stack';
@@ -27,7 +28,20 @@ export interface ComputeStackProps extends cdk.StackProps {
   componentsTable: dynamodb.Table;
   sharedComponentsTable: dynamodb.Table;
   dataAccountsTable: dynamodb.Table;
+  workflowsTable: dynamodb.Table;
+  workflowVersionsTable: dynamodb.Table;
+  testDatasetsTable: dynamodb.Table;
+  testRunsTable: dynamodb.Table;
+  workflowChatSessionsTable: dynamodb.Table;
   portalArtifactsBucket: s3.Bucket;
+  /**
+   * Workflow_Test_Runner Step Functions state machine (test-runner stack).
+   * When provided, the WorkflowTestingHandler receives its ARN as the
+   * TEST_RUN_STATE_MACHINE_ARN environment variable and is granted
+   * StartExecution/DescribeExecution; without it the handler falls back to
+   * the portal settings table for runtime configuration.
+   */
+  testRunStateMachine?: sfn.IStateMachine;
   /**
    * CloudFront domain for the portal frontend.
    * Used to configure CORS on Data Account buckets during UseCase onboarding.
@@ -95,6 +109,31 @@ export class ComputeStack extends cdk.Stack {
       description: 'JWT validation dependencies (PyJWT, cryptography)',
     });
 
+    // Lambda Layer for the shared workflow_core package (node catalog, serializer,
+    // validator, compiler) used by the Workflow Manager Lambda functions. The
+    // layer asset ships only the python/ package directory; test/build files
+    // that live alongside it in the source tree are excluded.
+    const workflowCoreLayer = new lambda.LayerVersion(this, 'WorkflowCoreLayer', {
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/workflow_core'), {
+        exclude: [
+          'tests',
+          'tests/**',
+          '.hypothesis',
+          '.hypothesis/**',
+          '.pytest_cache',
+          '.pytest_cache/**',
+          '**/__pycache__',
+          '**/__pycache__/**',
+          'build.sh',
+          'pyproject.toml',
+          'requirements.txt',
+          'README.md',
+        ],
+      }),
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
+      description: 'workflow_core shared package (catalog, serializer, validator, compiler) for Workflow Manager',
+    });
+
     // Base IAM Role for Lambda functions
     const createLambdaRole = (name: string) => {
       const role = new iam.Role(this, `${name}Role`, {
@@ -118,6 +157,11 @@ export class ComputeStack extends cdk.Stack {
       props.componentsTable.grantReadWriteData(role);
       props.sharedComponentsTable.grantReadWriteData(role);
       props.dataAccountsTable.grantReadWriteData(role);
+      props.workflowsTable.grantReadWriteData(role);
+      props.workflowVersionsTable.grantReadWriteData(role);
+      props.testDatasetsTable.grantReadWriteData(role);
+      props.testRunsTable.grantReadWriteData(role);
+      props.workflowChatSessionsTable.grantReadWriteData(role);
 
       // Grant S3 permissions for portal artifacts bucket
       props.portalArtifactsBucket.grantReadWrite(role);
@@ -429,7 +473,16 @@ export class ComputeStack extends cdk.Stack {
       SETTINGS_TABLE: props.settingsTable.tableName,
       COMPONENTS_TABLE: props.componentsTable.tableName,
       SHARED_COMPONENTS_TABLE: props.sharedComponentsTable.tableName,
+      WORKFLOWS_TABLE: props.workflowsTable.tableName,
+      WORKFLOW_VERSIONS_TABLE: props.workflowVersionsTable.tableName,
+      TEST_DATASETS_TABLE: props.testDatasetsTable.tableName,
+      TEST_RUNS_TABLE: props.testRunsTable.tableName,
+      WORKFLOW_CHAT_SESSIONS_TABLE: props.workflowChatSessionsTable.tableName,
       PORTAL_ARTIFACTS_BUCKET: props.portalArtifactsBucket.bucketName,
+      // Workflow Manager documents (definitions, compiled docs, test datasets,
+      // test results) live in the portal artifacts bucket under
+      // workflows/{usecase_id}/... prefixes.
+      WORKFLOWS_S3_PREFIX: 'workflows',
       PORTAL_ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
       USER_POOL_ID: props.userPool.userPoolId,
       // Shared component configuration - update DDA_LOCAL_SERVER_VERSION when publishing new component versions
@@ -854,6 +907,143 @@ export class ComputeStack extends cdk.Stack {
     // Grant Audit Logs Lambda read access to the audit log table
     props.auditLogTable.grantReadData(auditLogsHandler);
 
+    // ------------------------------------------------------------------
+    // Workflow Manager Lambda functions
+    // Handler modules (workflows.py, workflow_validation.py,
+    // workflow_packaging.py, workflow_generator.py, workflow_testing.py)
+    // live in backend/functions alongside the existing handlers.
+    // ------------------------------------------------------------------
+
+    // Workflows Lambda Handler (Workflow_Store API - CRUD, versioning, duplicate)
+    const workflowsHandler = new lambda.Function(this, 'WorkflowsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflows.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('Workflows'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflows',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    // Workflow Validation Lambda Handler (validate endpoint + node catalog)
+    const workflowValidationHandler = new lambda.Function(this, 'WorkflowValidationHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_validation.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowValidation'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-validation',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    // Workflow Packaging Lambda Handler (Component_Packager - compile, assemble
+    // per-arch artifacts, register Greengrass Workflow_Component)
+    const workflowPackagingHandler = new lambda.Function(this, 'WorkflowPackagingHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_packaging.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowPackaging'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-packaging',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(300), // compile + multi-arch artifact staging
+      memorySize: 1024,
+      ephemeralStorageSize: cdk.Size.gibibytes(4), // plugin artifact assembly
+    });
+
+    // Workflow Generator Lambda Handler (Bedrock prompt-based generation)
+    const workflowGeneratorHandler = new lambda.Function(this, 'WorkflowGeneratorHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_generator.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowGenerator'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-generator',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      // Bedrock invocation timeout is configurable up to 60s; leave headroom
+      timeout: cdk.Duration.seconds(90),
+    });
+
+    // Grant the generator permission to invoke the configured Bedrock model via
+    // the Converse API. The model identifier is runtime configuration
+    // (Bedrock_Configuration in the settings table), so the grant covers
+    // foundation models and inference profiles rather than a fixed model ARN.
+    workflowGeneratorHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        'arn:aws:bedrock:*::foundation-model/*',
+        `arn:aws:bedrock:*:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
+
+    // The data-accounts handler serves the Bedrock model dropdown on the
+    // settings page (GET /data-accounts/bedrock-configuration/models) by
+    // listing inference profiles and foundation models. These are list
+    // actions without resource-level scoping, hence resource '*'.
+    dataAccountsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:ListFoundationModels',
+        'bedrock:ListInferenceProfiles',
+      ],
+      resources: ['*'],
+    }));
+
+    // Workflow Testing Lambda Handler (Workflow_Test_Runner API - test dataset
+    // upload/list, test run start/status/results). The Step Functions state
+    // machine and Fargate sandbox live in the test-runner stack; its ARN is
+    // wired in as TEST_RUN_STATE_MACHINE_ARN (with a settings-table fallback
+    // inside the handler for environments without the test-runner stack).
+    //
+    // Triton model staging (workflow_model_staging.py): starting a test run
+    // resolves every model_inference node's model against MODELS_TABLE,
+    // reads the CPU-variant component recipe (greengrass:GetComponent), and
+    // streams the model artifact zip from the use-case data bucket into the
+    // portal artifacts bucket for the sandbox. All of that is covered by the
+    // shared createLambdaRole grants (Greengrass components:* read, the
+    // S3 data-plane grant — bounded by dataBucketAllowlist when configured —
+    // and the models table), so NO additional IAM grant is added; the
+    // sandbox task role stays portal-artifacts-only (Requirement 12.9).
+    // The artifact copy (models can be >100 MB) is why this handler gets a
+    // longer timeout and more memory than the other workflow handlers.
+    const workflowTestingHandler = new lambda.Function(this, 'WorkflowTestingHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_testing.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowTesting'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-testing',
+        ...(props.testRunStateMachine && {
+          TEST_RUN_STATE_MACHINE_ARN: props.testRunStateMachine.stateMachineArn,
+        }),
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(300), // model artifact staging copy
+      memorySize: 1024,
+    });
+
+    // Allow the testing handler to start test-run executions and poll their
+    // status (states:StartExecution + DescribeExecution and related reads).
+    if (props.testRunStateMachine) {
+      props.testRunStateMachine.grantStartExecution(workflowTestingHandler);
+      props.testRunStateMachine.grantRead(workflowTestingHandler);
+    }
+
     // Grant SharedComponents Lambda permission to update the GDK component bucket policy
     // This is needed to add new usecase accounts to the bucket policy during onboarding
     const componentBucketName = `dda-component-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}`;
@@ -1151,6 +1341,11 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       sharedComponentsHandler,
       dataAccountsHandler,
       auditLogsHandler,
+      workflowsHandler,
+      workflowValidationHandler,
+      workflowPackagingHandler,
+      workflowGeneratorHandler,
+      workflowTestingHandler,
       lambdaEnvironment,
       createLambdaRole,
       sharedLayer,

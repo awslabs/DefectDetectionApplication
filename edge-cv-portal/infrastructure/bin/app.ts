@@ -4,6 +4,7 @@ import * as cdk from 'aws-cdk-lib';
 import { AuthStack } from '../lib/auth-stack';
 import { StorageStack } from '../lib/storage-stack';
 import { ComputeStack } from '../lib/compute-stack';
+import { TestRunnerStack } from '../lib/test-runner-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 
 const app = new cdk.App();
@@ -27,6 +28,16 @@ const authStack = new AuthStack(app, 'EdgeCVPortalAuthStack', {
 const storageStack = new StorageStack(app, 'EdgeCVPortalStorageStack', {
   env,
   description: 'Data storage infrastructure for Edge CV Portal',
+});
+
+// Test Runner Stack (Workflow_Test_Runner: Step Functions state machine +
+// Fargate sandbox in an isolated subnet). The sandbox container image tag is
+// configurable via `-c testSandboxImageTag=<tag>` (default: latest).
+const testRunnerStack = new TestRunnerStack(app, 'EdgeCVPortalTestRunnerStack', {
+  env,
+  description: 'Workflow test-runner infrastructure (Step Functions + Fargate sandbox) for Edge CV Portal',
+  testRunsTable: storageStack.testRunsTable,
+  portalArtifactsBucket: storageStack.portalArtifactsBucket,
 });
 
 // Compute Stack (Lambda functions, API Gateway)
@@ -66,7 +77,13 @@ const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   componentsTable: storageStack.componentsTable,
   sharedComponentsTable: storageStack.sharedComponentsTable,
   dataAccountsTable: storageStack.dataAccountsTable,
+  workflowsTable: storageStack.workflowsTable,
+  workflowVersionsTable: storageStack.workflowVersionsTable,
+  testDatasetsTable: storageStack.testDatasetsTable,
+  testRunsTable: storageStack.testRunsTable,
+  workflowChatSessionsTable: storageStack.workflowChatSessionsTable,
   portalArtifactsBucket: storageStack.portalArtifactsBucket,
+  testRunStateMachine: testRunnerStack.stateMachine,
   cloudFrontDomain,
   trustedUseCaseAccountIds,
   dataBucketAllowlist,

@@ -6,12 +6,27 @@ Data Accounts are separate AWS accounts that store training data,
 allowing usecases to access data cross-account.
 
 Only PortalAdmin users can manage Data Accounts.
+
+Bedrock_Configuration (workflow-manager Requirement 10.6):
+This handler also serves the Bedrock_Configuration settings API used by
+the Workflow_Generator. No dedicated /settings API Gateway route exists
+and no new routes may be added, so the configuration rides the existing
+PortalAdmin-only /data-accounts/{id} GET/PUT routes using the reserved
+id 'bedrock-configuration' (which can never collide with a real Data
+Account id - those are 12-digit AWS account ids). This handler already
+backs the portal Settings page, making it the natural carrier. Access
+is restricted to PortalAdmin via Permission.BEDROCK_CONFIG_WRITE. The
+stored item shape matches exactly what workflow_generator.py reads:
+    {setting_key: 'bedrock_configuration',
+     value: {model_id, region, max_tokens, temperature, top_p,
+             timeout_seconds}}
 """
 import json
 import os
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from datetime import datetime
+from decimal import Decimal
 import boto3
 from botocore.exceptions import ClientError
 import uuid
@@ -22,7 +37,7 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     validate_required_fields, assume_cross_account_role as assume_role,
-    require_super_user
+    require_super_user, rbac_manager, Permission
 )
 
 logger = logging.getLogger()
@@ -34,6 +49,41 @@ s3 = boto3.client('s3')
 
 # Environment variables
 DATA_ACCOUNTS_TABLE = os.environ.get('DATA_ACCOUNTS_TABLE')
+SETTINGS_TABLE = os.environ.get('SETTINGS_TABLE')
+
+# --------------------------------------------------------------------------
+# Bedrock_Configuration (workflow-manager Requirements 10.6, 10.7)
+# --------------------------------------------------------------------------
+
+# Reserved path id on /data-accounts/{id} that routes to the Bedrock
+# configuration handlers instead of the Data Account CRUD.
+BEDROCK_CONFIG_RESOURCE_ID = 'bedrock-configuration'
+
+# Settings-table key read by workflow_generator.get_bedrock_configuration().
+BEDROCK_CONFIG_SETTING_KEY = 'bedrock_configuration'
+
+# Requirement 10.7: invocation timeout is configurable up to 60 seconds.
+MAX_BEDROCK_TIMEOUT_SECONDS = 60
+
+# Must mirror workflow_generator.DEFAULT_BEDROCK_CONFIG so reads return
+# the effective configuration even before anything is stored.
+DEFAULT_BEDROCK_CONFIG = {
+    'model_id': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+    'region': os.environ.get('AWS_REGION', 'us-east-1'),
+    'max_tokens': 4096,
+    # Both sampling parameters remain part of the stored/displayed shape,
+    # but at invocation the Workflow_Generator prefers temperature: recent
+    # Anthropic models reject requests setting temperature AND top_p
+    # together, so top_p is only sent when temperature is null/absent
+    # (see workflow_generator.invoke_generation).
+    'temperature': 0.2,
+    'top_p': 0.9,
+    'timeout_seconds': MAX_BEDROCK_TIMEOUT_SECONDS,
+}
+
+# bedrock control-plane clients (list-foundation-models /
+# list-inference-profiles) cached per region for warm invocations.
+_bedrock_control_clients: Dict[str, Any] = {}
 
 
 def is_portal_admin(user: Dict) -> bool:
@@ -103,6 +153,12 @@ def handler(event: Dict, context: Any) -> Dict:
     PUT    /api/v1/data-accounts/{id}      - Update Data Account (PortalAdmin only)
     DELETE /api/v1/data-accounts/{id}      - Delete Data Account (PortalAdmin only)
     POST   /api/v1/data-accounts/{id}/test - Test connection (PortalAdmin only)
+
+    Reserved id 'bedrock-configuration' (workflow-manager Requirement 10.6,
+    PortalAdmin only via bedrock-config:write):
+    GET    /api/v1/data-accounts/bedrock-configuration        - Read Bedrock_Configuration
+    PUT    /api/v1/data-accounts/bedrock-configuration        - Update Bedrock_Configuration
+    GET    /api/v1/data-accounts/bedrock-configuration/models - List invokable model options
     """
     try:
         http_method = event.get('httpMethod')
@@ -122,6 +178,12 @@ def handler(event: Dict, context: Any) -> Dict:
             }
         
         user = get_user_from_event(event)
+        
+        # Reserved id: Bedrock_Configuration settings API (Requirement 10.6).
+        # Handled before Data Account CRUD; PortalAdmin-only via
+        # Permission.BEDROCK_CONFIG_WRITE.
+        if path_params.get('id') == BEDROCK_CONFIG_RESOURCE_ID:
+            return handle_bedrock_configuration(event, user, http_method)
         
         # List Data Accounts is allowed for all authenticated users (read-only for dropdown)
         # All other operations require PortalAdmin
@@ -404,3 +466,351 @@ def test_connection(event: Dict, user: Dict, data_account_id: str) -> Dict:
     except Exception as e:
         logger.error(f"Error testing connection: {str(e)}")
         return create_response(500, {'error': 'Failed to test connection'})
+
+
+# --------------------------------------------------------------------------
+# Bedrock_Configuration settings API (workflow-manager Requirement 10.6)
+# --------------------------------------------------------------------------
+
+def _decimal_to_native(obj):
+    """Convert Decimal objects from DynamoDB to native Python types"""
+    if isinstance(obj, Decimal):
+        return float(obj) if obj % 1 else int(obj)
+    elif isinstance(obj, dict):
+        return {k: _decimal_to_native(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_decimal_to_native(i) for i in obj]
+    return obj
+
+
+def _native_to_dynamo(obj):
+    """Convert native Python floats to Decimal for DynamoDB storage"""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    elif isinstance(obj, dict):
+        return {k: _native_to_dynamo(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_native_to_dynamo(i) for i in obj]
+    return obj
+
+
+def read_stored_bedrock_configuration() -> Dict:
+    """
+    Effective Bedrock_Configuration: stored values merged over defaults,
+    timeout clamped to at most 60 seconds. Mirrors the read logic in
+    workflow_generator.get_bedrock_configuration() so the settings UI
+    shows exactly what the Workflow_Generator will use.
+    """
+    config = dict(DEFAULT_BEDROCK_CONFIG)
+    if SETTINGS_TABLE:
+        try:
+            response = dynamodb.Table(SETTINGS_TABLE).get_item(
+                Key={'setting_key': BEDROCK_CONFIG_SETTING_KEY}
+            )
+            item = response.get('Item')
+            if item:
+                stored = item.get('value') if isinstance(item.get('value'), dict) else item
+                stored = _decimal_to_native(stored)
+                for key in DEFAULT_BEDROCK_CONFIG:
+                    if stored.get(key) is not None:
+                        config[key] = stored[key]
+        except ClientError as e:
+            logger.warning(f"Could not read Bedrock configuration, using defaults: {str(e)}")
+
+    try:
+        timeout = int(config['timeout_seconds'])
+    except (TypeError, ValueError):
+        timeout = MAX_BEDROCK_TIMEOUT_SECONDS
+    config['timeout_seconds'] = max(1, min(timeout, MAX_BEDROCK_TIMEOUT_SECONDS))
+    return config
+
+
+def _is_number(value) -> bool:
+    """True for int/float but not bool (bool is a subclass of int)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def validate_bedrock_configuration(config: Dict) -> List[str]:
+    """
+    Validate a complete Bedrock_Configuration value. Returns a list of
+    human-readable validation errors (empty when valid).
+    """
+    errors = []
+
+    model_id = config.get('model_id')
+    if not isinstance(model_id, str) or not model_id.strip():
+        errors.append('model_id must be a non-empty string')
+
+    region = config.get('region')
+    if not isinstance(region, str) or not region.strip():
+        errors.append('region must be a non-empty string')
+
+    max_tokens = config.get('max_tokens')
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
+        errors.append('max_tokens must be a positive integer')
+
+    temperature = config.get('temperature')
+    if not _is_number(temperature) or not (0 <= temperature <= 1):
+        errors.append('temperature must be a number between 0 and 1')
+
+    top_p = config.get('top_p')
+    if not _is_number(top_p) or not (0 <= top_p <= 1):
+        errors.append('top_p must be a number between 0 and 1')
+
+    timeout_seconds = config.get('timeout_seconds')
+    if (not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool)
+            or not (1 <= timeout_seconds <= MAX_BEDROCK_TIMEOUT_SECONDS)):
+        errors.append(
+            f'timeout_seconds must be an integer between 1 and {MAX_BEDROCK_TIMEOUT_SECONDS}')
+
+    return errors
+
+
+def handle_bedrock_configuration(event: Dict, user: Dict, http_method: str) -> Dict:
+    """
+    Route Bedrock_Configuration requests. Restricted to PortalAdmin via
+    Permission.BEDROCK_CONFIG_WRITE (Requirement 10.6); denied attempts
+    are audit-logged.
+    """
+    if not rbac_manager.has_permission(
+            user['user_id'], 'global', Permission.BEDROCK_CONFIG_WRITE, user_info=user):
+        log_audit_event(
+            user_id=user['user_id'],
+            action='unauthorized_access',
+            resource_type='setting',
+            resource_id=BEDROCK_CONFIG_SETTING_KEY,
+            result='denied',
+            details={
+                'required_permissions': [Permission.BEDROCK_CONFIG_WRITE.value],
+                'method': http_method,
+                'path': event.get('path'),
+            }
+        )
+        return create_response(403, {
+            'error': 'PortalAdmin access required',
+            'required_permissions': [Permission.BEDROCK_CONFIG_WRITE.value],
+        })
+
+    # GET /data-accounts/bedrock-configuration/models: invokable model
+    # options for the settings-page model dropdown. Read-gated exactly like
+    # the configuration GET above (same PortalAdmin permission check).
+    is_models_path = (event.get('path') or '').rstrip('/').endswith('/models')
+    if http_method == 'GET' and is_models_path:
+        return list_bedrock_model_options(event, user)
+    if http_method == 'GET':
+        return get_bedrock_configuration_setting(event, user)
+    if http_method == 'PUT':
+        return update_bedrock_configuration_setting(event, user)
+    return create_response(404, {'error': 'Not found'})
+
+
+def get_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
+    """Return the effective Bedrock_Configuration (stored over defaults)."""
+    try:
+        if not SETTINGS_TABLE:
+            return create_response(500, {'error': 'Settings storage is not configured'})
+        return create_response(200, {
+            'bedrock_configuration': read_stored_bedrock_configuration(),
+            'defaults': DEFAULT_BEDROCK_CONFIG,
+            'max_timeout_seconds': MAX_BEDROCK_TIMEOUT_SECONDS,
+        })
+    except Exception as e:
+        logger.error(f"Error reading Bedrock configuration: {str(e)}")
+        return create_response(500, {'error': 'Failed to read Bedrock configuration'})
+
+
+def update_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
+    """
+    Update the Bedrock_Configuration. Accepts any subset of the known
+    keys; the provided values are merged over the current effective
+    configuration, the merged result is validated, and the complete
+    value is written in the exact shape workflow_generator.py reads:
+        {setting_key: 'bedrock_configuration', value: {...}}
+    """
+    try:
+        if not SETTINGS_TABLE:
+            return create_response(500, {'error': 'Settings storage is not configured'})
+
+        try:
+            body = json.loads(event.get('body') or '{}')
+        except (json.JSONDecodeError, TypeError):
+            return create_response(400, {'error': 'Request body is not valid JSON'})
+        if not isinstance(body, dict):
+            return create_response(400, {'error': 'Request body must be a JSON object'})
+
+        # Merge provided keys over the current effective configuration;
+        # unknown keys are ignored.
+        config = read_stored_bedrock_configuration()
+        for key in DEFAULT_BEDROCK_CONFIG:
+            if key in body:
+                config[key] = body[key]
+
+        errors = validate_bedrock_configuration(config)
+        if errors:
+            return create_response(400, {
+                'error': 'Invalid Bedrock configuration',
+                'validation_errors': errors,
+            })
+
+        value = {key: config[key] for key in DEFAULT_BEDROCK_CONFIG}
+        value['model_id'] = value['model_id'].strip()
+        value['region'] = value['region'].strip()
+
+        timestamp = int(datetime.utcnow().timestamp() * 1000)
+        dynamodb.Table(SETTINGS_TABLE).put_item(Item={
+            'setting_key': BEDROCK_CONFIG_SETTING_KEY,
+            'value': _native_to_dynamo(value),
+            'updated_at': timestamp,
+            'updated_by': user['user_id'],
+        })
+
+        log_audit_event(
+            user_id=user['user_id'],
+            action='update_bedrock_configuration',
+            resource_type='setting',
+            resource_id=BEDROCK_CONFIG_SETTING_KEY,
+            result='success',
+            details=_native_to_dynamo(value),
+        )
+
+        return create_response(200, {
+            'message': 'Bedrock configuration updated successfully',
+            'bedrock_configuration': value,
+        })
+
+    except Exception as e:
+        logger.error(f"Error updating Bedrock configuration: {str(e)}")
+        return create_response(500, {'error': 'Failed to update Bedrock configuration'})
+
+
+# --------------------------------------------------------------------------
+# Bedrock model options (settings-page model dropdown)
+# --------------------------------------------------------------------------
+
+def _get_bedrock_control_client(region: str):
+    """bedrock control-plane client (list APIs), cached per region."""
+    client = _bedrock_control_clients.get(region)
+    if client is None:
+        client = boto3.client('bedrock', region_name=region)
+        _bedrock_control_clients[region] = client
+    return client
+
+
+def _is_access_denied(error: ClientError) -> bool:
+    code = error.response.get('Error', {}).get('Code', '')
+    return code in ('AccessDenied', 'AccessDeniedException', 'UnauthorizedOperation')
+
+
+def _list_inference_profiles(client) -> List[Dict]:
+    """All system-defined inference profile summaries (paginated)."""
+    summaries: List[Dict] = []
+    next_token = None
+    while True:
+        kwargs = {'maxResults': 100}
+        if next_token:
+            kwargs['nextToken'] = next_token
+        response = client.list_inference_profiles(**kwargs)
+        summaries.extend(response.get('inferenceProfileSummaries', []))
+        next_token = response.get('nextToken')
+        if not next_token:
+            return summaries
+
+
+def list_bedrock_model_options(event: Dict, user: Dict) -> Dict:
+    """
+    GET /data-accounts/bedrock-configuration/models
+
+    Invokable model options for the settings-page model dropdown, resolved
+    for the configured region (or ?region=... override):
+
+    - Inference profiles (bedrock:ListInferenceProfiles): these are the
+      invokable ids for current Anthropic models (prefixed us./global./...).
+      Listed as {id: inferenceProfileId, label: inferenceProfileName}.
+    - Foundation models (bedrock:ListFoundationModels) with
+      modelLifecycle.status == ACTIVE, included only when directly
+      invokable (inferenceTypesSupported contains ON_DEMAND).
+
+    Deduplicated (an inference profile wins over the foundation model it
+    fronts) and sorted anthropic-first, then alphabetically. When the
+    Lambda lacks the bedrock list permissions, returns an empty list plus
+    a 'permissions' hint so the UI can fall back to free-text entry.
+    """
+    try:
+        query = event.get('queryStringParameters') or {}
+        region = (query.get('region') or '').strip() \
+            or read_stored_bedrock_configuration()['region']
+        client = _get_bedrock_control_client(region)
+
+        access_denied = False
+        profile_options: List[Dict] = []
+        try:
+            for profile in _list_inference_profiles(client):
+                profile_id = profile.get('inferenceProfileId')
+                if profile_id:
+                    profile_options.append({
+                        'id': profile_id,
+                        'label': profile.get('inferenceProfileName') or profile_id,
+                    })
+        except ClientError as e:
+            if not _is_access_denied(e):
+                raise
+            access_denied = True
+
+        # Foundation model ids fronted by a listed inference profile are
+        # dropped: the profile id (e.g. us.anthropic....) is the invokable
+        # one for those models. Profile ids are '<prefix>.<model-id>'.
+        profile_base_ids = {
+            option['id'].split('.', 1)[1]
+            for option in profile_options if '.' in option['id']
+        }
+
+        model_options: List[Dict] = []
+        try:
+            response = client.list_foundation_models()
+            for summary in response.get('modelSummaries', []):
+                model_id = summary.get('modelId')
+                if not model_id:
+                    continue
+                if summary.get('modelLifecycle', {}).get('status') != 'ACTIVE':
+                    continue
+                if 'ON_DEMAND' not in (summary.get('inferenceTypesSupported') or []):
+                    continue
+                if model_id in profile_base_ids:
+                    continue
+                model_options.append({
+                    'id': model_id,
+                    'label': summary.get('modelName') or model_id,
+                })
+        except ClientError as e:
+            if not _is_access_denied(e):
+                raise
+            access_denied = True
+
+        def sort_key(option: Dict):
+            model_id = option['id']
+            base_id = model_id.split('.', 1)[1] if '.' in model_id else model_id
+            is_anthropic = (base_id.startswith('anthropic.')
+                            or model_id.startswith('anthropic.'))
+            return (0 if is_anthropic else 1, option['label'].lower(), model_id)
+
+        # Deduplicate by id (profiles first so they win), then sort.
+        seen = set()
+        options = []
+        for option in profile_options + model_options:
+            if option['id'] not in seen:
+                seen.add(option['id'])
+                options.append(option)
+        options.sort(key=sort_key)
+
+        payload: Dict[str, Any] = {'models': options, 'region': region}
+        if access_denied:
+            payload['permissions'] = (
+                'Missing bedrock:ListInferenceProfiles and/or '
+                'bedrock:ListFoundationModels permission; enter the model '
+                'id manually.'
+            )
+        return create_response(200, payload)
+
+    except Exception as e:
+        logger.error(f"Error listing Bedrock model options: {str(e)}")
+        return create_response(500, {'error': 'Failed to list Bedrock model options'})
