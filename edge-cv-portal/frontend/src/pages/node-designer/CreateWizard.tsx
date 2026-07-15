@@ -57,6 +57,7 @@ import {
   parametersStepErrors,
   portsStepErrors,
 } from './declaration';
+import ParameterScanPanel from './ParameterScanPanel';
 import { downloadZip } from './zip';
 
 const initialForm = (): WizardForm => ({
@@ -459,6 +460,17 @@ export default function CreateWizard() {
                 {attempted && stepErrors[2].length > 0 && (
                   <Alert type="error">{stepErrors[2].join(' ')}</Alert>
                 )}
+                {/*
+                 * No plugin context (no pluginId/version): the panel renders
+                 * the static "scanning requires a built plugin" notice — no
+                 * Plugin_Artifact exists before the first build (5.6, 7.1).
+                 * onMerge never fires without plugin context, but wiring it
+                 * through patch keeps the props type-correct.
+                 */}
+                <ParameterScanPanel
+                  parameters={form.parameters}
+                  onMerge={({ parameters }) => patch({ parameters })}
+                />
                 <Box>
                   <Button
                     onClick={() =>

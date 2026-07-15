@@ -125,23 +125,39 @@ export function formFromDeclaration(
       : [];
 
   const parameters: ParameterForm[] = Array.isArray(declaration.parameters)
-    ? (declaration.parameters as any[]).map((parameter) => ({
-        name: String(parameter?.name ?? ''),
-        paramType: String(parameter?.paramType ?? 'string'),
-        required: Boolean(parameter?.required),
-        defaultValue:
-          parameter?.default === undefined || parameter?.default === null
-            ? ''
-            : String(parameter.default),
-        description: String(parameter?.description ?? ''),
-        example:
-          Array.isArray(parameter?.examples) && parameter.examples.length > 0
-            ? String(parameter.examples[0])
+    ? (declaration.parameters as any[]).map((parameter) => {
+        const form: ParameterForm = {
+          name: String(parameter?.name ?? ''),
+          paramType: String(parameter?.paramType ?? 'string'),
+          required: Boolean(parameter?.required),
+          defaultValue:
+            parameter?.default === undefined || parameter?.default === null
+              ? ''
+              : String(parameter.default),
+          description: String(parameter?.description ?? ''),
+          example:
+            Array.isArray(parameter?.examples) && parameter.examples.length > 0
+              ? String(parameter.examples[0])
+              : '',
+          enumValues: Array.isArray(parameter?.constraints?.values)
+            ? (parameter.constraints.values as unknown[]).map(String).join(', ')
             : '',
-        enumValues: Array.isArray(parameter?.constraints?.values)
-          ? (parameter.constraints.values as unknown[]).map(String).join(', ')
-          : '',
-      }))
+        };
+        // Numeric min/max ride-along retained on the row so the
+        // assembled declaration re-emits it (3.3).
+        const min = parameter?.constraints?.min;
+        const max = parameter?.constraints?.max;
+        if (typeof min === 'number' || typeof max === 'number') {
+          form.constraints = {};
+          if (typeof min === 'number') {
+            form.constraints.min = min;
+          }
+          if (typeof max === 'number') {
+            form.constraints.max = max;
+          }
+        }
+        return form;
+      })
     : [];
 
   const declared = new Map<string, any>();

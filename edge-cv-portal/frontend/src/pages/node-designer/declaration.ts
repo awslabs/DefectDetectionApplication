@@ -32,6 +32,13 @@ export interface ParameterForm {
   example: string;
   /** enum only: comma-separated allowed values. */
   enumValues: string;
+  /**
+   * Numeric min/max ride-along (gst-parameter-prepopulation, 3.3):
+   * carried on the row from a scanned Parameter_Suggestion (or a
+   * stored declaration) with no editable UI; parameterFromForm
+   * re-emits it so the constraints survive declaration assembly.
+   */
+  constraints?: { min?: number; max?: number };
 }
 
 export interface WizardForm {
@@ -129,6 +136,18 @@ function parameterFromForm(parameter: ParameterForm): ParameterDeclaration {
       .map((value) => value.trim())
       .filter((value) => value.length > 0);
     declaration.constraints = { values };
+  } else if (parameter.constraints) {
+    // Numeric min/max ride-along re-emitted verbatim (3.3).
+    const constraints: Record<string, unknown> = {};
+    if (parameter.constraints.min !== undefined) {
+      constraints.min = parameter.constraints.min;
+    }
+    if (parameter.constraints.max !== undefined) {
+      constraints.max = parameter.constraints.max;
+    }
+    if (Object.keys(constraints).length > 0) {
+      declaration.constraints = constraints;
+    }
   }
   return declaration;
 }

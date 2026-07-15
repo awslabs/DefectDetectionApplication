@@ -92,6 +92,14 @@ from plugin_records import (
     plugin_table,
     successful_build_archs,
 )
+# Introspection_Report shape validation (gst-parameter-prepopulation
+# design component 4): pure module shipped alongside this handler.
+from gst_properties import (
+    ReportError,
+    STATUS_CAPTURED,
+    STATUS_FAILED,
+    parse_report,
+)
 
 # Configure logging
 logger = logging.getLogger()
@@ -170,6 +178,15 @@ ERROR_LINE_PATTERN = re.compile(
 #: object already synced under the version's plugin-sources prefix).
 MAX_PREBUILT_INLINE_BYTES = 6 * 1024 * 1024
 
+#: Property_Introspection runs on x86_64 only (gst-parameter-prepopulation
+#: design: GObject property declarations are architecture-independent and
+#: the x86_64 build is the designer's gating artifact everywhere else).
+INTROSPECTION_ARCH = 'x86_64'
+
+#: Size cap on stored Introspection_Report objects
+#: (gst-parameter-prepopulation design component 3).
+GST_REPORT_MAX_BYTES = 256 * 1024
+
 
 # ------------------------------------------------------------ pure helpers
 
@@ -187,6 +204,12 @@ def library_so_key(usecase_id: str, arch: str, plugin_name: str) -> str:
 def signature_key(so_key: str) -> str:
     """Detached signature key alongside the artifact (design S3 layout)"""
     return so_key + '.sig'
+
+
+def gst_report_key(so_key: str) -> str:
+    """Introspection_Report key alongside the promoted artifact
+    ({plugin}.so.gstinspect.json, gst-parameter-prepopulation design)"""
+    return so_key + '.gstinspect.json'
 
 
 def sha256_hex(data: bytes) -> str:
@@ -352,6 +375,74 @@ def store_signed_artifact(usecase_id: str, arch: str, plugin_name: str,
     return {'s3Key': so_key, 'checksum': checksum, 'signature': signature}
 
 
+def build_gst_introspection_stanza(so_key: str) -> Dict:
+    """
+    gstIntrospection stanza for the x86_64 artifact entry
+    (gst-parameter-prepopulation Requirements 1.1, 1.6): fetch the
+    Introspection_Report the build uploaded next to the promoted .so
+    ({plugin}.so.gstinspect.json), enforce the 256 KiB size cap, and
+    validate its shape via gst_properties.parse_report.
+
+    Returns either:
+      - {status: "captured", s3Key, gstVersion, capturedAt} for a valid
+        captured report, or
+      - {status: "failed", message} for a report that itself recorded a
+        capture failure (its message is carried through), a missing
+        object, an oversized object, or malformed JSON/shape (8.3
+        handled at write time too).
+
+    Never raises: any unexpected error is folded into a failed stanza so
+    the SUCCEEDED handling is untouched (Requirement 1.4).
+    """
+    report_key = gst_report_key(so_key)
+    try:
+        try:
+            obj = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET,
+                                Key=report_key)
+        except ClientError as e:
+            if e.response.get('Error', {}).get('Code') in ('NoSuchKey', '404'):
+                return {'status': STATUS_FAILED,
+                        'message': 'No introspection report was uploaded '
+                                   'by the build'}
+            raise
+
+        size = obj.get('ContentLength')
+        if size is not None and size > GST_REPORT_MAX_BYTES:
+            return {'status': STATUS_FAILED,
+                    'message': f'Introspection report exceeds the '
+                               f'{GST_REPORT_MAX_BYTES // 1024} KiB size cap '
+                               f'({size} bytes)'}
+        data = obj['Body'].read(GST_REPORT_MAX_BYTES + 1)
+        if len(data) > GST_REPORT_MAX_BYTES:
+            return {'status': STATUS_FAILED,
+                    'message': f'Introspection report exceeds the '
+                               f'{GST_REPORT_MAX_BYTES // 1024} KiB size cap'}
+
+        try:
+            report = parse_report(json.loads(data.decode('utf-8')))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {'status': STATUS_FAILED,
+                    'message': 'Introspection report is not valid JSON'}
+        except ReportError as e:
+            return {'status': STATUS_FAILED,
+                    'message': f'Introspection report is malformed: {e}'}
+
+        if report.status != STATUS_CAPTURED:
+            return {'status': STATUS_FAILED,
+                    'message': report.message
+                    or 'Introspection reported a capture failure'}
+
+        return {'status': STATUS_CAPTURED,
+                's3Key': report_key,
+                'gstVersion': report.gst_version,
+                'capturedAt': report.captured_at}
+    except Exception as e:  # introspection recording never fails the build (1.4)
+        logger.warning(
+            f"Could not record introspection report {report_key}: {e}")
+        return {'status': STATUS_FAILED,
+                'message': f'Could not record introspection report: {e}'}
+
+
 def record_promoted_artifact(usecase_id: str, arch: str,
                              plugin_name: str) -> Optional[Dict]:
     """
@@ -360,6 +451,12 @@ def record_promoted_artifact(usecase_id: str, arch: str,
     the digest with the portal key, and (re)write the authoritative
     detached signature. Returns the artifact entry fields, or None when
     the promoted object is missing.
+
+    For the x86_64 artifact the entry additionally carries the
+    gstIntrospection stanza validated from the report the build uploaded
+    next to the promoted .so (gst-parameter-prepopulation 1.1, 1.6);
+    stanza recording is best-effort and never alters the build outcome
+    (1.4). Non-x86_64 entries are unchanged.
     """
     so_key = library_so_key(usecase_id, arch, plugin_name)
     try:
@@ -373,7 +470,10 @@ def record_promoted_artifact(usecase_id: str, arch: str,
     signature = sign_digest(hashlib.sha256(data).digest())
     s3.put_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=signature_key(so_key),
                   Body=base64.b64decode(signature))
-    return {'s3Key': so_key, 'checksum': checksum, 'signature': signature}
+    fields = {'s3Key': so_key, 'checksum': checksum, 'signature': signature}
+    if arch == INTROSPECTION_ARCH:
+        fields['gstIntrospection'] = build_gst_introspection_stanza(so_key)
+    return fields
 
 
 def extract_error_excerpt(lines: List[str]) -> str:

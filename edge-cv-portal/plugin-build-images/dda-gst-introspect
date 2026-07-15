@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""dda-gst-introspect - GStreamer plugin property introspection (custom-node-designer,
+gst-parameter-prepopulation).
+
+Ships at /usr/local/bin/dda-gst-introspect in the dda-plugin-build:x86_64
+image; `dda-plugin-build` runs it after promoting the built artifacts:
+
+    dda-gst-introspect <plugin-scan-dir> [plugin-file-basename]
+
+stdout is exactly one Introspection_Report JSON document (version 1), the
+shape `plugin_builds.py` validates and `gst_properties.py`'s parse_report
+consumes:
+
+    {
+      "reportVersion": 1,
+      "status": "captured" | "failed",
+      "message": str | null,
+      "gstVersion": str | null,
+      "capturedAt": ISO-8601 UTC str | null,
+      "elements": [
+        { "factory": str, "elementGType": str,
+          "instantiationError": str | null,
+          "properties": [
+            { "name": str, "gtype": str, "owner": str, "writable": bool,
+              "blurb": str | null, "default": JSON scalar | null,
+              "min": number | null, "max": number | null,
+              "enumValues": [{"value": int, "nick": str}, ...] | null } ] } ]
+    }
+
+Behavior (Requirements 1.1-1.4):
+  - GST_PLUGIN_PATH is pointed at <plugin-scan-dir> BEFORE Gst.init, and only
+    element factories whose plugin file lives under that directory are
+    reported - never the distro's elements. An optional second argument
+    restricts the scan to one plugin file basename.
+  - Per factory: factory.load() + Gst.ElementFactory.make, then every
+    GObject.list_properties() pspec is recorded with its name, GType name,
+    owner GType (base-class filtering ground truth, Requirement 1.3),
+    writability, blurb, default, numeric min/max where ranged, and GEnum
+    values with nicks where applicable (Requirement 1.2).
+  - Elements that cannot be instantiated are recorded with an
+    instantiationError and an empty property list; a scan dir that registers
+    no factories yields status "failed" with a diagnostic (Requirement 1.4).
+  - Content failures NEVER produce a non-zero exit: every failure mode is
+    encoded as a {"status": "failed", ...} document so the calling build
+    script stays a dumb pipe and the build's success status is preserved
+    (Requirement 1.4). Diagnostics go to stderr only; stdout carries nothing
+    but the one JSON document.
+"""
+import json
+import math
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+REPORT_VERSION = 1
+
+# GTypes whose pspecs carry a numeric range (GParamSpec minimum/maximum).
+INT_GTYPES = {'gint', 'guint', 'gint64', 'guint64', 'glong', 'gulong', 'guchar'}
+FLOAT_GTYPES = {'gfloat', 'gdouble'}
+
+
+def log(message):
+    """Diagnostics to stderr; stdout is reserved for the report document."""
+    print('[dda-gst-introspect] %s' % message, file=sys.stderr)
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def emit(document):
+    """Print the one report document to stdout and exit 0."""
+    json.dump(document, sys.stdout, indent=2, sort_keys=False, allow_nan=False)
+    sys.stdout.write('\n')
+    sys.stdout.flush()
+    sys.exit(0)
+
+
+def failed_report(message, gst_version=None):
+    return {
+        'reportVersion': REPORT_VERSION,
+        'status': 'failed',
+        'message': message,
+        'gstVersion': gst_version,
+        'capturedAt': utc_now_iso(),
+        'elements': [],
+    }
+
+
+def finite_or_none(value):
+    """Clamp non-finite floats to null - the report is strict JSON."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def enum_values_for(pspec, GObject):
+    """[{value, nick}] for GEnum pspecs, sorted by value; None otherwise."""
+    try:
+        if not GObject.type_is_a(pspec.value_type, GObject.TYPE_ENUM):
+            return None
+        # __enum_values__ maps int value -> enum member. Use the keys for
+        # the integer values: PyGObject enum members expose value_nick but
+        # (on e.g. Ubuntu 22.04's PyGObject 3.42) no `.value` attribute.
+        entries = pspec.enum_class.__enum_values__
+        values = [{'value': int(value), 'nick': str(member.value_nick)}
+                  for value, member in entries.items()]
+        values.sort(key=lambda entry: entry['value'])
+        return values
+    except Exception as exc:  # noqa: BLE001 - best-effort per property
+        log('WARNING: could not read enum values for property %r: %s'
+            % (pspec.name, exc))
+        return None
+
+
+def default_for(pspec, gtype_name, enum_values):
+    """The pspec default as a JSON scalar (GEnum -> the default's nick)."""
+    try:
+        raw = pspec.default_value
+    except Exception:
+        return None
+    if enum_values is not None:
+        try:
+            default_int = int(raw)
+        except (TypeError, ValueError):
+            return None
+        for entry in enum_values:
+            if entry['value'] == default_int:
+                return entry['nick']
+        return None
+    if gtype_name == 'gboolean':
+        return bool(raw)
+    if gtype_name in INT_GTYPES:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+    if gtype_name in FLOAT_GTYPES:
+        try:
+            return finite_or_none(float(raw))
+        except (TypeError, ValueError):
+            return None
+    if gtype_name == 'gchararray':
+        return raw if isinstance(raw, str) else None
+    # Unmapped GTypes are skipped downstream; keep a default only when it is
+    # already a plain JSON scalar.
+    if isinstance(raw, bool) or isinstance(raw, (int, str)):
+        return raw
+    if isinstance(raw, float):
+        return finite_or_none(raw)
+    return None
+
+
+def range_for(pspec, gtype_name):
+    """(min, max) for ranged numeric pspecs, (None, None) otherwise."""
+    if gtype_name not in INT_GTYPES and gtype_name not in FLOAT_GTYPES:
+        return None, None
+    minimum = getattr(pspec, 'minimum', None)
+    maximum = getattr(pspec, 'maximum', None)
+    if minimum is None or maximum is None:
+        return None, None
+    try:
+        if gtype_name in INT_GTYPES:
+            return int(minimum), int(maximum)
+        return finite_or_none(float(minimum)), finite_or_none(float(maximum))
+    except (TypeError, ValueError):
+        return None, None
+
+
+def describe_property(pspec, GObject):
+    gtype_name = str(pspec.value_type.name)
+    enum_values = enum_values_for(pspec, GObject)
+    minimum, maximum = range_for(pspec, gtype_name)
+    blurb = pspec.blurb
+    return {
+        'name': str(pspec.name),
+        'gtype': gtype_name,
+        'owner': str(pspec.owner_type.name),
+        'writable': bool(pspec.flags & GObject.ParamFlags.WRITABLE),
+        'blurb': str(blurb) if blurb is not None else None,
+        'default': default_for(pspec, gtype_name, enum_values),
+        'min': minimum,
+        'max': maximum,
+        'enumValues': enum_values,
+    }
+
+
+def describe_factory(factory, Gst, GObject):
+    """One report element for a factory: load, instantiate, list properties."""
+    factory_name = str(factory.get_name())
+    element_gtype = 'unknown'
+    try:
+        loaded = factory.load()
+        if loaded is None:
+            raise RuntimeError('factory.load() returned no loaded factory')
+        factory = loaded
+        gtype = factory.get_element_type()
+        if gtype is not None and gtype.name:
+            element_gtype = str(gtype.name)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            'factory': factory_name,
+            'elementGType': element_gtype,
+            'instantiationError': 'failed to load factory: %s' % exc,
+            'properties': [],
+        }
+
+    try:
+        element = Gst.ElementFactory.make(factory_name, None)
+        if element is None:
+            raise RuntimeError('Gst.ElementFactory.make returned no element')
+    except Exception as exc:  # noqa: BLE001
+        return {
+            'factory': factory_name,
+            'elementGType': element_gtype,
+            'instantiationError': str(exc),
+            'properties': [],
+        }
+
+    element_gtype = str(element.__gtype__.name)
+    properties = []
+    for pspec in element.list_properties():
+        try:
+            properties.append(describe_property(pspec, GObject))
+        except Exception as exc:  # noqa: BLE001 - skip only the broken pspec
+            log('WARNING: skipping unreadable property %r on %r: %s'
+                % (getattr(pspec, 'name', '?'), factory_name, exc))
+    return {
+        'factory': factory_name,
+        'elementGType': element_gtype,
+        'instantiationError': None,
+        'properties': properties,
+    }
+
+
+def plugin_filename_under(plugin, scan_dir):
+    """True when the factory's plugin file lives under the scan directory."""
+    filename = plugin.get_filename() if plugin is not None else None
+    if not filename:
+        return False
+    real = os.path.realpath(filename)
+    return real == scan_dir or real.startswith(scan_dir + os.sep)
+
+
+def scan(scan_dir, basename):
+    """Introspect the plugins under scan_dir; return the report document."""
+    # GST_PLUGIN_PATH must point at the scan dir BEFORE Gst.init so the
+    # freshly built plugins register; a private registry keeps this run
+    # isolated from any cached system registry.
+    os.environ['GST_PLUGIN_PATH'] = scan_dir
+    os.environ.setdefault(
+        'GST_REGISTRY',
+        os.path.join(tempfile.mkdtemp(prefix='dda-gst-introspect.'), 'registry.bin'))
+    os.environ.setdefault('GST_REGISTRY_FORK', 'no')
+
+    try:
+        import gi
+        gi.require_version('Gst', '1.0')
+        from gi.repository import GObject, Gst
+    except Exception as exc:  # noqa: BLE001
+        return failed_report('GStreamer GI bindings unavailable: %s' % exc)
+
+    try:
+        Gst.init(None)
+    except Exception as exc:  # noqa: BLE001
+        return failed_report('Gst.init failed: %s' % exc)
+
+    gst_version = '%d.%d.%d' % Gst.version()[:3]
+
+    try:
+        registry = Gst.Registry.get()
+        factories = []
+        for feature in registry.get_feature_list(Gst.ElementFactory):
+            plugin = feature.get_plugin()
+            if not plugin_filename_under(plugin, scan_dir):
+                continue
+            if basename and os.path.basename(plugin.get_filename() or '') != basename:
+                continue
+            factories.append(feature)
+    except Exception as exc:  # noqa: BLE001
+        return failed_report('failed to enumerate element factories: %s' % exc,
+                             gst_version)
+
+    if not factories:
+        detail = (' matching plugin file %r' % basename) if basename else ''
+        return failed_report(
+            'no element factories registered by plugins under %r%s '
+            '(is the .so a GStreamer plugin built for this platform?)'
+            % (scan_dir, detail), gst_version)
+
+    factories.sort(key=lambda f: str(f.get_name()))
+    elements = []
+    for factory in factories:
+        log('Introspecting element factory %r' % str(factory.get_name()))
+        elements.append(describe_factory(factory, Gst, GObject))
+
+    return {
+        'reportVersion': REPORT_VERSION,
+        'status': 'captured',
+        'message': None,
+        'gstVersion': gst_version,
+        'capturedAt': utc_now_iso(),
+        'elements': elements,
+    }
+
+
+def main(argv):
+    if len(argv) < 2 or len(argv) > 3:
+        # Usage errors still emit a failed document and exit 0: the calling
+        # build script is a dumb pipe (Requirement 1.4).
+        emit(failed_report(
+            'usage: dda-gst-introspect <plugin-scan-dir> [plugin-file-basename]'))
+
+    scan_dir = os.path.realpath(argv[1])
+    basename = argv[2] if len(argv) == 3 else None
+
+    if not os.path.isdir(scan_dir):
+        emit(failed_report('plugin scan directory %r does not exist' % argv[1]))
+
+    try:
+        document = scan(scan_dir, basename)
+    except Exception as exc:  # noqa: BLE001 - catastrophic, still exit 0
+        log('ERROR: unexpected introspection failure: %s' % exc)
+        document = failed_report('unexpected introspection failure: %s' % exc)
+    emit(document)
+
+
+if __name__ == '__main__':
+    main(sys.argv)

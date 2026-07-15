@@ -153,6 +153,11 @@ export class NodeDesignerApiStack extends cdk.NestedStack {
     // per-arch builds with the selection as the PLUGIN_TARGETS env override.
     addMethod(versionResource.addResource('select-plugins'), 'POST', importerIntegration);
 
+    // Stored Introspection_Report with derived Parameter_Suggestions, or a
+    // machine-readable unavailability reason (gst-parameter-prepopulation
+    // 1.5, 1.6) — served by plugin_records.py.
+    addMethod(versionResource.addResource('gst-properties'), 'GET', recordsIntegration);
+
     // Lifecycle transitions and security review (plugin_records.py).
     addMethod(versionResource.addResource('promote'), 'POST', recordsIntegration);
     addMethod(versionResource.addResource('demote'), 'POST', recordsIntegration);

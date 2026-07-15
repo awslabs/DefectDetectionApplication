@@ -55,6 +55,11 @@ async function renderLibrary(plugins: PluginRecordSummary[]) {
   listPlugins.mockResolvedValue({ plugins, count: plugins.length });
   render(<PluginLibrary />);
   await waitFor(() => expect(listPlugins).toHaveBeenCalled());
+  // Wait for the fetched rows to actually render; asserting right after
+  // the fetch call resolves races React's state update under load.
+  if (plugins.length > 0) {
+    await screen.findAllByText(plugins[0].name);
+  }
 }
 
 beforeEach(() => {

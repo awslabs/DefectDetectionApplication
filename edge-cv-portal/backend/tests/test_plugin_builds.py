@@ -762,3 +762,151 @@ class TestErrorExcerpt:
 
     def test_empty_lines(self, benv):
         assert benv.module.extract_error_excerpt([]) == ""
+
+
+class TestGstIntrospectionStanza:
+    """gstIntrospection stanza recording on the x86_64 artifact entry
+    (gst-parameter-prepopulation task 4.4, Requirements 1.4, 1.6).
+
+    The SUCCEEDED path validates the report the build uploaded next to
+    the promoted .so ({plugin}.so.gstinspect.json) and records either a
+    captured stanza {status, s3Key, gstVersion, capturedAt} or a failed
+    stanza {status, message}; recording is best-effort and never alters
+    the build's succeeded status (1.4)."""
+
+    #: A valid captured Introspection_Report (gst_properties shape v1).
+    CAPTURED_REPORT = {
+        "reportVersion": 1,
+        "status": "captured",
+        "gstVersion": "1.20.3",
+        "capturedAt": "2025-01-15T10:30:00Z",
+        "elements": [{
+            "factory": "blurregions",
+            "elementGType": "GstBlurRegions",
+            "properties": [{
+                "name": "strength",
+                "gtype": "gint",
+                "owner": "GstBlurRegions",
+                "writable": True,
+                "blurb": "Blur strength",
+                "default": 5,
+                "min": 0,
+                "max": 100,
+            }],
+        }],
+    }
+
+    def _succeed_with_report(self, benv, report_body=None, arch="x86_64"):
+        """POST /build for one arch, stage the promoted .so (and the
+        introspection report when given), deliver SUCCEEDED, and return
+        (result, artifact entry, report key)."""
+        usecase_id = benv.create_usecase()
+        admin = benv.make_admin(usecase_id)
+        plugin = benv.create_plugin(admin, usecase_id)
+        plugin_id, version = plugin["plugin_id"], plugin["version"]
+        status, body = benv.post_build(admin, plugin_id, version,
+                                       {"architectures": [arch]})
+        assert status == 202, body
+        build_id = benv.get_item(plugin_id, version)["artifacts"][arch]["buildId"]
+        so_key = benv.put_promoted_artifact(usecase_id, arch, "blur-regions",
+                                            b"\x7fELF-shared-object")
+        report_key = so_key + ".gstinspect.json"
+        if report_body is not None:
+            benv.s3.put_object(Bucket=benv.bucket, Key=report_key,
+                               Body=report_body)
+        result = benv.deliver_result(
+            arch=arch, build_id=build_id, status="SUCCEEDED",
+            plugin_id=plugin_id, version=version,
+            usecase_id=usecase_id, plugin_name="blur-regions")
+        entry = benv.get_item(plugin_id, version)["artifacts"][arch]
+        return result, entry, report_key
+
+    def _assert_build_untouched(self, result, entry):
+        """The SUCCEEDED handling is unaffected by stanza recording (1.4):
+        status, artifact key, checksum, and signature are all recorded."""
+        assert result["recorded"] is True
+        assert entry["buildStatus"] == "succeeded"
+        assert entry["s3Key"] and entry["checksum"] and entry["signature"]
+
+    def test_captured_report_records_captured_stanza(self, benv):
+        """A valid captured report yields {status: captured, s3Key,
+        gstVersion, capturedAt} on the x86_64 entry."""
+        result, entry, report_key = self._succeed_with_report(
+            benv, json.dumps(self.CAPTURED_REPORT).encode())
+
+        assert entry["gstIntrospection"] == {
+            "status": "captured",
+            "s3Key": report_key,
+            "gstVersion": "1.20.3",
+            "capturedAt": "2025-01-15T10:30:00Z",
+        }
+        self._assert_build_untouched(result, entry)
+
+    def test_failed_report_carries_its_message(self, benv):
+        """A report that itself recorded a capture failure becomes a
+        failed stanza carrying the report's message."""
+        failed_report = {
+            "reportVersion": 1,
+            "status": "failed",
+            "message": "Gst.init failed: no registry",
+            "elements": [],
+        }
+        result, entry, _ = self._succeed_with_report(
+            benv, json.dumps(failed_report).encode())
+
+        stanza = entry["gstIntrospection"]
+        assert stanza["status"] == "failed"
+        assert stanza["message"] == "Gst.init failed: no registry"
+        self._assert_build_untouched(result, entry)
+
+    def test_missing_report_object_records_failed_stanza(self, benv):
+        """No uploaded report (e.g. the build image predates the
+        introspection step) -> failed stanza with a diagnostic."""
+        result, entry, _ = self._succeed_with_report(benv, report_body=None)
+
+        stanza = entry["gstIntrospection"]
+        assert stanza["status"] == "failed"
+        assert "No introspection report" in stanza["message"]
+        self._assert_build_untouched(result, entry)
+
+    def test_oversized_report_records_failed_stanza(self, benv):
+        """A report over the 256 KiB cap is rejected with a failed
+        stanza naming the cap."""
+        oversized = b"x" * (benv.module.GST_REPORT_MAX_BYTES + 1)
+        result, entry, _ = self._succeed_with_report(benv, oversized)
+
+        stanza = entry["gstIntrospection"]
+        assert stanza["status"] == "failed"
+        assert "size cap" in stanza["message"]
+        self._assert_build_untouched(result, entry)
+
+    def test_invalid_json_records_failed_stanza(self, benv):
+        """A report object that is not JSON at all -> failed stanza."""
+        result, entry, _ = self._succeed_with_report(benv, b"not json {{{")
+
+        stanza = entry["gstIntrospection"]
+        assert stanza["status"] == "failed"
+        assert "not valid JSON" in stanza["message"]
+        self._assert_build_untouched(result, entry)
+
+    def test_malformed_report_shape_records_failed_stanza(self, benv):
+        """Valid JSON that fails gst_properties.parse_report (wrong
+        reportVersion here) -> failed stanza with the shape diagnostic."""
+        bad_shape = {"reportVersion": 99, "status": "captured"}
+        result, entry, _ = self._succeed_with_report(
+            benv, json.dumps(bad_shape).encode())
+
+        stanza = entry["gstIntrospection"]
+        assert stanza["status"] == "failed"
+        assert "malformed" in stanza["message"]
+        self._assert_build_untouched(result, entry)
+
+    def test_non_x86_64_entry_gets_no_stanza(self, benv):
+        """Property_Introspection is x86_64-only: another arch's entry
+        never carries a gstIntrospection stanza even when a report
+        object exists next to its artifact."""
+        result, entry, _ = self._succeed_with_report(
+            benv, json.dumps(self.CAPTURED_REPORT).encode(), arch="arm64_jp5")
+
+        assert "gstIntrospection" not in entry
+        self._assert_build_untouched(result, entry)

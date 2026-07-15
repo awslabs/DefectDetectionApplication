@@ -31,6 +31,11 @@
 #      Every built .so lands under its own basename; the primary artifact
 #      is (also) written as $PLUGIN_NAME.so, the key plugin_builds.py
 #      streams, checksums, and re-signs on SUCCEEDED.
+#   6. Best-effort (x86_64 only): run dda-gst-introspect against the built
+#      artifacts and upload the report as $PLUGIN_NAME.so.gstinspect.json
+#      next to the promoted .so. No introspection or upload failure ever
+#      changes the build exit code; plugin_builds.py records whatever
+#      report is (or is not) present on the SUCCEEDED path.
 #
 # Environment (project-level): TARGET_ARCH, ARTIFACTS_BUCKET,
 # PLUGIN_STAGING_PREFIX, PLUGIN_LIBRARY_CUSTOM_PREFIX, SIGNING_KEY_ARN.
@@ -278,5 +283,49 @@ for a in "${ARTIFACTS[@]}"; do
 done
 log "Promoting primary to Plugin_Library: $LIBRARY_BASE/$PLUGIN_NAME.so"
 upload_pair "$PRIMARY" "$LIBRARY_BASE" "$PLUGIN_NAME"
+
+# --------------------------------- best-effort GStreamer introspection
+# x86_64 only: capture the built plugin's element properties and upload
+# the report next to the promoted .so as $PLUGIN_NAME.so.gstinspect.json.
+# Strictly best-effort (Requirement 1.4): every step runs inside
+# run_introspection, which is invoked under `if !` so `set -e` cannot
+# abort the build, and any failure only logs a warning.
+run_introspection() {
+  command -v dda-gst-introspect >/dev/null 2>&1 || {
+    log "WARNING: dda-gst-introspect not found in image; skipping introspection"
+    return 1
+  }
+  # Stage the built artifacts into a clean scan dir so GST_PLUGIN_PATH
+  # sees exactly this build's plugins; the primary is staged under its
+  # promoted basename ($PLUGIN_NAME.so) and the report is filtered to it.
+  local scan_dir="$WORK_DIR/gst-introspect"
+  local report="$WORK_DIR/gstinspect-report.json"
+  mkdir -p "$scan_dir" || return 1
+  local a name
+  for a in "${ARTIFACTS[@]}"; do
+    name="$(basename "$a" .so)"
+    [ "$a" = "$PRIMARY" ] && continue
+    cp "$a" "$scan_dir/$name.so" || return 1
+  done
+  cp "$PRIMARY" "$scan_dir/$PLUGIN_NAME.so" || return 1
+  log "Running dda-gst-introspect on $scan_dir (plugin file $PLUGIN_NAME.so)"
+  if ! dda-gst-introspect "$scan_dir" "$PLUGIN_NAME.so" > "$report" \
+      || [ ! -s "$report" ]; then
+    # The script itself never exits non-zero for content problems, so
+    # this only covers catastrophic failures (missing interpreter, OOM).
+    log "WARNING: dda-gst-introspect failed; uploading a failed-status report"
+    printf '{"status":"failed","message":"dda-gst-introspect did not produce a report"}\n' \
+      > "$report" || return 1
+  fi
+  aws s3 cp --no-progress "$report" \
+    "$LIBRARY_BASE/$PLUGIN_NAME.so.gstinspect.json" || return 1
+  log "Uploaded introspection report: $LIBRARY_BASE/$PLUGIN_NAME.so.gstinspect.json"
+}
+
+if [ "$TARGET_ARCH" = "x86_64" ]; then
+  if ! run_introspection; then
+    log "WARNING: GStreamer introspection step failed; continuing (build result unaffected)"
+  fi
+fi
 
 log "Build complete: $LIBRARY_BASE/$PLUGIN_NAME.so"

@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  Badge,
   Box,
   Button,
   Checkbox,
@@ -42,7 +43,10 @@ import {
   PluginVersionDetail,
 } from './types';
 import { emptyParameter, emptyPort, detailsStepErrors, parametersStepErrors, portsStepErrors } from './declaration';
-import type { WizardForm } from './declaration';
+import type { ParameterForm, WizardForm } from './declaration';
+import ParameterScanPanel, {
+  ParameterScanMergeResult,
+} from './ParameterScanPanel';
 import {
   MappingForm,
   RegistrationForm,
@@ -177,6 +181,53 @@ export default function RegistrationWizard() {
     const mappings = [...form.mappings];
     mappings[index] = { ...mappings[index], ...changes };
     patch({ mappings });
+  };
+
+  // ---------------------------------------------------- parameter rows
+  //
+  // Rows added by the property scan carry a "from scan" badge until the
+  // user edits them (gst-parameter-prepopulation, Requirement 6.4). The
+  // scanned names live outside the form so the merge flows through the
+  // exact same patch({parameters}) path as manual edits and step gating
+  // (parametersStepErrors) is untouched (3.3, 5.5).
+
+  const [scannedNames, setScannedNames] = useState<Set<string>>(new Set());
+
+  const dropScannedName = (name: string) =>
+    setScannedNames((current) => {
+      if (!current.has(name)) return current;
+      const next = new Set(current);
+      next.delete(name);
+      return next;
+    });
+
+  /** Edit one parameter row; any edit clears its scan provenance (6.4). */
+  const patchParameter = (index: number, changes: Partial<ParameterForm>) => {
+    if (!form) return;
+    const parameters = [...form.parameters];
+    const editedName = parameters[index].name.trim();
+    parameters[index] = { ...parameters[index], ...changes };
+    patch({ parameters });
+    dropScannedName(editedName);
+  };
+
+  const removeParameter = (index: number) => {
+    if (!form) return;
+    const removedName = form.parameters[index].name.trim();
+    patch({ parameters: form.parameters.filter((_, i) => i !== index) });
+    dropScannedName(removedName);
+  };
+
+  /** Scan merge result applied through the ordinary patch path (5.1, 5.2). */
+  const applyScanMerge = (result: ParameterScanMergeResult) => {
+    patch({ parameters: result.parameters });
+    if (result.added.length > 0) {
+      setScannedNames((current) => {
+        const next = new Set(current);
+        result.added.forEach((name) => next.add(name.trim()));
+        return next;
+      });
+    }
   };
 
   // ------------------------------------------------------------- submit
@@ -452,6 +503,13 @@ export default function RegistrationWizard() {
                 {attempted && stepErrors[2].length > 0 && (
                   <Alert type="error">{stepErrors[2].join(' ')}</Alert>
                 )}
+                <ParameterScanPanel
+                  pluginId={plugin.plugin_id}
+                  version={plugin.version}
+                  preferredFactory={defaultElementFactory(plugin.name)}
+                  parameters={form.parameters}
+                  onMerge={applyScanMerge}
+                />
                 <Box>
                   <Button
                     onClick={() =>
@@ -471,15 +529,14 @@ export default function RegistrationWizard() {
                           <Button
                             iconName="remove"
                             ariaLabel={`Remove parameter ${index + 1}`}
-                            onClick={() =>
-                              patch({
-                                parameters: form.parameters.filter((_, i) => i !== index),
-                              })
-                            }
+                            onClick={() => removeParameter(index)}
                           />
                         }
                       >
-                        {parameter.name.trim() || `Parameter ${index + 1}`}
+                        {parameter.name.trim() || `Parameter ${index + 1}`}{' '}
+                        {scannedNames.has(parameter.name.trim()) && (
+                          <Badge color="blue">from scan</Badge>
+                        )}
                       </Header>
                     }
                   >
@@ -489,11 +546,9 @@ export default function RegistrationWizard() {
                           <Input
                             value={parameter.name}
                             placeholder="radius"
-                            onChange={({ detail }) => {
-                              const parameters = [...form.parameters];
-                              parameters[index] = { ...parameters[index], name: detail.value };
-                              patch({ parameters });
-                            }}
+                            onChange={({ detail }) =>
+                              patchParameter(index, { name: detail.value })
+                            }
                           />
                         </FormField>
                         <FormField label="Type">
@@ -503,27 +558,19 @@ export default function RegistrationWizard() {
                               value: parameter.paramType,
                             }}
                             options={PARAMETER_TYPES.map((t) => ({ label: t, value: t }))}
-                            onChange={({ detail }) => {
-                              const parameters = [...form.parameters];
-                              parameters[index] = {
-                                ...parameters[index],
+                            onChange={({ detail }) =>
+                              patchParameter(index, {
                                 paramType: detail.selectedOption.value || parameter.paramType,
-                              };
-                              patch({ parameters });
-                            }}
+                              })
+                            }
                           />
                         </FormField>
                         <FormField label="Required">
                           <Checkbox
                             checked={parameter.required}
-                            onChange={({ detail }) => {
-                              const parameters = [...form.parameters];
-                              parameters[index] = {
-                                ...parameters[index],
-                                required: detail.checked,
-                              };
-                              patch({ parameters });
-                            }}
+                            onChange={({ detail }) =>
+                              patchParameter(index, { required: detail.checked })
+                            }
                           >
                             required
                           </Checkbox>
@@ -536,14 +583,9 @@ export default function RegistrationWizard() {
                         <Input
                           value={parameter.description}
                           placeholder="Blur radius in pixels"
-                          onChange={({ detail }) => {
-                            const parameters = [...form.parameters];
-                            parameters[index] = {
-                              ...parameters[index],
-                              description: detail.value,
-                            };
-                            patch({ parameters });
-                          }}
+                          onChange={({ detail }) =>
+                            patchParameter(index, { description: detail.value })
+                          }
                         />
                       </FormField>
                       <SpaceBetween direction="horizontal" size="s">
@@ -554,27 +596,17 @@ export default function RegistrationWizard() {
                           <Input
                             value={parameter.example}
                             placeholder={parameter.paramType === 'bool' ? 'true' : '5'}
-                            onChange={({ detail }) => {
-                              const parameters = [...form.parameters];
-                              parameters[index] = {
-                                ...parameters[index],
-                                example: detail.value,
-                              };
-                              patch({ parameters });
-                            }}
+                            onChange={({ detail }) =>
+                              patchParameter(index, { example: detail.value })
+                            }
                           />
                         </FormField>
                         <FormField label={<span>Default <i>- optional</i></span>}>
                           <Input
                             value={parameter.defaultValue}
-                            onChange={({ detail }) => {
-                              const parameters = [...form.parameters];
-                              parameters[index] = {
-                                ...parameters[index],
-                                defaultValue: detail.value,
-                              };
-                              patch({ parameters });
-                            }}
+                            onChange={({ detail }) =>
+                              patchParameter(index, { defaultValue: detail.value })
+                            }
                           />
                         </FormField>
                         {parameter.paramType === 'enum' && (
@@ -585,14 +617,9 @@ export default function RegistrationWizard() {
                             <Input
                               value={parameter.enumValues}
                               placeholder="low, medium, high"
-                              onChange={({ detail }) => {
-                                const parameters = [...form.parameters];
-                                parameters[index] = {
-                                  ...parameters[index],
-                                  enumValues: detail.value,
-                                };
-                                patch({ parameters });
-                              }}
+                              onChange={({ detail }) =>
+                                patchParameter(index, { enumValues: detail.value })
+                              }
                             />
                           </FormField>
                         )}

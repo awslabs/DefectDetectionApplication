@@ -27,6 +27,12 @@ Routes (API Gateway REST):
                                                        checksums/signatures            (10.2, 15.6)
     GET    /plugins/{id}/versions/{v}/source           Source inspection: file listing
                                                        or single-file content          (10.2)
+    GET    /plugins/{id}/versions/{v}/gst-properties   Stored Introspection_Report with
+                                                       derived per-element
+                                                       Parameter_Suggestions, or a
+                                                       machine-readable unavailability
+                                                       reason (gst-parameter-
+                                                       prepopulation 1.5, 1.6, 7.4, 8.3)
     PUT    /plugins/{id}/versions/{v}/source           Persist submitted scaffold
                                                        source (original or edited)
                                                        ahead of a build               (1.5, 1.6)
@@ -91,6 +97,15 @@ from workflow_core.scaffold import (
     render_scaffold,
     scaffold_defects,
 )
+# Introspection_Report parsing and Parameter_Suggestion derivation
+# (gst-parameter-prepopulation design component 4): pure module shipped
+# alongside this handler in the functions asset.
+from gst_properties import (
+    ReportError,
+    STATUS_CAPTURED,
+    parse_report,
+    suggestions_for_element,
+)
 
 # Configure logging
 logger = logging.getLogger()
@@ -132,6 +147,17 @@ BUILD_SUCCEEDED = 'succeeded'
 
 # Maximum size of a source file returned inline for inspection (10.2)
 MAX_SOURCE_FILE_BYTES = 512 * 1024
+
+# Property_Introspection runs on x86_64 only (gst-parameter-prepopulation
+# design: GObject property declarations are architecture-independent and
+# the x86_64 build is the designer's gating artifact everywhere else).
+INTROSPECTION_ARCH = 'x86_64'
+
+# Machine-readable unavailability reasons of the gst-properties route
+# (gst-parameter-prepopulation Requirements 1.6, 7.4, 8.3).
+GST_REASON_NO_BUILD = 'no_x86_64_build'
+GST_REASON_NOT_CAPTURED = 'not_captured'
+GST_REASON_FAILED = 'introspection_failed'
 
 
 # ------------------------------------------------------------------ helpers
@@ -937,6 +963,101 @@ def get_version_source(event: Dict, user: Dict, plugin_id: str, version: int) ->
     return create_response(200, {'files': files, 'count': len(files)})
 
 
+def _gst_unavailable(reason: str, message: Optional[str] = None) -> Dict:
+    """200 {available: false, reason, message?} — scan unavailability is a
+    normal, machine-readable outcome, never an error (1.6, 7.4, 8.3)."""
+    payload: Dict[str, Any] = {'available': False, 'reason': reason}
+    if message:
+        payload['message'] = message
+    return create_response(200, payload)
+
+
+def get_version_gst_properties(event: Dict, user: Dict, plugin_id: str,
+                               version: int) -> Dict:
+    """
+    GET /plugins/{id}/versions/{v}/gst-properties
+
+    Serves the stored Introspection_Report of the version's x86_64
+    Plugin_Artifact together with the derived Parameter_Suggestions
+    (gst-parameter-prepopulation Requirement 1.5), or a machine-readable
+    unavailability reason (1.6, 7.4):
+
+      - `no_x86_64_build`: no successfully built x86_64 Plugin_Artifact
+      - `not_captured`: the build predates Property_Introspection (no
+        gstIntrospection stanza on the artifact entry)
+      - `introspection_failed`: capture recorded a failure, or the stored
+        report is missing or malformed at read time (8.3 — never a 500)
+
+    Available responses carry per-element suggestions in the
+    ParameterDeclaration wire shape: base-class-filtered, type-mapped,
+    and required-classified by gst_properties.suggestions_for_element,
+    plus the skipped properties with reasons (2.5).
+    """
+    item = get_version_item(plugin_id, version)
+    if not item:
+        return not_found_response()
+    err = authorize_record_access(user, event, item)
+    if err:
+        return err
+
+    entry = (item.get('artifacts') or {}).get(INTROSPECTION_ARCH)
+    if (not isinstance(entry, dict)
+            or entry.get('buildStatus') != BUILD_SUCCEEDED):
+        return _gst_unavailable(GST_REASON_NO_BUILD)
+
+    stanza = entry.get('gstIntrospection')
+    if not isinstance(stanza, dict):
+        # Successful build recorded before this feature existed (7.4).
+        return _gst_unavailable(GST_REASON_NOT_CAPTURED)
+
+    if stanza.get('status') != STATUS_CAPTURED:
+        return _gst_unavailable(GST_REASON_FAILED, stanza.get('message'))
+
+    report_key = stanza.get('s3Key')
+    if not report_key:
+        return _gst_unavailable(
+            GST_REASON_FAILED, 'Stored introspection stanza has no report key')
+
+    try:
+        obj = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=report_key)
+        document = json.loads(obj['Body'].read().decode('utf-8'))
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') in ('NoSuchKey', '404'):
+            return _gst_unavailable(
+                GST_REASON_FAILED, 'Stored introspection report is missing')
+        raise
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _gst_unavailable(
+            GST_REASON_FAILED, 'Stored introspection report is not valid JSON')
+
+    # Malformed stored documents map to the unavailability reason, never
+    # an internal error (8.3).
+    try:
+        report = parse_report(document)
+    except ReportError as e:
+        return _gst_unavailable(
+            GST_REASON_FAILED, f'Stored introspection report is malformed: {e}')
+
+    if report.status != STATUS_CAPTURED:
+        return _gst_unavailable(GST_REASON_FAILED, report.message)
+
+    elements = []
+    for element in report.elements:
+        derived = suggestions_for_element(element)
+        elements.append({
+            'factory': element.factory,
+            'suggestions': derived['suggestions'],
+            'skipped': derived['skipped'],
+        })
+
+    return create_response(200, {
+        'available': True,
+        'gstVersion': report.gst_version or stanza.get('gstVersion'),
+        'capturedAt': report.captured_at or stanza.get('capturedAt'),
+        'elements': elements,
+    })
+
+
 def put_version_source(event: Dict, user: Dict, plugin_id: str, version: int) -> Dict:
     """
     PUT /plugins/{id}/versions/{v}/source
@@ -1211,6 +1332,9 @@ def handler(event: Dict, context: Any) -> Dict:
                     return get_version_source(event, user, plugin_id, version)
                 if http_method == 'PUT':
                     return put_version_source(event, user, plugin_id, version)
+            elif resource == '/plugins/{id}/versions/{v}/gst-properties':
+                if http_method == 'GET':
+                    return get_version_gst_properties(event, user, plugin_id, version)
             elif resource == '/plugins/{id}/versions/{v}/promote':
                 if http_method == 'POST':
                     return promote_version(event, user, plugin_id, version)

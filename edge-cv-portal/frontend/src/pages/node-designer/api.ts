@@ -11,6 +11,7 @@
 import { getConfig } from '../../config';
 import { ApiError } from '../../services/api';
 import { beginRequest, endRequest } from '../../services/loadingBus';
+import type { GstPropertiesResponse } from './scan';
 import type {
   GenerationTurnState,
   NodeTypeDetail,
@@ -174,6 +175,20 @@ export const nodeDesignerApi = {
   getBuilds(pluginId: string, version: number): Promise<PluginBuildsView> {
     return request(
       `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/builds`
+    );
+  },
+
+  /**
+   * GET .../gst-properties — the version's stored Introspection_Report
+   * as per-element Parameter_Suggestions for the wizard's parameter
+   * scan (gst-parameter-prepopulation Requirement 1.5), or a
+   * machine-readable unavailability reason — `no_x86_64_build`,
+   * `not_captured`, `introspection_failed` — as a normal 200, never an
+   * error (1.6, 7.4).
+   */
+  getGstProperties(pluginId: string, version: number): Promise<GstPropertiesResponse> {
+    return request(
+      `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/gst-properties`
     );
   },
 

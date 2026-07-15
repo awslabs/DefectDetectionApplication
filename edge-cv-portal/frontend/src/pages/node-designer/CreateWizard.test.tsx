@@ -131,6 +131,27 @@ describe('CreateWizard', () => {
     expect(screen.getByRole('button', { name: 'Generate scaffold' })).toBeInTheDocument();
   });
 
+  it('renders the static scanning-requires-a-built-plugin notice on the Parameters step (gst-parameter-prepopulation 5.6, 7.1)', async () => {
+    const { container } = render(<CreateWizard />);
+    await waitFor(() => expect(listUseCases).toHaveBeenCalled());
+
+    fillName(container, 'Blur Regions');
+    clickNext();
+    clickNext();
+
+    // No plugin context in the create wizard: the panel shows the
+    // static notice instead of fetching (no Plugin_Artifact exists).
+    const notice = screen.getByTestId('scan-no-plugin-notice');
+    expect(notice.textContent).toContain('has not been built yet');
+    expect(notice.textContent).toContain(
+      'rescan from the registration wizard after the first successful build'
+    );
+
+    // The manual parameter flow is unchanged next to the notice.
+    fireEvent.click(screen.getByRole('button', { name: 'Add parameter' }));
+    expect(screen.getByText('Parameter 1')).toBeInTheDocument();
+  });
+
   it('submits the assembled declaration and previews the scaffold with a zip download (1.1, 1.5)', async () => {
     const { container } = render(<CreateWizard />);
     await waitFor(() => expect(listUseCases).toHaveBeenCalled());
