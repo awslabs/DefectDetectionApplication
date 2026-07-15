@@ -1872,8 +1872,16 @@ class ApiService {
   // Workflow Manager endpoints
   // Node type catalog for the Workflow_Builder Node_Palette (camelCase
   // wire form of workflow_core.catalog, Requirement 2.8).
-  async getWorkflowNodeCatalog(): Promise<{ nodeTypes: NodeTypeDescriptor[] }> {
-    return this.request('/workflows/node-catalog');
+  async getWorkflowNodeCatalog(
+    usecaseId?: string
+  ): Promise<{ nodeTypes: NodeTypeDescriptor[] }> {
+    // With usecase_id the Use_Case's registered Custom_Node_Types are
+    // merged in (test/prod backed only); without it the endpoint serves
+    // the built-in catalog unchanged.
+    const query = usecaseId
+      ? `?usecase_id=${encodeURIComponent(usecaseId)}`
+      : '';
+    return this.request(`/workflows/node-catalog${query}`);
   }
 
   // Workflow_Store API (workflows.py): CRUD, versioning, duplication

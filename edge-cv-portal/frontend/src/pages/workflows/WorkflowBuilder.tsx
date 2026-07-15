@@ -509,11 +509,15 @@ export default function WorkflowBuilder() {
   const [catalog, setCatalog] = useState<NodeTypeDescriptor[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { workflowId } = useParams<{ workflowId: string }>();
+  const { selectedUsecaseId } = useUsecase();
 
   useEffect(() => {
     let cancelled = false;
+    // The Use_Case id merges the registered Custom_Node_Types into the
+    // palette catalog (test/prod backed only, 8.2/9.2); without it the
+    // endpoint serves just the built-in node types.
     apiService
-      .getWorkflowNodeCatalog()
+      .getWorkflowNodeCatalog(selectedUsecaseId || undefined)
       .then((response) => {
         if (!cancelled) {
           setCatalog(response.nodeTypes);
@@ -527,7 +531,7 @@ export default function WorkflowBuilder() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [selectedUsecaseId]);
 
   return (
     <div
