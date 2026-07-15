@@ -104,6 +104,30 @@ class TestRenderLaunchString:
         )
         assert rendering.render_launch_string(document) == "videotestsrc"
 
+    def test_empty_string_arg_is_quoted_not_bare(self):
+        # A bare `meta=` makes Gst.parse_launch read `meta` as an
+        # element name and fail with 'no element "meta"' — the
+        # emlcapture regression behind the workflow test failures.
+        rendered = rendering.render_element(
+            {"nodeId": "n3", "factory": "emlcapture",
+             "args": {"buffer-message-id": "file-target", "meta": ""}})
+        assert rendered == 'emlcapture buffer-message-id=file-target meta=""'
+
+    def test_values_with_launch_syntax_are_quoted_and_escaped(self):
+        assert rendering.render_value("with space") == '"with space"'
+        assert rendering.render_value("a!b") == '"a!b"'
+        assert rendering.render_value('say "hi"') == '"say \\"hi\\""'
+        assert rendering.render_value("back\\slash") == '"back\\\\slash"'
+
+    def test_plain_tokens_stay_unquoted(self):
+        # Caps strings, paths, and numbers keep their existing bare form.
+        assert rendering.render_value("video/x-raw,format=RGB") == \
+            "video/x-raw,format=RGB"
+        assert rendering.render_value("/tmp/out_%05d.jpg") == \
+            "/tmp/out_%05d.jpg"
+        assert rendering.render_value(85) == "85"
+        assert rendering.render_value(0.5) == "0.5"
+
     def test_document_without_segments_renders_empty(self):
         assert rendering.render_launch_string(make_document([])) == ""
 

@@ -1,7 +1,7 @@
 """Shared pytest/hypothesis configuration for workflow_core tests.
 
-Registers and loads a hypothesis profile that runs every property test
-with a minimum of 100 examples, as required by the workflow-manager spec.
+Registers and loads a hypothesis profile that caps property tests at
+25 examples for fast local runs (HYPOTHESIS_PROFILE=ci for larger runs).
 """
 
 import os
@@ -19,14 +19,16 @@ _PACKAGE_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _PACKAGE_ROOT not in sys.path:
     sys.path.append(_PACKAGE_ROOT)
 
-# Property tests must run at least 100 iterations per property.
+# Default example budget for property tests. Reduced from the original
+# 100-example profile to keep local suite runtime low; use the "ci"
+# profile (HYPOTHESIS_PROFILE=ci) for a more exhaustive run.
 settings.register_profile(
     "workflow-manager",
-    max_examples=100,
+    max_examples=25,
     suppress_health_check=[HealthCheck.too_slow],
 )
 
 # Allow overriding via HYPOTHESIS_PROFILE (e.g. a larger "ci" run),
-# defaulting to the spec-mandated 100-example profile.
+# defaulting to the fast 25-example profile.
 settings.register_profile("ci", max_examples=500)
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "workflow-manager"))

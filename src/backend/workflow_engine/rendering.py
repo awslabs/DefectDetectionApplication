@@ -43,12 +43,28 @@ import re
 from typing import Any, Dict, Optional
 
 
+#: Characters in a rendered argument value that require launch quoting:
+#: without it ``Gst.parse_launch`` misreads the token (e.g. a bare
+#: ``meta=`` from an empty value makes the parser treat ``meta`` as an
+#: element name and fail with ``no element "meta"``).
+_UNSAFE_VALUE_PATTERN = re.compile(r"[\s!\"'();\\]")
+
+
 def render_value(value: Any) -> str:
     """One argument value in launch-string form (bools lower-cased the
-    way GStreamer parses them; everything else via ``str``)."""
+    way GStreamer parses them; everything else via ``str``). Empty
+    strings and values carrying launch syntax characters (whitespace,
+    ``!``, quotes ...) are double-quoted with backslash escaping — the
+    quoting ``Gst.parse_launch`` understands — so an empty property
+    renders as ``meta=""`` rather than the bare ``meta=`` the parser
+    misreads as an element named ``meta``."""
     if isinstance(value, bool):
         return "true" if value else "false"
-    return str(value)
+    text = str(value)
+    if not text or _UNSAFE_VALUE_PATTERN.search(text):
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        return '"{0}"'.format(escaped)
+    return text
 
 
 def render_element(element: Dict) -> str:
@@ -109,6 +125,23 @@ def node_id_for_element(
     """The nodeId behind a bus-error source element name, or None for
     synthetic/unknown elements."""
     return name_map.get(element_name)
+
+
+def resolve_placeholder(document: Dict, placeholder: str, value: str) -> int:
+    """Resolve ``{placeholder}`` occurrences left in element argument
+    values (the same lenient-placeholder rule the test-sandbox harness
+    applies to ``{dataset_location}``). The compiler leaves
+    ``{work_dir}`` in bedrock_inference frame-capture sink locations for
+    the executor to resolve per run. Returns the substitution count."""
+    token = "{" + placeholder + "}"
+    count = 0
+    for segment in document.get("segments", []):
+        for element in segment.get("elements", []):
+            for name, arg_value in list(element.get("args", {}).items()):
+                if isinstance(arg_value, str) and token in arg_value:
+                    element["args"][name] = arg_value.replace(token, value)
+                    count += 1
+    return count
 
 
 #: GStreamer debug strings embed the failing element as an object path:

@@ -205,6 +205,38 @@ export class TestRunnerStack extends cdk.Stack {
     props.portalArtifactsBucket.grantReadWrite(stepsRole);
     props.testRunsTable.grantReadWriteData(stepsRole);
 
+    // Merged Node_Type_Catalog resolution (custom-node-designer task 13.1,
+    // Requirements 12.1, 12.2): the validate/compile steps read the
+    // Use_Case's registered Custom_Node_Types and their backing
+    // Plugin_Records to compile against the merged catalog, stage custom
+    // x86_64 Plugin_Artifacts under the run's prefix, and substitute
+    // pass-through stubs for types without an x86_64 build. The tables
+    // live in the NodeDesignerStack; referencing its table tokens here
+    // would create a cross-stack coupling this standalone stack avoids,
+    // so the FIXED physical table names declared in node-designer-stack.ts
+    // are used instead (the same pattern as the ComputeStack's
+    // catalogConsumerHandlers). The handler degrades to the built-in
+    // catalog when the tables are not deployed. Read-only: no write
+    // action is granted. The Plugin_Library custom prefix lives in the
+    // portal artifacts bucket, already granted above.
+    const CUSTOM_NODE_TYPES_TABLE_NAME = 'dda-portal-custom-node-types';
+    const PLUGIN_RECORDS_TABLE_NAME = 'dda-portal-plugin-records';
+    stepsRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:BatchGetItem',
+        'dynamodb:Query',
+        'dynamodb:Scan',
+      ],
+      resources: [
+        `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${CUSTOM_NODE_TYPES_TABLE_NAME}`,
+        `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${CUSTOM_NODE_TYPES_TABLE_NAME}/index/*`,
+        `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${PLUGIN_RECORDS_TABLE_NAME}`,
+        `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${PLUGIN_RECORDS_TABLE_NAME}/index/*`,
+      ],
+    }));
+
     const stepsFunction = new lambda.Function(this, 'TestRunStepsHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'workflow_test_steps.handler',
@@ -213,7 +245,9 @@ export class TestRunnerStack extends cdk.Stack {
       environment: {
         TEST_RUNS_TABLE: props.testRunsTable.tableName,
         PORTAL_ARTIFACTS_BUCKET: props.portalArtifactsBucket.bucketName,
-        CODE_VERSION: '2025-01-25-workflow-test-steps',
+        CUSTOM_NODE_TYPES_TABLE: CUSTOM_NODE_TYPES_TABLE_NAME,
+        PLUGIN_RECORDS_TABLE: PLUGIN_RECORDS_TABLE_NAME,
+        CODE_VERSION: '2026-02-14-workflow-test-steps-custom-plugins',
       },
       layers: [workflowCoreLayer],
       timeout: cdk.Duration.seconds(120),

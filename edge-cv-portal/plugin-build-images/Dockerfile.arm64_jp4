@@ -1,0 +1,65 @@
+# dda-plugin-build:arm64_jp4 - Jetson JetPack 4 plugin build image
+# (linux/arm64, native ARM build on a CodeBuild ARM fleet).
+#
+# Based on NVIDIA's L4T r32.x container (JetPack 4, Ubuntu 18.04,
+# GStreamer 1.14). nvcr.io/nvidia/l4t-base:r32.7.1 is pullable without
+# NGC auth.
+#
+# Ubuntu 18.04 quirks handled here:
+#   - default python3 is 3.6, which has no python3-embed pkg-config file;
+#     the scaffold meson projects depend on python3-embed, so python3.8
+#     (bionic universe) is installed and its python-3.8-embed.pc gets an
+#     unversioned python3-embed.pc alias.
+#   - apt meson is 0.45; meson >= 0.60 comes from pip (pinned to the last
+#     python3.8-compatible line).
+#
+# TODO(arm64_jp4): pin the DeepStream 5.x/6.0 SDK matching JetPack 4
+# (Requirement 5.2) once DeepStream-flagged plugins need its headers;
+# GStreamer plugin builds compile without it.
+FROM nvcr.io/nvidia/l4t-base:r32.7.1
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        ninja-build \
+        autoconf \
+        automake \
+        libtool \
+        git \
+        python3.8 \
+        python3.8-dev \
+        python3.8-distutils \
+        libgstreamer1.0-dev \
+        libgstreamer-plugins-base1.0-dev \
+        libgstreamer-plugins-bad1.0-dev \
+        ca-certificates \
+        curl \
+        unzip \
+        xxd \
+    && rm -rf /var/lib/apt/lists/*
+
+# pip for python3.8 (bionic's python3-pip targets 3.6), then meson.
+# meson 1.4.x is the last line supporting Python 3.7+; runs fine on 3.8.
+RUN curl -fsSL https://bootstrap.pypa.io/pip/3.8/get-pip.py -o /tmp/get-pip.py \
+    && python3.8 /tmp/get-pip.py \
+    && rm /tmp/get-pip.py \
+    && python3.8 -m pip install --no-cache-dir 'meson==1.4.2'
+
+# Unversioned python3-embed.pc alias for the scaffold's
+# dependency('python3-embed') (python3.8 ships only python-3.8-embed.pc
+# on bionic, where the unversioned alias belongs to python3-dev/3.6).
+RUN set -e; \
+    pc="$(find /usr -name 'python-3.8-embed.pc' | head -n1)"; \
+    test -n "$pc"; \
+    ln -sf "$pc" "$(dirname "$pc")/python3-embed.pc"
+
+# AWS CLI v2 (S3 staging/promotion + KMS signing in the entrypoint).
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" \
+        -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/awscliv2.zip /tmp/aws
+
+COPY dda-plugin-build /usr/local/bin/dda-plugin-build
+RUN chmod +x /usr/local/bin/dda-plugin-build

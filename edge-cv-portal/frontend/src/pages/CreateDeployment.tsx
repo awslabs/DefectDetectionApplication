@@ -23,10 +23,17 @@ import {
   Modal,
 } from '@cloudscape-design/components';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { apiService } from '../services/api';
+import { apiService, ApiError } from '../services/api';
 import { UseCase } from '../types';
 import { useUsecase } from '../contexts/UsecaseContext';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
+import { LifecycleBadge } from './node-designer/badges';
+import {
+  PluginGateRejection,
+  isPluginComponent,
+  parsePluginGateRejection,
+} from './deployments/pluginComponents';
+import { ArchitectureChips, PluginGateRejectionAlert } from './deployments/PluginComponentUi';
 
 interface ComponentSelection {
   component_name: string;
@@ -36,6 +43,10 @@ interface ComponentSelection {
   displayName?: string;
   category?: string;
   model_name?: string;
+  // Node Designer Plugin_Component fields (custom-node-designer, 16.2)
+  is_plugin_component?: boolean;
+  lifecycle_state?: string | null;
+  supported_architectures?: string[];
 }
 
 interface DeviceInfo {
@@ -54,6 +65,12 @@ interface ComponentInfo {
   model_name?: string;
   platforms?: Array<{ name?: string; attributes?: Record<string, string> }>;
   scope: 'PRIVATE' | 'PUBLIC';
+  // Node Designer Plugin_Component fields (custom-node-designer, 16.2):
+  // backing Plugin_Record Lifecycle_State and the Target_Architectures
+  // derived from the recipe's platform manifests (components.py).
+  is_plugin_component?: boolean;
+  lifecycle_state?: string | null;
+  supported_architectures?: string[];
 }
 
 // Helper to parse component name into friendly display name
@@ -63,6 +80,11 @@ const getComponentDisplayName = (componentName: string, modelName?: string): str
     return modelName;
   }
   
+  // Node Designer Plugin_Components: dda.plugin.{pluginId} (16.2)
+  if (isPluginComponent(componentName)) {
+    return componentName.replace('dda.plugin.', '');
+  }
+
   // Parse common DDA component patterns
   if (componentName.startsWith('com.dda.')) {
     const parts = componentName.replace('com.dda.', '').split('.');
@@ -80,6 +102,9 @@ const getComponentDisplayName = (componentName: string, modelName?: string): str
 
 // Helper to categorize components
 const getComponentCategory = (componentName: string, modelName?: string, scope?: string): string => {
+  if (isPluginComponent(componentName)) {
+    return 'Node Plugins';
+  }
   if (modelName || componentName.toLowerCase().includes('model')) {
     return 'Model Components';
   }
@@ -182,6 +207,8 @@ export default function CreateDeployment() {
   // State
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+  // Pre-submit plugin gate rejection (custom-node-designer, 16.3/16.6)
+  const [gateRejection, setGateRejection] = useState<PluginGateRejection | null>(null);
   const [loading, setLoading] = useState(true);
   const [showRemovalWarning, setShowRemovalWarning] = useState(false);
 
@@ -289,11 +316,23 @@ export default function CreateDeployment() {
   const hasComponentRemovals = Object.keys(componentsToBeRemoved).length > 0;
 
   // Filter and categorize components based on selected devices
-  const { recommendedComponents, compatiblePrivate, compatiblePublic, incompatibleComponents } = useMemo(() => {
+  const { recommendedComponents, compatiblePrivate, compatiblePublic, incompatibleComponents, pluginComponents } = useMemo(() => {
     const hasDeviceSelection = targetType === 'devices' && targetDevices.length > 0;
-    
+
+    // Node Designer Plugin_Components (dda.plugin.*, 16.2) are listed in
+    // their own tab with lifecycle badges and Target_Architecture chips.
+    // They are excluded from the generic architecture filter: the backend
+    // pre-submit gates enforce lifecycle and per-architecture support
+    // exactly (16.3, 16.6) and rejections are surfaced on submit.
+    const plugins = allPrivateComponents.filter(
+      comp => comp.is_plugin_component || isPluginComponent(comp.component_name)
+    );
+    const nonPluginPrivate = allPrivateComponents.filter(
+      comp => !(comp.is_plugin_component || isPluginComponent(comp.component_name))
+    );
+
     // Filter private components
-    const filteredPrivate = allPrivateComponents.filter(comp => {
+    const filteredPrivate = nonPluginPrivate.filter(comp => {
       if (!hasDeviceSelection) return true;
       return selectedDeviceArchitectures.every(arch => isCompatibleWithDevice(comp, arch));
     });
@@ -306,7 +345,7 @@ export default function CreateDeployment() {
     
     // Find incompatible components
     const incompatible = hasDeviceSelection ? [
-      ...allPrivateComponents.filter(comp => !selectedDeviceArchitectures.every(arch => isCompatibleWithDevice(comp, arch))),
+      ...nonPluginPrivate.filter(comp => !selectedDeviceArchitectures.every(arch => isCompatibleWithDevice(comp, arch))),
       ...allPublicComponents.filter(comp => !selectedDeviceArchitectures.every(arch => isCompatibleWithDevice(comp, arch)))
     ] : [];
     
@@ -333,7 +372,8 @@ export default function CreateDeployment() {
       recommendedComponents: recommended,
       compatiblePrivate: filteredPrivate,
       compatiblePublic: filteredPublic,
-      incompatibleComponents: incompatible
+      incompatibleComponents: incompatible,
+      pluginComponents: plugins
     };
   }, [allPrivateComponents, allPublicComponents, selectedDeviceArchitectures, targetType, targetDevices, devicesWithoutDDA]);
 
@@ -461,6 +501,9 @@ export default function CreateDeployment() {
           displayName: getComponentDisplayName(match.component_name, match.model_name),
           category: getComponentCategory(match.component_name, match.model_name, match.scope),
           model_name: match.model_name,
+          is_plugin_component: match.is_plugin_component,
+          lifecycle_state: match.lifecycle_state,
+          supported_architectures: match.supported_architectures,
         });
       } else {
         // Component not found in catalog (e.g. removed) - still represent it so the
@@ -537,7 +580,11 @@ export default function CreateDeployment() {
         description: comp.description,
         model_name: comp.model_name,
         platforms: comp.platforms || comp.latest_version?.platforms || [],
-        scope: 'PRIVATE' as const
+        scope: 'PRIVATE' as const,
+        // Node Designer Plugin_Component listing fields (16.2)
+        is_plugin_component: comp.is_plugin_component || isPluginComponent(comp.component_name),
+        lifecycle_state: comp.lifecycle_state ?? null,
+        supported_architectures: comp.supported_architectures || []
       })));
       
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -671,7 +718,10 @@ export default function CreateDeployment() {
       scope: comp.scope,
       displayName,
       category: getComponentCategory(comp.component_name, comp.model_name, comp.scope),
-      model_name: comp.model_name
+      model_name: comp.model_name,
+      is_plugin_component: comp.is_plugin_component,
+      lifecycle_state: comp.lifecycle_state,
+      supported_architectures: comp.supported_architectures
     }]);
   };
 
@@ -737,6 +787,7 @@ export default function CreateDeployment() {
   const executeDeployment = async () => {
     setCreating(true);
     setError('');
+    setGateRejection(null);
     setShowRemovalWarning(false);
     setShowGroupConflictWarning(false);
 
@@ -785,7 +836,17 @@ export default function CreateDeployment() {
         navigate(`/deployments/${response.deployment_id}?usecase_id=${selectedUseCase.value}`);
       }, 500);
     } catch (err) {
-      setError(getErrorMessage(err, 'Failed to create deployment'));
+      // Pre-submit plugin gate rejections carry distinct codes so each
+      // Plugin_Component and its lifecycle violation (16.3) or
+      // unsupported architecture (16.6) can be identified.
+      const rejection = err instanceof ApiError
+        ? parsePluginGateRejection(err.code, err.message, err.details)
+        : null;
+      if (rejection) {
+        setGateRejection(rejection);
+      } else {
+        setError(getErrorMessage(err, 'Failed to create deployment'));
+      }
       console.error('Failed to create deployment:', err);
       scrollToTop();
     } finally {
@@ -826,6 +887,14 @@ export default function CreateDeployment() {
         >
           <SpaceBetween size="l">
             {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+
+            {/* Pre-submit plugin gate rejection (16.3, 16.6) */}
+            {gateRejection && (
+              <PluginGateRejectionAlert
+                rejection={gateRejection}
+                onDismiss={() => setGateRejection(null)}
+              />
+            )}
 
             {/* Revise-mode banner */}
             {existingDeployment && (
@@ -1039,6 +1108,57 @@ export default function CreateDeployment() {
                         </SpaceBetween>
                       ),
                     },
+                    {
+                      // Node Designer Plugin_Components (dda.plugin.*):
+                      // name, version, backing Lifecycle_State badge, and
+                      // supported Target_Architecture chips (16.2).
+                      id: 'plugins',
+                      label: `Node Plugins (${pluginComponents.length})`,
+                      content: (
+                        <SpaceBetween size="s">
+                          {pluginComponents.length === 0 ? (
+                            <Box color="text-body-secondary" padding="s">
+                              No custom node plugin components found. Build a plugin in the
+                              Node Designer to make it deployable here.
+                            </Box>
+                          ) : (
+                            <ColumnLayout columns={2} variant="text-grid">
+                              {pluginComponents.map(comp => {
+                                const isSelected = selectedComponents.some(c => c.arn === comp.arn);
+                                const displayName = getComponentDisplayName(comp.component_name);
+                                const version = comp.latest_version?.componentVersion || 'latest';
+
+                                return (
+                                  <Box key={comp.arn} padding="s" variant="div">
+                                    <SpaceBetween size="xxs">
+                                      <SpaceBetween direction="horizontal" size="xs">
+                                        <Box fontWeight="bold">{displayName}</Box>
+                                        <Badge color="blue">Plugin</Badge>
+                                        <LifecycleBadge state={comp.lifecycle_state} />
+                                      </SpaceBetween>
+                                      <Box color="text-body-secondary" fontSize="body-s">
+                                        v{version} • {comp.component_name}
+                                      </Box>
+                                      <ArchitectureChips
+                                        architectures={comp.supported_architectures || []}
+                                      />
+                                      <Button
+                                        variant={isSelected ? "normal" : "primary"}
+                                        disabled={isSelected}
+                                        onClick={() => handleAddComponent(comp)}
+                                        iconName={isSelected ? "status-positive" : "add-plus"}
+                                      >
+                                        {isSelected ? 'Added' : 'Add'}
+                                      </Button>
+                                    </SpaceBetween>
+                                  </Box>
+                                );
+                              })}
+                            </ColumnLayout>
+                          )}
+                        </SpaceBetween>
+                      ),
+                    },
                   ]}
                 />
 
@@ -1077,8 +1197,24 @@ export default function CreateDeployment() {
                           <SpaceBetween direction="horizontal" size="xs">
                             <span>{item.displayName || item.component_name}</span>
                             {item.category === 'Model Components' && <Badge color="green">Model</Badge>}
+                            {item.is_plugin_component && (
+                              <>
+                                <Badge color="blue">Plugin</Badge>
+                                <LifecycleBadge state={item.lifecycle_state} />
+                              </>
+                            )}
                           </SpaceBetween>
                         ),
+                      },
+                      {
+                        id: 'architectures',
+                        header: 'Architectures',
+                        cell: item =>
+                          item.is_plugin_component ? (
+                            <ArchitectureChips architectures={item.supported_architectures || []} />
+                          ) : (
+                            <Box color="text-body-secondary">—</Box>
+                          ),
                       },
                       {
                         id: 'technical',

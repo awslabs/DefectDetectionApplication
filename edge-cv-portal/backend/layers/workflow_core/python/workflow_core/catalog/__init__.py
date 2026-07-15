@@ -13,6 +13,7 @@ from .models import (
     ARCH_ARM64_JP6,
     ARCH_SIM,
     ARCH_X86_64,
+    ARCH_X86_64_NVIDIA,
     ARCHITECTURES,
     CATEGORIES,
     CATEGORY_INFERENCE,
@@ -48,6 +49,21 @@ from .nodes import (
     get_node_type,
     nodes_by_category,
 )
+from .classification import (
+    CLASSIFICATION_BAD,
+    CLASSIFICATION_GOOD,
+    CLASSIFICATION_UGLY,
+    CLASSIFICATION_UNCLASSIFIED,
+    CLASSIFICATIONS,
+    EXPLANATIONS,
+    classify_plugin_set,
+)
+from .custom import (
+    DEEPSTREAM_ARCHITECTURES,
+    DeclarationError,
+    descriptor_from_declaration,
+    resolve_catalog,
+)
 
 __all__ = [
     # models
@@ -68,6 +84,7 @@ __all__ = [
     "ARCHITECTURES",
     "DEVICE_ARCHITECTURES",
     "ARCH_X86_64",
+    "ARCH_X86_64_NVIDIA",
     "ARCH_ARM64_JP4",
     "ARCH_ARM64_JP5",
     "ARCH_ARM64_JP6",
@@ -87,4 +104,17 @@ __all__ = [
     "CONDITION_LANGUAGE_DESCRIPTION",
     "get_node_type",
     "nodes_by_category",
+    # plugin-set classification
+    "CLASSIFICATION_GOOD",
+    "CLASSIFICATION_BAD",
+    "CLASSIFICATION_UGLY",
+    "CLASSIFICATION_UNCLASSIFIED",
+    "CLASSIFICATIONS",
+    "EXPLANATIONS",
+    "classify_plugin_set",
+    # custom node type declarations
+    "DEEPSTREAM_ARCHITECTURES",
+    "DeclarationError",
+    "descriptor_from_declaration",
+    "resolve_catalog",
 ]

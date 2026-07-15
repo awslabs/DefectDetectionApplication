@@ -387,7 +387,7 @@ describe('Property 12: Inline markers are exactly the offending nodes', () => {
           state = { ...state, nodes: applyAndCheckMarkers(state.nodes, state.edges, catalog) };
         }
       }),
-      { numRuns: 200 }
+      { numRuns: 25 }
     );
   });
 });

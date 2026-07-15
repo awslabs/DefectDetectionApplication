@@ -91,6 +91,30 @@ class TestRenderLaunchString:
         ]}
         assert renderer.render_launch_string(document) == "fakesrc"
 
+    def test_empty_string_arg_is_quoted_not_bare(self):
+        # A bare `meta=` makes Gst.parse_launch read `meta` as an
+        # element name and fail with 'no element "meta"' — the
+        # emlcapture regression behind the workflow test failures.
+        document = {"segments": [_segment("s0", [
+            _element("emlcapture", "n3",
+                     **{"buffer-message-id": "file-target", "meta": ""}),
+        ])]}
+        assert renderer.render_launch_string(document) == \
+            'emlcapture buffer-message-id=file-target meta=""'
+
+    def test_values_with_launch_syntax_are_quoted_and_escaped(self):
+        assert renderer.render_value("with space") == '"with space"'
+        assert renderer.render_value("a!b") == '"a!b"'
+        assert renderer.render_value('say "hi"') == '"say \\"hi\\""'
+
+    def test_plain_tokens_stay_unquoted(self):
+        # Caps strings, paths, and numbers keep their existing bare form.
+        assert renderer.render_value("video/x-raw,format=RGB") == \
+            "video/x-raw,format=RGB"
+        assert renderer.render_value("/tmp/out_%05d.jpg") == \
+            "/tmp/out_%05d.jpg"
+        assert renderer.render_value(85) == "85"
+
 
 class TestElementNameMap:
     def test_auto_names_use_per_factory_counters(self):

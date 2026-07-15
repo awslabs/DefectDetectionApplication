@@ -131,13 +131,18 @@ def testing_env(aws_stack):
 
     # Re-import so the modules bind the table names above and
     # moto-intercepted boto3 clients (conftest pattern).
-    for module_name in ("workflow_testing", "workflow_test_steps"):
+    # node_catalog_resolution is popped too so the merged-catalog
+    # resolution the steps handler now performs (custom-node-designer
+    # 12.1) binds moto-intercepted clients as well.
+    for module_name in ("workflow_testing", "workflow_test_steps",
+                        "node_catalog_resolution"):
         sys.modules.pop(module_name, None)
     import workflow_testing
     import workflow_test_steps
 
     resource = boto3.resource("dynamodb", region_name=REGION)
     yield SimpleNamespace(
+        stack=aws_stack,
         testing=workflow_testing,
         steps=workflow_test_steps,
         datasets_table=resource.Table(TEST_DATASETS_TABLE_NAME),
@@ -355,10 +360,11 @@ class TestDatasetUploadBoundaries:
 # 2. Validator / compiler failure short-circuit (Requirement 12.12)
 # ===========================================================================
 
-def stage_run(testing_env, definition, target_arch="x86_64"):
+def stage_run(testing_env, definition, target_arch="x86_64",
+              usecase_id=None, custom_node_type_pins=None):
     """Stage a stored definition + TestRuns item; returns the step input."""
     test_run_id = f"run-{uuid.uuid4()}"
-    usecase_id = f"uc-{uuid.uuid4()}"
+    usecase_id = usecase_id or f"uc-{uuid.uuid4()}"
     definition_key = f"workflows/{usecase_id}/defs/{test_run_id}.json"
     results_key = f"workflows/{usecase_id}/test-runs/{test_run_id}/results.json"
     testing_env.s3.put_object(
@@ -384,6 +390,7 @@ def stage_run(testing_env, definition, target_arch="x86_64"):
         "artifacts_bucket": testing_env.bucket,
         "target_arch": target_arch,
         "simulation": True,
+        "custom_node_type_pins": custom_node_type_pins or {},
     }
 
 
@@ -960,3 +967,194 @@ class TestSimulatedInferenceStartRun:
         assert status == 400
         assert body["error"]["code"] == "INVALID_SIMULATED_INFERENCE"
         assert fake_sfn.calls == []
+
+
+# ===========================================================================
+# 5. Custom_Node_Types in cloud test runs
+#    (custom-node-designer task 13.1, Requirements 12.1, 12.2)
+# ===========================================================================
+
+from test_custom_node_types import make_declaration  # noqa: E402
+
+
+def custom_definition(type_id):
+    """camera_source -> <custom type> (VideoFrames in/out) -> capture."""
+    return {
+        "schemaVersion": 1,
+        "nodes": [
+            {"id": "n1", "type": "camera_source",
+             "position": {"x": 100, "y": 100}, "parameters": {}},
+            {"id": "n2", "type": type_id,
+             "position": {"x": 350, "y": 100}, "parameters": {"radius": 5}},
+            {"id": "n3", "type": "capture",
+             "position": {"x": 600, "y": 100},
+             "parameters": {"output_path": "/data/captures"}},
+        ],
+        "connections": [
+            {"id": "c1", "from": {"node": "n1", "port": "out"},
+             "to": {"node": "n2", "port": "in"}},
+            {"id": "c2", "from": {"node": "n2", "port": "out"},
+             "to": {"node": "n3", "port": "in"}},
+        ],
+    }
+
+
+def seed_custom_node_type(testing_env, usecase_id, type_id,
+                          plugin_name, with_artifact=True):
+    """A registered Custom_Node_Type version item plus its backing
+    Plugin_Record — with or without a successful x86_64 Plugin_Artifact
+    promoted to the Plugin_Library prefix of the portal bucket."""
+    plugin_id = f"plg-{uuid.uuid4().hex[:8]}"
+    artifacts = {}
+    if with_artifact:
+        so_key = (f"workflow-plugins/custom/{usecase_id}/x86_64/"
+                  f"{plugin_name}.so")
+        testing_env.s3.put_object(Bucket=testing_env.bucket, Key=so_key,
+                                  Body=b"\x7fELF custom plugin bytes")
+        artifacts["x86_64"] = {
+            "buildStatus": "succeeded", "s3Key": so_key,
+            "checksum": "abc123", "signature": "c2ln", "logTail": "",
+        }
+    testing_env.stack.tables.plugin_records.put_item(Item={
+        "plugin_id": plugin_id, "version": 1, "usecase_id": usecase_id,
+        "name": plugin_name, "lifecycle_state": "test",
+        "artifacts": artifacts,
+    })
+    declaration = make_declaration(type_id)
+    for mapping in declaration["mappings"]:
+        mapping["pluginDependencies"] = [f"custom:{usecase_id}/{plugin_name}"]
+    testing_env.stack.tables.custom_node_types.put_item(Item={
+        "node_type_id": type_id, "version": 1, "usecase_id": usecase_id,
+        "plugin_id": plugin_id, "plugin_version": 1,
+        "declaration": declaration, "deprecated": False,
+    })
+    return plugin_id
+
+
+def compiled_document(testing_env, inp):
+    key = inp["results_s3_key"].rsplit("/", 1)[0] + "/compiled_pipeline.json"
+    obj = testing_env.s3.get_object(Bucket=testing_env.bucket, Key=key)
+    return json.loads(obj["Body"].read().decode("utf-8"))
+
+
+def elements_for_node(document, node_id):
+    return [e for s in document["segments"] for e in s["elements"]
+            if e.get("nodeId") == node_id]
+
+
+def read_custom_plugins_manifest(testing_env, inp):
+    key = inp["results_s3_key"].rsplit("/", 1)[0] + "/custom_plugins.json"
+    obj = testing_env.s3.get_object(Bucket=testing_env.bucket, Key=key)
+    return json.loads(obj["Body"].read().decode("utf-8"))
+
+
+def manifest_absent(testing_env, inp):
+    key = inp["results_s3_key"].rsplit("/", 1)[0] + "/custom_plugins.json"
+    listed = testing_env.s3.list_objects_v2(
+        Bucket=testing_env.bucket, Prefix=key)
+    return listed.get("KeyCount", 0) == 0
+
+
+class TestCustomPluginCompile:
+    """The compile step compiles against the merged catalog of the run's
+    Use_Case, stages custom x86_64 Plugin_Artifacts under the run's
+    prefix for the sandbox task, and substitutes the pass-through
+    recording stub for Custom_Node_Types without an x86_64 build
+    (custom-node-designer 12.1, 12.2)."""
+
+    def test_compile_uses_merged_catalog_and_stages_custom_plugin(
+            self, testing_env):
+        """A workflow using a Custom_Node_Type with a successful x86_64
+        Plugin_Artifact validates and compiles against the merged catalog;
+        the real declared element chain is emitted for the custom node and
+        the artifact is staged under the run's plugins/ prefix with a
+        manifest entry (12.1)."""
+        usecase_id = f"uc-{uuid.uuid4()}"
+        type_id = "custom.blur_real"
+        seed_custom_node_type(testing_env, usecase_id, type_id, "blurplug",
+                              with_artifact=True)
+        inp = stage_run(testing_env, custom_definition(type_id),
+                        usecase_id=usecase_id)
+
+        # The merged catalog makes the custom type a known type (12.1).
+        assert testing_env.steps.handler(
+            {"step": "validate", "input": inp}, None)["ok"] is True
+
+        outcome = testing_env.steps.handler(
+            {"step": "compile", "input": inp}, None)
+        assert outcome["ok"] is True, outcome
+        assert outcome["stubbed_custom_node_types"] == []
+
+        # The custom node compiled to its real declared element chain.
+        document = compiled_document(testing_env, inp)
+        factories = [e["factory"] for e in elements_for_node(document, "n2")]
+        assert factories == ["blurregions"]
+
+        # The x86_64 artifact is staged under the run's plugins/ prefix.
+        manifest = read_custom_plugins_manifest(testing_env, inp)
+        assert manifest["stubbedNodeTypeIds"] == []
+        assert [p["nodeTypeId"] for p in manifest["plugins"]] == [type_id]
+        staged_key = manifest["plugins"][0]["s3Key"]
+        assert staged_key == (inp["results_s3_key"].rsplit("/", 1)[0]
+                              + "/plugins/blurplug.so")
+        staged = testing_env.s3.get_object(
+            Bucket=testing_env.bucket, Key=staged_key)
+        assert staged["Body"].read() == b"\x7fELF custom plugin bytes"
+
+    def test_compile_stubs_custom_node_without_x86_64_artifact(
+            self, testing_env):
+        """A Custom_Node_Type without a successful x86_64 Plugin_Artifact
+        is substituted with the pass-through recording stub — an identity
+        element named custom_stub_<nodeId> — and identified as stubbed in
+        the manifest; nothing is staged for it (12.2)."""
+        usecase_id = f"uc-{uuid.uuid4()}"
+        type_id = "custom.blur_stubbed"
+        seed_custom_node_type(testing_env, usecase_id, type_id, "stubplug",
+                              with_artifact=False)
+        inp = stage_run(testing_env, custom_definition(type_id),
+                        usecase_id=usecase_id)
+
+        outcome = testing_env.steps.handler(
+            {"step": "compile", "input": inp}, None)
+        assert outcome["ok"] is True, outcome
+        assert outcome["stubbed_custom_node_types"] == [type_id]
+
+        # The stub passes frames through unchanged and carries the
+        # per-node name the harness identifies stubbed nodes by.
+        document = compiled_document(testing_env, inp)
+        elements = elements_for_node(document, "n2")
+        assert [e["factory"] for e in elements] == ["identity"]
+        assert elements[0]["args"]["name"] == "custom_stub_n2"
+        assert "custom:" not in json.dumps(document.get("pluginDependencies"))
+
+        manifest = read_custom_plugins_manifest(testing_env, inp)
+        assert manifest["plugins"] == []
+        assert manifest["stubbedNodeTypeIds"] == [type_id]
+
+        # No artifact staged under the run's plugins/ prefix.
+        plugins_prefix = (inp["results_s3_key"].rsplit("/", 1)[0]
+                          + "/plugins/")
+        assert objects_under(testing_env, plugins_prefix) == []
+
+    def test_builtin_only_run_writes_no_custom_manifest(self, testing_env):
+        """Runs without custom nodes stay byte-identical to the
+        pre-existing flow: no custom_plugins.json is written."""
+        inp = stage_run(testing_env, VALID_DEFINITION)
+        outcome = testing_env.steps.handler(
+            {"step": "compile", "input": inp}, None)
+        assert outcome["ok"] is True
+        assert outcome["stubbed_custom_node_types"] == []
+        assert manifest_absent(testing_env, inp)
+
+    def test_stub_decision_is_exactly_artifact_absence(self, testing_env):
+        """Pure decision examples: a type is stubbed iff its backing
+        record lacks a successful x86_64 artifact entry (12.2)."""
+        steps = testing_env.steps
+        entries = {
+            "t.real": {"buildStatus": "succeeded", "s3Key": "k.so"},
+            "t.failed": {"buildStatus": "failed", "logTail": "boom"},
+            "t.keyless": {"buildStatus": "succeeded"},
+            "t.missing": None,
+        }
+        stubbed = steps.stubbed_custom_type_ids(sorted(entries), entries)
+        assert stubbed == frozenset({"t.failed", "t.keyless", "t.missing"})

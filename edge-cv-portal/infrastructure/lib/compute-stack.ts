@@ -990,6 +990,78 @@ export class ComputeStack extends cdk.Stack {
       ],
     }));
 
+    // ------------------------------------------------------------------
+    // Merged Node_Type_Catalog resolution (custom-node-designer task 9.2):
+    // the workflow store / validation / generator handlers read the
+    // Use_Case's registered Custom_Node_Types and the Lifecycle_State of
+    // their backing Plugin_Record versions. Those tables live in the
+    // NodeDesignerStack, which already depends on this stack's REST API —
+    // referencing its table tokens here would create a circular
+    // cross-stack reference, so the FIXED physical table names declared
+    // in node-designer-stack.ts are used instead (the same fixed-name
+    // pattern that stack uses for its simulator state machine ARN). The
+    // handlers degrade to the built-in catalog when the tables are not
+    // deployed.
+    const CUSTOM_NODE_TYPES_TABLE_NAME = 'dda-portal-custom-node-types';
+    const PLUGIN_RECORDS_TABLE_NAME = 'dda-portal-plugin-records';
+    const catalogConsumerHandlers = [
+      workflowsHandler,
+      workflowValidationHandler,
+      workflowGeneratorHandler,
+      // Component_Packager (custom-node-designer task 10.1): compiles
+      // against the merged catalog and loads the backing Plugin_Records
+      // for the custom-plugin packaging gates and artifact verification.
+      workflowPackagingHandler,
+      // Deployment_Service (custom-node-designer task 10.5): loads the
+      // backing Plugin_Records of a deployment's dependency closure for
+      // the pre-submit lifecycle and architecture gates.
+      deploymentsHandler,
+      // Component listing (custom-node-designer task 10.8): joins
+      // dda.plugin.* Plugin_Components with their backing Plugin_Record's
+      // Lifecycle_State for the deployment screen (Requirement 16.2).
+      componentsHandler,
+    ];
+    for (const handler of catalogConsumerHandlers) {
+      handler.addEnvironment('CUSTOM_NODE_TYPES_TABLE', CUSTOM_NODE_TYPES_TABLE_NAME);
+      handler.addEnvironment('PLUGIN_RECORDS_TABLE', PLUGIN_RECORDS_TABLE_NAME);
+      handler.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'dynamodb:GetItem',
+          'dynamodb:BatchGetItem',
+          'dynamodb:Query',
+          'dynamodb:Scan',
+        ],
+        resources: [
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${CUSTOM_NODE_TYPES_TABLE_NAME}`,
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${CUSTOM_NODE_TYPES_TABLE_NAME}/index/*`,
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${PLUGIN_RECORDS_TABLE_NAME}`,
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${PLUGIN_RECORDS_TABLE_NAME}/index/*`,
+        ],
+      }));
+    }
+
+    // Custom-plugin artifact verification (custom-node-designer task 10.1,
+    // Requirement 10.4): the Component_Packager KMS-Verifies each custom
+    // Plugin_Artifact signature against the portal signing key. The key
+    // lives in the NodeDesignerStack (same circular-reference constraint as
+    // the tables above), so its FIXED alias declared in
+    // node-designer-stack.ts is referenced instead of the key ARN; the
+    // grant is scoped to requests made through that alias.
+    const PLUGIN_SIGNING_KEY_ALIAS = 'alias/dda-portal/plugin-signing';
+    workflowPackagingHandler.addEnvironment(
+      'PLUGIN_SIGNING_KEY_ARN',
+      `arn:aws:kms:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:${PLUGIN_SIGNING_KEY_ALIAS}`,
+    );
+    workflowPackagingHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['kms:Verify', 'kms:DescribeKey'],
+      resources: [`arn:aws:kms:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:key/*`],
+      conditions: {
+        StringEquals: { 'kms:RequestAlias': PLUGIN_SIGNING_KEY_ALIAS },
+      },
+    }));
+
     // The data-accounts handler serves the Bedrock model dropdown on the
     // settings page (GET /data-accounts/bedrock-configuration/models) by
     // listing inference profiles and foundation models. These are list

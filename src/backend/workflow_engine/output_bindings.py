@@ -64,6 +64,10 @@ BINDING_DIGITAL_OUTPUT = "digital_output"
 BINDING_MQTT_PUBLISH = "mqtt_publish"
 BINDING_OPCUA_WRITE = "opcua_write"
 BINDING_DIGITAL_INPUT = "digital_input"
+#: Handled by BedrockInferenceProcessor BEFORE the output bindings run
+#: (the pipeline executor merges its result into the tag values this
+#: processor gates on); skipped here.
+BINDING_BEDROCK_INFERENCE = "bedrock_inference"
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +379,185 @@ def _default_opcua_writer(endpoint: str, node_id: str, value: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bedrock comparison inference (bedrock_inference bindings)
+#
+# Runs BEFORE the gating/output bindings evaluate: the pipeline executor
+# reads the two frames the compiled pipeline captured (the binding's
+# {work_dir}-rooted capturePaths), calls the Bedrock runtime converse
+# API with the configured model/prompt, parses the model's JSON answer,
+# and merges {is_anomalous, confidence} into the run's inference
+# metadata so downstream filters/conditionals/outputs see the fields —
+# exactly like emltriton tag values flow today. Failures (network,
+# credentials, missing frames, unparseable answers) are contained per
+# Requirement 13.7: the run is marked failed with the node identified,
+# and nothing else (other bindings, other pipelines) is touched.
+# ---------------------------------------------------------------------------
+
+#: Fixed client-side read timeout for Bedrock runtime invocations.
+BEDROCK_READ_TIMEOUT_SEC = 30
+
+#: Default model when the binding parameter is absent (mirrors the
+#: catalog default).
+BEDROCK_DEFAULT_MODEL = "us.amazon.nova-lite-v1:0"
+
+
+class BedrockInferenceError(Exception):
+    """A bedrock_inference binding failed. Carries the workflow node id
+    so the executor can mark the run failed with the node identified
+    (Requirements 9.7, 13.7)."""
+
+    def __init__(self, node_id: Optional[str], message: str) -> None:
+        super().__init__(message)
+        self.node_id = node_id
+
+
+_FENCED_BLOCK = re.compile(r"```[A-Za-z0-9_-]*\s*(.*?)```", re.DOTALL)
+
+
+def parse_bedrock_answer(text: str) -> Dict[str, Any]:
+    """Parse the model's answer into ``{is_anomalous, confidence}``.
+
+    Tolerates fenced code blocks (``` / ```json) and surrounding prose:
+    the first JSON object found is used. Raises ``ValueError`` when no
+    JSON object with the expected fields can be extracted.
+    """
+    candidates = [match.group(1) for match in _FENCED_BLOCK.finditer(text or "")]
+    candidates.append(text or "")
+    for candidate in candidates:
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start < 0 or end <= start:
+            continue
+        try:
+            parsed = json.loads(candidate[start:end + 1])
+        except ValueError:
+            continue
+        if not isinstance(parsed, dict) or "is_anomalous" not in parsed:
+            continue
+        is_anomalous = _coerce(parsed.get("is_anomalous"))
+        confidence = _coerce(parsed.get("confidence", 0.0))
+        if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+            confidence = 0.0
+        return {
+            "is_anomalous": bool(is_anomalous),
+            "confidence": float(confidence),
+        }
+    raise ValueError(
+        "Bedrock response did not contain the expected JSON object "
+        "{{\"is_anomalous\": ..., \"confidence\": ...}}: {0!r}".format(
+            (text or "")[:200]))
+
+
+def _default_bedrock_invoker(
+    model: str, prompt: str, images: List, region: str, max_tokens: int
+) -> str:
+    """Invoke the Bedrock runtime converse API and return the model's
+    text answer. ``images`` is a list of ``(label, jpeg_bytes)`` pairs
+    attached as image content blocks. boto3 is imported lazily so this
+    module stays importable everywhere (Requirement 13.7)."""
+    import boto3
+    from botocore.config import Config as BotoConfig
+
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=region,
+        config=BotoConfig(
+            read_timeout=BEDROCK_READ_TIMEOUT_SEC,
+            retries={"max_attempts": 1},
+        ),
+    )
+    content = [{"text": prompt}]
+    for label, data in images:
+        content.append({"text": "{0}:".format(label)})
+        content.append({"image": {"format": "jpeg", "source": {"bytes": data}}})
+    response = client.converse(
+        modelId=model,
+        messages=[{"role": "user", "content": content}],
+        inferenceConfig={"maxTokens": int(max_tokens)},
+    )
+    parts = (response.get("output", {}).get("message", {}).get("content", []))
+    return "".join(part.get("text", "") for part in parts
+                   if isinstance(part, dict))
+
+
+class BedrockInferenceProcessor:
+    """Runs a compiled document's ``bedrock_inference`` bindings.
+
+    Called by the WorkflowExecutor after a successful pipeline run and
+    before the run is finalized (so the merged metadata reaches the
+    post-run output bindings). The invoker is injectable so tests run
+    without boto3 or network access.
+    """
+
+    def __init__(self, invoker: Optional[Callable] = None) -> None:
+        self._invoker = invoker or _default_bedrock_invoker
+
+    def bindings(self, document: dict) -> List[dict]:
+        return [
+            binding for binding in (document.get("executorBindings") or [])
+            if binding.get("binding") == BINDING_BEDROCK_INFERENCE
+        ]
+
+    def process(
+        self, document: dict, tag_values: dict, work_dir: Optional[str]
+    ) -> Dict[str, Any]:
+        """Run every bedrock_inference binding and return the run's
+        inference metadata with the parsed fields merged in. Raises
+        :class:`BedrockInferenceError` naming the failing node."""
+        metadata = dict(tag_values or {})
+        for binding in self.bindings(document):
+            node_id = binding.get("nodeId")
+            try:
+                metadata.update(self._run_one(binding, work_dir))
+                logger.info(
+                    "Bedrock inference binding (node %s) processed", node_id
+                )
+            except BedrockInferenceError:
+                raise
+            except Exception as e:  # noqa: BLE001 - re-raised with the node
+                raise BedrockInferenceError(
+                    node_id,
+                    "Bedrock inference node '{0}' failed: {1}".format(
+                        node_id, e),
+                ) from e
+        return metadata
+
+    def _run_one(self, binding: dict, work_dir: Optional[str]) -> Dict[str, Any]:
+        node_id = binding.get("nodeId")
+        parameters = dict(binding.get("parameters") or {})
+        images = []
+        for port, label in (("in", "Input image"),
+                            ("reference", "Reference image")):
+            path = (binding.get("capturePaths") or {}).get(port)
+            if not path:
+                raise BedrockInferenceError(
+                    node_id,
+                    "Bedrock inference node '{0}' has no captured frame for "
+                    "its '{1}' input (the port is not fed by any video "
+                    "source)".format(node_id, port))
+            if work_dir:
+                path = path.replace("{work_dir}", work_dir)
+            try:
+                with open(path, "rb") as f:
+                    images.append((label, f.read()))
+            except OSError as e:
+                raise BedrockInferenceError(
+                    node_id,
+                    "Bedrock inference node '{0}' could not read the "
+                    "captured '{1}' frame from {2}: {3}".format(
+                        node_id, port, path, e)) from e
+
+        answer = self._invoker(
+            str(parameters.get("model") or BEDROCK_DEFAULT_MODEL),
+            str(parameters.get("prompt") or ""),
+            images,
+            str(parameters.get("region") or "us-east-1"),
+            int(parameters.get("max_tokens") or 256),
+        )
+        return parse_bedrock_answer(answer)
+
+
+# ---------------------------------------------------------------------------
 # Processor
 # ---------------------------------------------------------------------------
 
@@ -421,6 +604,8 @@ class OutputBindingProcessor:
                     continue  # evaluated above; routes/gates, no action
                 if kind == BINDING_DIGITAL_INPUT:
                     continue  # input side; not an output binding
+                if kind == BINDING_BEDROCK_INFERENCE:
+                    continue  # ran before this processor; fields merged
                 if kind == BINDING_DIGITAL_OUTPUT:
                     runner = self._run_digital_output
                 elif kind == BINDING_MQTT_PUBLISH:

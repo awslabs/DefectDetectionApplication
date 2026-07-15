@@ -48,6 +48,47 @@ see "Staging the DDA Triton conversion resources" below), plus
 The task role only has portal-artifacts S3 and TestRuns table access —
 no Greengrass or device permissions (Requirement 12.9).
 
+## Simulate mode (`HARNESS_MODE=simulate`)
+
+The same image also serves the Custom Node Designer's Plugin_Simulator
+(custom-node-designer Requirements 7.2, 7.3, 7.6). Setting
+`HARNESS_MODE=simulate` switches the entrypoint to `harness/simulate.py`,
+which exercises exactly one custom-node plugin element instead of a
+Compiled Pipeline Document:
+
+1. Stages the plugin's x86_64 `.so` (`PLUGIN_S3_KEY`) into the task's
+   plugin scan directory, prepended to `GST_PLUGIN_PATH` before
+   GStreamer initializes.
+2. Stages the sample input frames (`DATASET_S3_PREFIX`) with the same
+   dataset staging as test runs and uploads each staged input frame
+   under the run's `frames/` prefix.
+3. Renders and executes the single-plugin pipeline
+   `multifilesrc ! jpegparse ! jpegdec ! videoconvert !
+   <element> <declared-params> ! videoconvert ! jpegenc ! appsink` via
+   `Gst.parse_launch`. The appsink is the frame capture + metadata tap:
+   each output frame is uploaded and its result record
+   `{frameIndex, inputRef, outputRef, metadata}` is flushed to
+   `RESULTS_S3_KEY` incrementally, so partial results survive a mid-run
+   plugin failure.
+4. Abnormal plugin termination stays contained to the task: bus errors
+   and the plugin's captured stderr are recorded in the flushed results
+   document; a hard native crash kills only the Fargate task and the
+   simulator state machine's catch marks the run failed with the
+   flushed partial results retained.
+
+### Simulate-mode environment contract
+
+Set by the RunSandbox state of the node-designer simulator state
+machine (`node-designer-stack.ts`, task 8.2): `SIMULATION_RUN_ID`,
+`ARTIFACTS_BUCKET`, `DATASET_S3_PREFIX`, `RESULTS_S3_KEY`,
+`PLUGIN_S3_KEY` (the plugin `.so` staged under the run's prefix),
+`ELEMENT_FACTORY` (the plugin's element name), `ELEMENT_PARAMETERS`
+(JSON `{parameter: value}`, optional), plus optional `PLUGIN_SCAN_DIR`
+and `PIPELINE_TIMEOUT_SEC` (default 270 s — under the state machine's
+5-minute limit so the harness flushes the timeout failure itself). The
+task role is limited to the run's S3 prefix: no Plugin_Library write
+path, no other Use_Case data (7.2).
+
 ## Image contents
 
 - Ubuntu 22.04 (x86_64) with GStreamer 1.20 + Python GI bindings

@@ -49,6 +49,7 @@ CATEGORIES = (
 # --------------------------------------------------------------------------
 
 ARCH_X86_64 = "x86_64"
+ARCH_X86_64_NVIDIA = "x86_64_nvidia"
 ARCH_ARM64_JP4 = "arm64_jp4"
 ARCH_ARM64_JP5 = "arm64_jp5"
 ARCH_ARM64_JP6 = "arm64_jp6"
@@ -56,8 +57,10 @@ ARCH_SIM = "sim"
 
 #: All architectures a workflow can be compiled for. ``sim`` is the
 #: cloud-side test sandbox (x86_64 container, CPU Triton).
+#: ``x86_64_nvidia`` is an x86_64 device with the NVIDIA GPU runtime.
 ARCHITECTURES = (
     ARCH_X86_64,
+    ARCH_X86_64_NVIDIA,
     ARCH_ARM64_JP4,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
@@ -67,6 +70,7 @@ ARCHITECTURES = (
 #: Architectures that correspond to physical edge devices.
 DEVICE_ARCHITECTURES = (
     ARCH_X86_64,
+    ARCH_X86_64_NVIDIA,
     ARCH_ARM64_JP4,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,

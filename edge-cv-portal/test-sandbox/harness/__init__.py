@@ -27,4 +27,10 @@ stubs) lives in :mod:`harness.renderer`, :mod:`harness.results`,
 :mod:`harness.dataset` and :mod:`harness.bindings`, importable without
 GStreamer or AWS SDKs so it is unit-testable anywhere. The runtime
 (S3 + GStreamer) lives in :mod:`harness.harness`.
+
+``HARNESS_MODE=simulate`` selects the Plugin_Simulator mode instead
+(:mod:`harness.simulate`, custom-node-designer Requirements 7.2, 7.3,
+7.6): a single custom-node plugin element exercised against sample
+input frames, with per-frame ``{frameIndex, inputRef, outputRef,
+metadata}`` results flushed incrementally to S3.
 """

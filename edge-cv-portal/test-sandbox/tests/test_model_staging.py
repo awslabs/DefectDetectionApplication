@@ -326,7 +326,9 @@ class TestPrebuiltRepositoryZips:
 # ===========================================================================
 
 class FakeS3:
-    """download_file stub backed by an in-memory {key: bytes} map."""
+    """download_file/get_object stub backed by an in-memory {key: bytes}
+    map (get_object raises the NoSuchKey ClientError the harness treats
+    as "no custom plugins manifest staged")."""
 
     def __init__(self, objects):
         self.objects = objects
@@ -338,6 +340,14 @@ class FakeS3:
             raise RuntimeError("NoSuchKey: " + key)
         with open(path, "wb") as handle:
             handle.write(self.objects[key])
+
+    def get_object(self, Bucket, Key):
+        from botocore.exceptions import ClientError
+        if Key not in self.objects:
+            raise ClientError(
+                {"Error": {"Code": "NoSuchKey", "Message": "missing"}},
+                "GetObject")
+        return {"Body": io.BytesIO(self.objects[Key])}
 
 
 def zip_bytes(files):

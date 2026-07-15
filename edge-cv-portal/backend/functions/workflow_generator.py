@@ -84,6 +84,13 @@ from workflow_core.catalog import NODE_CATALOG
 # (workflow_validation.py lives in the same Lambda bundle).
 from workflow_validation import descriptor_to_wire
 
+# Merged Node_Type_Catalog resolution (custom-node-designer task 9.2):
+# generation embeds the Use_Case's merged palette catalog in the system
+# prompt so generated workflows may use registered Custom_Node_Types
+# (same palette rules as GET /workflows/node-catalog: test/prod only,
+# deprecated excluded).
+from node_catalog_resolution import palette_catalog_for_usecase
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -278,15 +285,23 @@ def get_bedrock_client(region: str, timeout_seconds: int):
 # Prompt and tool assembly (Requirements 10.2, 10.5)
 # --------------------------------------------------------------------------
 
-def serialized_catalog_json() -> str:
-    """The node type catalog in its camelCase wire form, as a JSON string"""
+def serialized_catalog_json(catalog=NODE_CATALOG) -> str:
+    """A node type catalog in its camelCase wire form, as a JSON string.
+
+    Defaults to the static built-in catalog (cached per container); a
+    merged catalog carrying a Use_Case's Custom_Node_Types is serialized
+    per invocation (task 9.2).
+    """
     global _catalog_json_cache
-    if _catalog_json_cache is None:
-        _catalog_json_cache = json.dumps(
-            [descriptor_to_wire(d) for d in NODE_CATALOG],
-            sort_keys=True
-        )
-    return _catalog_json_cache
+    if catalog is NODE_CATALOG:
+        if _catalog_json_cache is None:
+            _catalog_json_cache = json.dumps(
+                [descriptor_to_wire(d) for d in NODE_CATALOG],
+                sort_keys=True
+            )
+        return _catalog_json_cache
+    return json.dumps([descriptor_to_wire(d) for d in catalog],
+                      sort_keys=True)
 
 
 def create_workflow_tool_schema() -> Dict:
@@ -320,8 +335,10 @@ def build_tool_config() -> Dict:
     }
 
 
-def build_system_prompt() -> str:
-    """System prompt embedding the serialized node catalog (Requirement 10.2)"""
+def build_system_prompt(catalog=NODE_CATALOG) -> str:
+    """System prompt embedding the serialized node catalog (Requirement
+    10.2). ``catalog`` is the effective (possibly merged) catalog for the
+    requesting Use_Case (custom-node-designer task 9.2)."""
     return (
         'You are the workflow generation assistant of the DDA edge computer '
         'vision portal. Users describe video analytics pipelines in natural '
@@ -350,7 +367,7 @@ def build_system_prompt() -> str:
         'requested modification to it and return the complete modified '
         'definition; do not regenerate an unrelated workflow from scratch.\n'
         '\n'
-        f'NODE TYPE CATALOG (JSON):\n{serialized_catalog_json()}'
+        f'NODE TYPE CATALOG (JSON):\n{serialized_catalog_json(catalog)}'
     )
 
 
@@ -432,9 +449,11 @@ def converse_messages(history: List[Dict], user_text: str) -> List[Dict]:
     return messages
 
 
-def invoke_generation(config: Dict, messages: List[Dict]) -> Tuple[Optional[Dict], Optional[str], Optional[Dict]]:
+def invoke_generation(config: Dict, messages: List[Dict],
+                      catalog=NODE_CATALOG) -> Tuple[Optional[Dict], Optional[str], Optional[Dict]]:
     """
-    Invoke the configured Bedrock model via the Converse API.
+    Invoke the configured Bedrock model via the Converse API with the
+    effective (possibly merged) node type catalog in the system prompt.
 
     Returns (tool_input, assistant_text, None) on success or
     (None, None, error_response). Timeouts and invocation failures are
@@ -455,7 +474,7 @@ def invoke_generation(config: Dict, messages: List[Dict]) -> Tuple[Optional[Dict
     try:
         response = client.converse(
             modelId=config['model_id'],
-            system=[{'text': build_system_prompt()}],
+            system=[{'text': build_system_prompt(catalog)}],
             messages=messages,
             inferenceConfig=inference_config,
             toolConfig=build_tool_config()
@@ -621,7 +640,13 @@ def generate_workflow(event: Dict, user: Dict) -> Dict:
     history = session.get('messages') or []
     messages = converse_messages(history, user_text)
 
-    tool_input, assistant_text, err = invoke_generation(config, messages)
+    # The Use_Case's merged palette catalog (built-ins + registered
+    # Custom_Node_Types in test/prod, deprecated excluded) drives both the
+    # system prompt and the validation of the generated output (task 9.2).
+    catalog, _markers = palette_catalog_for_usecase(usecase_id)
+
+    tool_input, assistant_text, err = invoke_generation(config, messages,
+                                                        catalog=catalog)
     if err:
         # No session mutation on failure: the canvas stays untouched and the
         # client retries with the preserved prompt (10.4, 10.7).
@@ -643,9 +668,10 @@ def generate_workflow(event: Dict, user: Dict) -> Dict:
     canonical_json = serialize_graph(result.graph)
     definition = json.loads(canonical_json)
 
-    # Full Workflow_Validator run; the complete findings list accompanies the
-    # definition so the user reviews it on the canvas before any save (10.3).
-    findings = run_validator(result.graph)
+    # Full Workflow_Validator run against the same merged catalog; the
+    # complete findings list accompanies the definition so the user
+    # reviews it on the canvas before any save (10.3).
+    findings = run_validator(result.graph, catalog=catalog)
     wire_findings = [f.to_dict() for f in findings]
     error_count = sum(1 for f in findings if f.severity == SEVERITY_ERROR)
     warning_count = sum(1 for f in findings if f.severity == SEVERITY_WARNING)

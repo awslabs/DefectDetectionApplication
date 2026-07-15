@@ -289,6 +289,38 @@ class TestCpuVariantSelection:
         item, arn = staging_env.staging.resolve_model_item(items, "other")
         assert item is None and arn is None
 
+    def test_training_job_name_resolves_component_base_registry_name(self, staging_env):
+        # The dropdown stores the training-job model_name (yolo_test); the
+        # registry item carries the component base name (model-yolo-test).
+        items = [{"name": "model-yolo-test", "created_at": 1,
+                  "component_arns": {"x86_64-cpu": component_arn("model-yolo-test-x86-64-cpu", "1.0.0")}}]
+        item, arn = staging_env.staging.resolve_model_item(items, "yolo_test")
+        assert item is not None
+        assert arn == component_arn("model-yolo-test-x86-64-cpu", "1.0.0")
+
+    def test_hyphenated_training_name_resolves_prefixed_registry_name(self, staging_env):
+        items = [{"name": "model-cookies-binary", "created_at": 1,
+                  "component_arns": {"x86_64-cpu": component_arn("model-cookies-binary-x86-64-cpu", "1.0.0")}}]
+        item, arn = staging_env.staging.resolve_model_item(items, "cookies-binary")
+        assert item is not None and arn is not None
+
+    def test_exact_match_wins_over_prefixed_candidate(self, staging_env):
+        # An exact-name registry item is preferred over the model- prefixed
+        # spelling of the same dropdown name.
+        items = [
+            {"name": "cookies-binary", "created_at": 1,
+             "component_arns": {"x86_64-cpu": component_arn("cookies-binary-x86-64-cpu", "1.0.0")}},
+            {"name": "model-cookies-binary", "created_at": 2,
+             "component_arns": {"x86_64-cpu": component_arn("model-cookies-binary-x86-64-cpu", "2.0.0")}},
+        ]
+        item, arn = staging_env.staging.resolve_model_item(items, "cookies-binary")
+        assert item["name"] == "cookies-binary"
+
+    def test_registry_name_candidates_order_and_dedup(self, staging_env):
+        assert staging_env.staging.registry_name_candidates("yolo_test") == [
+            "yolo_test", "yolo-test", "model-yolo_test", "model-yolo-test"]
+        assert staging_env.staging.registry_name_candidates("model-x") == ["model-x"]
+
 
 class TestDefinitionParsing:
 

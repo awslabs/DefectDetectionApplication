@@ -46,7 +46,7 @@ import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from workflow_engine import environment
+from workflow_engine import environment, gst_plugins
 
 logger = logging.getLogger(__name__)
 
@@ -127,11 +127,14 @@ def validate_artifact_set(
     artifact_set: DiscoveredArtifactSet,
     device_arch: Optional[str] = None,
     running_version: Optional[str] = None,
+    plugins_root: str = gst_plugins.DEVICE_PLUGINS_ROOT,
 ) -> ArtifactValidation:
     """Classify one artifact set as registered or invalid (with reason).
 
     ``device_arch`` / ``running_version`` default to this device's
-    probed values; tests inject them explicitly.
+    probed values; tests inject them explicitly. ``plugins_root`` is the
+    Plugin_Component install root checksum verification resolves
+    component-delivered plugin files under.
     """
     if device_arch is None:
         device_arch = environment.device_arch()
@@ -214,6 +217,33 @@ def validate_artifact_set(
             status=STATUS_INVALID,
             arch=arch,
             reason=f"Malformed {COMPILED_PIPELINE_FILE}: missing 'segments' list",
+            manifest=manifest,
+            compiled_document=compiled_document,
+        )
+
+    # 6. Every plugin file the manifest records a checksum for — inline
+    # under plugins/<arch>/ or installed by a depended-on
+    # Plugin_Component — must hash to that checksum (custom-node-designer
+    # Requirement 10.6). A mismatch registers the workflow as invalid
+    # with the failing file identified; it is reported but never runnable.
+    verification = gst_plugins.verify_manifest_plugins(
+        manifest, artifact_set.path, plugins_root=plugins_root
+    )
+    if not verification.ok:
+        details = "; ".join(
+            "{0} ({1}): {2}".format(
+                key,
+                gst_plugins.resolve_checksum_path(
+                    key, manifest, artifact_set.path, plugins_root
+                ),
+                reason,
+            )
+            for key, reason in verification.failures
+        )
+        return ArtifactValidation(
+            status=STATUS_INVALID,
+            arch=arch,
+            reason=f"Plugin checksum verification failed: {details}",
             manifest=manifest,
             compiled_document=compiled_document,
         )

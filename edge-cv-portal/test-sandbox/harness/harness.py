@@ -102,6 +102,25 @@ SIMULATED_INFERENCE_NOTE = (
     "configured outcome was injected"
 )
 
+#: Note recorded with every custom-node pass-through stub activity entry
+#: (custom-node-designer Requirement 12.2): the Custom_Node_Type has no
+#: x86_64 Plugin_Artifact, so the compile step substituted a recording
+#: stub that passes input frames through unchanged.
+CUSTOM_NODE_STUB_NOTE = (
+    "Simulated: this custom node has no x86_64 build; a pass-through "
+    "stub recorded the frames the node would have consumed and passed "
+    "them through unchanged"
+)
+
+#: Manifest written by the compile step next to the compiled document,
+#: listing the staged custom x86_64 Plugin_Artifacts to download into the
+#: task's plugin scan path plus the stubbed Custom_Node_Type ids
+#: (custom-node-designer 12.1, 12.2).
+CUSTOM_PLUGINS_MANIFEST_NAME = "custom_plugins.json"
+
+#: Shape used when the manifest is absent (runs without custom nodes).
+EMPTY_CUSTOM_PLUGINS_MANIFEST = {"plugins": [], "stubbedNodeTypeIds": []}
+
 
 # ---------------------------------------------------------------------------
 # S3 helpers
@@ -133,6 +152,90 @@ def download_dataset(s3, bucket: str, prefix: str, target_dir: str) -> Dict[str,
             s3.download_file(bucket, key, local_path)
             files[name] = local_path
     return files
+
+
+def custom_plugins_manifest_key(results_key: str) -> str:
+    """The custom-plugins manifest lives next to the results document:
+    .../test-runs/{test_run_id}/custom_plugins.json"""
+    prefix = results_key.rsplit("/", 1)[0] if "/" in results_key else ""
+    return (prefix + "/" if prefix else "") + CUSTOM_PLUGINS_MANIFEST_NAME
+
+
+def parse_custom_plugins_manifest(document: Any) -> Dict:
+    """The ``{plugins, stubbedNodeTypeIds}`` manifest shape from a parsed
+    document; absent/malformed input yields the empty manifest (the
+    compile step writes the manifest, so this is defensive only)."""
+    if not isinstance(document, dict):
+        return dict(EMPTY_CUSTOM_PLUGINS_MANIFEST)
+    plugins = document.get("plugins")
+    stubbed = document.get("stubbedNodeTypeIds")
+    return {
+        "plugins": [p for p in plugins if isinstance(p, dict)]
+        if isinstance(plugins, list) else [],
+        "stubbedNodeTypeIds": [s for s in stubbed if isinstance(s, str)]
+        if isinstance(stubbed, list) else [],
+    }
+
+
+def load_custom_plugins_manifest(s3, bucket: str, results_key: str) -> Dict:
+    """Read the custom-plugins manifest the compile step staged next to
+    the compiled document; a missing manifest (runs without custom nodes,
+    or a compile step predating custom-node support) yields the empty
+    manifest (custom-node-designer 12.1)."""
+    from botocore.exceptions import ClientError
+
+    key = custom_plugins_manifest_key(results_key)
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+        document = json.loads(response["Body"].read().decode("utf-8"))
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") not in ("NoSuchKey", "404"):
+            raise
+        return dict(EMPTY_CUSTOM_PLUGINS_MANIFEST)
+    except (ValueError, UnicodeDecodeError) as e:
+        logger.warning("Malformed custom plugins manifest %s: %s", key, str(e))
+        return dict(EMPTY_CUSTOM_PLUGINS_MANIFEST)
+    return parse_custom_plugins_manifest(document)
+
+
+def plugin_scan_dir(workdir: str) -> str:
+    """The task's plugin scan directory: PLUGIN_SCAN_DIR when set (tests,
+    stack overrides), otherwise a run-local directory under the task's
+    workdir — per-task by construction on Fargate."""
+    return os.environ.get("PLUGIN_SCAN_DIR") or os.path.join(workdir, "plugins")
+
+
+def extend_plugin_path(existing: Optional[str], scan_dir: str) -> str:
+    """The GST_PLUGIN_PATH value with the task's plugin scan directory
+    prepended (staged custom plugins found first; the image's DDA plugin
+    set stays available)."""
+    if not existing:
+        return scan_dir
+    parts = existing.split(os.pathsep)
+    if scan_dir in parts:
+        return existing
+    return scan_dir + os.pathsep + existing
+
+
+def stage_custom_plugins(s3, bucket: str, entries: List[Dict],
+                         scan_dir: str) -> List[str]:
+    """Download the staged custom x86_64 Plugin_Artifacts into the task's
+    plugin scan directory (before GStreamer initializes, so the registry
+    scan finds them — custom-node-designer 12.1). Returns the staged
+    paths."""
+    os.makedirs(scan_dir, exist_ok=True)
+    staged: List[str] = []
+    for entry in entries:
+        key = entry.get("s3Key")
+        if not key:
+            continue
+        filename = entry.get("fileName") or os.path.basename(key) or "plugin.so"
+        if not filename.endswith(".so"):
+            filename += ".so"
+        target = os.path.join(scan_dir, filename)
+        s3.download_file(bucket, key, target)
+        staged.append(target)
+    return staged
 
 
 def make_flush(s3, bucket: str, key: str):
@@ -359,6 +462,23 @@ def execute(s3, bucket: str, results_key: str, dataset_prefix: str,
             document: Dict, store: ResultsStore) -> int:
     workdir = tempfile.mkdtemp(prefix="test-run-")
 
+    # -1. Custom plugin staging (custom-node-designer 12.1): the compile
+    #     step staged each used Custom_Node_Type's x86_64 Plugin_Artifact
+    #     under the run's prefix and listed it in custom_plugins.json.
+    #     Download them into the task's plugin scan directory and prepend
+    #     it to GST_PLUGIN_PATH before GStreamer initializes, so the
+    #     registry scan finds the custom elements and the pipeline
+    #     executes them. Runs without custom nodes have no manifest.
+    manifest = load_custom_plugins_manifest(s3, bucket, results_key)
+    if manifest["plugins"]:
+        scan_dir = plugin_scan_dir(workdir)
+        staged_plugins = stage_custom_plugins(s3, bucket,
+                                              manifest["plugins"], scan_dir)
+        os.environ["GST_PLUGIN_PATH"] = extend_plugin_path(
+            os.environ.get("GST_PLUGIN_PATH"), scan_dir)
+        logger.info("Staged %d custom plugin(s) into scan dir %s: %s",
+                    len(staged_plugins), scan_dir, staged_plugins)
+
     # 0. Triton model staging: the STAGED_MODELS manifest lists the
     #    model artifacts the portal copied under the run's prefix for
     #    every model_inference node. Each zip is unpacked into the
@@ -427,6 +547,25 @@ def execute(s3, bucket: str, results_key: str, dataset_prefix: str,
                         "note": "Simulated: source fed from the selected "
                                 "Test_Dataset instead of camera hardware",
                     }, flush=False)
+        store.flush()
+
+    # Record the pass-through stub substitution on every stubbed
+    # Custom_Node_Type node (custom-node-designer 12.2): the identity
+    # element custom_stub_<nodeId> passes frames through unchanged while
+    # this entry identifies the node as stubbed in the test run report.
+    # Recorded before execution so a later failure retains it (12.10).
+    custom_stub_nodes = renderer.custom_stub_node_ids(document)
+    if custom_stub_nodes:
+        frame_count = len(dataset_module.plan_staging(list(files.keys())))
+        for node_id in custom_stub_nodes:
+            store.add_stub_activity(node_id, {
+                "type": "custom_node_stub",
+                "element": "custom_stub_" + node_id,
+                "frameCount": frame_count,
+                "note": CUSTOM_NODE_STUB_NOTE,
+            }, flush=False)
+        logger.info("Custom node(s) %s stubbed with pass-through recorders",
+                    custom_stub_nodes)
         store.flush()
 
     # 2. Render exactly as LocalServer does and execute (12.5).

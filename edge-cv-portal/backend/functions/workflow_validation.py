@@ -52,6 +52,16 @@ from workflow_core.catalog import (
 from workflow_core.serializer import parse as parse_definition
 from workflow_core.validator import validate as run_validator, SEVERITY_ERROR, SEVERITY_WARNING
 
+# Merged Node_Type_Catalog resolution for Custom_Node_Types (task 9.2):
+# the palette merge (test/prod only, dev excluded, deprecated excluded,
+# test markers) and the resolution merge for validating existing
+# workflows (pinned versions honored, deprecated resolvable). Same
+# deployment bundle (functions/).
+from node_catalog_resolution import (
+    palette_catalog_for_usecase,
+    resolution_catalog_for_usecase,
+)
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -248,16 +258,38 @@ def descriptor_to_wire(descriptor: NodeTypeDescriptor) -> Dict:
 
 def get_node_catalog(event: Dict, user: Dict) -> Dict:
     """
-    GET /workflows/node-catalog
-    Serves the full node type catalog for the frontend Node_Palette:
-    every node type's ports, port types, parameters with types, defaults,
-    and constraints, per-arch mappings, and hardware-dependence flag
-    (Requirement 2.8). The catalog is global, static data with no
-    tenant-scoped content, so any authenticated user may read it.
+    GET /workflows/node-catalog[?usecase_id=...]
+    Serves the node type catalog for the frontend Node_Palette: every
+    node type's ports, port types, parameters with types, defaults, and
+    constraints, per-arch mappings, and hardware-dependence flag
+    (workflow-manager Requirement 2.8).
+
+    Without ``usecase_id`` the built-in catalog is served unchanged
+    (global, static data any authenticated user may read). With
+    ``usecase_id`` the Use_Case's registered Custom_Node_Types are merged
+    in (custom-node-designer 8.2, 8.3): only types backed by a test- or
+    prod-state Plugin_Record version (dev excluded, 9.2), deprecated
+    types excluded from new placement (14.3), and test-state entries
+    carrying a ``lifecycleState: "test"`` palette marker (9.6).
     """
+    params = event.get('queryStringParameters') or {}
+    usecase_id = params.get('usecase_id')
+    if usecase_id and not has_workflow_permission(user, usecase_id,
+                                                  Permission.WORKFLOW_READ):
+        return forbidden_response(user, event, usecase_id,
+                                  [Permission.WORKFLOW_READ])
+
+    catalog, markers = palette_catalog_for_usecase(usecase_id)
+    node_types = []
+    for descriptor in catalog:
+        wire = descriptor_to_wire(descriptor)
+        marker = markers.get(descriptor.type_id)
+        if marker:
+            wire['lifecycleState'] = marker
+        node_types.append(wire)
     return create_response(200, {
-        'nodeTypes': [descriptor_to_wire(d) for d in NODE_CATALOG],
-        'count': len(NODE_CATALOG)
+        'nodeTypes': node_types,
+        'count': len(node_types)
     })
 
 
@@ -321,8 +353,15 @@ def validate_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                               'Stored workflow definition could not be parsed',
                               {'code': result.error.code, 'path': result.error.path})
 
-    # All checks always run; the complete findings list is returned (4.6)
-    findings = run_validator(result.graph)
+    # All checks always run; the complete findings list is returned (4.6).
+    # Validation runs against the merged catalog for the workflow's
+    # Use_Case (custom-node-designer task 9.2): Custom_Node_Type versions
+    # recorded at save are honored (14.2) and deprecated types remain
+    # resolvable so existing workflows stay validatable (14.3).
+    pinned_versions = version_item.get('custom_node_types') or {}
+    catalog = resolution_catalog_for_usecase(item['usecase_id'],
+                                             pinned_versions)
+    findings = run_validator(result.graph, catalog=catalog)
     wire_findings = [f.to_dict() for f in findings]
     error_count = sum(1 for f in findings if f.severity == SEVERITY_ERROR)
     warning_count = sum(1 for f in findings if f.severity == SEVERITY_WARNING)

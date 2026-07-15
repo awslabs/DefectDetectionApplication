@@ -1,0 +1,47 @@
+# dda-plugin-build:x86_64 - plain x86_64 plugin build image (linux/amd64).
+#
+# Ubuntu 22.04 + GStreamer 1.20 dev headers, matching the test-sandbox
+# runtime image (test-sandbox/Dockerfile). Used by the CodeBuild project
+# dda-plugin-build-x86_64 (node-designer-stack.ts); the buildspec runs
+# /usr/local/bin/dda-plugin-build.
+#
+# Build (from edge-cv-portal/plugin-build-images/):
+#   docker buildx build --platform linux/amd64 -f Dockerfile.x86_64 \
+#     -t <repo-uri>:x86_64 .
+FROM public.ecr.aws/ubuntu/ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Toolchain + GStreamer development headers. The Plugin_Scaffold meson
+# projects (workflow_core/scaffold.py) depend on gstreamer-1.0,
+# gstreamer-app-1.0 (libgstreamer-plugins-base1.0-dev) and python3-embed
+# (python3-dev). autotools covers imported repositories using configure.ac.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        meson \
+        ninja-build \
+        autoconf \
+        automake \
+        libtool \
+        git \
+        python3 \
+        python3-dev \
+        python3-pip \
+        libgstreamer1.0-dev \
+        libgstreamer-plugins-base1.0-dev \
+        libgstreamer-plugins-bad1.0-dev \
+        ca-certificates \
+        curl \
+        unzip \
+        xxd \
+    && rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2 (S3 staging/promotion + KMS signing in the entrypoint).
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
+        -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/awscliv2.zip /tmp/aws
+
+COPY dda-plugin-build /usr/local/bin/dda-plugin-build
+RUN chmod +x /usr/local/bin/dda-plugin-build

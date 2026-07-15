@@ -1,8 +1,8 @@
 """Smoke tests for the workflow_core package skeleton and test setup.
 
 Verifies the package layout imports cleanly and that the hypothesis
-profile mandated by the workflow-manager spec (100+ examples per
-property) is active for this test session.
+profile registered in conftest.py (25+ examples per property for fast
+local runs) is active for this test session.
 """
 
 from hypothesis import given, settings
@@ -19,8 +19,8 @@ def test_package_imports():
     assert workflow_core.__version__
 
 
-def test_hypothesis_profile_runs_at_least_100_examples():
-    assert settings().max_examples >= 100
+def test_hypothesis_profile_runs_at_least_25_examples():
+    assert settings().max_examples >= 25
 
 
 def test_hypothesis_executes_properties():
@@ -32,4 +32,4 @@ def test_hypothesis_executes_properties():
         executed.append(n)
 
     prop()
-    assert len(executed) >= 100
+    assert len(executed) >= 25

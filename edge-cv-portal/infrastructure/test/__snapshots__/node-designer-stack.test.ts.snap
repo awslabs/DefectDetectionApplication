@@ -1,0 +1,745 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`plugin build CodeBuild projects (Requirements 3.1, 3.2) all five build projects stack snapshot 1`] = `
+{
+  "dda-plugin-build-arm64_jp4": {
+    "Properties": {
+      "Artifacts": {
+        "Type": "NO_ARTIFACTS",
+      },
+      "Cache": {
+        "Type": "NO_CACHE",
+      },
+      "Description": "Custom node plugin build for arm64_jp4 (fresh container per build, prefix-scoped role, no VPC access to portal internals)",
+      "EncryptionKey": "alias/aws/s3",
+      "Environment": {
+        "ComputeType": "BUILD_GENERAL1_LARGE",
+        "EnvironmentVariables": [
+          {
+            "Name": "TARGET_ARCH",
+            "Type": "PLAINTEXT",
+            "Value": "arm64_jp4",
+          },
+          {
+            "Name": "ARTIFACTS_BUCKET",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+            },
+          },
+          {
+            "Name": "PLUGIN_STAGING_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "plugin-staging",
+          },
+          {
+            "Name": "PLUGIN_LIBRARY_CUSTOM_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "workflow-plugins/custom",
+          },
+          {
+            "Name": "SIGNING_KEY_ARN",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::GetAtt": [
+                "PluginSigningKeyF582FEC9",
+                "Arn",
+              ],
+            },
+          },
+        ],
+        "Image": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Fn::Select": [
+                  4,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::GetAtt": [
+                          "PluginBuildImageRepositoryDC232F59",
+                          "Arn",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              ".dkr.ecr.",
+              {
+                "Fn::Select": [
+                  3,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::GetAtt": [
+                          "PluginBuildImageRepositoryDC232F59",
+                          "Arn",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              ".",
+              {
+                "Ref": "AWS::URLSuffix",
+              },
+              "/",
+              {
+                "Ref": "PluginBuildImageRepositoryDC232F59",
+              },
+              ":arm64_jp4",
+            ],
+          ],
+        },
+        "ImagePullCredentialsType": "SERVICE_ROLE",
+        "PrivilegedMode": false,
+        "Type": "ARM_CONTAINER",
+      },
+      "Name": "dda-plugin-build-arm64_jp4",
+      "ServiceRole": {
+        "Fn::GetAtt": [
+          "PluginBuildRolearm64jp42798C3A5",
+          "Arn",
+        ],
+      },
+      "Source": {
+        "BuildSpec": "{
+  "version": "0.2",
+  "phases": {
+    "build": {
+      "commands": [
+        "dda-plugin-build"
+      ]
+    }
+  }
+}",
+        "Location": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+              },
+              "/plugin-sources/",
+            ],
+          ],
+        },
+        "Type": "S3",
+      },
+      "TimeoutInMinutes": 30,
+    },
+    "Type": "AWS::CodeBuild::Project",
+  },
+  "dda-plugin-build-arm64_jp5": {
+    "Properties": {
+      "Artifacts": {
+        "Type": "NO_ARTIFACTS",
+      },
+      "Cache": {
+        "Type": "NO_CACHE",
+      },
+      "Description": "Custom node plugin build for arm64_jp5 (fresh container per build, prefix-scoped role, no VPC access to portal internals)",
+      "EncryptionKey": "alias/aws/s3",
+      "Environment": {
+        "ComputeType": "BUILD_GENERAL1_LARGE",
+        "EnvironmentVariables": [
+          {
+            "Name": "TARGET_ARCH",
+            "Type": "PLAINTEXT",
+            "Value": "arm64_jp5",
+          },
+          {
+            "Name": "ARTIFACTS_BUCKET",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+            },
+          },
+          {
+            "Name": "PLUGIN_STAGING_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "plugin-staging",
+          },
+          {
+            "Name": "PLUGIN_LIBRARY_CUSTOM_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "workflow-plugins/custom",
+          },
+          {
+            "Name": "SIGNING_KEY_ARN",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::GetAtt": [
+                "PluginSigningKeyF582FEC9",
+                "Arn",
+              ],
+            },
+          },
+        ],
+        "Image": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Fn::Select": [
+                  4,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::GetAtt": [
+                          "PluginBuildImageRepositoryDC232F59",
+                          "Arn",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              ".dkr.ecr.",
+              {
+                "Fn::Select": [
+                  3,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::GetAtt": [
+                          "PluginBuildImageRepositoryDC232F59",
+                          "Arn",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              ".",
+              {
+                "Ref": "AWS::URLSuffix",
+              },
+              "/",
+              {
+                "Ref": "PluginBuildImageRepositoryDC232F59",
+              },
+              ":arm64_jp5",
+            ],
+          ],
+        },
+        "ImagePullCredentialsType": "SERVICE_ROLE",
+        "PrivilegedMode": false,
+        "Type": "ARM_CONTAINER",
+      },
+      "Name": "dda-plugin-build-arm64_jp5",
+      "ServiceRole": {
+        "Fn::GetAtt": [
+          "PluginBuildRolearm64jp5334CE4E3",
+          "Arn",
+        ],
+      },
+      "Source": {
+        "BuildSpec": "{
+  "version": "0.2",
+  "phases": {
+    "build": {
+      "commands": [
+        "dda-plugin-build"
+      ]
+    }
+  }
+}",
+        "Location": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+              },
+              "/plugin-sources/",
+            ],
+          ],
+        },
+        "Type": "S3",
+      },
+      "TimeoutInMinutes": 30,
+    },
+    "Type": "AWS::CodeBuild::Project",
+  },
+  "dda-plugin-build-arm64_jp6": {
+    "Properties": {
+      "Artifacts": {
+        "Type": "NO_ARTIFACTS",
+      },
+      "Cache": {
+        "Type": "NO_CACHE",
+      },
+      "Description": "Custom node plugin build for arm64_jp6 (fresh container per build, prefix-scoped role, no VPC access to portal internals)",
+      "EncryptionKey": "alias/aws/s3",
+      "Environment": {
+        "ComputeType": "BUILD_GENERAL1_LARGE",
+        "EnvironmentVariables": [
+          {
+            "Name": "TARGET_ARCH",
+            "Type": "PLAINTEXT",
+            "Value": "arm64_jp6",
+          },
+          {
+            "Name": "ARTIFACTS_BUCKET",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+            },
+          },
+          {
+            "Name": "PLUGIN_STAGING_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "plugin-staging",
+          },
+          {
+            "Name": "PLUGIN_LIBRARY_CUSTOM_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "workflow-plugins/custom",
+          },
+          {
+            "Name": "SIGNING_KEY_ARN",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::GetAtt": [
+                "PluginSigningKeyF582FEC9",
+                "Arn",
+              ],
+            },
+          },
+        ],
+        "Image": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Fn::Select": [
+                  4,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::GetAtt": [
+                          "PluginBuildImageRepositoryDC232F59",
+                          "Arn",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              ".dkr.ecr.",
+              {
+                "Fn::Select": [
+                  3,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::GetAtt": [
+                          "PluginBuildImageRepositoryDC232F59",
+                          "Arn",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              ".",
+              {
+                "Ref": "AWS::URLSuffix",
+              },
+              "/",
+              {
+                "Ref": "PluginBuildImageRepositoryDC232F59",
+              },
+              ":arm64_jp6",
+            ],
+          ],
+        },
+        "ImagePullCredentialsType": "SERVICE_ROLE",
+        "PrivilegedMode": false,
+        "Type": "ARM_CONTAINER",
+      },
+      "Name": "dda-plugin-build-arm64_jp6",
+      "ServiceRole": {
+        "Fn::GetAtt": [
+          "PluginBuildRolearm64jp6E6DF7FFF",
+          "Arn",
+        ],
+      },
+      "Source": {
+        "BuildSpec": "{
+  "version": "0.2",
+  "phases": {
+    "build": {
+      "commands": [
+        "dda-plugin-build"
+      ]
+    }
+  }
+}",
+        "Location": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+              },
+              "/plugin-sources/",
+            ],
+          ],
+        },
+        "Type": "S3",
+      },
+      "TimeoutInMinutes": 30,
+    },
+    "Type": "AWS::CodeBuild::Project",
+  },
+  "dda-plugin-build-x86_64": {
+    "Properties": {
+      "Artifacts": {
+        "Type": "NO_ARTIFACTS",
+      },
+      "Cache": {
+        "Type": "NO_CACHE",
+      },
+      "Description": "Custom node plugin build for x86_64 (fresh container per build, prefix-scoped role, no VPC access to portal internals)",
+      "EncryptionKey": "alias/aws/s3",
+      "Environment": {
+        "ComputeType": "BUILD_GENERAL1_LARGE",
+        "EnvironmentVariables": [
+          {
+            "Name": "TARGET_ARCH",
+            "Type": "PLAINTEXT",
+            "Value": "x86_64",
+          },
+          {
+            "Name": "ARTIFACTS_BUCKET",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+            },
+          },
+          {
+            "Name": "PLUGIN_STAGING_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "plugin-staging",
+          },
+          {
+            "Name": "PLUGIN_LIBRARY_CUSTOM_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "workflow-plugins/custom",
+          },
+          {
+            "Name": "SIGNING_KEY_ARN",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::GetAtt": [
+                "PluginSigningKeyF582FEC9",
+                "Arn",
+              ],
+            },
+          },
+        ],
+        "Image": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Fn::Select": [
+                  4,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::GetAtt": [
+                          "PluginBuildImageRepositoryDC232F59",
+                          "Arn",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              ".dkr.ecr.",
+              {
+                "Fn::Select": [
+                  3,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::GetAtt": [
+                          "PluginBuildImageRepositoryDC232F59",
+                          "Arn",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              ".",
+              {
+                "Ref": "AWS::URLSuffix",
+              },
+              "/",
+              {
+                "Ref": "PluginBuildImageRepositoryDC232F59",
+              },
+              ":x86_64",
+            ],
+          ],
+        },
+        "ImagePullCredentialsType": "SERVICE_ROLE",
+        "PrivilegedMode": false,
+        "Type": "LINUX_CONTAINER",
+      },
+      "Name": "dda-plugin-build-x86_64",
+      "ServiceRole": {
+        "Fn::GetAtt": [
+          "PluginBuildRolex86647AD4591A",
+          "Arn",
+        ],
+      },
+      "Source": {
+        "BuildSpec": "{
+  "version": "0.2",
+  "phases": {
+    "build": {
+      "commands": [
+        "dda-plugin-build"
+      ]
+    }
+  }
+}",
+        "Location": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+              },
+              "/plugin-sources/",
+            ],
+          ],
+        },
+        "Type": "S3",
+      },
+      "TimeoutInMinutes": 30,
+    },
+    "Type": "AWS::CodeBuild::Project",
+  },
+  "dda-plugin-build-x86_64_nvidia": {
+    "Properties": {
+      "Artifacts": {
+        "Type": "NO_ARTIFACTS",
+      },
+      "Cache": {
+        "Type": "NO_CACHE",
+      },
+      "Description": "Custom node plugin build for x86_64_nvidia (fresh container per build, prefix-scoped role, no VPC access to portal internals)",
+      "EncryptionKey": "alias/aws/s3",
+      "Environment": {
+        "ComputeType": "BUILD_GENERAL1_LARGE",
+        "EnvironmentVariables": [
+          {
+            "Name": "TARGET_ARCH",
+            "Type": "PLAINTEXT",
+            "Value": "x86_64_nvidia",
+          },
+          {
+            "Name": "ARTIFACTS_BUCKET",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+            },
+          },
+          {
+            "Name": "PLUGIN_STAGING_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "plugin-staging",
+          },
+          {
+            "Name": "PLUGIN_LIBRARY_CUSTOM_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "workflow-plugins/custom",
+          },
+          {
+            "Name": "SIGNING_KEY_ARN",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::GetAtt": [
+                "PluginSigningKeyF582FEC9",
+                "Arn",
+              ],
+            },
+          },
+        ],
+        "Image": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Fn::Select": [
+                  4,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::GetAtt": [
+                          "PluginBuildImageRepositoryDC232F59",
+                          "Arn",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              ".dkr.ecr.",
+              {
+                "Fn::Select": [
+                  3,
+                  {
+                    "Fn::Split": [
+                      ":",
+                      {
+                        "Fn::GetAtt": [
+                          "PluginBuildImageRepositoryDC232F59",
+                          "Arn",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              ".",
+              {
+                "Ref": "AWS::URLSuffix",
+              },
+              "/",
+              {
+                "Ref": "PluginBuildImageRepositoryDC232F59",
+              },
+              ":x86_64_nvidia",
+            ],
+          ],
+        },
+        "ImagePullCredentialsType": "SERVICE_ROLE",
+        "PrivilegedMode": false,
+        "Type": "LINUX_CONTAINER",
+      },
+      "Name": "dda-plugin-build-x86_64_nvidia",
+      "ServiceRole": {
+        "Fn::GetAtt": [
+          "PluginBuildRolex8664nvidia633A6830",
+          "Arn",
+        ],
+      },
+      "Source": {
+        "BuildSpec": "{
+  "version": "0.2",
+  "phases": {
+    "build": {
+      "commands": [
+        "dda-plugin-build"
+      ]
+    }
+  }
+}",
+        "Location": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+              },
+              "/plugin-sources/",
+            ],
+          ],
+        },
+        "Type": "S3",
+      },
+      "TimeoutInMinutes": 30,
+    },
+    "Type": "AWS::CodeBuild::Project",
+  },
+  "dda-plugin-fetch": {
+    "Properties": {
+      "Artifacts": {
+        "Type": "NO_ARTIFACTS",
+      },
+      "Cache": {
+        "Type": "NO_CACHE",
+      },
+      "Description": "Clones a public plugin repository at a revision and syncs the tree to plugin-sources/",
+      "EncryptionKey": "alias/aws/s3",
+      "Environment": {
+        "ComputeType": "BUILD_GENERAL1_SMALL",
+        "EnvironmentVariables": [
+          {
+            "Name": "ARTIFACTS_BUCKET",
+            "Type": "PLAINTEXT",
+            "Value": {
+              "Fn::ImportValue": "Deps:ExportsOutputRefArtifacts82DD59A14F4A635A",
+            },
+          },
+          {
+            "Name": "REPO_URL",
+            "Type": "PLAINTEXT",
+            "Value": "",
+          },
+          {
+            "Name": "REVISION",
+            "Type": "PLAINTEXT",
+            "Value": "",
+          },
+          {
+            "Name": "DEST_PREFIX",
+            "Type": "PLAINTEXT",
+            "Value": "",
+          },
+        ],
+        "Image": "aws/codebuild/standard:7.0",
+        "ImagePullCredentialsType": "CODEBUILD",
+        "PrivilegedMode": false,
+        "Type": "LINUX_CONTAINER",
+      },
+      "Name": "dda-plugin-fetch",
+      "ServiceRole": {
+        "Fn::GetAtt": [
+          "PluginFetchRoleA5F8096D",
+          "Arn",
+        ],
+      },
+      "Source": {
+        "BuildSpec": "{
+  "version": "0.2",
+  "phases": {
+    "build": {
+      "commands": [
+        "test -n \\"$REPO_URL\\" && test -n \\"$DEST_PREFIX\\"",
+        "git clone \\"$REPO_URL\\" /tmp/repo",
+        "if [ -n \\"$REVISION\\" ]; then git -C /tmp/repo checkout \\"$REVISION\\"; fi",
+        "rm -rf /tmp/repo/.git",
+        "aws s3 sync /tmp/repo/ \\"s3://$ARTIFACTS_BUCKET/$DEST_PREFIX/\\""
+      ]
+    }
+  }
+}",
+        "Type": "NO_SOURCE",
+      },
+      "TimeoutInMinutes": 10,
+    },
+    "Type": "AWS::CodeBuild::Project",
+  },
+}
+`;

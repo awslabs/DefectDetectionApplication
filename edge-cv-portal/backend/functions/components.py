@@ -86,6 +86,101 @@ def _resolve_latest_component_version(greengrass, base_arn):
         return None
     return max(versions, key=_version_key) if versions else None
 
+
+# ---------------------------------------------------------------------------
+# Plugin_Component listing (custom-node-designer, Requirement 16.2)
+#
+# Node Designer plugins are auto-packaged as Greengrass components named
+# `dda.plugin.{pluginId}` and tagged with `dda-portal:plugin-id` /
+# `dda-portal:plugin-version` (see plugin_components.py registry_tags in the
+# node-designer Lambda bundle). The deployment screen listing joins them with
+# their backing Plugin_Record (PLUGIN_RECORDS_TABLE) to show the record's
+# Lifecycle_State, and derives the supported Target_Architectures from the
+# recipe's platform manifests.
+
+# Keep in sync with plugin_components.py PLUGIN_COMPONENT_PREFIX.
+PLUGIN_COMPONENT_PREFIX = 'dda.plugin.'
+
+TAG_PLUGIN_ID = 'dda-portal:plugin-id'
+TAG_PLUGIN_VERSION = 'dda-portal:plugin-version'
+
+
+def is_plugin_component(component_name: str) -> bool:
+    """True when a component is a Node Designer Plugin_Component (16.2)"""
+    return str(component_name).startswith(PLUGIN_COMPONENT_PREFIX)
+
+
+def plugin_version_from_component_version(component_version: Any) -> Optional[int]:
+    """
+    The backing Plugin_Record version of a Plugin_Component version.
+
+    Plugin_Component versions are '{pluginVersion}.0.0' (the inverse of
+    plugin_components.component_version_for), so the Plugin_Record version is
+    the major part. Returns None when the version doesn't parse.
+    """
+    try:
+        return int(str(component_version).split('.')[0])
+    except (ValueError, AttributeError):
+        return None
+
+
+def target_architectures_from_platforms(platforms) -> List[str]:
+    """
+    Derive the DDA Target_Architectures a Plugin_Component supports from its
+    recipe's platform manifests (16.2). This is the inverse of
+    plugin_components.platform_for:
+
+      - architecture aarch64  -> the JetPack arch named by the 'variant'
+                                 attribute (arm64_jp4 / arm64_jp5 / arm64_jp6)
+      - architecture amd64 + 'runtime: nvidia' -> x86_64_nvidia
+      - architecture amd64 (no runtime)        -> x86_64
+
+    Accepts either recipe Manifest 'Platform' blocks (flat dicts) or the
+    describe_component API shape ({'name': ..., 'attributes': {...}}).
+    Pure over its input so it is fixture-testable without AWS (task 10.9).
+    """
+    architectures: List[str] = []
+    for platform in platforms or []:
+        if not isinstance(platform, dict):
+            continue
+        attributes = platform.get('attributes', platform)
+        if not isinstance(attributes, dict):
+            continue
+        gg_arch = attributes.get('architecture')
+        if gg_arch == 'aarch64':
+            derived = attributes.get('variant')
+        elif gg_arch == 'amd64':
+            derived = 'x86_64_nvidia' if attributes.get('runtime') == 'nvidia' else 'x86_64'
+        else:
+            derived = None
+        if derived and derived not in architectures:
+            architectures.append(derived)
+    return architectures
+
+
+def get_plugin_record_lifecycle_state(plugin_id: Optional[str],
+                                      plugin_version: Optional[Any]) -> Optional[str]:
+    """
+    The backing Plugin_Record's Lifecycle_State for one Plugin_Component
+    version (16.2). Returns None when the record (or the PLUGIN_RECORDS_TABLE
+    configuration) is unavailable — the listing still shows the component, it
+    just cannot attribute a lifecycle state.
+    """
+    table_name = os.environ.get('PLUGIN_RECORDS_TABLE')
+    if not table_name or not plugin_id or plugin_version is None:
+        return None
+    try:
+        table = boto3.resource('dynamodb').Table(table_name)
+        response = table.get_item(
+            Key={'plugin_id': plugin_id, 'version': int(plugin_version)})
+        item = response.get('Item')
+        return item.get('lifecycle_state') if item else None
+    except (ClientError, ValueError, TypeError) as e:
+        print(f"Warning: could not read Plugin_Record {plugin_id} "
+              f"v{plugin_version}: {e}")
+        return None
+
+
 def lambda_handler(event, context):
     """
     Handle Greengrass component management requests
@@ -427,6 +522,31 @@ def list_private_components(credentials: Dict, region: str, query_params: Dict) 
                     'device_count': 0
                 }
             }
+
+            # Plugin_Component listing (custom-node-designer, 16.2): join
+            # dda.plugin.* components with their backing Plugin_Record via the
+            # registry tags and expose the record's Lifecycle_State plus the
+            # supported Target_Architectures derived from the recipe's
+            # platform manifests for the deployment screen.
+            if is_plugin_component(component_name):
+                plugin_id = comp_data['tags'].get(TAG_PLUGIN_ID)
+                # The listed version is the resolved latest component version;
+                # its major part IS the backing Plugin_Record version. The
+                # version tag is only a fallback (tags are merged across
+                # version-level entries, so it may name an older version).
+                plugin_version = plugin_version_from_component_version(final_version)
+                if plugin_version is None:
+                    plugin_version = comp_data['tags'].get(TAG_PLUGIN_VERSION)
+                enriched_component.update({
+                    'is_plugin_component': True,
+                    'plugin_id': plugin_id,
+                    'plugin_version': plugin_version,
+                    'lifecycle_state': get_plugin_record_lifecycle_state(
+                        plugin_id, plugin_version),
+                    'supported_architectures':
+                        target_architectures_from_platforms(platforms),
+                })
+
             components.append(enriched_component)
         
         print(f"Returning {len(components)} unique components (latest versions only)")

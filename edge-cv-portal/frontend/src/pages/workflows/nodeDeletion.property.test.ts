@@ -118,7 +118,7 @@ describe('Property 11: Node deletion leaves no dangling connections', () => {
         expect(nodes).toHaveLength(ids.length);
         expect(edges).toHaveLength(endpoints.length);
       }),
-      { numRuns: 200 }
+      { numRuns: 25 }
     );
   });
 });

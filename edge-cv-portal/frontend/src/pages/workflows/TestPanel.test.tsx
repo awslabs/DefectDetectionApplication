@@ -21,6 +21,7 @@ import TestPanel, {
   ACTIVE_TEST_RUN_STORAGE_KEY,
   canTestWorkflows,
   parseSimulatedConfidence,
+  stubActivityNotes,
 } from './TestPanel';
 import type { UserRole } from '../../types';
 import type { WorkflowMeta } from './WorkflowToolbar';
@@ -322,6 +323,68 @@ describe('TestPanel report stub identification', () => {
 
     expect(screen.queryByText('Simulated')).toBeNull();
     expect(screen.queryByText('Some nodes were simulated')).toBeNull();
+  });
+
+  // ------------------------------------------------------------------
+  // Stubbed Custom_Node_Type limitation display (custom-node-designer
+  // task 13.3, Requirement 12.3): the harness records the limitation
+  // note with the custom_node_stub activity; the report displays it.
+  // ------------------------------------------------------------------
+
+  /** The note the sandbox harness records on stubbed Custom_Node_Types
+   *  (harness.py CUSTOM_NODE_STUB_NOTE). */
+  const CUSTOM_NODE_STUB_NOTE =
+    'Simulated: this custom node has no x86_64 build; a pass-through ' +
+    'stub recorded the frames the node would have consumed and passed ' +
+    'them through unchanged';
+
+  it('describes that a stubbed Custom_Node_Type was simulated because no x86_64 build exists (custom-node-designer 12.3)', async () => {
+    await runTestToCompletion([
+      nodeResult({ nodeId: 'folder_source_1' }),
+      nodeResult({
+        nodeId: 'custom_blur_1',
+        stubActivity: [
+          {
+            type: 'custom_node_stub',
+            element: 'custom_stub_custom_blur_1',
+            frameCount: 3,
+            note: CUSTOM_NODE_STUB_NOTE,
+          },
+        ],
+      }),
+    ]);
+
+    const report = screen.getByRole('list', { name: 'Per-node test results' });
+    const items = within(report).getAllByRole('listitem');
+    const stubbedItem = items.find((item) => item.textContent?.includes('custom_blur_1'));
+    expect(stubbedItem).toBeDefined();
+
+    // The stubbed custom node carries the Simulated badge and the
+    // recorded limitation note: simulated because no x86_64 build exists.
+    expect(within(stubbedItem!).getByText('Simulated')).toBeInTheDocument();
+    expect(within(stubbedItem!).getByText(/no x86_64 build/)).toBeInTheDocument();
+    expect(within(stubbedItem!).getByText(/pass-through/)).toBeInTheDocument();
+    // The note replaces the generic hardware-not-actuated fallback text.
+    expect(within(stubbedItem!).queryByText(/hardware was not actuated/)).toBeNull();
+    // The run-level simulated-nodes limitation alert still appears (12.8).
+    expect(screen.getByText('Some nodes were simulated')).toBeInTheDocument();
+  });
+
+  it('extracts distinct note strings from stub activity entries', () => {
+    expect(
+      stubActivityNotes(
+        nodeResult({
+          stubActivity: [
+            { type: 'custom_node_stub', note: CUSTOM_NODE_STUB_NOTE },
+            { type: 'custom_node_stub', note: CUSTOM_NODE_STUB_NOTE },
+            { type: 'frames_fed' },
+            'not-an-object',
+            { note: 42 },
+          ],
+        })
+      )
+    ).toEqual([CUSTOM_NODE_STUB_NOTE]);
+    expect(stubActivityNotes(nodeResult({ stubActivity: [] }))).toEqual([]);
   });
 });
 
@@ -780,6 +843,7 @@ describe('TestPanel gating', () => {
 
 describe('TestPanel simulated inference outcome', () => {
   const WITH_INFERENCE = () => definitionWith(['folder_source', 'model_inference', 'capture']);
+  const WITH_BEDROCK = () => definitionWith(['folder_source', 'bedrock_inference', 'capture']);
   const WITHOUT_INFERENCE = () => definitionWith(['folder_source', 'capture']);
 
   it('parses the confidence input strictly to 0..1', () => {
@@ -813,6 +877,38 @@ describe('TestPanel simulated inference outcome', () => {
     expect(screen.getByText(/drives downstream nodes/)).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Anomaly detected' })).toBeInTheDocument();
     expect(screen.getByLabelText('Simulated confidence')).toBeInTheDocument();
+  });
+
+  it('shows the section for workflows with a bedrock_inference node', async () => {
+    // The Bedrock model is stubbed in the sandbox too (no internet in
+    // the sandbox VPC), so the configured outcome controls apply.
+    renderPanel({ getDefinition: WITH_BEDROCK });
+    await waitFor(() => expect(listTestDatasets).toHaveBeenCalled());
+
+    expect(screen.getByText('Simulated inference outcome')).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Anomaly detected' })).toBeInTheDocument();
+  });
+
+  it('sends the configured outcome for bedrock_inference workflows', async () => {
+    startTestRun.mockResolvedValue({ test_run: testRun({ status: 'running' }) });
+    getTestRun.mockResolvedValue({
+      test_run: testRun({ status: 'completed' }),
+      node_results: [],
+    });
+
+    renderPanel({ getDefinition: WITH_BEDROCK });
+    await waitFor(() => expect(listTestDatasets).toHaveBeenCalled());
+    await selectDataset();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Anomaly detected' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Run test' }));
+
+    await waitFor(() =>
+      expect(startTestRun).toHaveBeenCalledWith('wf-1', {
+        dataset_id: 'ds-1',
+        version: 3,
+        simulated_inference: { is_anomalous: true, confidence: 0.9 },
+      })
+    );
   });
 
   it('sends the default outcome (not anomalous, 0.9) with startTestRun', async () => {

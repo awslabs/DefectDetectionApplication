@@ -34,9 +34,9 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
-from ..catalog import ARCH_SIM, ARCHITECTURES, bundled_plugins_for, get_node_type
+from ..catalog import ARCH_SIM, ARCHITECTURES, NODE_CATALOG, bundled_plugins_for
 from ..catalog.models import GstMapping, NodeTypeDescriptor
 from ..serializer.models import Node, WorkflowGraph
 from ..validator import SEVERITY_ERROR, validate
@@ -58,12 +58,31 @@ __all__ = ["compile"]
 #: inference_filter.
 BINDING_CONDITIONAL = "conditional"
 
+#: The Bedrock comparison-inference executor binding (the
+#: bedrock_inference node on device architectures). Unlike other
+#: executor-level nodes, its two VideoFrames input branches TERMINATE in
+#: the pipeline: the compiler appends one synthetic frame-capture sink
+#: chain (``videoconvert ! jpegenc ! multifilesink``) per feeding
+#: GStreamer branch so each branch ends in a real sink that persists the
+#: latest frame, and the emitted binding carries the per-input-port
+#: capture file paths (``capturePaths``). The paths are rooted at the
+#: ``{work_dir}`` placeholder, resolved by the LocalServer executor per
+#: run (the same lenient-placeholder mechanism as ``{dataset_location}``
+#: for the test harness). Frames do NOT flow through the node, so
+#: pipeline-element consumers downstream of its InferenceMeta output are
+#: never fed on device architectures (metadata-level executor consumers
+#: — filters, conditionals, hardware outputs — are the supported
+#: downstream). In simulation the node resolves to its sim stub chain
+#: (identity pass-through) and none of this applies.
+BINDING_BEDROCK_INFERENCE = "bedrock_inference"
+
 
 def compile(
     graph: WorkflowGraph,
     target_arch: str,
     context: Optional[CompileContext] = None,
     simulation: bool = False,
+    catalog: Sequence[NodeTypeDescriptor] = NODE_CATALOG,
 ) -> Union[CompiledPipelineDocument, List[CompileError]]:
     """Compile ``graph`` for ``target_arch``.
 
@@ -72,15 +91,28 @@ def compile(
     mapping; all other nodes compile identically to non-simulation output
     (Requirement 12.6).
 
+    ``catalog`` is the effective Node_Type_Catalog to compile against —
+    by default the built-in ``NODE_CATALOG``; portal callers pass the
+    merged tuple from ``resolve_catalog`` so workflows may use registered
+    Custom_Node_Types (custom-node-designer Requirements 5.4, 8.6). The
+    compiler treats built-in and custom descriptors identically: custom
+    plugin dependencies flow into ``pluginDependencies``, and a node type
+    without a mapping for ``target_arch`` yields the standard
+    ``CompileError{nodeId, arch}``.
+
     Returns a :class:`CompiledPipelineDocument` on success, or the
     complete list of :class:`CompileError` records on failure (validation
     errors, or nodes without a mapping for the architecture).
     """
     context = context or CompileContext()
+    descriptors_by_id: Dict[str, NodeTypeDescriptor] = {
+        descriptor.type_id: descriptor for descriptor in catalog
+    }
 
     # 1. Re-run validation; refuse to compile on errors (Requirement 6.1).
     validation_errors = [
-        finding for finding in validate(graph) if finding.severity == SEVERITY_ERROR
+        finding for finding in validate(graph, catalog)
+        if finding.severity == SEVERITY_ERROR
     ]
     if validation_errors:
         return [
@@ -101,7 +133,7 @@ def compile(
     mappings: Dict[str, GstMapping] = {}
     unmapped: List[CompileError] = []
     for node in graph.nodes:
-        descriptor = get_node_type(node.type)  # known: validation passed
+        descriptor = descriptors_by_id[node.type]  # known: validation passed
         node_arch = (
             ARCH_SIM
             if stub_hardware and descriptor.hardware_dependent
@@ -130,9 +162,17 @@ def compile(
 
     # 3. Collapse executor-level nodes out of the stream and
     #    topologically sort the remaining GStreamer nodes.
+    #    Bedrock inference nodes (executor-level realization) are opaque:
+    #    frames terminate at their synthetic capture sinks instead of
+    #    flowing through to downstream pipeline elements.
     gst_set = set(gst_node_ids)
+    bedrock_node_ids = [
+        n.id for n in graph.nodes
+        if mappings[n.id].executor_binding == BINDING_BEDROCK_INFERENCE
+    ]
+    opaque = set(bedrock_node_ids)
     stream_out = {
-        node_id: _stream_successors(node_id, successors, gst_set)
+        node_id: _stream_successors(node_id, successors, gst_set, opaque)
         for node_id in gst_node_ids
     }
     stream_in: Dict[str, List[str]] = {node_id: [] for node_id in gst_node_ids}
@@ -141,12 +181,26 @@ def compile(
             stream_in[target].append(source)
     topo_order = _topological_sort(gst_node_ids, stream_out, stream_in)
 
+    # Bedrock frame captures: one synthetic sink chain per GStreamer
+    # branch feeding a bedrock_inference input port, plus the per-port
+    # capture file paths for each node's executor binding.
+    feeder_captures, bedrock_capture_paths = _bedrock_capture_plan(
+        graph, bedrock_node_ids, gst_set, opaque, descriptors_by_id
+    )
+
     # 4./5. Emit tagged element chains linearized into segments.
     chains = {
-        node_id: _resolve_chain(nodes_by_id[node_id], mappings[node_id], context)
+        node_id: _resolve_chain(
+            nodes_by_id[node_id],
+            descriptors_by_id[nodes_by_id[node_id].type],
+            mappings[node_id],
+            context,
+        )
         for node_id in gst_node_ids
     }
-    segments = _build_segments(topo_order, stream_out, stream_in, chains)
+    segments = _build_segments(
+        topo_order, stream_out, stream_in, chains, feeder_captures
+    )
 
     # Executor bindings, one entry per executor-level node (Requirement 6.6).
     predecessors = _node_predecessors(graph)
@@ -154,7 +208,7 @@ def compile(
     executor_bindings = []
     for node_id in executor_node_ids:
         node = nodes_by_id[node_id]
-        descriptor = get_node_type(node.type)
+        descriptor = descriptors_by_id[node.type]
         parameters = _effective_parameters(node, descriptor)
         entry = {
             "nodeId": node_id,
@@ -182,6 +236,11 @@ def compile(
                 "true": condition,
                 "false": "!({0})".format(condition),
             }
+        # Bedrock inference bindings carry the per-input-port capture
+        # file paths their frame branches sink to ({work_dir}-rooted,
+        # resolved by the LocalServer executor per run).
+        if mappings[node_id].executor_binding == BINDING_BEDROCK_INFERENCE:
+            entry["capturePaths"] = bedrock_capture_paths.get(node_id, {})
         executor_bindings.append(entry)
 
     # 6. Plugin dependencies beyond the LocalServer-bundled set
@@ -247,9 +306,13 @@ def _stream_successors(
     node_id: str,
     successors: Dict[str, List[str]],
     gst_set: set,
+    opaque: Optional[set] = None,
 ) -> List[str]:
     """The GStreamer nodes ``node_id`` streams into, looking through
-    executor-level nodes (which have no pipeline elements)."""
+    executor-level nodes (which have no pipeline elements) — except
+    ``opaque`` nodes (bedrock_inference), where the frame stream
+    terminates in the node's synthetic capture sink."""
+    opaque = opaque or set()
     result: List[str] = []
     seen = {node_id}
     frontier = list(successors.get(node_id, []))
@@ -261,9 +324,116 @@ def _stream_successors(
         if current in gst_set:
             if current not in result:
                 result.append(current)
-        else:
+        elif current not in opaque:
             frontier.extend(successors.get(current, []))
     return result
+
+
+# --------------------------------------------------------------------------
+# Bedrock inference frame captures
+# --------------------------------------------------------------------------
+
+_UNSAFE_PATH_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def _frame_feeders(
+    graph: WorkflowGraph,
+    node_id: str,
+    port_name: str,
+    gst_set: set,
+    opaque: set,
+) -> List[str]:
+    """The GStreamer nodes whose frames reach input port ``port_name``
+    of ``node_id``, looking upstream through executor-level nodes (the
+    buffer stream passes through them) but never through other opaque
+    frame-terminating nodes."""
+    frontier = [
+        connection.source.node for connection in graph.connections
+        if connection.target.node == node_id
+        and connection.target.port == port_name
+    ]
+    feeders: List[str] = []
+    seen = set()
+    while frontier:
+        current = frontier.pop(0)
+        if current in seen or current == node_id:
+            continue
+        seen.add(current)
+        if current in gst_set:
+            if current not in feeders:
+                feeders.append(current)
+        elif current not in opaque:
+            frontier.extend(
+                connection.source.node for connection in graph.connections
+                if connection.target.node == current
+            )
+    return feeders
+
+
+def _bedrock_capture_plan(
+    graph: WorkflowGraph,
+    bedrock_node_ids: List[str],
+    gst_set: set,
+    opaque: set,
+    descriptors_by_id: Dict[str, NodeTypeDescriptor],
+):
+    """Plan the synthetic frame-capture sinks for bedrock_inference nodes.
+
+    Returns ``(feeder_captures, capture_paths_by_node)``:
+
+    - ``feeder_captures``: GStreamer feeder node id -> capture file path.
+      Every branch feeding any bedrock input port ends in exactly one
+      capture sink chain persisting its latest frame; a feeder serving
+      several ports (or several bedrock nodes) shares its single file —
+      the frames are the same stream.
+    - ``capture_paths_by_node``: bedrock node id -> {input port name:
+      capture path, or None when nothing feeds the port}. When several
+      branches feed one port, the first (connection-ordered) feeder's
+      file is used.
+
+    Paths are rooted at the ``{work_dir}`` placeholder the LocalServer
+    executor resolves per run; feeder node ids are sanitized to a safe
+    file-name form (collisions disambiguated with a numeric suffix).
+    """
+    feeder_captures: Dict[str, str] = {}
+    used_names: set = set()
+    capture_paths_by_node: Dict[str, Dict[str, Optional[str]]] = {}
+
+    def path_for(feeder_id: str) -> str:
+        if feeder_id not in feeder_captures:
+            base = _UNSAFE_PATH_CHARS.sub("_", feeder_id) or "node"
+            name = base
+            suffix = 0
+            while name in used_names:
+                suffix += 1
+                name = "{0}_{1}".format(base, suffix)
+            used_names.add(name)
+            feeder_captures[feeder_id] = (
+                "{work_dir}/bedrock_frame_" + name + ".jpg"
+            )
+        return feeder_captures[feeder_id]
+
+    for node_id in bedrock_node_ids:
+        descriptor = descriptors_by_id[graph.node_by_id(node_id).type]
+        ports: Dict[str, Optional[str]] = {}
+        for port in descriptor.inputs:
+            feeders = _frame_feeders(graph, node_id, port.name, gst_set, opaque)
+            ports[port.name] = path_for(feeders[0]) if feeders else None
+        capture_paths_by_node[node_id] = ports
+
+    return feeder_captures, capture_paths_by_node
+
+
+def _capture_chain(path: str) -> List[dict]:
+    """The synthetic frame-capture sink chain terminating a bedrock
+    feeder branch: raw frames converted, JPEG-encoded, and written to
+    ``path`` (multifilesink without a printf index rewrites the same
+    file per buffer, so the latest frame persists for the executor)."""
+    return [
+        _synthetic("videoconvert"),
+        _synthetic("jpegenc"),
+        _synthetic("multifilesink", {"location": path}),
+    ]
 
 
 def _topological_sort(
@@ -324,6 +494,13 @@ def _derived_values(node: Node, parameters: Dict[str, Any]) -> Dict[str, Any]:
         # stubbed inference nodes and inject the configured simulated
         # inference outcome as their metadata (Requirement 12.6).
         "sim_inference_name": "sim_inference_{0}".format(node.id),
+        # Per-node element name for the custom-node pass-through recording
+        # stub substituted when a Custom_Node_Type has no x86_64
+        # Plugin_Artifact, so the test harness can identify the stubbed
+        # nodes in the test run report (custom-node-designer
+        # Requirement 12.2; the stub mapping is built by the test-runner
+        # compile step in workflow_test_steps.py).
+        "custom_stub_name": "custom_stub_{0}".format(node.id),
     }
     dio_keys = ("pin", "signal_type", "pulse_width_ms", "condition")
     dio_config = {key: parameters[key] for key in dio_keys if key in parameters}
@@ -336,12 +513,13 @@ def _derived_values(node: Node, parameters: Dict[str, Any]) -> Dict[str, Any]:
 
 def _resolve_chain(
     node: Node,
+    descriptor: NodeTypeDescriptor,
     mapping: GstMapping,
     context: CompileContext,
 ) -> List[dict]:
     """Resolve a mapping's element chain templates into concrete
     elements, each tagged with the originating nodeId (Requirement 6.6)."""
-    parameters = _effective_parameters(node, get_node_type(node.type))
+    parameters = _effective_parameters(node, descriptor)
     resolution = _LenientDict(DEFAULT_CONTEXT_VALUES)
     resolution.update(_derived_values(node, parameters))
     resolution.update(context.values)
@@ -390,6 +568,7 @@ def _build_segments(
     stream_out: Dict[str, List[str]],
     stream_in: Dict[str, List[str]],
     chains: Dict[str, List[dict]],
+    feeder_captures: Optional[Dict[str, str]] = None,
 ) -> List[dict]:
     """Linearize the stream DAG into named segments.
 
@@ -399,7 +578,13 @@ def _build_segments(
       (Requirement 6.3).
     - Fan-in nodes start their own segment headed by a named ``funnel``;
       converging branches carry ``"linkTo"`` naming that funnel.
+    - A node in ``feeder_captures`` (it feeds a bedrock_inference input
+      port) additionally sinks its frames to the planned capture file:
+      inline at the end of its branch when the branch otherwise
+      terminates there, or as an extra queue-headed tee branch when the
+      stream also continues downstream.
     """
+    feeder_captures = feeder_captures or {}
     segments: List[dict] = []
     placed = set()
     counters = {"tee": 0, "segment": 0}
@@ -426,16 +611,22 @@ def _build_segments(
         placed.add(node_id)
         segment["elements"].extend(chains[node_id])
         downstream = stream_out[node_id]
+        capture_path = feeder_captures.get(node_id)
         if not downstream:
+            # A bedrock feeder whose branch ends here: the capture sink
+            # chain terminates the branch inline (no tee).
+            if capture_path:
+                segment["elements"].extend(_capture_chain(capture_path))
             return
-        if len(downstream) == 1:
+        if len(downstream) == 1 and not capture_path:
             target = downstream[0]
             if target in funnel_names:
                 segment["linkTo"] = funnel_names[target]
             else:
                 extend(target, segment)
             return
-        # Fan-out: tee, then one queue-headed branch segment per target.
+        # Fan-out (or downstream continuation plus a bedrock capture):
+        # tee, then one queue-headed branch segment per target.
         tee_name = "t{0}".format(counters["tee"])
         counters["tee"] += 1
         segment["elements"].append(_synthetic("tee", {"name": tee_name}))
@@ -446,6 +637,10 @@ def _build_segments(
                 branch["linkTo"] = funnel_names[target]
             else:
                 extend(target, branch)
+        if capture_path:
+            branch = new_segment(from_ref=tee_name)
+            branch["elements"].append(_synthetic("queue"))
+            branch["elements"].extend(_capture_chain(capture_path))
 
     for node_id in topo_order:
         if node_id in placed:

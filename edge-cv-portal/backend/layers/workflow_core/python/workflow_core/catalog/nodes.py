@@ -20,6 +20,7 @@ from .models import (
     ARCH_ARM64_JP6,
     ARCH_SIM,
     ARCH_X86_64,
+    ARCH_X86_64_NVIDIA,
     ARCHITECTURES,
     DEVICE_ARCHITECTURES,
     SIM_RECORDING_BINDING_PREFIX,
@@ -197,6 +198,16 @@ CAMERA_SOURCE = NodeTypeDescriptor(
             ],
             plugin_dependencies=["video4linux2", "videoconvertscale"],
         ),
+        # x86_64 with the NVIDIA GPU runtime: same V4L2 capture path as
+        # plain x86_64 (an NVIDIA-accelerated chain may be declared later).
+        GstMapping(
+            arch=ARCH_X86_64_NVIDIA,
+            element_chain=[
+                _element("v4l2src", device="{device}"),
+                _element("videoconvert"),
+            ],
+            plugin_dependencies=["video4linux2", "videoconvertscale"],
+        ),
         # Existing appsrc-fed camera path on JetPack 4/5 (frames pushed by
         # the LocalServer camera adapter, as in _add_camera_image_source).
         GstMapping(
@@ -249,6 +260,10 @@ FOLDER_SOURCE = NodeTypeDescriptor(
     ],
     mappings=[
         GstMapping(arch=ARCH_X86_64, element_chain=_jpeg_file_chain("{location}"),
+                   plugin_dependencies=["coreelements", "emexifextract", "jpeg",
+                                        "videoconvertscale", "videofilter"]),
+        # x86_64 with the NVIDIA GPU runtime mirrors the plain x86_64 chain.
+        GstMapping(arch=ARCH_X86_64_NVIDIA, element_chain=_jpeg_file_chain("{location}"),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
         GstMapping(arch=ARCH_ARM64_JP4, element_chain=_jpeg_file_chain("{location}"),
@@ -473,6 +488,107 @@ MODEL_INFERENCE = NodeTypeDescriptor(
     ],
     # The model executes only on a device (Jetson-compiled artifacts,
     # proprietary Triton plugin): simulation compiles the sim stub above.
+    hardware_dependent=True,
+)
+
+#: Default comparison prompt for the Bedrock Inference node. The model
+#: must answer with the JSON shape the shared condition evaluator
+#: consumes ({is_anomalous, confidence}).
+BEDROCK_DEFAULT_PROMPT = (
+    "Compare the input image to the reference image. Respond with JSON: "
+    '{"is_anomalous": true|false, "confidence": 0..1} where is_anomalous '
+    "is true when the input meaningfully differs from the reference."
+)
+
+BEDROCK_INFERENCE = NodeTypeDescriptor(
+    type_id="bedrock_inference",
+    category=CATEGORY_INFERENCE,
+    display_name="Bedrock Inference",
+    # Two VideoFrames inputs: the frame under inspection and a reference
+    # image the model compares it against per the configured prompt.
+    inputs=[
+        PortDescriptor("in", PORT_TYPE_VIDEO_FRAMES),
+        PortDescriptor("reference", PORT_TYPE_VIDEO_FRAMES),
+    ],
+    outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
+    parameters=[
+        ParameterDescriptor("model", "enum", required=False,
+                            default="us.amazon.nova-lite-v1:0",
+                            constraints={"values": [
+                                "us.amazon.nova-pro-v1:0",
+                                "us.amazon.nova-lite-v1:0",
+                                "qwen.qwen3-vl-235b-a22b",
+                                "moonshotai.kimi-k2.5",
+                            ]},
+                            description="Bedrock multimodal model invoked "
+                                        "with the input frame and the "
+                                        "reference image, e.g. "
+                                        "us.amazon.nova-lite-v1:0.",
+                            examples=["us.amazon.nova-lite-v1:0",
+                                      "us.amazon.nova-pro-v1:0"]),
+        ParameterDescriptor("prompt", "string", required=True,
+                            default=BEDROCK_DEFAULT_PROMPT,
+                            constraints={"min_length": 1},
+                            description="Instruction sent to the model with "
+                                        "both images. The model must answer "
+                                        "with JSON of the shape "
+                                        '{"is_anomalous": true|false, '
+                                        '"confidence": 0..1}; those fields '
+                                        "become the inference metadata "
+                                        "(is_anomalous, confidence) driving "
+                                        "downstream filters, conditionals, "
+                                        "and outputs.",
+                            examples=[BEDROCK_DEFAULT_PROMPT]),
+        ParameterDescriptor("region", "string", required=False,
+                            default="us-east-1",
+                            constraints={"min_length": 1},
+                            description="AWS region of the Bedrock runtime "
+                                        "endpoint the device calls, e.g. "
+                                        "us-east-1.",
+                            examples=["us-east-1", "us-west-2"]),
+        ParameterDescriptor("max_tokens", "int", required=False, default=256,
+                            constraints={"min": 1, "max": 4096},
+                            description="Maximum tokens the model may "
+                                        "generate for its JSON answer, "
+                                        "e.g. 256.",
+                            examples=[256, 512]),
+    ],
+    # Executor-level on every physical device architecture: the node has
+    # no GStreamer element of its own. The compiler terminates each
+    # VideoFrames input branch in a synthetic frame-capture sink chain
+    # (videoconvert ! jpegenc ! multifilesink location={work_dir}/...)
+    # and emits a "bedrock_inference" executor binding carrying the
+    # parameters plus the per-port capture file paths; after a successful
+    # pipeline run the LocalServer executor reads the two captured
+    # frames, calls the Bedrock runtime (network + AWS credentials
+    # required on the device), and merges the parsed {is_anomalous,
+    # confidence} into the run's inference metadata. Because frames stop
+    # at the capture sinks, the node's InferenceMeta output must feed
+    # only executor-level consumers (filters, conditionals, hardware
+    # outputs) on device architectures.
+    #
+    # Simulation: the cloud sandbox VPC has no internet, so the node is
+    # stubbed exactly like model_inference — a pass-through chain (RGB
+    # capsfilter + identity named ``sim_inference_<nodeId>``) the test
+    # harness recognizes; the configured simulated inference outcome is
+    # injected as the node's metadata and the model is never invoked
+    # (Requirement 12.6).
+    mappings=_same_on_device_archs(
+        executor_binding="bedrock_inference",
+        plugin_dependencies=["videoconvertscale", "jpeg", "multifile",
+                             "python:boto3"],
+    ) + [
+        GstMapping(
+            arch=ARCH_SIM,
+            element_chain=[
+                _element("capsfilter", caps="video/x-raw,format=RGB"),
+                _element("identity", name="{sim_inference_name}"),
+            ],
+            plugin_dependencies=["coreelements"],
+        ),
+    ],
+    # Needs device-side network access and AWS credentials; simulation
+    # compiles the sim stub above (Requirement 12.6).
     hardware_dependent=True,
 )
 
@@ -823,6 +939,7 @@ NODE_CATALOG = (
     CROP,
     FORMAT_CONVERT,
     MODEL_INFERENCE,
+    BEDROCK_INFERENCE,
     CUSTOM_PYTHON,
     INFERENCE_FILTER,
     CONDITIONAL,

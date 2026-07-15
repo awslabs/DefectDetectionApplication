@@ -23,7 +23,10 @@
  * displayed as the test report. Every node executed with
  * a stub (non-empty `stubActivity`) is marked with a "Simulated" badge and
  * the report describes the limitation that stubbed nodes were simulated
- * rather than actuated (12.8).
+ * rather than actuated (12.8). The notes the harness recorded with the
+ * stub activity are displayed as each stubbed node's limitation text —
+ * for a stubbed Custom_Node_Type the note describes that the node was
+ * simulated because no x86_64 build exists (custom-node-designer 12.3).
  *
  * Role gating: the test action requires workflow:test (DataScientist,
  * UseCaseAdmin, PortalAdmin per the design RBAC matrix); the action is also
@@ -101,6 +104,15 @@ export const SIMULATED_INFERENCE_HELP_TEXT =
 const DEFAULT_SIMULATED_CONFIDENCE = '0.9';
 
 /**
+ * Node types whose inference is stubbed in cloud test runs, so the
+ * panel offers the simulated inference outcome controls (12.6):
+ * model_inference (device-compiled models never run in the sandbox)
+ * and bedrock_inference (the sandbox VPC has no internet, so the
+ * Bedrock model is never invoked).
+ */
+const SIMULATED_INFERENCE_NODE_TYPES = ['model_inference', 'bedrock_inference'];
+
+/**
  * Parse the simulated-confidence input: a number between 0 and 1, or
  * null when the text is not a valid confidence.
  */
@@ -175,6 +187,30 @@ function clearPersistedTestRun(): void {
 /** True when the node was executed with a stub (12.6, 12.8). */
 export function isStubbedResult(result: TestRunNodeResult): boolean {
   return Array.isArray(result.stubActivity) && result.stubActivity.length > 0;
+}
+
+/**
+ * The distinct limitation notes recorded with a stubbed node's stub
+ * activity, in recorded order. The harness attaches a `note` describing
+ * each substitution — for a stubbed Custom_Node_Type the note describes
+ * the limitation that the node was simulated because no x86_64 build
+ * exists (custom-node-designer Requirement 12.3). Entries without a
+ * note (or non-object entries) contribute nothing.
+ */
+export function stubActivityNotes(result: TestRunNodeResult): string[] {
+  if (!Array.isArray(result.stubActivity)) {
+    return [];
+  }
+  const notes: string[] = [];
+  for (const entry of result.stubActivity) {
+    if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+      const note = (entry as { [key: string]: unknown }).note;
+      if (typeof note === 'string' && note !== '' && !notes.includes(note)) {
+        notes.push(note);
+      }
+    }
+  }
+  return notes;
 }
 
 /**
@@ -311,11 +347,13 @@ export default function TestPanel({
   const canTest = canTestWorkflows(role);
 
   // Simulated inference outcome (12.6): offered when the workflow on the
-  // canvas contains a model_inference node — the model is not executed
-  // in the cloud sandbox, so the user configures the injected outcome.
+  // canvas contains a node whose inference is stubbed in the cloud
+  // sandbox — model_inference (device-compiled models, no emltriton in
+  // the sandbox) and bedrock_inference (no internet in the sandbox VPC).
+  // The user configures the injected outcome per run.
   const hasModelInference =
     getDefinition !== undefined &&
-    getDefinition().nodes.some((node) => node.type === 'model_inference');
+    getDefinition().nodes.some((node) => SIMULATED_INFERENCE_NODE_TYPES.includes(node.type));
   const [simAnomalous, setSimAnomalous] = useState(false);
   const [simConfidenceText, setSimConfidenceText] = useState(DEFAULT_SIMULATED_CONFIDENCE);
   const simConfidence = parseSimulatedConfidence(simConfidenceText);
@@ -824,13 +862,26 @@ export default function TestPanel({
                         </StatusIndicator>
                         {isStubbedResult(result) && <Badge color="blue">Simulated</Badge>}
                       </SpaceBetween>
-                      {isStubbedResult(result) && (
-                        <Box color="text-body-secondary" fontSize="body-s">
-                          Simulated: this node's hardware was not actuated; its stub
-                          recorded {result.stubActivity.length} activity{' '}
-                          {result.stubActivity.length === 1 ? 'entry' : 'entries'}.
-                        </Box>
-                      )}
+                      {/* Per-node limitation description: the notes the
+                          harness recorded with the stub activity (for a
+                          stubbed Custom_Node_Type: simulated because no
+                          x86_64 build exists — custom-node-designer 12.3);
+                          entries without notes fall back to the generic
+                          simulated-not-actuated text (12.8). */}
+                      {isStubbedResult(result) &&
+                        (stubActivityNotes(result).length > 0 ? (
+                          stubActivityNotes(result).map((note) => (
+                            <Box key={note} color="text-body-secondary" fontSize="body-s">
+                              {note}.
+                            </Box>
+                          ))
+                        ) : (
+                          <Box color="text-body-secondary" fontSize="body-s">
+                            Simulated: this node's hardware was not actuated; its stub
+                            recorded {result.stubActivity.length} activity{' '}
+                            {result.stubActivity.length === 1 ? 'entry' : 'entries'}.
+                          </Box>
+                        ))}
                       {result.outputs.length > 0 && (
                         <Box color="text-body-secondary" fontSize="body-s">
                           {result.outputs.length} output{result.outputs.length === 1 ? '' : 's'}{' '}

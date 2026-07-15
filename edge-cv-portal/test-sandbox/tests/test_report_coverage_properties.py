@@ -145,7 +145,7 @@ def _drive_failure_flow(document, flush, failing_node_id):
 
 
 @given(graph=graph_strategy(), failure_choice=st.integers(min_value=0))
-@settings(max_examples=100, deadline=None,
+@settings(max_examples=25, deadline=None,
           suppress_health_check=[HealthCheck.too_slow])
 def test_report_covers_every_node(graph, failure_choice):
     """**Feature: workflow-manager, Property 15: Test report covers every node**

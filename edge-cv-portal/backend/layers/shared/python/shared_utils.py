@@ -213,6 +213,17 @@ class Permission(Enum):
     WORKFLOW_DEPLOY = "workflow:deploy"
     BEDROCK_CONFIG_WRITE = "bedrock-config:write"
     
+    # Node Designer (custom-node-designer, Requirement 13)
+    NODE_DESIGNER_READ = "node-designer:read"
+    NODE_DESIGNER_CREATE = "node-designer:create"
+    NODE_DESIGNER_GENERATE = "node-designer:generate"
+    NODE_DESIGNER_IMPORT = "node-designer:import"
+    NODE_DESIGNER_SIMULATE = "node-designer:simulate"
+    NODE_DESIGNER_REGISTER = "node-designer:register"
+    NODE_DESIGNER_PROMOTE_DEMOTE = "node-designer:promote-demote"
+    NODE_DESIGNER_MANAGE = "node-designer:manage"
+    NODE_DESIGNER_SECURITY_REVIEW = "node-designer:security-review"
+    
     # System Administration
     VIEW_AUDIT_LOGS = "view_audit_logs"
     MANAGE_SETTINGS = "manage_settings"
@@ -252,6 +263,9 @@ class RBACManager:
                 Permission.VIEW_DEVICE_LOGS,
                 # Workflow Manager: read-only view of workflows and deployment status
                 Permission.WORKFLOW_READ,
+                # Node Designer: read-only view of Custom_Node_Types and
+                # Plugin_Records (13.3)
+                Permission.NODE_DESIGNER_READ,
             },
             
             Role.OPERATOR: {
@@ -277,6 +291,9 @@ class RBACManager:
                 Permission.WORKFLOW_READ,
                 Permission.WORKFLOW_PACKAGE,
                 Permission.WORKFLOW_DEPLOY,
+                # Node Designer: read-only view of Custom_Node_Types and
+                # Plugin_Records (13.3)
+                Permission.NODE_DESIGNER_READ,
             },
             
             Role.DATA_SCIENTIST: {
@@ -305,6 +322,9 @@ class RBACManager:
                 Permission.WORKFLOW_SAVE,
                 Permission.WORKFLOW_DELETE,
                 Permission.WORKFLOW_TEST,
+                # Node Designer: read-only view of Custom_Node_Types and
+                # Plugin_Records (13.3)
+                Permission.NODE_DESIGNER_READ,
             },
             
             Role.USECASE_ADMIN: {
@@ -345,6 +365,20 @@ class RBACManager:
                 Permission.WORKFLOW_TEST,
                 Permission.WORKFLOW_PACKAGE,
                 Permission.WORKFLOW_DEPLOY,
+                # Node Designer: UseCaseAdmins create scaffolds, use the
+                # Node_Generator, import plugins, run the Plugin_Simulator,
+                # register Custom_Node_Types, promote/demote between dev and
+                # test, and manage Plugin_Records within their own Use_Case
+                # (13.1). node-designer:security-review remains
+                # PortalAdmin-only (13.2).
+                Permission.NODE_DESIGNER_READ,
+                Permission.NODE_DESIGNER_CREATE,
+                Permission.NODE_DESIGNER_GENERATE,
+                Permission.NODE_DESIGNER_IMPORT,
+                Permission.NODE_DESIGNER_SIMULATE,
+                Permission.NODE_DESIGNER_REGISTER,
+                Permission.NODE_DESIGNER_PROMOTE_DEMOTE,
+                Permission.NODE_DESIGNER_MANAGE,
                 # Add UseCaseAdmin-specific permissions
                 Permission.UPDATE_USECASES,
                 Permission.DELETE_USECASES,

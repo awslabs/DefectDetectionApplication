@@ -16,6 +16,7 @@ from .models import (
     ARCH_ARM64_JP6,
     ARCH_SIM,
     ARCH_X86_64,
+    ARCH_X86_64_NVIDIA,
 )
 
 # Core GStreamer plugins present in every LocalServer image (base, good,
@@ -58,8 +59,11 @@ _COMMON = _GST_CORE | _DDA_ELEMENTS | _LOCALSERVER_PYTHON
 
 #: arch -> frozenset of plugin names bundled with the LocalServer build
 #: for that architecture. ``sim`` mirrors the x86_64 sandbox image.
+#: ``x86_64_nvidia`` mirrors ``x86_64`` — the LocalServer amd64 GPU build
+#: bundles the same base plugin set.
 LOCALSERVER_BUNDLED_PLUGINS = {
     ARCH_X86_64: _COMMON,
+    ARCH_X86_64_NVIDIA: _COMMON,
     ARCH_ARM64_JP4: _COMMON | frozenset({"nvvideo4linux2"}),
     ARCH_ARM64_JP5: _COMMON | frozenset({"nvvideo4linux2"}),
     ARCH_ARM64_JP6: _COMMON | frozenset({"nvvideo4linux2"}),

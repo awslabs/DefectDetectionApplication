@@ -52,6 +52,7 @@ export default function Layout() {
     { type: 'link' as const, text: 'Models', href: '/models' },
     { type: 'divider' as const },
     { type: 'link' as const, text: 'Workflows', href: '/workflows/builder' },
+    { type: 'link' as const, text: 'Node Designer', href: '/node-designer' },
     { type: 'link' as const, text: 'Components', href: '/components' },
     { type: 'link' as const, text: 'Deployments', href: '/deployments' },
     { type: 'link' as const, text: 'Devices', href: '/devices' },
@@ -60,6 +61,7 @@ export default function Layout() {
   // Admin-only items (PortalAdmin only)
   const portalAdminItems: SideNavigationProps.Item[] = [
     { type: 'divider' as const },
+    { type: 'link' as const, text: 'Plugin Review', href: '/node-designer/review' },
     { type: 'link' as const, text: 'Settings', href: '/settings' },
   ];
 

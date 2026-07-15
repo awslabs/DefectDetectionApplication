@@ -21,6 +21,21 @@ Per-arch artifact zip layout (discovered by LocalServer under
     python/{nodeId}/handler.py        Custom_Python_Node code (7.3)
     python/{nodeId}/requirements.txt  Custom_Python_Node dependencies (7.3)
 
+Custom_Node_Type plugins (custom-node-designer Requirements 10.4, 11.1,
+11.2, 11.3, 16.4): compilation runs against the merged Node_Type_Catalog
+resolving the Custom_Node_Type versions pinned at workflow save (14.2).
+Compiled ``custom:{usecase}/{name}`` plugin dependencies are NEVER
+bundled inline; each resolves to its backing Plugin_Record, which is
+gated (dev lifecycle state, missing per-arch Plugin_Artifact, or missing
+Plugin_Component version reject the request identifying the
+Custom_Node_Type and arch/state), verified (streamed SHA-256 recompute +
+KMS signature verification, failing via the PackagingError path on
+either mismatch), recorded per arch in manifest.json ``pluginChecksums``
+/ ``pluginComponents``, and delivered by a Greengrass
+``ComponentDependencies`` entry on ``dda.plugin.{pluginId}`` pinned to
+the recorded Plugin_Record version. Built-in/curated plugins keep the
+inline ``plugins/{arch}/*.so`` bundling unchanged.
+
 All-or-nothing staging (Requirement 7.5): every artifact is uploaded to a
 temporary staging prefix first; only after every artifact for every
 selected architecture uploads successfully are the objects promoted to
@@ -32,9 +47,13 @@ The recipe is install-only — no Run lifecycle — so deploying or removing
 a Workflow_Component never restarts LocalServer or any other component
 (Requirement 13.3).
 """
+import base64
+import binascii
+import hashlib
 import json
 import os
 import logging
+import posixpath
 import shutil
 import tempfile
 import time
@@ -56,6 +75,15 @@ from shared_utils import (
 from workflow_core.serializer import parse as parse_definition
 from workflow_core.compiler import compile as compile_workflow, CompileContext
 from workflow_core.catalog import DEVICE_ARCHITECTURES
+from workflow_core.catalog.custom import resolve_catalog
+
+# Merged-catalog resolution + Plugin_Record persistence (same bundle)
+from node_catalog_resolution import (
+    descriptors_from_items,
+    load_registered_node_types,
+    resolution_items,
+)
+from plugin_records import get_version_item as get_plugin_record_version
 
 # Configure logging
 logger = logging.getLogger()
@@ -64,6 +92,7 @@ logger.setLevel(logging.INFO)
 # AWS clients (portal account)
 dynamodb = boto3.resource('dynamodb')
 s3 = boto3.client('s3')
+kms = boto3.client('kms')
 
 # Environment variables
 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
@@ -84,13 +113,47 @@ MIN_LOCAL_SERVER_VERSION = os.environ.get(
 WORKFLOW_COMPONENT_PREFIX = 'dda.workflow.'
 COMPONENT_PUBLISHER = 'DDA Portal Workflow Manager'
 
+# Plugin_Component naming (custom-node-designer, Requirement 16.4). Kept as
+# a local constant: plugin_components.py imports THIS module, so importing
+# it back would be circular.
+PLUGIN_COMPONENT_PREFIX = 'dda.plugin.'
+
 # Use_Case account S3 prefixes for Workflow_Component artifacts
 COMPONENT_S3_PREFIX = 'workflows/components'
 STAGING_S3_PREFIX = 'workflows/staging'
 
-# arch id (workflow_core) -> Greengrass platform architecture
+# Compiler pluginDependencies prefixes (split_plugin_dependencies)
+PYTHON_DEP_PREFIX = 'python:'
+#: A Custom_Node_Type plugin dependency: custom:{usecase_id}/{plugin_name}
+#: (recorded by custom_node_types.py, Requirement 8.6). Routed to the
+#: plugin's Plugin_Component instead of inline bundling (16.4).
+CUSTOM_DEP_PREFIX = 'custom:'
+
+# The portal Plugin_Artifact signing key (custom-node-designer 10.4):
+# packaging KMS-Verifies each custom plugin artifact's recorded signature.
+PLUGIN_SIGNING_KEY_ARN = os.environ.get('PLUGIN_SIGNING_KEY_ARN')
+SIGNING_ALGORITHM = 'ECDSA_SHA_256'
+
+# Backing Plugin_Record lifecycle states allowed to package (11.3: dev is
+# rejected; anything unknown fails closed).
+PACKAGEABLE_LIFECYCLE_STATES = ('test', 'prod')
+
+# Custom-plugin packaging gate codes (11.2, 11.3, 16.4)
+GATE_RECORD_MISSING = 'PLUGIN_RECORD_NOT_FOUND'
+GATE_LIFECYCLE = 'PLUGIN_LIFECYCLE_VIOLATION'
+GATE_ARTIFACT_MISSING = 'PLUGIN_ARTIFACT_MISSING'
+GATE_COMPONENT_MISSING = 'PLUGIN_COMPONENT_MISSING'
+
+ARCH_X86_64 = 'x86_64'
+ARCH_X86_64_NVIDIA = 'x86_64_nvidia'
+
+# arch id (workflow_core) -> Greengrass platform architecture. Both x86_64
+# flavors map to Greengrass amd64; recipes disambiguate with the
+# 'runtime: nvidia' platform attribute on x86_64_nvidia manifests plus the
+# manifest ordering from recipe_manifest_order (design: x86_64_nvidia).
 ARCH_TO_GG_PLATFORM = {
     'x86_64': 'amd64',
+    'x86_64_nvidia': 'amd64',
     'arm64_jp4': 'aarch64',
     'arm64_jp5': 'aarch64',
     'arm64_jp6': 'aarch64',
@@ -293,24 +356,310 @@ def gather_custom_python_nodes(graph) -> List[Dict]:
     return nodes
 
 
-def split_plugin_dependencies(plugin_dependencies: List[str]) -> Tuple[List[str], List[str]]:
-    """Split compiler pluginDependencies into GStreamer plugin names
-    (packaged as plugins/{arch}/*.so) and python: runtime packages
-    (surfaced in manifest.json for the edge executor)."""
-    gst_plugins, python_packages = [], []
+def split_plugin_dependencies(plugin_dependencies: List[str]
+                              ) -> Tuple[List[str], List[str], List[str]]:
+    """Split compiler pluginDependencies into curated GStreamer plugin
+    names (packaged inline as plugins/{arch}/*.so), custom:{usecase}/{name}
+    Custom_Node_Type plugin dependencies (delivered by Plugin_Component
+    dependency, never bundled inline — Requirement 16.4), and python:
+    runtime packages (surfaced in manifest.json for the edge executor)."""
+    gst_plugins, custom_plugins, python_packages = [], [], []
     for dep in plugin_dependencies:
-        if dep.startswith('python:'):
-            python_packages.append(dep[len('python:'):])
+        if dep.startswith(PYTHON_DEP_PREFIX):
+            python_packages.append(dep[len(PYTHON_DEP_PREFIX):])
+        elif dep.startswith(CUSTOM_DEP_PREFIX):
+            custom_plugins.append(dep)
         else:
             gst_plugins.append(dep)
-    return sorted(gst_plugins), sorted(python_packages)
+    return sorted(gst_plugins), sorted(custom_plugins), sorted(python_packages)
+
+
+# --------------------------------------------------------------------------
+# Custom_Node_Type plugin resolution, gates, and verification
+# (custom-node-designer Requirements 10.4, 11.1, 11.2, 11.3, 16.4)
+#
+# Everything up to load_custom_plugin_records is pure over plain dicts so
+# the gate/dependency decision logic is property-testable without AWS
+# (tasks 10.2-10.4).
+# --------------------------------------------------------------------------
+
+def plugin_component_name(plugin_id: str) -> str:
+    """The Greengrass Plugin_Component name of a Plugin_Record (16.4)"""
+    return f"{PLUGIN_COMPONENT_PREFIX}{plugin_id}"
+
+
+def plugin_version_requirement(plugin_version: int) -> str:
+    """Greengrass VersionRequirement pinning the Plugin_Record version
+    recorded by the workflow's pinned Custom_Node_Type version (16.4)."""
+    version = int(plugin_version)
+    return f">={version}.0.0 <{version + 1}.0.0"
+
+
+def custom_dependency_index(node_type_items: List[Dict]) -> Dict[str, Dict]:
+    """Map each ``custom:`` plugin dependency recorded in the resolved
+    Custom_Node_Type declarations to its CustomNodeTypes item, so a
+    compiled dependency resolves to the pinned backing Plugin_Record and
+    gate rejections can identify the Custom_Node_Type (11.2, 11.3).
+    Deterministic: items visited sorted by (node_type_id, version)."""
+    index: Dict[str, Dict] = {}
+    ordered = sorted(node_type_items,
+                     key=lambda i: (str(i.get('node_type_id')),
+                                    int(i.get('version', 0))))
+    for item in ordered:
+        declaration = item.get('declaration')
+        if not isinstance(declaration, dict):
+            continue
+        mappings = declaration.get('mappings')
+        if not isinstance(mappings, list):
+            continue
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
+                continue
+            for dep in mapping.get('pluginDependencies') or []:
+                if isinstance(dep, str) and dep.startswith(CUSTOM_DEP_PREFIX):
+                    index[dep] = item
+    return index
+
+
+def artifact_entry_complete(entry: Optional[Dict]) -> bool:
+    """A per-arch Plugin_Record artifact entry usable for packaging: a
+    succeeded build with the recorded key, checksum, and signature that
+    verification (10.4) needs."""
+    return bool(entry
+                and entry.get('buildStatus') == 'succeeded'
+                and entry.get('s3Key')
+                and entry.get('checksum')
+                and entry.get('signature'))
+
+
+def custom_plugin_gate_findings(arch_custom_deps: Dict[str, List[str]],
+                                dep_index: Dict[str, Dict],
+                                dep_records: Dict[str, Optional[Dict]]
+                                ) -> List[Dict]:
+    """
+    Evaluate the custom-plugin packaging gates (11.2, 11.3, 16.4) before
+    any artifact is assembled. Returns [] when packaging may proceed,
+    otherwise the complete list of findings, each identifying the
+    Custom_Node_Type and the offending lifecycle state or missing
+    Target_Architecture / Plugin_Component.
+
+    ``arch_custom_deps``: {arch: [custom: deps compiled for that arch]}
+    ``dep_index``: custom_dependency_index over the resolved items
+    ``dep_records``: {dep: backing Plugin_Record item or None}
+    """
+    findings: List[Dict] = []
+    dep_archs: Dict[str, List[str]] = {}
+    for arch in sorted(arch_custom_deps):
+        for dep in arch_custom_deps[arch]:
+            dep_archs.setdefault(dep, []).append(arch)
+
+    for dep in sorted(dep_archs):
+        item = dep_index.get(dep)
+        node_type_id = item.get('node_type_id') if item else None
+        record = dep_records.get(dep)
+        if not item or not record:
+            findings.append({
+                'code': GATE_RECORD_MISSING,
+                'message': (f"Custom plugin dependency '{dep}' of "
+                            f"Custom_Node_Type '{node_type_id or 'unknown'}' has no "
+                            f"resolvable backing Plugin_Record"),
+                'node_type_id': node_type_id,
+                'dependency': dep,
+            })
+            continue
+
+        plugin_id = record.get('plugin_id')
+        plugin_version = record.get('version')
+        state = record.get('lifecycle_state')
+        if state not in PACKAGEABLE_LIFECYCLE_STATES:
+            # 11.3: dev (or unknown — fail closed) lifecycle state rejects,
+            # identifying the Custom_Node_Type and its Lifecycle_State.
+            findings.append({
+                'code': GATE_LIFECYCLE,
+                'message': (f"Custom_Node_Type '{node_type_id}' is backed by "
+                            f"plugin '{plugin_id}' v{plugin_version} in lifecycle "
+                            f"state '{state}'; packaging requires test or prod"),
+                'node_type_id': node_type_id,
+                'dependency': dep,
+                'plugin_id': plugin_id,
+                'plugin_version': plugin_version,
+                'lifecycle_state': state,
+            })
+            continue
+
+        artifacts = record.get('artifacts') or {}
+        for arch in dep_archs[dep]:
+            if not artifact_entry_complete(artifacts.get(arch)):
+                # 11.2: missing per-arch Plugin_Artifact rejects, identifying
+                # the Custom_Node_Type and the missing Target_Architecture.
+                findings.append({
+                    'code': GATE_ARTIFACT_MISSING,
+                    'message': (f"Custom_Node_Type '{node_type_id}' has no built "
+                                f"Plugin_Artifact for architecture '{arch}' "
+                                f"(plugin '{plugin_id}' v{plugin_version})"),
+                    'node_type_id': node_type_id,
+                    'dependency': dep,
+                    'plugin_id': plugin_id,
+                    'plugin_version': plugin_version,
+                    'arch': arch,
+                })
+
+        component = record.get('component') or {}
+        if component.get('status') != 'registered':
+            # 16.4: the Workflow_Component depends on the Plugin_Component,
+            # so a missing registered version rejects packaging.
+            findings.append({
+                'code': GATE_COMPONENT_MISSING,
+                'message': (f"Custom_Node_Type '{node_type_id}' has no registered "
+                            f"Plugin_Component version for plugin '{plugin_id}' "
+                            f"v{plugin_version} "
+                            f"({plugin_component_name(str(plugin_id))})"),
+                'node_type_id': node_type_id,
+                'dependency': dep,
+                'plugin_id': plugin_id,
+                'plugin_version': plugin_version,
+            })
+    return findings
+
+
+def plugin_component_dependencies(dep_records: Dict[str, Optional[Dict]]) -> Dict:
+    """The Greengrass ComponentDependencies block of the Workflow_Component
+    recipe (16.4): one HARD dependency on dda.plugin.{pluginId} per distinct
+    custom plugin, pinned to the recorded Plugin_Record version."""
+    dependencies: Dict[str, Dict] = {}
+    for dep in sorted(dep_records):
+        record = dep_records[dep]
+        if not record:
+            continue
+        dependencies[plugin_component_name(str(record['plugin_id']))] = {
+            'VersionRequirement': plugin_version_requirement(record['version']),
+            'DependencyType': 'HARD',
+        }
+    return dependencies
+
+
+def recipe_manifest_order(archs) -> List[str]:
+    """Deterministic platform-manifest order: sorted, except the plain
+    x86_64 manifest is listed after the x86_64_nvidia one — both map to
+    Greengrass amd64, so attribute-less amd64 devices match plain x86_64
+    while devices declaring 'runtime: nvidia' match the more specific
+    manifest first (design: x86_64_nvidia)."""
+    ordered = sorted(archs)
+    if ARCH_X86_64 in ordered and ARCH_X86_64_NVIDIA in ordered:
+        ordered.remove(ARCH_X86_64)
+        ordered.insert(ordered.index(ARCH_X86_64_NVIDIA) + 1, ARCH_X86_64)
+    return ordered
+
+
+def load_custom_plugin_records(arch_custom_deps: Dict[str, List[str]],
+                               dep_index: Dict[str, Dict]
+                               ) -> Dict[str, Optional[Dict]]:
+    """The backing Plugin_Record of every distinct compiled custom plugin
+    dependency, resolved through the pinned Custom_Node_Type version
+    (14.2). Unresolvable dependencies map to None (gates fail closed)."""
+    records: Dict[str, Optional[Dict]] = {}
+    for deps in arch_custom_deps.values():
+        for dep in deps:
+            if dep in records:
+                continue
+            item = dep_index.get(dep)
+            if not item or item.get('plugin_id') is None \
+                    or item.get('plugin_version') is None:
+                records[dep] = None
+                continue
+            records[dep] = get_plugin_record_version(
+                item['plugin_id'], int(item['plugin_version']))
+    return records
+
+
+def verify_custom_plugin_artifact(dependency: str, node_type_id: Optional[str],
+                                  record: Dict, arch: str) -> Tuple[str, str]:
+    """
+    Stream one custom Plugin_Artifact's bytes for ``arch`` from the
+    Plugin_Library, recompute the SHA-256, and KMS-Verify the recorded
+    signature against the portal signing key (Requirement 10.4). Returns
+    ``(manifest_key, checksum)`` for the arch manifest's pluginChecksums
+    ({<pluginComponentName>/<file>: <sha256>}). Raises PackagingError —
+    the existing all-or-nothing path (stage cleanup, no partial
+    component) — on a missing artifact, checksum mismatch, or signature
+    verification failure.
+    """
+    entry = (record.get('artifacts') or {}).get(arch) or {}
+    so_key = entry['s3Key']
+    so_name = posixpath.basename(so_key)
+    component_name = plugin_component_name(str(record['plugin_id']))
+    manifest_key = f"{component_name}/{so_name}"
+    label = f"custom-plugins/{arch}/{so_name}"
+    identity = (f"Custom plugin artifact '{so_name}' for architecture '{arch}' "
+                f"(Custom_Node_Type '{node_type_id}', plugin "
+                f"'{record.get('plugin_id')}' v{record.get('version')})")
+
+    try:
+        response = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=so_key)
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        raise PackagingError(
+            label,
+            f"{identity} could not be read from the Plugin_Library "
+            f"(s3://{PORTAL_ARTIFACTS_BUCKET}/{so_key}): {code or str(e)}")
+
+    digest = hashlib.sha256()
+    body = response['Body']
+    while True:
+        chunk = body.read(1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+
+    if digest.hexdigest() != entry['checksum']:
+        raise PackagingError(
+            label,
+            f"{identity} failed checksum verification against the "
+            f"Plugin_Record (Requirement 10.4)")
+
+    try:
+        signature = base64.b64decode(entry['signature'])
+    except (TypeError, ValueError, binascii.Error):
+        signature = None
+    signature_valid = False
+    if signature:
+        try:
+            verified = kms.verify(
+                KeyId=PLUGIN_SIGNING_KEY_ARN,
+                Message=digest.digest(),
+                MessageType='DIGEST',
+                SigningAlgorithm=SIGNING_ALGORITHM,
+                Signature=signature,
+            )
+            signature_valid = bool(verified.get('SignatureValid'))
+        except ClientError as e:
+            code = e.response.get('Error', {}).get('Code', '')
+            if code != 'KMSInvalidSignatureException':
+                raise PackagingError(
+                    label,
+                    f"{identity} signature could not be verified: {code or str(e)}")
+    if not signature_valid:
+        raise PackagingError(
+            label,
+            f"{identity} failed signature verification against the portal "
+            f"signing key (Requirement 10.4)")
+
+    return manifest_key, entry['checksum']
 
 
 def build_manifest(workflow_id: str, workflow_version: int, arch: str,
                    gst_plugins: List[str], python_packages: List[str],
-                   custom_python_nodes: List[Dict], user: Dict) -> Dict:
+                   custom_python_nodes: List[Dict], user: Dict,
+                   plugin_checksums: Optional[Dict[str, str]] = None,
+                   plugin_components: Optional[Dict[str, str]] = None) -> Dict:
     """manifest.json content: what WorkflowWatcher needs to register the
-    workflow and what the deployment compatibility check reads (8.4)"""
+    workflow and what the deployment compatibility check reads (8.4).
+
+    ``plugin_checksums`` ({<pluginComponentName>/<file>: <sha256>}) and
+    ``plugin_components`` ({<pluginComponentName>: <componentVersion>})
+    let the LocalServer plugin loader verify each Plugin_Component-
+    delivered custom plugin file and derive its install root
+    (custom-node-designer Requirements 10.4, 10.6, 11.1)."""
     return {
         'componentName': component_name_for(workflow_id),
         'componentVersion': component_version_for(workflow_version),
@@ -320,6 +669,8 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
         'minLocalServerVersion': MIN_LOCAL_SERVER_VERSION,
         'pluginDependencies': gst_plugins,
         'pythonDependencies': python_packages,
+        'pluginChecksums': dict(plugin_checksums or {}),
+        'pluginComponents': dict(plugin_components or {}),
         'customPythonNodeIds': [n['node_id'] for n in custom_python_nodes],
         'packagedAt': now_ms(),
         'packagedBy': user['user_id']
@@ -445,7 +796,8 @@ def stage_and_promote_artifacts(usecase_s3, bucket: str, workflow_id: str,
 # --------------------------------------------------------------------------
 
 def build_recipe(workflow_id: str, workflow_version: int, bucket: str,
-                 final_keys: Dict[str, str]) -> Dict:
+                 final_keys: Dict[str, str],
+                 component_dependencies: Optional[Dict] = None) -> Dict:
     """
     Install-only Greengrass recipe with one platform manifest per selected
     architecture (Requirements 7.2, 7.4). There is deliberately no Run
@@ -453,23 +805,32 @@ def build_recipe(workflow_id: str, workflow_version: int, bucket: str,
     /aws_dda/workflows/ and finishes, so deploying or removing it never
     disturbs LocalServer or any other component (Requirement 13.3) — the
     LocalServer workflow engine discovers the files at runtime.
+
+    ``component_dependencies`` is the ComponentDependencies block
+    declaring the Plugin_Components of the workflow's Custom_Node_Types
+    (custom-node-designer Requirement 16.4); omitted when the workflow
+    uses none.
     """
     component_name = component_name_for(workflow_id)
     component_version = component_version_for(workflow_version)
     install_dir = f"{DEVICE_WORKFLOWS_ROOT}/{workflow_id}/{workflow_version}"
 
     # Greengrass matches manifests on platform attributes. amd64 vs aarch64
-    # separates x86_64 from the Jetson builds; when more than one arm64
-    # JetPack variant is packaged, a custom 'variant' attribute (declared
-    # in the device's Nucleus platform overrides) disambiguates them.
+    # separates the x86 flavors from the Jetson builds; when more than one
+    # arm64 JetPack variant is packaged, a custom 'variant' attribute
+    # (declared in the device's Nucleus platform overrides) disambiguates
+    # them, and x86_64_nvidia always carries 'runtime: nvidia' (with the
+    # plain x86_64 manifest ordered after it — recipe_manifest_order).
     arm_archs = [a for a in final_keys if ARCH_TO_GG_PLATFORM.get(a) == 'aarch64']
     disambiguate_arm = len(arm_archs) > 1
 
     manifests = []
-    for arch in sorted(final_keys):
+    for arch in recipe_manifest_order(final_keys):
         platform = {'os': 'linux', 'architecture': ARCH_TO_GG_PLATFORM[arch]}
         if disambiguate_arm and ARCH_TO_GG_PLATFORM[arch] == 'aarch64':
             platform['variant'] = arch
+        elif arch == ARCH_X86_64_NVIDIA:
+            platform['runtime'] = 'nvidia'
         unarchived_dir = zip_artifact_name(arch)[:-len('.zip')]
         install_script = (
             f"mkdir -p {install_dir} && "
@@ -495,7 +856,7 @@ def build_recipe(workflow_id: str, workflow_version: int, bucket: str,
             ]
         })
 
-    return {
+    recipe = {
         'RecipeFormatVersion': '2020-01-25',
         'ComponentName': component_name,
         'ComponentVersion': component_version,
@@ -510,6 +871,9 @@ def build_recipe(workflow_id: str, workflow_version: int, bucket: str,
         'Manifests': manifests,
         'Lifecycle': {}
     }
+    if component_dependencies:
+        recipe['ComponentDependencies'] = component_dependencies
+    return recipe
 
 
 def register_component(greengrass, recipe: Dict, usecase_id: str,
@@ -642,11 +1006,20 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                               {'path': parse_result.error.path})
     graph = parse_result.graph
 
+    # Merged Node_Type_Catalog resolving the Custom_Node_Type versions
+    # pinned at workflow save (custom-node-designer 14.2; built-in-only
+    # workflows resolve to the built-in catalog unchanged).
+    pinned_versions = version_item.get('custom_node_types') or {}
+    node_type_items = load_registered_node_types(usecase_id)
+    resolved_items = resolution_items(node_type_items, pinned_versions)
+    catalog = resolve_catalog(descriptors_from_items(resolved_items))
+
     # Compile once per user-selected architecture (Requirement 7.4)
     compile_context = CompileContext(workflow_id=workflow_id, workflow_version=str(version))
     compiled_docs: Dict[str, Any] = {}
     for arch in architectures:
-        result = compile_workflow(graph, arch, compile_context, simulation=False)
+        result = compile_workflow(graph, arch, compile_context, simulation=False,
+                                  catalog=catalog)
         if isinstance(result, list):
             return error_response(400, 'COMPILATION_FAILED',
                                   f"Workflow failed to compile for architecture '{arch}'",
@@ -655,6 +1028,37 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
         compiled_docs[arch] = result
 
     custom_python_nodes = gather_custom_python_nodes(graph)
+
+    # Split each arch's compiled plugin dependencies: curated plugins stay
+    # bundled inline; custom: dependencies resolve to Plugin_Components.
+    arch_gst_plugins: Dict[str, List[str]] = {}
+    arch_python_packages: Dict[str, List[str]] = {}
+    arch_custom_deps: Dict[str, List[str]] = {}
+    for arch, compiled in compiled_docs.items():
+        gst_plugins, custom_plugins, python_packages = split_plugin_dependencies(
+            compiled.plugin_dependencies)
+        arch_gst_plugins[arch] = gst_plugins
+        arch_python_packages[arch] = python_packages
+        arch_custom_deps[arch] = custom_plugins
+
+    # Custom-plugin packaging gates before any assembly (11.2, 11.3, 16.4):
+    # dev lifecycle state, a missing per-arch Plugin_Artifact, or a missing
+    # Plugin_Component version rejects with the Custom_Node_Type and the
+    # arch/state identified.
+    dep_records: Dict[str, Optional[Dict]] = {}
+    if any(arch_custom_deps.values()):
+        dep_index = custom_dependency_index(resolved_items)
+        dep_records = load_custom_plugin_records(arch_custom_deps, dep_index)
+        findings = custom_plugin_gate_findings(arch_custom_deps, dep_index,
+                                               dep_records)
+        if findings:
+            return error_response(
+                409, findings[0]['code'], findings[0]['message'],
+                {'findings': findings, 'version': version,
+                 'architectures': architectures})
+    else:
+        dep_index = {}
+    component_dependencies = plugin_component_dependencies(dep_records)
 
     # Assemble the per-arch artifact zips locally, then run the
     # all-or-nothing stage -> promote -> register sequence (7.1, 7.3, 7.5)
@@ -667,14 +1071,38 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # objects, even when promotion itself failed partway (Requirement 7.5).
     final_prefix = f"{COMPONENT_S3_PREFIX}/{workflow_id}/{version}"
     try:
+        # Verify every custom Plugin_Artifact per selected architecture
+        # against its Plugin_Record — streamed SHA-256 recompute + KMS
+        # signature verification (10.4) — collecting the per-arch
+        # pluginChecksums for the manifests. Custom .so files are never
+        # bundled inline (16.4).
+        arch_plugin_checksums: Dict[str, Dict[str, str]] = {}
+        arch_plugin_components: Dict[str, Dict[str, str]] = {}
+        verified_cache: Dict[Tuple[str, str], Tuple[str, str]] = {}
+        for arch in compiled_docs:
+            arch_plugin_checksums[arch] = {}
+            arch_plugin_components[arch] = {}
+            for dep in arch_custom_deps[arch]:
+                record = dep_records[dep]
+                cache_key = (dep, arch)
+                if cache_key not in verified_cache:
+                    node_type_item = dep_index.get(dep) or {}
+                    verified_cache[cache_key] = verify_custom_plugin_artifact(
+                        dep, node_type_item.get('node_type_id'), record, arch)
+                manifest_key, checksum = verified_cache[cache_key]
+                arch_plugin_checksums[arch][manifest_key] = checksum
+                arch_plugin_components[arch][
+                    plugin_component_name(str(record['plugin_id']))] = \
+                    component_version_for(record['version'])
+
         arch_zip_paths: Dict[str, str] = {}
-        arch_plugins: Dict[str, List[str]] = {}
         for arch, compiled in compiled_docs.items():
-            gst_plugins, python_packages = split_plugin_dependencies(
-                compiled.plugin_dependencies)
-            arch_plugins[arch] = gst_plugins
-            manifest = build_manifest(workflow_id, version, arch, gst_plugins,
-                                      python_packages, custom_python_nodes, user)
+            gst_plugins = arch_gst_plugins[arch]
+            manifest = build_manifest(
+                workflow_id, version, arch, gst_plugins,
+                arch_python_packages[arch], custom_python_nodes, user,
+                plugin_checksums=arch_plugin_checksums[arch],
+                plugin_components=arch_plugin_components[arch])
             zip_path = os.path.join(work_dir, zip_artifact_name(arch))
             build_arch_zip(zip_path, arch, manifest, definition_json,
                            compiled.to_json(), gst_plugins, custom_python_nodes)
@@ -688,8 +1116,10 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
         final_prefix, final_keys = stage_and_promote_artifacts(
             usecase_s3, usecase_bucket, workflow_id, version, arch_zip_paths)
 
-        # Register only after every artifact uploaded successfully (7.5)
-        recipe = build_recipe(workflow_id, version, usecase_bucket, final_keys)
+        # Register only after every artifact uploaded successfully (7.5);
+        # the recipe pins each custom plugin's Plugin_Component (16.4).
+        recipe = build_recipe(workflow_id, version, usecase_bucket, final_keys,
+                              component_dependencies=component_dependencies)
         component_arn = register_component(greengrass, recipe, usecase_id,
                                            workflow_id, version, user)
     except PackagingError as e:
@@ -731,13 +1161,25 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                       ContentType='application/json')
         compiled_arch_keys[arch] = portal_key
 
+    # The dependency closure of the packaged Workflow_Component: every
+    # depended-on Plugin_Component (dda.plugin.* name -> component version)
+    # across all packaged architectures. Recorded on the version item so
+    # the Deployment_Service's pre-submit lifecycle/architecture gates can
+    # evaluate the closure without re-resolving the recipe
+    # (custom-node-designer task 10.5, Requirements 9.7, 9.8, 16.3, 16.6).
+    workflow_plugin_components: Dict[str, str] = {}
+    for arch_map in arch_plugin_components.values():
+        workflow_plugin_components.update(arch_map)
+
     dynamodb.Table(WORKFLOW_VERSIONS_TABLE).update_item(
         Key={'workflow_id': workflow_id, 'version': version},
         UpdateExpression=('SET component_arn = :arn, compiled_arch_keys = :keys, '
+                          'plugin_components = :pc, '
                           'packaged_at = :at, packaged_by = :by'),
         ExpressionAttributeValues={
             ':arn': component_arn,
             ':keys': compiled_arch_keys,
+            ':pc': workflow_plugin_components,
             ':at': now_ms(),
             ':by': user['user_id']
         }

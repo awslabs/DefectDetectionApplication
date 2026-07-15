@@ -165,3 +165,53 @@ describe('BuilderNodeComponent conditional output handles', () => {
     expect(screen.getByLabelText('br output port false (InferenceMeta)')).toBeInTheDocument();
   });
 });
+
+describe('BuilderNodeComponent multi-input rendering (bedrock_inference node)', () => {
+  const BEDROCK: NodeTypeDescriptor = {
+    typeId: 'bedrock_inference',
+    category: 'inference',
+    displayName: 'Bedrock Inference',
+    inputs: [
+      { name: 'in', portType: 'VideoFrames' },
+      { name: 'reference', portType: 'VideoFrames' },
+    ],
+    outputs: [{ name: 'out', portType: 'InferenceMeta' }],
+    parameters: [
+      {
+        name: 'model',
+        paramType: 'enum',
+        required: false,
+        default: 'us.amazon.nova-lite-v1:0',
+        constraints: {
+          values: [
+            'us.amazon.nova-pro-v1:0',
+            'us.amazon.nova-lite-v1:0',
+            'qwen.qwen3-vl-235b-a22b',
+            'moonshotai.kimi-k2.5',
+          ],
+        },
+      },
+      { name: 'prompt', paramType: 'string', required: true, default: null, constraints: {} },
+    ],
+    mappings: [],
+    hardwareDependent: true,
+  };
+
+  it('renders both input handles labeled with their port names and types', () => {
+    const { container } = renderNode([], BEDROCK, 'br');
+
+    const inHandle = container.querySelector('[data-handleid="in"]');
+    const referenceHandle = container.querySelector('[data-handleid="reference"]');
+    expect(inHandle).not.toBeNull();
+    expect(referenceHandle).not.toBeNull();
+    expect(inHandle!.getAttribute('aria-label')).toBe('br input port in (VideoFrames)');
+    expect(referenceHandle!.getAttribute('aria-label')).toBe(
+      'br input port reference (VideoFrames)'
+    );
+    expect(screen.getByLabelText('br output port out (InferenceMeta)')).toBeInTheDocument();
+
+    // Both port names render as visible row labels beside the handles.
+    expect(screen.getByText('in')).toBeInTheDocument();
+    expect(screen.getByText('reference')).toBeInTheDocument();
+  });
+});

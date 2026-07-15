@@ -37,7 +37,7 @@ import time
 import uuid
 from typing import Callable, Dict, List, Optional
 
-from workflow_engine import discovery
+from workflow_engine import discovery, gst_plugins
 from workflow_engine.discovery import (
     STATUS_INVALID,
     WORKFLOWS_ROOT,
@@ -65,6 +65,7 @@ class WorkflowWatcher:
         poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
         device_arch: Optional[str] = None,
         running_version: Optional[str] = None,
+        plugins_root: str = gst_plugins.DEVICE_PLUGINS_ROOT,
     ) -> None:
         if session_factory is None:
             # Imported lazily so the module is importable without the
@@ -77,6 +78,7 @@ class WorkflowWatcher:
         self._poll_interval = poll_interval
         self._device_arch = device_arch
         self._running_version = running_version
+        self._plugins_root = plugins_root
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         # registration id -> reason, reported for invalid artifact sets.
@@ -154,6 +156,7 @@ class WorkflowWatcher:
             artifact_set,
             device_arch=self._device_arch,
             running_version=self._running_version,
+            plugins_root=self._plugins_root,
         )
 
         with self._reasons_lock:

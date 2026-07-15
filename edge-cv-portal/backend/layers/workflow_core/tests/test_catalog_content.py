@@ -176,7 +176,7 @@ class TestModelInferenceNodeType:
         descriptor = get_node_type("model_inference")
         device_mappings = [m for m in descriptor.mappings if m.arch != "sim"]
         assert sorted(m.arch for m in device_mappings) == sorted(
-            ["x86_64", "arm64_jp4", "arm64_jp5", "arm64_jp6"])
+            ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"])
         for mapping in device_mappings:
             factories = [entry["factory"] for entry in mapping.element_chain]
             assert factories == ["capsfilter", "emltriton"]
@@ -205,6 +205,70 @@ class TestModelInferenceNodeType:
         identity = sim.element_chain[1]
         assert identity["args_template"]["name"] == "{sim_inference_name}"
         assert "emltriton" not in sim.plugin_dependencies
+
+
+# --------------------------------------------------------------------------
+# Bedrock inference node type (reference-comparison via Bedrock runtime)
+# --------------------------------------------------------------------------
+
+class TestBedrockInferenceNodeType:
+    def test_bedrock_inference_present_with_two_video_inputs(self):
+        descriptor = get_node_type("bedrock_inference")
+        assert descriptor is not None
+        assert descriptor.category == CATEGORY_INFERENCE
+        assert descriptor.display_name == "Bedrock Inference"
+        # Two VideoFrames inputs: the frame under inspection and the
+        # reference image; one InferenceMeta output.
+        assert [(port.name, port.port_type) for port in descriptor.inputs] == [
+            ("in", PORT_TYPE_VIDEO_FRAMES),
+            ("reference", PORT_TYPE_VIDEO_FRAMES),
+        ]
+        assert _port_types(descriptor.outputs) == [PORT_TYPE_INFERENCE_META]
+
+    def test_bedrock_inference_parameterization(self):
+        params = _params_by_name(get_node_type("bedrock_inference"))
+        assert params["model"].param_type == "enum"
+        assert set(params["model"].constraints["values"]) == {
+            "us.amazon.nova-pro-v1:0",
+            "us.amazon.nova-lite-v1:0",
+            "qwen.qwen3-vl-235b-a22b",
+            "moonshotai.kimi-k2.5",
+        }
+        assert params["model"].default == "us.amazon.nova-lite-v1:0"
+        assert params["prompt"].required is True
+        assert params["prompt"].param_type == "string"
+        assert '"is_anomalous"' in params["prompt"].default
+        assert '"confidence"' in params["prompt"].default
+        assert params["region"].required is False
+        assert params["region"].default == "us-east-1"
+        assert params["max_tokens"].param_type == "int"
+        assert params["max_tokens"].default == 256
+
+    def test_bedrock_inference_is_an_executor_binding_on_device_archs(self):
+        # Executor-level realization on every physical device
+        # architecture: no GStreamer elements of its own; the compiler
+        # terminates the input branches in synthetic capture sinks and
+        # the binding carries the parameters + capture paths.
+        descriptor = get_node_type("bedrock_inference")
+        assert descriptor.hardware_dependent is True
+        device_mappings = [m for m in descriptor.mappings if m.arch != "sim"]
+        assert sorted(m.arch for m in device_mappings) == sorted(
+            ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"])
+        for mapping in device_mappings:
+            assert mapping.element_chain == []
+            assert mapping.executor_binding == "bedrock_inference"
+            # The capture sink chain (videoconvert ! jpegenc !
+            # multifilesink) and the boto3 runtime client.
+            assert set(mapping.plugin_dependencies) == {
+                "videoconvertscale", "jpeg", "multifile", "python:boto3"}
+
+    def test_bedrock_inference_sim_mapping_matches_the_model_inference_stub(self):
+        # Simulation stubs the node exactly like model_inference: the
+        # sandbox VPC has no internet, so the model is never invoked and
+        # the harness injects the configured simulated outcome via the
+        # sim_inference_<nodeId> identity (Requirement 12.6).
+        sim = get_node_type("bedrock_inference").mapping_for("sim")
+        assert sim == get_node_type("model_inference").mapping_for("sim")
 
 
 # --------------------------------------------------------------------------
@@ -357,7 +421,7 @@ class TestCatalogCoverage:
     EXPECTED_TYPE_IDS = {
         "camera_source", "folder_source", "digital_input",
         "dewarp", "rotate", "crop", "format_convert",
-        "model_inference",
+        "model_inference", "bedrock_inference",
         "custom_python", "inference_filter", "conditional",
         "digital_output", "mqtt_publish", "opcua_write", "capture",
     }

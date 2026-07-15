@@ -348,7 +348,8 @@ class TestModelInferenceStub:
         # Non-simulation compilation must stay byte-identical on every
         # device architecture: RGB capsfilter + emltriton with the model
         # name and LocalServer Triton paths (Requirement 6.2).
-        for arch in ("x86_64", "arm64_jp4", "arm64_jp5", "arm64_jp6"):
+        for arch in ("x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5",
+                     "arm64_jp6"):
             document = _compile_ok(self._graph(), arch=arch)
             elements = _elements_of(document, "inf")
             assert elements == [

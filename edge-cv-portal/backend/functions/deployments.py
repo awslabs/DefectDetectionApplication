@@ -31,6 +31,28 @@ DEPLOYMENTS_TABLE = os.environ.get('DEPLOYMENTS_TABLE', 'dda-portal-deployments'
 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
 
 # ---------------------------------------------------------------------------
+# Plugin_Component deployment gates (custom-node-designer, Requirements
+# 9.7, 9.8, 9.11, 16.3, 16.5, 16.6)
+# ---------------------------------------------------------------------------
+
+# Plugin_Components are named dda.plugin.{pluginId} by plugin_components.py
+PLUGIN_COMPONENT_PREFIX = 'dda.plugin.'
+
+# Backing Plugin_Records (lifecycle_state + component pointer with the
+# published platform-manifest architectures)
+PLUGIN_RECORDS_TABLE = os.environ.get('PLUGIN_RECORDS_TABLE')
+
+# Devices table: carries the UseCaseAdmin-set `test_device` flag (9.8) and
+# the device's recorded Target_Architecture (16.6)
+DEVICES_TABLE = os.environ.get('DEVICES_TABLE')
+
+# Lifecycle_State values (dev → test → prod). dev-state components are
+# rejected for any deployment target; test-state components deploy only to
+# devices flagged test_device; prod deploys anywhere in the Use_Case.
+LIFECYCLE_TEST = 'test'
+LIFECYCLE_PROD = 'prod'
+
+# ---------------------------------------------------------------------------
 # Workflow_Component deployment constants (Workflow Manager, Requirement 8)
 # ---------------------------------------------------------------------------
 
@@ -798,6 +820,26 @@ def create_deployment(body, user):
                 target_thing_group, region, account_id
             )
 
+        # Standalone Plugin_Component deployments (custom-node-designer
+        # 16.3, 16.6): any dda.plugin.* component in the requested set is
+        # subject to the pre-submit lifecycle gate (test-state only to
+        # devices flagged test_device; dev-state rejected for any target)
+        # and the per-device architecture gate before submission.
+        plugin_component_targets = {
+            comp['component_name']: comp.get('component_version')
+            for comp in components
+            if str(comp.get('component_name', '')).startswith(
+                PLUGIN_COMPONENT_PREFIX)
+        }
+        resolved_plugin_devices = []
+        if plugin_component_targets:
+            resolved_plugin_devices = resolve_target_thing_names(
+                iot_client, target_devices, target_thing_group)
+            gate_error = check_plugin_deployment_gates(
+                plugin_component_targets, resolved_plugin_devices)
+            if gate_error:
+                return gate_error
+
         # Auto-include CloudWatch log manager for device logging
         if needs_nucleus and 'aws.greengrass.LogManager' not in components_map:
             # Build componentLogsConfigurationMap dynamically from all components in the deployment
@@ -989,7 +1031,17 @@ def create_deployment(body, user):
         response = greengrass_client.create_deployment(**deployment_params)
         
         deployment_id = response.get('deploymentId')
-        
+
+        # Standalone Plugin_Component deployments are recorded in the
+        # Deployments table with component_type: 'plugin' (task 10.5).
+        if plugin_component_targets:
+            record_plugin_deployment(
+                deployment_id, usecase_id, plugin_component_targets,
+                target_arn, resolved_plugin_devices, target_thing_group,
+                is_revision,
+                existing_deployment.get('deploymentId') if is_revision else None,
+                user)
+
         log_audit_event(
             user['user_id'],
             'revise_deployment' if is_revision else 'create_deployment',
@@ -1151,6 +1203,264 @@ def _decimal_to_native(obj):
     elif isinstance(obj, list):
         return [_decimal_to_native(i) for i in obj]
     return obj
+
+
+# ---------------------------------------------------------------------------
+# Plugin lifecycle and architecture gates (custom-node-designer)
+#
+# Both gates extend the pre-submit pass that already inspects each target
+# device before submission (check_local_server_compatibility): the
+# lifecycle gate evaluates the Lifecycle_State of every depended-on
+# Plugin_Component over the dependency closure (9.7, 9.8, 9.11, 16.3),
+# and the architecture gate checks each target device's recorded
+# Target_Architecture against the platform manifests of every depended-on
+# Plugin_Component version (16.6). Greengrass dependency resolution
+# delivers the depended-on Plugin_Component versions with workflow
+# deployments (16.5), so the gates are the only deployment-side change.
+#
+# evaluate_plugin_lifecycle_gate and evaluate_plugin_arch_gate are pure
+# over plain dicts so the gate decision logic is property-testable
+# without AWS (tasks 10.6 / 10.7).
+# ---------------------------------------------------------------------------
+
+
+def evaluate_plugin_lifecycle_gate(closure_states, device_flags):
+    """
+    Lifecycle gate over the dependency closure (9.7, 9.8, 9.11, 16.3).
+
+    ``closure_states``: {plugin component identifier: Lifecycle_State}
+    ``device_flags``: {device thing name: bool test_device flag}
+
+    Returns [] when the deployment may be submitted, otherwise the
+    complete list of violations, each identifying the Plugin_Component
+    and its Lifecycle_State plus the offending target devices:
+
+    - dev state (or unknown — fail closed) is rejected for any target;
+    - test state is permitted only to devices flagged ``test_device``;
+    - prod deploys anywhere in the Use_Case.
+    """
+    violations = []
+    devices = sorted(device_flags)
+    for component in sorted(closure_states):
+        state = closure_states[component]
+        if state == LIFECYCLE_PROD:
+            continue
+        if state == LIFECYCLE_TEST:
+            offending = [d for d in devices if not device_flags[d]]
+            if offending:
+                violations.append({
+                    'pluginComponent': component,
+                    'lifecycleState': state,
+                    'devices': offending,
+                })
+        else:
+            # dev, or an unresolvable/unknown state: fail closed for
+            # every target device.
+            violations.append({
+                'pluginComponent': component,
+                'lifecycleState': state,
+                'devices': devices,
+            })
+    return violations
+
+
+def evaluate_plugin_arch_gate(component_manifests, device_archs):
+    """
+    Architecture gate (16.6): each target device's recorded
+    Target_Architecture must appear in the platform manifests of every
+    depended-on Plugin_Component version.
+
+    ``component_manifests``: {plugin component name:
+        {'version': component version, 'architectures': [archs]}}
+    ``device_archs``: {device thing name: recorded Target_Architecture
+        or None when the device has none recorded}
+
+    Architectures are matched by exact name — ``x86_64`` and
+    ``x86_64_nvidia`` are distinct with no fallback in either direction.
+    A device with no recorded Target_Architecture fails closed.
+
+    Returns [] when every device is covered, otherwise one offending
+    entry {pluginComponent, version, device, deviceArch} per
+    (component, device) miss.
+    """
+    offending = []
+    for name in sorted(component_manifests):
+        manifest = component_manifests[name]
+        supported = set(manifest.get('architectures') or [])
+        for device in sorted(device_archs):
+            device_arch = device_archs[device]
+            if device_arch not in supported:
+                offending.append({
+                    'pluginComponent': name,
+                    'version': manifest.get('version'),
+                    'device': device,
+                    'deviceArch': device_arch,
+                })
+    return offending
+
+
+def parse_plugin_component_ref(component_name, component_version):
+    """(plugin_id, Plugin_Record version) of a dda.plugin.* component
+    reference. The record version is the leading integer of the component
+    version ({pluginVersion}.0.0); None when it cannot be derived."""
+    if not str(component_name).startswith(PLUGIN_COMPONENT_PREFIX):
+        return None, None
+    plugin_id = str(component_name)[len(PLUGIN_COMPONENT_PREFIX):]
+    try:
+        record_version = int(str(component_version).split('.')[0])
+    except (TypeError, ValueError):
+        return plugin_id, None
+    return plugin_id, record_version
+
+
+def load_plugin_record(plugin_id, record_version):
+    """The backing Plugin_Record of one Plugin_Component version, or None
+    (gates fail closed on unresolvable records)."""
+    if not PLUGIN_RECORDS_TABLE or not plugin_id or record_version is None:
+        return None
+    try:
+        response = dynamodb.Table(PLUGIN_RECORDS_TABLE).get_item(
+            Key={'plugin_id': plugin_id, 'version': record_version})
+    except ClientError as e:
+        logger.warning(
+            f"Could not read plugin record {plugin_id} v{record_version}: {e}")
+        return None
+    item = response.get('Item')
+    return _decimal_to_native(item) if item else None
+
+
+def plugin_component_architectures(record):
+    """The Target_Architectures a Plugin_Component version's platform
+    manifests cover. The component pointer's ``architectures`` list is
+    written by plugin_components.py as exactly the successfully built
+    architectures the recipe carries manifests for (16.1); fall back to
+    the per-arch artifact entries when the pointer is absent."""
+    if not record:
+        return []
+    component = record.get('component') or {}
+    architectures = component.get('architectures')
+    if architectures:
+        return [str(arch) for arch in architectures]
+    artifacts = record.get('artifacts') or {}
+    return sorted(arch for arch, entry in artifacts.items()
+                  if (entry or {}).get('buildStatus') == 'succeeded')
+
+
+def load_device_gate_info(thing_names):
+    """The Devices-table gate attributes of each target device: the
+    UseCaseAdmin-set ``test_device`` flag (9.8) and the recorded
+    ``target_architecture`` (16.6). Devices without a record fail closed
+    (not a Test_Device; no recorded architecture)."""
+    device_flags = {}
+    device_archs = {}
+    table = dynamodb.Table(DEVICES_TABLE) if DEVICES_TABLE else None
+    for thing_name in thing_names:
+        item = None
+        if table is not None:
+            try:
+                item = table.get_item(Key={'device_id': thing_name}).get('Item')
+            except ClientError as e:
+                logger.warning(
+                    f"Could not read device record for {thing_name}: {e}")
+        item = item or {}
+        device_flags[thing_name] = bool(item.get('test_device'))
+        device_archs[thing_name] = item.get('target_architecture') or None
+    return device_flags, device_archs
+
+
+def check_plugin_deployment_gates(plugin_components, thing_names):
+    """
+    Pre-submit Plugin_Component gates over a deployment's dependency
+    closure (9.7, 9.8, 9.11, 16.3, 16.6). ``plugin_components`` maps each
+    depended-on Plugin_Component name to its component version — a
+    Workflow_Component's recorded closure, or the dda.plugin.* components
+    of a standalone deployment. Returns an error response when the
+    deployment must be rejected, otherwise None.
+    """
+    if not plugin_components:
+        return None
+
+    device_flags, device_archs = load_device_gate_info(thing_names)
+
+    closure = {}
+    for component_name in sorted(plugin_components):
+        component_version = plugin_components[component_name]
+        plugin_id, record_version = parse_plugin_component_ref(
+            component_name, component_version)
+        record = load_plugin_record(plugin_id, record_version)
+        closure[component_name] = {
+            'version': str(component_version),
+            'plugin_id': plugin_id,
+            'lifecycle_state': (record or {}).get('lifecycle_state'),
+            'architectures': plugin_component_architectures(record),
+        }
+
+    # Lifecycle gate over the closure (9.7, 9.8, 9.11, 16.3)
+    closure_states = {name: info['lifecycle_state']
+                      for name, info in closure.items()}
+    violations = evaluate_plugin_lifecycle_gate(closure_states, device_flags)
+    if violations:
+        detailed = [dict(v,
+                         version=closure[v['pluginComponent']]['version'],
+                         plugin_id=closure[v['pluginComponent']]['plugin_id'])
+                    for v in violations]
+        return _workflow_error(
+            409, 'PLUGIN_LIFECYCLE_VIOLATION',
+            'One or more depended-on plugin components are not deployable '
+            'to the requested target devices in their current lifecycle '
+            'state; the deployment was not submitted',
+            {'violations': detailed})
+
+    # Architecture gate: recorded device Target_Architecture vs the
+    # platform manifests of every depended-on Plugin_Component (16.6)
+    component_manifests = {
+        name: {'version': info['version'],
+               'architectures': info['architectures']}
+        for name, info in closure.items()
+    }
+    unsupported = evaluate_plugin_arch_gate(component_manifests, device_archs)
+    if unsupported:
+        return _workflow_error(
+            409, 'PLUGIN_ARCH_UNSUPPORTED',
+            'One or more target devices have no published Plugin_Artifact '
+            'for their recorded Target_Architecture in a depended-on '
+            'plugin component version; the deployment was not submitted',
+            {'unsupported': unsupported})
+
+    return None
+
+
+def record_plugin_deployment(deployment_id, usecase_id, plugin_components,
+                             target_arn, target_devices, target_thing_group,
+                             is_revision, superseded_deployment_id, user):
+    """
+    Record a standalone Plugin_Component deployment in the Deployments
+    table with component_type: 'plugin' (task 10.5). Mirrors the
+    workflow association record shape.
+    """
+    timestamp = int(datetime.utcnow().timestamp() * 1000)
+    names = sorted(plugin_components)
+    item = {
+        'deployment_id': deployment_id,
+        'usecase_id': usecase_id,
+        'component_type': 'plugin',
+        'plugin_components': {name: str(plugin_components[name])
+                              for name in names},
+        'component_name': names[0],
+        'component_version': str(plugin_components[names[0]]),
+        'target_arn': target_arn,
+        'target_devices': list(target_devices),
+        'target_thing_group': target_thing_group or None,
+        'status': 'IN_PROGRESS',
+        'deployment_status': 'IN_PROGRESS',
+        'is_revision': is_revision,
+        'superseded_deployment_id': superseded_deployment_id,
+        'created_by': user['user_id'],
+        'created_at': timestamp,
+        'updated_at': timestamp
+    }
+    dynamodb.Table(DEPLOYMENTS_TABLE).put_item(Item=item)
+    return item
 
 
 def has_workflow_permission(user, usecase_id, permission):
@@ -1415,6 +1725,23 @@ def create_workflow_deployment(body, user):
                     'min_local_server_version': min_local_server,
                     'incompatible_devices': incompatible
                 })
+
+        # Plugin lifecycle + architecture gates over the dependency closure
+        # (custom-node-designer 9.7, 9.8, 9.11, 16.3, 16.6), alongside the
+        # minLocalServerVersion pass above. The Component_Packager records
+        # the workflow's depended-on Plugin_Components (dda.plugin.* name ->
+        # component version) on the version item; Greengrass dependency
+        # resolution delivers those versions with the deployment (16.5), so
+        # only the pre-submit gates run here.
+        plugin_closure = {
+            str(name): str(version)
+            for name, version in
+            (version_item.get('plugin_components') or {}).items()
+        }
+        gate_error = check_plugin_deployment_gates(plugin_closure,
+                                                   resolved_devices)
+        if gate_error:
+            return gate_error
 
         if target_thing_group:
             target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{target_thing_group}"

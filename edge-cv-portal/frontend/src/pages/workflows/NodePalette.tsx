@@ -39,6 +39,26 @@ function PaletteItem({ descriptor }: { descriptor: NodeTypeDescriptor }) {
       }}
     >
       {descriptor.displayName}
+      {descriptor.lifecycleState === 'test' && (
+        // Visible test-state marker on Custom_Node_Types backed by a
+        // test-state Plugin_Record (custom-node-designer, Requirement 9.6).
+        <span
+          aria-label="test state"
+          style={{
+            marginLeft: 'auto',
+            fontSize: 10,
+            fontWeight: 700,
+            lineHeight: '14px',
+            color: '#0972d3',
+            border: '1px solid #0972d3',
+            borderRadius: 8,
+            padding: '0 6px',
+            textTransform: 'uppercase',
+          }}
+        >
+          test
+        </span>
+      )}
     </div>
   );
 }

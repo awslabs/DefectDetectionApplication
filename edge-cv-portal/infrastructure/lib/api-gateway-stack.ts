@@ -368,6 +368,13 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
+    // PUT /devices/{id} — portal-recorded device attributes: the
+    // UseCaseAdmin-set test_device flag and the recorded
+    // target_architecture (custom-node-designer task 10.5).
+    deviceResource.addMethod('PUT', devicesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
 
     // SSH tunnel (AWS IoT Secure Tunneling) — enable/disable + status + open.
     const sshTunnelResource = deviceResource.addResource('ssh-tunnel');

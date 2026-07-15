@@ -265,7 +265,8 @@ class _GraphBuilder:
         #: (node_id, port_name, effective_port_type) for every output port.
         self.sources: List[Tuple[str, str, str]] = []
 
-    def add_node(self, type_id: str, forced_params: Optional[Dict[str, Any]] = None) -> Node:
+    def add_node(self, type_id: str, forced_params: Optional[Dict[str, Any]] = None,
+                 register_outputs: bool = True) -> Node:
         descriptor = get_node_type(type_id)
         assert descriptor is not None, type_id
         self._node_counter += 1
@@ -280,6 +281,8 @@ class _GraphBuilder:
         )
         self.nodes.append(node)
 
+        if not register_outputs:
+            return node
         output_override = None
         parameter_names = {p.name for p in descriptor.parameters}
         if "output_port_type" in parameter_names:
@@ -291,6 +294,38 @@ class _GraphBuilder:
                 (node.id, port.name, output_override or port.port_type)
             )
         return node
+
+    def add_bedrock_node(self) -> Node:
+        """Add a two-input bedrock_inference node fed by dedicated fresh
+        VideoFrames sources (Requirement: two-input inference wiring).
+
+        The feeders' output ports are deliberately NOT registered as
+        wiring sources for other consumers, and neither is the bedrock
+        node's InferenceMeta output: on device architectures the
+        compiler terminates each feeding branch in a frame-capture sink
+        (frames do not flow through the node), so generated graphs keep
+        bedrock branches self-contained — matching the topology the
+        compiler supports while still exercising the two-input node
+        through every property. A drawn boolean shares one feeder
+        between both input ports (same-source comparison) or gives each
+        port its own feeder.
+        """
+        shared_feeder = self._draw(st.booleans())
+        first = self.add_node(
+            self._draw(st.sampled_from(_VIDEO_INPUT_TYPES)),
+            register_outputs=False,
+        )
+        second = (
+            first if shared_feeder
+            else self.add_node(
+                self._draw(st.sampled_from(_VIDEO_INPUT_TYPES)),
+                register_outputs=False,
+            )
+        )
+        bedrock = self.add_node("bedrock_inference", register_outputs=False)
+        self.connect((first.id, "out"), bedrock.id, "in")
+        self.connect((second.id, "out"), bedrock.id, "reference")
+        return bedrock
 
     def connect(self, source: Tuple[str, str], target_node_id: str, target_port: str) -> Connection:
         self._connection_counter += 1
@@ -385,6 +420,11 @@ def graph_strategy(
     for _ in range(draw(st.integers(min_value=0, max_value=max_intermediates))):
         feasible = builder.feasible_consumer_types(_INTERMEDIATE_TYPES)
         builder.add_wired_consumer(draw(st.sampled_from(feasible)), hub)
+
+    # Optionally exercise the two-input Bedrock inference node with its
+    # dedicated feeder sources (see add_bedrock_node).
+    if draw(st.booleans()):
+        builder.add_bedrock_node()
 
     for _ in range(1 + draw(st.integers(min_value=0, max_value=max_extra_outputs))):
         feasible = builder.feasible_consumer_types(_OUTPUT_TYPES)

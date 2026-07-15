@@ -305,6 +305,28 @@ class CommonPermissions:
     DEPLOY_WORKFLOWS = [Permission.WORKFLOW_PACKAGE, Permission.WORKFLOW_DEPLOY]
     MANAGE_BEDROCK_CONFIG = [Permission.BEDROCK_CONFIG_WRITE]
 
+    # Node Designer Operations (custom-node-designer, Requirement 13)
+    # Role mapping (see shared_utils.RBACManager):
+    #   node-designer:read              -> Viewer, Operator, DataScientist,
+    #                                      UseCaseAdmin, PortalAdmin (13.3)
+    #   node-designer:create/generate/import/simulate/register/
+    #                 promote-demote/manage
+    #                                   -> UseCaseAdmin (own Use_Case),
+    #                                      PortalAdmin (13.1)
+    #   node-designer:security-review   -> PortalAdmin only (13.2)
+    # Denials return the standard authorization error envelope (13.4).
+    VIEW_NODE_DESIGNER = [Permission.NODE_DESIGNER_READ]
+    MANAGE_NODE_DESIGNER = [
+        Permission.NODE_DESIGNER_CREATE,
+        Permission.NODE_DESIGNER_GENERATE,
+        Permission.NODE_DESIGNER_IMPORT,
+        Permission.NODE_DESIGNER_SIMULATE,
+        Permission.NODE_DESIGNER_REGISTER,
+        Permission.NODE_DESIGNER_PROMOTE_DEMOTE,
+        Permission.NODE_DESIGNER_MANAGE,
+    ]
+    REVIEW_NODE_DESIGNER = [Permission.NODE_DESIGNER_SECURITY_REVIEW]
+
 
 # Convenience decorators for common permission patterns
 def require_data_scientist_or_admin(usecase_param: str = 'usecase_id'):
@@ -345,3 +367,19 @@ def require_workflow_test(usecase_param: str = 'usecase_id'):
 def require_workflow_deploy(usecase_param: str = 'usecase_id'):
     """Require workflow package/deploy (Operator, UseCaseAdmin, PortalAdmin)"""
     return rbac_check(CommonPermissions.DEPLOY_WORKFLOWS, usecase_param)
+
+
+def require_node_designer_read(usecase_param: str = 'usecase_id'):
+    """Require node-designer:read (every role of the Use_Case, 13.3)"""
+    return rbac_check(CommonPermissions.VIEW_NODE_DESIGNER, usecase_param)
+
+
+def require_node_designer_manage(usecase_param: str = 'usecase_id'):
+    """Require node-designer create/generate/import/simulate/register/
+    promote-demote/manage (UseCaseAdmin within own Use_Case, PortalAdmin, 13.1)"""
+    return rbac_check(CommonPermissions.MANAGE_NODE_DESIGNER, usecase_param)
+
+
+def require_node_designer_security_review(usecase_param: str = 'usecase_id'):
+    """Require node-designer:security-review (PortalAdmin only, 13.2)"""
+    return rbac_check(CommonPermissions.REVIEW_NODE_DESIGNER, usecase_param)

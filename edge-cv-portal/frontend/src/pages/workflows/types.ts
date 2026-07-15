@@ -209,6 +209,13 @@ export interface NodeTypeDescriptor {
   parameters: ParameterDescriptor[];
   mappings: GstMapping[];
   hardwareDependent: boolean;
+  /**
+   * Lifecycle marker served by the merged node catalog on
+   * Custom_Node_Type entries backed by a test-state Plugin_Record
+   * ("test"); absent on built-in node types (custom-node-designer,
+   * Requirement 9.6).
+   */
+  lifecycleState?: string | null;
 }
 
 // --------------------------------------------------------------------------

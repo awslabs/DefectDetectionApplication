@@ -50,12 +50,19 @@ failed and nothing propagates (Requirement 13.7).
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 from typing import Callable, Optional
 
 from workflow_engine import executor as executor_hook
 from workflow_engine import python_bridge, rendering
-from workflow_engine.discovery import COMPILED_PIPELINE_FILE, STATUS_REGISTERED
+from workflow_engine.output_bindings import BedrockInferenceProcessor
+from workflow_engine.discovery import (
+    COMPILED_PIPELINE_FILE,
+    MANIFEST_FILE,
+    STATUS_REGISTERED,
+)
 from workflow_engine.gst_plugins import workflow_plugin_path
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
 
@@ -108,6 +115,7 @@ class WorkflowExecutor:
         pipeline_manager_factory: Optional[Callable] = None,
         post_run_handler: Optional[PostRunHandler] = None,
         bridged_pipeline_runner: Optional[Callable] = None,
+        bedrock_processor: Optional[BedrockInferenceProcessor] = None,
     ) -> None:
         if session_factory is None:
             # Imported lazily so the module is importable without the
@@ -126,6 +134,12 @@ class WorkflowExecutor:
         self._bridged_pipeline_runner = (
             bridged_pipeline_runner or python_bridge.run_bridged_pipeline
         )
+        # Runs bedrock_inference bindings between the pipeline run and
+        # the output bindings: the compiled pipeline captured the two
+        # input frames; the processor calls the Bedrock runtime and
+        # merges {is_anomalous, confidence} into the tag values the
+        # post-run handler gates on. Injectable for tests without boto3.
+        self._bedrock_processor = bedrock_processor or BedrockInferenceProcessor()
 
     def set_post_run_handler(self, handler: Optional[PostRunHandler]) -> None:
         """Register the post-pipeline output-binding processor (task 12.4)."""
@@ -143,6 +157,7 @@ class WorkflowExecutor:
         identifiable) and nothing raised (Requirements 9.7, 13.7).
         """
         session = self._session_factory()
+        work_dir: Optional[str] = None
         try:
             execution = session.get(WorkflowExecution, execution_id)
             if execution is None:
@@ -180,6 +195,12 @@ class WorkflowExecutor:
             if bridge_specs:
                 document = python_bridge.rewrite_document(document)
 
+            # Per-run working directory for {work_dir}-rooted artifacts
+            # (bedrock_inference frame-capture sinks); resolved into the
+            # element args before rendering, exactly like the harness
+            # resolves {dataset_location}. Removed after the run.
+            work_dir = self._prepare_work_dir(document)
+
             launch_string = rendering.render_launch_string(document)
             if not launch_string:
                 self._finish_failed(
@@ -205,8 +226,19 @@ class WorkflowExecutor:
             plugin_dir = os.path.join(
                 registration.artifact_path, "plugins", registration.arch
             )
+            # The manifest names the Plugin_Component install roots that
+            # join the plugin scan path and carries the pluginChecksums
+            # verified before the registry scan (custom-node-designer
+            # Requirements 10.6, 11.4). Best effort: a workflow without
+            # a loadable manifest keeps the inline-directory behavior
+            # (its registration would be invalid anyway).
+            manifest = self._load_manifest(registration)
             try:
-                with workflow_plugin_path(plugin_dir):
+                with workflow_plugin_path(
+                    plugin_dir,
+                    manifest=manifest,
+                    artifact_path=registration.artifact_path,
+                ):
                     if bridge_specs:
                         tag_values = self._run_bridged(
                             registration, bridge_specs, launch_string
@@ -238,6 +270,35 @@ class WorkflowExecutor:
                 )
                 return
 
+            # Bedrock comparison inference: runs BEFORE the run is
+            # finalized and before the gating/output bindings evaluate.
+            # The parsed {is_anomalous, confidence} fields merge into
+            # the tag values so downstream filters/conditionals/outputs
+            # see them; a failure (network, credentials, unparseable
+            # response) marks THIS run failed with the node identified
+            # and touches nothing else (Requirement 13.7).
+            if self._bedrock_processor.bindings(document):
+                try:
+                    tag_values = self._bedrock_processor.process(
+                        document, tag_values, work_dir
+                    )
+                except Exception as e:  # noqa: BLE001 - contained per 13.7
+                    failing_node_id = getattr(e, "node_id", None)
+                    logger.error(
+                        "Workflow execution %s failed in Bedrock inference "
+                        "(node %s): %s",
+                        execution_id,
+                        failing_node_id or "unidentified",
+                        e,
+                    )
+                    self._finish_failed(
+                        session,
+                        execution,
+                        error=str(e),
+                        failing_node_id=failing_node_id,
+                    )
+                    return
+
             execution.status = EXECUTION_STATUS_COMPLETED
             execution.finished_at = int(time.time())
             session.commit()
@@ -255,6 +316,8 @@ class WorkflowExecutor:
                 execution_id, "Workflow executor failed unexpectedly; see logs"
             )
         finally:
+            if work_dir is not None:
+                shutil.rmtree(work_dir, ignore_errors=True)
             session.close()
 
     # ------------------------------------------------------------------
@@ -282,6 +345,42 @@ class WorkflowExecutor:
             for bridge in bridges:
                 bridge.stop()
 
+    #: Placeholder the compiler leaves in bedrock_inference capture
+    #: paths for the executor to resolve per run.
+    _WORK_DIR_TOKEN = "{work_dir}"
+
+    @classmethod
+    def _needs_work_dir(cls, document: dict) -> bool:
+        """True when the document references the {work_dir} placeholder
+        (element args or bedrock_inference capturePaths)."""
+        for segment in document.get("segments", []):
+            for element in segment.get("elements", []):
+                for value in (element.get("args") or {}).values():
+                    if isinstance(value, str) and cls._WORK_DIR_TOKEN in value:
+                        return True
+        for binding in document.get("executorBindings") or []:
+            paths = binding.get("capturePaths") or {}
+            for value in paths.values():
+                if isinstance(value, str) and cls._WORK_DIR_TOKEN in value:
+                    return True
+        return False
+
+    def _prepare_work_dir(self, document: dict) -> Optional[str]:
+        """Create the per-run working directory and resolve {work_dir}
+        into the document's element args, or None when unused."""
+        if not self._needs_work_dir(document):
+            return None
+        work_dir = tempfile.mkdtemp(prefix="workflow-run-")
+        substitutions = rendering.resolve_placeholder(
+            document, "work_dir", work_dir
+        )
+        logger.info(
+            "Resolved {work_dir} -> %s (%d element substitution(s))",
+            work_dir,
+            substitutions,
+        )
+        return work_dir
+
     @staticmethod
     def _preflight(registration: Optional[WorkflowRegistration]) -> Optional[str]:
         """Reason the run cannot start, or None when it can."""
@@ -295,6 +394,17 @@ class WorkflowExecutor:
                 f"'{registration.status}' and cannot be run"
             )
         return None
+
+    @staticmethod
+    def _load_manifest(registration: WorkflowRegistration) -> Optional[dict]:
+        """The artifact set's manifest.json, or None when unreadable."""
+        path = os.path.join(registration.artifact_path, MANIFEST_FILE)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, ValueError):
+            return None
+        return manifest if isinstance(manifest, dict) else None
 
     @staticmethod
     def _load_compiled_document(registration: WorkflowRegistration):

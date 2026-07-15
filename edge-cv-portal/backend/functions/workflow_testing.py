@@ -1090,6 +1090,11 @@ def start_test_run(event: Dict, user: Dict, workflow_id: str) -> Dict:
         'artifacts_bucket': PORTAL_ARTIFACTS_BUCKET,
         'target_arch': 'x86_64',
         'simulation': True,
+        # Custom_Node_Type versions pinned at workflow save ({typeId:
+        # typeVersion} from the WorkflowVersions item, custom-node-designer
+        # 14.2): the validate/compile steps resolve the merged catalog
+        # against exactly these versions (12.1).
+        'custom_node_type_pins': version_item.get('custom_node_types') or {},
         # Simulated inference outcome for stubbed model inference nodes
         # (12.6): the object for readability, plus the pre-serialized
         # JSON string the RunSandbox containerOverrides pass through as

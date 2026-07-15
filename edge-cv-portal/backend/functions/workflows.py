@@ -42,6 +42,20 @@ from shared_utils import (
 )
 from workflow_core.serializer import parse as parse_definition, serialize as serialize_graph
 
+# Custom_Node_Type reference recording at save (custom-node-designer task
+# 9.2, Requirement 14.2): the version items carry a `custom_node_types`
+# map {typeId: typeVersion} pinning the Custom_Node_Type versions in use.
+# Design note: no inverted-index GSI (node-type-refs-index) is created —
+# a DynamoDB GSI indexes one scalar attribute value per item, but a
+# workflow version may reference several Custom_Node_Types, so a scalar
+# ref_node_type_id cannot represent the reference set. The removal scan
+# in custom_node_types.py already honors the map attribute in its
+# fallback path without loading definition documents from S3.
+from node_catalog_resolution import (
+    load_registered_node_types,
+    referenced_node_type_versions,
+)
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -200,8 +214,31 @@ def load_definition(s3_key: str) -> Dict:
     return json.loads(response['Body'].read().decode('utf-8'))
 
 
-def put_version_item(workflow_id: str, version: int, s3_key: str, user: Dict) -> Dict:
-    """Record an immutable workflow version (design: WorkflowVersions table)"""
+def custom_node_type_references(usecase_id: str, canonical_json: str) -> Dict:
+    """
+    The Custom_Node_Type versions a definition being saved uses
+    (custom-node-designer 14.2): {typeId: typeVersion} recording the
+    latest registered version of each referenced custom type at save
+    time. Empty when the definition uses only built-in node types or the
+    node-designer stack is not deployed.
+    """
+    definition = json.loads(canonical_json)
+    registered = load_registered_node_types(usecase_id)
+    if not registered:
+        return {}
+    return referenced_node_type_versions(definition, registered)
+
+
+def put_version_item(workflow_id: str, version: int, s3_key: str, user: Dict,
+                     custom_node_types: Optional[Dict] = None) -> Dict:
+    """Record an immutable workflow version (design: WorkflowVersions table).
+
+    ``custom_node_types`` pins the Custom_Node_Type versions the saved
+    definition uses ({typeId: typeVersion}, custom-node-designer 14.2);
+    it is always recorded (empty map for built-in-only workflows) so the
+    reference scan in custom_node_types.py never needs the S3 document
+    for versions saved after task 9.2.
+    """
     item = {
         'workflow_id': workflow_id,
         'version': version,
@@ -209,6 +246,7 @@ def put_version_item(workflow_id: str, version: int, s3_key: str, user: Dict) ->
         'validation_status': {'status': 'none'},
         'compiled_arch_keys': {},
         'component_arn': None,
+        'custom_node_types': custom_node_types or {},
         'created_by': user['user_id'],
         'created_at': now_ms()
     }
@@ -346,7 +384,8 @@ def create_workflow(event: Dict, user: Dict) -> Dict:
     timestamp = now_ms()
 
     s3_key = put_definition(usecase_id, workflow_id, 1, canonical_json)
-    put_version_item(workflow_id, 1, s3_key, user)
+    put_version_item(workflow_id, 1, s3_key, user,
+                     custom_node_type_references(usecase_id, canonical_json))
 
     item = {
         'workflow_id': workflow_id,
@@ -503,7 +542,8 @@ def update_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     new_version = int(new_item['latest_version'])
 
     s3_key = put_definition(usecase_id, workflow_id, new_version, canonical_json)
-    put_version_item(workflow_id, new_version, s3_key, user)
+    put_version_item(workflow_id, new_version, s3_key, user,
+                     custom_node_type_references(usecase_id, canonical_json))
 
     log_audit_event(
         user_id=user['user_id'],
@@ -646,7 +686,8 @@ def duplicate_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     timestamp = now_ms()
 
     s3_key = put_definition(usecase_id, new_workflow_id, 1, canonical_json)
-    put_version_item(new_workflow_id, 1, s3_key, user)
+    put_version_item(new_workflow_id, 1, s3_key, user,
+                     custom_node_type_references(usecase_id, canonical_json))
 
     new_item = {
         'workflow_id': new_workflow_id,

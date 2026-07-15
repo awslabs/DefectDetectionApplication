@@ -145,18 +145,44 @@ def select_cpu_component_arn(component_arns: Any) -> Optional[str]:
     return None
 
 
+def registry_name_candidates(model_name: str) -> List[str]:
+    """Registry ``name`` values that may denote ``model_name``.
+
+    The Workflow_Builder model dropdown stores the training-job
+    ``model_name`` (e.g. ``yolo_test``), while the packaging pipeline
+    registers the model in MODELS_TABLE under its component base name:
+    ``model-`` prefix with underscores normalized to hyphens (e.g.
+    ``model-yolo-test``). Both spellings resolve so workflows built from
+    either source stage correctly.
+    """
+    candidates = [model_name]
+    normalized = model_name.replace('_', '-')
+    if normalized not in candidates:
+        candidates.append(normalized)
+    for base in (model_name, normalized):
+        prefixed = 'model-' + base
+        if not base.startswith('model-') and prefixed not in candidates:
+            candidates.append(prefixed)
+    return candidates
+
+
 def resolve_model_item(model_items: List[Dict], model_name: str) -> Tuple[Optional[Dict], Optional[str]]:
     """Resolve the registry item to stage for ``model_name``.
 
     ``model_items`` are the Use_Case's MODELS_TABLE items. Among items
-    whose ``name`` matches, the newest (created_at) one carrying a
-    CPU-runnable variant wins. Returns ``(item, cpu_component_arn)``;
-    ``(None, None)`` when the name is not registered at all, and
-    ``(item, None)`` when it is registered but no variant can run on
-    CPU.
+    whose ``name`` matches (exactly, or via the component base-name
+    convention - see registry_name_candidates), the newest (created_at)
+    one carrying a CPU-runnable variant wins. Returns
+    ``(item, cpu_component_arn)``; ``(None, None)`` when the name is not
+    registered at all, and ``(item, None)`` when it is registered but no
+    variant can run on CPU.
     """
-    matching = [item for item in model_items
-                if isinstance(item, dict) and item.get('name') == model_name]
+    matching: List[Dict] = []
+    for candidate in registry_name_candidates(model_name):
+        matching = [item for item in model_items
+                    if isinstance(item, dict) and item.get('name') == candidate]
+        if matching:
+            break
     if not matching:
         return None, None
     matching.sort(key=lambda item: item.get('created_at') or 0, reverse=True)

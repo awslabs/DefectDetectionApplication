@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# dda-plugin-build - per-architecture plugin build entrypoint (custom-node-designer).
+#
+# Ships at /usr/local/bin/dda-plugin-build in every dda-plugin-build:{arch}
+# image; the CodeBuild buildspec (node-designer-stack.ts) runs exactly this
+# command. Implements the contract expected by plugin_builds.py:
+#
+#   1. The plugin source tree (the version's plugin-sources/... prefix) is
+#      dropped by CodeBuild's S3 source into $CODEBUILD_SRC_DIR.
+#   2. Build the plugin for $TARGET_ARCH:
+#        - builds/$TARGET_ARCH/meson.build   (Plugin_Scaffold layout), else
+#        - meson.build at the source root, else
+#        - autotools (configure / configure.ac + Makefile), else
+#        - prebuilt .so passthrough (prebuilt/$TARGET_ARCH/*.so or
+#          builds/$TARGET_ARCH/*.so shipped in the source tree).
+#      When PLUGIN_TARGETS is non-empty (comma-separated plugin names a
+#      user selected from a plugin-set import such as gst-plugins-good),
+#      a top-level meson build is configured with -Dauto_features=disabled
+#      plus -D{name}=enabled per selected plugin so only those plugins
+#      compile; an empty PLUGIN_TARGETS builds the whole tree.
+#   3. Upload every built .so to
+#        s3://$ARTIFACTS_BUCKET/$PLUGIN_STAGING_PREFIX/$USECASE_ID/$TARGET_ARCH/
+#   4. Best-effort: KMS-sign each artifact's SHA-256 digest with
+#      $SIGNING_KEY_ARN (ECDSA_SHA_256) and write the detached signature
+#      next to it. Signing failure or an absent key never fails the build:
+#      plugin_builds.py's SUCCEEDED path re-checksums and re-signs the
+#      promoted object itself (record_promoted_artifact), so the
+#      authoritative signature is always rewritten server-side.
+#   5. Promote to
+#        s3://$ARTIFACTS_BUCKET/$PLUGIN_LIBRARY_CUSTOM_PREFIX/$USECASE_ID/$TARGET_ARCH/
+#      Every built .so lands under its own basename; the primary artifact
+#      is (also) written as $PLUGIN_NAME.so, the key plugin_builds.py
+#      streams, checksums, and re-signs on SUCCEEDED.
+#
+# Environment (project-level): TARGET_ARCH, ARTIFACTS_BUCKET,
+# PLUGIN_STAGING_PREFIX, PLUGIN_LIBRARY_CUSTOM_PREFIX, SIGNING_KEY_ARN.
+# StartBuild overrides: USECASE_ID, PLUGIN_ID, PLUGIN_VERSION, PLUGIN_NAME,
+# PLUGIN_TARGETS (optional; empty = build everything).
+#
+# Any build failure aborts with a clear message and a non-zero exit so
+# CodeBuild reports FAILED; plugin_builds.py then records the CloudWatch
+# log tail on the per-arch Plugin_Record entry.
+set -euo pipefail
+
+log()  { echo "[dda-plugin-build] $*"; }
+fail() { echo "[dda-plugin-build] ERROR: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- env check
+for var in TARGET_ARCH ARTIFACTS_BUCKET PLUGIN_STAGING_PREFIX \
+           PLUGIN_LIBRARY_CUSTOM_PREFIX \
+           USECASE_ID PLUGIN_ID PLUGIN_VERSION PLUGIN_NAME; do
+  [ -n "${!var:-}" ] || fail "required environment variable $var is not set"
+done
+PLUGIN_TARGETS="${PLUGIN_TARGETS:-}"
+SIGNING_KEY_ARN="${SIGNING_KEY_ARN:-}"
+
+SRC_DIR="${CODEBUILD_SRC_DIR:-$PWD}"
+[ -d "$SRC_DIR" ] || fail "source directory $SRC_DIR does not exist"
+cd "$SRC_DIR"
+
+log "Building plugin '$PLUGIN_NAME' ($PLUGIN_ID v$PLUGIN_VERSION) for $TARGET_ARCH"
+log "Source tree: $SRC_DIR"
+[ -n "$PLUGIN_TARGETS" ] && log "Selected plugin targets: $PLUGIN_TARGETS"
+
+WORK_DIR="$(mktemp -d /tmp/dda-plugin-build.XXXXXX)"
+BUILD_DIR="$WORK_DIR/build"
+
+# Comma-separated PLUGIN_TARGETS -> TARGETS array (empty = build everything).
+TARGETS=()
+if [ -n "$PLUGIN_TARGETS" ]; then
+  IFS=',' read -r -a TARGETS <<< "$PLUGIN_TARGETS"
+fi
+
+# ------------------------------------------------------------ build systems
+run_meson() {
+  local config_dir="$1"; shift
+  local extra_opts=("$@")
+  log "meson setup $BUILD_DIR $config_dir ${extra_opts[*]:-}"
+  meson setup "$BUILD_DIR" "$config_dir" "${extra_opts[@]}"
+  log "meson compile -C $BUILD_DIR"
+  meson compile -C "$BUILD_DIR"
+}
+
+run_autotools() {
+  if [ ! -x ./configure ] && [ -f configure.ac ]; then
+    log "autoreconf --install (configure.ac without configure)"
+    autoreconf --install --force
+  fi
+  if [ -f ./configure ]; then
+    log "./configure"
+    chmod +x ./configure
+    ./configure
+  fi
+  [ -f Makefile ] || fail "autotools build has no Makefile after configure"
+  log "make -j$(nproc)"
+  make -j"$(nproc)"
+}
+
+# All .so files under a directory (excluding meson-internal paths).
+find_all_so() {
+  local dir="$1"
+  find "$dir" -name '*.so' -type f ! -path '*/meson-*' | sort
+}
+
+# Pick the primary .so from the built set: exact $PLUGIN_NAME.so, then a
+# single candidate, then a target-name match (libgst{target}.so /
+# {target}.so for the first selected target), then a single libgst*/gst*
+# candidate, else the first (staging keeps every artifact regardless).
+select_primary() {
+  local candidates=("$@")
+  [ "${#candidates[@]}" -gt 0 ] || return 1
+  local c base
+  for c in "${candidates[@]}"; do
+    [ "$(basename "$c")" = "$PLUGIN_NAME.so" ] && { echo "$c"; return 0; }
+  done
+  if [ "${#candidates[@]}" -eq 1 ]; then
+    echo "${candidates[0]}"; return 0
+  fi
+  if [ "${#TARGETS[@]}" -gt 0 ]; then
+    local first="${TARGETS[0]}"
+    for c in "${candidates[@]}"; do
+      base="$(basename "$c")"
+      case "$base" in "libgst$first.so"|"gst$first.so"|"$first.so")
+        echo "$c"; return 0;;
+      esac
+    done
+  fi
+  local gst_matches=()
+  for c in "${candidates[@]}"; do
+    base="$(basename "$c")"
+    case "$base" in libgst*.so|gst*.so) gst_matches+=("$c");; esac
+  done
+  if [ "${#gst_matches[@]}" -eq 1 ]; then
+    echo "${gst_matches[0]}"; return 0
+  fi
+  echo "${candidates[0]}"
+}
+
+# ------------------------------------------------------- locate + run build
+ARTIFACTS=()
+SCAFFOLD_MESON="builds/$TARGET_ARCH/meson.build"
+if [ -f "$SCAFFOLD_MESON" ]; then
+  log "Found Plugin_Scaffold build configuration: $SCAFFOLD_MESON"
+  run_meson "builds/$TARGET_ARCH"
+  mapfile -t ARTIFACTS < <(find_all_so "$BUILD_DIR")
+  [ "${#ARTIFACTS[@]}" -gt 0 ] \
+    || fail "meson build produced no shared library under $BUILD_DIR"
+elif [ -f meson.build ]; then
+  MESON_OPTS=()
+  if [ "${#TARGETS[@]}" -gt 0 ]; then
+    # Plugin-set monorepo (gst-plugins-*): disable everything meson would
+    # auto-enable, then enable exactly the selected plugin options.
+    log "Restricting meson build to selected plugins: ${TARGETS[*]}"
+    MESON_OPTS+=("-Dauto_features=disabled")
+    for t in "${TARGETS[@]}"; do
+      MESON_OPTS+=("-D$t=enabled")
+    done
+  fi
+  log "Found top-level meson.build"
+  if ! run_meson "." "${MESON_OPTS[@]}" && [ "${#TARGETS[@]}" -gt 0 ]; then
+    # Old plugin-set branches (e.g. gst-plugins-good 1.14) predate the
+    # per-plugin meson options: configure the whole tree instead and
+    # cherry-pick the selected plugins' .so files afterwards.
+    log "Per-plugin meson options rejected; falling back to a full-tree build"
+    rm -rf "$BUILD_DIR"
+    run_meson "."
+  fi
+  mapfile -t ARTIFACTS < <(find_all_so "$BUILD_DIR")
+  [ "${#ARTIFACTS[@]}" -gt 0 ] \
+    || fail "meson build produced no shared library under $BUILD_DIR"
+  if [ "${#TARGETS[@]}" -gt 0 ]; then
+    # Keep only the selected plugins' artifacts (libgst<name>.so /
+    # gst<name>.so / <name>.so); a full-tree fallback build produces
+    # many more, and only the selection was imported.
+    SELECTED_ARTIFACTS=()
+    for a in "${ARTIFACTS[@]}"; do
+      base="$(basename "$a")"
+      for t in "${TARGETS[@]}"; do
+        case "$base" in
+          "libgst$t.so"|"gst$t.so"|"$t.so") SELECTED_ARTIFACTS+=("$a");;
+        esac
+      done
+    done
+    if [ "${#SELECTED_ARTIFACTS[@]}" -gt 0 ]; then
+      ARTIFACTS=("${SELECTED_ARTIFACTS[@]}")
+      log "Selected plugin artifacts: ${ARTIFACTS[*]}"
+    else
+      log "WARNING: no artifact matched the selected plugin names; keeping all built artifacts"
+    fi
+  fi
+elif [ -f configure.ac ] || [ -x ./configure ] || [ -f ./configure ]; then
+  log "Found autotools build configuration"
+  run_autotools
+  mapfile -t ARTIFACTS < <(find_all_so "$SRC_DIR")
+  [ "${#ARTIFACTS[@]}" -gt 0 ] \
+    || fail "autotools build produced no shared library under $SRC_DIR"
+else
+  # Prebuilt passthrough: a .so shipped in the source tree for this arch
+  # (a tree that is only a prebuilt .so just uploads it).
+  log "No meson.build or autotools configuration; looking for a prebuilt .so"
+  for dir in "prebuilt/$TARGET_ARCH" "builds/$TARGET_ARCH" "."; do
+    if [ -d "$dir" ]; then
+      while IFS= read -r f; do ARTIFACTS+=("$f"); done \
+        < <(find "$dir" -maxdepth 1 -name '*.so' -type f | sort)
+    fi
+    [ "${#ARTIFACTS[@]}" -gt 0 ] && break
+  done
+  [ "${#ARTIFACTS[@]}" -gt 0 ] || fail \
+    "no build configuration found: expected $SCAFFOLD_MESON, a top-level meson.build, configure(.ac), or a prebuilt .so under prebuilt/$TARGET_ARCH/"
+  log "Using prebuilt shared librar(ies): ${ARTIFACTS[*]}"
+fi
+
+log "Built artifacts (${#ARTIFACTS[@]}):"
+for a in "${ARTIFACTS[@]}"; do
+  [ -s "$a" ] || fail "artifact $a is missing or empty"
+  log "  $a ($(stat -c%s "$a") bytes)"
+done
+
+PRIMARY="$(select_primary "${ARTIFACTS[@]}")"
+log "Primary artifact (promoted as $PLUGIN_NAME.so): $PRIMARY"
+
+# --------------------------------------------- best-effort KMS signature
+# Sign a file's SHA-256 digest; writes <out>. Returns non-zero on failure.
+# Tolerant to absence: an unset SIGNING_KEY_ARN or a Sign failure logs a
+# warning and skips the .sig - plugin_builds.py re-signs the promoted
+# object authoritatively on SUCCEEDED (record_promoted_artifact).
+sign_file() {
+  local file="$1" out="$2"
+  [ -n "$SIGNING_KEY_ARN" ] || { log "WARNING: SIGNING_KEY_ARN not set; skipping signature for $(basename "$file")"; return 1; }
+  local digest_hex digest_bin
+  digest_hex="$(sha256sum "$file" | awk '{print $1}')"
+  digest_bin="$WORK_DIR/digest.bin"
+  printf '%s' "$digest_hex" | xxd -r -p > "$digest_bin"
+  if aws kms sign \
+      --key-id "$SIGNING_KEY_ARN" \
+      --message "fileb://$digest_bin" \
+      --message-type DIGEST \
+      --signing-algorithm ECDSA_SHA_256 \
+      --output text --query Signature 2>/dev/null | base64 -d > "$out" \
+      && [ -s "$out" ]; then
+    log "Signed $(basename "$file") (sha256 $digest_hex)"
+    return 0
+  fi
+  log "WARNING: KMS signing failed for $(basename "$file"); continuing without a build-time signature (plugin_builds.py re-signs the promoted artifact)"
+  rm -f "$out"
+  return 1
+}
+
+# ------------------------------------------------------- staging + promote
+STAGING_BASE="s3://$ARTIFACTS_BUCKET/$PLUGIN_STAGING_PREFIX/$USECASE_ID/$TARGET_ARCH"
+LIBRARY_BASE="s3://$ARTIFACTS_BUCKET/$PLUGIN_LIBRARY_CUSTOM_PREFIX/$USECASE_ID/$TARGET_ARCH"
+
+upload_pair() {  # upload_pair <local_so> <s3_base> <object_name_without_ext>
+  local so="$1" base="$2" name="$3"
+  aws s3 cp --no-progress "$so" "$base/$name.so"
+  local sig="$WORK_DIR/$name.so.sig"
+  if sign_file "$so" "$sig"; then
+    aws s3 cp --no-progress "$sig" "$base/$name.so.sig"
+  fi
+}
+
+for a in "${ARTIFACTS[@]}"; do
+  name="$(basename "$a" .so)"
+  log "Uploading to staging: $STAGING_BASE/$name.so"
+  upload_pair "$a" "$STAGING_BASE" "$name"
+done
+
+# The library prefix is PutObject-only for this role; promote by uploading
+# the local files (no server-side copy). Every artifact under its own
+# basename, and the primary at the $PLUGIN_NAME.so key plugin_builds.py
+# records/re-signs.
+for a in "${ARTIFACTS[@]}"; do
+  name="$(basename "$a" .so)"
+  if [ "$name" != "$PLUGIN_NAME" ]; then
+    log "Promoting to Plugin_Library: $LIBRARY_BASE/$name.so"
+    upload_pair "$a" "$LIBRARY_BASE" "$name"
+  fi
+done
+log "Promoting primary to Plugin_Library: $LIBRARY_BASE/$PLUGIN_NAME.so"
+upload_pair "$PRIMARY" "$LIBRARY_BASE" "$PLUGIN_NAME"
+
+log "Build complete: $LIBRARY_BASE/$PLUGIN_NAME.so"

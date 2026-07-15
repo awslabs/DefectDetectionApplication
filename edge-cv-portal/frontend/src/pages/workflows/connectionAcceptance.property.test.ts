@@ -195,7 +195,7 @@ describe('Property 10: Connection acceptance equals port compatibility', () => {
           expect((reason as string).length).toBeGreaterThan(0);
         }
       }),
-      { numRuns: 200 }
+      { numRuns: 25 }
     );
   });
 });

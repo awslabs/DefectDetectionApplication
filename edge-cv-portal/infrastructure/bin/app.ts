@@ -5,6 +5,7 @@ import { AuthStack } from '../lib/auth-stack';
 import { StorageStack } from '../lib/storage-stack';
 import { ComputeStack } from '../lib/compute-stack';
 import { TestRunnerStack } from '../lib/test-runner-stack';
+import { NodeDesignerStack } from '../lib/node-designer-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 
 const app = new cdk.App();
@@ -87,6 +88,32 @@ const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   cloudFrontDomain,
   trustedUseCaseAccountIds,
   dataBucketAllowlist,
+});
+
+// Node Designer Stack (custom-node-designer: PluginRecords/CustomNodeTypes/
+// ModuleIndexCache/SimulationRuns/NodeGenSessions tables, the plugin-artifact
+// KMS signing key, per-architecture plugin CodeBuild projects + the
+// repository-fetch project, EventBridge build-result delivery, the seven
+// Node_Designer Lambda handlers, and their API routes registered against the
+// ComputeStack API in a nested stack. The per-arch build image tag suffix is
+// configurable via `-c pluginBuildImageTag=<suffix>`.
+const nodeDesignerStack = new NodeDesignerStack(app, 'EdgeCVPortalNodeDesignerStack', {
+  env,
+  description: 'Custom node designer infrastructure (plugin builds, signing, simulator data, API) for Edge CV Portal',
+  portalArtifactsBucket: storageStack.portalArtifactsBucket,
+  useCasesTable: storageStack.useCasesTable,
+  userRolesTable: storageStack.userRolesTable,
+  auditLogTable: storageStack.auditLogTable,
+  settingsTable: storageStack.settingsTable,
+  workflowsTable: storageStack.workflowsTable,
+  workflowVersionsTable: storageStack.workflowVersionsTable,
+  testDatasetsTable: storageStack.testDatasetsTable,
+  trustedUseCaseAccountIds,
+  userPool: authStack.userPool,
+  restApiId: computeStack.api.restApiId,
+  restApiRootResourceId: computeStack.api.restApiRootResourceId,
+  // Must match ApiGatewayStack deployOptions.stageName.
+  apiStageName: 'v1',
 });
 
 // Frontend Stack (CloudFront, S3)

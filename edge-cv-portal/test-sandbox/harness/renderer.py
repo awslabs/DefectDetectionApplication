@@ -18,15 +18,33 @@ names each element ``<factory><N>`` with a per-factory creation counter
 unless the element carries an explicit ``name=`` argument.
 """
 
+import re
 from typing import Any, Dict, List, Optional, Tuple
+
+#: Characters in a rendered argument value that require launch quoting:
+#: without it ``Gst.parse_launch`` misreads the token (e.g. a bare
+#: ``meta=`` from an empty value makes the parser treat ``meta`` as an
+#: element name and fail with ``no element "meta"``). Kept identical to
+#: src/backend/workflow_engine/rendering.py so the sandbox renders the
+#: same launch string LocalServer does.
+_UNSAFE_VALUE_PATTERN = re.compile(r"[\s!\"'();\\]")
 
 
 def render_value(value: Any) -> str:
     """One argument value in launch-string form (bools lower-cased the
-    way GStreamer parses them; everything else via ``str``)."""
+    way GStreamer parses them; everything else via ``str``). Empty
+    strings and values containing launch-syntax characters are
+    double-quoted with backslash escaping — the quoting
+    ``Gst.parse_launch`` understands — so e.g. an empty property renders
+    as ``meta=""`` rather than the bare ``meta=`` the parser misreads as
+    an element named ``meta``."""
     if isinstance(value, bool):
         return "true" if value else "false"
-    return str(value)
+    text = str(value)
+    if isinstance(value, str) and (not text or _UNSAFE_VALUE_PATTERN.search(text)):
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        return '"{0}"'.format(escaped)
+    return text
 
 
 def render_element(element: Dict) -> str:
@@ -158,6 +176,26 @@ def sim_inference_node_ids(document: Dict) -> List[str]:
             name = element.get("args", {}).get("name")
             if (element["factory"] == "identity" and isinstance(name, str)
                     and name.startswith("sim_inference_")
+                    and element.get("nodeId")):
+                if element["nodeId"] not in matches:
+                    matches.append(element["nodeId"])
+    return matches
+
+
+def custom_stub_node_ids(document: Dict) -> List[str]:
+    """Node ids of stubbed Custom_Node_Types (custom-node-designer 12.2).
+
+    The test-runner compile step substitutes a pass-through recording
+    stub — an identity element named ``custom_stub_<nodeId>`` — for every
+    Custom_Node_Type without a successful x86_64 Plugin_Artifact; the
+    harness records the substitution as stub activity so the test run
+    report identifies the node as stubbed."""
+    matches: List[str] = []
+    for segment in document.get("segments", []):
+        for element in segment["elements"]:
+            name = element.get("args", {}).get("name")
+            if (element["factory"] == "identity" and isinstance(name, str)
+                    and name.startswith("custom_stub_")
                     and element.get("nodeId")):
                 if element["nodeId"] not in matches:
                     matches.append(element["nodeId"])

@@ -7,10 +7,12 @@ import logging
 import os
 import boto3
 from botocore.exceptions import ClientError
+from datetime import datetime
+
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, is_super_user, assume_cross_account_role, get_usecase,
-    create_boto3_client
+    create_boto3_client, rbac_manager, Permission
 )
 
 logger = logging.getLogger()
@@ -18,6 +20,30 @@ logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource('dynamodb')
 USECASES_TABLE = os.environ.get('USECASES_TABLE')
+
+# Devices table: portal-recorded device attributes — the UseCaseAdmin-set
+# `test_device` flag and the device's recorded Target_Architecture
+# (custom-node-designer, Requirements 9.7, 9.8, 16.3, 16.6). The live
+# Greengrass/IoT state continues to come from the Use_Case account.
+DEVICES_TABLE = os.environ.get('DEVICES_TABLE')
+
+# DDA Target_Architectures a device can be recorded as (matched exactly by
+# the deployment architecture gate — x86_64 and x86_64_nvidia are distinct)
+TARGET_ARCHITECTURES = ('x86_64', 'x86_64_nvidia',
+                        'arm64_jp4', 'arm64_jp5', 'arm64_jp6')
+
+
+def get_device_record(device_id):
+    """The Devices-table record of one device, or {} when none exists"""
+    if not DEVICES_TABLE or not device_id:
+        return {}
+    try:
+        response = dynamodb.Table(DEVICES_TABLE).get_item(
+            Key={'device_id': device_id})
+    except ClientError as e:
+        logger.warning(f"Could not read device record for {device_id}: {e}")
+        return {}
+    return response.get('Item') or {}
 
 
 def handler(event, context):
@@ -65,12 +91,112 @@ def handler(event, context):
             return list_devices(user, query_parameters)
         elif http_method == 'GET' and device_id:
             return get_device(device_id, user, query_parameters)
+        elif http_method == 'PUT' and device_id:
+            body = json.loads(event.get('body') or '{}')
+            return update_device_flags(device_id, user, query_parameters, body)
         
         return create_response(404, {'error': 'Not found'})
         
     except Exception as e:
         logger.error(f"Error in devices handler: {str(e)}", exc_info=True)
         return create_response(500, {'error': 'Internal server error'})
+
+
+def update_device_flags(device_id, user, query_params, body):
+    """
+    PUT /api/v1/devices/{id}
+
+    Record portal-managed device attributes on the Devices table
+    (custom-node-designer task 10.5):
+
+    - ``test_device`` (bool): designates the device as a Test_Device, the
+      only kind of target a test-state plugin may be deployed to
+      (Requirements 9.7, 9.8, 16.3). Set by a UseCaseAdmin.
+    - ``target_architecture`` (optional): the device's recorded DDA
+      Target_Architecture, checked by the deployment architecture gate
+      against Plugin_Component platform manifests (Requirement 16.6).
+
+    Body: {"usecase_id": "...", "test_device": true|false,
+           "target_architecture": "x86_64"|...|null}
+    """
+    try:
+        usecase_id = body.get('usecase_id') or query_params.get('usecase_id')
+        if not usecase_id:
+            return create_response(400, {'error': 'usecase_id required'})
+
+        # Designating a Test_Device is a UseCaseAdmin action within their
+        # own Use_Case (PortalAdmin anywhere) — the same principal set as
+        # node-designer:manage, which this flag exists to serve (the
+        # test-state deployment gate). Operator-held device permissions
+        # (manage_devices) deliberately do not grant it.
+        if not is_super_user(user['user_id']) and not rbac_manager.has_permission(
+                user['user_id'], usecase_id, Permission.NODE_DESIGNER_MANAGE,
+                user_info=user):
+            log_audit_event(
+                user['user_id'], 'update_device_flags', 'device', device_id,
+                'denied', {'usecase_id': usecase_id,
+                           'required_permissions': [
+                               Permission.NODE_DESIGNER_MANAGE.value]}
+            )
+            return create_response(403, {'error': 'Access denied'})
+
+        if 'test_device' not in body and 'target_architecture' not in body:
+            return create_response(400, {
+                'error': 'test_device or target_architecture required'})
+
+        if not DEVICES_TABLE:
+            return create_response(500, {'error': 'Devices table not configured'})
+
+        updates = {}
+        if 'test_device' in body:
+            if not isinstance(body['test_device'], bool):
+                return create_response(400, {'error': 'test_device must be a boolean'})
+            updates['test_device'] = body['test_device']
+        if 'target_architecture' in body:
+            target_architecture = body['target_architecture']
+            if target_architecture is not None and \
+                    target_architecture not in TARGET_ARCHITECTURES:
+                return create_response(400, {
+                    'error': (f"target_architecture must be one of "
+                              f"{list(TARGET_ARCHITECTURES)} or null")})
+            updates['target_architecture'] = target_architecture
+
+        set_parts = ['usecase_id = :uid', 'updated_at = :at', 'updated_by = :by']
+        values = {
+            ':uid': usecase_id,
+            ':at': int(datetime.utcnow().timestamp() * 1000),
+            ':by': user['user_id'],
+        }
+        for index, (attr, value) in enumerate(sorted(updates.items())):
+            set_parts.append(f"{attr} = :v{index}")
+            values[f":v{index}"] = value
+
+        result = dynamodb.Table(DEVICES_TABLE).update_item(
+            Key={'device_id': device_id},
+            UpdateExpression='SET ' + ', '.join(set_parts),
+            ExpressionAttributeValues=values,
+            ReturnValues='ALL_NEW'
+        )
+        record = result.get('Attributes', {})
+
+        log_audit_event(
+            user['user_id'], 'update_device_flags', 'device', device_id,
+            'success', {'usecase_id': usecase_id, **updates}
+        )
+
+        return create_response(200, {
+            'device_id': device_id,
+            'usecase_id': usecase_id,
+            'test_device': bool(record.get('test_device')),
+            'target_architecture': record.get('target_architecture'),
+        })
+
+    except ClientError as e:
+        logger.error(f"AWS error updating device flags: {str(e)}")
+        return create_response(500, {'error': f'Failed to update device: {str(e)}'})
+    except Exception as e:
+        logger.error(f"Error updating device flags: {str(e)}", exc_info=True)
+        return create_response(500, {'error': 'Failed to update device'})
 
 
 def list_devices(user, query_params):
@@ -173,6 +299,11 @@ def list_devices(user, query_params):
                         if last_status:
                             last_status = last_status.isoformat() if hasattr(last_status, 'isoformat') else str(last_status)
                         
+                        # Portal-recorded attributes (Devices table): the
+                        # UseCaseAdmin-set Test_Device flag and the
+                        # recorded Target_Architecture.
+                        device_record = get_device_record(thing_name)
+
                         devices.append({
                             'device_id': thing_name,
                             'thing_name': thing_name,
@@ -181,6 +312,8 @@ def list_devices(user, query_params):
                             'last_status_update': last_status,
                             'platform': platform,
                             'architecture': architecture,
+                            'test_device': bool(device_record.get('test_device')),
+                            'target_architecture': device_record.get('target_architecture'),
                             'tags': tags,
                             'usecase_id': usecase_id,
                             'installed_components': installed_components,
@@ -288,6 +421,10 @@ def get_device(device_id, user, query_params):
         if last_status:
             last_status = last_status.isoformat() if hasattr(last_status, 'isoformat') else str(last_status)
         
+        # Portal-recorded attributes (Devices table): the UseCaseAdmin-set
+        # Test_Device flag and the recorded Target_Architecture.
+        device_record = get_device_record(device_id)
+
         device = {
             'device_id': device_id,
             'thing_name': device_id,
@@ -301,6 +438,8 @@ def get_device(device_id, user, query_params):
             'greengrass_version': gg_status.get('coreVersion', ''),
             'platform': gg_status.get('platform', ''),
             'architecture': gg_status.get('architecture', ''),
+            'test_device': bool(device_record.get('test_device')),
+            'target_architecture': device_record.get('target_architecture'),
             'installed_components': installed_components,
             'deployments': deployments,
             'usecase_id': usecase_id
