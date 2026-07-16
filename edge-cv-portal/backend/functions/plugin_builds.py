@@ -670,7 +670,11 @@ def start_queued_builds(plugin_id: str, version: int) -> Dict[str, Dict]:
     authenticated user on the EventBridge path).
     """
     try:
-        item = get_version_item(plugin_id, version)
+        # Consistent read: this runs in the same invocation as the write
+        # that queued the builds (fetch-settle or revision adjustment), so
+        # an eventually-consistent read could miss the just-written
+        # arch_revisions mapping and resolve the wrong source prefix.
+        item = get_version_item(plugin_id, version, consistent_read=True)
         if not item:
             logger.warning(f"Auto-start: Plugin_Record {plugin_id} "
                            f"v{version} not found")

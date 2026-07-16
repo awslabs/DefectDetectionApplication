@@ -259,9 +259,22 @@ def plugin_table():
     return dynamodb.Table(PLUGIN_RECORDS_TABLE)
 
 
-def get_version_item(plugin_id: str, version: int) -> Optional[Dict]:
-    """Fetch one Plugin_Record version item, or None"""
-    response = plugin_table().get_item(Key={'plugin_id': plugin_id, 'version': version})
+def get_version_item(plugin_id: str, version: int,
+                     consistent_read: bool = False) -> Optional[Dict]:
+    """Fetch one Plugin_Record version item, or None.
+
+    consistent_read exists for same-invocation read-your-own-write
+    callers (auto-start after an adjustment/fetch-settle write), which
+    must see the mapping they just wrote — mirroring the
+    _handle_multi_fetch_result ConsistentRead=True settlement check in
+    plugin_importer.py. The default (False) issues exactly the same
+    eventually-consistent get_item as before, with no ConsistentRead
+    key at all.
+    """
+    kwargs = {'Key': {'plugin_id': plugin_id, 'version': version}}
+    if consistent_read:
+        kwargs['ConsistentRead'] = True
+    response = plugin_table().get_item(**kwargs)
     item = response.get('Item')
     return decimal_to_native(item) if item else None
 
