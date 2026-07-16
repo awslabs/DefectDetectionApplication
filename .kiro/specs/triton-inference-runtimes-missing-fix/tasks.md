@@ -105,14 +105,14 @@ This plan fixes the missing `inference_runtimes.py` on the subsequent-setup path
     - Confirm all tests still pass after the fix (no regressions)
     - _Requirements: 3.1, 3.2, 3.3, 3.4_
 
-- [-] 4. Add drift-proofing and downstream staging tests
+- [ ] 4. Add drift-proofing and downstream staging tests
   - **Property 1: Fix Checking (PBT)** - Generate varied source resource file sets (add arbitrary new resource files alongside `inference_runtimes.py`) and varied pre-existing destination states → assert the fixed re-sync delivers every source file to `/aws_dda/resources_for_copy`, proving the drift class of bug cannot recur
   - Verify downstream staging: with `inference_runtimes.py` now present in `/aws_dda/resources_for_copy`, run the `model_convertor.py` staging path and assert `inference_runtimes.py` is copied next to `lfv_model_template.py` into the model version directory (Requirement 2.2)
   - Run all tests
   - **EXPECTED OUTCOME**: All tests PASS
   - _Requirements: 2.1, 2.2, 3.2_
 
-- [~] 5. Deploy and verify on-device (JP6 first, then JP5)
+- [ ] 5. Deploy and verify on-device (JP6 first, then JP5)
   - Rebuild and republish the JP6 LocalServer component (`LocalServer.arm64JP6`) first, since JP6 devices are the confirmed affected fleet
   - Rebuild and republish the JP5 LocalServer component (`LocalServer.arm64JP5`)
   - **NOTE**: These are build/publish/deploy steps that must be run manually — provide the exact commands to the user rather than running long-running processes here
@@ -122,7 +122,7 @@ This plan fixes the missing `inference_runtimes.py` on the subsequent-setup path
   - Confirm on-device: detection and segmentation models transition to `AVAILABLE`, `base_*` no longer reports `UNAVAILABLE`, and no `ModuleNotFoundError: No module named 'inference_runtimes'` appears in the Triton logs
   - _Requirements: 2.3, 3.4_
 
-- [~] 6. Checkpoint - Ensure all tests pass
+- [ ] 6. Checkpoint - Ensure all tests pass
   - Ensure all unit, property-based, and staging tests pass; ask the user if questions arise.
 
 ## Notes
