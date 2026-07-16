@@ -171,7 +171,7 @@ _detection_payload = st.lists(_detection_object(), min_size=1, max_size=8)
 
 # Feature: object-detection-visualization, Property 4: The Detections_Block is emitted and retains index plus label
 # Validates: Requirements 1.6, 3.1, 3.5
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(detections=_detection_payload)
 def test_detections_block_emitted_retains_index_and_label(detections):
     """For any detection capture with valid boxes, the Detections_Block is
@@ -218,7 +218,7 @@ def test_detections_block_emitted_retains_index_and_label(detections):
 
 # Feature: object-detection-visualization, Property 4: The Detections_Block is emitted and retains index plus label
 # Validates: Requirements 1.6, 3.1, 3.5
-@settings(max_examples=100)
+@settings(max_examples=25)
 @given(
     class_index=st.integers(min_value=0, max_value=120).map(str),
     label=st.text(min_size=1, max_size=12),

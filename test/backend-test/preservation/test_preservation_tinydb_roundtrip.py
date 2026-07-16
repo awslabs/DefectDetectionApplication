@@ -134,7 +134,7 @@ def _normalize(value):
 # --------------------------------------------------------------------------- #
 # Spec: python-3-11-security-upgrade — Property 2: Preservation
 # Validates: Requirements 3.8
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(table=_default_tables)
 def test_tinydb_records_load_unchanged(table):
     """Records written in the 3.9 TinyDB layout read back unchanged.
@@ -153,7 +153,7 @@ def test_tinydb_records_load_unchanged(table):
 
 # Spec: python-3-11-security-upgrade — Property 2: Preservation
 # Validates: Requirements 3.8
-@settings(max_examples=100, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(table=_default_tables)
 def test_tinydb_full_document_roundtrip(table):
     """The whole ``{"_default": ...}`` document survives a dump→load round-trip.

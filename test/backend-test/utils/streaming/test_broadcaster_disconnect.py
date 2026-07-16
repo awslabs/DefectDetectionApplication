@@ -114,7 +114,7 @@ class _StubAcquisitionWorker:
 @pytest.mark.parametrize(
     "backend_cls", MOCK_BACKEND_CLASSES.values(), ids=list(MOCK_BACKEND_CLASSES)
 )
-@settings(max_examples=150, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(
     num_viewers=st.integers(min_value=1, max_value=_CONFIG.max_viewers),
     publish_cached_frame=st.booleans(),

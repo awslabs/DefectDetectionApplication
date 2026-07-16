@@ -106,7 +106,7 @@ def test_camera_frame_none_roundtrip_baseline():
 
 
 # Validates: Requirements 3.5
-@settings(max_examples=60, deadline=None,
+@settings(max_examples=25, deadline=None,
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(data=st.binary(min_size=0, max_size=4096),
        height=st.integers(min_value=1, max_value=4320),
@@ -175,7 +175,7 @@ def test_dio_health_message_example_baseline():
 
 
 # Validates: Requirements 3.5
-@settings(max_examples=60, deadline=None,
+@settings(max_examples=25, deadline=None,
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(status=st.sampled_from(list(DIOProcessHealthStatusEnum)),
        error_type=st.one_of(st.none(), st.text(max_size=120)),

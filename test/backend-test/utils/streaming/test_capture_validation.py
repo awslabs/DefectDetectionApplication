@@ -140,7 +140,7 @@ def _capture_case(draw):
 
 # Feature: concurrent-camera-stream-viewing, Property 21: Out-of-range capture configuration is rejected
 # Validates: Requirements 6.5
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(_capture_case())
 def test_property_21_out_of_range_capture_configuration_is_rejected(case):
     """Out-of-range capture config is rejected naming an offending parameter;

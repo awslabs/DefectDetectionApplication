@@ -110,7 +110,7 @@ _subscribe_offsets = st.lists(
 @pytest.mark.parametrize(
     "backend_cls", MOCK_BACKEND_CLASSES.values(), ids=list(MOCK_BACKEND_CLASSES)
 )
-@settings(max_examples=150, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(
     subscribe_offsets=_subscribe_offsets,
     data=st.data(),

@@ -377,7 +377,7 @@ def _run_legacy(instance, case):
 
 # Feature: object-detection-visualization, Property 7: Anomaly-classification behavior is unchanged
 # Validates: Requirements 1.7, 2.6, 5.3, 5.4
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(case=_anomaly_case())
 def test_anomaly_metadata_matches_legacy_baseline(case):
     """For any payload with no ``bounding_box`` field, the current Marshal

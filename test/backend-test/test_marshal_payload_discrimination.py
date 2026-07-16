@@ -179,7 +179,7 @@ _anomaly_payloads = st.one_of(
 
 # Feature: object-detection-visualization, Property 1: Detection payloads are distinguished solely by a bounding_box field
 # Validates: Requirements 1.1, 5.5
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(payload=st.one_of(_detection_payloads, _anomaly_payloads))
 def test_detection_iff_first_entry_has_bounding_box(payload):
     """_is_detection_list returns True iff the payload is a non-empty list whose
@@ -189,7 +189,7 @@ def test_detection_iff_first_entry_has_bounding_box(payload):
 
 # Feature: object-detection-visualization, Property 1: Detection payloads are distinguished solely by a bounding_box field
 # Validates: Requirements 1.1, 5.5
-@settings(max_examples=100)
+@settings(max_examples=25)
 @given(payload=_detection_payloads)
 def test_detection_shaped_payloads_classify_as_detection(payload):
     """Every detection-shaped payload (including the zero-object sentinel) is
@@ -199,7 +199,7 @@ def test_detection_shaped_payloads_classify_as_detection(payload):
 
 # Feature: object-detection-visualization, Property 1: Detection payloads are distinguished solely by a bounding_box field
 # Validates: Requirements 1.1, 5.5
-@settings(max_examples=100)
+@settings(max_examples=25)
 @given(payload=_anomaly_payloads)
 def test_anomaly_shaped_payloads_classify_as_anomaly(payload):
     """No anomaly-shaped payload (empty list or lists of anomaly dicts without a

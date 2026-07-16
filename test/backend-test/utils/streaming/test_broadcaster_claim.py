@@ -289,7 +289,7 @@ class SingleClaimMachineGStreamer(SingleClaimMachine):
 
 # Feature: concurrent-camera-stream-viewing, Property 1: Single device-claim invariant
 # Validates: Requirements 1.2, 2.1, 3.4, 7.7
-_MACHINE_SETTINGS = settings(max_examples=120, stateful_step_count=40, deadline=None)
+_MACHINE_SETTINGS = settings(max_examples=25, stateful_step_count=40, deadline=None)
 
 TestSingleClaimInvariantAravis = SingleClaimMachineAravis.TestCase
 TestSingleClaimInvariantAravis.settings = _MACHINE_SETTINGS

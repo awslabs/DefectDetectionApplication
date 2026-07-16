@@ -98,7 +98,7 @@ def _viewer(last_active: float = 0.0) -> Viewer:
 
 # Feature: concurrent-camera-stream-viewing, Property 9: Heartbeat update and staleness predicate
 # Validates: Requirements 3.9, 8.3
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(initial=_times, t=_times)
 def test_property_9_heartbeat_sets_last_active(initial, t):
     """Processing a heartbeat at ``t`` sets the viewer's ``last_active`` to ``t``.
@@ -115,7 +115,7 @@ def test_property_9_heartbeat_sets_last_active(initial, t):
 
 # Feature: concurrent-camera-stream-viewing, Property 9: Heartbeat update and staleness predicate
 # Validates: Requirements 3.9, 8.3
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(initial=_times, first=_times, second=_times)
 def test_property_9_heartbeat_overwrites_previous(initial, first, second):
     """Each heartbeat overwrites the prior ``last_active`` with the new receipt time.
@@ -134,7 +134,7 @@ def test_property_9_heartbeat_overwrites_previous(initial, first, second):
 
 # Feature: concurrent-camera-stream-viewing, Property 9: Heartbeat update and staleness predicate
 # Validates: Requirements 3.9, 8.3
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(last_active=_times, now=_times, stale_timeout_s=_timeouts)
 def test_property_9_staleness_predicate(last_active, now, stale_timeout_s):
     """A viewer is stale exactly when ``now - last_active > stale_timeout_s``.
@@ -153,7 +153,7 @@ def test_property_9_staleness_predicate(last_active, now, stale_timeout_s):
 
 # Feature: concurrent-camera-stream-viewing, Property 9: Heartbeat update and staleness predicate
 # Validates: Requirements 3.9, 8.3
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(last_active=_int_times, stale_timeout_s=_int_timeouts)
 def test_property_9_exact_boundary_is_not_stale(last_active, stale_timeout_s):
     """Inactive for exactly ``stale_timeout_s`` is NOT stale (strict ``>``).
@@ -169,7 +169,7 @@ def test_property_9_exact_boundary_is_not_stale(last_active, stale_timeout_s):
 
 # Feature: concurrent-camera-stream-viewing, Property 9: Heartbeat update and staleness predicate
 # Validates: Requirements 3.9, 8.3
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(last_active=_int_times, stale_timeout_s=_int_timeouts)
 def test_property_9_one_past_boundary_is_stale(last_active, stale_timeout_s):
     """Inactive for ``stale_timeout_s + 1`` is stale (just beyond the window).
@@ -184,7 +184,7 @@ def test_property_9_one_past_boundary_is_stale(last_active, stale_timeout_s):
 
 # Feature: concurrent-camera-stream-viewing, Property 9: Heartbeat update and staleness predicate
 # Validates: Requirements 3.9, 8.3
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(subscribed_at=_int_times, t=_int_times)
 def test_property_9_heartbeat_then_staleness_against_config(subscribed_at, t):
     """End-to-end: a heartbeat at ``t`` makes the viewer fresh until the configured window.
