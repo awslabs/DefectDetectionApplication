@@ -104,6 +104,7 @@ from gst_properties import (
     ReportError,
     STATUS_CAPTURED,
     parse_report,
+    ports_for_element,
     suggestions_for_element,
 )
 
@@ -1057,10 +1058,17 @@ def get_version_gst_properties(event: Dict, user: Dict, plugin_id: str,
     elements = []
     for element in report.elements:
         derived = suggestions_for_element(element)
+        # Port_Scan derivation (port-guidance-and-pad-prepopulation 4.5):
+        # additive per-element fields; existing keys stay untouched (4.6).
+        ports = ports_for_element(element)
         elements.append({
             'factory': element.factory,
             'suggestions': derived['suggestions'],
             'skipped': derived['skipped'],
+            'portSuggestions': ports['portSuggestions'],
+            'unmappedPads': ports['unmappedPads'],
+            'padsReason': ports['padsReason'],
+            'padsMessage': ports['padsMessage'],
         })
 
     return create_response(200, {

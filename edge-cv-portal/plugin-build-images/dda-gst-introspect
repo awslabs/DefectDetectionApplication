@@ -24,7 +24,12 @@ consumes:
             { "name": str, "gtype": str, "owner": str, "writable": bool,
               "blurb": str | null, "default": JSON scalar | null,
               "min": number | null, "max": number | null,
-              "enumValues": [{"value": int, "nick": str}, ...] | null } ] } ]
+              "enumValues": [{"value": int, "nick": str}, ...] | null } ],
+          "pads": [
+            { "name": str, "direction": "sink" | "src",
+              "presence": "always" | "sometimes" | "request",
+              "caps": str, "capsTruncated": bool } ],
+          "padsError": str | null } ]
     }
 
 Behavior (Requirements 1.1-1.4):
@@ -40,6 +45,15 @@ Behavior (Requirements 1.1-1.4):
   - Elements that cannot be instantiated are recorded with an
     instantiationError and an empty property list; a scan dir that registers
     no factories yields status "failed" with a diagnostic (Requirement 1.4).
+  - Per factory the static Pad_Templates are also captured (port-guidance-
+    and-pad-prepopulation, Requirements 3.1/3.2/3.4/3.5): name template,
+    direction, presence, and caps (truncated to MAX_CAPS_LEN with a
+    machine-readable marker). A per-element read failure degrades only that
+    element to pads: [] with a padsError diagnostic; property data and the
+    report status are untouched. An element with no templates records
+    pads: [] with padsError: null. The load-failure and instantiation-
+    failure early returns also emit pads: [] with a padsError describing
+    the failure.
   - Content failures NEVER produce a non-zero exit: every failure mode is
     encoded as a {"status": "failed", ...} document so the calling build
     script stays a dumb pipe and the build's success status is preserved
@@ -58,6 +72,64 @@ REPORT_VERSION = 1
 # GTypes whose pspecs carry a numeric range (GParamSpec minimum/maximum).
 INT_GTYPES = {'gint', 'guint', 'gint64', 'guint64', 'glong', 'gulong', 'guchar'}
 FLOAT_GTYPES = {'gfloat', 'gdouble'}
+
+# Longest caps string recorded per Pad_Template; longer caps are truncated
+# with a machine-readable marker rather than omitted (Requirement 3.4).
+MAX_CAPS_LEN = 4096
+
+
+def truncate_caps(caps):
+    """(caps_str, truncated_flag): first MAX_CAPS_LEN chars and whether
+    truncation occurred (Requirement 3.4). Pure and GI-free."""
+    if len(caps) > MAX_CAPS_LEN:
+        return caps[:MAX_CAPS_LEN], True
+    return caps, False
+
+
+def describe_pad_templates(factory, Gst):
+    """(pads, pads_error): the pad list and None, or [] and a diagnostic
+    when reading any template of this factory fails (Requirement 3.2).
+
+    A factory with no static pad templates yields ([], None), which is the
+    distinguishable no-templates case (Requirement 3.5)."""
+    factory_name = str(factory.get_name())
+    try:
+        directions = {
+            Gst.PadDirection.SINK: 'sink',
+            Gst.PadDirection.SRC: 'src',
+        }
+        presences = {
+            Gst.PadPresence.ALWAYS: 'always',
+            Gst.PadPresence.SOMETIMES: 'sometimes',
+            Gst.PadPresence.REQUEST: 'request',
+        }
+        pads = []
+        for template in factory.get_static_pad_templates():
+            name = str(template.name_template)
+            direction = directions.get(template.direction)
+            if direction is None:
+                raise RuntimeError(
+                    'unmappable pad direction %r on pad template %r'
+                    % (template.direction, name))
+            presence = presences.get(template.presence)
+            if presence is None:
+                raise RuntimeError(
+                    'unmappable pad presence %r on pad template %r'
+                    % (template.presence, name))
+            caps, truncated = truncate_caps(str(template.get_caps().to_string()))
+            pads.append({
+                'name': name,
+                'direction': direction,
+                'presence': presence,
+                'caps': caps,
+                'capsTruncated': truncated,
+            })
+        return pads, None
+    except Exception as exc:  # noqa: BLE001 - degrade this one element (3.2)
+        message = ('failed to read pad templates of factory %r: %s'
+                   % (factory_name, exc))
+        log('WARNING: %s' % message)
+        return [], message
 
 
 def log(message):
@@ -204,6 +276,9 @@ def describe_factory(factory, Gst, GObject):
             'elementGType': element_gtype,
             'instantiationError': 'failed to load factory: %s' % exc,
             'properties': [],
+            'pads': [],
+            'padsError': ('pad templates not read: failed to load factory: %s'
+                          % exc),
         }
 
     try:
@@ -216,6 +291,9 @@ def describe_factory(factory, Gst, GObject):
             'elementGType': element_gtype,
             'instantiationError': str(exc),
             'properties': [],
+            'pads': [],
+            'padsError': ('pad templates not read: failed to instantiate '
+                          'element: %s' % exc),
         }
 
     element_gtype = str(element.__gtype__.name)
@@ -226,11 +304,16 @@ def describe_factory(factory, Gst, GObject):
         except Exception as exc:  # noqa: BLE001 - skip only the broken pspec
             log('WARNING: skipping unreadable property %r on %r: %s'
                 % (getattr(pspec, 'name', '?'), factory_name, exc))
+    # Pad templates are class-level metadata on the loaded factory; a read
+    # failure degrades only this element's pads (3.2), never the properties.
+    pads, pads_error = describe_pad_templates(factory, Gst)
     return {
         'factory': factory_name,
         'elementGType': element_gtype,
         'instantiationError': None,
         'properties': properties,
+        'pads': pads,
+        'padsError': pads_error,
     }
 
 

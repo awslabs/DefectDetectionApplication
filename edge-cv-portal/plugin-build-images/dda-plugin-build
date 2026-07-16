@@ -296,20 +296,26 @@ run_introspection() {
     return 1
   }
   # Stage the built artifacts into a clean scan dir so GST_PLUGIN_PATH
-  # sees exactly this build's plugins; the primary is staged under its
-  # promoted basename ($PLUGIN_NAME.so) and the report is filtered to it.
+  # sees exactly this build's plugins. Every artifact - the primary
+  # included - keeps its ORIGINAL basename: GStreamer derives the plugin
+  # entry-point symbol from the file name (libgstvideobox.so ->
+  # gst_plugin_videobox_get_desc), so a rename to the promoted record
+  # name ($PLUGIN_NAME.so) makes the loader look for the wrong symbol
+  # and silently skip the plugin ("no element factories registered").
+  # The report is filtered to the primary's original basename; only the
+  # uploaded report key uses $PLUGIN_NAME.
   local scan_dir="$WORK_DIR/gst-introspect"
   local report="$WORK_DIR/gstinspect-report.json"
   mkdir -p "$scan_dir" || return 1
   local a name
   for a in "${ARTIFACTS[@]}"; do
     name="$(basename "$a" .so)"
-    [ "$a" = "$PRIMARY" ] && continue
     cp "$a" "$scan_dir/$name.so" || return 1
   done
-  cp "$PRIMARY" "$scan_dir/$PLUGIN_NAME.so" || return 1
-  log "Running dda-gst-introspect on $scan_dir (plugin file $PLUGIN_NAME.so)"
-  if ! dda-gst-introspect "$scan_dir" "$PLUGIN_NAME.so" > "$report" \
+  local primary_base
+  primary_base="$(basename "$PRIMARY")"
+  log "Running dda-gst-introspect on $scan_dir (plugin file $primary_base)"
+  if ! dda-gst-introspect "$scan_dir" "$primary_base" > "$report" \
       || [ ! -s "$report" ]; then
     # The script itself never exits non-zero for content problems, so
     # this only covers catastrophic failures (missing interpreter, OOM).

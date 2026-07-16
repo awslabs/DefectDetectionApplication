@@ -419,6 +419,19 @@ export interface SelectImportPluginsResponse {
   };
 }
 
+/**
+ * Outcome of POST /plugins/{id}/versions/{v}/adjust-revision (202):
+ * the updated Plugin_Record detail (carrying the new/updated `fetches`
+ * entry and, on the reuse path, the arch's `arch_revisions` mapping)
+ * plus the refreshed builds view — the adjusted architecture is queued
+ * again, so the view is no longer settled and the detail page's poll
+ * resumes.
+ */
+export interface AdjustRevisionResponse {
+  plugin: PluginVersionDetail;
+  builds: PluginBuildsView;
+}
+
 // --------------------------------------------------------------------------
 // Plugin_Simulator wire shapes (plugin_simulator.py, task 12.4)
 // --------------------------------------------------------------------------

@@ -880,6 +880,61 @@ class TestGstIntrospectionStanza:
         assert "size cap" in stanza["message"]
         self._assert_build_untouched(result, entry)
 
+    # -------- extended (pads-bearing) report shape
+    # (port-guidance-and-pad-prepopulation task 4.3, Requirement 3.3)
+
+    def _pads_bearing_report(self, pad_count, caps_len):
+        """CAPTURED_REPORT extended with `pad_count` valid always-pads
+        whose caps strings are `caps_len` characters each (the extended
+        version-1 report shape of port-guidance-and-pad-prepopulation)."""
+        report = json.loads(json.dumps(self.CAPTURED_REPORT))
+        element = report["elements"][0]
+        prefix = "video/x-raw, format=(string)"
+        element["pads"] = [{
+            "name": f"{'sink' if i % 2 == 0 else 'src'}_{i}",
+            "direction": "sink" if i % 2 == 0 else "src",
+            "presence": "always",
+            "caps": (prefix + "R" * caps_len)[:caps_len],
+            "capsTruncated": False,
+        } for i in range(pad_count)]
+        element["padsError"] = None
+        return report
+
+    def test_pads_bearing_report_records_captured_stanza(self, benv):
+        """The unchanged stanza code accepts the extended report shape:
+        a valid captured report carrying pad data under the size cap
+        records the ordinary captured stanza."""
+        report = self._pads_bearing_report(pad_count=2, caps_len=64)
+        result, entry, report_key = self._succeed_with_report(
+            benv, json.dumps(report).encode())
+
+        assert entry["gstIntrospection"] == {
+            "status": "captured",
+            "s3Key": report_key,
+            "gstVersion": "1.20.3",
+            "capturedAt": "2025-01-15T10:30:00Z",
+        }
+        self._assert_build_untouched(result, entry)
+
+    def test_oversized_pads_bearing_report_records_failed_stanza(self, benv):
+        """A pads-bearing report over the 256 KiB cap — likelier now
+        that pad data (caps up to 4096 chars per pad) rides along —
+        yields the failed stanza with the size-cap diagnostic while the
+        build status stays succeeded (3.3)."""
+        report = self._pads_bearing_report(pad_count=80, caps_len=4000)
+        body = json.dumps(report).encode()
+        assert len(body) > benv.module.GST_REPORT_MAX_BYTES
+        # The document itself is a valid extended-shape report — only
+        # the size cap fails it, not pad validation.
+        benv.module.parse_report(json.loads(body.decode()))
+
+        result, entry, _ = self._succeed_with_report(benv, body)
+
+        stanza = entry["gstIntrospection"]
+        assert stanza["status"] == "failed"
+        assert "size cap" in stanza["message"]
+        self._assert_build_untouched(result, entry)
+
     def test_invalid_json_records_failed_stanza(self, benv):
         """A report object that is not JSON at all -> failed stanza."""
         result, entry, _ = self._succeed_with_report(benv, b"not json {{{")

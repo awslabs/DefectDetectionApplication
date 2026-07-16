@@ -43,10 +43,13 @@ import {
   PluginVersionDetail,
 } from './types';
 import { emptyParameter, emptyPort, detailsStepErrors, parametersStepErrors, portsStepErrors } from './declaration';
-import type { ParameterForm, WizardForm } from './declaration';
+import type { ParameterForm, PortForm, WizardForm } from './declaration';
 import ParameterScanPanel, {
   ParameterScanMergeResult,
 } from './ParameterScanPanel';
+import PortGuidancePanel from './PortGuidancePanel';
+import PortScanPanel, { PortScanApplyResult } from './PortScanPanel';
+import { removalBlockReason } from './portScan';
 import {
   MappingForm,
   RegistrationForm,
@@ -225,6 +228,65 @@ export default function RegistrationWizard() {
       setScannedNames((current) => {
         const next = new Set(current);
         result.added.forEach((name) => next.add(name.trim()));
+        return next;
+      });
+    }
+  };
+
+  // --------------------------------------------------------- port rows
+  //
+  // Ports applied by the pad scan whose Port_Type needs confirmation
+  // carry a "confirm type" warning badge until the user edits the row
+  // (port-guidance-and-pad-prepopulation, Requirement 6.5). Like the
+  // parameter scan's scannedNames, the set lives outside the form so
+  // the apply flows through the exact same patch({inputs, outputs})
+  // path as manual edits — applied ports stay indistinguishable from
+  // manual ones for editing, removal, validation, and step gating
+  // (Requirement 6.8) and portsStepErrors is untouched.
+
+  const [unconfirmedPortNames, setUnconfirmedPortNames] = useState<Set<string>>(
+    new Set()
+  );
+
+  const dropUnconfirmedPortName = (name: string) =>
+    setUnconfirmedPortNames((current) => {
+      if (!current.has(name)) return current;
+      const next = new Set(current);
+      next.delete(name);
+      return next;
+    });
+
+  /**
+   * Edit one port row; any name or type edit — including re-selecting
+   * the same type, the confirmation gesture — confirms the port (6.5).
+   */
+  const patchPort = (
+    side: 'inputs' | 'outputs',
+    index: number,
+    changes: Partial<PortForm>
+  ) => {
+    if (!form) return;
+    const ports = [...form[side]];
+    const editedName = ports[index].name.trim();
+    ports[index] = { ...ports[index], ...changes };
+    patch({ [side]: ports });
+    dropUnconfirmedPortName(editedName);
+  };
+
+  const removePort = (side: 'inputs' | 'outputs', index: number) => {
+    if (!form) return;
+    const removedName = form[side][index].name.trim();
+    patch({ [side]: form[side].filter((_, i) => i !== index) });
+    dropUnconfirmedPortName(removedName);
+  };
+
+  /** Port_Scan apply, through the ordinary patch path (6.1, 6.8). */
+  const applyPortScan = (result: PortScanApplyResult) => {
+    patch({ inputs: result.inputs, outputs: result.outputs });
+    if (result.unconfirmed.length > 0) {
+      setUnconfirmedPortNames((current) => {
+        const next = new Set(current);
+        result.unconfirmed.forEach((name) => next.add(name.trim()));
         return next;
       });
     }
@@ -427,6 +489,19 @@ export default function RegistrationWizard() {
                 {attempted && stepErrors[1].length > 0 && (
                   <Alert type="error">{stepErrors[1].join(' ')}</Alert>
                 )}
+                <PortGuidancePanel
+                  category={form.category}
+                  inputs={form.inputs}
+                  outputs={form.outputs}
+                />
+                <PortScanPanel
+                  pluginId={plugin.plugin_id}
+                  version={plugin.version}
+                  preferredFactory={defaultElementFactory(plugin.name)}
+                  inputs={form.inputs}
+                  outputs={form.outputs}
+                  onApply={applyPortScan}
+                />
                 {(['inputs', 'outputs'] as const).map((side) => (
                   <Container
                     key={side}
@@ -449,44 +524,70 @@ export default function RegistrationWizard() {
                       {form[side].length === 0 && (
                         <Box color="text-status-inactive">No {side} declared.</Box>
                       )}
-                      {form[side].map((port, index) => (
-                        <SpaceBetween key={index} direction="horizontal" size="s">
-                          <FormField label={index === 0 ? 'Port name' : undefined}>
-                            <Input
-                              value={port.name}
-                              placeholder={side === 'inputs' ? 'in' : 'out'}
-                              onChange={({ detail }) => {
-                                const ports = [...form[side]];
-                                ports[index] = { ...ports[index], name: detail.value };
-                                patch({ [side]: ports });
-                              }}
-                            />
-                          </FormField>
-                          <FormField label={index === 0 ? 'Port type' : undefined}>
-                            <Select
-                              selectedOption={{ label: port.portType, value: port.portType }}
-                              options={PORT_TYPES.map((t) => ({ label: t, value: t }))}
-                              onChange={({ detail }) => {
-                                const ports = [...form[side]];
-                                ports[index] = {
-                                  ...ports[index],
-                                  portType: detail.selectedOption.value || port.portType,
-                                };
-                                patch({ [side]: ports });
-                              }}
-                            />
-                          </FormField>
-                          <FormField label={index === 0 ? ' ' : undefined}>
-                            <Button
-                              iconName="remove"
-                              ariaLabel={`Remove ${side} port ${index + 1}`}
-                              onClick={() =>
-                                patch({ [side]: form[side].filter((_, i) => i !== index) })
-                              }
-                            />
-                          </FormField>
-                        </SpaceBetween>
-                      ))}
+                      {form[side].map((port, index) => {
+                        // Update-mode removal protection (6.9): a port
+                        // the registered declaration depends on cannot
+                        // be removed, whatever its provenance.
+                        const blockReason = removalBlockReason(
+                          side,
+                          port.name,
+                          existing?.declaration ?? null
+                        );
+                        const unconfirmed = unconfirmedPortNames.has(
+                          port.name.trim()
+                        );
+                        return (
+                          <SpaceBetween key={index} size="xxs">
+                            <SpaceBetween direction="horizontal" size="s">
+                              <FormField label={index === 0 ? 'Port name' : undefined}>
+                                <Input
+                                  value={port.name}
+                                  placeholder={side === 'inputs' ? 'in' : 'out'}
+                                  onChange={({ detail }) =>
+                                    patchPort(side, index, { name: detail.value })
+                                  }
+                                />
+                              </FormField>
+                              <FormField label={index === 0 ? 'Port type' : undefined}>
+                                <Select
+                                  selectedOption={{ label: port.portType, value: port.portType }}
+                                  options={PORT_TYPES.map((t) => ({ label: t, value: t }))}
+                                  onChange={({ detail }) =>
+                                    patchPort(side, index, {
+                                      portType:
+                                        detail.selectedOption.value || port.portType,
+                                    })
+                                  }
+                                />
+                              </FormField>
+                              <FormField
+                                label={index === 0 ? ' ' : undefined}
+                                warningText={blockReason ?? undefined}
+                              >
+                                <Button
+                                  iconName="remove"
+                                  ariaLabel={`Remove ${side} port ${index + 1}`}
+                                  disabled={blockReason != null}
+                                  onClick={() => removePort(side, index)}
+                                />
+                              </FormField>
+                              {unconfirmed && (
+                                <Badge color="severity-medium">confirm type</Badge>
+                              )}
+                            </SpaceBetween>
+                            {unconfirmed && (
+                              <Box color="text-status-warning" fontSize="body-s">
+                                This port came from the pad scan with a type
+                                GStreamer caps cannot determine (see its caps
+                                in the scan summary above): InferenceMeta and
+                                EventSignal are DDA semantic concepts, so the
+                                type defaults to VideoFrames. Confirm it by
+                                re-selecting the type, or change it.
+                              </Box>
+                            )}
+                          </SpaceBetween>
+                        );
+                      })}
                     </SpaceBetween>
                   </Container>
                 ))}

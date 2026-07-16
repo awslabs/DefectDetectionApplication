@@ -463,3 +463,171 @@ class TestAccessControl:
         assert status in (200, 404)
         if status == 404:
             assert body["error"]["code"] == "PLUGIN_NOT_FOUND"
+
+
+# --------------------------- pad-derived port fields (4.4, 4.5, 4.6, 4.7, 4.8)
+
+def pads_bearing_report_document():
+    """The captured report document extended with a per-element pad list:
+    one always/sink video pad (confident input suggestion), one always/src
+    non-video pad (unconfirmed output suggestion), and one request pad
+    (Unmapped_Pad)."""
+    document = captured_report_document()
+    document["elements"][0]["pads"] = [
+        {"name": "sink", "direction": "sink", "presence": "always",
+         "caps": "video/x-raw, format=(string){ RGB, BGR }",
+         "capsTruncated": False},
+        {"name": "src", "direction": "src", "presence": "always",
+         "caps": "application/x-custom", "capsTruncated": False},
+        {"name": "req_%u", "direction": "src", "presence": "request",
+         "caps": "ANY", "capsTruncated": False},
+    ]
+    document["elements"][0]["padsError"] = None
+    return document
+
+
+class TestPadDerivedPortFields:
+    """The route's additive per-element pad fields (`portSuggestions`,
+    `unmappedPads`, `padsReason`, `padsMessage`) ride alongside the
+    unchanged `suggestions`/`skipped` (port-guidance-and-pad-prepopulation
+    4.4-4.8)."""
+
+    def test_pads_bearing_report_serves_port_fields_per_element(self, genv):
+        """A stored pads-bearing report answers available:true with the
+        derived Port_Suggestions and Unmapped_Pads per element (4.5)."""
+        _, admin, plugin = genv.plugin_with_report(
+            pads_bearing_report_document())
+
+        status, body = genv.get_gst_properties(
+            admin, plugin["plugin_id"], plugin["version"])
+
+        assert status == 200
+        assert body["available"] is True
+        element = body["elements"][0]
+
+        # Always-pads with valid names become Port_Suggestions in pad
+        # order: sink -> input, src -> output; confidence follows the
+        # video/x-raw caps prefix.
+        assert element["portSuggestions"] == [
+            {"name": "sink", "direction": "input",
+             "portType": "VideoFrames", "confident": True,
+             "caps": "video/x-raw, format=(string){ RGB, BGR }",
+             "capsTruncated": False,
+             "reason": "the pad's caps begin with video/x-raw"},
+            {"name": "src", "direction": "output",
+             "portType": "VideoFrames", "confident": False,
+             "caps": "application/x-custom", "capsTruncated": False,
+             "reason": ("InferenceMeta and EventSignal are DDA semantic "
+                        "concepts that GStreamer caps cannot express; "
+                        "confirm the Port_Type yourself if this pad does "
+                        "not carry raw video")},
+        ]
+        # The request pad is unmapped with its runtime-pads caveat.
+        assert element["unmappedPads"] == [
+            {"name": "req_%u", "direction": "src", "presence": "request",
+             "caveat": ("request pads are created at runtime and do not "
+                        "correspond to fixed declared Ports")},
+        ]
+        # Non-empty pads: no reason, no message.
+        assert element["padsReason"] is None
+        assert element["padsMessage"] is None
+
+    def test_suggestions_and_skipped_identical_to_pad_free_control(self,
+                                                                   genv):
+        """Pad data never changes the parameter-scan fields: the
+        pads-bearing report's `suggestions`/`skipped` are byte-identical
+        to a pad-free control of the same properties (4.6)."""
+        _, admin_pads, plugin_pads = genv.plugin_with_report(
+            pads_bearing_report_document())
+        _, admin_ctrl, plugin_ctrl = genv.plugin_with_report(
+            captured_report_document())
+
+        _, body_pads = genv.get_gst_properties(
+            admin_pads, plugin_pads["plugin_id"], plugin_pads["version"])
+        _, body_ctrl = genv.get_gst_properties(
+            admin_ctrl, plugin_ctrl["plugin_id"], plugin_ctrl["version"])
+
+        pads_element = body_pads["elements"][0]
+        ctrl_element = body_ctrl["elements"][0]
+        assert (json.dumps(pads_element["suggestions"], sort_keys=True)
+                == json.dumps(ctrl_element["suggestions"], sort_keys=True))
+        assert (json.dumps(pads_element["skipped"], sort_keys=True)
+                == json.dumps(ctrl_element["skipped"], sort_keys=True))
+
+    def test_legacy_report_answers_available_with_pads_not_captured(self,
+                                                                    genv):
+        """A stored legacy report (no `pads` key) stays fully available;
+        each element reports padsReason 'pads_not_captured' with empty
+        port lists (4.7)."""
+        _, admin, plugin = genv.plugin_with_report(
+            captured_report_document())
+
+        status, body = genv.get_gst_properties(
+            admin, plugin["plugin_id"], plugin["version"])
+
+        assert status == 200
+        assert body["available"] is True
+        element = body["elements"][0]
+        # The parameter scan still works (available path unchanged)...
+        assert element["suggestions"]
+        # ...while the pad side is explicitly not captured.
+        assert element["padsReason"] == "pads_not_captured"
+        assert element["padsMessage"] is None
+        assert element["portSuggestions"] == []
+        assert element["unmappedPads"] == []
+
+    def test_malformed_pads_report_introspection_failed(self, genv):
+        """A stored report whose pad data is malformed (invalid
+        direction) fails parse_report and maps to the existing
+        introspection_failed unavailability reason (4.4)."""
+        document = pads_bearing_report_document()
+        document["elements"][0]["pads"][0]["direction"] = "north"
+        _, admin, plugin = genv.plugin_with_report(document)
+
+        status, body = genv.get_gst_properties(
+            admin, plugin["plugin_id"], plugin["version"])
+
+        assert status == 200
+        assert body["available"] is False
+        assert body["reason"] == "introspection_failed"
+
+    def test_empty_pad_list_answers_no_pad_templates(self, genv):
+        """An element with `pads: []` and no padsError declares no static
+        pad templates (4.8)."""
+        document = captured_report_document()
+        document["elements"][0]["pads"] = []
+        document["elements"][0]["padsError"] = None
+        _, admin, plugin = genv.plugin_with_report(document)
+
+        status, body = genv.get_gst_properties(
+            admin, plugin["plugin_id"], plugin["version"])
+
+        assert status == 200
+        assert body["available"] is True
+        element = body["elements"][0]
+        assert element["padsReason"] == "no_pad_templates"
+        assert element["padsMessage"] is None
+        assert element["portSuggestions"] == []
+        assert element["unmappedPads"] == []
+
+    def test_pads_read_failed_element_carries_its_message(self, genv):
+        """An element whose pad capture failed (`pads: []` with a
+        padsError diagnostic) surfaces the diagnostic as padsMessage
+        (3.2 surfacing)."""
+        document = captured_report_document()
+        document["elements"][0]["pads"] = []
+        document["elements"][0]["padsError"] = (
+            "reading static pad templates raised TypeError")
+        _, admin, plugin = genv.plugin_with_report(document)
+
+        status, body = genv.get_gst_properties(
+            admin, plugin["plugin_id"], plugin["version"])
+
+        assert status == 200
+        assert body["available"] is True
+        element = body["elements"][0]
+        assert element["padsReason"] == "pads_read_failed"
+        assert element["padsMessage"] == (
+            "reading static pad templates raised TypeError")
+        assert element["portSuggestions"] == []
+        assert element["unmappedPads"] == []

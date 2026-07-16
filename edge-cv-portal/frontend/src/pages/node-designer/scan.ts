@@ -11,6 +11,7 @@
  * live here too (task 6.2).
  */
 import type { ParameterForm } from './declaration';
+import type { PadsReason, PortSuggestion, UnmappedPad } from './portScan';
 import type { ParameterDeclaration } from './types';
 
 /** Machine-readable reasons of an `available: false` response (1.6, 7.4). */
@@ -28,6 +29,17 @@ export interface ScanElement {
   factory: string;
   suggestions: ParameterDeclaration[];
   skipped: { name: string; reason: string }[];
+  /**
+   * Pad-derived port scan extension
+   * (port-guidance-and-pad-prepopulation, 4.5): optional fields an
+   * old backend simply omits. `padsReason` is non-null exactly when
+   * no pad data could be derived (4.7, 4.8); `padsMessage` carries
+   * the pads_read_failed diagnostic (3.2).
+   */
+  portSuggestions?: PortSuggestion[];
+  unmappedPads?: UnmappedPad[];
+  padsReason?: PadsReason | null;
+  padsMessage?: string | null;
 }
 
 /**

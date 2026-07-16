@@ -55,6 +55,19 @@ VALID_STATUSES = (STATUS_CAPTURED, STATUS_FAILED)
 # JSON scalar type for property default values.
 JsonScalar = Union[str, int, float, bool]
 
+# Pad_Template direction and presence vocabularies
+# (port-guidance-and-pad-prepopulation, Requirement 4.4).
+PAD_DIRECTION_SINK = 'sink'
+PAD_DIRECTION_SRC = 'src'
+VALID_PAD_DIRECTIONS = (PAD_DIRECTION_SINK, PAD_DIRECTION_SRC)
+PAD_PRESENCE_ALWAYS = 'always'
+VALID_PAD_PRESENCES = ('always', 'sometimes', 'request')
+
+# Maximum stored caps string length; capture truncates longer caps and marks
+# them with capsTruncated (Requirement 3.4). The parser rejects longer caps
+# as malformed, making the truncation contract enforceable here.
+MAX_CAPS_LEN = 4096
+
 
 class ReportError(Exception):
     """A stored/received Introspection_Report document is malformed.
@@ -93,12 +106,30 @@ class GstProperty:
 
 
 @dataclass(frozen=True)
+class PadTemplate:
+    """One static Pad_Template captured from the element factory
+    (port-guidance-and-pad-prepopulation, Requirement 4.1)."""
+    name: str             # name template, e.g. 'sink', 'src', 'src_%u'
+    direction: str        # 'sink' | 'src'
+    presence: str         # 'always' | 'sometimes' | 'request'
+    caps: str             # caps string, at most MAX_CAPS_LEN chars
+    caps_truncated: bool  # True when capture truncated the caps (3.4)
+
+
+@dataclass(frozen=True)
 class ReportElement:
-    """One element factory registered by the introspected Plugin_Artifact."""
+    """One element factory registered by the introspected Plugin_Artifact.
+
+    ``pads`` is None when the report predates pad capture (legacy version-1
+    reports, Requirement 4.2). Domain invariant: ``pads_error`` is non-None
+    only when ``pads == []`` (a per-element pad read failure, 3.2).
+    """
     factory: str
     element_gtype: str
     instantiation_error: Optional[str] = None
     properties: List[GstProperty] = field(default_factory=list)
+    pads: Optional[List[PadTemplate]] = None  # None = not captured (legacy)
+    pads_error: Optional[str] = None          # meaningful only when pads is not None
 
 
 @dataclass(frozen=True)
@@ -198,9 +229,47 @@ def _parse_property(value: Any, where: str) -> GstProperty:
     )
 
 
+def _parse_pad(value: Any, where: str) -> PadTemplate:
+    pad = _require_dict(value, where)
+    direction = _require_str(pad.get('direction'), f'{where}.direction')
+    if direction not in VALID_PAD_DIRECTIONS:
+        raise ReportError(f'{where}.direction: expected one of {VALID_PAD_DIRECTIONS}, '
+                          f'got {direction!r}')
+    presence = _require_str(pad.get('presence'), f'{where}.presence')
+    if presence not in VALID_PAD_PRESENCES:
+        raise ReportError(f'{where}.presence: expected one of {VALID_PAD_PRESENCES}, '
+                          f'got {presence!r}')
+    caps = _require_str(pad.get('caps'), f'{where}.caps')
+    if len(caps) > MAX_CAPS_LEN:
+        raise ReportError(f'{where}.caps: expected at most {MAX_CAPS_LEN} characters, '
+                          f'got {len(caps)}')
+    return PadTemplate(
+        name=_require_str(pad.get('name'), f'{where}.name'),
+        direction=direction,
+        presence=presence,
+        caps=caps,
+        caps_truncated=_require_bool(pad.get('capsTruncated'), f'{where}.capsTruncated'),
+    )
+
+
 def _parse_element(value: Any, where: str) -> ReportElement:
     element = _require_dict(value, where)
     properties_raw = _require_list(element.get('properties', []), f'{where}.properties')
+
+    # Pad data is an optional, strictly additive extension of the version-1
+    # element shape (port-guidance-and-pad-prepopulation). An absent `pads`
+    # key is the legacy report shape: pads were not captured (Requirement
+    # 4.2); a stray `padsError` without `pads` is ignored. When `pads` is
+    # present, every entry is validated as strictly as properties are — any
+    # violation raises ReportError (Requirement 4.4).
+    pads: Optional[List[PadTemplate]] = None
+    pads_error: Optional[str] = None
+    if 'pads' in element:
+        pads_raw = _require_list(element.get('pads'), f'{where}.pads')
+        pads = [_parse_pad(pad, f'{where}.pads[{i}]')
+                for i, pad in enumerate(pads_raw)]
+        pads_error = _optional_str(element.get('padsError'), f'{where}.padsError')
+
     return ReportElement(
         factory=_require_str(element.get('factory'), f'{where}.factory'),
         element_gtype=_require_str(element.get('elementGType'), f'{where}.elementGType'),
@@ -208,6 +277,8 @@ def _parse_element(value: Any, where: str) -> ReportElement:
                                           f'{where}.instantiationError'),
         properties=[_parse_property(prop, f'{where}.properties[{i}]')
                     for i, prop in enumerate(properties_raw)],
+        pads=pads,
+        pads_error=pads_error,
     )
 
 
@@ -260,13 +331,30 @@ def _serialize_property(prop: GstProperty) -> Dict[str, Any]:
     }
 
 
-def _serialize_element(element: ReportElement) -> Dict[str, Any]:
+def _serialize_pad(pad: PadTemplate) -> Dict[str, Any]:
     return {
+        'name': pad.name,
+        'direction': pad.direction,
+        'presence': pad.presence,
+        'caps': pad.caps,
+        'capsTruncated': pad.caps_truncated,
+    }
+
+
+def _serialize_element(element: ReportElement) -> Dict[str, Any]:
+    document = {
         'factory': element.factory,
         'elementGType': element.element_gtype,
         'instantiationError': element.instantiation_error,
         'properties': [_serialize_property(prop) for prop in element.properties],
     }
+    # When pads were never captured (legacy element), both keys are omitted
+    # so legacy-shaped reports serialize byte-identically to the pre-pad
+    # output (Requirements 4.2, 4.3).
+    if element.pads is not None:
+        document['pads'] = [_serialize_pad(pad) for pad in element.pads]
+        document['padsError'] = element.pads_error
+    return document
 
 
 def serialize_report(report: Report) -> Dict[str, Any]:
@@ -536,3 +624,107 @@ def suggestions_for_element(element: ReportElement) -> Dict[str, List[Dict[str, 
         else:
             suggestions.append(mapped)
     return {'suggestions': suggestions, 'skipped': skipped}
+
+
+# ---------------------------------------------------------------------------
+# Port_Suggestion derivation (ports_for_element)
+# port-guidance-and-pad-prepopulation, Requirements 4.7, 4.8, 5.1-5.7
+# ---------------------------------------------------------------------------
+
+# The only Port_Type derivable from caps: caps beginning with the exact
+# case-sensitive prefix `video/x-raw` map confidently to VideoFrames
+# (Requirement 5.2); InferenceMeta and EventSignal are DDA semantic concepts
+# GStreamer caps cannot express (Requirement 5.3).
+PORT_TYPE_VIDEO_FRAMES = 'VideoFrames'
+CONFIDENT_CAPS_PREFIX = 'video/x-raw'   # exact, case-sensitive (5.2)
+
+# Machine-readable reasons for an element with no derivable pad data
+# (mutually exclusive, Requirements 4.7, 4.8, 3.2 surfacing).
+PADS_REASON_NOT_CAPTURED = 'pads_not_captured'   # report predates pad capture (4.7)
+PADS_REASON_NO_TEMPLATES = 'no_pad_templates'    # element declares none (4.8)
+PADS_REASON_READ_FAILED = 'pads_read_failed'     # per-element capture failure (3.2)
+
+# Caveat / reason texts, defined once so derivation is deterministic (5.7).
+_CAVEAT_RUNTIME_PADS = ('{presence} pads are created at runtime and do not '
+                        'correspond to fixed declared Ports')
+_CAVEAT_INVALID_NAME = ('the pad name template is not a valid Port name '
+                        '(Port names must be non-empty)')
+_REASON_CONFIDENT = f"the pad's caps begin with {CONFIDENT_CAPS_PREFIX}"
+_REASON_UNCONFIRMED = ('InferenceMeta and EventSignal are DDA semantic concepts '
+                       'that GStreamer caps cannot express; confirm the Port_Type '
+                       'yourself if this pad does not carry raw video')
+
+
+def ports_for_element(element: ReportElement) -> Dict[str, Any]:
+    """Derive the Port_Scan result for one report element.
+
+    Pure and deterministic (Requirement 5.7). Returns the wire shape served
+    alongside `suggestions_for_element` by the gst-properties route::
+
+        {
+          "portSuggestions": [{"name", "direction", "portType", "confident",
+                               "caps", "capsTruncated", "reason"}, ...],
+          "unmappedPads": [{"name", "direction", "presence", "caveat"}, ...],
+          "padsReason": str | None,
+          "padsMessage": str | None
+        }
+
+    Reason classification (mutually exclusive, Requirements 4.7, 4.8):
+      pads is None                    -> 'pads_not_captured' (legacy report)
+      pads == [] with pads_error      -> 'pads_read_failed' + the diagnostic
+      pads == [] without pads_error   -> 'no_pad_templates'
+      pads non-empty                  -> None (derivation runs)
+
+    Derivation walks the pads in report order (5.1); each pad lands in
+    exactly one output list:
+      presence != 'always'            -> Unmapped_Pad, runtime-pads caveat (5.4)
+      empty/whitespace name template  -> Unmapped_Pad, invalid-name caveat (5.6)
+      otherwise                       -> Port_Suggestion: sink -> input,
+                                         src -> output, name verbatim,
+                                         portType VideoFrames, confident iff
+                                         caps start with video/x-raw (5.1-5.3)
+    """
+    port_suggestions: List[Dict[str, Any]] = []
+    unmapped_pads: List[Dict[str, Any]] = []
+
+    if element.pads is None:
+        return {'portSuggestions': port_suggestions, 'unmappedPads': unmapped_pads,
+                'padsReason': PADS_REASON_NOT_CAPTURED, 'padsMessage': None}
+    if not element.pads:
+        if element.pads_error is not None:
+            return {'portSuggestions': port_suggestions, 'unmappedPads': unmapped_pads,
+                    'padsReason': PADS_REASON_READ_FAILED,
+                    'padsMessage': element.pads_error}
+        return {'portSuggestions': port_suggestions, 'unmappedPads': unmapped_pads,
+                'padsReason': PADS_REASON_NO_TEMPLATES, 'padsMessage': None}
+
+    for pad in element.pads:
+        if pad.presence != PAD_PRESENCE_ALWAYS:
+            unmapped_pads.append({
+                'name': pad.name,
+                'direction': pad.direction,
+                'presence': pad.presence,
+                'caveat': _CAVEAT_RUNTIME_PADS.format(presence=pad.presence),
+            })
+            continue
+        if not pad.name.strip():
+            unmapped_pads.append({
+                'name': pad.name,
+                'direction': pad.direction,
+                'presence': pad.presence,
+                'caveat': _CAVEAT_INVALID_NAME,
+            })
+            continue
+        confident = pad.caps.startswith(CONFIDENT_CAPS_PREFIX)
+        port_suggestions.append({
+            'name': pad.name,
+            'direction': 'input' if pad.direction == PAD_DIRECTION_SINK else 'output',
+            'portType': PORT_TYPE_VIDEO_FRAMES,
+            'confident': confident,
+            'caps': pad.caps,
+            'capsTruncated': pad.caps_truncated,
+            'reason': _REASON_CONFIDENT if confident else _REASON_UNCONFIRMED,
+        })
+
+    return {'portSuggestions': port_suggestions, 'unmappedPads': unmapped_pads,
+            'padsReason': None, 'padsMessage': None}

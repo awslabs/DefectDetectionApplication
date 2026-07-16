@@ -58,6 +58,7 @@ import {
   portsStepErrors,
 } from './declaration';
 import ParameterScanPanel from './ParameterScanPanel';
+import PortGuidancePanel from './PortGuidancePanel';
 import { downloadZip } from './zip';
 
 const initialForm = (): WizardForm => ({
@@ -384,6 +385,26 @@ export default function CreateWizard() {
                 {attempted && stepErrors[1].length > 0 && (
                   <Alert type="error">{stepErrors[1].join(' ')}</Alert>
                 )}
+                {/*
+                 * Static Port_Guidance only (Requirement 1.5): no
+                 * PortScanPanel, no scan control, no network request —
+                 * port pre-population needs a Plugin_Artifact, which does
+                 * not exist during creation (Requirement 7.4). Mirrors the
+                 * Parameters step's no-plugin ParameterScanPanel notice.
+                 */}
+                <PortGuidancePanel
+                  category={form.category}
+                  inputs={form.inputs}
+                  outputs={form.outputs}
+                />
+                <Box
+                  color="text-body-secondary"
+                  data-testid="port-prepopulation-note"
+                >
+                  Port pre-population from the plugin&apos;s pad templates
+                  requires a built plugin; it becomes available later in the
+                  Registration wizard.
+                </Box>
                 {(['inputs', 'outputs'] as const).map((side) => (
                   <Container
                     key={side}
