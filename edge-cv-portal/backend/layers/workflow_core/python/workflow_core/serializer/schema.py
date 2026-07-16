@@ -41,6 +41,15 @@ _NODE_SCHEMA = {
             "type": "object",
             "description": "Parameter name to JSON value; keys and value types are declared by the node type's catalog descriptor.",
         },
+        "data": {
+            "type": "object",
+            "description": (
+                "Optional advisory node data (e.g. cameraBindingHint recorded "
+                "by the Workflow_Builder camera picker). Preserved through "
+                "parse/serialize round trips but ignored by validation and "
+                "compilation (Requirements 7.5, 11.5)."
+            ),
+        },
     },
 }
 

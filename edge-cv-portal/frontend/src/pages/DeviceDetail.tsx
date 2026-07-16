@@ -21,6 +21,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { Device, InstalledComponent, DeviceDeployment } from '../types';
+import DeviceCamerasTab from '../components/DeviceCamerasTab';
 import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
 import RemoteAccessTab from '../components/RemoteAccessTab';
 import ResultsTab from '../components/ResultsTab';
@@ -498,6 +499,13 @@ export default function DeviceDetail() {
                   }
                 />
               </Container>
+            ),
+          },
+          {
+            id: 'cameras',
+            label: 'Cameras',
+            content: (
+              <DeviceCamerasTab deviceId={device.device_id} usecaseId={usecaseId || ''} />
             ),
           },
           {

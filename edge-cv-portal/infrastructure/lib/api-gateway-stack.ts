@@ -45,6 +45,13 @@ export interface ApiGatewayStackProps extends cdk.NestedStackProps {
 export class ApiGatewayStack extends cdk.NestedStack {
   public readonly api: apigateway.RestApi;
   public readonly apiUrl: string;
+  /**
+   * Resource id of /devices/{id}. The Camera_Registry routes
+   * (camera-registry-sync) attach under this resource from their own nested
+   * stack (CameraRegistryApiStack) because this stack sits at the
+   * CloudFormation 500-resource limit.
+   */
+  public readonly deviceResourceId: string;
 
   constructor(scope: Construct, id: string, props: ApiGatewayStackProps) {
     super(scope, id, props);
@@ -364,6 +371,7 @@ export class ApiGatewayStack extends cdk.NestedStack {
     });
 
     const deviceResource = devicesResource.addResource('{id}');
+    this.deviceResourceId = deviceResource.resourceId;
     deviceResource.addMethod('GET', devicesIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
@@ -412,6 +420,12 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
+
+    // Camera_Registry endpoints (camera-registry-sync) live in their own
+    // nested stack (CameraRegistryApiStack) — this nested stack sits at the
+    // CloudFormation 500-resource limit, the same reason the Node_Designer
+    // routes moved to NodeDesignerApiStack. The device resource id is
+    // exported below so the camera routes can attach under /devices/{id}.
 
     // Deployments endpoints
     const deploymentsResource = this.api.root.addResource('deployments');

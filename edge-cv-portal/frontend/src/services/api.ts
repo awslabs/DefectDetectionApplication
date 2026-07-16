@@ -17,6 +17,13 @@ import type {
   WorkflowValidationRun,
   WorkflowValidationStatus,
 } from '../pages/workflows/types';
+import type {
+  CameraMutationResponse,
+  CameraSourceMutationBody,
+  DeviceCameraConflictsResponse,
+  DeviceCamerasResponse,
+} from '../pages/workflows/cameraReference';
+import type { CameraBindingContext } from '../pages/deployments/cameraBindings';
 import { beginRequest, endRequest } from './loadingBus';
 
 /**
@@ -384,6 +391,118 @@ class ApiService {
       throw new Error('usecase_id is required');
     }
     return this.request<{ device: Device }>(`/devices/${id}?usecase_id=${usecaseId}`);
+  }
+
+  /**
+   * The device's Camera_Registry entries with computed staleness and the
+   * device's IoT connectivity status (camera-registry-sync Requirements
+   * 1.3, 7.1). Devices that never completed a synchronization return
+   * `state: "never-synced"` rather than a bare empty list.
+   */
+  async getDeviceCameras(deviceId: string, usecaseId: string): Promise<DeviceCamerasResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceCamerasResponse>(
+      `/devices/${deviceId}/cameras?usecase_id=${usecaseId}`
+    );
+  }
+
+  /**
+   * The device's recorded camera-sync conflict events, newest first
+   * (camera-registry-sync Requirement 6.3).
+   */
+  async getDeviceCameraConflicts(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<DeviceCameraConflictsResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceCameraConflictsResponse>(
+      `/devices/${deviceId}/cameras/conflicts?usecase_id=${usecaseId}`
+    );
+  }
+
+  /** Create a portal-managed Camera_Source (Operator, Requirement 5.1). */
+  async createDeviceCamera(
+    deviceId: string,
+    usecaseId: string,
+    body: CameraSourceMutationBody
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras?usecase_id=${usecaseId}`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Update a portal-managed Camera_Source (Operator, Requirement 5.1). */
+  async updateDeviceCamera(
+    deviceId: string,
+    cameraSourceId: string,
+    usecaseId: string,
+    body: CameraSourceMutationBody
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras/${encodeURIComponent(cameraSourceId)}?usecase_id=${usecaseId}`,
+      { method: 'PUT', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Pending-delete a portal-managed Camera_Source (Operator). */
+  async deleteDeviceCamera(
+    deviceId: string,
+    cameraSourceId: string,
+    usecaseId: string
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras/${encodeURIComponent(cameraSourceId)}?usecase_id=${usecaseId}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * Re-issue a conflict's overridden portal version as a new pending
+   * change (Operator, Requirement 6.4).
+   */
+  async reapplyCameraConflict(
+    deviceId: string,
+    conflictId: string,
+    usecaseId: string
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras/conflicts/${encodeURIComponent(conflictId)}/reapply?usecase_id=${usecaseId}`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * On-demand refresh: pulls the device's registry shadow through the
+   * same reducer as the ingest path and returns the refreshed inventory.
+   */
+  async refreshDeviceCameras(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<DeviceCamerasResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceCamerasResponse>(
+      `/devices/${deviceId}/cameras/refresh?usecase_id=${usecaseId}`,
+      { method: 'POST' }
+    );
   }
 
   // Device Logs endpoints
@@ -1166,6 +1285,84 @@ class ApiService {
   }> {
     return this.request(`/deployments/${deploymentId}?usecase_id=${usecaseId}`, {
       method: 'DELETE',
+    });
+  }
+
+  /**
+   * Deploy-time Camera_Binding context for the CreateDeployment binding
+   * matrix (camera-registry-sync Requirements 8.1, 8.5, 8.9): for each
+   * Camera_Input_Node of the workflow version and each target device,
+   * the device's registered Camera_Sources as binding options with
+   * hint-matching pre-selection. `binding_required: false` skips the
+   * matrix step entirely.
+   */
+  async getCameraBindingContext(params: {
+    usecase_id: string;
+    workflow_id: string;
+    workflow_version?: number;
+    target_devices?: string[];
+    target_thing_group?: string;
+  }): Promise<CameraBindingContext> {
+    const qs = new URLSearchParams({
+      view: 'binding-context',
+      usecase_id: params.usecase_id,
+      workflow_id: params.workflow_id,
+    });
+    if (params.workflow_version !== undefined) {
+      qs.set('workflow_version', String(params.workflow_version));
+    }
+    if (params.target_devices && params.target_devices.length > 0) {
+      qs.set('target_devices', params.target_devices.join(','));
+    }
+    if (params.target_thing_group) {
+      qs.set('target_thing_group', params.target_thing_group);
+    }
+    return this.request(`/deployments?${qs.toString()}`);
+  }
+
+  /**
+   * Deploy a packaged Workflow_Component (component_type: workflow) with
+   * optional deploy-time Camera_Bindings and confirmed warning ids
+   * (camera-registry-sync Requirements 8.2, 8.5, 9.3). Rejections carry
+   * structured codes: 409 CAMERA_BINDINGS_INVALID {errors, warnings},
+   * 409 CAMERA_WARNINGS_UNCONFIRMED {warnings}, 503 REGISTRY_UNAVAILABLE,
+   * and 502 BINDING_DELIVERY_FAILED.
+   */
+  async createWorkflowDeployment(data: {
+    usecase_id: string;
+    workflow_id: string;
+    workflow_version?: number;
+    target_devices?: string[];
+    target_thing_group?: string;
+    deployment_name?: string;
+    rollout_config?: {
+      auto_rollback?: boolean;
+      timeout_seconds?: number;
+    };
+    camera_bindings?: Record<
+      string,
+      Record<string, { cameraSourceId: string } | { override: Record<string, unknown> }>
+    >;
+    confirmed_warnings?: string[];
+  }): Promise<{
+    deployment_id: string;
+    iot_job_id: string;
+    iot_job_arn: string;
+    workflow_id: string;
+    workflow_version: number;
+    component_name: string;
+    component_version: string;
+    target_arn: string;
+    target_devices: string[];
+    target_thing_group?: string | null;
+    is_revision: boolean;
+    superseded_deployment_id?: string | null;
+    camera_bindings_delivered: boolean;
+    message: string;
+  }> {
+    return this.request('/deployments', {
+      method: 'POST',
+      body: JSON.stringify({ component_type: 'workflow', ...data }),
     });
   }
 

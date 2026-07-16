@@ -34,6 +34,13 @@ export type BuilderNodeData = {
   descriptor: NodeTypeDescriptor;
   parameters: Record<string, JsonValue>;
   validationMessages: string[];
+  /**
+   * Advisory node data carried in the definition's `nodes[].data` (e.g.
+   * the camera picker's `cameraBindingHint`, camera-registry-sync
+   * Requirements 7.2, 7.5). Preserved verbatim through save/load round
+   * trips; absent on nodes without advisory data.
+   */
+  advisoryData?: Record<string, JsonValue>;
 };
 
 /** A React Flow node on the Workflow_Builder canvas. */
@@ -120,11 +127,18 @@ export function createBuilderNode(
 
 /** The Workflow_Definition node for a canvas node. */
 export function toWorkflowNode(node: BuilderNode): WorkflowNode {
+  const advisoryData = node.data.advisoryData;
   return {
     id: node.id,
     type: node.data.descriptor.typeId,
     position: { x: node.position.x, y: node.position.y },
     parameters: node.data.parameters,
+    // Advisory node data (e.g. cameraBindingHint) rides along in the
+    // definition's `data` field; omitted entirely when empty so
+    // pre-feature definitions serialize byte-identically.
+    ...(advisoryData !== undefined && Object.keys(advisoryData).length > 0
+      ? { data: advisoryData }
+      : {}),
   };
 }
 
@@ -260,6 +274,11 @@ export function fromWorkflowDefinition(
         descriptor,
         parameters: { ...node.parameters },
         validationMessages: [],
+        // Advisory node data (e.g. cameraBindingHint) is restored so the
+        // hint survives save/load round trips (Requirement 7.5).
+        ...(node.data !== undefined && Object.keys(node.data).length > 0
+          ? { advisoryData: { ...node.data } }
+          : {}),
       },
     };
   });

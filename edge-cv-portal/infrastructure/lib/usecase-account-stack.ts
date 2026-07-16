@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as iot from 'aws-cdk-lib/aws-iot';
 import { Construct } from 'constructs';
 
 /**
@@ -11,7 +12,7 @@ import { Construct } from 'constructs';
  * - MINOR: New features (new permissions, new resources)
  * - PATCH: Bug fixes
  */
-const STACK_VERSION = '1.4.0';
+const STACK_VERSION = '1.5.0';
 
 export interface UseCaseAccountStackProps extends cdk.StackProps {
   /**
@@ -775,6 +776,57 @@ export class UseCaseAccountStack extends cdk.Stack {
     );
 
     this.roleArn = this.role.roleArn;
+
+    // Camera registry shadow-report forwarding (camera-registry-sync)
+    // The Edge_Sync_Agent reports each device's Camera_Source inventory into
+    // the dda-camera-registry named shadow. This IoT topic rule forwards
+    // every shadow /update/documents event to the Portal account's
+    // dda-portal-camera-shadow-reports SQS queue (the portal side carries the
+    // matching cross-account queue policy), where the Portal_Sync_Service
+    // Lambda ingests it into the Camera_Registry.
+    const cameraShadowReportQueueName = 'dda-portal-camera-shadow-reports';
+    const cameraShadowReportQueueArn = `arn:aws:sqs:${region}:${portalAccountId}:${cameraShadowReportQueueName}`;
+    const cameraShadowReportQueueUrl = `https://sqs.${region}.amazonaws.com/${portalAccountId}/${cameraShadowReportQueueName}`;
+
+    const cameraShadowRuleRole = new iam.Role(this, 'CameraShadowRuleRole', {
+      roleName: 'DDACameraShadowRuleRole',
+      description: 'Role for the dda-camera-registry shadow IoT topic rule to deliver shadow documents events to the DDA Portal shadow-report queue',
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com'),
+    });
+
+    cameraShadowRuleRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SendCameraShadowReports',
+        effect: iam.Effect.ALLOW,
+        actions: ['sqs:SendMessage'],
+        resources: [cameraShadowReportQueueArn],
+      })
+    );
+
+    new iot.CfnTopicRule(this, 'CameraRegistryShadowRule', {
+      ruleName: 'dda_camera_registry_shadow_documents',
+      topicRulePayload: {
+        // topic(3) is the thing name in $aws/things/{thing}/shadow/...
+        sql: "SELECT *, topic(3) AS thing_name FROM '$aws/things/+/shadow/name/dda-camera-registry/update/documents'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        description: 'Forward dda-camera-registry shadow documents events to the DDA Portal camera shadow-report queue',
+        actions: [
+          {
+            sqs: {
+              queueUrl: cameraShadowReportQueueUrl,
+              roleArn: cameraShadowRuleRole.roleArn,
+              useBase64: false,
+            },
+          },
+        ],
+      },
+    });
+
+    new cdk.CfnOutput(this, 'CameraShadowReportQueueArn', {
+      value: cameraShadowReportQueueArn,
+      description: 'Portal SQS queue receiving dda-camera-registry shadow documents events',
+    });
 
     // Cross-Account EventBridge Forwarding
     // Forward SageMaker events to Portal Account for real-time status updates

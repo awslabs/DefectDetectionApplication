@@ -83,6 +83,7 @@ const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   testDatasetsTable: storageStack.testDatasetsTable,
   testRunsTable: storageStack.testRunsTable,
   workflowChatSessionsTable: storageStack.workflowChatSessionsTable,
+  cameraRegistryTable: storageStack.cameraRegistryTable,
   portalArtifactsBucket: storageStack.portalArtifactsBucket,
   testRunStateMachine: testRunnerStack.stateMachine,
   cloudFrontDomain,

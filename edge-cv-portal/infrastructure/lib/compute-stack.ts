@@ -7,11 +7,14 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
+import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import { ApiGatewayStack } from './api-gateway-stack';
+import { CameraRegistryApiStack } from './camera-registry-api-stack';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
@@ -33,6 +36,7 @@ export interface ComputeStackProps extends cdk.StackProps {
   testDatasetsTable: dynamodb.Table;
   testRunsTable: dynamodb.Table;
   workflowChatSessionsTable: dynamodb.Table;
+  cameraRegistryTable: dynamodb.Table;
   portalArtifactsBucket: s3.Bucket;
   /**
    * Workflow_Test_Runner Step Functions state machine (test-runner stack).
@@ -162,6 +166,7 @@ export class ComputeStack extends cdk.Stack {
       props.testDatasetsTable.grantReadWriteData(role);
       props.testRunsTable.grantReadWriteData(role);
       props.workflowChatSessionsTable.grantReadWriteData(role);
+      props.cameraRegistryTable.grantReadWriteData(role);
 
       // Grant S3 permissions for portal artifacts bucket
       props.portalArtifactsBucket.grantReadWrite(role);
@@ -478,6 +483,7 @@ export class ComputeStack extends cdk.Stack {
       TEST_DATASETS_TABLE: props.testDatasetsTable.tableName,
       TEST_RUNS_TABLE: props.testRunsTable.tableName,
       WORKFLOW_CHAT_SESSIONS_TABLE: props.workflowChatSessionsTable.tableName,
+      CAMERA_REGISTRY_TABLE: props.cameraRegistryTable.tableName,
       PORTAL_ARTIFACTS_BUCKET: props.portalArtifactsBucket.bucketName,
       // Workflow Manager documents (definitions, compiled docs, test datasets,
       // test results) live in the portal artifacts bucket under
@@ -906,6 +912,116 @@ export class ComputeStack extends cdk.Stack {
 
     // Grant Audit Logs Lambda read access to the audit log table
     props.auditLogTable.grantReadData(auditLogsHandler);
+
+    // ------------------------------------------------------------------
+    // Camera Registry Sync (camera-registry-sync)
+    // Edge devices report their Camera_Source inventory into the
+    // dda-camera-registry named shadow; a per-use-case IoT topic rule on
+    // $aws/things/+/shadow/name/dda-camera-registry/update/documents
+    // (provisioned by the UseCaseAccountStack during use-case onboarding)
+    // forwards each shadow documents event to the SQS queue below, where the
+    // Portal_Sync_Service Lambda (camera_sync.py) reduces it into the
+    // dda-portal-camera-registry table.
+    // ------------------------------------------------------------------
+
+    // Dead-letter queue for shadow-report events that repeatedly fail
+    // processing (malformed/unparseable reports are also dead-lettered
+    // explicitly by the handler without blocking the batch).
+    const cameraShadowReportDlq = new sqs.Queue(this, 'CameraShadowReportDLQ', {
+      queueName: 'dda-portal-camera-shadow-reports-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+    });
+
+    // Shadow-report queue fed by the per-use-case IoT topic rules. The
+    // visibility timeout is a multiple of the consumer Lambda timeout per
+    // the SQS event-source guidance.
+    const cameraShadowReportQueue = new sqs.Queue(this, 'CameraShadowReportQueue', {
+      queueName: 'dda-portal-camera-shadow-reports',
+      visibilityTimeout: cdk.Duration.seconds(180),
+      retentionPeriod: cdk.Duration.days(4),
+      enforceSSL: true,
+      deadLetterQueue: {
+        queue: cameraShadowReportDlq,
+        maxReceiveCount: 3,
+      },
+    });
+
+    // Cross-account queue policy: an IoT topic rule delivers to SQS through
+    // its rule role, an IAM principal in the (use-case) account where the
+    // rule runs. Allow SendMessage from the trusted UseCase accounts plus
+    // this portal account (same-account use cases).
+    cameraShadowReportQueue.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'AllowUseCaseAccountIotRuleDelivery',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['sqs:SendMessage'],
+      resources: [cameraShadowReportQueue.queueArn],
+      conditions: {
+        StringEquals: {
+          'aws:PrincipalAccount': Array.from(
+            new Set([...props.trustedUseCaseAccountIds, cdk.Aws.ACCOUNT_ID])
+          ),
+        },
+      },
+    }));
+
+    // Portal_Sync_Service ingest Lambda (camera_sync.py) — consumes shadow
+    // documents events from the queue and applies the reduce_report sync
+    // reducer per camera source into the camera registry table.
+    const cameraSyncHandler = new lambda.Function(this, 'CameraSyncHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'camera_sync.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('CameraSync'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-02-14-camera-sync',
+        CAMERA_SHADOW_REPORT_DLQ_URL: cameraShadowReportDlq.queueUrl,
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    cameraSyncHandler.addEventSource(new SqsEventSource(cameraShadowReportQueue, {
+      batchSize: 10,
+      reportBatchItemFailures: true,
+    }));
+
+    // The handler dead-letters malformed reports explicitly (in addition to
+    // the redrive policy above).
+    cameraShadowReportDlq.grantSendMessages(cameraSyncHandler);
+
+    // Camera_Registry API Lambda (camera_registry.py) — device cameras
+    // read/mutate routes, conflict listing/re-apply, and on-demand refresh
+    // (GetThingShadow pull through the assumed use-case role).
+    const cameraRegistryHandler = new lambda.Function(this, 'CameraRegistryHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'camera_registry.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('CameraRegistry'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-02-14-camera-registry',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    // Deploy-time Camera_Binding delivery: deployments.py writes
+    // desired.bindings["{workflowId}/{version}"] into each target thing's
+    // dda-camera-bindings named shadow at deployment submission. IAM scopes
+    // shadow actions to the thing ARN (named shadows share the thing
+    // resource); this explicit iot-data grant keeps the camera-bindings
+    // shadow write working independently of the base-role IoT statement.
+    deploymentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iot:GetThingShadow',
+        'iot:UpdateThingShadow',
+      ],
+      resources: ['arn:aws:iot:*:*:thing/*'],
+    }));
 
     // ------------------------------------------------------------------
     // Workflow Manager Lambda functions
@@ -1425,6 +1541,24 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
 
     this.api = apiGatewayStack.api;
     this.apiUrl = apiGatewayStack.apiUrl;
+
+    // Camera_Registry routes (camera-registry-sync) in their own nested
+    // stack: the ApiGateway nested stack sits at the CloudFormation
+    // 500-resource limit, so the camera routes import the Rest API and the
+    // /devices/{id} resource by id and attach there — the same pattern as
+    // NodeDesignerApiStack.
+    const cameraRegistryApiStack = new CameraRegistryApiStack(this, 'CameraRegistryApi', {
+      restApiId: apiGatewayStack.api.restApiId,
+      restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+      deviceResourceId: apiGatewayStack.deviceResourceId,
+      // Must match ApiGatewayStack deployOptions.stageName.
+      stageName: 'v1',
+      userPool: props.userPool,
+      cameraRegistryHandler,
+    });
+    // The stage re-pointing deployment inside CameraRegistryApiStack needs
+    // the ApiGatewayStack's stage (and its own deployment) to exist first.
+    cameraRegistryApiStack.addDependency(apiGatewayStack);
 
     // Custom Resource to update UseCases Lambda environment variable with API Gateway ID
     // This avoids circular dependency by updating the Lambda AFTER both resources are created

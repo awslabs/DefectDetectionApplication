@@ -61,6 +61,7 @@ from data_models.common import (
 )
 from utils.camera_manager import get_camera_frame
 from endpoints.route.access_log_router import get_api_router
+from camera_sync.hooks import notify_image_source_changed
 
 router = get_api_router()
 
@@ -239,7 +240,10 @@ class AddImageSourceResponse(RootModel):
 
 @router.post("/image-sources")
 def add_image_source(request: AddImageSourceRequest, db: Session = Depends(get_db)) -> AddImageSourceResponse:
-    return image_source_accessor.create_image_source(request.dict(exclude_unset=True), db)
+    response = image_source_accessor.create_image_source(request.dict(exclude_unset=True), db)
+    # Image_Source CRUD triggers a debounced camera-registry report (Req 3.1)
+    notify_image_source_changed()
+    return response
 
 
 class EditImageSourceRequest(BaseModel):
@@ -257,9 +261,12 @@ class UpdateImageSourceResponse(RootModel):
 def update_image_source(
     image_source_id: str, request: EditImageSourceRequest, db: Session = Depends(get_db)
 ) -> UpdateImageSourceResponse:
-    return image_source_accessor.update_image_source(
+    response = image_source_accessor.update_image_source(
         image_source_id, request.dict(exclude_unset=True), db
     )
+    # Image_Source CRUD triggers a debounced camera-registry report (Req 3.1)
+    notify_image_source_changed()
+    return response
 
 
 class ListImageSourcesResponse(RootModel):
@@ -284,4 +291,7 @@ def get_image_source(imageSourceId: str, db: Session = Depends(get_db)):
 
 @router.delete("/image-sources/{image_source_id}")
 def delete_image_source(image_source_id: str, db: Session = Depends(get_db)):
-    return image_source_accessor.delete_image_source(image_source_id, db)
+    response = image_source_accessor.delete_image_source(image_source_id, db)
+    # Image_Source CRUD triggers a debounced camera-registry report (Req 3.1)
+    notify_image_source_changed()
+    return response

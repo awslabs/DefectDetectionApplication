@@ -10,17 +10,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import createWrapper from '@cloudscape-design/components/test-utils/dom';
-import NodeConfigPanel from './NodeConfigPanel';
+import NodeConfigPanel, { cameraOption } from './NodeConfigPanel';
 import { WORKFLOW_NODE_TYPE, type BuilderNode } from './builderGraph';
+import type { CameraSourceEntry } from './cameraReference';
 import { PORT_TYPES, type JsonValue, type NodeTypeDescriptor } from './types';
 
-const { listModels, useUsecaseMock } = vi.hoisted(() => ({
+const { listModels, listDevices, getDeviceCameras, useUsecaseMock } = vi.hoisted(() => ({
   listModels: vi.fn(),
+  listDevices: vi.fn(),
+  getDeviceCameras: vi.fn(),
   useUsecaseMock: vi.fn(),
 }));
 
 vi.mock('../../services/api', () => ({
-  apiService: { listModels },
+  apiService: { listModels, listDevices, getDeviceCameras },
 }));
 
 vi.mock('../../contexts/UsecaseContext', () => ({
@@ -175,6 +178,15 @@ function builderNode(
 beforeEach(() => {
   listModels.mockReset();
   listModels.mockResolvedValue({ models: [], count: 0, usecase_id: 'uc-1' });
+  listDevices.mockReset();
+  listDevices.mockResolvedValue({ devices: [], count: 0 });
+  getDeviceCameras.mockReset();
+  getDeviceCameras.mockResolvedValue({
+    device_id: 'dev-1',
+    state: 'synced',
+    cameras: [],
+    count: 0,
+  });
   useUsecaseMock.mockReturnValue({
     selectedUsecaseId: 'uc-1',
     setSelectedUsecaseId: vi.fn(),
@@ -693,6 +705,268 @@ describe('NodeConfigPanel', () => {
     it('renders no examples row for parameters without catalog examples', () => {
       render(<NodeConfigPanel node={builderNode(CAMERA)} onParametersChange={vi.fn()} />);
       expect(screen.queryByRole('group', { name: /Examples for/ })).toBeNull();
+    });
+  });
+
+  // ------------------------------------------------------------------------
+  // Camera reference control (camera-registry-sync task 9.3,
+  // Requirements 7.1, 7.3, 7.4, 7.5)
+  // ------------------------------------------------------------------------
+
+  describe('camera reference control (camera-registry-sync)', () => {
+    /** camera_source with only the device parameter, so the picker's two
+     * selects (reference device + camera) are the only selects rendered. */
+    const CAMERA_DEVICE_ONLY: NodeTypeDescriptor = {
+      ...CAMERA,
+      parameters: [
+        { name: 'device', paramType: 'string', required: true, default: null, constraints: {} },
+      ],
+    };
+
+    const DEVICES = [
+      { device_id: 'dev-1', usecase_id: 'uc-1', thing_name: 'edge-thing-1', status: 'HEALTHY' },
+      { device_id: 'dev-2', usecase_id: 'uc-1', thing_name: 'edge-thing-2', status: 'UNHEALTHY' },
+    ];
+
+    const REGISTRY_CAMERAS: CameraSourceEntry[] = [
+      {
+        camera_source_id: 'cfg-a1b2',
+        name: 'Line 1 inspection cam',
+        type: 'Camera',
+        params: { devicePath: '/dev/video2', gain: 8, exposure: 16000000 },
+        origin: 'edge-configured',
+        sync_status: 'synced',
+        stale: false,
+        absent: false,
+      },
+      {
+        camera_source_id: 'disc-9f',
+        name: 'Rear dock cam',
+        type: 'Camera',
+        params: { devicePath: '/dev/video5' },
+        origin: 'edge-discovered',
+        sync_status: 'synced',
+        stale: true,
+        absent: false,
+      },
+    ];
+
+    /** A camera_source node with the device parameter unset (and no
+     * hand-typed value), so the control starts on the reference picker. */
+    function pickerNode(advisoryData?: Record<string, JsonValue>): BuilderNode {
+      const node = builderNode(CAMERA_DEVICE_ONLY);
+      if (advisoryData !== undefined) {
+        node.data = { ...node.data, advisoryData };
+      }
+      return node;
+    }
+
+    beforeEach(() => {
+      listDevices.mockResolvedValue({ devices: DEVICES, count: DEVICES.length });
+      getDeviceCameras.mockResolvedValue({
+        device_id: 'dev-1',
+        state: 'synced',
+        cameras: REGISTRY_CAMERAS,
+        count: REGISTRY_CAMERAS.length,
+      });
+    });
+
+    describe('cameraOption display fields (Requirement 7.4)', () => {
+      it('shows name, device path, type, and sync status', () => {
+        const option = cameraOption(REGISTRY_CAMERAS[0]);
+        expect(option.value).toBe('cfg-a1b2');
+        expect(option.label).toBe('Line 1 inspection cam');
+        expect(option.description).toBe('/dev/video2');
+        expect(option.tags).toEqual(['Camera', 'synced']);
+        // Non-stale sources carry no staleness badge.
+        expect(option.labelTag).toBeUndefined();
+      });
+
+      it('badges stale sources and tags absent ones', () => {
+        expect(cameraOption(REGISTRY_CAMERAS[1]).labelTag).toBe('Stale');
+        const absent = cameraOption({ ...REGISTRY_CAMERAS[1], absent: true });
+        expect(absent.tags).toContain('absent');
+      });
+
+      it('falls back to the id for nameless sources and the url for pathless ones', () => {
+        const rtsp = cameraOption({
+          camera_source_id: 'cfg-rtsp',
+          params: { url: 'rtsp://10.0.0.5/stream' },
+        });
+        expect(rtsp.label).toBe('cfg-rtsp');
+        expect(rtsp.description).toBe('rtsp://10.0.0.5/stream');
+      });
+    });
+
+    it('populates the device selector from the use case devices and the camera dropdown from the registry (Requirement 7.1)', async () => {
+      const { container } = render(
+        <NodeConfigPanel node={pickerNode()} onParametersChange={vi.fn()} />
+      );
+
+      await waitFor(() => expect(listDevices).toHaveBeenCalledWith('uc-1'));
+
+      const [deviceSelect, cameraSelect] = createWrapper(container).findAllSelects();
+      await waitFor(() => {
+        deviceSelect.openDropdown();
+        expect(deviceSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+      expect(deviceSelect.findDropdown().getElement().textContent).toContain('edge-thing-1');
+      expect(deviceSelect.findDropdown().getElement().textContent).toContain('edge-thing-2');
+
+      // The camera dropdown stays disabled until a device is chosen.
+      expect(cameraSelect.isDisabled()).toBe(true);
+
+      deviceSelect.selectOptionByValue('dev-1');
+      await waitFor(() => expect(getDeviceCameras).toHaveBeenCalledWith('dev-1', 'uc-1'));
+
+      await waitFor(() => {
+        cameraSelect.openDropdown();
+        expect(cameraSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+      // Each option shows the source's name, path, type, and sync status.
+      const dropdownText = cameraSelect.findDropdown().getElement().textContent!;
+      expect(dropdownText).toContain('Line 1 inspection cam');
+      expect(dropdownText).toContain('/dev/video2');
+      expect(dropdownText).toContain('Camera');
+      expect(dropdownText).toContain('synced');
+    });
+
+    it('renders the staleness badge on stale cameras in the dropdown (Requirement 7.4)', async () => {
+      const { container } = render(
+        <NodeConfigPanel node={pickerNode()} onParametersChange={vi.fn()} />
+      );
+      await waitFor(() => expect(listDevices).toHaveBeenCalled());
+
+      const [deviceSelect, cameraSelect] = createWrapper(container).findAllSelects();
+      await waitFor(() => {
+        deviceSelect.openDropdown();
+        expect(deviceSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+      deviceSelect.selectOptionByValue('dev-1');
+
+      await waitFor(() => {
+        cameraSelect.openDropdown();
+        expect(cameraSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+      const options = cameraSelect.findDropdown().findOptions();
+      // The stale source (disc-9f) carries the badge; the fresh one does not.
+      expect(options[1].getElement().textContent).toContain('Stale');
+      expect(options[0].getElement().textContent).not.toContain('Stale');
+    });
+
+    describe('manual entry toggle (Requirement 7.3)', () => {
+      it('switches from the picker to the plain text input and back', () => {
+        const onParametersChange = vi.fn();
+        const { container } = render(
+          <NodeConfigPanel node={pickerNode()} onParametersChange={onParametersChange} />
+        );
+
+        // Starts on the reference picker: two selects, no plain input.
+        expect(createWrapper(container).findAllSelects()).toHaveLength(2);
+        expect(container.querySelector('input[aria-label="device"]')).toBeNull();
+
+        // Toggling manual entry shows the plain text input.
+        const toggle = container.querySelector(
+          'input[aria-label="Manual entry for device"]'
+        )!;
+        fireEvent.click(toggle);
+        const deviceInput = container.querySelector('input[aria-label="device"]')!;
+        expect(deviceInput).toBeInTheDocument();
+        expect(createWrapper(container).findAllSelects()).toHaveLength(0);
+
+        // Typed values propagate as ordinary parameter edits.
+        fireEvent.change(deviceInput, { target: { value: '/dev/video9' } });
+        expect(onParametersChange).toHaveBeenCalledWith('camera_source_1', {
+          device: '/dev/video9',
+        });
+
+        // Toggling back restores the picker.
+        fireEvent.click(toggle);
+        expect(container.querySelector('input[aria-label="device"]')).toBeNull();
+        expect(createWrapper(container).findAllSelects()).toHaveLength(2);
+      });
+
+      it('starts in manual mode for a hand-typed device value without a hint', () => {
+        const node = builderNode(CAMERA_DEVICE_ONLY, { device: '/dev/video7' });
+        const { container } = render(
+          <NodeConfigPanel node={node} onParametersChange={vi.fn()} />
+        );
+        expect(container.querySelector('input[aria-label="device"]')).toHaveValue(
+          '/dev/video7'
+        );
+        expect(createWrapper(container).findAllSelects()).toHaveLength(0);
+      });
+    });
+
+    describe('binding hint persistence (Requirement 7.5)', () => {
+      const HINT = {
+        cameraSourceId: 'cfg-a1b2',
+        cameraName: 'Line 1 inspection cam',
+        sourceDeviceId: 'dev-1',
+      };
+
+      it('reports the selection through onCameraSelection with the updated parameters and the hint', async () => {
+        const onParametersChange = vi.fn();
+        const onCameraSelection = vi.fn();
+        const { container } = render(
+          <NodeConfigPanel
+            node={pickerNode()}
+            onParametersChange={onParametersChange}
+            onCameraSelection={onCameraSelection}
+          />
+        );
+        await waitFor(() => expect(listDevices).toHaveBeenCalled());
+
+        const [deviceSelect, cameraSelect] = createWrapper(container).findAllSelects();
+        await waitFor(() => {
+          deviceSelect.openDropdown();
+          expect(deviceSelect.findDropdown().findOptions()).toHaveLength(2);
+        });
+        deviceSelect.selectOptionByValue('dev-1');
+        await waitFor(() => {
+          cameraSelect.openDropdown();
+          expect(cameraSelect.findDropdown().findOptions()).toHaveLength(2);
+        });
+        cameraSelect.selectOptionByValue('cfg-a1b2');
+
+        // The selection populates the node's parameters from the source
+        // and records the advisory hint; plain parameter edits are not
+        // routed through onParametersChange.
+        expect(onCameraSelection).toHaveBeenCalledWith(
+          'camera_source_1',
+          { device: '/dev/video2', gain: 8, exposure: 16000000 },
+          HINT
+        );
+        expect(onParametersChange).not.toHaveBeenCalled();
+      });
+
+      it('reads the hint back from node.data.advisoryData: picker pre-selected and link shown', async () => {
+        // A hand-set device value plus a hint starts on the picker (not
+        // manual entry), pre-selected to the hint's device and camera.
+        const node = builderNode(CAMERA_DEVICE_ONLY, { device: '/dev/video2' });
+        node.data = { ...node.data, advisoryData: { cameraBindingHint: HINT } };
+        const { container } = render(
+          <NodeConfigPanel node={node} onParametersChange={vi.fn()} />
+        );
+
+        expect(container.querySelector('input[aria-label="device"]')).toBeNull();
+        expect(
+          screen.getByText(/linked to Line 1 inspection cam on dev-1/)
+        ).toBeInTheDocument();
+
+        // The hint's device drives the camera fetch without user input.
+        await waitFor(() => expect(getDeviceCameras).toHaveBeenCalledWith('dev-1', 'uc-1'));
+
+        const [deviceSelect, cameraSelect] = createWrapper(container).findAllSelects();
+        await waitFor(() =>
+          expect(deviceSelect.findTrigger().getElement().textContent).toContain('edge-thing-1')
+        );
+        await waitFor(() =>
+          expect(cameraSelect.findTrigger().getElement().textContent).toContain(
+            'Line 1 inspection cam'
+          )
+        );
+      });
     });
   });
 });

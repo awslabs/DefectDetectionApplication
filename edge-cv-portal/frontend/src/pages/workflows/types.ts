@@ -48,6 +48,14 @@ export interface WorkflowNode {
   type: string;
   position: NodePosition;
   parameters: Record<string, JsonValue>;
+  /**
+   * Optional advisory node data (e.g. the `cameraBindingHint` recorded
+   * by the Workflow_Builder camera picker, camera-registry-sync
+   * Requirements 7.2, 7.5). Preserved through save/load round trips but
+   * ignored by validation and compilation, so definitions carrying it
+   * stay device-portable.
+   */
+  data?: Record<string, JsonValue>;
 }
 
 /** A typed port endpoint: a port name on a specific node. */

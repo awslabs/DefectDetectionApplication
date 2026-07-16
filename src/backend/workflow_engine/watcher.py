@@ -38,6 +38,11 @@ import uuid
 from typing import Callable, Dict, List, Optional
 
 from workflow_engine import discovery, gst_plugins
+from workflow_engine.camera_binding import (
+    STATUS_RESOLVED,
+    ResolutionResult,
+    resolve_bindings,
+)
 from workflow_engine.discovery import (
     STATUS_INVALID,
     WORKFLOWS_ROOT,
@@ -48,6 +53,12 @@ from workflow_engine.models import WorkflowRegistration
 logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
+
+#: Invalid-registration reason when a document carries binding points but
+#: the ``dda-camera-bindings`` shadow cannot be read (camera-registry-sync
+#: Requirements 10.2, 11.1). Legacy documents without binding points
+#: register as today even then.
+REASON_BINDINGS_UNAVAILABLE = "bindings unavailable"
 
 
 def registration_id_for(workflow_id: str, version: str) -> str:
@@ -66,6 +77,8 @@ class WorkflowWatcher:
         device_arch: Optional[str] = None,
         running_version: Optional[str] = None,
         plugins_root: str = gst_plugins.DEVICE_PLUGINS_ROOT,
+        binding_store=None,
+        inventory_provider: Optional[Callable] = None,
     ) -> None:
         if session_factory is None:
             # Imported lazily so the module is importable without the
@@ -79,6 +92,15 @@ class WorkflowWatcher:
         self._device_arch = device_arch
         self._running_version = running_version
         self._plugins_root = plugins_root
+        # Camera_Binding resolution (camera-registry-sync Requirements
+        # 10.2, 10.4, 11.1). ``binding_store`` is a CameraBindingStore (or
+        # a fake exposing ``bindings_for``/``invalidate``); when None the
+        # feature is unwired and every document registers exactly as
+        # before. ``inventory_provider`` is a zero-argument callable
+        # returning the device-local Camera_Source inventory (the
+        # ``build_inventory`` merge) — injectable for tests.
+        self.binding_store = binding_store
+        self._inventory_provider = inventory_provider
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         # registration id -> reason, reported for invalid artifact sets.
@@ -86,6 +108,9 @@ class WorkflowWatcher:
         # API can surface the reason alongside the stored status.
         self._invalid_reasons: Dict[str, str] = {}
         self._reasons_lock = threading.Lock()
+        # registration id -> ResolutionResult for registrations whose
+        # bindings resolved (substituted document + adapter assignments).
+        self._binding_resolutions: Dict[str, ResolutionResult] = {}
 
     # ------------------------------------------------------------------
     # Public interface
@@ -112,6 +137,38 @@ class WorkflowWatcher:
         """The reported reason for an invalid registration, if known."""
         with self._reasons_lock:
             return self._invalid_reasons.get(registration_id)
+
+    def binding_resolution(self, registration_id: str) -> Optional[ResolutionResult]:
+        """The latest successful Camera_Binding resolution for a
+        registration (substituted document + adapter assignments), or
+        None when the document has no applied bindings."""
+        with self._reasons_lock:
+            return self._binding_resolutions.get(registration_id)
+
+    def on_discovery_change(self, snapshot=None) -> None:
+        """Camera_Discovery ``on_change`` hook: the local inventory
+        changed, so re-resolve registrations — an invalid registration
+        flips to registered when its camera appeared (Requirement 10.4)."""
+        self._resync_for_bindings()
+
+    def on_bindings_delta(self, message=None) -> None:
+        """Bindings-shadow delta hook: refresh the cached bindings and
+        re-resolve registrations (Requirement 10.4)."""
+        if self.binding_store is not None:
+            try:
+                self.binding_store.invalidate()
+            except Exception:  # noqa: BLE001 - hook isolation (11.2)
+                logger.exception("Could not invalidate the camera-binding cache")
+        self._resync_for_bindings()
+
+    def _resync_for_bindings(self) -> None:
+        """One contained rescan; ``sync_once`` re-runs binding resolution
+        for every artifact set, so status flips both ways as cameras and
+        bindings come and go."""
+        try:
+            self.sync_once()
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception("Camera-binding re-resolution scan failed")
 
     def sync_once(self) -> List[str]:
         """One full scan/validate/register pass.
@@ -159,11 +216,24 @@ class WorkflowWatcher:
             plugins_root=self._plugins_root,
         )
 
+        # Camera_Binding resolution can downgrade a structurally valid
+        # artifact set to invalid (missing camera source / bindings
+        # unavailable — Requirements 10.2, 11.1); the effective status and
+        # reason drive the row, the reasons map, and the log lines below.
+        status, reason, resolution = self._resolve_camera_bindings(
+            artifact_set, validation
+        )
+        is_valid = status != STATUS_INVALID
+
         with self._reasons_lock:
-            if validation.is_valid:
+            if is_valid:
                 self._invalid_reasons.pop(registration_id, None)
             else:
-                self._invalid_reasons[registration_id] = validation.reason or ""
+                self._invalid_reasons[registration_id] = reason or ""
+            if resolution is not None and is_valid:
+                self._binding_resolutions[registration_id] = resolution
+            else:
+                self._binding_resolutions.pop(registration_id, None)
 
         row = session.get(WorkflowRegistration, registration_id)
         if row is None:
@@ -174,29 +244,29 @@ class WorkflowWatcher:
                     version=artifact_set.version,
                     arch=validation.arch,
                     artifact_path=artifact_set.path,
-                    status=validation.status,
+                    status=status,
                     registered_at=int(time.time()),
                 )
             )
             changed = True
         else:
             changed = (
-                row.status != validation.status
+                row.status != status
                 or row.arch != validation.arch
                 or row.artifact_path != artifact_set.path
             )
             if changed:
                 row.arch = validation.arch
                 row.artifact_path = artifact_set.path
-                row.status = validation.status
+                row.status = status
                 row.registered_at = int(time.time())
 
-        if not validation.is_valid:
+        if not is_valid:
             # Reported, never runnable (Requirements 9.1, 13.3).
             logger.error(
                 "Workflow artifact set %s registered as invalid: %s",
                 registration_id,
-                validation.reason,
+                reason,
             )
         elif changed:
             logger.info(
@@ -206,6 +276,67 @@ class WorkflowWatcher:
                 validation.arch,
             )
         return changed
+
+    def _resolve_camera_bindings(self, artifact_set, validation):
+        """Camera_Binding resolution for one artifact set (camera-registry-
+        sync Requirements 10.2, 10.4, 11.1).
+
+        Returns ``(status, reason, resolution)`` — the effective
+        registration status/reason after resolution, and the
+        ResolutionResult when bindings were applied. Rules:
+
+        - No binding store wired, or structurally invalid artifact set:
+          the discovery validation stands unchanged.
+        - Bindings shadow unreadable: documents *with* binding points are
+          invalid with reason ``bindings unavailable``; documents without
+          binding points register as today (11.1).
+        - An unresolved ``cameraSourceId`` (or override violation) marks
+          the registration invalid with the resolver's reasons —
+          ``missing camera source {csid}`` — so the existing
+          invalid-registration path rejects triggers (10.2).
+        """
+        if not validation.is_valid or self.binding_store is None:
+            return validation.status, validation.reason, None
+
+        document = validation.compiled_document or {}
+        has_binding_points = bool(document.get("bindingPoints"))
+
+        try:
+            bindings = self.binding_store.bindings_for(
+                artifact_set.workflow_id, artifact_set.version
+            )
+        except Exception:  # noqa: BLE001 - store isolation (11.2)
+            logger.exception("Camera-binding lookup failed")
+            bindings = None
+
+        if bindings is None:
+            # Bindings shadow unreadable (10.2/11.1). Legacy documents
+            # (no bindingPoints) never needed bindings — register as today.
+            if has_binding_points:
+                return STATUS_INVALID, REASON_BINDINGS_UNAVAILABLE, None
+            return validation.status, validation.reason, None
+
+        if not has_binding_points or not bindings:
+            # Pre-feature document, or nothing bound: the compiled-in
+            # values run exactly as before (10.5, 11.1).
+            return validation.status, validation.reason, None
+
+        resolution = resolve_bindings(document, bindings, self._local_inventory())
+        if resolution.status != STATUS_RESOLVED:
+            return STATUS_INVALID, "; ".join(resolution.errors), resolution
+        return validation.status, validation.reason, resolution
+
+    def _local_inventory(self):
+        """The device-local Camera_Source inventory from the injected
+        provider; a provider failure resolves against an empty inventory
+        (the next re-resolution pass recovers, 10.4)."""
+        if self._inventory_provider is None:
+            return {}
+        try:
+            return self._inventory_provider()
+        except Exception:  # noqa: BLE001 - provider isolation (11.2)
+            logger.exception("Local camera inventory read failed")
+            return {}
 
     def _invalidate_removed(self, session, seen_ids) -> List[str]:
         """Mark registrations whose artifacts disappeared as invalid."""

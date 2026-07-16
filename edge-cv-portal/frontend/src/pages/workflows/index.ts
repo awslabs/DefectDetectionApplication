@@ -6,6 +6,7 @@
  */
 
 export * from './types';
+export * from './cameraReference';
 export * from './compatibility';
 export * from './parameters';
 export * from './inlineChecks';

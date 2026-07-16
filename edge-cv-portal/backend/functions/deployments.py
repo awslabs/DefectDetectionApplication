@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 import boto3
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
@@ -306,6 +307,14 @@ def handler(event, context):
         user = get_user_from_event(event)
         
         if http_method == 'GET' and not path_parameters.get('id'):
+            # Deploy-time Camera_Binding context (camera-registry-sync
+            # Requirements 8.1, 8.5): per-target Camera_Sources for each
+            # Camera_Input_Node with hint-matching pre-selection. Checked
+            # before the target-deployment dispatch because this view also
+            # names its targets in the query string.
+            if (path.endswith('/binding-context')
+                    or query_parameters.get('view') == 'binding-context'):
+                return get_camera_binding_context(user, query_parameters)
             # Sub-resource: look up the existing deployment for a specific target
             if path.endswith('/target-deployment') or query_parameters.get('target_device') or query_parameters.get('target_thing_group'):
                 return get_target_deployment(user, query_parameters)
@@ -1579,11 +1588,14 @@ def check_local_server_compatibility(greengrass_client, thing_names,
 def record_workflow_deployment(deployment_id, usecase_id, workflow_id,
                                workflow_version, target_arn, target_devices,
                                target_thing_group, is_revision,
-                               superseded_deployment_id, user):
+                               superseded_deployment_id, user,
+                               camera_bindings=None):
     """
     Record the workflow version -> deployment -> devices association in the
     Deployments table (Requirement 8.2). component_type: 'workflow' plus
     workflow_id is the shape workflows.py's delete flow matches on (5.6).
+    Delivered Camera_Bindings are stored on the record for display and
+    audit (camera-registry-sync Requirements 8.2, 12.3).
     """
     timestamp = int(datetime.utcnow().timestamp() * 1000)
     item = {
@@ -1607,8 +1619,714 @@ def record_workflow_deployment(deployment_id, usecase_id, workflow_id,
         'created_at': timestamp,
         'updated_at': timestamp
     }
+    if camera_bindings is not None:
+        item['camera_bindings'] = _dynamo_safe(camera_bindings)
     dynamodb.Table(DEPLOYMENTS_TABLE).put_item(Item=item)
     return item
+
+
+# ---------------------------------------------------------------------------
+# Deploy-time Camera_Binding validation (camera-registry-sync
+# Requirements 8.3, 8.4, 8.7, 8.8, 8.9, 9.1-9.5, 11.1)
+#
+# validate_camera_bindings is a pure function over plain dicts (like the
+# plugin gates above) so the binding decision logic is property-testable
+# without AWS. The workflow version item's packager-recorded discriminator
+# separates the two regimes:
+#
+# - has_binding_points true: every Camera_Input_Node needs a Camera_Binding
+#   (registered source or manual override) per target device — errors
+#   reject the deployment (8.7, 9.1, 9.2, 9.4, 8.4); degraded sources and
+#   never-synced targets produce warnings that must be confirmed (9.3, 8.8).
+# - has_binding_points false (legacy versions): the compiled-in device
+#   paths are compared against each target's registry and unmatched paths
+#   produce warnings only, never errors (9.5, 11.1).
+#
+# Workflow versions with no Camera_Input_Nodes produce no errors and no
+# warnings (8.9).
+# ---------------------------------------------------------------------------
+
+# Error codes (deployment rejected)
+CAMERA_ERROR_UNBOUND = 'CAMERA_NODE_UNBOUND'                # 8.7
+CAMERA_ERROR_SOURCE_MISSING = 'CAMERA_SOURCE_MISSING'       # 9.1, 9.2
+CAMERA_ERROR_TYPE_INCOMPATIBLE = 'CAMERA_TYPE_INCOMPATIBLE' # 9.4
+CAMERA_ERROR_OVERRIDE_INVALID = 'CAMERA_OVERRIDE_INVALID'   # 8.4
+
+# Warning codes (require a matching confirmed_warnings id to submit)
+CAMERA_WARNING_SOURCE_DEGRADED = 'CAMERA_SOURCE_DEGRADED'   # 9.3
+CAMERA_WARNING_NEVER_SYNCED = 'DEVICE_NEVER_SYNCED'         # 8.8
+CAMERA_WARNING_LEGACY_PATH = 'COMPILED_PATH_UNREGISTERED'   # 9.5
+
+#: Camera_Source types (registry ``type`` attribute) compatible with each
+#: built-in Camera_Input_Node type. camera_source captures from a device
+#: camera (v4l2src, the JP4/5 camera adapter, or the JP6 CSI host
+#: service), so folder and network-stream sources cannot back it.
+_CAMERA_COMPATIBLE_SOURCE_TYPES = {
+    'camera_source': frozenset({'Camera', 'ICam', 'NvidiaCSI',
+                                'V4L2Discovered'}),
+}
+
+#: Camera_Source types that are never a camera. Custom camera-backed node
+#: types declare no backing transport, so only the categorically
+#: incompatible Folder type (Requirement 9.4's example) is rejected for
+#: them; everything else is accepted.
+_NEVER_CAMERA_SOURCE_TYPES = frozenset({'Folder'})
+
+#: Registry-entry param keys that may carry the source's device path
+#: (the edge report shape writes ``devicePath``; ``device`` is accepted
+#: for parity with the node parameter name).
+_DEVICE_PATH_PARAM_KEYS = ('devicePath', 'device')
+
+
+def _registry_device_paths(cameras):
+    """Every device path registered in one device's camera map."""
+    paths = set()
+    for entry in cameras.values():
+        params = (entry or {}).get('params') or {}
+        for key in _DEVICE_PATH_PARAM_KEYS:
+            value = params.get(key)
+            if isinstance(value, str) and value:
+                paths.add(value)
+    return paths
+
+
+def _camera_source_type_compatible(node_type, source_type):
+    """Whether a Camera_Source type may back a Camera_Input_Node type
+    (Requirement 9.4)."""
+    compatible = _CAMERA_COMPATIBLE_SOURCE_TYPES.get(node_type)
+    if compatible is not None:
+        return source_type in compatible
+    return source_type not in _NEVER_CAMERA_SOURCE_TYPES
+
+
+def _degraded_source_conditions(entry):
+    """The Requirement 9.3 warning conditions a registry entry is in:
+    absent, stale, and/or sync status pending/failed."""
+    conditions = []
+    if entry.get('absent'):
+        conditions.append('absent')
+    if entry.get('stale'):
+        conditions.append('stale')
+    if entry.get('sync_status') in ('pending', 'failed'):
+        conditions.append(entry['sync_status'])
+    return conditions
+
+
+def _camera_node_descriptor(node_type, descriptors):
+    """The NodeTypeDescriptor of a Camera_Input_Node type: the caller's
+    merged-catalog mapping when it covers the type (camera-backed
+    Custom_Node_Types), otherwise the built-in workflow_core catalog.
+    None when unresolvable — override validation fails closed."""
+    if descriptors and node_type in descriptors:
+        return descriptors[node_type]
+    # Imported lazily: only override validation needs the workflow_core
+    # layer; every other deployments.py path stays importable without it.
+    from workflow_core.catalog import get_node_type
+    return get_node_type(node_type)
+
+
+def _override_errors(thing_name, node_id, node_type, override, descriptors):
+    """Manual-override constraint violations (Requirement 8.4): each
+    supplied value is checked against the node type's declared parameter
+    constraints with the workflow_core parameter validator. Values are
+    validated as supplied — the compiled document keeps rendered defaults
+    for parameters an override omits."""
+    descriptor = _camera_node_descriptor(node_type, descriptors)
+    if descriptor is None:
+        # Fail closed, matching the plugin gates' unresolvable-record rule.
+        return [{
+            'code': CAMERA_ERROR_OVERRIDE_INVALID,
+            'device': thing_name,
+            'nodeId': node_id,
+            'message': (f"Override values for camera input node '{node_id}' "
+                        f"on device '{thing_name}' cannot be validated: no "
+                        f"parameter declaration is available for node type "
+                        f"'{node_type}'"),
+        }]
+    from workflow_core.validator import check_parameter_value
+    parameters = {p.name: p for p in descriptor.parameters}
+    errors = []
+    for name in sorted(override):
+        parameter = parameters.get(name)
+        if parameter is None:
+            errors.append({
+                'code': CAMERA_ERROR_OVERRIDE_INVALID,
+                'device': thing_name,
+                'nodeId': node_id,
+                'parameter': name,
+                'message': (f"Override for camera input node '{node_id}' on "
+                            f"device '{thing_name}' sets '{name}', which is "
+                            f"not a declared parameter of node type "
+                            f"'{node_type}'"),
+            })
+            continue
+        violation = check_parameter_value(parameter, override[name])
+        if violation is not None:
+            errors.append({
+                'code': CAMERA_ERROR_OVERRIDE_INVALID,
+                'device': thing_name,
+                'nodeId': node_id,
+                'parameter': name,
+                'violation': violation.code,
+                'message': (f"Override for camera input node '{node_id}' on "
+                            f"device '{thing_name}': {violation.message}"),
+            })
+    return errors
+
+
+def _legacy_path_warnings(camera_nodes, thing_name, cameras, confirmed_ids):
+    """Requirement 9.5 / 11.1: for a version without binding points, each
+    compiled-in device path that matches no registered Camera_Source on
+    the target produces a warning — never an error."""
+    registered_paths = _registry_device_paths(cameras)
+    warnings = []
+    for node in camera_nodes:
+        node_id = node.get('node_id')
+        compiled_paths = node.get('compiled_device_paths') or {}
+        unmatched = {}
+        for arch in sorted(compiled_paths):
+            path = compiled_paths[arch]
+            if isinstance(path, str) and path and path not in registered_paths:
+                unmatched.setdefault(path, []).append(arch)
+        for path in sorted(unmatched):
+            warning_id = f'legacy-path:{thing_name}:{node_id}:{path}'
+            warnings.append({
+                'id': warning_id,
+                'code': CAMERA_WARNING_LEGACY_PATH,
+                'device': thing_name,
+                'nodeId': node_id,
+                'path': path,
+                'architectures': unmatched[path],
+                'confirmed': warning_id in confirmed_ids,
+                'message': (f"Compiled-in device path '{path}' of camera "
+                            f"input node '{node_id}' matches no camera "
+                            f"registered on device '{thing_name}'"),
+            })
+    return warnings
+
+
+def validate_camera_bindings(version_item, targets, registry_snapshot,
+                             bindings, confirmed, descriptors=None):
+    """
+    Pre-submit Camera_Binding validation (camera-registry-sync
+    Requirements 8.3, 8.4, 8.7, 8.8, 8.9, 9.1-9.5, 11.1). Pure over its
+    inputs; returns ``(errors, warnings)``.
+
+    ``version_item``: the workflow version item carrying the
+        packager-recorded ``has_binding_points`` flag and
+        ``camera_input_nodes`` records ({node_id, node_type,
+        binding_hint?, compiled_device_paths: {arch: path}}).
+    ``targets``: the target device thing names.
+    ``registry_snapshot``: {thing_name: {'never_synced': bool, 'cameras':
+        {camera_source_id: registry entry}}} with per-entry ``stale``
+        precomputed by the caller against the Staleness_Threshold (the
+        function itself is time-free). A device absent from the snapshot
+        is treated as never synced with an empty registry (fail-safe).
+    ``bindings``: {thing_name: {node_id: {'cameraSourceId': id} |
+        {'override': {param: value}}}}. When both keys are present the
+        registered-source binding is authoritative.
+    ``confirmed``: the submitted ``confirmed_warnings`` ids; each returned
+        warning carries ``confirmed`` so the caller accepts the deployment
+        only when every warning is confirmed.
+    ``descriptors``: optional {node_type: NodeTypeDescriptor} for
+        camera-backed Custom_Node_Types (built-ins resolve from the
+        workflow_core catalog).
+
+    Errors reject the deployment: unbound Camera_Input_Node on any target
+    (8.7); referenced cameraSourceId absent from the target's registry
+    (9.1, 9.2, and the never-synced manual-override restriction of 8.8);
+    Camera_Source type incompatible with the node type (9.4); override
+    values violating declared parameter constraints (8.4). Distinct
+    bindings per device for the same node are the natural map shape (8.3).
+    """
+    camera_nodes = (version_item or {}).get('camera_input_nodes') or []
+    if not camera_nodes:
+        # No Camera_Input_Nodes: deployment proceeds without bindings (8.9)
+        return [], []
+
+    confirmed_ids = set(confirmed or [])
+    bindings = bindings or {}
+    registry_snapshot = registry_snapshot or {}
+    errors = []
+    warnings = []
+
+    for thing_name in sorted(targets or []):
+        device_snapshot = registry_snapshot.get(thing_name)
+        cameras = (device_snapshot or {}).get('cameras') or {}
+        if device_snapshot is None:
+            never_synced = True
+        else:
+            never_synced = bool(device_snapshot.get('never_synced'))
+
+        if not version_item.get('has_binding_points'):
+            # Legacy regime: compiled-in path comparison, warnings only
+            # (9.5, 11.1)
+            warnings.extend(_legacy_path_warnings(
+                camera_nodes, thing_name, cameras, confirmed_ids))
+            continue
+
+        if never_synced and not cameras:
+            # 8.8: warn, and permit binding only through manual override
+            # (a cameraSourceId binding below fails the existence check
+            # against the empty registry).
+            warning_id = f'never-synced:{thing_name}'
+            warnings.append({
+                'id': warning_id,
+                'code': CAMERA_WARNING_NEVER_SYNCED,
+                'device': thing_name,
+                'confirmed': warning_id in confirmed_ids,
+                'message': (f"Device '{thing_name}' has never completed a "
+                            f"camera registry synchronization; camera "
+                            f"bindings are restricted to manual override"),
+            })
+
+        device_bindings = bindings.get(thing_name) or {}
+        for node in camera_nodes:
+            node_id = node.get('node_id')
+            node_type = node.get('node_type')
+            binding = device_bindings.get(node_id)
+            camera_source_id = None
+            override = None
+            if isinstance(binding, dict):
+                if isinstance(binding.get('cameraSourceId'), str) \
+                        and binding['cameraSourceId']:
+                    camera_source_id = binding['cameraSourceId']
+                elif isinstance(binding.get('override'), dict):
+                    override = binding['override']
+
+            if camera_source_id is None and override is None:
+                # Neither a selected Camera_Source nor a manual override (8.7)
+                errors.append({
+                    'code': CAMERA_ERROR_UNBOUND,
+                    'device': thing_name,
+                    'nodeId': node_id,
+                    'message': (f"Camera input node '{node_id}' has no camera "
+                                f"binding for target device '{thing_name}'"),
+                })
+                continue
+
+            if override is not None:
+                errors.extend(_override_errors(
+                    thing_name, node_id, node_type, override, descriptors))
+                continue
+
+            entry = cameras.get(camera_source_id)
+            if entry is None:
+                # Referenced source not in the target's registry (9.1, 9.2)
+                errors.append({
+                    'code': CAMERA_ERROR_SOURCE_MISSING,
+                    'device': thing_name,
+                    'nodeId': node_id,
+                    'cameraSourceId': camera_source_id,
+                    'message': (f"Camera source '{camera_source_id}' bound to "
+                                f"node '{node_id}' is not registered on "
+                                f"device '{thing_name}'"),
+                })
+                continue
+
+            source_type = entry.get('type')
+            if not _camera_source_type_compatible(node_type, source_type):
+                errors.append({
+                    'code': CAMERA_ERROR_TYPE_INCOMPATIBLE,
+                    'device': thing_name,
+                    'nodeId': node_id,
+                    'cameraSourceId': camera_source_id,
+                    'sourceType': source_type,
+                    'nodeType': node_type,
+                    'message': (f"Camera source '{camera_source_id}' of type "
+                                f"'{source_type}' is not compatible with "
+                                f"node '{node_id}' of type '{node_type}' on "
+                                f"device '{thing_name}'"),
+                })
+
+            conditions = _degraded_source_conditions(entry)
+            if conditions:
+                # 9.3: degraded source needs explicit confirmation
+                warning_id = (f"camera-degraded:{thing_name}:{node_id}:"
+                              f"{camera_source_id}:{'+'.join(conditions)}")
+                warnings.append({
+                    'id': warning_id,
+                    'code': CAMERA_WARNING_SOURCE_DEGRADED,
+                    'device': thing_name,
+                    'nodeId': node_id,
+                    'cameraSourceId': camera_source_id,
+                    'conditions': conditions,
+                    'confirmed': warning_id in confirmed_ids,
+                    'message': (f"Camera source '{camera_source_id}' bound to "
+                                f"node '{node_id}' on device '{thing_name}' "
+                                f"is {', '.join(conditions)}"),
+                })
+
+    return errors, warnings
+
+
+# ---------------------------------------------------------------------------
+# Camera_Registry snapshot, binding context, and Camera_Binding delivery
+# (camera-registry-sync task 11.7 — Requirements 8.1, 8.2, 8.5, 8.6, 12.3)
+# ---------------------------------------------------------------------------
+
+# Per-device Camera_Registry written by the Portal_Sync_Service
+# (camera_sync.py); read here for the binding context endpoint and the
+# pre-submit binding validation.
+CAMERA_REGISTRY_TABLE = os.environ.get('CAMERA_REGISTRY_TABLE')
+SETTINGS_TABLE = os.environ.get('SETTINGS_TABLE')
+
+# Item-type SK prefixes of the dda-portal-camera-registry table.
+CAMERA_SK_META = 'META'
+CAMERA_SK_PREFIX = 'CAMERA#'
+
+# Staleness_Threshold setting (camera_registry.py owns the same key):
+# per-entry ``stale`` is computed here before the snapshot reaches the
+# time-free validate_camera_bindings (Req 4.1 feeding 9.3).
+CAMERA_STALENESS_SETTING_KEY = 'camera_registry.staleness_threshold_hours'
+CAMERA_DEFAULT_STALENESS_HOURS = 24
+
+# Camera_Binding delivery shadow: desired.bindings["{workflowId}/{version}"]
+# per target thing, written at deployment submission (Req 8.6).
+CAMERA_BINDINGS_SHADOW_NAME = 'dda-camera-bindings'
+
+# Rejection codes of the submission flow
+CAMERA_ERROR_REGISTRY_UNAVAILABLE = 'REGISTRY_UNAVAILABLE'
+CAMERA_ERROR_BINDING_DELIVERY = 'BINDING_DELIVERY_FAILED'
+CAMERA_ERROR_BINDINGS_INVALID = 'CAMERA_BINDINGS_INVALID'
+CAMERA_ERROR_WARNINGS_UNCONFIRMED = 'CAMERA_WARNINGS_UNCONFIRMED'
+
+
+class CameraRegistryUnavailable(Exception):
+    """The Camera_Registry could not be read. Submission rejects with
+    REGISTRY_UNAVAILABLE rather than skipping binding validation."""
+
+
+def _dynamo_safe(obj):
+    """A JSON-shaped value with floats as Decimal, safe for DynamoDB."""
+    return json.loads(json.dumps(obj), parse_float=Decimal)
+
+
+def _camera_staleness_threshold_ms():
+    """The configured Staleness_Threshold in milliseconds (default 24 h).
+
+    A settings-read failure degrades to the default: staleness only grades
+    warnings, so it must not turn into a registry-availability rejection.
+    """
+    hours = CAMERA_DEFAULT_STALENESS_HOURS
+    if SETTINGS_TABLE:
+        try:
+            response = dynamodb.Table(SETTINGS_TABLE).get_item(
+                Key={'setting_key': CAMERA_STALENESS_SETTING_KEY})
+            value = (response.get('Item') or {}).get('value')
+            if value is not None and float(value) > 0:
+                hours = float(value)
+        except (ClientError, TypeError, ValueError) as e:
+            logger.warning(f"Could not read staleness threshold setting: {e}")
+    return hours * 3600 * 1000
+
+
+def load_camera_registry_snapshot(thing_names):
+    """The per-target Camera_Registry snapshot consumed by
+    validate_camera_bindings and the binding context endpoint:
+    ``{thing_name: {'never_synced': bool, 'cameras': {csid: entry}}}``
+    with per-entry ``stale`` precomputed against the Staleness_Threshold.
+
+    Raises CameraRegistryUnavailable when the registry cannot be read —
+    the caller must reject the submission, never skip validation.
+    """
+    if not CAMERA_REGISTRY_TABLE:
+        raise CameraRegistryUnavailable(
+            'Camera registry table is not configured')
+    table = dynamodb.Table(CAMERA_REGISTRY_TABLE)
+    threshold_ms = _camera_staleness_threshold_ms()
+    now = int(datetime.utcnow().timestamp() * 1000)
+    snapshot = {}
+    for thing_name in thing_names:
+        items = []
+        kwargs = {'KeyConditionExpression': Key('device_id').eq(thing_name)}
+        try:
+            while True:
+                response = table.query(**kwargs)
+                items.extend(response.get('Items', []))
+                last_key = response.get('LastEvaluatedKey')
+                if not last_key:
+                    break
+                kwargs['ExclusiveStartKey'] = last_key
+        except ClientError as e:
+            raise CameraRegistryUnavailable(
+                f"Camera registry read failed for device "
+                f"'{thing_name}': {e}") from e
+        meta = next((item for item in items
+                     if item.get('sk') == CAMERA_SK_META), None)
+        cameras = {}
+        for item in items:
+            sk = item.get('sk') or ''
+            if not sk.startswith(CAMERA_SK_PREFIX):
+                continue
+            entry = _decimal_to_native(dict(item))
+            last_reported_at = entry.get('last_reported_at')
+            entry['stale'] = (last_reported_at is not None
+                              and (now - int(last_reported_at)) > threshold_ms)
+            csid = entry.get('camera_source_id') or sk[len(CAMERA_SK_PREFIX):]
+            cameras[csid] = entry
+        snapshot[thing_name] = {
+            'never_synced': meta is None or bool(meta.get('never_synced', True)),
+            'cameras': cameras,
+        }
+    return snapshot
+
+
+def _binding_camera_view(csid, entry):
+    """One registry entry as a selectable binding option (Reqs 8.1, 7.4
+    display fields plus the degraded-condition inputs of 9.3)."""
+    view = {
+        'camera_source_id': csid,
+        'name': entry.get('name'),
+        'type': entry.get('type'),
+        'params': entry.get('params') or {},
+        'capabilities': entry.get('capabilities') or {},
+        'origin': entry.get('origin'),
+        'sync_status': entry.get('sync_status'),
+        'last_reported_at': entry.get('last_reported_at'),
+        'absent': bool(entry.get('absent', False)),
+        'stale': bool(entry.get('stale', False)),
+    }
+    if view['absent'] and entry.get('absent_since') is not None:
+        view['absent_since'] = entry['absent_since']
+    return view
+
+
+def get_camera_binding_context(user, query_params):
+    """
+    GET /deployments?view=binding-context — the CreateDeployment binding
+    matrix's data source (camera-registry-sync Requirements 8.1, 8.5, 8.9).
+
+    Query: usecase_id, workflow_id, workflow_version? (defaults to the
+    latest version), and target_devices (comma-separated thing names) or
+    target_thing_group.
+
+    Returns, for each Camera_Input_Node of the workflow version and each
+    target Edge_Device, the device's registered Camera_Sources as binding
+    options (8.1), with a pre-selected cameraSourceId per node when the
+    node's binding hint matches a source present in that device's
+    registry (8.5). Versions without Camera_Input_Nodes return an empty
+    matrix so the frontend skips the step entirely (8.9).
+    """
+    try:
+        usecase_id = query_params.get('usecase_id')
+        workflow_id = query_params.get('workflow_id')
+        if not usecase_id or not workflow_id:
+            return _workflow_error(400, 'MISSING_FIELDS',
+                                   'usecase_id and workflow_id required')
+
+        if not has_workflow_permission(user, usecase_id,
+                                       Permission.WORKFLOW_DEPLOY):
+            log_audit_event(
+                user['user_id'], 'unauthorized_access', 'workflow',
+                workflow_id, 'denied', {
+                    'required_permissions': [Permission.WORKFLOW_DEPLOY.value],
+                    'usecase_id': usecase_id,
+                    'operation': 'camera_binding_context'
+                })
+            return _workflow_error(403, 'FORBIDDEN',
+                                   'Insufficient permissions', {
+                                       'required_permissions':
+                                           [Permission.WORKFLOW_DEPLOY.value],
+                                       'usecase_id': usecase_id
+                                   })
+
+        workflow_item = get_workflow_metadata(workflow_id)
+        if not workflow_item or workflow_item.get('usecase_id') != usecase_id:
+            return _workflow_error(404, 'WORKFLOW_NOT_FOUND',
+                                   'Workflow not found')
+
+        version_param = query_params.get(
+            'workflow_version', workflow_item.get('latest_version', 1))
+        try:
+            workflow_version = int(version_param)
+        except (TypeError, ValueError):
+            return _workflow_error(400, 'INVALID_VERSION',
+                                   'workflow_version must be an integer')
+
+        version_item = workflow_guards.get_version_item(
+            workflow_id, workflow_version)
+        if not version_item:
+            return _workflow_error(404, 'VERSION_NOT_FOUND',
+                                   'Workflow version not found')
+        version_item = _decimal_to_native(version_item)
+
+        camera_nodes = version_item.get('camera_input_nodes') or []
+        node_views = []
+        for node in camera_nodes:
+            node_view = {
+                'node_id': node.get('node_id'),
+                'node_type': node.get('node_type'),
+            }
+            if node.get('binding_hint'):
+                node_view['binding_hint'] = node['binding_hint']
+            node_views.append(node_view)
+
+        context = {
+            'workflow_id': workflow_id,
+            'workflow_version': workflow_version,
+            'has_binding_points': bool(version_item.get('has_binding_points')),
+            # Frontend skip discriminator: no Camera_Input_Nodes, no
+            # binding step (8.9).
+            'binding_required': bool(version_item.get('has_binding_points')
+                                     and camera_nodes),
+            'camera_input_nodes': node_views,
+            'targets': {},
+        }
+        if not camera_nodes:
+            return create_response(200, context)
+
+        target_devices = [name for name in
+                          (query_params.get('target_devices') or '').split(',')
+                          if name]
+        target_thing_group = query_params.get('target_thing_group')
+        if not target_devices and not target_thing_group:
+            return _workflow_error(
+                400, 'MISSING_FIELDS',
+                'Either target_devices or target_thing_group required')
+
+        usecase = get_usecase(usecase_id)
+        if not usecase:
+            return _workflow_error(404, 'USECASE_NOT_FOUND',
+                                   'Use case not found')
+        if target_devices:
+            resolved_devices = list(target_devices)
+        else:
+            region = get_usecase_region(usecase)
+            iot_client = get_usecase_client('iot', usecase, region=region)
+            resolved_devices = resolve_target_thing_names(
+                iot_client, [], target_thing_group)
+
+        try:
+            registry_snapshot = load_camera_registry_snapshot(resolved_devices)
+        except CameraRegistryUnavailable as e:
+            logger.error(f"Camera registry unavailable: {e}")
+            return _workflow_error(
+                503, CAMERA_ERROR_REGISTRY_UNAVAILABLE,
+                'The camera registry could not be read for the target '
+                'devices', {'reason': str(e)})
+
+        for thing_name in resolved_devices:
+            device_snapshot = registry_snapshot.get(thing_name) or {}
+            cameras = device_snapshot.get('cameras') or {}
+            camera_views = sorted(
+                (_binding_camera_view(csid, entry)
+                 for csid, entry in cameras.items()),
+                key=lambda c: (c.get('name') or '', c['camera_source_id']))
+            # Hint-matching pre-selection (8.5): the node's recorded
+            # binding hint proposes a source only when that source is
+            # present in THIS device's registry; the user confirms or
+            # changes it in the matrix.
+            preselected = {}
+            for node in camera_nodes:
+                hint = node.get('binding_hint') or {}
+                hinted_csid = hint.get('cameraSourceId')
+                if hinted_csid and hinted_csid in cameras:
+                    preselected[node['node_id']] = hinted_csid
+            context['targets'][thing_name] = {
+                'state': ('never-synced'
+                          if device_snapshot.get('never_synced', True)
+                          else 'synced'),
+                'cameras': camera_views,
+                'preselected': preselected,
+            }
+
+        return create_response(200, context)
+
+    except Exception as e:
+        logger.error(f"Error building camera binding context: {str(e)}",
+                     exc_info=True)
+        return _workflow_error(500, 'INTERNAL_ERROR',
+                               'Failed to build camera binding context')
+
+
+def _workflow_binding_key(workflow_id, workflow_version):
+    """The dda-camera-bindings desired.bindings key of one deployed
+    workflow version (design: '{workflowId}/{version}')."""
+    return f"{workflow_id}/{int(workflow_version)}"
+
+
+def _deployed_workflow_binding_keys(components_map):
+    """The binding keys of every Workflow_Component in a deployment's
+    component set — the keys that must survive a shadow prune."""
+    keys = set()
+    for name in components_map or {}:
+        if not name.startswith(WORKFLOW_COMPONENT_PREFIX):
+            continue
+        wf_id = name[len(WORKFLOW_COMPONENT_PREFIX):]
+        version = str((components_map[name] or {}).get('componentVersion', ''))
+        major = version.split('.')[0]
+        if wf_id and major.isdigit():
+            keys.add(_workflow_binding_key(wf_id, int(major)))
+    return keys
+
+
+def _existing_binding_keys(iot_data, thing_name):
+    """The desired.bindings keys currently in one thing's camera-bindings
+    shadow (empty when the shadow does not exist yet)."""
+    try:
+        response = iot_data.get_thing_shadow(
+            thingName=thing_name, shadowName=CAMERA_BINDINGS_SHADOW_NAME)
+        payload = json.loads(response['payload'].read())
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ResourceNotFoundException':
+            return []
+        raise
+    desired = (payload.get('state') or {}).get('desired') or {}
+    return list((desired.get('bindings') or {}).keys())
+
+
+def rollback_camera_bindings(iot_data, thing_names, binding_key):
+    """Best-effort prune of an aborted submission's already-written
+    binding keys (mid-submission failure handling, Req 8.6)."""
+    for thing_name in thing_names:
+        try:
+            iot_data.update_thing_shadow(
+                thingName=thing_name,
+                shadowName=CAMERA_BINDINGS_SHADOW_NAME,
+                payload=json.dumps({'state': {'desired': {'bindings': {
+                    binding_key: None}}}}))
+        except Exception as e:  # noqa: BLE001 — best-effort by contract
+            logger.warning(
+                f"Best-effort binding rollback failed for {thing_name}: {e}")
+
+
+def deliver_camera_bindings(iot_data, thing_names, binding_key,
+                            camera_bindings, deployed_keys):
+    """
+    Write ``desired.bindings[binding_key]`` (this device's per-node
+    Camera_Bindings) into each target thing's dda-camera-bindings shadow
+    and prune keys for workflow versions no longer deployed to the device
+    (Reqs 8.2, 8.6). The packaged artifact is untouched — bindings travel
+    only in the shadow.
+
+    Returns ``(written, failure)``: the things written so far and, on the
+    first failure, a failure record. On failure the already-written
+    targets are best-effort pruned and the caller aborts deployment
+    creation.
+    """
+    written = []
+    for thing_name in thing_names:
+        bindings_update = {binding_key: camera_bindings.get(thing_name) or {}}
+        try:
+            for key in _existing_binding_keys(iot_data, thing_name):
+                if key != binding_key and key not in deployed_keys:
+                    # Version no longer deployed to this device: prune.
+                    bindings_update[key] = None
+            iot_data.update_thing_shadow(
+                thingName=thing_name,
+                shadowName=CAMERA_BINDINGS_SHADOW_NAME,
+                payload=json.dumps(
+                    {'state': {'desired': {'bindings': bindings_update}}},
+                    default=lambda o: (float(o) if isinstance(o, Decimal)
+                                       else str(o))))
+        except Exception as e:  # noqa: BLE001 — any write failure aborts
+            logger.error(
+                f"Camera binding shadow write failed for {thing_name}: {e}")
+            rollback_camera_bindings(iot_data, written, binding_key)
+            return written, {'device': thing_name, 'error': str(e)}
+        written.append(thing_name)
+    return written, None
 
 
 def create_workflow_deployment(body, user):
@@ -1743,6 +2461,45 @@ def create_workflow_deployment(body, user):
         if gate_error:
             return gate_error
 
+        # Deploy-time Camera_Binding validation (camera-registry-sync
+        # 8.3, 8.4, 8.7-8.9, 9.1-9.5), alongside the pre-submit gates
+        # above. Versions without Camera_Input_Nodes skip the step
+        # entirely (8.9). A registry read failure rejects the submission
+        # with REGISTRY_UNAVAILABLE — validation is never skipped.
+        camera_bindings = body.get('camera_bindings') or {}
+        confirmed_warnings = body.get('confirmed_warnings') or []
+        native_version_item = _decimal_to_native(version_item)
+        camera_nodes = native_version_item.get('camera_input_nodes') or []
+        camera_warnings = []
+        if camera_nodes:
+            try:
+                registry_snapshot = load_camera_registry_snapshot(
+                    resolved_devices)
+            except CameraRegistryUnavailable as e:
+                logger.error(f"Camera registry unavailable: {e}")
+                return _workflow_error(
+                    503, CAMERA_ERROR_REGISTRY_UNAVAILABLE,
+                    'The camera registry could not be read for the target '
+                    'devices; camera binding validation cannot run and the '
+                    'deployment was not submitted', {'reason': str(e)})
+            camera_errors, camera_warnings = validate_camera_bindings(
+                native_version_item, resolved_devices, registry_snapshot,
+                camera_bindings, confirmed_warnings)
+            if camera_errors:
+                return _workflow_error(
+                    409, CAMERA_ERROR_BINDINGS_INVALID,
+                    'One or more camera bindings are invalid; the '
+                    'deployment was not submitted',
+                    {'errors': camera_errors, 'warnings': camera_warnings})
+            unconfirmed = [w for w in camera_warnings
+                           if not w.get('confirmed')]
+            if unconfirmed:
+                return _workflow_error(
+                    409, CAMERA_ERROR_WARNINGS_UNCONFIRMED,
+                    'Camera binding warnings require explicit confirmation '
+                    'before the deployment can be created',
+                    {'warnings': camera_warnings})
+
         if target_thing_group:
             target_arn = f"arn:aws:iot:{region}:{account_id}:thinggroup/{target_thing_group}"
         else:
@@ -1804,31 +2561,63 @@ def create_workflow_deployment(body, user):
                 }
             }
 
+        # Camera_Binding delivery (Reqs 8.2, 8.6): each target thing's
+        # dda-camera-bindings shadow gets desired.bindings["{wf}/{ver}"]
+        # via the assumed-role iot-data client, with keys for versions no
+        # longer deployed pruned. The Greengrass artifact stays untouched.
+        # A mid-submission shadow write failure aborts deployment creation
+        # with best-effort pruning of the already-written targets.
+        delivered_bindings = None
+        if camera_nodes and native_version_item.get('has_binding_points'):
+            binding_key = _workflow_binding_key(workflow_id, workflow_version)
+            iot_data_client = get_usecase_client(
+                'iot-data', usecase, session_name=session_name, region=region)
+            written, failure = deliver_camera_bindings(
+                iot_data_client, resolved_devices, binding_key,
+                camera_bindings, _deployed_workflow_binding_keys(components_map))
+            if failure:
+                return _workflow_error(
+                    502, CAMERA_ERROR_BINDING_DELIVERY,
+                    'Camera binding delivery to a target device failed; the '
+                    'deployment was not submitted and bindings already '
+                    'written were pruned',
+                    {'failed_device': failure['device'],
+                     'error': failure['error'],
+                     'rolled_back_devices': written})
+            delivered_bindings = camera_bindings
+
         response = greengrass_client.create_deployment(**deployment_params)
         deployment_id = response.get('deploymentId')
 
-        # Association record: workflow version -> deployment -> devices (8.2)
+        # Association record: workflow version -> deployment -> devices
+        # (8.2); delivered Camera_Bindings are stored on the record for
+        # display and audit (camera-registry-sync 8.2, 12.3).
         superseded_id = existing_deployment.get('deploymentId') if is_revision else None
         record_workflow_deployment(
             deployment_id, usecase_id, workflow_id, workflow_version,
             target_arn, resolved_devices, target_thing_group,
-            is_revision, superseded_id, user)
+            is_revision, superseded_id, user,
+            camera_bindings=delivered_bindings)
 
-        # Audit log entry for deploy (Requirement 11.5)
+        # Audit log entry for deploy (Requirement 11.5; camera-registry-sync
+        # 12.3 — a deployment created with Camera_Bindings records them).
+        audit_details = {
+            'usecase_id': usecase_id,
+            'workflow_version': workflow_version,
+            'deployment_id': deployment_id,
+            'component_name': component_name,
+            'component_version': component_version,
+            'target_arn': target_arn,
+            'target_devices': resolved_devices,
+            'target_thing_group': target_thing_group,
+            'is_revision': is_revision,
+            'superseded_deployment_id': superseded_id
+        }
+        if delivered_bindings is not None:
+            audit_details['camera_bindings'] = _dynamo_safe(delivered_bindings)
         log_audit_event(
             user['user_id'], 'deploy_workflow', 'workflow', workflow_id,
-            'success', {
-                'usecase_id': usecase_id,
-                'workflow_version': workflow_version,
-                'deployment_id': deployment_id,
-                'component_name': component_name,
-                'component_version': component_version,
-                'target_arn': target_arn,
-                'target_devices': resolved_devices,
-                'target_thing_group': target_thing_group,
-                'is_revision': is_revision,
-                'superseded_deployment_id': superseded_id
-            }
+            'success', audit_details
         )
 
         logger.info(
@@ -1848,6 +2637,8 @@ def create_workflow_deployment(body, user):
             'target_thing_group': target_thing_group,
             'is_revision': is_revision,
             'superseded_deployment_id': superseded_id,
+            'camera_bindings_delivered': delivered_bindings is not None,
+            'camera_warnings': camera_warnings,
             'message': ('Workflow deployment updated successfully' if is_revision
                         else 'Workflow deployment created successfully')
         })

@@ -7,8 +7,11 @@
 - fixed whitespace (2-space indent), ASCII-escaped output.
 
 Canonical output makes the round-trip property "identical JSON structure"
-achievable (Requirement 3.4): any two serializations of equivalent graphs
-are byte-identical.
+achievable (Requirement 3.4): serializing a parsed serialization is
+byte-identical to the original serialization. Advisory node ``data``
+(excluded from graph equivalence) is preserved verbatim and omitted when
+empty, so definitions without node data serialize exactly as before the
+field existed (Requirement 11.5).
 """
 
 from __future__ import annotations
@@ -37,12 +40,7 @@ def graph_to_document(graph: WorkflowGraph) -> Dict[str, Any]:
     return {
         "schemaVersion": SCHEMA_VERSION,
         "nodes": [
-            {
-                "id": node.id,
-                "type": node.type,
-                "position": {"x": node.position.x, "y": node.position.y},
-                "parameters": dict(node.parameters),
-            }
+            _node_to_document(node)
             for node in sorted(graph.nodes, key=lambda n: n.id)
         ],
         "connections": [
@@ -54,6 +52,21 @@ def graph_to_document(graph: WorkflowGraph) -> Dict[str, Any]:
             for connection in sorted(graph.connections, key=lambda c: c.id)
         ],
     }
+
+
+def _node_to_document(node) -> Dict[str, Any]:
+    """A node's document form; advisory ``data`` is emitted only when
+    non-empty so definitions without node data serialize byte-identically
+    to before the field existed (Requirement 11.5)."""
+    document = {
+        "id": node.id,
+        "type": node.type,
+        "position": {"x": node.position.x, "y": node.position.y},
+        "parameters": dict(node.parameters),
+    }
+    if node.data:
+        document["data"] = dict(node.data)
+    return document
 
 
 def serialize(graph: WorkflowGraph) -> str:

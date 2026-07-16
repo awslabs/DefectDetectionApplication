@@ -22,6 +22,7 @@ stored item shape matches exactly what workflow_generator.py reads:
              timeout_seconds}}
 """
 import json
+import math
 import os
 import logging
 from typing import Dict, Any, List, Optional
@@ -61,6 +62,26 @@ BEDROCK_CONFIG_RESOURCE_ID = 'bedrock-configuration'
 
 # Settings-table key read by workflow_generator.get_bedrock_configuration().
 BEDROCK_CONFIG_SETTING_KEY = 'bedrock_configuration'
+
+# --------------------------------------------------------------------------
+# Camera_Registry Staleness_Threshold (camera-registry-sync Requirement 4.3)
+# --------------------------------------------------------------------------
+
+# Reserved path id on /data-accounts/{id} that routes to the Camera_Registry
+# configuration handlers instead of the Data Account CRUD (same carrier as
+# 'bedrock-configuration' above; can never collide with a real Data Account
+# id - those are 12-digit AWS account ids).
+CAMERA_REGISTRY_CONFIG_RESOURCE_ID = 'camera-registry-configuration'
+
+# Settings-table key read by camera_registry.staleness_threshold_hours()
+# and deployments._camera_staleness_threshold_ms(). Stored item shape:
+#     {setting_key: 'camera_registry.staleness_threshold_hours',
+#      value: <positive number of hours>}
+CAMERA_STALENESS_SETTING_KEY = 'camera_registry.staleness_threshold_hours'
+
+# Must mirror the readers' fallback so reads return the effective value
+# even before anything is stored (camera-registry-sync Req 4.3).
+DEFAULT_CAMERA_STALENESS_THRESHOLD_HOURS = 24
 
 # Requirement 10.7: invocation timeout is configurable up to 60 seconds.
 MAX_BEDROCK_TIMEOUT_SECONDS = 60
@@ -159,6 +180,11 @@ def handler(event: Dict, context: Any) -> Dict:
     GET    /api/v1/data-accounts/bedrock-configuration        - Read Bedrock_Configuration
     PUT    /api/v1/data-accounts/bedrock-configuration        - Update Bedrock_Configuration
     GET    /api/v1/data-accounts/bedrock-configuration/models - List invokable model options
+
+    Reserved id 'camera-registry-configuration' (camera-registry-sync
+    Requirement 4.3, PortalAdmin only):
+    GET    /api/v1/data-accounts/camera-registry-configuration - Read Staleness_Threshold
+    PUT    /api/v1/data-accounts/camera-registry-configuration - Update Staleness_Threshold
     """
     try:
         http_method = event.get('httpMethod')
@@ -184,6 +210,11 @@ def handler(event: Dict, context: Any) -> Dict:
         # Permission.BEDROCK_CONFIG_WRITE.
         if path_params.get('id') == BEDROCK_CONFIG_RESOURCE_ID:
             return handle_bedrock_configuration(event, user, http_method)
+
+        # Reserved id: Camera_Registry Staleness_Threshold settings API
+        # (camera-registry-sync Requirement 4.3). PortalAdmin-only.
+        if path_params.get('id') == CAMERA_REGISTRY_CONFIG_RESOURCE_ID:
+            return handle_camera_registry_configuration(event, user, http_method)
         
         # List Data Accounts is allowed for all authenticated users (read-only for dropdown)
         # All other operations require PortalAdmin
@@ -681,6 +712,140 @@ def update_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
     except Exception as e:
         logger.error(f"Error updating Bedrock configuration: {str(e)}")
         return create_response(500, {'error': 'Failed to update Bedrock configuration'})
+
+
+# --------------------------------------------------------------------------
+# Camera_Registry Staleness_Threshold settings API
+# (camera-registry-sync task 6.5, Requirement 4.3)
+# --------------------------------------------------------------------------
+
+def read_stored_camera_staleness_threshold() -> float:
+    """The effective Staleness_Threshold in hours (stored over default).
+
+    Mirrors the read logic in camera_registry.staleness_threshold_hours()
+    and deployments._camera_staleness_threshold_ms() so the settings API
+    shows exactly what the cameras route will use.
+    """
+    if SETTINGS_TABLE:
+        try:
+            response = dynamodb.Table(SETTINGS_TABLE).get_item(
+                Key={'setting_key': CAMERA_STALENESS_SETTING_KEY}
+            )
+            value = (response.get('Item') or {}).get('value')
+            if value is not None:
+                hours = float(value)
+                if hours > 0:
+                    return hours
+        except (ClientError, TypeError, ValueError) as e:
+            logger.warning(f"Could not read staleness threshold setting: {e}")
+    return DEFAULT_CAMERA_STALENESS_THRESHOLD_HOURS
+
+
+def validate_camera_staleness_threshold(hours) -> List[str]:
+    """Positive finite number of hours; returns human-readable errors."""
+    if (not _is_number(hours)
+            or not math.isfinite(hours)
+            or hours <= 0):
+        return ['staleness_threshold_hours must be a positive number of hours']
+    return []
+
+
+def handle_camera_registry_configuration(event: Dict, user: Dict,
+                                         http_method: str) -> Dict:
+    """
+    Route Camera_Registry configuration requests. Restricted to
+    PortalAdmin (camera-registry-sync Requirement 4.3); denied attempts
+    are audit-logged.
+    """
+    if not is_portal_admin(user):
+        log_audit_event(
+            user_id=user['user_id'],
+            action='unauthorized_access',
+            resource_type='setting',
+            resource_id=CAMERA_STALENESS_SETTING_KEY,
+            result='denied',
+            details={
+                'required_role': 'PortalAdmin',
+                'method': http_method,
+                'path': event.get('path'),
+            }
+        )
+        return create_response(403, {'error': 'PortalAdmin access required'})
+
+    if http_method == 'GET':
+        return get_camera_registry_configuration_setting(event, user)
+    if http_method == 'PUT':
+        return update_camera_registry_configuration_setting(event, user)
+    return create_response(404, {'error': 'Not found'})
+
+
+def get_camera_registry_configuration_setting(event: Dict, user: Dict) -> Dict:
+    """Return the effective Staleness_Threshold (stored over default)."""
+    try:
+        if not SETTINGS_TABLE:
+            return create_response(500, {'error': 'Settings storage is not configured'})
+        return create_response(200, {
+            'staleness_threshold_hours': read_stored_camera_staleness_threshold(),
+            'default_staleness_threshold_hours':
+                DEFAULT_CAMERA_STALENESS_THRESHOLD_HOURS,
+        })
+    except Exception as e:
+        logger.error(f"Error reading camera registry configuration: {str(e)}")
+        return create_response(500, {'error': 'Failed to read camera registry configuration'})
+
+
+def update_camera_registry_configuration_setting(event: Dict, user: Dict) -> Dict:
+    """
+    Update the Staleness_Threshold. Validates a positive number of hours
+    and writes the exact item shape read by
+    camera_registry.staleness_threshold_hours():
+        {setting_key: 'camera_registry.staleness_threshold_hours',
+         value: <hours>}
+    """
+    try:
+        if not SETTINGS_TABLE:
+            return create_response(500, {'error': 'Settings storage is not configured'})
+
+        try:
+            body = json.loads(event.get('body') or '{}')
+        except (json.JSONDecodeError, TypeError):
+            return create_response(400, {'error': 'Request body is not valid JSON'})
+        if not isinstance(body, dict):
+            return create_response(400, {'error': 'Request body must be a JSON object'})
+
+        hours = body.get('staleness_threshold_hours')
+        errors = validate_camera_staleness_threshold(hours)
+        if errors:
+            return create_response(400, {
+                'error': 'Invalid camera registry configuration',
+                'validation_errors': errors,
+            })
+
+        timestamp = int(datetime.utcnow().timestamp() * 1000)
+        dynamodb.Table(SETTINGS_TABLE).put_item(Item={
+            'setting_key': CAMERA_STALENESS_SETTING_KEY,
+            'value': _native_to_dynamo(hours),
+            'updated_at': timestamp,
+            'updated_by': user['user_id'],
+        })
+
+        log_audit_event(
+            user_id=user['user_id'],
+            action='update_camera_registry_configuration',
+            resource_type='setting',
+            resource_id=CAMERA_STALENESS_SETTING_KEY,
+            result='success',
+            details={'staleness_threshold_hours': _native_to_dynamo(hours)},
+        )
+
+        return create_response(200, {
+            'message': 'Camera registry configuration updated successfully',
+            'staleness_threshold_hours': hours,
+        })
+
+    except Exception as e:
+        logger.error(f"Error updating camera registry configuration: {str(e)}")
+        return create_response(500, {'error': 'Failed to update camera registry configuration'})
 
 
 # --------------------------------------------------------------------------

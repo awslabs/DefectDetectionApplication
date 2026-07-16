@@ -40,12 +40,20 @@ class Node:
 
     ``type`` is a node type id from the catalog (``workflow_core.catalog``);
     ``parameters`` maps parameter names to JSON-representable values.
+
+    ``data`` is optional advisory node data (e.g. the camera picker's
+    ``cameraBindingHint``). It is preserved through parse/serialize round
+    trips but carries no workflow semantics: validation and compilation
+    ignore it, and it is excluded from node equality / graph equivalence
+    (``compare=False``) so hinted and hint-stripped definitions remain
+    equivalent (Requirements 7.5, 11.5).
     """
 
     id: str
     type: str
     position: Position
     parameters: Dict[str, Any] = field(default_factory=dict)
+    data: Dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 @dataclass
@@ -86,8 +94,8 @@ class WorkflowGraph:
         """Order-insensitive graph equivalence (Requirement 3.4).
 
         True when both graphs contain the same set of nodes (by full
-        content) and the same set of connections, regardless of list
-        ordering.
+        content, excluding advisory ``data``) and the same set of
+        connections, regardless of list ordering.
         """
         if not isinstance(other, WorkflowGraph):
             return False

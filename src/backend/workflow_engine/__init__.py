@@ -35,6 +35,12 @@ Package layout:
   the WorkflowExecutor registers itself here.
 - ``rendering.py``: launch-string rendering of the Compiled Pipeline
   Document and element-name -> nodeId failure mapping (pure functions).
+- ``camera_binding.py``: pure device-side Camera_Binding resolution —
+  ``resolve_bindings`` substitutes bound Camera_Source parameters into a
+  compiled document's ``bindingPoints`` slots (camera-registry-sync).
+- ``camera_binding_store.py``: CameraBindingStore — cached reads of the
+  ``dda-camera-bindings`` named shadow feeding the watcher's binding
+  resolution, refreshed on shadow delta (camera-registry-sync).
 - ``gst_plugins.py``: per-run scoping of the component's
   ``plugins/<arch>/`` directory (GST_PLUGIN_PATH prepend + registry scan).
 - ``pipeline_executor.py``: WorkflowExecutor — executes triggered runs

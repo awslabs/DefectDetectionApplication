@@ -61,6 +61,7 @@ import {
   toWorkflowDefinition,
   type BuilderNode,
 } from './builderGraph';
+import { CAMERA_BINDING_HINT_KEY, type CameraBindingHint } from './cameraReference';
 import GenerateChatPanel from './GenerateChatPanel';
 import NodeConfigPanel from './NodeConfigPanel';
 import TestPanel from './TestPanel';
@@ -291,6 +292,31 @@ function BuilderCanvas({
     [setNodes]
   );
 
+  // Apply a camera reference selection (camera-registry-sync Requirement
+  // 7.2): the updated parameters plus the advisory binding hint stored in
+  // the node's advisory data (`nodes[].data.cameraBindingHint` in the
+  // serialized definition), preserved through save/load round trips
+  // without making the definition device-specific (Requirement 7.5).
+  const onNodeCameraSelection = useCallback(
+    (nodeId: string, parameters: Record<string, JsonValue>, hint: CameraBindingHint) => {
+      setNodes((existing) =>
+        existing.map((node) =>
+          node.id === nodeId
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  parameters,
+                  advisoryData: { ...node.data.advisoryData, [CAMERA_BINDING_HINT_KEY]: { ...hint } },
+                },
+              }
+            : node
+        )
+      );
+    },
+    [setNodes]
+  );
+
   // Render a generated workflow onto the canvas (Requirement 10.3). The
   // chat panel calls this only after the client-side parse succeeded, so
   // a failed generation never reaches here and the canvas stays
@@ -398,6 +424,7 @@ function BuilderCanvas({
       <NodeConfigPanel
         node={selectedNode}
         onParametersChange={onNodeParametersChange}
+        onCameraSelection={onNodeCameraSelection}
         onClose={closeConfigPanel}
       />
       {/* Generate/Test side drawer. Both panels stay mounted (hidden via

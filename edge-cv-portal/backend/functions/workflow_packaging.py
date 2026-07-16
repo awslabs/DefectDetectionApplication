@@ -54,6 +54,7 @@ import json
 import os
 import logging
 import posixpath
+import re
 import shutil
 import tempfile
 import time
@@ -74,7 +75,12 @@ from shared_utils import (
 )
 from workflow_core.serializer import parse as parse_definition
 from workflow_core.compiler import compile as compile_workflow, CompileContext
-from workflow_core.catalog import DEVICE_ARCHITECTURES
+from workflow_core.catalog import (
+    ARCH_ARM64_JP4,
+    ARCH_ARM64_JP5,
+    ARCH_ARM64_JP6,
+    DEVICE_ARCHITECTURES,
+)
 from workflow_core.catalog.custom import resolve_catalog
 
 # Merged-catalog resolution + Plugin_Record persistence (same bundle)
@@ -372,6 +378,221 @@ def split_plugin_dependencies(plugin_dependencies: List[str]
         else:
             gst_plugins.append(dep)
     return sorted(gst_plugins), sorted(custom_plugins), sorted(python_packages)
+
+
+# --------------------------------------------------------------------------
+# Camera_Input_Node binding points
+# (camera-registry-sync Requirements 8.6, 11.5)
+#
+# For each Camera_Input_Node the packager appends a ``bindingPoints`` entry
+# to compiled_pipeline.json mapping the node's logical parameters to the
+# rendered element arguments, and records the ``has_binding_points`` /
+# ``camera_input_nodes`` discriminator on the workflow version item. The
+# compiled elements keep their fully rendered default values, so an unbound
+# document behaves byte-identically to pre-feature output, and workflows
+# without Camera_Input_Nodes produce byte-identical documents (11.5).
+# --------------------------------------------------------------------------
+
+#: The built-in Camera_Input_Node type.
+CAMERA_SOURCE_TYPE_ID = 'camera_source'
+
+#: Optional Custom_Node_Type descriptor flag declaring the type
+#: camera-backed. Both the snake_case spelling from the design and the
+#: camelCase convention of custom declaration wire shapes are honored.
+CAMERA_BACKED_FLAGS = ('camera_backed', 'cameraBacked')
+
+#: Architectures where camera_source renders as an appsrc fed by the
+#: LocalServer camera adapter: binding resolution selects which local
+#: Image_Source/cameraId the executor's adapter connects, not an element
+#: argument, so the binding point carries ``adapterBinding: true`` with
+#: empty slots.
+ADAPTER_BINDING_ARCHS = (ARCH_ARM64_JP4, ARCH_ARM64_JP5)
+
+#: An argument template value that is exactly one ``{placeholder}`` token —
+#: the only shape that lands a node parameter verbatim in an element arg.
+_SLOT_PLACEHOLDER = re.compile(r'^\{(\w+)\}$')
+
+
+def camera_backed_type_ids(node_type_items: List[Dict]) -> set:
+    """Type ids of resolved Custom_Node_Types declared camera-backed via
+    the optional ``camera_backed: true`` descriptor flag."""
+    type_ids = set()
+    for item in node_type_items or []:
+        declaration = item.get('declaration')
+        if not isinstance(declaration, dict):
+            continue
+        if any(declaration.get(flag) is True for flag in CAMERA_BACKED_FLAGS):
+            type_id = declaration.get('typeId')
+            if isinstance(type_id, str):
+                type_ids.add(type_id)
+    return type_ids
+
+
+def gather_camera_input_nodes(graph, camera_backed_types: set) -> List:
+    """The graph's Camera_Input_Nodes: camera_source nodes plus nodes of
+    any Custom_Node_Type declared camera-backed, in graph node order."""
+    return [node for node in graph.nodes
+            if node.type == CAMERA_SOURCE_TYPE_ID
+            or node.type in camera_backed_types]
+
+
+def binding_hints_from_definition(definition: Dict) -> Dict[str, Dict]:
+    """Per-node ``cameraBindingHint`` advisory data recorded by the
+    Workflow_Builder in the definition document (``nodes[].data``), keyed
+    by node id. Tolerant of definitions carrying no node data at all —
+    every pre-feature definition — so packaging them is unchanged (11.5)."""
+    hints: Dict[str, Dict] = {}
+    for node in definition.get('nodes') or []:
+        if not isinstance(node, dict):
+            continue
+        data = node.get('data')
+        hint = data.get('cameraBindingHint') if isinstance(data, dict) else None
+        node_id = node.get('id')
+        if isinstance(hint, dict) and hint and isinstance(node_id, str):
+            hints[node_id] = hint
+    return hints
+
+
+def rendered_default_parameters(node, descriptor) -> Dict[str, Any]:
+    """The parameter values rendered into the compiled document: declared
+    defaults overlaid with the node's explicit values (the compiler's
+    effective-value rule)."""
+    values = {parameter.name: parameter.default
+              for parameter in descriptor.parameters}
+    values.update(node.parameters)
+    return values
+
+
+def binding_point_slots(compiled_doc: Dict, node_id: str, mapping,
+                        parameter_names: set) -> List[Dict]:
+    """Where each of the node's parameters lands in THIS compiled document:
+    one slot per element argument whose catalog template is exactly a
+    single ``{parameter}`` placeholder (e.g. the v4l2src ``device`` arg on
+    x86_64 / x86_64_nvidia). The node's element chain appears contiguously
+    in exactly one segment (compiler Requirement 6.6), so template index k
+    addresses the k-th element of that run."""
+    if mapping is None or not mapping.element_chain:
+        return []
+    slots: List[Dict] = []
+    for segment_index, segment in enumerate(compiled_doc.get('segments') or []):
+        elements = segment.get('elements') or []
+        run_start = next((index for index, element in enumerate(elements)
+                          if element.get('nodeId') == node_id), None)
+        if run_start is None:
+            continue
+        for offset, template in enumerate(mapping.element_chain):
+            for arg in sorted(template.get('args_template') or {}):
+                value = template['args_template'][arg]
+                if not isinstance(value, str):
+                    continue
+                match = _SLOT_PLACEHOLDER.match(value)
+                if match and match.group(1) in parameter_names:
+                    slots.append({
+                        'param': match.group(1),
+                        'segment': segment_index,
+                        'element': run_start + offset,
+                        'arg': arg,
+                    })
+        break  # each node's chain lives in exactly one segment
+    return slots
+
+
+def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
+                         hints: Dict[str, Dict],
+                         descriptors_by_id: Dict) -> List[Dict]:
+    """The ``bindingPoints`` section of one architecture's compiled
+    document: nodeId, nodeType, bindingHint from the definition, rendered
+    default parameters, and arch-specific slots. On JP4/JP5 camera_source
+    is adapter-fed (``adapterBinding: true``, empty slots); on JP6 the
+    binding selects the CSI sensor the capture host service stages from
+    (``csiSensorBinding: true``, empty slots)."""
+    binding_points: List[Dict] = []
+    for node in camera_nodes:
+        descriptor = descriptors_by_id[node.type]
+        entry: Dict[str, Any] = {
+            'nodeId': node.id,
+            'nodeType': node.type,
+            'parameters': rendered_default_parameters(node, descriptor),
+            'slots': [],
+        }
+        hint = hints.get(node.id)
+        if hint:
+            entry['bindingHint'] = hint
+        if node.type == CAMERA_SOURCE_TYPE_ID and arch in ADAPTER_BINDING_ARCHS:
+            entry['adapterBinding'] = True
+        elif node.type == CAMERA_SOURCE_TYPE_ID and arch == ARCH_ARM64_JP6:
+            entry['csiSensorBinding'] = True
+        else:
+            entry['slots'] = binding_point_slots(
+                compiled_doc, node.id, descriptor.mapping_for(arch),
+                {parameter.name for parameter in descriptor.parameters})
+        binding_points.append(entry)
+    return binding_points
+
+
+def compiled_document_json(compiled, binding_points: List[Dict]) -> str:
+    """compiled_pipeline.json content: the canonical compiler output plus
+    the ``bindingPoints`` section when the workflow has Camera_Input_Nodes.
+    With no camera nodes the output is byte-identical to the compiler's
+    own serialization (Requirement 11.5)."""
+    if not binding_points:
+        return compiled.to_json()
+    document = compiled.to_dict()
+    document['bindingPoints'] = binding_points
+    return json.dumps(document, sort_keys=True, indent=2, ensure_ascii=True)
+
+
+def _rendered_slot_value(compiled_doc: Dict, slot: Dict) -> Any:
+    """The rendered element-argument value a slot points at."""
+    try:
+        segment = compiled_doc['segments'][slot['segment']]
+        return segment['elements'][slot['element']]['args'][slot['arg']]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _dynamo_safe(obj: Any) -> Any:
+    """Floats are not storable in DynamoDB; convert them to Decimal."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {key: _dynamo_safe(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_dynamo_safe(item) for item in obj]
+    return obj
+
+
+def camera_input_nodes_record(camera_nodes: List, hints: Dict[str, Dict],
+                              arch_binding_points: Dict[str, List[Dict]],
+                              arch_compiled_docs: Dict[str, Dict]) -> List[Dict]:
+    """The ``camera_input_nodes`` version-item attribute: node id, node
+    type, binding hint, and the per-arch compiled device paths (the
+    rendered ``device`` slot values) the Deployment_Service's legacy path
+    check and binding matrix read without re-fetching compiled documents
+    from S3 (camera-registry-sync 8.6, 9.5)."""
+    records: List[Dict] = []
+    for node in camera_nodes:
+        record: Dict[str, Any] = {
+            'node_id': node.id,
+            'node_type': node.type,
+            'compiled_device_paths': {},
+        }
+        hint = hints.get(node.id)
+        if hint:
+            record['binding_hint'] = hint
+        for arch in sorted(arch_binding_points):
+            entry = next((point for point in arch_binding_points[arch]
+                          if point['nodeId'] == node.id), None)
+            if not entry:
+                continue
+            for slot in entry['slots']:
+                if slot['param'] != 'device':
+                    continue
+                value = _rendered_slot_value(arch_compiled_docs[arch], slot)
+                if isinstance(value, str):
+                    record['compiled_device_paths'][arch] = value
+        records.append(record)
+    return records
 
 
 # --------------------------------------------------------------------------
@@ -1029,6 +1250,26 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
 
     custom_python_nodes = gather_custom_python_nodes(graph)
 
+    # Camera_Input_Node binding points (camera-registry-sync 8.6, 11.5):
+    # one bindingPoints entry per camera node in each arch's compiled
+    # document, plus the version-item discriminator recorded on success.
+    # Workflows without camera nodes serialize byte-identically to the
+    # plain compiler output.
+    camera_nodes = gather_camera_input_nodes(
+        graph, camera_backed_type_ids(resolved_items))
+    binding_hints = binding_hints_from_definition(json.loads(definition_json))
+    descriptors_by_id = {descriptor.type_id: descriptor for descriptor in catalog}
+    arch_compiled_dicts: Dict[str, Dict] = {}
+    arch_binding_points: Dict[str, List[Dict]] = {}
+    arch_compiled_json: Dict[str, str] = {}
+    for arch, compiled in compiled_docs.items():
+        compiled_dict = compiled.to_dict()
+        binding_points = build_binding_points(
+            camera_nodes, compiled_dict, arch, binding_hints, descriptors_by_id)
+        arch_compiled_dicts[arch] = compiled_dict
+        arch_binding_points[arch] = binding_points
+        arch_compiled_json[arch] = compiled_document_json(compiled, binding_points)
+
     # Split each arch's compiled plugin dependencies: curated plugins stay
     # bundled inline; custom: dependencies resolve to Plugin_Components.
     arch_gst_plugins: Dict[str, List[str]] = {}
@@ -1105,7 +1346,8 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                 plugin_components=arch_plugin_components[arch])
             zip_path = os.path.join(work_dir, zip_artifact_name(arch))
             build_arch_zip(zip_path, arch, manifest, definition_json,
-                           compiled.to_json(), gst_plugins, custom_python_nodes)
+                           arch_compiled_json[arch], gst_plugins,
+                           custom_python_nodes)
             arch_zip_paths[arch] = zip_path
 
         # Use_Case account clients via the assumed cross-account role (7.2)
@@ -1154,10 +1396,10 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
 
     # Success bookkeeping: compiled documents to portal S3 + version record
     compiled_arch_keys: Dict[str, str] = {}
-    for arch, compiled in compiled_docs.items():
+    for arch in compiled_docs:
         portal_key = compiled_doc_portal_key(usecase_id, workflow_id, version, arch)
         s3.put_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=portal_key,
-                      Body=compiled.to_json().encode('utf-8'),
+                      Body=arch_compiled_json[arch].encode('utf-8'),
                       ContentType='application/json')
         compiled_arch_keys[arch] = portal_key
 
@@ -1171,15 +1413,27 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     for arch_map in arch_plugin_components.values():
         workflow_plugin_components.update(arch_map)
 
+    # The version-item binding discriminator (camera-registry-sync 8.6,
+    # 11.5): has_binding_points separates the strict deploy-time binding
+    # rule from legacy leniency, and camera_input_nodes feeds the binding
+    # matrix and the legacy compiled-path check (9.5) without re-reading
+    # compiled documents from S3.
+    camera_input_nodes = camera_input_nodes_record(
+        camera_nodes, binding_hints, arch_binding_points, arch_compiled_dicts)
+
     dynamodb.Table(WORKFLOW_VERSIONS_TABLE).update_item(
         Key={'workflow_id': workflow_id, 'version': version},
         UpdateExpression=('SET component_arn = :arn, compiled_arch_keys = :keys, '
                           'plugin_components = :pc, '
+                          'has_binding_points = :hbp, '
+                          'camera_input_nodes = :cin, '
                           'packaged_at = :at, packaged_by = :by'),
         ExpressionAttributeValues={
             ':arn': component_arn,
             ':keys': compiled_arch_keys,
             ':pc': workflow_plugin_components,
+            ':hbp': bool(camera_nodes),
+            ':cin': _dynamo_safe(camera_input_nodes),
             ':at': now_ms(),
             ':by': user['user_id']
         }

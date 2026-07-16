@@ -34,6 +34,21 @@ import {
   parsePluginGateRejection,
 } from './deployments/pluginComponents';
 import { ArchitectureChips, PluginGateRejectionAlert } from './deployments/PluginComponentUi';
+import {
+  BindingCell,
+  BindingSelections,
+  CameraBindingContext,
+  CameraBindingIssue,
+  CameraBindingWarning,
+  buildCameraBindings,
+  expectedBindingWarnings,
+  initialBindingSelections,
+  parseCameraBindingRejection,
+  parseWorkflowComponent,
+  unboundCells,
+  withBindingCell,
+} from './deployments/cameraBindings';
+import { CameraBindingMatrix } from './deployments/CameraBindingMatrix';
 
 interface ComponentSelection {
   component_name: string;
@@ -212,6 +227,21 @@ export default function CreateDeployment() {
   const [loading, setLoading] = useState(true);
   const [showRemovalWarning, setShowRemovalWarning] = useState(false);
 
+  // Deploy-time Camera_Binding matrix state, keyed by workflow id
+  // (camera-registry-sync 12.1 — Requirements 8.1, 8.4, 8.5, 8.7-8.9,
+  // 9.2, 9.3). Contexts come from GET /deployments?view=binding-context
+  // for each selected dda.workflow.* component once targets are chosen.
+  const [bindingContexts, setBindingContexts] = useState<Record<string, CameraBindingContext>>({});
+  const [bindingSelections, setBindingSelections] = useState<Record<string, BindingSelections>>({});
+  // Warnings reported by a rejected submission (409) beyond the ones
+  // predicted client-side; confirmation checkboxes feed confirmed_warnings.
+  const [serverBindingWarnings, setServerBindingWarnings] = useState<Record<string, CameraBindingWarning[]>>({});
+  const [confirmedWarningIds, setConfirmedWarningIds] = useState<Set<string>>(new Set());
+  // Validation errors of a 409 CAMERA_BINDINGS_INVALID rejection,
+  // surfaced next to the matrix identifying node and device.
+  const [bindingErrors, setBindingErrors] = useState<Record<string, CameraBindingIssue[]>>({});
+  const [bindingContextError, setBindingContextError] = useState('');
+
   // Existing deployment for the selected target (revise mode). Greengrass
   // deployments are immutable and one-per-target; deploying again revises the
   // existing deployment rather than creating a parallel one.
@@ -314,6 +344,118 @@ export default function CreateDeployment() {
   }, [targetDevices, allDevices, selectedComponents, targetType]);
 
   const hasComponentRemovals = Object.keys(componentsToBeRemoved).length > 0;
+
+  // Selected packaged Workflow_Components (dda.workflow.*) resolved to
+  // their workflow identity (camera-registry-sync 12.1).
+  const selectedWorkflows = useMemo(() => {
+    const refs: Array<{ workflowId: string; workflowVersion: number | null }> = [];
+    for (const comp of selectedComponents) {
+      const ref = parseWorkflowComponent(comp.component_name, comp.component_version);
+      if (ref && !refs.some(r => r.workflowId === ref.workflowId)) {
+        refs.push(ref);
+      }
+    }
+    return refs;
+  }, [selectedComponents]);
+
+  // Matrix step shown only for workflow versions with Camera_Input_Nodes
+  // (binding_required) — skipped entirely otherwise (Requirement 8.9).
+  const bindingMatrices = useMemo(
+    () => Object.entries(bindingContexts).filter(([, ctx]) => ctx.binding_required),
+    [bindingContexts]
+  );
+
+  // The warnings the current matrix state needs confirmed (8.8, 9.3):
+  // client-side predictions plus any extra warnings a rejected
+  // submission reported.
+  const bindingWarningsFor = (workflowId: string): CameraBindingWarning[] => {
+    const context = bindingContexts[workflowId];
+    if (!context) return [];
+    const expected = expectedBindingWarnings(context, bindingSelections[workflowId] || {});
+    const seen = new Set(expected.map(w => w.id));
+    const extra = (serverBindingWarnings[workflowId] || []).filter(w => !seen.has(w.id));
+    return [...expected, ...extra];
+  };
+
+  // Load the binding context of every selected workflow component once a
+  // use case and deployment targets are chosen (Requirement 8.1).
+  useEffect(() => {
+    const usecaseId = selectedUseCase?.value as string | undefined;
+    const deviceNames = targetType === 'devices'
+      ? targetDevices.map(d => d.value as string)
+      : [];
+    const thingGroup = targetType === 'group' ? targetThingGroup.trim() : '';
+    if (!usecaseId || selectedWorkflows.length === 0
+        || (deviceNames.length === 0 && !thingGroup)) {
+      setBindingContexts({});
+      setBindingSelections({});
+      setServerBindingWarnings({});
+      setBindingErrors({});
+      setBindingContextError('');
+      return;
+    }
+    let cancelled = false;
+    const loadBindingContexts = async () => {
+      try {
+        setBindingContextError('');
+        const contexts: Record<string, CameraBindingContext> = {};
+        for (const workflow of selectedWorkflows) {
+          contexts[workflow.workflowId] = await apiService.getCameraBindingContext({
+            usecase_id: usecaseId,
+            workflow_id: workflow.workflowId,
+            workflow_version: workflow.workflowVersion ?? undefined,
+            target_devices: deviceNames.length > 0 ? deviceNames : undefined,
+            target_thing_group: thingGroup || undefined,
+          });
+        }
+        if (cancelled) return;
+        setBindingContexts(contexts);
+        // Seed each matrix from the hint pre-selection (8.5), keeping
+        // choices the user already made for still-present cells.
+        setBindingSelections(prev => {
+          const next: Record<string, BindingSelections> = {};
+          for (const [workflowId, context] of Object.entries(contexts)) {
+            if (context.binding_required) {
+              next[workflowId] = initialBindingSelections(context, prev[workflowId]);
+            }
+          }
+          return next;
+        });
+      } catch (err) {
+        if (cancelled) return;
+        console.error('Failed to load camera binding context:', err);
+        setBindingContexts({});
+        setBindingSelections({});
+        setBindingContextError(getErrorMessage(
+          err,
+          'Failed to load the camera binding context for the selected workflow component(s)'
+        ));
+      }
+    };
+    loadBindingContexts();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedUseCase, targetType, targetDevices, targetThingGroup, selectedWorkflows]);
+
+  const handleBindingCellChange = (workflowId: string, device: string,
+                                   nodeId: string, cell: BindingCell) => {
+    setBindingSelections(prev => ({
+      ...prev,
+      [workflowId]: withBindingCell(prev[workflowId] || {}, device, nodeId, cell),
+    }));
+  };
+
+  const handleToggleBindingWarning = (warningId: string, confirmed: boolean) => {
+    setConfirmedWarningIds(prev => {
+      const next = new Set(prev);
+      if (confirmed) {
+        next.add(warningId);
+      } else {
+        next.delete(warningId);
+      }
+      return next;
+    });
+  };
 
   // Filter and categorize components based on selected devices
   const { recommendedComponents, compatiblePrivate, compatiblePublic, incompatibleComponents, pluginComponents } = useMemo(() => {
@@ -808,6 +950,39 @@ export default function CreateDeployment() {
         throw new Error('Please enter a thing group name');
       }
 
+      // Camera binding gates (camera-registry-sync 8.7, 9.3): every
+      // Camera_Input_Node needs a binding on every target device, and
+      // every warning needs its confirmation checkbox checked, before
+      // the deployment is submitted.
+      if (selectedWorkflows.length > 0 && bindingContextError) {
+        throw new Error(
+          'The camera binding context for the selected workflow ' +
+          'component(s) could not be loaded, so camera bindings cannot ' +
+          'be validated. Resolve the problem and try again.'
+        );
+      }
+      for (const [workflowId, context] of bindingMatrices) {
+        const missing = unboundCells(context, bindingSelections[workflowId] || {});
+        if (missing.length > 0) {
+          throw new Error(
+            `Workflow '${workflowId}' still has unbound camera input ` +
+            `node(s): ` +
+            missing
+              .map(m => `node '${m.nodeId}' on device '${m.device}'`)
+              .join('; ')
+          );
+        }
+        const unconfirmed = bindingWarningsFor(workflowId)
+          .filter(w => !confirmedWarningIds.has(w.id));
+        if (unconfirmed.length > 0) {
+          throw new Error(
+            'Camera binding warnings require confirmation before the ' +
+            'deployment can be created. Review the checkboxes in the ' +
+            'camera bindings section.'
+          );
+        }
+      }
+
       const deploymentData = {
         usecase_id: selectedUseCase.value,
         deployment_name: deploymentName || undefined,
@@ -827,6 +1002,70 @@ export default function CreateDeployment() {
           timeout_seconds: parseInt(timeoutSeconds) || 60
         }
       };
+
+      // Workflow components with Camera_Input_Nodes are submitted through
+      // the workflow deployment path (component_type: workflow) so the
+      // backend validates and delivers the Camera_Bindings (8.2, 8.6).
+      // Everything else keeps the existing generic path unchanged (8.9,
+      // 11.5). The generic deployment goes first: the workflow path
+      // revises it, merging its component set with the workflow component.
+      if (bindingMatrices.length > 0) {
+        const bindingWorkflowIds = new Set(bindingMatrices.map(([id]) => id));
+        const otherComponents = deploymentData.components.filter(c => {
+          const ref = parseWorkflowComponent(c.component_name, c.component_version);
+          return !ref || !bindingWorkflowIds.has(ref.workflowId);
+        });
+
+        let lastDeploymentId = '';
+        if (otherComponents.length > 0) {
+          const genericResponse = await apiService.createDeployment({
+            ...deploymentData,
+            components: otherComponents,
+          });
+          lastDeploymentId = genericResponse.deployment_id;
+        }
+
+        for (const [workflowId, context] of bindingMatrices) {
+          try {
+            const workflowResponse = await apiService.createWorkflowDeployment({
+              usecase_id: selectedUseCase.value as string,
+              workflow_id: workflowId,
+              workflow_version: context.workflow_version,
+              target_devices: deploymentData.target_devices,
+              target_thing_group: deploymentData.target_thing_group,
+              deployment_name: deploymentData.deployment_name,
+              rollout_config: deploymentData.rollout_config,
+              camera_bindings: buildCameraBindings(bindingSelections[workflowId] || {}),
+              confirmed_warnings: Array.from(confirmedWarningIds),
+            });
+            lastDeploymentId = workflowResponse.deployment_id;
+          } catch (err) {
+            // 409 CAMERA_BINDINGS_INVALID / CAMERA_WARNINGS_UNCONFIRMED,
+            // 503 REGISTRY_UNAVAILABLE, 502 BINDING_DELIVERY_FAILED:
+            // surface errors and warnings next to the matrix, naming the
+            // node and device (8.7, 9.2, 9.3).
+            const rejection = err instanceof ApiError
+              ? parseCameraBindingRejection(err.code, err.message, err.details)
+              : null;
+            if (!rejection) {
+              throw err;
+            }
+            setBindingErrors(prev => ({ ...prev, [workflowId]: rejection.errors }));
+            if (rejection.warnings.length > 0) {
+              setServerBindingWarnings(prev => ({ ...prev, [workflowId]: rejection.warnings }));
+            }
+            setError(rejection.message);
+            scrollToTop();
+            return;
+          }
+        }
+
+        setBindingErrors({});
+        setTimeout(() => {
+          navigate(`/deployments/${lastDeploymentId}?usecase_id=${selectedUseCase.value}`);
+        }, 500);
+        return;
+      }
 
       const response = await apiService.createDeployment(deploymentData);
       
@@ -1374,6 +1613,28 @@ export default function CreateDeployment() {
                 </SpaceBetween>
               </FormField>
             )}
+
+            {/* Camera binding matrix (camera-registry-sync 12.1): shown
+                only when a selected workflow component's version has
+                Camera_Input_Nodes (8.9). */}
+            {bindingContextError && (
+              <Alert type="error" header="Camera binding context unavailable">
+                {bindingContextError}
+              </Alert>
+            )}
+            {bindingMatrices.map(([workflowId, context]) => (
+              <CameraBindingMatrix
+                key={workflowId}
+                context={context}
+                selections={bindingSelections[workflowId] || {}}
+                onCellChange={(device, nodeId, cell) =>
+                  handleBindingCellChange(workflowId, device, nodeId, cell)}
+                warnings={bindingWarningsFor(workflowId)}
+                confirmedWarningIds={confirmedWarningIds}
+                onToggleWarning={handleToggleBindingWarning}
+                errors={bindingErrors[workflowId] || []}
+              />
+            ))}
 
             {/* Advanced Options */}
             <ExpandableSection headerText="Advanced Options" variant="footer">

@@ -22,6 +22,7 @@ export class StorageStack extends cdk.Stack {
   public readonly testDatasetsTable: dynamodb.Table;
   public readonly testRunsTable: dynamodb.Table;
   public readonly workflowChatSessionsTable: dynamodb.Table;
+  public readonly cameraRegistryTable: dynamodb.Table;
   public readonly portalArtifactsBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -561,6 +562,39 @@ export class StorageStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // CameraRegistry Table - per-device Camera_Source inventory synced from
+    // edge devices (camera-registry-sync). One partition per device (thing
+    // name) with item-type-prefixed sort keys:
+    //   CAMERA#{camera_source_id} — camera source entries with sync metadata
+    //   META                      — device meta (last_report_at, never_synced)
+    //   CONFLICT#{ts}#{uuid}      — conflict events, co-located with the device
+    this.cameraRegistryTable = new dynamodb.Table(this, 'CameraRegistryTable', {
+      tableName: 'dda-portal-camera-registry',
+      partitionKey: {
+        name: 'device_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'sk',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Use_Case-scoped listings and authorization checks (every item carries
+    // the usecase_id of its device).
+    this.cameraRegistryTable.addGlobalSecondaryIndex({
+      indexName: 'usecase-index',
+      partitionKey: {
+        name: 'usecase_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+    });
+
     // Portal Artifacts Bucket - stores shared component artifacts (dda-LocalServer)
     // Note: For cross-account Greengrass component access, we use the GDK component bucket
     // (dda-component-{region}-{account}) which is configured with cross-account access
@@ -686,6 +720,11 @@ export class StorageStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'WorkflowChatSessionsTableName', {
       value: this.workflowChatSessionsTable.tableName,
       description: 'WorkflowChatSessions DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'CameraRegistryTableName', {
+      value: this.cameraRegistryTable.tableName,
+      description: 'CameraRegistry DynamoDB Table Name',
     });
 
     new cdk.CfnOutput(this, 'PortalArtifactsBucketName', {

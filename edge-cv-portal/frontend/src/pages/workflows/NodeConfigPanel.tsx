@@ -52,7 +52,18 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import Textarea from '@cloudscape-design/components/textarea';
 import { apiService } from '../../services/api';
 import { useUsecase } from '../../contexts/UsecaseContext';
+import type { Device } from '../../types';
 import type { BuilderNode } from './builderGraph';
+import {
+  applyCameraSelection,
+  cameraDeviceValue,
+  cameraDisplayName,
+  defaultManualEntry,
+  getCameraBindingHint,
+  isCameraReferenceParameter,
+  type CameraBindingHint,
+  type CameraSourceEntry,
+} from './cameraReference';
 import { checkParameterValue } from './parameters';
 import { PORT_TYPES, type JsonValue, type ParameterDescriptor } from './types';
 
@@ -610,6 +621,283 @@ function ParameterField(props: ParameterFieldProps) {
 }
 
 // --------------------------------------------------------------------------
+// Camera reference control (camera-registry-sync Requirements 7.1-7.4)
+// --------------------------------------------------------------------------
+
+/** Load state of an async Select's options. */
+interface AsyncOptionsState<T> {
+  status: 'pending' | 'loading' | 'error' | 'finished';
+  items: T[];
+  errorText?: string;
+}
+
+/** Load state of the camera dropdown, including the never-synced flag. */
+interface CameraOptionsState extends AsyncOptionsState<CameraSourceEntry> {
+  neverSynced?: boolean;
+}
+
+/** The Select statusType for an async options state. */
+function selectStatus(state: { status: AsyncOptionsState<unknown>['status'] }) {
+  return state.status === 'pending' ? ('finished' as const) : state.status;
+}
+
+/** The camera dropdown option for one Camera_Source (Requirement 7.4). */
+export function cameraOption(camera: CameraSourceEntry): SelectProps.Option {
+  const tags = [camera.type, camera.sync_status, camera.absent ? 'absent' : null].filter(
+    (tag): tag is string => typeof tag === 'string' && tag !== ''
+  );
+  return {
+    value: camera.camera_source_id,
+    label: cameraDisplayName(camera),
+    // Staleness badge on the option label (Requirement 7.4).
+    labelTag: camera.stale ? 'Stale' : undefined,
+    description: cameraDeviceValue(camera) ?? undefined,
+    tags,
+  };
+}
+
+interface CameraReferenceFieldProps {
+  typeId: string;
+  /** The `device` parameter descriptor. */
+  descriptor: ParameterDescriptor;
+  /** The node's full parameters record. */
+  parameters: Record<string, JsonValue>;
+  /** The node's current advisory binding hint, when any. */
+  hint: CameraBindingHint | null;
+  /** Manual-entry edits: the full updated parameters record. */
+  onParametersChange: (parameters: Record<string, JsonValue>) => void;
+  /** A camera selection: updated parameters plus the binding hint. */
+  onCameraSelection: (parameters: Record<string, JsonValue>, hint: CameraBindingHint) => void;
+  modelOptions: ModelOptionsState;
+}
+
+/**
+ * The camera reference control for the `camera_source` node's `device`
+ * parameter: a reference-device selector over the current Use_Case's
+ * devices and a camera dropdown fed by `GET /devices/{id}/cameras`
+ * showing each Camera_Source's name, type, path/URL, sync status, and
+ * staleness badge (Requirements 7.1, 7.4). Selecting a camera populates
+ * the node's parameters and records the advisory binding hint
+ * (Requirement 7.2). The "Manual entry" toggle retains the plain text
+ * input (Requirement 7.3).
+ */
+function CameraReferenceField(props: CameraReferenceFieldProps) {
+  const { typeId, descriptor, parameters, hint, onParametersChange, onCameraSelection } = props;
+  const { selectedUsecaseId } = useUsecase();
+
+  const [manual, setManual] = useState(() =>
+    defaultManualEntry(parameters, descriptor.name, descriptor.default, hint)
+  );
+  const [devices, setDevices] = useState<AsyncOptionsState<Device>>({
+    status: 'pending',
+    items: [],
+  });
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(
+    hint?.sourceDeviceId ?? null
+  );
+  const [cameras, setCameras] = useState<CameraOptionsState>({ status: 'pending', items: [] });
+  const [selectedCameraId, setSelectedCameraId] = useState<string | null>(
+    hint?.cameraSourceId ?? null
+  );
+
+  // Devices of the current Use_Case (the reference-device selector).
+  useEffect(() => {
+    if (manual) {
+      return undefined;
+    }
+    if (!selectedUsecaseId) {
+      setDevices({
+        status: 'error',
+        items: [],
+        errorText: 'Select a use case to list its devices',
+      });
+      return undefined;
+    }
+    let cancelled = false;
+    setDevices({ status: 'loading', items: [] });
+    apiService
+      .listDevices(selectedUsecaseId)
+      .then((response) => {
+        if (!cancelled) {
+          setDevices({ status: 'finished', items: response.devices ?? [] });
+        }
+      })
+      .catch((error: Error) => {
+        if (!cancelled) {
+          setDevices({
+            status: 'error',
+            items: [],
+            errorText: error.message || 'Failed to load devices',
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [manual, selectedUsecaseId]);
+
+  // The selected device's Camera_Registry entries (Requirement 7.1).
+  useEffect(() => {
+    if (manual || selectedDeviceId === null) {
+      return undefined;
+    }
+    if (!selectedUsecaseId) {
+      return undefined;
+    }
+    let cancelled = false;
+    setCameras({ status: 'loading', items: [] });
+    apiService
+      .getDeviceCameras(selectedDeviceId, selectedUsecaseId)
+      .then((response) => {
+        if (!cancelled) {
+          setCameras({
+            status: 'finished',
+            items: response.cameras ?? [],
+            neverSynced: response.state === 'never-synced',
+          });
+        }
+      })
+      .catch((error: Error) => {
+        if (!cancelled) {
+          setCameras({
+            status: 'error',
+            items: [],
+            errorText: error.message || 'Failed to load the device cameras',
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [manual, selectedDeviceId, selectedUsecaseId]);
+
+  // Inline validation of the effective device value stays visible in
+  // both modes (the same constraint predicate as every parameter).
+  const effective = effectiveParameterValue(parameters, descriptor);
+  const violation = checkParameterValue(descriptor, effective === undefined ? null : effective);
+  const label = parameterLabel(descriptor);
+
+  const manualToggle = (
+    <Checkbox
+      checked={manual}
+      onChange={({ detail }) => setManual(detail.checked)}
+      ariaLabel={`Manual entry for ${descriptor.name}`}
+    >
+      Manual entry
+    </Checkbox>
+  );
+
+  // Manual entry keeps the plain text input exactly as before
+  // (Requirement 7.3), including description, examples, and validation.
+  if (manual) {
+    return (
+      <SpaceBetween size="xxs">
+        {manualToggle}
+        <ParameterField
+          typeId={typeId}
+          descriptor={descriptor}
+          value={effective}
+          onChange={(value) =>
+            onParametersChange({ ...parameters, [descriptor.name]: value })
+          }
+          modelOptions={props.modelOptions}
+        />
+      </SpaceBetween>
+    );
+  }
+
+  const deviceOptions: SelectProps.Option[] = devices.items.map((device) => ({
+    value: device.device_id,
+    label: device.thing_name || device.device_id,
+    description: device.status,
+  }));
+  const selectedDeviceOption =
+    deviceOptions.find((option) => option.value === selectedDeviceId) ??
+    (selectedDeviceId !== null ? { value: selectedDeviceId, label: selectedDeviceId } : null);
+
+  const cameraOptions = cameras.items.map(cameraOption);
+  const selectedCameraOption =
+    cameraOptions.find((option) => option.value === selectedCameraId) ?? null;
+
+  const onCameraChange = (option: SelectProps.Option) => {
+    const camera = cameras.items.find((entry) => entry.camera_source_id === option.value);
+    if (camera === undefined || selectedDeviceId === null) {
+      return;
+    }
+    setSelectedCameraId(camera.camera_source_id);
+    const result = applyCameraSelection(parameters, camera, selectedDeviceId);
+    onCameraSelection(result.parameters, result.hint);
+  };
+
+  return (
+    <SpaceBetween size="xxs">
+      {manualToggle}
+      <FormField
+        label={
+          descriptor.required ? (
+            label
+          ) : (
+            <span>
+              {label} <i>- optional</i>
+            </span>
+          )
+        }
+        description={descriptor.description ?? undefined}
+        errorText={violation?.message}
+        stretch
+      >
+        <SpaceBetween size="xxs">
+          <Select
+            selectedOption={selectedDeviceOption}
+            onChange={({ detail }) => {
+              setSelectedCameraId(null);
+              setSelectedDeviceId(detail.selectedOption.value ?? null);
+            }}
+            options={deviceOptions}
+            statusType={selectStatus(devices)}
+            loadingText="Loading devices"
+            errorText={devices.errorText}
+            placeholder="Choose a reference device"
+            empty="No devices in this use case"
+            ariaLabel={`Reference device for ${descriptor.name}`}
+          />
+          <Select
+            selectedOption={selectedCameraOption}
+            onChange={({ detail }) => onCameraChange(detail.selectedOption)}
+            options={cameraOptions}
+            statusType={selectStatus(cameras)}
+            loadingText="Loading cameras"
+            errorText={cameras.errorText}
+            disabled={selectedDeviceId === null}
+            placeholder={
+              selectedDeviceId === null ? 'Choose a device first' : 'Choose a camera'
+            }
+            empty={
+              cameras.neverSynced === true
+                ? 'This device has never synced its cameras'
+                : 'No cameras registered for this device'
+            }
+            triggerVariant="option"
+            ariaLabel={`Camera source for ${descriptor.name}`}
+          />
+          <Box fontSize="body-s" color="text-body-secondary">
+            {`Current value: ${textValue(effective) || '(not set)'}`}
+            {hint !== null && ` \u2014 linked to ${hint.cameraName} on ${hint.sourceDeviceId}`}
+          </Box>
+        </SpaceBetween>
+        {/* Catalog-served examples stay available as quick manual fills. */}
+        <ExampleChips
+          descriptor={descriptor}
+          onChange={(value) =>
+            onParametersChange({ ...parameters, [descriptor.name]: value })
+          }
+        />
+      </FormField>
+    </SpaceBetween>
+  );
+}
+
+// --------------------------------------------------------------------------
 // Panel
 // --------------------------------------------------------------------------
 
@@ -618,11 +906,27 @@ export interface NodeConfigPanelProps {
   node: BuilderNode | null;
   /** Called with the node id and its full updated parameters record. */
   onParametersChange: (nodeId: string, parameters: Record<string, JsonValue>) => void;
+  /**
+   * Applies a camera reference selection (camera-registry-sync
+   * Requirement 7.2): the node id, its full updated parameters record,
+   * and the advisory binding hint to store as `data.cameraBindingHint`.
+   * When absent, camera selections update parameters only.
+   */
+  onCameraSelection?: (
+    nodeId: string,
+    parameters: Record<string, JsonValue>,
+    hint: CameraBindingHint
+  ) => void;
   /** Closes the panel (deselects the node); omits the close button when absent. */
   onClose?: () => void;
 }
 
-export default function NodeConfigPanel({ node, onParametersChange, onClose }: NodeConfigPanelProps) {
+export default function NodeConfigPanel({
+  node,
+  onParametersChange,
+  onCameraSelection,
+  onClose,
+}: NodeConfigPanelProps) {
   const needsModels =
     node?.data.descriptor.parameters.some((parameter) => parameter.paramType === 'model_ref') ??
     false;
@@ -679,18 +983,38 @@ export default function NodeConfigPanel({ node, onParametersChange, onClose }: N
         ) : (
           descriptor.parameters
             .filter((parameter) => isParameterVisible(parameter, descriptor.parameters, parameters))
-            .map((parameter) => (
-              <ParameterField
-                key={parameter.name}
-                typeId={descriptor.typeId}
-                descriptor={parameter}
-                value={effectiveParameterValue(parameters, parameter)}
-                onChange={(value) =>
-                  onParametersChange(node.id, { ...parameters, [parameter.name]: value })
-                }
-                modelOptions={modelOptions}
-              />
-            ))
+            .map((parameter) =>
+              isCameraReferenceParameter(descriptor.typeId, parameter.name) ? (
+                // The camera_source device parameter renders as the camera
+                // reference control (camera-registry-sync Requirement 7.1);
+                // keyed by node id so switching nodes resets its state.
+                <CameraReferenceField
+                  key={`${node.id}:${parameter.name}`}
+                  typeId={descriptor.typeId}
+                  descriptor={parameter}
+                  parameters={parameters}
+                  hint={getCameraBindingHint(node.data.advisoryData)}
+                  onParametersChange={(updated) => onParametersChange(node.id, updated)}
+                  onCameraSelection={(updated, hint) =>
+                    onCameraSelection !== undefined
+                      ? onCameraSelection(node.id, updated, hint)
+                      : onParametersChange(node.id, updated)
+                  }
+                  modelOptions={modelOptions}
+                />
+              ) : (
+                <ParameterField
+                  key={parameter.name}
+                  typeId={descriptor.typeId}
+                  descriptor={parameter}
+                  value={effectiveParameterValue(parameters, parameter)}
+                  onChange={(value) =>
+                    onParametersChange(node.id, { ...parameters, [parameter.name]: value })
+                  }
+                  modelOptions={modelOptions}
+                />
+              )
+            )
         )}
       </SpaceBetween>
     </aside>
