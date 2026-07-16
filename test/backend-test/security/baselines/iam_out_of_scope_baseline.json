@@ -5,7 +5,7 @@
   "missing_at_capture": [],
   "note": "Out-of-scope preservation guard for security-iam-authorization-fixes (Req 3.18). These files belong to sibling specs / generated build artifacts and MUST remain byte-for-byte unchanged by this spec.",
   "sibling_spec_files": {
-    "edge-cv-portal/backend/functions/components.py": "5d93a01b6c0803696240b3be189d2afe4ca64781001397ef2370d6172227cdcd",
+    "edge-cv-portal/backend/functions/components.py": "1edaa4877553c9bd9bbd7c03c13659c7fe66abfb57f5312fc5f4ba62113101af",
     "edge-cv-portal/backend/functions/jwt_authorizer.py": "a6346ca76c243e2c9978ee757d770f0cf2a180756a05bfc99f8abf58dceef876",
     "edge-cv-portal/backend/functions/model_converter.py": "1acab7c119908377dc6d315685126492075be0165c8dea51b5594762b2dc2738",
     "edge-cv-portal/backend/functions/packaging.py": "79684d1a88847c5dd5cbc9ea07b1d75e4f2719ae5ce607fc6687156d420fd9a6",
