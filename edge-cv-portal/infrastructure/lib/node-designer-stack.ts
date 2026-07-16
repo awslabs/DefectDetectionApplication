@@ -639,6 +639,13 @@ export class NodeDesignerStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         FETCH_PROJECT_NAME: this.fetchProject.projectName,
+        // The importer starts per-arch builds directly on the select-plugins
+        // and adjust-revision (tree reuse) paths via
+        // plugin_builds.start_queued_builds, which resolves project names
+        // from BUILD_PROJECTS_JSON in ITS OWN Lambda environment - without
+        // it every queued arch is skipped as "unconfigured" and sits queued
+        // forever (imported-plugin-revision-adjustment-fix follow-up).
+        BUILD_PROJECTS_JSON: buildProjectsJson,
         CODE_VERSION: '2026-02-10-plugin-importer',
       },
       layers: [sharedLayer, workflowCoreLayer],
@@ -647,7 +654,9 @@ export class NodeDesignerStack extends cdk.Stack {
     this.pluginImporterHandler.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['codebuild:StartBuild', 'codebuild:BatchGetBuilds'],
-      resources: [this.fetchProject.projectArn],
+      // The fetch project plus the per-arch build projects (start_queued_builds
+      // runs inside this Lambda on the select-plugins / adjust-revision paths).
+      resources: [this.fetchProject.projectArn, ...buildProjectArns],
     }));
 
     // node_generator.py - Bedrock Converse scaffold-generation sessions

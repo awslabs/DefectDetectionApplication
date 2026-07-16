@@ -5,7 +5,7 @@
  * recorded selection shows the whole enumeration, and non-imports show
  * no such field.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import PluginDetail from './PluginDetail';
 import type { PluginVersionDetail } from './types';
@@ -255,6 +255,316 @@ describe('PluginDetail platform compatibility warnings', () => {
     );
 
     expect(screen.queryByText(/requires GStreamer/)).not.toBeInTheDocument();
+  });
+});
+
+describe('PluginDetail revision adjustment (bug condition exploration)', () => {
+  // Bug condition exploration for the imported-plugin revision
+  // adjustment dead end (Property 1). EXPECTED TO FAIL on unfixed
+  // code: the UI renders the incompatible-platform advice as plain
+  // text with no control to apply the suggested revision (bug 1.1).
+  // Once the fix lands, this same test validates the expected
+  // behavior: an adjust-revision action pre-filled with the recorded
+  // suggestedRevision, editable by the user.
+  //
+  // **Validates: Requirements 1.1, 1.3**
+  const jp4IncompatibleMap = {
+    arm64_jp4: {
+      compatible: false,
+      platformVersion: '1.14',
+      requiredVersion: '1.24.0',
+      reason:
+        'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 provides 1.14',
+      suggestedRevision: '1.14',
+    },
+  };
+
+  it('offers an adjust-revision control pre-filled with the suggested revision', async () => {
+    await renderDetail(
+      importedDetail({
+        artifacts: {
+          arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error' },
+        },
+        platform_compatibility: jp4IncompatibleMap,
+      })
+    );
+
+    // The advisory warning renders (unchanged behavior)...
+    expect(
+      screen.getByText(
+        'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 ' +
+          'provides 1.14. Import revision 1.14 for this platform instead.'
+      )
+    ).toBeInTheDocument();
+
+    // ...and an action exists to act on it (expected behavior; the
+    // unfixed page renders the advice as text only).
+    const adjust = screen.getByRole('button', { name: /adjust revision/i });
+    fireEvent.click(adjust);
+
+    // The revision input is pre-filled with the recorded suggestion.
+    expect(screen.getByDisplayValue('1.14')).toBeInTheDocument();
+  });
+});
+
+describe('PluginDetail revision adjustment (fix specifics)', () => {
+  // Unit tests for the adjust-revision action beyond the exploration
+  // coverage above: the action renders EXACTLY for incompatible
+  // entries carrying a suggestion on settled imports, the pre-filled
+  // input is editable, Apply calls the API and refreshes the page
+  // state, and errors surface on the affected platform's entry only.
+  //
+  // **Validates: Requirements 2.1, 2.4**
+  const jp4Incompatible = {
+    compatible: false,
+    platformVersion: '1.14',
+    requiredVersion: '1.24.0',
+    reason:
+      'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 provides 1.14',
+    suggestedRevision: '1.14',
+  };
+
+  function detailWithWarning(
+    overrides: Partial<PluginVersionDetail> = {}
+  ): PluginVersionDetail {
+    return importedDetail({
+      artifacts: {
+        arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error' },
+      },
+      platform_compatibility: { arm64_jp4: jp4Incompatible },
+      ...overrides,
+    });
+  }
+
+  async function mockAdjustRevision(mock: ReturnType<typeof vi.fn>) {
+    const api = (await import('./api')).nodeDesignerApi as Record<
+      string,
+      unknown
+    >;
+    api.adjustRevision = mock;
+  }
+
+  it('offers no action for incompatible entries without a suggested revision', async () => {
+    await renderDetail(
+      detailWithWarning({
+        platform_compatibility: {
+          arm64_jp4: { ...jp4Incompatible, suggestedRevision: null },
+        },
+      })
+    );
+
+    // The advisory warning still renders, but without the action.
+    expect(screen.getByText(/requires GStreamer/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /adjust revision/i })
+    ).not.toBeInTheDocument();
+  });
+
+  it('offers no action while the import has not settled', async () => {
+    await renderDetail(detailWithWarning({ import_status: 'failed' }));
+
+    expect(
+      screen.queryByRole('button', { name: /adjust revision/i })
+    ).not.toBeInTheDocument();
+  });
+
+  it('applies the edited revision via the API and refreshes the page state', async () => {
+    const adjustedView = {
+      plugin_id: 'p-1',
+      version: 1,
+      requested_architectures: ['arm64_jp4', 'x86_64'],
+      builds: {
+        arm64_jp4: { buildStatus: 'queued', logTail: '', prebuilt: false },
+        x86_64: { buildStatus: 'succeeded', logTail: '', prebuilt: false },
+      },
+      settled: false,
+      component_packaging_triggered: false,
+    };
+    const adjustRevision = vi.fn().mockResolvedValue({
+      plugin: detailWithWarning(),
+      builds: adjustedView,
+    });
+    await mockAdjustRevision(adjustRevision);
+    await renderDetail(detailWithWarning());
+
+    fireEvent.click(screen.getByRole('button', { name: /adjust revision/i }));
+
+    // The pre-filled suggestion is editable before applying.
+    const input = screen.getByDisplayValue('1.14');
+    fireEvent.change(input, { target: { value: '1.16' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    await waitFor(() =>
+      expect(adjustRevision).toHaveBeenCalledWith('p-1', 1, 'arm64_jp4', '1.16')
+    );
+    // The page reflects the response's builds view (the platform is
+    // queued while the adjustment fetch runs) and the input closes.
+    await waitFor(() =>
+      expect(screen.getByText('arm64 JetPack 4: queued')).toBeInTheDocument()
+    );
+    expect(screen.queryByDisplayValue('1.16')).not.toBeInTheDocument();
+  });
+
+  it('surfaces the adjustment error on the affected platform only', async () => {
+    const adjustRevision = vi
+      .fn()
+      .mockRejectedValue(new Error('The revision 9.99 does not exist'));
+    await mockAdjustRevision(adjustRevision);
+    await renderDetail(
+      detailWithWarning({
+        artifacts: {
+          arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error' },
+          arm64_jp5: { buildStatus: 'failed', logTail: 'meson: error' },
+        },
+        platform_compatibility: {
+          arm64_jp4: jp4Incompatible,
+          arm64_jp5: {
+            ...jp4Incompatible,
+            platformVersion: '1.16',
+            reason:
+              'The source requires GStreamer >= 1.24.0; arm64 JetPack 5 provides 1.16',
+            suggestedRevision: '1.16',
+          },
+        },
+      })
+    );
+
+    // Both incompatible platforms carry their own action.
+    const actions = screen.getAllByRole('button', {
+      name: /adjust revision/i,
+    });
+    expect(actions).toHaveLength(2);
+
+    fireEvent.click(actions[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    // The rejection surfaces once, on the platform that was adjusted.
+    await waitFor(() =>
+      expect(
+        screen.getAllByText('The revision 9.99 does not exist')
+      ).toHaveLength(1)
+    );
+    // The action is still available to retry the adjustment.
+    expect(
+      screen.getAllByRole('button', { name: /adjust revision/i }).length
+    ).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('PluginDetail revision adjustment (end-to-end detail-page flow)', () => {
+  // Integration flow (task 5): the incompatible-platform warning
+  // renders with the adjust action -> Apply calls the endpoint -> the
+  // page state reflects the response's builds view and the revision
+  // label shows the adjusted revision once arm64_jp4 maps through
+  // arch_revisions -> fetches -> the build poll resumes because the
+  // view is no longer settled.
+  //
+  // **Validates: Requirements 2.4, 3.3**
+  const jp4Incompatible = {
+    compatible: false,
+    platformVersion: '1.14',
+    requiredVersion: '1.24.0',
+    reason:
+      'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 provides 1.14',
+    suggestedRevision: '1.14',
+  };
+
+  const settledBuilds = {
+    plugin_id: 'p-1',
+    version: 1,
+    requested_architectures: ['arm64_jp4', 'x86_64'],
+    builds: {
+      arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error', prebuilt: false },
+      x86_64: { buildStatus: 'succeeded', logTail: '', prebuilt: false },
+    },
+    settled: true,
+    component_packaging_triggered: true,
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('applies the adjustment, maps the revision label, and resumes the poll', async () => {
+    // shouldAdvanceTime keeps waitFor and promise resolution working
+    // in real time while letting the test jump the 10 s poll interval.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const detail = importedDetail({
+      artifacts: {
+        arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error' },
+        x86_64: { buildStatus: 'succeeded' },
+      },
+      platform_compatibility: { arm64_jp4: jp4Incompatible },
+    });
+    getBuilds.mockResolvedValue(settledBuilds);
+    // The endpoint's 202 response: the '1.14' tree is recorded in the
+    // fetches map, arm64_jp4 mapped through arch_revisions, its build
+    // queued — the view is no longer settled.
+    const adjustedPlugin = {
+      ...detail,
+      fetches: {
+        '1.14': {
+          revision: '1.14',
+          source_prefix: 'plugin-sources/uc-1/p-1/1/rev-1.14/',
+          status: 'succeeded',
+        },
+      },
+      arch_revisions: { arm64_jp4: '1.14' },
+    };
+    const queuedView = {
+      ...settledBuilds,
+      builds: {
+        ...settledBuilds.builds,
+        arm64_jp4: { buildStatus: 'queued', logTail: '', prebuilt: false },
+      },
+      settled: false,
+    };
+    const adjustRevision = vi
+      .fn()
+      .mockResolvedValue({ plugin: adjustedPlugin, builds: queuedView });
+    const api = (await import('./api')).nodeDesignerApi as Record<string, unknown>;
+    api.adjustRevision = adjustRevision;
+
+    await renderDetail(detail);
+
+    // The warning renders with the action.
+    expect(
+      screen.getByText(
+        'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 ' +
+          'provides 1.14. Import revision 1.14 for this platform instead.'
+      )
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /adjust revision/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    await waitFor(() =>
+      expect(adjustRevision).toHaveBeenCalledWith('p-1', 1, 'arm64_jp4', '1.14')
+    );
+    // The page reflects the response's builds view...
+    await waitFor(() =>
+      expect(screen.getByText('arm64 JetPack 4: queued')).toBeInTheDocument()
+    );
+    // ...and the revision label shows the adjusted revision once the
+    // architecture is mapped.
+    expect(screen.getByText('revision 1.14')).toBeInTheDocument();
+
+    // The poll resumes (the view is no longer settled): the next tick
+    // refreshes the builds view and the page shows the running build.
+    const pollsBefore = getBuilds.mock.calls.length;
+    getBuilds.mockResolvedValue({
+      ...queuedView,
+      builds: {
+        ...queuedView.builds,
+        arm64_jp4: { buildStatus: 'building', logTail: '', prebuilt: false },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await waitFor(() =>
+      expect(getBuilds.mock.calls.length).toBeGreaterThan(pollsBefore)
+    );
+    await waitFor(() =>
+      expect(screen.getByText('arm64 JetPack 4: building')).toBeInTheDocument()
+    );
   });
 });
 

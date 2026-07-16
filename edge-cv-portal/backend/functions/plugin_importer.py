@@ -39,6 +39,15 @@ Routes (API Gateway REST):
                                 Target_Architectures. plugin_builds.py
                                 passes the selection to CodeBuild as the
                                 PLUGIN_TARGETS env override.
+    POST   /plugins/{id}/versions/{v}/adjust-revision
+                                Apply a per-platform source-revision
+                                override to a settled imported plugin
+                                (imported-plugin-revision-adjustment-fix):
+                                fetch (or reuse) the adjusted revision's
+                                tree into the record's `fetches` map,
+                                map arch_revisions[arch] on fetch
+                                success, and re-run the affected
+                                platform's build. See adjust_revision.
     GET    /plugin-modules      Module_Listing (Requirement 6): fetch the
                                 official GStreamer module index from
                                 https://gstreamer.freedesktop.org/modules/,
@@ -166,6 +175,13 @@ DEFAULT_REVISION = 'default'
 #: projects (queued -> building); the EventBridge build results then
 #: settle the status to succeeded/failed.
 BUILD_QUEUED = 'queued'
+
+#: Per-arch build status recorded when a post-import revision
+#: adjustment's fetch fails: the affected architecture's entry settles
+#: failed with the fetch-failure logTail
+#: (_handle_adjustment_fetch_result), mirroring
+#: plugin_builds.BUILD_FAILED.
+BUILD_FAILED = 'failed'
 
 #: Import outcome recorded on the Plugin_Record (4.5). A fresh import
 #: starts in 'fetching' while the asynchronous CodeBuild fetch clones
@@ -712,6 +728,60 @@ def multi_fetch_failure_finding(failed_revisions: List[str]) -> str:
     return ('Could not retrieve the repository at revision'
             f"{plural} {', '.join(failed_revisions)}: it is unreachable "
             'or the requested revision does not exist')
+
+
+def adjustment_fetch_failure_log_tail(revision: str) -> str:
+    """logTail recorded on an adjusted architecture's artifact entry
+    when the adjustment's fetch fails (2.4). Pure."""
+    return (f'The adjusted revision {revision} could not be fetched: '
+            'the repository is unreachable or the revision does not exist')
+
+
+#: adjustment_fetch_slot actions: reuse an already-synced succeeded
+#: tree (no fetch), join a concurrent adjustment fetch of the same
+#: revision (no second fetch), or fetch the revision (a fresh slug, or
+#: a previously failed entry reset in place).
+ADJUST_REUSE = 'reuse'
+ADJUST_JOIN = 'join'
+ADJUST_FETCH = 'fetch'
+
+
+def adjustment_fetch_slot(item: Dict, revision: str) -> Tuple[str, str]:
+    """
+    Resolve the `fetches` slot a post-import revision adjustment
+    targets for `revision`. Pure over the Plugin_Record item.
+
+    Returns (slug, action) where action is one of:
+      - ADJUST_REUSE: an existing entry records the same revision with
+        status 'succeeded' — the synced tree is reused, no new fetch;
+      - ADJUST_JOIN: an existing entry records the same revision with
+        status 'fetching' (a concurrent adjustment) — the arch joins
+        its pending_archs, no second fetch;
+      - ADJUST_FETCH: the revision needs fetching — either into an
+        existing entry recording the same revision whose fetch failed
+        (reset in place, same slug), or under a fresh slug allocated
+        via revision_slug with numeric-suffix collision disambiguation
+        against the existing slugs (exactly like revision_fetch_plan),
+        so an entry recording a DIFFERENT revision is never clobbered.
+    """
+    fetches = item.get('fetches') or {}
+    for slug in sorted(fetches):
+        entry = fetches[slug] or {}
+        if entry.get('revision') != revision:
+            continue
+        status = entry.get('status')
+        if status == FETCH_STATUS_SUCCEEDED:
+            return slug, ADJUST_REUSE
+        if status == FETCH_STATUS_FETCHING:
+            return slug, ADJUST_JOIN
+        return slug, ADJUST_FETCH  # failed entry: re-fetch in place
+
+    slug = base = revision_slug(revision)
+    suffix = 2
+    while slug in fetches:
+        slug = f'{base}-{suffix}'
+        suffix += 1
+    return slug, ADJUST_FETCH
 
 
 # ------------------------------------------------- pure: provenance
@@ -1728,6 +1798,11 @@ def handle_fetch_result(detail: Dict) -> Dict:
       with the REPO_FETCH_FAILED finding (the record exists so the UI
       can show why — a deliberate change from the old synchronous
       no-record behavior, 4.4).
+
+    Post-import revision adjustments (adjust_revision) fetch against a
+    SETTLED record: their results — a `fetches` entry named by
+    REVISION_SLUG carrying the pending_archs marker — route to
+    _handle_adjustment_fetch_result before the import paths above.
     """
     build_id = fetch_build_id_from_arn(detail.get('build-id') or '')
     build_status = detail.get('build-status')
@@ -1746,7 +1821,19 @@ def handle_fetch_result(detail: Dict) -> Dict:
                        f"{plugin_id} v{version} not found")
         return {'recorded': False, 'reason': 'plugin record not found'}
 
-    if item.get('fetches'):
+    fetches = item.get('fetches') or {}
+    adjustment_slug = env.get('REVISION_SLUG')
+    if (adjustment_slug
+            and (fetches.get(adjustment_slug) or {}).get('pending_archs')):
+        # Post-import revision adjustment fetch (adjust_revision): the
+        # slug's entry carries the pending_archs marker — a settled
+        # record, not an import in flight, so it must be routed before
+        # the import_status == 'fetching' paths below
+        # (imported-plugin-revision-adjustment-fix, 2.3/2.4).
+        return _handle_adjustment_fetch_result(item, build_id,
+                                               build_status, env)
+
+    if fetches:
         # Multi-revision import (arch_revisions): one fetch per distinct
         # revision, each attributed by its REVISION_SLUG env override.
         return _handle_multi_fetch_result(item, build_id, build_status, env)
@@ -1948,6 +2035,132 @@ def _handle_multi_fetch_result(item: Dict, build_id: str,
     return {'recorded': True, 'import_status': updates['import_status']}
 
 
+def _handle_adjustment_fetch_result(item: Dict, build_id: str,
+                                    build_status: Optional[str],
+                                    env: Dict[str, str]) -> Dict:
+    """
+    One fetch result of a post-import revision adjustment
+    (adjust_revision, imported-plugin-revision-adjustment-fix): the
+    REVISION_SLUG env override names the `fetches` entry whose
+    pending_archs marker routed the delivery here. The record has
+    already settled — import_status is never written on this path.
+
+    Idempotency mirrors _handle_multi_fetch_result: one per-slug
+    conditional write guarded on the entry's fetch_build_id matching
+    this build AND its status still 'fetching', so superseded builds
+    and duplicate deliveries change nothing.
+
+    - SUCCEEDED: the entry settles 'succeeded' with pending_archs
+      cleared, every pending arch maps through arch_revisions[arch] =
+      slug (the map is created when the record is still flat), and the
+      queued builds start — their source now resolves through the
+      adjusted tree via plugin_builds.arch_source_prefix (2.3).
+    - FAILED / FAULT / STOPPED / TIMED_OUT: the entry settles 'failed'
+      with pending_archs cleared and each pending arch's artifact entry
+      records the fetch-failure logTail — arch_revisions and every
+      other architecture's entry are untouched, so the prior mapping
+      and other platforms' builds stay intact (2.4, 3.5).
+
+    Audit-logged as the record's created_by (no authenticated user on
+    the EventBridge path). Never raises beyond what handle_build_result
+    already tolerates (only unexpected DynamoDB errors propagate,
+    exactly like _handle_multi_fetch_result).
+    """
+    plugin_id = item['plugin_id']
+    version = int(item['version'])
+    slug = env.get('REVISION_SLUG') or ''
+    entry = (item.get('fetches') or {}).get(slug) or {}
+
+    recorded_build_id = entry.get('fetch_build_id')
+    if recorded_build_id and recorded_build_id != build_id:
+        logger.info(f"Adjustment fetch build {build_id} superseded by "
+                    f"{recorded_build_id}; skipping")
+        return {'recorded': False, 'reason': 'superseded build'}
+    if entry.get('status') != FETCH_STATUS_FETCHING:
+        logger.info(f"Adjustment fetch build {build_id} already recorded; "
+                    "skipping duplicate delivery")
+        return {'recorded': False, 'reason': 'already recorded'}
+
+    pending = [str(a) for a in entry.get('pending_archs') or []]
+    revision = str(entry.get('revision') or slug)
+    settled = (FETCH_STATUS_SUCCEEDED if build_status == 'SUCCEEDED'
+               else FETCH_STATUS_FAILED)
+
+    # One conditional write settles the slot AND applies the per-arch
+    # outcome (arch_revisions mapping on success, fetch-failure artifact
+    # entries on failure) atomically: a duplicate delivery loses the
+    # condition and changes nothing.
+    names: Dict[str, str] = {'#s': slug, '#st': 'status'}
+    values: Dict = {':settled': settled, ':bid': build_id,
+                    ':pending': FETCH_STATUS_FETCHING, ':t': now_ms()}
+    sets = ['fetches.#s.#st = :settled', 'updated_at = :t']
+
+    if settled == FETCH_STATUS_SUCCEEDED:
+        # Flip the pending archs' mappings to the adjusted tree (2.3).
+        if item.get('arch_revisions') is not None:
+            values[':slug'] = slug
+            for index, arch in enumerate(pending):
+                names[f'#a{index}'] = arch
+                sets.append(f'arch_revisions.#a{index} = :slug')
+        else:
+            values[':ar'] = {arch: slug for arch in pending}
+            sets.append('arch_revisions = :ar')
+    else:
+        # The fetch failure surfaces on the pending archs' entries ONLY
+        # — arch_revisions (the prior mapping) and every other
+        # architecture's entry are untouched (2.4, 3.5).
+        values[':fail'] = {
+            'buildStatus': BUILD_FAILED,
+            'logTail': adjustment_fetch_failure_log_tail(revision),
+        }
+        for index, arch in enumerate(pending):
+            names[f'#a{index}'] = arch
+            sets.append(f'artifacts.#a{index} = :fail')
+
+    try:
+        plugin_table().update_item(
+            Key={'plugin_id': plugin_id, 'version': version},
+            UpdateExpression=('SET ' + ', '.join(sets)
+                              + ' REMOVE fetches.#s.pending_archs'),
+            ConditionExpression=('fetches.#s.fetch_build_id = :bid AND '
+                                 'fetches.#s.#st = :pending'),
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as e:
+        if (e.response.get('Error', {}).get('Code')
+                == 'ConditionalCheckFailedException'):
+            return {'recorded': False, 'reason': 'already recorded'}
+        raise
+
+    if settled == FETCH_STATUS_SUCCEEDED:
+        # The pending archs are queued with their mappings in place:
+        # start their builds now (only queued entries are touched).
+        # Auto-start failure never fails the fetch-result handler.
+        _start_queued_builds(plugin_id, version)
+
+    log_audit_event(
+        user_id=item.get('created_by') or 'system',
+        action='adjust_plugin_revision',
+        resource_type='plugin_record',
+        resource_id=plugin_id,
+        result=('success' if settled == FETCH_STATUS_SUCCEEDED
+                else 'failure'),
+        details={'usecase_id': item.get('usecase_id'), 'version': version,
+                 'revision': revision, 'revision_slug': slug,
+                 'architectures': pending,
+                 'fetch_build_id': build_id,
+                 'fetch_status': build_status,
+                 **({'reason': 'REPO_FETCH_FAILED'}
+                    if settled != FETCH_STATUS_SUCCEEDED else {})}
+    )
+    logger.info(f"Recorded adjustment fetch {build_id} ({slug}: {settled}) "
+                f"for {plugin_id} v{version}; archs: {', '.join(pending)}")
+    return {'recorded': True, 'revision_slug': slug,
+            'fetch_status': settled,
+            'import_status': item.get('import_status')}
+
+
 def select_plugins(event: Dict, user: Dict, plugin_id: str,
                    version: int) -> Dict:
     """
@@ -2055,6 +2268,188 @@ def select_plugins(event: Dict, user: Dict, plugin_id: str,
             'selected_plugins': selected,
             'submitted_architectures': architectures,
         },
+    })
+
+
+def adjust_revision(event: Dict, user: Dict, plugin_id: str,
+                    version: int) -> Dict:
+    """
+    POST /plugins/{id}/versions/{v}/adjust-revision
+    Body: {architecture, revision}
+
+    Apply a per-platform source-revision override to a settled imported
+    plugin (imported-plugin-revision-adjustment-fix, 2.1-2.5): the
+    dead-end fix for the incompatible-platform warning's
+    suggestedRevision. Resolves the requested revision to a `fetches`
+    slot via adjustment_fetch_slot:
+
+      - reuse: the revision's tree already synced (status 'succeeded')
+        — map arch_revisions[arch] to it, re-queue the arch, and start
+        the build immediately (2.2);
+      - join: a concurrent adjustment is already fetching the revision
+        — the arch joins its pending_archs and waits for that result;
+      - fetch: StartBuild the fetch step for the revision's own
+        rev-{slug}/ prefix (REVISION_SLUG attribution) and record the
+        'fetching' entry with pending_archs = [arch].
+        arch_revisions[arch] is NOT changed yet: it flips only when
+        the fetch succeeds (_handle_adjustment_fetch_result), so a
+        fetch failure leaves the prior mapping intact (2.4).
+
+    Every path re-queues ONLY the adjusted architecture's artifact
+    entry and REMOVEs components_triggered (a new build round, 3.6).
+    The record's source_s3_prefix, default_fetch_slug, plugins_found,
+    selected_plugins, and every other architecture's entry are never
+    written (3.4, 3.5). Requires node-designer:manage (2.5); rejected
+    with 409 for records that are not repository imports or whose
+    import has not settled to 'imported'.
+    """
+    body, err = parse_body(event)
+    if err:
+        return err
+
+    item = get_version_item(plugin_id, version)
+    if not item:
+        return not_found_response()
+
+    architectures = [str(a) for a in item.get('requested_architectures') or []]
+    architecture = body.get('architecture')
+    if not isinstance(architecture, str) or architecture not in architectures:
+        return error_response(
+            400, 'INVALID_ARCHITECTURE',
+            "architecture must be one of this version's requested "
+            'Target_Architectures',
+            {'requested_architectures': architectures})
+
+    revision = body.get('revision')
+    if not isinstance(revision, str) or not revision.strip():
+        return error_response(400, 'INVALID_REVISION',
+                              'revision must be a non-empty string')
+    revision = revision.strip()
+
+    err = authorize_record_access(user, event, item, manage=True,
+                                  permission=Permission.NODE_DESIGNER_MANAGE)
+    if err:
+        return err
+
+    provenance = item.get('provenance') or {}
+    if (item.get('kind') != 'imported' or not provenance.get('repoUrl')
+            or item.get('import_status') != IMPORT_STATUS_IMPORTED):
+        return error_response(
+            409, 'REVISION_ADJUSTMENT_NOT_AVAILABLE',
+            'Per-platform revision adjustment is only available for '
+            'repository imports whose import has settled',
+            {'kind': item.get('kind'),
+             'import_status': item.get('import_status')})
+
+    fetches = item.get('fetches') or {}
+    slug, action = adjustment_fetch_slot(item, revision)
+
+    # One update writes the whole adjustment: the adjusted arch
+    # re-queued and components_triggered REMOVEd (a new build round,
+    # exactly like start_builds) plus the action-specific mutation.
+    # Nothing else on the record is written (3.4, 3.5).
+    names: Dict[str, str] = {'#a': architecture}
+    values: Dict = {':q': {'buildStatus': BUILD_QUEUED}, ':t': now_ms()}
+    sets = ['artifacts.#a = :q', 'updated_at = :t']
+    fetch_build_id: Optional[str] = None
+
+    if action == ADJUST_REUSE:
+        # The revision's tree is already synced: map the arch to it now
+        # (creating arch_revisions when the record is still flat).
+        if item.get('arch_revisions') is not None:
+            values[':slug'] = slug
+            sets.append('arch_revisions.#a = :slug')
+        else:
+            values[':ar'] = {architecture: slug}
+            sets.append('arch_revisions = :ar')
+    elif action == ADJUST_JOIN:
+        # A concurrent adjustment is fetching this revision: the arch
+        # joins its pending_archs and settles with that fetch result.
+        pending = [str(a) for a
+                   in (fetches.get(slug) or {}).get('pending_archs') or []]
+        if architecture not in pending:
+            pending.append(architecture)
+        names['#s'] = slug
+        values[':pa'] = pending
+        sets.append('fetches.#s.pending_archs = :pa')
+    else:  # ADJUST_FETCH: fresh slug, or a failed entry reset in place
+        base_prefix = source_s3_prefix(item['usecase_id'], plugin_id,
+                                       version)
+        entry = {
+            'revision': revision,
+            'source_prefix': f'{base_prefix}rev-{slug}/',
+            'status': FETCH_STATUS_FETCHING,
+            'pending_archs': [architecture],
+        }
+        try:
+            fetch_build_id = start_fetch(
+                provenance['repoUrl'],
+                (None if revision == DEFAULT_REVISION else revision),
+                entry['source_prefix'].rstrip('/'),
+                usecase_id=item['usecase_id'], plugin_id=plugin_id,
+                version=version, revision_slug_id=slug)
+        except Exception as exc:
+            logger.error(f'Adjustment fetch StartBuild failed: {exc}',
+                         exc_info=True)
+            log_audit_event(
+                user_id=user['user_id'],
+                action='adjust_plugin_revision',
+                resource_type='plugin_record',
+                resource_id=plugin_id,
+                result='failure',
+                details={'usecase_id': item['usecase_id'],
+                         'version': version,
+                         'architecture': architecture,
+                         'revision': revision,
+                         'reason': 'REPO_FETCH_FAILED'}
+            )
+            return error_response(
+                502, 'REPO_FETCH_FAILED',
+                'The adjusted revision fetch could not be started',
+                {'revision': revision})
+        entry['fetch_build_id'] = fetch_build_id
+        if fetches:
+            names['#s'] = slug
+            values[':fe'] = entry
+            sets.append('fetches.#s = :fe')
+        else:
+            values[':fm'] = {slug: entry}
+            sets.append('fetches = :fm')
+
+    plugin_table().update_item(
+        Key={'plugin_id': plugin_id, 'version': version},
+        UpdateExpression=('SET ' + ', '.join(sets)
+                          + ' REMOVE components_triggered'),
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
+    )
+
+    if action == ADJUST_REUSE:
+        # The adjusted arch is queued with its mapping in place: start
+        # its build now; only its entry is queued, so the start touches
+        # nothing else. Auto-start failure never fails the adjustment.
+        _start_queued_builds(plugin_id, version)
+
+    log_audit_event(
+        user_id=user['user_id'],
+        action='adjust_plugin_revision',
+        resource_type='plugin_record',
+        resource_id=plugin_id,
+        result='success',
+        details={'usecase_id': item['usecase_id'], 'version': version,
+                 'architecture': architecture, 'revision': revision,
+                 'revision_slug': slug, 'mode': action,
+                 **({'fetch_build_id': fetch_build_id}
+                    if fetch_build_id else {})}
+    )
+
+    updated = get_version_item(plugin_id, version)
+    # plugin_builds lazily imports this module for fetch results, so a
+    # module-level import would be circular (mirrors _start_queued_builds).
+    import plugin_builds
+    return create_response(202, {
+        'plugin': import_detail(updated),
+        'builds': plugin_builds.builds_view(updated),
     })
 
 
@@ -2211,6 +2606,17 @@ def handler(event: Dict, context) -> Dict:
                                       'version must be an integer')
             if plugin_id:
                 return select_plugins(event, user, plugin_id, version)
+        if (resource == '/plugins/{id}/versions/{v}/adjust-revision'
+                and http_method == 'POST'):
+            path_params = event.get('pathParameters') or {}
+            plugin_id = path_params.get('id')
+            try:
+                version = int(path_params.get('v'))
+            except (TypeError, ValueError):
+                return error_response(400, 'INVALID_VERSION',
+                                      'version must be an integer')
+            if plugin_id:
+                return adjust_revision(event, user, plugin_id, version)
 
         return error_response(404, 'NOT_FOUND', 'Not found')
 

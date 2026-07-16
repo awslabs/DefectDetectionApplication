@@ -571,6 +571,47 @@ export function incompatiblePlatformWarnings(
     }));
 }
 
+// ------------------------------------ post-import revision adjustment
+//
+// An incompatible platform entry carrying a suggestedRevision can be
+// adjusted after the import settles: POST .../adjust-revision fetches
+// (or reuses) the adjusted revision's tree and re-runs the platform's
+// build. These pure helpers gate the detail page's inline action and
+// validate its input, mirroring the backend's adjust_revision checks.
+
+/**
+ * True exactly when the adjust-revision action applies to one
+ * architecture of a record: the detail is an imported record whose
+ * import settled (import_status 'imported') and the architecture's
+ * platform_compatibility entry is incompatible with a non-null
+ * suggestedRevision. Mirrors the backend gate so the UI never offers
+ * an action the endpoint would reject.
+ */
+export function canAdjustRevision(
+  detail: Pick<
+    PluginVersionDetail,
+    'kind' | 'import_status' | 'platform_compatibility'
+  >,
+  arch: string
+): boolean {
+  if (detail.kind !== 'imported' || detail.import_status !== 'imported') {
+    return false;
+  }
+  const entry = detail.platform_compatibility?.[arch];
+  return (
+    !!entry && entry.compatible === false && entry.suggestedRevision != null
+  );
+}
+
+/**
+ * Validate the adjust-revision input before it is submitted, mirroring
+ * the backend's INVALID_REVISION check: null when the trimmed value is
+ * non-empty, the error to display otherwise.
+ */
+export function adjustRevisionError(value: string): string | null {
+  return value.trim() ? null : 'Enter a revision to import for this platform';
+}
+
 // ------------------------------------- per-architecture revisions
 //
 // Importing one plugin set for every platform can need DIFFERENT

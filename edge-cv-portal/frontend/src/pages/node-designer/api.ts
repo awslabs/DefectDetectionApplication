@@ -13,6 +13,7 @@ import { ApiError } from '../../services/api';
 import { beginRequest, endRequest } from '../../services/loadingBus';
 import type { GstPropertiesResponse } from './scan';
 import type {
+  AdjustRevisionResponse,
   GenerationTurnState,
   NodeTypeDetail,
   NodeTypeSummary,
@@ -318,6 +319,31 @@ export const nodeDesignerApi = {
     return request(
       `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/select-plugins`,
       { method: 'POST', body: JSON.stringify({ selected_plugins: selectedPlugins }) }
+    );
+  },
+
+  /**
+   * POST /plugins/{id}/versions/{v}/adjust-revision — apply a
+   * per-platform source revision override to a settled imported record
+   * (import_status 'imported'): the backend fetches the adjusted
+   * revision's tree into the record's `fetches` map (reusing an
+   * already-fetched tree recording the same revision), maps
+   * `arch_revisions[architecture]` on fetch success, and re-runs the
+   * affected platform's build. Answers 202 with the updated plugin
+   * detail and builds view; rejected with 409
+   * REVISION_ADJUSTMENT_NOT_AVAILABLE for non-imports or unsettled
+   * imports and 400 INVALID_ARCHITECTURE / INVALID_REVISION on bad
+   * input.
+   */
+  adjustRevision(
+    pluginId: string,
+    version: number,
+    architecture: string,
+    revision: string
+  ): Promise<AdjustRevisionResponse> {
+    return request(
+      `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/adjust-revision`,
+      { method: 'POST', body: JSON.stringify({ architecture, revision }) }
     );
   },
 

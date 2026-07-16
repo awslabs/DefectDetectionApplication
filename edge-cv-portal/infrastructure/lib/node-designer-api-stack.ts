@@ -38,7 +38,8 @@ export interface NodeDesignerApiStackProps extends cdk.NestedStackProps {
  *                         GET /plugins/{id}/versions/{v},
  *                         POST .../promote | .../demote | .../review
  * - plugin_importer.py:   POST /plugins/import, GET /plugin-modules,
- *                         POST /plugins/{id}/versions/{v}/select-plugins
+ *                         POST /plugins/{id}/versions/{v}/select-plugins,
+ *                         POST /plugins/{id}/versions/{v}/adjust-revision
  * - node_generator.py:    POST /plugins/generate,
  *                         GET  /plugins/generate/{session},
  *                         POST /plugins/generate/{session}/message
@@ -152,6 +153,12 @@ export class NodeDesignerApiStack extends cdk.NestedStack {
     // chosen subset of the enumerated plugins and submitting the deferred
     // per-arch builds with the selection as the PLUGIN_TARGETS env override.
     addMethod(versionResource.addResource('select-plugins'), 'POST', importerIntegration);
+
+    // Post-import per-platform revision adjustment (plugin_importer.py):
+    // fetches (or reuses) the requested revision's source tree, maps the
+    // architecture through arch_revisions, and re-runs the affected
+    // platform's build (imported-plugin-revision-adjustment-fix 2.1).
+    addMethod(versionResource.addResource('adjust-revision'), 'POST', importerIntegration);
 
     // Stored Introspection_Report with derived Parameter_Suggestions, or a
     // machine-readable unavailability reason (gst-parameter-prepopulation

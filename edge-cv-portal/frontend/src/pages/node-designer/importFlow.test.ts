@@ -6,9 +6,11 @@ import { describe, expect, it } from 'vitest';
 import { ApiError } from '../../services/api';
 import {
   addAllToSelection,
+  adjustRevisionError,
   archRevisionEntries,
   archRevisionLabel,
   archRevisionsParam,
+  canAdjustRevision,
   CLASSIFICATION_EXPLANATIONS,
   classifyPluginSet,
   filterPluginEntries,
@@ -29,7 +31,11 @@ import {
   selectableArchitectures,
   togglePluginSelection,
 } from './importFlow';
-import type { EnumeratedPlugin, PlatformCompatibilityEntry } from './types';
+import type {
+  EnumeratedPlugin,
+  PlatformCompatibilityEntry,
+  PluginVersionDetail,
+} from './types';
 
 describe('CLASSIFICATION_EXPLANATIONS', () => {
   it('presents the fixed plain-language explanation per value (15.3)', () => {
@@ -650,5 +656,302 @@ describe('archRevisionLabel', () => {
   it('is null for unmapped architectures and single-revision records', () => {
     expect(archRevisionLabel(detail, 'arm64_jp6')).toBeNull();
     expect(archRevisionLabel({}, 'x86_64')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------
+// Preservation property tests: compatible-platform display is unchanged
+// (imported-plugin-revision-adjustment-fix, Property 2)
+// ---------------------------------------------------------------------
+//
+// **Validates: Requirements 3.2**
+//
+// Observation-first: these properties capture the display behavior
+// OBSERVED on the UNFIXED code for platform entries where the bug
+// condition does NOT hold — compatible entries and incompatible
+// entries WITHOUT a suggested revision. `platformWarningMessage`,
+// `incompatiblePlatformWarnings`, and `archRevisionLabel` must render
+// them exactly as today. These tests MUST PASS on the unfixed code
+// (the baseline) and MUST STILL PASS after the fix lands (task 3.7
+// re-runs them unchanged).
+
+import * as fc from 'fast-check';
+import { ARCHITECTURE_LABELS, DeviceArchitecture } from './types';
+import type { ImportFetchEntry, ImportFetchStatus } from './types';
+
+const ALL_ARCHS = [
+  'x86_64',
+  'x86_64_nvidia',
+  'arm64_jp4',
+  'arm64_jp5',
+  'arm64_jp6',
+] as const;
+
+const versionArb = fc.constantFrom('1.14', '1.16', '1.18', '1.20', '1.24.0');
+
+/** Recorded reasons: realistic sentences plus arbitrary text (never
+ * containing the adjustment suggestion marker, so its absence in the
+ * output is attributable to the helper, not the input). */
+const reasonArb = fc
+  .oneof(
+    fc.constantFrom(
+      'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 provides 1.14',
+      'This source may not be compatible with x86_64'
+    ),
+    fc.string({ minLength: 1, maxLength: 40 })
+  )
+  .filter((s) => !s.includes('Import revision'));
+
+/** A compatible platform entry (bug condition does not hold). */
+const compatibleEntryArb: fc.Arbitrary<PlatformCompatibilityEntry> = fc.record({
+  compatible: fc.constant(true),
+  platformVersion: fc.option(versionArb, { nil: null }),
+  requiredVersion: fc.option(versionArb, { nil: null }),
+  reason: fc.constant(null),
+  suggestedRevision: fc.constant(null),
+});
+
+/** An incompatible entry WITHOUT a suggested revision (non-official
+ * repositories — the bug condition does not hold either). */
+const noSuggestionEntryArb: fc.Arbitrary<PlatformCompatibilityEntry> =
+  fc.record({
+    compatible: fc.constant(false),
+    platformVersion: fc.option(versionArb, { nil: null }),
+    requiredVersion: fc.option(versionArb, { nil: null }),
+    reason: fc.option(reasonArb, { nil: null }),
+    suggestedRevision: fc.constant(null),
+  });
+
+/** An incompatible entry WITH a suggested revision (the bug-condition
+ * anchor — included in map generation so the warnings list is checked
+ * against mixed maps, its own message rendering unchanged). */
+const suggestionEntryArb: fc.Arbitrary<PlatformCompatibilityEntry> = fc.record({
+  compatible: fc.constant(false),
+  platformVersion: fc.option(versionArb, { nil: null }),
+  requiredVersion: fc.option(versionArb, { nil: null }),
+  reason: fc.option(reasonArb, { nil: null }),
+  suggestedRevision: versionArb,
+});
+
+const archArb = fc.constantFrom<string>(...ALL_ARCHS);
+
+describe('Property 2 (preservation): compatible-platform display is unchanged (3.2)', () => {
+  it('renders entries WITHOUT a suggested revision as the plain reason sentence, never an adjustment suggestion', () => {
+    fc.assert(
+      fc.property(
+        archArb,
+        fc.oneof(compatibleEntryArb, noSuggestionEntryArb),
+        (arch, entry) => {
+          const message = platformWarningMessage(arch, entry);
+
+          // Exactly today's rendering: the recorded reason (or the
+          // locally built fallback) as one sentence...
+          const label =
+            ARCHITECTURE_LABELS[arch as DeviceArchitecture] || arch;
+          const reason =
+            entry.reason ||
+            (entry.requiredVersion && entry.platformVersion
+              ? `The source requires GStreamer >= ${entry.requiredVersion}; ` +
+                `${label} provides ${entry.platformVersion}`
+              : `This source may not be compatible with ${label}`);
+          expect(message).toBe(`${reason}.`);
+
+          // ...and never the revision suggestion tail.
+          expect(message).not.toContain('Import revision');
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+
+  it('lists exactly the incompatible entries, sorted, each rendered by platformWarningMessage', () => {
+    fc.assert(
+      fc.property(
+        fc.dictionary(
+          archArb,
+          fc.oneof(compatibleEntryArb, noSuggestionEntryArb, suggestionEntryArb),
+          { maxKeys: 5 }
+        ),
+        (map) => {
+          const warnings = incompatiblePlatformWarnings({
+            platform_compatibility: map,
+          });
+
+          // Compatible entries never produce a warning; incompatible
+          // ones (with or without a suggestion) all do, in arch order.
+          const expected = Object.keys(map)
+            .filter((arch) => map[arch].compatible === false)
+            .sort();
+          expect(warnings.map((w) => w.arch)).toEqual(expected);
+          for (const warning of warnings) {
+            expect(warning.message).toBe(
+              platformWarningMessage(warning.arch, map[warning.arch])
+            );
+          }
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+
+  it('keeps archRevisionLabel resolution unchanged for any record shape', () => {
+    const slugArb = fc.constantFrom(
+      'default',
+      '1.14',
+      '1.16',
+      'a-b',
+      'feature-x'
+    );
+    const fetchEntryArb: fc.Arbitrary<ImportFetchEntry> = fc.record({
+      revision: fc.constantFrom('default', '1.14', '1.16', 'main'),
+      source_prefix: fc.constant('plugin-sources/uc/p/1/rev-x/'),
+      status: fc.constantFrom<ImportFetchStatus>(
+        'succeeded',
+        'fetching',
+        'failed'
+      ),
+    });
+    fc.assert(
+      fc.property(
+        fc.dictionary(archArb, slugArb, { maxKeys: 5 }),
+        fc.dictionary(slugArb, fetchEntryArb, { maxKeys: 5 }),
+        archArb,
+        (archRevisions, fetches, arch) => {
+          const detail = { arch_revisions: archRevisions, fetches };
+          const label = archRevisionLabel(detail, arch);
+
+          const slug = archRevisions[arch];
+          if (!slug) {
+            // Unmapped architectures and single-revision records show
+            // no per-arch revision label — exactly today's behavior.
+            expect(label).toBeNull();
+            expect(archRevisionLabel({}, arch)).toBeNull();
+            return;
+          }
+          // Mapped architectures resolve slug -> fetches revision
+          // (slug itself when the entry is missing), 'default'
+          // rendering as 'default branch'.
+          const revision = fetches[slug]?.revision || slug;
+          expect(label).toBe(
+            revision === 'default' ? 'default branch' : revision
+          );
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+});
+
+// ---------------------------------------------------------------------
+// Post-import revision adjustment helpers
+// (imported-plugin-revision-adjustment-fix, task 4 unit tests)
+// ---------------------------------------------------------------------
+//
+// **Validates: Requirements 2.1, 2.5**
+
+describe('canAdjustRevision', () => {
+  type AdjustableDetail = Pick<
+    PluginVersionDetail,
+    'kind' | 'import_status' | 'platform_compatibility'
+  >;
+
+  const incompatibleWithSuggestion: PlatformCompatibilityEntry = {
+    compatible: false,
+    platformVersion: '1.14',
+    requiredVersion: '1.24.0',
+    reason: null,
+    suggestedRevision: '1.14',
+  };
+
+  const settledImport: AdjustableDetail = {
+    kind: 'imported',
+    import_status: 'imported',
+    platform_compatibility: { arm64_jp4: incompatibleWithSuggestion },
+  };
+
+  it('is true exactly for a settled import with an incompatible entry carrying a suggestion (2.1)', () => {
+    expect(canAdjustRevision(settledImport, 'arm64_jp4')).toBe(true);
+  });
+
+  it('is false for non-imports (mirrors the backend 409 gate, 2.5)', () => {
+    expect(
+      canAdjustRevision({ ...settledImport, kind: 'scaffold' }, 'arm64_jp4')
+    ).toBe(false);
+    expect(
+      canAdjustRevision({ ...settledImport, kind: 'generated' }, 'arm64_jp4')
+    ).toBe(false);
+  });
+
+  it('is false while the import has not settled (2.5)', () => {
+    for (const status of [
+      'fetching',
+      'pending_selection',
+      'failed',
+    ] as const) {
+      expect(
+        canAdjustRevision({ ...settledImport, import_status: status }, 'arm64_jp4')
+      ).toBe(false);
+    }
+    expect(
+      canAdjustRevision(
+        { ...settledImport, import_status: undefined },
+        'arm64_jp4'
+      )
+    ).toBe(false);
+  });
+
+  it('is false for compatible entries and entries without a suggested revision', () => {
+    expect(
+      canAdjustRevision(
+        {
+          ...settledImport,
+          platform_compatibility: {
+            arm64_jp4: { ...incompatibleWithSuggestion, compatible: true },
+          },
+        },
+        'arm64_jp4'
+      )
+    ).toBe(false);
+    expect(
+      canAdjustRevision(
+        {
+          ...settledImport,
+          platform_compatibility: {
+            arm64_jp4: {
+              ...incompatibleWithSuggestion,
+              suggestedRevision: null,
+            },
+          },
+        },
+        'arm64_jp4'
+      )
+    ).toBe(false);
+  });
+
+  it('is false for architectures without an entry and records without a map', () => {
+    expect(canAdjustRevision(settledImport, 'arm64_jp5')).toBe(false);
+    expect(
+      canAdjustRevision(
+        { kind: 'imported', import_status: 'imported' },
+        'arm64_jp4'
+      )
+    ).toBe(false);
+  });
+});
+
+describe('adjustRevisionError', () => {
+  it('accepts any non-empty trimmed revision', () => {
+    expect(adjustRevisionError('1.14')).toBeNull();
+    expect(adjustRevisionError('  1.16  ')).toBeNull();
+    expect(adjustRevisionError('feature/x')).toBeNull();
+  });
+
+  it('rejects empty and whitespace-only input with the display message', () => {
+    expect(adjustRevisionError('')).toBe(
+      'Enter a revision to import for this platform'
+    );
+    expect(adjustRevisionError('   ')).toBe(
+      'Enter a revision to import for this platform'
+    );
   });
 });

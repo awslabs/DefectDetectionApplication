@@ -13,6 +13,7 @@ import {
   ColumnLayout,
   Container,
   Header,
+  Input,
   Select,
   SelectProps,
   SpaceBetween,
@@ -30,7 +31,9 @@ import {
 } from './types';
 import { BuildStatusIndicator, ClassificationBadge, LifecycleBadge, logExcerpt } from './badges';
 import {
+  adjustRevisionError,
   archRevisionLabel,
+  canAdjustRevision,
   importedPluginsSummary,
   platformWarningMessage,
 } from './importFlow';
@@ -54,6 +57,14 @@ export default function PluginDetail() {
   // the retry-all action share this so double submission is blocked).
   const [retrying, setRetrying] = useState<string[]>([]);
   const [retryError, setRetryError] = useState<string | null>(null);
+  // Post-import revision adjustment (incompatible platforms carrying a
+  // suggestedRevision): which architecture's inline input is open, its
+  // editable value, the in-flight flag, and per-arch errors surfaced
+  // on the affected platform's entry only.
+  const [adjustingArch, setAdjustingArch] = useState<string | null>(null);
+  const [adjustValue, setAdjustValue] = useState('');
+  const [adjustSubmitting, setAdjustSubmitting] = useState(false);
+  const [adjustErrors, setAdjustErrors] = useState<Record<string, string>>({});
   // Record deletion (bad/duplicate imports): confirmation modal state.
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -161,6 +172,51 @@ export default function PluginDetail() {
       setRetryError(err?.message || 'The build retry could not be started');
     } finally {
       setRetrying([]);
+    }
+  };
+
+  const clearAdjustError = (arch: string) =>
+    setAdjustErrors(({ [arch]: _dropped, ...rest }) => rest);
+
+  // Open the inline adjust-revision input for one architecture,
+  // pre-filled with the recorded suggestedRevision (editable).
+  const openAdjust = (arch: string, suggested: string) => {
+    setAdjustingArch(arch);
+    setAdjustValue(suggested);
+    clearAdjustError(arch);
+  };
+
+  // Apply the per-platform revision adjustment: POST .../adjust-revision
+  // fetches (or reuses) the adjusted revision's tree and re-runs the
+  // platform's build. The response carries the refreshed record and
+  // builds view; the build poll resumes because the view is no longer
+  // settled. Errors surface on the affected platform's entry only.
+  const applyAdjustment = async (arch: string) => {
+    if (!pluginId || !plugin) return;
+    const validation = adjustRevisionError(adjustValue);
+    if (validation) {
+      setAdjustErrors((prev) => ({ ...prev, [arch]: validation }));
+      return;
+    }
+    setAdjustSubmitting(true);
+    clearAdjustError(arch);
+    try {
+      const response = await nodeDesignerApi.adjustRevision(
+        pluginId,
+        plugin.version,
+        arch,
+        adjustValue.trim()
+      );
+      setPlugin(response.plugin);
+      setBuilds(response.builds);
+      setAdjustingArch(null);
+    } catch (err: any) {
+      setAdjustErrors((prev) => ({
+        ...prev,
+        [arch]: err?.message || 'The revision adjustment could not be applied',
+      }));
+    } finally {
+      setAdjustSubmitting(false);
     }
   };
   // Which plugins an import covers ('rtsp (1 of 74 found)' for a
@@ -428,9 +484,62 @@ export default function PluginDetail() {
                     </SpaceBetween>
                     {compat && compat.compatible === false && (
                       <Box padding={{ left: 'l' }}>
-                        <StatusIndicator type="warning">
-                          {platformWarningMessage(arch, compat)}
-                        </StatusIndicator>
+                        <SpaceBetween size="xs">
+                          <StatusIndicator type="warning">
+                            {platformWarningMessage(arch, compat)}
+                          </StatusIndicator>
+                          {canAdjustRevision(plugin, arch) &&
+                            (adjustingArch === arch ? (
+                              <SpaceBetween direction="horizontal" size="xs">
+                                <Input
+                                  value={adjustValue}
+                                  onChange={({ detail }) =>
+                                    setAdjustValue(detail.value)
+                                  }
+                                  ariaLabel={`Revision for ${arch}`}
+                                  disabled={adjustSubmitting}
+                                />
+                                <Button
+                                  variant="primary"
+                                  loading={adjustSubmitting}
+                                  disabled={retrying.length > 0}
+                                  onClick={() => applyAdjustment(arch)}
+                                >
+                                  Apply
+                                </Button>
+                                <Button
+                                  disabled={adjustSubmitting}
+                                  onClick={() => setAdjustingArch(null)}
+                                >
+                                  Cancel
+                                </Button>
+                              </SpaceBetween>
+                            ) : (
+                              <Button
+                                variant="inline-link"
+                                disabled={
+                                  retrying.length > 0 || adjustSubmitting
+                                }
+                                onClick={() =>
+                                  openAdjust(
+                                    arch,
+                                    compat.suggestedRevision || ''
+                                  )
+                                }
+                              >
+                                Adjust revision for this platform
+                              </Button>
+                            ))}
+                          {adjustErrors[arch] && (
+                            <Alert
+                              type="error"
+                              dismissible
+                              onDismiss={() => clearAdjustError(arch)}
+                            >
+                              {adjustErrors[arch]}
+                            </Alert>
+                          )}
+                        </SpaceBetween>
                       </Box>
                     )}
                     {entry.buildStatus === 'failed' && excerpt && (
