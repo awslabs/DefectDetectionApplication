@@ -43,6 +43,7 @@ Error envelope (design): {"error": {"code", "message", "details"}} with
 403 RBAC denial (11.4) and 404s that avoid cross-tenant existence leaks.
 """
 import copy
+import importlib
 import json
 import os
 import logging
@@ -52,7 +53,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 from decimal import Decimal
 import boto3
-from botocore.config import Config as BotoConfig
 from botocore.exceptions import (
     ClientError,
     ConnectTimeoutError,
@@ -84,6 +84,36 @@ from workflow_core.catalog import NODE_CATALOG
 # (workflow_validation.py lives in the same Lambda bundle).
 from workflow_validation import descriptor_to_wire
 
+# Shared Bedrock_Configuration resolution, client cache, and inference
+# config (custom-node-code-assist Requirement 4.1): bedrock_common.py lives
+# in the same Lambda bundle, so this is a same-directory import exactly like
+# `from workflow_validation import …` above. The module is reloaded so it
+# rebinds its environment (SETTINGS_TABLE) and boto3 resource whenever this
+# module is (re-)imported — preserving the previous behavior where these
+# bindings lived here and were refreshed on every import of
+# workflow_generator (the test suites re-import this module per fixture
+# after repointing SETTINGS_TABLE). A single extra exec at Lambda cold
+# start; a no-op behaviorally in production.
+import bedrock_common
+bedrock_common = importlib.reload(bedrock_common)
+from bedrock_common import (
+    BEDROCK_CONFIG_SETTING_KEY,
+    DEFAULT_BEDROCK_CONFIG,
+    MAX_TIMEOUT_SECONDS,
+    build_inference_config,
+    get_bedrock_client,
+    get_bedrock_configuration,
+)
+
+# Code_Assist_Generator (custom-node-code-assist Requirement 2.1):
+# code_assist.py lives in the same Lambda bundle and serves POST
+# /code-assist, dispatched from handler() below. Reloaded AFTER the
+# bedrock_common reload above so its own `from bedrock_common import ...`
+# bindings always reference the freshly reloaded module (the test suites
+# re-import this module per fixture after repointing SETTINGS_TABLE).
+import code_assist
+code_assist = importlib.reload(code_assist)
+
 # Merged Node_Type_Catalog resolution (custom-node-designer task 9.2):
 # generation embeds the Use_Case's merged palette catalog in the system
 # prompt so generated workflows may use registered Custom_Node_Types
@@ -99,38 +129,14 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.resource('dynamodb')
 s3 = boto3.client('s3')
 
-# Environment variables
-SETTINGS_TABLE = os.environ.get('SETTINGS_TABLE')
+# Environment variables (SETTINGS_TABLE moved to bedrock_common)
 WORKFLOW_CHAT_SESSIONS_TABLE = os.environ.get('WORKFLOW_CHAT_SESSIONS_TABLE')
 PORTAL_ARTIFACTS_BUCKET = os.environ.get('PORTAL_ARTIFACTS_BUCKET')
 WORKFLOWS_S3_PREFIX = os.environ.get('WORKFLOWS_S3_PREFIX', 'workflows')
 
-# Bedrock_Configuration lives in the portal settings table under this key;
-# the settings UI/API (task 10.2) is restricted to PortalAdmin via
-# bedrock-config:write (Requirement 10.6).
-BEDROCK_CONFIG_SETTING_KEY = 'bedrock_configuration'
-
-# Requirement 10.7: the invocation timeout is configurable up to 60 seconds.
-MAX_TIMEOUT_SECONDS = 60
-
-DEFAULT_BEDROCK_CONFIG = {
-    # Cross-region inference profile: current Anthropic models on Bedrock
-    # are invokable only through inference profiles (the bare
-    # foundation-model ids are not directly invokable, and older direct
-    # ids like claude-3-5-sonnet have reached end of life).
-    'model_id': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
-    'region': os.environ.get('AWS_REGION', 'us-east-1'),
-    'max_tokens': 4096,
-    # Sampling parameters are unset by default: they are sent to Bedrock
-    # only when explicitly configured in the settings (or overridden
-    # per-request). Recent Anthropic models reject requests that set
-    # temperature at all, and never accept temperature AND top_p together,
-    # so invoke_generation() omits None values and sends at most one of
-    # the two (see get_bedrock_configuration / invoke_generation).
-    'temperature': None,
-    'top_p': None,
-    'timeout_seconds': MAX_TIMEOUT_SECONDS,
-}
+# BEDROCK_CONFIG_SETTING_KEY, MAX_TIMEOUT_SECONDS, and
+# DEFAULT_BEDROCK_CONFIG now live in bedrock_common (re-exported above,
+# values unchanged - custom-node-code-assist Requirement 4.1).
 
 # Chat sessions expire after 24 hours (DynamoDB TTL attribute 'ttl');
 # the TTL is refreshed on every message.
@@ -140,9 +146,6 @@ SESSION_TTL_SECONDS = 24 * 60 * 60
 MAX_HISTORY_MESSAGES = 20
 
 TOOL_NAME = 'create_workflow'
-
-# Cached per (region, timeout) so warm invocations reuse connections.
-_bedrock_clients: Dict[Tuple[str, int], Any] = {}
 
 # Serialized node catalog is static; built once per container.
 _catalog_json_cache: Optional[str] = None
@@ -213,73 +216,11 @@ def parse_body(event: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
 
 # --------------------------------------------------------------------------
 # Bedrock_Configuration (Requirements 10.6, 10.7)
+#
+# get_bedrock_configuration and get_bedrock_client now live in
+# bedrock_common (imported above with unchanged semantics); node_generator
+# keeps importing them from this module.
 # --------------------------------------------------------------------------
-
-def get_bedrock_configuration() -> Dict:
-    """
-    Load the Bedrock_Configuration from the portal settings table, falling
-    back to sensible defaults for any missing value.
-
-    Stored item shape (written by the PortalAdmin settings API, task 10.2):
-        {setting_key: 'bedrock_configuration',
-         value: {model_id, region, max_tokens, temperature, top_p,
-                 timeout_seconds}}
-    A flat item (attributes directly on the item) is also accepted.
-
-    The timeout is clamped to at most 60 seconds (Requirement 10.7).
-    """
-    config = dict(DEFAULT_BEDROCK_CONFIG)
-    if SETTINGS_TABLE:
-        try:
-            response = dynamodb.Table(SETTINGS_TABLE).get_item(
-                Key={'setting_key': BEDROCK_CONFIG_SETTING_KEY}
-            )
-            item = response.get('Item')
-            if item:
-                stored = item.get('value') if isinstance(item.get('value'), dict) else item
-                stored = decimal_to_native(stored)
-                for key in DEFAULT_BEDROCK_CONFIG:
-                    if key in ('temperature', 'top_p'):
-                        # An explicitly stored null unsets a sampling
-                        # parameter (recent Anthropic models reject
-                        # temperature and top_p together; nulling
-                        # temperature lets top_p be sent instead).
-                        if key in stored:
-                            config[key] = stored[key]
-                    elif stored.get(key) is not None:
-                        config[key] = stored[key]
-        except ClientError as e:
-            logger.warning(f"Could not read Bedrock configuration, using defaults: {str(e)}")
-
-    try:
-        timeout = int(config['timeout_seconds'])
-    except (TypeError, ValueError):
-        timeout = MAX_TIMEOUT_SECONDS
-    config['timeout_seconds'] = max(1, min(timeout, MAX_TIMEOUT_SECONDS))
-    return config
-
-
-def get_bedrock_client(region: str, timeout_seconds: int):
-    """
-    bedrock-runtime client with a client-side read timeout equal to the
-    configured invocation timeout (design section 9: "Lambda invokes with a
-    client-side timeout equal to the configured value"). Retries are disabled
-    so the total wall time cannot exceed the configured timeout.
-    """
-    cache_key = (region, timeout_seconds)
-    client = _bedrock_clients.get(cache_key)
-    if client is None:
-        client = boto3.client(
-            'bedrock-runtime',
-            region_name=region,
-            config=BotoConfig(
-                connect_timeout=min(timeout_seconds, 10),
-                read_timeout=timeout_seconds,
-                retries={'max_attempts': 0}
-            )
-        )
-        _bedrock_clients[cache_key] = client
-    return client
 
 
 # --------------------------------------------------------------------------
@@ -464,14 +405,9 @@ def invoke_generation(config: Dict, messages: List[Dict],
     client = get_bedrock_client(config['region'], config['timeout_seconds'])
     # Never send temperature and top_p together: recent Anthropic models
     # (e.g. claude-sonnet-4-5) reject requests specifying both. Temperature
-    # wins when set; top_p is sent only when temperature is absent/None.
-    inference_config = {'maxTokens': int(config['max_tokens'])}
-    temperature = config.get('temperature')
-    top_p = config.get('top_p')
-    if temperature is not None:
-        inference_config['temperature'] = float(temperature)
-    elif top_p is not None:
-        inference_config['topP'] = float(top_p)
+    # wins when set; top_p is sent only when temperature is absent/None
+    # (bedrock_common.build_inference_config, Requirements 4.2, 4.3).
+    inference_config = build_inference_config(config)
     try:
         response = client.converse(
             modelId=config['model_id'],
@@ -729,6 +665,12 @@ def handler(event: Dict, context: Any) -> Dict:
 
         if resource == '/workflows/generate' and http_method == 'POST':
             return generate_workflow(event, user)
+
+        # Code assistance for custom Python node modules
+        # (custom-node-code-assist Requirement 2.1). Unexpected exceptions
+        # fall through to the 500 INTERNAL_ERROR guard below.
+        if resource == '/code-assist' and http_method == 'POST':
+            return code_assist.handle_code_assist(event, user)
 
         return error_response(404, 'NOT_FOUND', 'Not found')
 

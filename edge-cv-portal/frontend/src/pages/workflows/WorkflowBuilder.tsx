@@ -426,6 +426,7 @@ function BuilderCanvas({
         onParametersChange={onNodeParametersChange}
         onCameraSelection={onNodeCameraSelection}
         onClose={closeConfigPanel}
+        role={user?.role}
       />
       {/* Generate/Test side drawer. Both panels stay mounted (hidden via
           display:none) so their state survives collapsing and tab switches. */}

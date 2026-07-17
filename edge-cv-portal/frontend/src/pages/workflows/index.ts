@@ -12,6 +12,7 @@ export * from './parameters';
 export * from './inlineChecks';
 export * from './builderGraph';
 export * from './validationMarkers';
+export * from './importAnalyzer';
 export {
   default as WorkflowToolbar,
   canEditWorkflows,
