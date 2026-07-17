@@ -2443,7 +2443,7 @@ def adjust_revision(event: Dict, user: Dict, plugin_id: str,
                     if fetch_build_id else {})}
     )
 
-    updated = get_version_item(plugin_id, version)
+    updated = get_version_item(plugin_id, version, consistent_read=True)
     # plugin_builds lazily imports this module for fetch results, so a
     # module-level import would be circular (mirrors _start_queued_builds).
     import plugin_builds
