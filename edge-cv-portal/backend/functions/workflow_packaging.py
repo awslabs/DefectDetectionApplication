@@ -348,12 +348,20 @@ def zip_artifact_name(arch: str) -> str:
 # Artifact assembly
 # --------------------------------------------------------------------------
 
+#: Node types whose per-node code and declared pip dependencies ship as
+#: python/{nodeId}/handler.py + requirements.txt in every architecture
+#: artifact zip and are listed together in the manifest's
+#: customPythonNodeIds (custom-python-frames Requirements 2.4, 2.5).
+CUSTOM_PYTHON_NODE_TYPES = ('custom_python', 'custom_python_preprocess')
+
+
 def gather_custom_python_nodes(graph) -> List[Dict]:
     """Custom_Python_Nodes whose code + declared dependencies ship in the
-    Workflow_Component artifacts (Requirement 7.3)"""
+    Workflow_Component artifacts (Requirement 7.3; both Custom Python node
+    types — custom-python-frames Requirements 2.4, 2.5)"""
     nodes = []
     for node in graph.nodes:
-        if node.type == 'custom_python':
+        if node.type in CUSTOM_PYTHON_NODE_TYPES:
             nodes.append({
                 'node_id': node.id,
                 'code': str(node.parameters.get('code') or ''),

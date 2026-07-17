@@ -37,8 +37,9 @@ executor manages the bridge itself, exactly as the design prescribes:
   frame bytes. Executor -> handler headers carry ``nodeId``, ``width``,
   ``height``, ``format`` and ``metadata``; handler -> executor headers
   carry ``status`` (``ok``/``error``), ``metadata`` and the transformed
-  frame. The handler contract is ``handle(frame_bytes, metadata) ->
-  (frame_bytes, metadata)``.
+  frame. The handler contract is ``process_frame(frame, metadata)``
+  (NumPy-array based, preferred) or ``handle(frame_bytes, metadata) ->
+  (frame_bytes, metadata)`` (raw bytes).
 - **Failure containment**: non-zero exit, wall-clock timeout, memory
   exhaustion, handler exceptions, and protocol violations all raise
   :class:`CustomPythonNodeError` carrying the ``node_id`` — the executor
@@ -74,7 +75,30 @@ HANDLER_PATH_ARG = "handler-path"
 #: Per-frame wall-clock limit for one handler invocation.
 DEFAULT_WALL_CLOCK_LIMIT_SEC = 10.0
 #: Address-space bound for the handler subprocess (RLIMIT_AS).
+#: RLIMIT_AS limits *virtual* address space, not resident memory.
+#: NumPy's OpenBLAS and OpenCV both spawn one worker thread per CPU at
+#: import/first-use, and each thread's stack reservation counts against
+#: RLIMIT_AS — on many-core hosts the reservations alone exceed any
+#: reasonable cap and ``import numpy`` hangs (it does not fail cleanly).
+#: The bridge therefore caps those pools to one thread via environment
+#: variables (see ``_THREAD_CAP_ENV`` in ``_start_locked``), which was
+#: verified to let numpy + cv2 import and process 4K frames comfortably
+#: within 512 MB. The limit stays configurable per bridge via the
+#: ``memory_limit_bytes`` constructor parameter.
 DEFAULT_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
+
+#: Thread-pool caps applied to the handler subprocess environment when a
+#: memory limit is in force (values already set by the operator win).
+#: Without these, OpenBLAS (numpy) and OpenCV size their pools to the
+#: host CPU count and the per-thread stack reservations blow through
+#: RLIMIT_AS — OpenBLAS then *hangs* inside ``import numpy`` instead of
+#: failing, stalling the subprocess until the per-frame wall-clock
+#: limit kills it.
+_THREAD_CAP_ENV = {
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENCV_FOR_THREADS_NUM": "1",
+}
 
 #: Protocol sanity bounds — anything past these is a protocol violation.
 MAX_HEADER_BYTES = 1 << 20
@@ -151,21 +175,219 @@ def decode_header(raw: bytes) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Frame_Helpers module source (``dda_frames``), executed inside the handler
+# subprocess. Self-contained on purpose: it must not import LocalServer
+# modules, and it is importable standalone (exec into a fresh module
+# namespace) for direct testing. The runner registers it in ``sys.modules``
+# as ``dda_frames`` before the handler loads, so handlers can
+# ``import dda_frames`` without the node shipping extra artifact files
+# (Requirement 5.1).
+# ---------------------------------------------------------------------------
+
+HELPERS_SOURCE = r'''
+"""dda_frames — frame helpers for Custom Python handlers.
+
+Provides frame/array conversion (``to_array``/``to_bytes``), the
+current frame's caps (``frame_info``), and image loading from local
+disk or S3 (``load_image``). All functions raise ``ValueError`` with a
+descriptive message on bad input.
+"""
+
+#: Supported Pixel_Formats and their channel counts.
+FORMAT_CHANNELS = {"RGB": 3, "BGR": 3, "RGBA": 4, "GRAY8": 1}
+
+_current_frame = None
+_s3_client = None
+
+
+def _set_current(info):
+    """Set (info dict) or clear (None) the per-invocation frame context.
+
+    Called by the runner around each handler invocation; not part of the
+    public handler API.
+    """
+    global _current_frame
+    _current_frame = dict(info) if info is not None else None
+
+
+def frame_info():
+    """``{'width': int, 'height': int, 'format': str}`` for the frame
+    whose handler invocation is in progress; None outside an invocation."""
+    return dict(_current_frame) if _current_frame is not None else None
+
+
+def _require_numpy(what):
+    try:
+        import numpy
+        return numpy
+    except ImportError:
+        raise ValueError(
+            "{0}: NumPy is not importable in the handler "
+            "subprocess".format(what)
+        )
+
+
+def _require_cv2(what):
+    try:
+        import cv2
+        return cv2
+    except ImportError:
+        raise ValueError(
+            "{0}: OpenCV (cv2) is not importable in the handler "
+            "subprocess".format(what)
+        )
+
+
+def to_array(frame_bytes, width, height, format):
+    """Raw frame bytes -> NumPy uint8 array (H x W x C; H x W for GRAY8).
+
+    The row stride is ``len(frame_bytes) // height``; each row's first
+    ``width * channels`` bytes are taken, tolerating row padding in the
+    frame bytes.
+    """
+    np = _require_numpy("to_array")
+    if format not in FORMAT_CHANNELS:
+        raise ValueError(
+            "to_array: unsupported format '{0}' (supported: {1})".format(
+                format, ", ".join(sorted(FORMAT_CHANNELS))
+            )
+        )
+    if not isinstance(width, int) or not isinstance(height, int) \
+            or width <= 0 or height <= 0:
+        raise ValueError(
+            "to_array: invalid dimensions {0!r}x{1!r}".format(width, height)
+        )
+    frame_bytes = bytes(frame_bytes)
+    channels = FORMAT_CHANNELS[format]
+    row_bytes = width * channels
+    stride = len(frame_bytes) // height
+    if stride < row_bytes:
+        raise ValueError(
+            "to_array: frame bytes too short: got {0} bytes for "
+            "{1}x{2} {3}, which needs at least {4} bytes".format(
+                len(frame_bytes), width, height, format, row_bytes * height
+            )
+        )
+    rows = np.frombuffer(
+        frame_bytes[: stride * height], dtype=np.uint8
+    ).reshape(height, stride)[:, :row_bytes]
+    array = rows.copy()
+    if channels == 1:
+        return array.reshape(height, width)
+    return array.reshape(height, width, channels)
+
+
+def to_bytes(array):
+    """NumPy uint8 array -> contiguous raw frame bytes (no padding)."""
+    np = _require_numpy("to_bytes")
+    if not isinstance(array, np.ndarray):
+        raise ValueError(
+            "to_bytes: expected a NumPy array, got {0}".format(
+                type(array).__name__
+            )
+        )
+    if array.dtype != np.uint8:
+        raise ValueError(
+            "to_bytes: expected a uint8 array, got dtype {0}".format(
+                array.dtype
+            )
+        )
+    return np.ascontiguousarray(array).tobytes()
+
+
+def _decode_image(source, data):
+    np = _require_numpy("load_image: '{0}'".format(source))
+    cv2 = _require_cv2("load_image: '{0}'".format(source))
+    buffer = np.frombuffer(data, dtype=np.uint8)
+    image = cv2.imdecode(buffer, cv2.IMREAD_UNCHANGED)
+    if image is not None and image.ndim == 2 and image.dtype == np.uint8:
+        return image  # grayscale sources decode to a 2-D array
+    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)  # 8-bit BGR
+    if image is None:
+        raise ValueError(
+            "load_image: content of '{0}' could not be decoded as an "
+            "image".format(source)
+        )
+    return image
+
+
+def load_image(source, s3_client=None):
+    """Local path or ``s3://bucket/key`` -> uint8 image array in OpenCV
+    BGR channel order (single-channel images decode to a 2-D array).
+
+    Raises ``ValueError`` naming the source on a missing file, malformed
+    URI, fetch failure, undecodable content, or missing boto3.
+    ``s3_client`` is injectable for tests; by default a lazily created
+    boto3 client using the device's ambient AWS credentials.
+    """
+    source = str(source)
+    if source.startswith("s3://"):
+        remainder = source[len("s3://"):]
+        bucket, _, key = remainder.partition("/")
+        if not bucket or not key:
+            raise ValueError(
+                "load_image: malformed S3 URI '{0}' (expected "
+                "s3://bucket/key)".format(source)
+            )
+        if s3_client is None:
+            try:
+                import boto3
+            except ImportError:
+                raise ValueError(
+                    "load_image: cannot fetch '{0}': boto3 is not "
+                    "installed".format(source)
+                )
+            global _s3_client
+            if _s3_client is None:
+                _s3_client = boto3.client("s3")
+            s3_client = _s3_client
+        try:
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            data = response["Body"].read()
+        except Exception as e:
+            raise ValueError(
+                "load_image: could not fetch '{0}': {1}".format(source, e)
+            )
+    else:
+        try:
+            with open(source, "rb") as f:
+                data = f.read()
+        except (OSError, ValueError) as e:
+            raise ValueError(
+                "load_image: could not read '{0}': {1}".format(source, e)
+            )
+    return _decode_image(source, data)
+'''
+
+
+# ---------------------------------------------------------------------------
 # Runner script executed inside the subprocess (self-contained on purpose:
 # the subprocess must not depend on LocalServer being importable)
 # ---------------------------------------------------------------------------
 
-#: The handler contract: ``handler.py`` defines
-#: ``handle(frame_bytes, metadata) -> (frame_bytes, metadata)``.
-#: Returning ``None`` for the frame passes the input frame through.
-#: stdout belongs to the protocol — handlers must not print to it.
-RUNNER_SOURCE = r'''
+#: The handler contract: ``handler.py`` defines either
+#: ``process_frame(frame, metadata)`` (NumPy-array contract, preferred
+#: when both are present — Requirement 3.7) or
+#: ``handle(frame_bytes, metadata) -> (frame_bytes, metadata)`` (the
+#: pre-existing raw-bytes contract — Requirement 3.6). Returning
+#: ``None`` passes the input frame through. stdout belongs to the
+#: protocol — handlers must not print to it.
+#:
+#: The runner is assembled with ``HELPERS_SOURCE`` (embedded via repr,
+#: keeping the script self-contained for ``python -c``): it registers
+#: the ``dda_frames`` module in ``sys.modules`` before the handler
+#: loads (Requirement 5.1) and best-effort binds ``cv2``/``np``/
+#: ``numpy`` on the handler module before its code executes
+#: (Requirements 4.1-4.3).
+RUNNER_SOURCE = "_HELPERS_SOURCE = " + repr(HELPERS_SOURCE) + "\n" + r'''
+import importlib
 import importlib.util
 import json
 import os
 import struct
 import sys
 import traceback
+import types
 
 
 def _read_exact(stream, n):
@@ -189,6 +411,91 @@ def _write(stream, header, frame):
     stream.flush()
 
 
+def _load_dda_frames():
+    """Register the embedded Frame_Helpers module as ``dda_frames``
+    before the handler loads (Requirement 5.1)."""
+    module = types.ModuleType("dda_frames")
+    exec(_HELPERS_SOURCE, module.__dict__)
+    sys.modules["dda_frames"] = module
+    return module
+
+
+def _invoke_process_frame(process_frame, dda_frames, frame, metadata, info):
+    """One process_frame invocation (Requirements 3.1-3.5)."""
+    width = info.get("width")
+    height = info.get("height")
+    frame_format = info.get("format")
+    if frame_format not in dda_frames.FORMAT_CHANNELS:
+        raise ValueError(
+            "process_frame: unsupported frame format {0!r} "
+            "(supported: {1})".format(
+                frame_format,
+                ", ".join(sorted(dda_frames.FORMAT_CHANNELS)),
+            )
+        )
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise ValueError(
+            "process_frame: the stream caps are missing frame "
+            "dimensions (width={0!r}, height={1!r})".format(width, height)
+        )
+    try:
+        import numpy as np
+    except ImportError:
+        raise ValueError(
+            "process_frame requires NumPy, which is not importable "
+            "in the handler subprocess"
+        )
+    array = dda_frames.to_array(frame, width, height, frame_format)
+    result = process_frame(array, metadata)
+    if result is None:
+        return frame, metadata  # pass-through (Requirement 3.3)
+    if not isinstance(result, np.ndarray):
+        raise ValueError(
+            "process_frame must return None or a NumPy array of "
+            "shape {0} and dtype {1}, got {2}".format(
+                array.shape, array.dtype, type(result).__name__
+            )
+        )
+    if result.shape != array.shape or result.dtype != array.dtype:
+        raise ValueError(
+            "process_frame returned an array of shape {0} and dtype "
+            "{1}; expected shape {2} and dtype {3}".format(
+                result.shape, result.dtype, array.shape, array.dtype
+            )
+        )
+    # Write pixel rows back into a copy of the input bytes at the
+    # original row stride: byte length and row padding are preserved
+    # so the appsrc caps stay valid (Requirement 3.2).
+    channels = dda_frames.FORMAT_CHANNELS[frame_format]
+    row_bytes = width * channels
+    stride = len(frame) // height
+    out = bytearray(frame)
+    pixels = np.ascontiguousarray(result).tobytes()
+    for row in range(height):
+        out[row * stride:row * stride + row_bytes] = (
+            pixels[row * row_bytes:(row + 1) * row_bytes]
+        )
+    return bytes(out), metadata
+
+
+def _invoke_handle(handle, frame, metadata):
+    """One handle invocation — the pre-existing raw-bytes contract,
+    unchanged in behavior (Requirement 3.6)."""
+    result = handle(frame, metadata)
+    if isinstance(result, tuple):
+        out_frame, out_meta = result
+    else:
+        out_frame, out_meta = result, {}
+    if out_frame is None:
+        out_frame = frame
+    if not isinstance(out_frame, (bytes, bytearray)):
+        raise TypeError(
+            "handle() must return frame bytes, got "
+            + type(out_frame).__name__
+        )
+    return out_frame, out_meta
+
+
 def main():
     handler_path = sys.argv[1]
     stdin = sys.stdin.buffer
@@ -196,15 +503,34 @@ def main():
     # Let the handler import siblings shipped in its python/{nodeId}/ dir.
     sys.path.insert(0, os.path.dirname(os.path.abspath(handler_path)))
     try:
+        dda_frames = _load_dda_frames()
         spec = importlib.util.spec_from_file_location(
             "dda_custom_python_handler", handler_path
         )
         module = importlib.util.module_from_spec(spec)
+        # Best-effort pre-imports before the handler code executes; an
+        # import failure leaves the binding absent, affecting only
+        # handlers that reference it (Requirements 4.1-4.3).
+        for module_name, binding in (
+            ("cv2", "cv2"),
+            ("numpy", "np"),
+            ("numpy", "numpy"),
+        ):
+            try:
+                setattr(
+                    module, binding, importlib.import_module(module_name)
+                )
+            except Exception:
+                pass
         spec.loader.exec_module(module)
+        process_frame = getattr(module, "process_frame", None)
         handle = getattr(module, "handle", None)
-        if not callable(handle):
+        process_frame = process_frame if callable(process_frame) else None
+        handle = handle if callable(handle) else None
+        if process_frame is None and handle is None:
             raise TypeError(
-                "handler.py does not define a callable "
+                "handler.py defines neither "
+                "process_frame(frame, metadata) nor "
                 "handle(frame_bytes, metadata)"
             )
     except BaseException:
@@ -223,18 +549,23 @@ def main():
         header = json.loads(raw_header.decode("utf-8"))
         frame = _read_exact(stdin, int(header.get("frameSize", 0))) or b""
         try:
-            result = handle(frame, header.get("metadata") or {})
-            if isinstance(result, tuple):
-                out_frame, out_meta = result
-            else:
-                out_frame, out_meta = result, {}
-            if out_frame is None:
-                out_frame = frame
-            if not isinstance(out_frame, (bytes, bytearray)):
-                raise TypeError(
-                    "handle() must return frame bytes, got "
-                    + type(out_frame).__name__
-                )
+            metadata = header.get("metadata") or {}
+            info = {"width": header.get("width"),
+                    "height": header.get("height"),
+                    "format": header.get("format")}
+            metadata["frame"] = info  # Requirement 3.9
+            dda_frames._set_current(info)  # Requirement 5.6
+            try:
+                if process_frame is not None:
+                    out_frame, out_meta = _invoke_process_frame(
+                        process_frame, dda_frames, frame, metadata, info
+                    )
+                else:
+                    out_frame, out_meta = _invoke_handle(
+                        handle, frame, metadata
+                    )
+            finally:
+                dda_frames._set_current(None)
             _write(stdout, {"status": "ok", "metadata": out_meta or {}},
                    bytes(out_frame))
         except BaseException:
@@ -327,6 +658,14 @@ class CustomPythonBridge:
         # runs the executor's interpreter with its default home.
         env = dict(os.environ)
         env.pop("PYTHONHOME", None)
+        if self._memory_limit_bytes:
+            # Cap the OpenBLAS/OpenMP/OpenCV thread pools so their
+            # per-thread stack reservations fit under RLIMIT_AS; an
+            # uncapped OpenBLAS hangs inside ``import numpy`` on
+            # many-core hosts (see _THREAD_CAP_ENV). Operator-set
+            # values take precedence.
+            for key, value in _THREAD_CAP_ENV.items():
+                env.setdefault(key, value)
         self._process = subprocess.Popen(
             [self._python_executable, "-c", RUNNER_SOURCE, self._handler_path],
             stdin=subprocess.PIPE,

@@ -7,6 +7,7 @@ Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5
 """
 
 from workflow_core.catalog import (
+    ARCHITECTURES,
     CATEGORY_INFERENCE,
     CATEGORY_INPUT,
     CATEGORY_OUTPUT,
@@ -146,6 +147,88 @@ class TestPreprocessingNodeTypes:
         assert params["format"].param_type == "enum"
         assert {"RGB", "BGR", "GRAY8"} <= set(params["format"].constraints["values"])
         assert params["format"].default == "RGB"
+
+
+# --------------------------------------------------------------------------
+# Custom Python preprocessing node type
+# (custom-python-frames Requirements 1.1-1.5)
+# --------------------------------------------------------------------------
+
+class TestCustomPythonPreprocessNodeType:
+    def test_descriptor_present_in_preprocessing_category(self):
+        descriptor = get_node_type("custom_python_preprocess")
+        assert descriptor is not None
+        assert descriptor.category == CATEGORY_PREPROCESSING
+        assert descriptor.display_name == "Custom Python (Frames)"
+        assert descriptor.hardware_dependent is False
+
+    def test_fixed_video_frames_ports_without_type_overrides(self):
+        # Exactly one VideoFrames input and one VideoFrames output; the
+        # per-instance port type override parameters of custom_python
+        # must not exist here (Requirement 1.2).
+        descriptor = get_node_type("custom_python_preprocess")
+        assert _port_types(descriptor.inputs) == [PORT_TYPE_VIDEO_FRAMES]
+        assert _port_types(descriptor.outputs) == [PORT_TYPE_VIDEO_FRAMES]
+        params = _params_by_name(descriptor)
+        assert "input_port_type" not in params
+        assert "output_port_type" not in params
+
+    def test_parameterization(self):
+        params = _params_by_name(get_node_type("custom_python_preprocess"))
+        assert params["code"].required is True
+        assert params["code"].param_type == "code"
+        assert params["requirements"].required is False
+        assert params["requirements"].param_type == "string"
+
+    def test_mappings_identical_to_custom_python(self):
+        # Same emlpython element chain and plugin dependencies as the
+        # custom_python post-processing node on every architecture
+        # (Requirement 1.4).
+        preprocess = get_node_type("custom_python_preprocess")
+        post = get_node_type("custom_python")
+        assert {m.arch for m in preprocess.mappings} == set(ARCHITECTURES)
+        for arch in ARCHITECTURES:
+            pre_mapping = preprocess.mapping_for(arch)
+            post_mapping = post.mapping_for(arch)
+            assert post_mapping is not None, arch
+            assert pre_mapping.element_chain == post_mapping.element_chain, arch
+            assert pre_mapping.plugin_dependencies == \
+                post_mapping.plugin_dependencies, arch
+
+
+# --------------------------------------------------------------------------
+# Custom Python contract documentation
+# (custom-python-frames Requirements 1.5, 8.1, 8.2)
+# --------------------------------------------------------------------------
+
+class TestCustomPythonContractDocumentation:
+    def test_preprocess_code_description_documents_process_frame(self):
+        code = _params_by_name(
+            get_node_type("custom_python_preprocess"))["code"]
+        assert "process_frame" in code.description
+        assert "process(data, metadata)" not in code.description
+
+    def test_custom_python_code_description_documents_actual_entry_points(self):
+        # The actual runtime entry points (process_frame and handle),
+        # never the non-existent process(data, metadata) contract
+        # (Requirement 8.1).
+        code = _params_by_name(get_node_type("custom_python"))["code"]
+        assert "process_frame" in code.description
+        assert "handle" in code.description
+        assert "process(data, metadata)" not in code.description
+
+    def test_every_code_example_defines_a_runtime_entry_point(self):
+        # Each code example exec's to a module defining a callable
+        # process_frame or handle, so it is a valid handler under the
+        # runtime contract (Requirements 1.5, 8.2).
+        for type_id in ("custom_python", "custom_python_preprocess"):
+            code = _params_by_name(get_node_type(type_id))["code"]
+            assert isinstance(code.examples, list) and code.examples, type_id
+            for example in code.examples:
+                namespace = {}
+                exec(compile(example, "<example>", "exec"), namespace)
+                entry = namespace.get("process_frame") or namespace.get("handle")
+                assert callable(entry), (type_id, example)
 
 
 # --------------------------------------------------------------------------
@@ -421,6 +504,7 @@ class TestCatalogCoverage:
     EXPECTED_TYPE_IDS = {
         "camera_source", "folder_source", "digital_input",
         "dewarp", "rotate", "crop", "format_convert",
+        "custom_python_preprocess",
         "model_inference", "bedrock_inference",
         "custom_python", "inference_filter", "conditional",
         "digital_output", "mqtt_publish", "opcua_write", "capture",

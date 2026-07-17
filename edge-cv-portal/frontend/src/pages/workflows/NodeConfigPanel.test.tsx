@@ -163,6 +163,20 @@ const CUSTOM_PYTHON: NodeTypeDescriptor = {
   hardwareDependent: false,
 };
 
+const CUSTOM_PYTHON_PREPROCESS: NodeTypeDescriptor = {
+  typeId: 'custom_python_preprocess',
+  category: 'preprocessing',
+  displayName: 'Custom Python (Frames)',
+  inputs: [{ name: 'in', portType: 'VideoFrames' }],
+  outputs: [{ name: 'out', portType: 'VideoFrames' }],
+  parameters: [
+    { name: 'code', paramType: 'code', required: true, default: null, constraints: { minLength: 1 } },
+    { name: 'requirements', paramType: 'string', required: false, default: '', constraints: {} },
+  ],
+  mappings: [],
+  hardwareDependent: false,
+};
+
 function builderNode(
   descriptor: NodeTypeDescriptor,
   parameters: Record<string, JsonValue> = {}
@@ -362,6 +376,31 @@ describe('NodeConfigPanel', () => {
       'custom_python_1',
       expect.objectContaining({ output_port_type: 'InferenceMeta' })
     );
+  });
+
+  it('renders the code editor for the custom_python_preprocess code parameter (custom-python-frames Requirement 7.2)', () => {
+    const onParametersChange = vi.fn();
+    const code = 'def process_frame(frame, metadata):\n    return cv2.GaussianBlur(frame, (5, 5), 0)';
+    const node = builderNode(CUSTOM_PYTHON_PREPROCESS, { code });
+    const { container } = render(
+      <NodeConfigPanel node={node} onParametersChange={onParametersChange} />
+    );
+
+    // Code editor with the current code.
+    const codeEditor = container.querySelector('textarea[aria-label="code"]');
+    expect(codeEditor).toHaveValue(code);
+
+    // Edits propagate through onParametersChange.
+    fireEvent.change(codeEditor!, {
+      target: { value: 'def process_frame(frame, metadata):\n    return None' },
+    });
+    expect(onParametersChange).toHaveBeenCalledWith(
+      'custom_python_preprocess_1',
+      expect.objectContaining({ code: 'def process_frame(frame, metadata):\n    return None' })
+    );
+
+    // Fixed VideoFrames ports: no per-instance port-type pickers.
+    expect(createWrapper(container).findAllSelects()).toHaveLength(0);
   });
 
   describe('mqtt_publish AWS IoT support (dependsOn visibility)', () => {

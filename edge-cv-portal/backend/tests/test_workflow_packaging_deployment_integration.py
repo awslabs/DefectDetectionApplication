@@ -260,6 +260,41 @@ def make_custom_python_definition():
     }
 
 
+CUSTOM_PYTHON_PREPROCESS_CODE = (
+    "def process_frame(frame, metadata):\n"
+    "    return cv2.GaussianBlur(frame, (5, 5), 0)\n"
+)
+CUSTOM_PYTHON_PREPROCESS_REQUIREMENTS = "scikit-image==0.24.0"
+
+
+def make_custom_python_preprocess_definition():
+    """folder_source -> custom_python_preprocess -> capture. The new
+    preprocessing node's code and declared dependencies must ship in the
+    artifacts exactly like custom_python's (custom-python-frames
+    Requirements 2.3, 2.4, 2.5)."""
+    return {
+        "schemaVersion": 1,
+        "nodes": [
+            {"id": "src", "type": "folder_source", "position": {"x": 0, "y": 0},
+             "parameters": {"location": "/data/images"}},
+            {"id": "prenode", "type": "custom_python_preprocess",
+             "position": {"x": 200, "y": 0},
+             "parameters": {
+                 "code": CUSTOM_PYTHON_PREPROCESS_CODE,
+                 "requirements": CUSTOM_PYTHON_PREPROCESS_REQUIREMENTS,
+             }},
+            {"id": "cap", "type": "capture", "position": {"x": 400, "y": 0},
+             "parameters": {"output_path": "/out"}},
+        ],
+        "connections": [
+            {"id": "c1", "from": {"node": "src", "port": "out"},
+             "to": {"node": "prenode", "port": "in"}},
+            {"id": "c2", "from": {"node": "prenode", "port": "out"},
+             "to": {"node": "cap", "port": "in"}},
+        ],
+    }
+
+
 # --------------------------------------------------------------------------
 # Harness
 # --------------------------------------------------------------------------
@@ -553,6 +588,46 @@ class TestCustomPythonArtifacts:
             assert manifest["customPythonNodeIds"] == ["pynode"]
             # The emlpython bridge plugin ships alongside the code.
             assert "plugins/x86_64/dda-emlpython.so" in names
+
+    def test_custom_python_preprocess_ships_in_every_arch_zip(
+            self, env, packaging, deployments, monkeypatch):
+        """A custom_python_preprocess node packages its handler.py and
+        requirements.txt into every architecture zip with the node id
+        listed in the manifest's customPythonNodeIds (custom-python-frames
+        Requirements 2.3, 2.4, 2.5)."""
+        archs = ["x86_64", "arm64_jp5", "arm64_jp6"]
+        fleet = FleetEnv(env, packaging, deployments, monkeypatch,
+                         definition=make_custom_python_preprocess_definition())
+        fleet.seed_plugins(archs, plugins=("dda-emlpython",))
+
+        status, payload = fleet.package(archs)
+
+        assert status == 201, payload
+        for arch in archs:
+            with fleet.zip_contents(arch) as zf:
+                names = set(zf.namelist())
+                assert "python/prenode/handler.py" in names
+                assert "python/prenode/requirements.txt" in names
+                assert zf.read("python/prenode/handler.py").decode() == \
+                    CUSTOM_PYTHON_PREPROCESS_CODE
+                assert zf.read("python/prenode/requirements.txt").decode() == \
+                    CUSTOM_PYTHON_PREPROCESS_REQUIREMENTS
+
+                # The compiled pipeline carries the node's emlpython
+                # element with the packaged handler path (2.3).
+                compiled = json.loads(zf.read("compiled_pipeline.json"))
+                elements = [element
+                            for segment in compiled["segments"]
+                            for element in segment["elements"]
+                            if element.get("nodeId") == "prenode"]
+                assert [e["factory"] for e in elements] == ["emlpython"]
+                assert elements[0]["args"]["handler-path"] == \
+                    "python/prenode/handler.py"
+
+                manifest = json.loads(zf.read("manifest.json"))
+                assert manifest["customPythonNodeIds"] == ["prenode"]
+                # The emlpython bridge plugin ships alongside the code.
+                assert f"plugins/{arch}/dda-emlpython.so" in names
 
 
 # ==========================================================================

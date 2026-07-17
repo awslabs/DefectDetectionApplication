@@ -113,6 +113,43 @@ const instanceArb: fc.Arbitrary<NodeInstance> = fc.oneof(
   customPythonInstanceArb
 );
 
+/**
+ * A custom_python_preprocess-shaped node: fixed VideoFrames input and
+ * output ports with no per-instance port type override parameters
+ * (custom-python-frames Requirement 1.2), so the declared port types are
+ * always the effective ones.
+ */
+const customPythonPreprocessInstance: NodeInstance = {
+  descriptor: {
+    typeId: 'custom_python_preprocess',
+    category: 'preprocessing',
+    displayName: 'Custom Python (Frames)',
+    inputs: [{ name: 'in', portType: PORT_TYPE_VIDEO_FRAMES }],
+    outputs: [{ name: 'out', portType: PORT_TYPE_VIDEO_FRAMES }],
+    parameters: [
+      { name: 'code', paramType: 'code', required: true },
+      { name: 'requirements', paramType: 'string', required: false },
+    ],
+    mappings: [],
+    hardwareDependent: false,
+  },
+  parameters: {},
+};
+
+/** A source node instance guaranteed to declare at least one output port. */
+const sourceWithOutputArb: fc.Arbitrary<NodeInstance> = fc.oneof(
+  plainInstanceArb.filter((instance) => instance.descriptor.outputs.length > 0),
+  customPythonInstanceArb
+);
+
+/** A source node plus one of its declared output ports as the dragged handle. */
+const fixedPortScenarioArb = sourceWithOutputArb.chain((source) =>
+  fc.record({
+    source: fc.constant(source),
+    sourceHandle: fc.constantFrom(...source.descriptor.outputs.map((port) => port.name)),
+  })
+);
+
 /** Every port name declared on a node type (inputs and outputs). */
 function portNames(descriptor: NodeTypeDescriptor): string[] {
   return [...descriptor.inputs, ...descriptor.outputs].map((port) => port.name);
@@ -187,6 +224,53 @@ describe('Property 10: Connection acceptance equals port compatibility', () => {
           sourceType !== undefined &&
           targetType !== undefined &&
           arePortsCompatible(sourceType, targetType);
+
+        if (expectedAccepted) {
+          expect(reason).toBeNull();
+        } else {
+          expect(typeof reason).toBe('string');
+          expect((reason as string).length).toBeGreaterThan(0);
+        }
+      }),
+      { numRuns: 25 }
+    );
+  });
+});
+
+/**
+ * **Feature: custom-python-frames, Property 11: Designer connection acceptance for fixed VideoFrames ports**
+ *
+ * For any generated pair of nodes where the target is a
+ * `custom_python_preprocess`-shaped descriptor (fixed VideoFrames ports, no
+ * port type override parameters), the Workflow_Builder connection acceptance
+ * function accepts the connection exactly when the source output port type is
+ * compatible with VideoFrames under the declared coercion rules (VideoFrames
+ * exactly, or InferenceMeta via the declared coercion — mirroring the backend
+ * validator per Requirement 2.1) and otherwise rejects it with a reason.
+ *
+ * **Validates: Requirements 7.3**
+ */
+describe('Property 11: Designer connection acceptance for fixed VideoFrames ports', () => {
+  it('accepts a drag onto the fixed VideoFrames input iff the source output port type is compatible with VideoFrames under the declared coercion rules, with a non-empty reason otherwise', () => {
+    fc.assert(
+      fc.property(fixedPortScenarioArb, ({ source, sourceHandle }) => {
+        const sourceNode = builderNode('src', source);
+        const targetNode = builderNode('tgt', customPythonPreprocessInstance);
+        const nodes = [sourceNode, targetNode];
+
+        const reason = connectionRejectionReason(
+          { source: 'src', sourceHandle, target: 'tgt', targetHandle: 'in' },
+          nodes
+        );
+
+        // The effective source output port type (per-instance overrides
+        // applied for custom_python sources; declared type otherwise).
+        const sourceType = resolvedPorts(toWorkflowNode(sourceNode), source.descriptor).outputs[
+          sourceHandle
+        ];
+        const expectedAccepted =
+          sourceType !== undefined &&
+          arePortsCompatible(sourceType, PORT_TYPE_VIDEO_FRAMES);
 
         if (expectedAccepted) {
           expect(reason).toBeNull();

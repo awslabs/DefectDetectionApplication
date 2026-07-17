@@ -12,6 +12,7 @@ import {
   CATEGORY_INPUT,
   CATEGORY_OUTPUT,
   CATEGORY_POST_PROCESSING,
+  CATEGORY_PREPROCESSING,
   PORT_TYPE_EVENT_SIGNAL,
   PORT_TYPE_INFERENCE_META,
   PORT_TYPE_VIDEO_FRAMES,
@@ -81,7 +82,21 @@ const CUSTOM_PYTHON: NodeTypeDescriptor = {
   hardwareDependent: false,
 };
 
-const CATALOG = [CAMERA, CAPTURE, CUSTOM_PYTHON];
+const CUSTOM_PYTHON_PREPROCESS: NodeTypeDescriptor = {
+  typeId: 'custom_python_preprocess',
+  category: CATEGORY_PREPROCESSING,
+  displayName: 'Custom Python (Frames)',
+  inputs: [{ name: 'in', portType: PORT_TYPE_VIDEO_FRAMES }],
+  outputs: [{ name: 'out', portType: PORT_TYPE_VIDEO_FRAMES }],
+  parameters: [
+    { name: 'code', paramType: 'code', required: true, default: null, constraints: { minLength: 1 } },
+    { name: 'requirements', paramType: 'string', required: false, default: '', constraints: {} },
+  ],
+  mappings: [],
+  hardwareDependent: false,
+};
+
+const CATALOG = [CAMERA, CAPTURE, CUSTOM_PYTHON, CUSTOM_PYTHON_PREPROCESS];
 
 function node(id: string, type: string, parameters: WorkflowNode['parameters'] = {}): WorkflowNode {
   return { id, type, position: { x: 0, y: 0 }, parameters };
@@ -133,6 +148,24 @@ describe('checkV4', () => {
 
   it('skips nodes with unknown types', () => {
     const graph = { nodes: [node('n1', 'not_in_catalog')], connections: [] };
+    expect(checkV4(graph, CATALOG)).toEqual([]);
+  });
+
+  it('reports a required-parameter marker for a custom_python_preprocess node without code (custom-python-frames Requirement 7.4)', () => {
+    const graph = { nodes: [node('n1', 'custom_python_preprocess')], connections: [] };
+    const findings = checkV4(graph, CATALOG);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].code).toBe(CODE_V4_MISSING_REQUIRED_PARAMETER);
+    expect(findings[0].severity).toBe('error');
+    expect(findings[0].nodeId).toBe('n1');
+    expect(findings[0].message).toContain('code');
+  });
+
+  it('reports no marker once the custom_python_preprocess code parameter has a value', () => {
+    const graph = {
+      nodes: [node('n1', 'custom_python_preprocess', { code: 'def process_frame(frame, metadata):\n    return None' })],
+      connections: [],
+    };
     expect(checkV4(graph, CATALOG)).toEqual([]);
   });
 });
