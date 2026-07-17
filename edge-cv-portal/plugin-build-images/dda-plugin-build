@@ -67,6 +67,43 @@ log "Building plugin '$PLUGIN_NAME' ($PLUGIN_ID v$PLUGIN_VERSION) for $TARGET_AR
 log "Source tree: $SRC_DIR"
 [ -n "$PLUGIN_TARGETS" ] && log "Selected plugin targets: $PLUGIN_TARGETS"
 
+# ------------------------------------------------ extra build dependencies
+# Escape hatch for plugins that need a build tool or -dev header the base
+# image does not ship (the base images already carry the common toolchain:
+# build-essential, pkg-config, meson, ninja, cmake, autotools, the
+# GStreamer dev headers). A plugin can declare additional apt packages in
+# a `dda-build-deps.txt` manifest at its source root (one package per line;
+# `#` comments and blank lines ignored) and they are apt-installed before
+# the build. Package names are validated against the Debian naming charset
+# so a manifest can never inject shell — anything else aborts the build.
+# The packages come from the image's already-configured apt sources
+# (Ubuntu/NVIDIA), so this adds a missing dependency without a base-image
+# rebuild; bake genuinely common deps into the Dockerfiles instead.
+DEPS_MANIFEST="dda-build-deps.txt"
+install_extra_build_deps() {
+  [ -f "$DEPS_MANIFEST" ] || return 0
+  local pkgs=() line pkg
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"                      # strip inline/full-line comments
+    # shellcheck disable=SC2001
+    pkg="$(echo "$line" | tr -d '[:space:]')"
+    [ -n "$pkg" ] || continue
+    if ! printf '%s' "$pkg" | grep -Eq '^[a-zA-Z0-9][a-zA-Z0-9+._-]*$'; then
+      fail "invalid package name in $DEPS_MANIFEST: '$pkg' (only Debian package-name characters are allowed)"
+    fi
+    pkgs+=("$pkg")
+  done < "$DEPS_MANIFEST"
+  [ "${#pkgs[@]}" -gt 0 ] || return 0
+  command -v apt-get >/dev/null 2>&1 \
+    || fail "$DEPS_MANIFEST requests extra packages but apt-get is unavailable in this image"
+  log "Installing extra build dependencies from $DEPS_MANIFEST: ${pkgs[*]}"
+  apt-get update \
+    && apt-get install -y --no-install-recommends "${pkgs[@]}" \
+    || fail "failed to install extra build dependencies (${pkgs[*]}) from $DEPS_MANIFEST"
+  rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+}
+install_extra_build_deps
+
 WORK_DIR="$(mktemp -d /tmp/dda-plugin-build.XXXXXX)"
 BUILD_DIR="$WORK_DIR/build"
 
