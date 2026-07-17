@@ -108,14 +108,25 @@ aws s3 cp "$APP_ZIP" "$S3_URI" --region "$PUB_REGION"
 python3 -c "import yaml" 2>/dev/null || pip3 install --user pyyaml >/dev/null 2>&1 || true
 ECR_RECIPE="greengrass-build/recipes/recipe-ecr.yaml"
 mkdir -p greengrass-build/recipes
-python3 - "recipe.yaml" "$ECR_RECIPE" "$ECR_REPO_BACKEND" "$ECR_REPO_FRONTEND" "$COMPONENT_VERSION" "$S3_URI" <<'PYEOF'
+python3 - "recipe.yaml" "$ECR_RECIPE" "$ECR_REPO_BACKEND" "$ECR_REPO_FRONTEND" "$COMPONENT_VERSION" "$S3_URI" "$COMPONENT_NAME" <<'PYEOF'
 import re, sys, yaml
 
-src, out, ecr_backend, ecr_frontend, version, s3_uri = sys.argv[1:7]
+src, out, ecr_backend, ecr_frontend, version, s3_uri, component_name = sys.argv[1:8]
 
 with open(src) as f:
-    recipe = yaml.safe_load(f)
+    text = f.read()
 
+# recipe.yaml on disk is written for whichever target (JP4/JP5/JP6) was
+# published last; retarget every occurrence of its component name (the
+# ComponentName field, access-control policy keys, and lifecycle script
+# paths under custom-build/<name>/...) to the component being published,
+# so alternating JP5/JP6 publishes don't register under the wrong name.
+old_name = yaml.safe_load(text).get('ComponentName')
+if old_name and old_name != component_name:
+    text = text.replace(old_name, component_name)
+
+recipe = yaml.safe_load(text)
+recipe['ComponentName'] = component_name
 recipe['ComponentVersion'] = version
 
 deps = recipe.setdefault('ComponentDependencies', {})
@@ -157,19 +168,12 @@ echo "Creating component version via API..."
 aws greengrassv2 create-component-version --inline-recipe fileb://"$ECR_RECIPE" --region "$PUB_REGION"
 
 echo "Tagging component for portal discovery..."
-# --no-paginate (same reason as the version lookup): without it the CLI applies
-# the filter per page and `| [0]` yields one value per page (real ARN on the
-# matching page, "None" on the others), producing a multiline ARN that breaks
-# tag-resource. head -n1 is an extra guard.
-COMPONENT_ARN=$(aws greengrassv2 list-components --scope PRIVATE --region "$PUB_REGION" --no-paginate \
-    --query "components[?componentName=='${COMPONENT_NAME}'].arn | [0]" --output text 2>/dev/null | head -n1)
-COMPONENT_ARN=$(echo "$COMPONENT_ARN" | tr -d '[:space:]')
-if [ -n "$COMPONENT_ARN" ] && [ "$COMPONENT_ARN" != "None" ]; then
-    aws greengrassv2 tag-resource --resource-arn "$COMPONENT_ARN" \
-        --tags "dda-portal:managed=true" --region "$PUB_REGION" 2>/dev/null \
-        && echo "Tagged $COMPONENT_ARN" || echo "WARN: tagging failed (non-critical)"
-else
-    echo "WARN: could not resolve component ARN for tagging (non-critical)"
-fi
+# The component ARN is deterministic — construct it directly instead of
+# searching list-components (whose paginated filter query returned "None"
+# whenever the component sat past the first page, silently skipping the tag).
+COMPONENT_ARN="arn:aws:greengrass:${PUB_REGION}:${PUB_ACCOUNT_ID}:components:${COMPONENT_NAME}"
+aws greengrassv2 tag-resource --resource-arn "$COMPONENT_ARN" \
+    --tags "dda-portal:managed=true" --region "$PUB_REGION" \
+    && echo "Tagged $COMPONENT_ARN" || echo "WARN: tagging failed (non-critical)"
 
 echo "DONE: published ${COMPONENT_NAME} v${COMPONENT_VERSION} (ECR + S3)"
