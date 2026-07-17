@@ -314,21 +314,23 @@ const IMPORTED_RESPONSE = {
 };
 
 describe('ImportView module plugin selection', () => {
-  it('loads the plugin list defaulting to all and sends a partial selection', async () => {
+  it('loads the plugin list defaulting to none and sends a partial selection', async () => {
     listModulePlugins.mockResolvedValue(MODULE_PLUGINS_RESPONSE);
     importPlugin.mockResolvedValue(IMPORTED_RESPONSE);
     const { container } = render(<ImportView />);
     await fillForm(container, 'gst-plugins-good');
 
-    // The chosen module's plugins load with everything selected.
+    // The chosen module's plugins load with nothing selected: the
+    // user opts in explicitly (2.7).
     await screen.findByText('Plugins to import');
     expect(listModulePlugins).toHaveBeenCalledWith('gst-plugins-good');
-    expect(screen.getByText('3 of 3 selected')).toBeInTheDocument();
+    expect(screen.getByText('0 of 3 selected')).toBeInTheDocument();
 
-    // Deselect jpeg (via its checkbox: the name itself now links to
-    // the plugin's docs page), review: the confirm step summarizes
+    // Check rtp and udp (via their checkboxes: the name itself links
+    // to the plugin's docs page), review: the confirm step summarizes
     // the subset.
-    fireEvent.click(screen.getAllByRole('checkbox')[0]);
+    fireEvent.click(screen.getAllByRole('checkbox')[1]);
+    fireEvent.click(screen.getAllByRole('checkbox')[2]);
     expect(screen.getByText('2 of 3 selected')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Review import' }));
     await screen.findByText('Upstream classification');
@@ -348,6 +350,11 @@ describe('ImportView module plugin selection', () => {
     importPlugin.mockResolvedValue(IMPORTED_RESPONSE);
     const { container } = render(<ImportView />);
     await fillForm(container, 'gst-plugins-good');
+    await screen.findByText('0 of 3 selected');
+
+    // Selecting every plugin explicitly keeps today's wire behavior:
+    // a full selection means whole-module import (3.12).
+    fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
     await screen.findByText('3 of 3 selected');
 
     fireEvent.click(screen.getByRole('button', { name: 'Review import' }));
@@ -359,18 +366,22 @@ describe('ImportView module plugin selection', () => {
     expect(importPlugin.mock.calls[0][0].selected_plugins).toBeUndefined();
   });
 
-  it('blocks the review only while the selection is empty', async () => {
+  it('blocks the review while the selection is empty, including the pristine default', async () => {
     listModulePlugins.mockResolvedValue(MODULE_PLUGINS_RESPONSE);
     const { container } = render(<ImportView />);
     await fillForm(container, 'gst-plugins-good');
-    await screen.findByText('3 of 3 selected');
+    await screen.findByText('0 of 3 selected');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    // The pristine empty default already shows the gate (2.8).
     expect(screen.getByText('Select at least one plugin to import')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Review import' })).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
     expect(screen.getByRole('button', { name: 'Review import' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(screen.getByText('Select at least one plugin to import')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review import' })).toBeDisabled();
   });
 
   it('treats a plugin-list failure as non-blocking and imports the full set', async () => {
@@ -394,6 +405,58 @@ describe('ImportView module plugin selection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Import plugin' }));
     await waitFor(() => expect(importPlugin).toHaveBeenCalled());
     expect(importPlugin.mock.calls[0][0].selected_plugins).toBeUndefined();
+  });
+});
+
+// -------------------------- Bug 3 exploration: opt-in module selection
+//
+// **Feature: workflow-designer-bugfixes, Property 5: Bug Condition —
+// Import selection defaults to none with an explicit gate**
+//
+// **Validates: Requirements 1.6, 2.7, 2.8**
+//
+// BUG CONDITION EXPLORATION (task 7): these assertions encode the
+// EXPECTED behavior and are expected to FAIL on the unfixed code —
+// the module plugin load effect seeds every plugin selected
+// (isBugCondition3 in design.md). They validate the fix once the
+// selection seeds empty with the explicit-selection gate active.
+
+describe('ImportView module plugin selection — Bug 3 exploration (expected behavior)', () => {
+  it('seeds the loaded plugin list with no plugins selected (1.6, 2.7)', async () => {
+    listModulePlugins.mockResolvedValue(MODULE_PLUGINS_RESPONSE);
+    const { container } = render(<ImportView />);
+    await fillForm(container, 'gst-plugins-good');
+
+    // The chosen module's plugins load with NOTHING selected: the
+    // user opts in to what to import instead of opting out.
+    await screen.findByText('Plugins to import');
+    expect(screen.getByText('0 of 3 selected')).toBeInTheDocument();
+  });
+
+  it('blocks the import until an explicit selection is made (2.8)', async () => {
+    listModulePlugins.mockResolvedValue(MODULE_PLUGINS_RESPONSE);
+    const { container } = render(<ImportView />);
+    await fillForm(container, 'gst-plugins-good');
+    await screen.findByText('Plugins to import');
+
+    // Pristine empty selection: the gate message shows and the
+    // review stays blocked — no import with zero explicit opt-in.
+    expect(
+      screen.getByText('Select at least one plugin to import')
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review import' })).toBeDisabled();
+
+    // An individual check is an explicit opt-in and unblocks.
+    fireEvent.click(screen.getAllByRole('checkbox')[0]);
+    expect(screen.getByText('1 of 3 selected')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review import' })).toBeEnabled();
+
+    // "Select all" is the other explicit opt-in path.
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(screen.getByRole('button', { name: 'Review import' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(screen.getByText('3 of 3 selected')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review import' })).toBeEnabled();
   });
 });
 
@@ -570,6 +633,10 @@ describe('ImportView per-architecture revisions', () => {
     const archSelect = wrapper.findMultiselect()!;
     archSelect.selectOptionByValue('arm64_jp5');
 
+    // Opt in to the whole module (the selection now defaults to none).
+    await screen.findByText('Plugins to import');
+    fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
+
     // The optional expandable section lists one input per selected
     // architecture, blank inputs following the top-level revision.
     fireEvent.click(screen.getByText('Per-architecture revisions'));
@@ -601,6 +668,10 @@ describe('ImportView per-architecture revisions', () => {
     importPlugin.mockResolvedValue(IMPORTED_RESPONSE);
     const { container } = render(<ImportView />);
     await fillForm(container, 'gst-plugins-good');
+
+    // Opt in to the whole module (the selection now defaults to none).
+    await screen.findByText('Plugins to import');
+    fireEvent.click(screen.getByRole('button', { name: 'Select all' }));
 
     fireEvent.click(screen.getByText('Per-architecture revisions'));
     fireEvent.change(screen.getByLabelText('Revision for x86_64'), {

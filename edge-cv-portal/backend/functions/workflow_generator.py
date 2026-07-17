@@ -121,13 +121,14 @@ DEFAULT_BEDROCK_CONFIG = {
     'model_id': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
     'region': os.environ.get('AWS_REGION', 'us-east-1'),
     'max_tokens': 4096,
-    # Both sampling parameters are kept in the stored/displayed shape, but
-    # recent Anthropic models reject requests that set temperature AND
-    # top_p together, so invoke_generation() sends temperature only; top_p
-    # is sent only when temperature is explicitly null/absent (see
-    # get_bedrock_configuration / invoke_generation).
-    'temperature': 0.2,
-    'top_p': 0.9,
+    # Sampling parameters are unset by default: they are sent to Bedrock
+    # only when explicitly configured in the settings (or overridden
+    # per-request). Recent Anthropic models reject requests that set
+    # temperature at all, and never accept temperature AND top_p together,
+    # so invoke_generation() omits None values and sends at most one of
+    # the two (see get_bedrock_configuration / invoke_generation).
+    'temperature': None,
+    'top_p': None,
     'timeout_seconds': MAX_TIMEOUT_SECONDS,
 }
 

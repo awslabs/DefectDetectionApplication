@@ -118,6 +118,40 @@ export const CATEGORY_ARRANGEMENTS: Record<NodeCategory, CategoryArrangement> =
     },
   };
 
+/** One side of the per-kind requirements line (e.g. "1 × VideoFrames"). */
+function sideRequirement(arrangement: PortType[] | 'at-least-one'): string {
+  if (arrangement === 'at-least-one') {
+    return 'at least one (any port type)';
+  }
+  if (arrangement.length === 0) {
+    return 'none';
+  }
+  const counts = new Map<PortType, number>();
+  for (const portType of arrangement) {
+    counts.set(portType, (counts.get(portType) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([portType, count]) => `${count} × ${portType}`)
+    .join(', ');
+}
+
+/**
+ * Explicit per-kind input/output requirements statement for one
+ * palette category (workflow-designer-bugfixes Bug 2, Requirement
+ * 2.6), derived from CATEGORY_ARRANGEMENTS: e.g. input →
+ * "Inputs: none · Outputs: 1 × VideoFrames"; output →
+ * "Inputs: at least one (any port type) · Outputs: none". An unknown
+ * category has no arrangement, so it answers null. Pure and
+ * deterministic; purely advisory — never contributes to step gating.
+ */
+export function arrangementRequirements(category: string): string | null {
+  if (!Object.prototype.hasOwnProperty.call(CATEGORY_ARRANGEMENTS, category)) {
+    return null;
+  }
+  const arrangement = CATEGORY_ARRANGEMENTS[category as NodeCategory];
+  return `Inputs: ${sideRequirement(arrangement.inputs)} · Outputs: ${sideRequirement(arrangement.outputs)}`;
+}
+
 // ----------------------------------------------------------- divergence
 
 /** The port shape the divergence rule needs; `PortForm` satisfies it. */

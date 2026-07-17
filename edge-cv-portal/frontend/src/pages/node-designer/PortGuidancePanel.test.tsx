@@ -24,6 +24,7 @@ import {
   INPUT_OUTPUT_DISTINCTION,
   PORT_DEFINITION,
   PORT_TYPE_GUIDANCE,
+  arrangementRequirements,
 } from './portGuidance';
 import { CATEGORIES, PORT_TYPES } from './types';
 
@@ -175,6 +176,38 @@ describe('PortGuidancePanel', () => {
       />
     );
     expect(divergenceAlert()).toBeNull();
+  });
+
+  // Per-kind requirement lines (workflow-designer-bugfixes Bug 2,
+  // Requirement 2.6): the ports step states what each node kind
+  // requires for inputs and outputs.
+  it("states each category's input/output requirements (bugfixes 2.6)", () => {
+    expect(arrangementRequirements('input')).toBe(
+      'Inputs: none · Outputs: 1 × VideoFrames'
+    );
+    expect(arrangementRequirements('output')).toBe(
+      'Inputs: at least one (any port type) · Outputs: none'
+    );
+    expect(arrangementRequirements('unknown')).toBeNull();
+
+    for (const category of CATEGORIES) {
+      const { unmount } = renderPanel(category, [], []);
+      const requirements = screen.getByTestId('port-guidance-requirements');
+      expect(requirements.textContent).toContain(
+        'Typical requirement for this node kind:'
+      );
+      expect(requirements.textContent).toContain(
+        arrangementRequirements(category)!
+      );
+      expect(requirements.textContent).toMatch(/inputs/i);
+      expect(requirements.textContent).toMatch(/outputs/i);
+      unmount();
+    }
+  });
+
+  it('renders no requirements line for an unknown category (bugfixes 2.6)', () => {
+    renderPanel('unknown', [], []);
+    expect(screen.queryByTestId('port-guidance-requirements')).toBeNull();
   });
 
   it('re-arms a dismissed advisory once the declaration matches again (2.4, 2.5)', () => {

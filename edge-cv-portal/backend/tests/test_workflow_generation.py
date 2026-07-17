@@ -283,18 +283,18 @@ class TestPromptAndCatalogAssembly:
         assert "topP" not in kwargs["inferenceConfig"]
         assert bedrock.client_requests[-1] == ("eu-west-1", 30)
 
-    def test_default_configuration_sends_temperature_without_top_p(
+    def test_default_configuration_sends_no_sampling_parameters(
             self, gen_env, bedrock, ctx):
-        """With nothing stored, the default configuration (which carries
-        both temperature and top_p in its stored shape) invokes with
-        temperature only - temperature and top_p must never be sent
-        together."""
+        """With nothing stored, the default configuration is unset for
+        both sampling parameters, so the invocation carries neither
+        temperature nor topP - they are sent only when explicitly
+        configured or overridden."""
         status, _ = generate(gen_env, ctx, "Any pipeline")
         assert status == 200
 
         inference_config = bedrock.client.converse.call_args.kwargs[
             "inferenceConfig"]
-        assert inference_config["temperature"] == 0.2
+        assert "temperature" not in inference_config
         assert "topP" not in inference_config
 
     def test_top_p_is_sent_when_temperature_is_explicitly_null(

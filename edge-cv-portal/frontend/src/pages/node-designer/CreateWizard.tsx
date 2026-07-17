@@ -51,9 +51,11 @@ import {
   WizardForm,
   architecturesStepErrors,
   buildDeclaration,
+  defaultPortsForCategory,
   detailsStepErrors,
   emptyParameter,
   emptyPort,
+  isDefaultPortArrangement,
   parametersStepErrors,
   portsStepErrors,
 } from './declaration';
@@ -65,8 +67,7 @@ const initialForm = (): WizardForm => ({
   name: '',
   description: '',
   category: 'preprocessing',
-  inputs: [{ ...emptyPort(), name: 'in' }],
-  outputs: [{ ...emptyPort(), name: 'out' }],
+  ...defaultPortsForCategory('preprocessing'),
   parameters: [],
   architectures: ['x86_64'],
 });
@@ -368,9 +369,19 @@ export default function CreateWizard() {
                   <Select
                     selectedOption={{ label: form.category, value: form.category }}
                     options={CATEGORIES.map((c) => ({ label: c, value: c }))}
-                    onChange={({ detail }) =>
-                      patch({ category: detail.selectedOption.value || 'preprocessing' })
-                    }
+                    onChange={({ detail }) => {
+                      const category =
+                        detail.selectedOption.value || 'preprocessing';
+                      // Untouched default port rows follow the selected
+                      // category's typical arrangement; user-edited rows
+                      // are preserved exactly (workflow-designer-bugfixes
+                      // Bug 2, Req 2.4, 2.5, 3.6).
+                      if (isDefaultPortArrangement(form.inputs, form.outputs)) {
+                        patch({ category, ...defaultPortsForCategory(category) });
+                      } else {
+                        patch({ category });
+                      }
+                    }}
                   />
                 </FormField>
               </SpaceBetween>

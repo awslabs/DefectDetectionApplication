@@ -53,14 +53,20 @@ function validate(form: BedrockFormState): FieldErrors {
     errors.max_tokens = 'Max tokens must be a positive integer';
   }
 
-  const temperature = Number(form.temperature);
-  if (form.temperature.trim() === '' || Number.isNaN(temperature) || temperature < 0 || temperature > 1) {
-    errors.temperature = 'Temperature must be between 0 and 1';
+  // Blank temperature / top_p means "unset": the sampling parameter is
+  // omitted from Bedrock invocations so the model uses its own default.
+  if (form.temperature.trim() !== '') {
+    const temperature = Number(form.temperature);
+    if (Number.isNaN(temperature) || temperature < 0 || temperature > 1) {
+      errors.temperature = 'Temperature must be between 0 and 1';
+    }
   }
 
-  const topP = Number(form.top_p);
-  if (form.top_p.trim() === '' || Number.isNaN(topP) || topP < 0 || topP > 1) {
-    errors.top_p = 'Top P must be between 0 and 1';
+  if (form.top_p.trim() !== '') {
+    const topP = Number(form.top_p);
+    if (Number.isNaN(topP) || topP < 0 || topP > 1) {
+      errors.top_p = 'Top P must be between 0 and 1';
+    }
   }
 
   const timeout = Number(form.timeout_seconds);
@@ -131,8 +137,10 @@ export default function BedrockConfigurationSettings() {
           model_id: config.model_id,
           region: config.region,
           max_tokens: String(config.max_tokens),
-          temperature: String(config.temperature),
-          top_p: String(config.top_p),
+          // A null/undefined sampling parameter is "unset" and renders as
+          // a blank field (never the literal string "null").
+          temperature: config.temperature == null ? '' : String(config.temperature),
+          top_p: config.top_p == null ? '' : String(config.top_p),
           timeout_seconds: String(config.timeout_seconds),
         });
       })
@@ -172,8 +180,11 @@ export default function BedrockConfigurationSettings() {
         model_id: form.model_id.trim(),
         region: form.region.trim(),
         max_tokens: Number(form.max_tokens),
-        temperature: Number(form.temperature),
-        top_p: Number(form.top_p),
+        // A blank field is sent as an explicit null: the backend merges
+        // provided keys over the current configuration, so omitting the
+        // key would keep the old value instead of unsetting it.
+        temperature: form.temperature.trim() === '' ? null : Number(form.temperature),
+        top_p: form.top_p.trim() === '' ? null : Number(form.top_p),
         timeout_seconds: Number(form.timeout_seconds),
       });
       setSuccess('Bedrock configuration saved');
@@ -276,7 +287,11 @@ export default function BedrockConfigurationSettings() {
             />
           </FormField>
 
-          <FormField label="Temperature" constraintText="0 to 1" errorText={fieldErrors.temperature}>
+          <FormField
+            label="Temperature"
+            constraintText="0 to 1 — leave blank to let the model use its default (parameter is omitted)"
+            errorText={fieldErrors.temperature}
+          >
             <Input
               type="number"
               step={0.1}
@@ -286,7 +301,11 @@ export default function BedrockConfigurationSettings() {
             />
           </FormField>
 
-          <FormField label="Top P" constraintText="0 to 1" errorText={fieldErrors.top_p}>
+          <FormField
+            label="Top P"
+            constraintText="0 to 1 — leave blank to let the model use its default (parameter is omitted)"
+            errorText={fieldErrors.top_p}
+          >
             <Input type="number" step={0.1} value={form.top_p} onChange={setField('top_p')} ariaLabel="Top P" />
           </FormField>
 

@@ -355,6 +355,7 @@ describe('pluginSelectionError', () => {
 
 import {
   allPluginNames,
+  moduleSelectionIncomplete,
   moduleSelectionSummary,
   normalizeModuleSelection,
   selectedPluginsParam,
@@ -373,6 +374,26 @@ describe('allPluginNames', () => {
   it('lists the plugin names in listing order', () => {
     expect(allPluginNames(MODULE_PLUGINS)).toEqual(AVAILABLE);
     expect(allPluginNames([])).toEqual([]);
+  });
+});
+
+describe('moduleSelectionIncomplete', () => {
+  it('gates a loaded plugin list with nothing selected (2.8)', () => {
+    expect(moduleSelectionIncomplete('module', AVAILABLE, [])).toBe(true);
+  });
+
+  it('unblocks once at least one plugin is selected', () => {
+    expect(moduleSelectionIncomplete('module', AVAILABLE, ['rtp'])).toBe(false);
+    expect(moduleSelectionIncomplete('module', AVAILABLE, AVAILABLE)).toBe(false);
+  });
+
+  it('never blocks without an available plugin list (3.13)', () => {
+    expect(moduleSelectionIncomplete('module', [], [])).toBe(false);
+  });
+
+  it('never gates manual repository URL imports', () => {
+    expect(moduleSelectionIncomplete('manual', AVAILABLE, [])).toBe(false);
+    expect(moduleSelectionIncomplete('manual', [], [])).toBe(false);
   });
 });
 

@@ -579,3 +579,58 @@ describe('RegistrationWizard ports step wiring', () => {
     await screen.findByRole('button', { name: 'Add parameter' });
   });
 });
+
+/**
+ * Category-driven default ports (workflow-designer-bugfixes Bug 2,
+ * Requirements 1.4, 2.4, 2.5, 2.6).
+ *
+ * BUG CONDITION EXPLORATION (task 4): these tests encode the EXPECTED
+ * behavior and are expected to FAIL on the unfixed code — the wizard
+ * seeds one "in" input and one "out" output regardless of the selected
+ * palette category and never rewrites the untouched default rows on a
+ * category change (isBugCondition2 in the workflow-designer-bugfixes
+ * design). They validate the fix when they pass.
+ */
+describe('RegistrationWizard category-driven default ports (workflow-designer-bugfixes Bug 2)', () => {
+  it('presents no input rows and one VideoFrames output after selecting the input category on untouched defaults (1.4, 2.4, 2.5, 2.6)', async () => {
+    // A report predating pad capture: the scan applies nothing, so the
+    // port rows stay the wizard-seeded Untouched_Defaults.
+    getGstProperties.mockResolvedValue(PADS_NOT_CAPTURED);
+    const { container } = render(<RegistrationWizard />);
+    await screen.findByText('Register custom node type');
+
+    // The details step's only Select is the palette category.
+    const categorySelect = createWrapper(container).findAllSelects()[0];
+    categorySelect.openDropdown();
+    categorySelect.selectOptionByValue('input');
+    clickNext();
+    await screen.findByText('Input ports');
+
+    // Input (source) nodes: no input port rows (2.4).
+    expect(screen.getByText('No inputs declared.')).toBeInTheDocument();
+    expect(container.querySelectorAll('input[placeholder="in"]')).toHaveLength(0);
+
+    // Exactly one VideoFrames output with a non-empty name (2.4).
+    const outputNames = container.querySelectorAll('input[placeholder="out"]');
+    expect(outputNames).toHaveLength(1);
+    expect((outputNames[0] as HTMLInputElement).value.trim()).not.toBe('');
+    const typeSelects = createWrapper(container)
+      .findAllSelects()
+      .filter(
+        (select) =>
+          select.getElement().getAttribute('data-testid') !==
+          'port-scan-factory-select'
+      );
+    expect(typeSelects).toHaveLength(1);
+    expect(typeSelects[0].findTrigger().getElement().textContent).toContain(
+      'VideoFrames'
+    );
+
+    // The ports step states the category's input/output requirements
+    // (2.6) — the design's fix interface: PortGuidancePanel renders them
+    // under data-testid="port-guidance-requirements".
+    const requirements = screen.getByTestId('port-guidance-requirements');
+    expect(requirements.textContent).toMatch(/inputs/i);
+    expect(requirements.textContent).toMatch(/outputs/i);
+  });
+});

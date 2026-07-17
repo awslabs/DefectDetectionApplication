@@ -38,6 +38,7 @@ import {
   PORT_DEFINITION,
   PORT_TYPE_GUIDANCE,
   PORT_TYPES,
+  arrangementRequirements,
   guidanceDivergence,
 } from './portGuidance';
 import type { NodeCategory } from './types';
@@ -69,6 +70,11 @@ export default function PortGuidancePanel({
   )
     ? CATEGORY_ARRANGEMENTS[category as NodeCategory]
     : null;
+
+  // Per-kind input/output requirements statement (workflow-designer-
+  // bugfixes Bug 2, Requirement 2.6). Purely advisory like the rest of
+  // the panel — never contributes to step gating.
+  const requirements = arrangementRequirements(category);
 
   const divergence = guidanceDivergence(category, inputs, outputs);
 
@@ -113,6 +119,13 @@ export default function PortGuidancePanel({
           data-testid="port-guidance-arrangement"
         >
           {arrangement.summary}
+        </Box>
+      )}
+
+      {requirements && (
+        <Box data-testid="port-guidance-requirements">
+          <Box variant="strong">Typical requirement for this node kind:</Box>{' '}
+          {requirements}
         </Box>
       )}
 

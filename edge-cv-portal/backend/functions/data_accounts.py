@@ -92,13 +92,14 @@ DEFAULT_BEDROCK_CONFIG = {
     'model_id': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
     'region': os.environ.get('AWS_REGION', 'us-east-1'),
     'max_tokens': 4096,
-    # Both sampling parameters remain part of the stored/displayed shape,
-    # but at invocation the Workflow_Generator prefers temperature: recent
-    # Anthropic models reject requests setting temperature AND top_p
-    # together, so top_p is only sent when temperature is null/absent
+    # Sampling parameters are unset by default: they are sent to Bedrock
+    # only when explicitly configured (or overridden per-request). Recent
+    # Anthropic models reject requests setting temperature at all, and
+    # never accept temperature AND top_p together, so the generators omit
+    # None values and send at most one of the two
     # (see workflow_generator.invoke_generation).
-    'temperature': 0.2,
-    'top_p': 0.9,
+    'temperature': None,
+    'top_p': None,
     'timeout_seconds': MAX_BEDROCK_TIMEOUT_SECONDS,
 }
 
@@ -543,7 +544,15 @@ def read_stored_bedrock_configuration() -> Dict:
                 stored = item.get('value') if isinstance(item.get('value'), dict) else item
                 stored = _decimal_to_native(stored)
                 for key in DEFAULT_BEDROCK_CONFIG:
-                    if stored.get(key) is not None:
+                    if key in ('temperature', 'top_p'):
+                        # Sampling parameters may be explicitly stored as
+                        # null (unset); carry the null through so it reads
+                        # back as unset instead of being masked by the
+                        # default. Mirrors
+                        # workflow_generator.get_bedrock_configuration().
+                        if key in stored:
+                            config[key] = stored[key]
+                    elif stored.get(key) is not None:
                         config[key] = stored[key]
         except ClientError as e:
             logger.warning(f"Could not read Bedrock configuration, using defaults: {str(e)}")
@@ -580,12 +589,16 @@ def validate_bedrock_configuration(config: Dict) -> List[str]:
     if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
         errors.append('max_tokens must be a positive integer')
 
+    # None is a valid stored state for the sampling parameters (unset:
+    # the parameter is omitted at invocation); non-None values must be
+    # numbers in [0, 1].
     temperature = config.get('temperature')
-    if not _is_number(temperature) or not (0 <= temperature <= 1):
+    if temperature is not None and (
+            not _is_number(temperature) or not (0 <= temperature <= 1)):
         errors.append('temperature must be a number between 0 and 1')
 
     top_p = config.get('top_p')
-    if not _is_number(top_p) or not (0 <= top_p <= 1):
+    if top_p is not None and (not _is_number(top_p) or not (0 <= top_p <= 1)):
         errors.append('top_p must be a number between 0 and 1')
 
     timeout_seconds = config.get('timeout_seconds')
