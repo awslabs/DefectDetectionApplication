@@ -193,6 +193,9 @@ COPY defect_detection_config ./defect_detection_config
 COPY dda_logging ./dda_logging
 COPY endpoints ./endpoints
 COPY data_models ./data_models
+COPY camera_discovery ./camera_discovery
+COPY camera_sync ./camera_sync
+COPY workflow_engine ./workflow_engine
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY dda_triton ./dda_triton
