@@ -4,10 +4,19 @@ Asserts presence and parameterization of all required input,
 preprocessing, inference, post-processing, and output node types.
 
 Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5
+
+Aravis camera input additions (aravis-camera-input task 1.3):
+descriptor identity, parameters, mappings, the camera_source pin, and
+the catalog mirror-equality check.
+
+Validates: aravis-camera-input Requirements 1.1, 1.2, 1.3, 1.4, 1.6, 7.4
 """
+
+import os
 
 from workflow_core.catalog import (
     ARCHITECTURES,
+    DEVICE_ARCHITECTURES,
     CATEGORY_INFERENCE,
     CATEGORY_INPUT,
     CATEGORY_OUTPUT,
@@ -100,6 +109,178 @@ class TestInputNodeTypes:
         assert params["trigger_edge"].default == "rising"
         assert params["poll_interval_ms"].param_type == "int"
         assert descriptor.hardware_dependent is True
+
+
+# --------------------------------------------------------------------------
+# Aravis camera input node type
+# (aravis-camera-input Requirements 1.1-1.4, 1.6, 7.4)
+# --------------------------------------------------------------------------
+
+class TestAravisCameraSourceNodeType:
+    def test_descriptor_identity(self):
+        # Requirement 1.1: type id, category, display name, no inputs,
+        # exactly one VideoFrames output port named "out".
+        descriptor = get_node_type("aravis_camera_source")
+        assert descriptor is not None
+        assert descriptor.type_id == "aravis_camera_source"
+        assert descriptor.category == CATEGORY_INPUT
+        assert descriptor.display_name == "Aravis Camera Source"
+        assert descriptor.inputs == []
+        assert [(port.name, port.port_type) for port in descriptor.outputs] == [
+            ("out", PORT_TYPE_VIDEO_FRAMES)]
+
+    def test_camera_id_parameterization(self):
+        # Requirement 1.2: required string camera_id, min_length 1,
+        # documented with at least one working example.
+        params = _params_by_name(get_node_type("aravis_camera_source"))
+        assert list(params) == ["camera_id", "gain", "exposure"]
+        camera_id = params["camera_id"]
+        assert camera_id.required is True
+        assert camera_id.param_type == "string"
+        assert camera_id.default is None
+        assert camera_id.constraints == {"min_length": 1}
+        assert camera_id.description.strip()
+        assert isinstance(camera_id.examples, list) and camera_id.examples
+
+    def test_gain_and_exposure_parameterization(self):
+        # Requirement 1.3: optional acquisition settings mirroring what
+        # the Camera_Manager applies, each documented with examples.
+        params = _params_by_name(get_node_type("aravis_camera_source"))
+        gain = params["gain"]
+        assert gain.required is False
+        assert gain.param_type == "int"
+        assert gain.default == 4
+        assert gain.constraints == {"min": 0, "max": 100}
+        assert gain.description.strip()
+        assert isinstance(gain.examples, list) and gain.examples
+        exposure = params["exposure"]
+        assert exposure.required is False
+        assert exposure.param_type == "int"
+        assert exposure.default == 5000000
+        assert exposure.constraints == {"min": 0}
+        assert exposure.description.strip()
+        assert isinstance(exposure.examples, list) and exposure.examples
+
+    def test_hardware_dependent(self):
+        # Requirement 1.4: the node is hardware dependent.
+        assert get_node_type("aravis_camera_source").hardware_dependent is True
+
+    def test_device_arch_mappings_are_the_appsrc_chain(self):
+        # Requirement 1.4: every physical device architecture renders
+        # appsrc name=appsrc_{nodeId} ! videoconvert with the app and
+        # videoconvertscale plugin dependencies. The appsrc name embeds
+        # the {nodeId} token so multi-camera documents stay addressable.
+        descriptor = get_node_type("aravis_camera_source")
+        assert {m.arch for m in descriptor.mappings} == set(ARCHITECTURES)
+        for arch in DEVICE_ARCHITECTURES:
+            mapping = descriptor.mapping_for(arch)
+            assert mapping is not None, arch
+            assert mapping.element_chain == [
+                {"factory": "appsrc",
+                 "args_template": {"name": "appsrc_{nodeId}"}},
+                {"factory": "videoconvert", "args_template": {}},
+            ], arch
+            assert mapping.plugin_dependencies == [
+                "app", "videoconvertscale"], arch
+            assert mapping.executor_binding is None, arch
+
+    def test_sim_mapping_is_the_dataset_fed_stub(self):
+        # Requirement 1.4: the sim mapping is the shared dataset-fed
+        # stub, byte-equal to camera_source's sim mapping.
+        aravis_sim = get_node_type("aravis_camera_source").mapping_for("sim")
+        camera_sim = get_node_type("camera_source").mapping_for("sim")
+        assert aravis_sim == camera_sim
+
+
+class TestCameraSourceUnchanged:
+    """Pin `camera_source`'s pre-Aravis descriptor shape.
+
+    Requirement 7.4: the existing camera_source node type keeps its
+    current parameters and mappings unchanged by the Aravis addition.
+    """
+
+    def test_identity_and_parameters_pinned(self):
+        descriptor = get_node_type("camera_source")
+        assert descriptor.type_id == "camera_source"
+        assert descriptor.category == CATEGORY_INPUT
+        assert descriptor.display_name == "Camera Source"
+        assert descriptor.inputs == []
+        assert [(port.name, port.port_type) for port in descriptor.outputs] == [
+            ("out", PORT_TYPE_VIDEO_FRAMES)]
+        assert descriptor.hardware_dependent is True
+        params = _params_by_name(descriptor)
+        assert list(params) == ["device", "gain", "exposure"]
+        device = params["device"]
+        assert device.required is False
+        assert device.param_type == "string"
+        assert device.default == "/dev/video0"
+        assert device.constraints == {"min_length": 1}
+        gain = params["gain"]
+        assert (gain.required, gain.param_type, gain.default) == (
+            False, "int", 4)
+        assert gain.constraints == {"min": 0, "max": 100}
+        exposure = params["exposure"]
+        assert (exposure.required, exposure.param_type, exposure.default) == (
+            False, "int", 5000000)
+        assert exposure.constraints == {"min": 0}
+
+    def test_mappings_pinned(self):
+        descriptor = get_node_type("camera_source")
+        assert {m.arch for m in descriptor.mappings} == set(ARCHITECTURES)
+        # x86 architectures: V4L2 capture, never appsrc.
+        for arch in ("x86_64", "x86_64_nvidia"):
+            mapping = descriptor.mapping_for(arch)
+            assert mapping.element_chain == [
+                {"factory": "v4l2src", "args_template": {"device": "{device}"}},
+                {"factory": "videoconvert", "args_template": {}},
+            ], arch
+            assert mapping.plugin_dependencies == [
+                "video4linux2", "videoconvertscale"], arch
+        # JP4/JP5: the classic adapter-fed appsrc named plain "appsrc"
+        # (never the per-node appsrc_{nodeId} the Aravis node uses).
+        for arch in ("arm64_jp4", "arm64_jp5"):
+            mapping = descriptor.mapping_for(arch)
+            assert mapping.element_chain == [
+                {"factory": "appsrc", "args_template": {"name": "appsrc"}},
+                {"factory": "videoconvert", "args_template": {}},
+            ], arch
+            assert mapping.plugin_dependencies == [
+                "app", "videoconvertscale"], arch
+        # JP6: the PNG-staged host-service capture path.
+        jp6 = descriptor.mapping_for("arm64_jp6")
+        assert [entry["factory"] for entry in jp6.element_chain] == [
+            "filesrc", "pngdec", "videoconvert"]
+        assert jp6.element_chain[0]["args_template"]["location"] == (
+            "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png")
+        assert jp6.plugin_dependencies == [
+            "coreelements", "png", "videoconvertscale", "python:pillow"]
+
+
+class TestCatalogMirrorEquality:
+    def test_portal_and_vendor_catalog_nodes_are_byte_identical(self):
+        # Requirement 1.6: the portal layer catalog and the edge vendor
+        # mirror carry the node identically — the two nodes.py sources
+        # stay byte-identical.
+        import workflow_core.catalog.nodes as portal_nodes
+
+        portal_path = os.path.abspath(portal_nodes.__file__)
+        if portal_path.endswith(".pyc"):
+            portal_path = portal_path[:-1]
+        # tests/ -> workflow_core -> layers -> backend -> edge-cv-portal
+        # -> repository root
+        repo_root = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "..", "..", "..", ".."))
+        vendor_path = os.path.join(
+            repo_root, "src", "backend", "workflow_engine", "vendor",
+            "workflow_core", "catalog", "nodes.py")
+        assert os.path.isfile(vendor_path), vendor_path
+        with open(portal_path, "rb") as handle:
+            portal_bytes = handle.read()
+        with open(vendor_path, "rb") as handle:
+            vendor_bytes = handle.read()
+        assert portal_bytes == vendor_bytes, (
+            "portal layer and edge vendor catalog nodes.py have diverged")
 
 
 # --------------------------------------------------------------------------
@@ -502,7 +683,8 @@ class TestOutputNodeTypes:
 
 class TestCatalogCoverage:
     EXPECTED_TYPE_IDS = {
-        "camera_source", "folder_source", "digital_input",
+        "camera_source", "aravis_camera_source", "folder_source",
+        "digital_input",
         "dewarp", "rotate", "crop", "format_convert",
         "custom_python_preprocess",
         "model_inference", "bedrock_inference",

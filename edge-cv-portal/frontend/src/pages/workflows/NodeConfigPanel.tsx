@@ -55,11 +55,14 @@ import { useUsecase } from '../../contexts/UsecaseContext';
 import type { Device } from '../../types';
 import type { BuilderNode } from './builderGraph';
 import {
+  applyAravisCameraSelection,
   applyCameraSelection,
   cameraDeviceValue,
   cameraDisplayName,
+  cameraIdValue,
   defaultManualEntry,
   getCameraBindingHint,
+  isAravisCompatibleCamera,
   isCameraReferenceParameter,
   type CameraBindingHint,
   type CameraSourceEntry,
@@ -641,8 +644,13 @@ function selectStatus(state: { status: AsyncOptionsState<unknown>['status'] }) {
   return state.status === 'pending' ? ('finished' as const) : state.status;
 }
 
-/** The camera dropdown option for one Camera_Source (Requirement 7.4). */
-export function cameraOption(camera: CameraSourceEntry): SelectProps.Option {
+/**
+ * The camera dropdown option for one Camera_Source (Requirement 7.4).
+ * Aravis options describe the source by its camera id instead of its
+ * device path (aravis-camera-input Requirement 3.5); name, type, sync
+ * status, and the staleness badge render identically for both flavors.
+ */
+export function cameraOption(camera: CameraSourceEntry, aravis = false): SelectProps.Option {
   const tags = [camera.type, camera.sync_status, camera.absent ? 'absent' : null].filter(
     (tag): tag is string => typeof tag === 'string' && tag !== ''
   );
@@ -651,7 +659,7 @@ export function cameraOption(camera: CameraSourceEntry): SelectProps.Option {
     label: cameraDisplayName(camera),
     // Staleness badge on the option label (Requirement 7.4).
     labelTag: camera.stale ? 'Stale' : undefined,
-    description: cameraDeviceValue(camera) ?? undefined,
+    description: (aravis ? cameraIdValue(camera) : cameraDeviceValue(camera)) ?? undefined,
     tags,
   };
 }
@@ -684,6 +692,11 @@ interface CameraReferenceFieldProps {
 function CameraReferenceField(props: CameraReferenceFieldProps) {
   const { typeId, descriptor, parameters, hint, onParametersChange, onCameraSelection } = props;
   const { selectedUsecaseId } = useUsecase();
+  // The aravis_camera_source flavor of the control (aravis-camera-input
+  // Requirements 3.2, 3.3, 3.5): options filtered to Aravis-compatible
+  // sources, described by camera id, applied through
+  // applyAravisCameraSelection. camera_source's path is untouched.
+  const isAravis = typeId === 'aravis_camera_source';
 
   const [manual, setManual] = useState(() =>
     defaultManualEntry(parameters, descriptor.name, descriptor.default, hint)
@@ -815,17 +828,24 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
     deviceOptions.find((option) => option.value === selectedDeviceId) ??
     (selectedDeviceId !== null ? { value: selectedDeviceId, label: selectedDeviceId } : null);
 
-  const cameraOptions = cameras.items.map(cameraOption);
+  // The Aravis node offers only Aravis-compatible sources (Requirement
+  // 3.2); camera_source keeps the full registry list.
+  const offeredCameras = isAravis
+    ? cameras.items.filter(isAravisCompatibleCamera)
+    : cameras.items;
+  const cameraOptions = offeredCameras.map((camera) => cameraOption(camera, isAravis));
   const selectedCameraOption =
     cameraOptions.find((option) => option.value === selectedCameraId) ?? null;
 
   const onCameraChange = (option: SelectProps.Option) => {
-    const camera = cameras.items.find((entry) => entry.camera_source_id === option.value);
+    const camera = offeredCameras.find((entry) => entry.camera_source_id === option.value);
     if (camera === undefined || selectedDeviceId === null) {
       return;
     }
     setSelectedCameraId(camera.camera_source_id);
-    const result = applyCameraSelection(parameters, camera, selectedDeviceId);
+    const result = isAravis
+      ? applyAravisCameraSelection(parameters, camera, selectedDeviceId)
+      : applyCameraSelection(parameters, camera, selectedDeviceId);
     onCameraSelection(result.parameters, result.hint);
   };
 
@@ -985,8 +1005,10 @@ export default function NodeConfigPanel({
             .filter((parameter) => isParameterVisible(parameter, descriptor.parameters, parameters))
             .map((parameter) =>
               isCameraReferenceParameter(descriptor.typeId, parameter.name) ? (
-                // The camera_source device parameter renders as the camera
-                // reference control (camera-registry-sync Requirement 7.1);
+                // The camera_source device parameter and the
+                // aravis_camera_source camera_id parameter render as the
+                // camera reference control (camera-registry-sync
+                // Requirement 7.1, aravis-camera-input Requirement 3.1);
                 // keyed by node id so switching nodes resets its state.
                 <CameraReferenceField
                   key={`${node.id}:${parameter.name}`}

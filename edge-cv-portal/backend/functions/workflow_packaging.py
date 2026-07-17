@@ -404,6 +404,13 @@ def split_plugin_dependencies(plugin_dependencies: List[str]
 #: The built-in Camera_Input_Node type.
 CAMERA_SOURCE_TYPE_ID = 'camera_source'
 
+#: The Aravis (GenICam) Camera_Input_Node type (aravis-camera-input
+#: Requirements 4.1, 4.2). Aravis acquisition happens in the LocalServer
+#: process through the camera manager, so the binding never lands in an
+#: element argument: the binding point carries ``aravisBinding: true``
+#: with empty slots on every physical device architecture.
+ARAVIS_CAMERA_SOURCE_TYPE_ID = 'aravis_camera_source'
+
 #: Optional Custom_Node_Type descriptor flag declaring the type
 #: camera-backed. Both the snake_case spelling from the design and the
 #: camelCase convention of custom declaration wire shapes are honored.
@@ -437,10 +444,12 @@ def camera_backed_type_ids(node_type_items: List[Dict]) -> set:
 
 
 def gather_camera_input_nodes(graph, camera_backed_types: set) -> List:
-    """The graph's Camera_Input_Nodes: camera_source nodes plus nodes of
-    any Custom_Node_Type declared camera-backed, in graph node order."""
+    """The graph's Camera_Input_Nodes: camera_source and
+    aravis_camera_source nodes plus nodes of any Custom_Node_Type declared
+    camera-backed, in graph node order."""
     return [node for node in graph.nodes
             if node.type == CAMERA_SOURCE_TYPE_ID
+            or node.type == ARAVIS_CAMERA_SOURCE_TYPE_ID
             or node.type in camera_backed_types]
 
 
@@ -513,7 +522,11 @@ def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
     default parameters, and arch-specific slots. On JP4/JP5 camera_source
     is adapter-fed (``adapterBinding: true``, empty slots); on JP6 the
     binding selects the CSI sensor the capture host service stages from
-    (``csiSensorBinding: true``, empty slots)."""
+    (``csiSensorBinding: true``, empty slots). aravis_camera_source is
+    executor-feed-bound on every physical device architecture
+    (``aravisBinding: true``, empty slots) with the rendered
+    camera_id/gain/exposure values in ``parameters`` (aravis-camera-input
+    Requirement 4.2)."""
     binding_points: List[Dict] = []
     for node in camera_nodes:
         descriptor = descriptors_by_id[node.type]
@@ -526,7 +539,9 @@ def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
         hint = hints.get(node.id)
         if hint:
             entry['bindingHint'] = hint
-        if node.type == CAMERA_SOURCE_TYPE_ID and arch in ADAPTER_BINDING_ARCHS:
+        if node.type == ARAVIS_CAMERA_SOURCE_TYPE_ID:
+            entry['aravisBinding'] = True
+        elif node.type == CAMERA_SOURCE_TYPE_ID and arch in ADAPTER_BINDING_ARCHS:
             entry['adapterBinding'] = True
         elif node.type == CAMERA_SOURCE_TYPE_ID and arch == ARCH_ARM64_JP6:
             entry['csiSensorBinding'] = True

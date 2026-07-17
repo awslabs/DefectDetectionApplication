@@ -17,6 +17,12 @@ and the periodic re-enumeration loop with absence tracking.
 Public surface for the camera-registry-sync feature (Requirements 2.1, 2.2,
 2.3, 2.4, 2.6, 11.2).
 """
+from camera_discovery.aravis import (
+    AravisDiscoveryResult,
+    DiscoveredAravisCamera,
+    aravis_stable_id,
+    enumerate_aravis,
+)
 from camera_discovery.discovery import (
     DEFAULT_INTERVAL_SECONDS,
     INTERVAL_CONFIG_KEY,
@@ -32,11 +38,15 @@ from camera_discovery.v4l2 import V4l2Io
 __all__ = [
     "DEFAULT_INTERVAL_SECONDS",
     "INTERVAL_CONFIG_KEY",
+    "AravisDiscoveryResult",
     "CameraDiscovery",
+    "DiscoveredAravisCamera",
     "DiscoveredCamera",
     "DiscoveryResult",
     "InventorySnapshot",
     "TrackedCamera",
     "V4l2Io",
+    "aravis_stable_id",
     "diff_snapshot",
+    "enumerate_aravis",
 ]

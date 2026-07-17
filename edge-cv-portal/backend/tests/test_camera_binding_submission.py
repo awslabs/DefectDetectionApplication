@@ -340,3 +340,59 @@ class TestBindingRecordStorage:
         record = fleet.env.stack.tables.deployments.get_item(
             Key={"deployment_id": payload["deployment_id"]})["Item"]
         assert "camera_bindings" not in record
+
+
+# --------------------------------------------------------------------------
+# Aravis binding delivery (aravis-camera-input task 8.4 — Requirement 5.5)
+# --------------------------------------------------------------------------
+
+class TestAravisBindingDelivery:
+    def test_aravis_binding_writes_shadow_and_leaves_artifact_untouched(
+            self, fleet):
+        """A submission binding an aravis_camera_source node to a
+        registered AravisDiscovered Camera_Source writes the expected
+        desired document into the target's dda-camera-bindings shadow —
+        keyed {workflowId}/{version}, carrying the node's binding — and
+        leaves the packaged artifact untouched: the Greengrass deployment
+        references only the component, and the staged artifact bytes are
+        byte-identical after submission (5.5)."""
+        aravis_node = {"node_id": "arv1", "node_type": "aravis_camera_source"}
+        fleet.seed_workflow([aravis_node])
+        fleet.seed_registry("line-a", {"arv-1": {
+            "type": "AravisDiscovered",
+            "origin": "edge-discovered",
+            "params": {"cameraId": "Aravis-Fake-GV01", "serial": "GV01",
+                       "protocol": "Fake", "address": "0.0.0.0"},
+        }})
+        fleet.gg.register_device("line-a")
+
+        # The packaged Workflow_Component artifact as staged in portal S3
+        # by the Component_Packager — bindings ride the shadow, never the
+        # artifact.
+        artifact_key = f"workflows/{fleet.workflow_id}/1/arm64_jp5/component.zip"
+        artifact_bytes = b"compiled-workflow-artifact-bytes"
+        fleet.env.s3.put_object(Bucket=fleet.env.bucket, Key=artifact_key,
+                                Body=artifact_bytes)
+
+        bindings = {"line-a": {"arv1": {"cameraSourceId": "arv-1"}}}
+        status, payload = fleet.deploy(["line-a"], camera_bindings=bindings)
+
+        assert status == 201, payload
+        assert payload["camera_bindings_delivered"] is True
+        # The expected desired document (unchanged shadow mechanism):
+        # desired.bindings["{workflowId}/{version}"] = node bindings.
+        assert fleet.iot_data.bindings["line-a"] == {
+            f"{fleet.workflow_id}/1": {"arv1": {"cameraSourceId": "arv-1"}}}
+        # The Greengrass deployment carries only the component map — no
+        # binding data rides the component set.
+        [call] = fleet.gg.create_deployment_calls
+        assert call["components"] == {
+            f"dda.workflow.{fleet.workflow_id}": {"componentVersion": "1.0.0"}}
+        # The staged artifact bytes are untouched.
+        stored = fleet.env.s3.get_object(
+            Bucket=fleet.env.bucket, Key=artifact_key)["Body"].read()
+        assert stored == artifact_bytes
+        # The delivered bindings are recorded on the deployment record.
+        record = fleet.env.stack.tables.deployments.get_item(
+            Key={"deployment_id": payload["deployment_id"]})["Item"]
+        assert record["camera_bindings"] == bindings

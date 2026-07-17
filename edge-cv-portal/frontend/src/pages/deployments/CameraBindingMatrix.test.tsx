@@ -48,6 +48,36 @@ const STALE: CameraSourceEntry = {
   absent: false,
 };
 
+const ARAVIS_DISCOVERED: CameraSourceEntry = {
+  camera_source_id: 'arv-1',
+  name: 'Basler acA1920',
+  type: 'AravisDiscovered',
+  params: { cameraId: 'Basler-12345678' },
+  sync_status: 'synced',
+  stale: false,
+  absent: false,
+};
+
+const ARAVIS_CONFIGURED: CameraSourceEntry = {
+  camera_source_id: 'cfg-3',
+  name: 'Inspection GigE cam',
+  type: 'Camera',
+  params: { cameraId: 'Aravis-Fake-GV01' },
+  sync_status: 'synced',
+  stale: false,
+  absent: false,
+};
+
+const V4L2_DISCOVERED: CameraSourceEntry = {
+  camera_source_id: 'disc-1',
+  name: 'USB webcam',
+  type: 'V4L2Discovered',
+  params: { devicePath: '/dev/video9' },
+  sync_status: 'synced',
+  stale: false,
+  absent: false,
+};
+
 const NODE_HINTED: BindingContextNode = {
   node_id: 'cam_in_1',
   node_type: 'camera_source',
@@ -294,6 +324,56 @@ describe('CameraBindingMatrix', () => {
       screen.getByText("Node 'cam_in_2' on device 'thing-1': no binding supplied")
     ).toBeInTheDocument();
     expect(screen.getByText("Device 'thing-2': never synced")).toBeInTheDocument();
+  });
+
+  it('offers only Aravis-compatible sources for an aravis_camera_source row with hint pre-selection (aravis-camera-input Requirement 5.1)', () => {
+    // Mixed registry: two Aravis-compatible entries (a discovered bus
+    // camera and a configured Camera-type source with a cameraId), a
+    // V4L2Discovered entry, and a Camera-type entry without a cameraId —
+    // the last two must not be offered to the Aravis node.
+    const aravisNode: BindingContextNode = {
+      node_id: 'arv_in_1',
+      node_type: 'aravis_camera_source',
+      binding_hint: {
+        cameraSourceId: 'arv-1',
+        cameraName: 'Basler acA1920',
+        sourceDeviceId: 'dev-ref',
+      },
+    };
+    const context = bindingContext({
+      camera_input_nodes: [aravisNode, NODE_PLAIN],
+      targets: {
+        'thing-1': {
+          state: 'synced',
+          cameras: [HEALTHY, ARAVIS_DISCOVERED, ARAVIS_CONFIGURED, V4L2_DISCOVERED],
+          preselected: { arv_in_1: 'arv-1' },
+        },
+      },
+    });
+    const { container } = renderMatrix({ context });
+
+    // The Aravis row's dropdown contains exactly the compatible entries.
+    const aravisCell = bodyCell(container, 1, 2).getElement();
+    const aravisSelect = createWrapper(aravisCell).findSelect()!;
+    aravisSelect.openDropdown();
+    const aravisOptions = aravisSelect
+      .findDropdown()
+      .findOptions()
+      .map((o) => o.getElement().textContent);
+    expect(aravisOptions).toHaveLength(2);
+    expect(aravisOptions[0]).toContain('Basler acA1920');
+    expect(aravisOptions[1]).toContain('Inspection GigE cam');
+    aravisSelect.closeDropdown();
+
+    // Hint pre-selection is unchanged: the hinted compatible entry is
+    // pre-selected and marked as suggested.
+    expect(aravisCell.textContent).toContain('Suggested from workflow hint');
+    expect(aravisCell.textContent).toContain('Basler acA1920');
+
+    // The camera_source row still offers every registered entry.
+    const cameraSelect = createWrapper(bodyCell(container, 2, 2).getElement()).findSelect()!;
+    cameraSelect.openDropdown();
+    expect(cameraSelect.findDropdown().findOptions()).toHaveLength(4);
   });
 
   it('shows the empty state for a context without Camera_Input_Nodes (Requirement 8.9 contract)', () => {

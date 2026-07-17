@@ -238,6 +238,52 @@ CAMERA_SOURCE = NodeTypeDescriptor(
     hardware_dependent=True,
 )
 
+ARAVIS_CAMERA_SOURCE = NodeTypeDescriptor(
+    type_id="aravis_camera_source",
+    category=CATEGORY_INPUT,
+    display_name="Aravis Camera Source",
+    inputs=[],
+    outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
+    parameters=[
+        ParameterDescriptor("camera_id", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="Aravis (GenICam) camera identifier "
+                                        "as enumerated on the edge device, "
+                                        "e.g. Aravis-Fake-GV01 or "
+                                        "Basler-12345678.",
+                            examples=["Aravis-Fake-GV01", "Basler-12345678"]),
+        ParameterDescriptor("gain", "int", required=False, default=4,
+                            constraints={"min": 0, "max": 100},
+                            description="Sensor gain (0-100) applied through "
+                                        "the camera manager. Higher values "
+                                        "brighten the image but add noise; "
+                                        "e.g. 4.",
+                            examples=[4, 10]),
+        ParameterDescriptor("exposure", "int", required=False, default=5000000,
+                            constraints={"min": 0},
+                            description="Sensor exposure time in nanoseconds "
+                                        "applied through the camera manager, "
+                                        "e.g. 5000000 (5 ms).",
+                            examples=[5000000, 16000000]),
+    ],
+    # Aravis acquisition happens in the LocalServer process through the
+    # camera manager (no aravissrc element ships in the DDA images):
+    # every physical architecture compiles an appsrc-headed chain the
+    # executor feeds a camera-manager-grabbed frame into, the classic
+    # Camera-type Frame_Feed model. The appsrc name is compile-time
+    # rendered per node ({nodeId} derived by the compiler) so
+    # multi-camera documents stay addressable. Simulation: fed from the
+    # Test_Dataset like camera_source (Requirement 12.6).
+    mappings=_same_on_device_archs(
+        element_chain=[
+            _element("appsrc", name="appsrc_{nodeId}"),
+            _element("videoconvert"),
+        ],
+        plugin_dependencies=["app", "videoconvertscale"],
+    ) + [_dataset_fed_sim_source()],
+    hardware_dependent=True,
+)
+
 FOLDER_SOURCE = NodeTypeDescriptor(
     type_id="folder_source",
     category=CATEGORY_INPUT,
@@ -977,6 +1023,7 @@ CAPTURE = NodeTypeDescriptor(
 
 NODE_CATALOG = (
     CAMERA_SOURCE,
+    ARAVIS_CAMERA_SOURCE,
     FOLDER_SOURCE,
     DIGITAL_INPUT,
     DEWARP,

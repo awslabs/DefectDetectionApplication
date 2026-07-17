@@ -413,3 +413,188 @@ class TestPackagingSnapshots:
         item = e.version_item()
         assert item["has_binding_points"] is False
         assert item["camera_input_nodes"] == []
+
+
+# --------------------------------------------------------------------------
+# Task 7.1 (spec: aravis-camera-input) - Aravis binding points
+#
+# An aravis_camera_source node is a Camera_Input_Node: packaging emits a
+# bindingPoints entry carrying ``aravisBinding: true`` with empty slots on
+# every physical device architecture, parameters holding the rendered
+# camera_id/gain/exposure (defaults-overlaid) values, and the bindingHint
+# when the definition carries one. The version item records the node in
+# camera_input_nodes with has_binding_points: true. Aravis-free workflows
+# package byte-identically to their pre-feature output.
+# _Requirements: 4.1, 4.2, 4.3_
+# --------------------------------------------------------------------------
+
+ARAVIS_HINT = {"cameraSourceId": "arv-1a2b3c4d5e6f",
+               "cameraName": "Basler GigE Line 2",
+               "sourceDeviceId": "thing-2"}
+
+
+def aravis_definition(hint=None):
+    """aravis_camera_source -> capture. The node's plugin dependencies
+    (app, videoconvertscale) are LocalServer-bundled on every
+    architecture, so packaging needs no curated plugin library seeding."""
+    aravis_node = {"id": "arv", "type": "aravis_camera_source",
+                   "position": {"x": 0, "y": 0},
+                   "parameters": {"camera_id": "Aravis-Fake-GV01"}}
+    if hint is not None:
+        aravis_node["data"] = {"cameraBindingHint": hint}
+    return {
+        "schemaVersion": 1,
+        "nodes": [
+            aravis_node,
+            {"id": "cap", "type": "capture", "position": {"x": 200, "y": 0},
+             "parameters": {"output_path": "/out"}},
+        ],
+        "connections": [
+            {"id": "c1", "from": {"node": "arv", "port": "out"},
+             "to": {"node": "cap", "port": "in"}},
+        ],
+    }
+
+
+def mixed_camera_definition():
+    """camera_source -> capture plus aravis_camera_source -> capture:
+    both Camera_Input_Node types in one definition."""
+    return {
+        "schemaVersion": 1,
+        "nodes": [
+            {"id": "cam", "type": "camera_source", "position": {"x": 0, "y": 0},
+             "parameters": {"device": "/dev/video1"}},
+            {"id": "arv", "type": "aravis_camera_source",
+             "position": {"x": 0, "y": 200},
+             "parameters": {"camera_id": "Aravis-Fake-GV01", "gain": 10}},
+            {"id": "cap1", "type": "capture", "position": {"x": 200, "y": 0},
+             "parameters": {"output_path": "/out1"}},
+            {"id": "cap2", "type": "capture", "position": {"x": 200, "y": 200},
+             "parameters": {"output_path": "/out2"}},
+        ],
+        "connections": [
+            {"id": "c1", "from": {"node": "cam", "port": "out"},
+             "to": {"node": "cap1", "port": "in"}},
+            {"id": "c2", "from": {"node": "arv", "port": "out"},
+             "to": {"node": "cap2", "port": "in"}},
+        ],
+    }
+
+
+class TestAravisBindingPoints:
+    """aravisBinding emission for aravis_camera_source (Requirements
+    4.1, 4.2)."""
+
+    #: Every physical device architecture (the sim document is never
+    #: packaged).
+    ARCHS = ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5",
+             "arm64_jp6"]
+
+    @pytest.fixture
+    def aravis_env(self, env, packaging, monkeypatch):
+        e = BindingPointsEnv(env, packaging, monkeypatch,
+                             aravis_definition(hint=ARAVIS_HINT))
+        status, payload = e.package(self.ARCHS)
+        assert status == 201, payload
+        return e
+
+    def test_aravis_binding_marker_on_every_device_arch(self, aravis_env):
+        """The Aravis node's entry carries aravisBinding: true with empty
+        slots and the rendered (defaults-overlaid) camera_id/gain/exposure
+        parameters on every device architecture, hint included."""
+        for arch in self.ARCHS:
+            points = aravis_env.compiled_pipeline(arch)["bindingPoints"]
+            assert len(points) == 1, arch
+            point = points[0]
+            assert point["nodeId"] == "arv"
+            assert point["nodeType"] == "aravis_camera_source"
+            assert point["aravisBinding"] is True
+            assert point["slots"] == []
+            # Explicit camera_id + declared gain/exposure defaults.
+            assert point["parameters"] == {"camera_id": "Aravis-Fake-GV01",
+                                           "gain": 4, "exposure": 5000000}
+            assert point["bindingHint"] == ARAVIS_HINT
+            # Never the other camera markers.
+            assert "adapterBinding" not in point
+            assert "csiSensorBinding" not in point
+
+    def test_version_item_records_the_aravis_node(self, aravis_env):
+        """camera_input_nodes lists the Aravis node through the existing
+        recording path with has_binding_points: true (Requirement 4.1)."""
+        item = aravis_env.version_item()
+        assert item["has_binding_points"] is True
+        nodes = item["camera_input_nodes"]
+        assert len(nodes) == 1
+        assert nodes[0]["node_id"] == "arv"
+        assert nodes[0]["node_type"] == "aravis_camera_source"
+        assert nodes[0]["binding_hint"] == ARAVIS_HINT
+        # No parameter ever lands in an element argument -> no device paths.
+        assert nodes[0]["compiled_device_paths"] == {}
+
+    def test_mixed_definition_emits_both_nodes_entries(self, env, packaging,
+                                                       monkeypatch):
+        """camera_source and aravis_camera_source in one definition each
+        get their own binding point with their own marker/slots; neither
+        disturbs the other (Requirements 4.1, 4.2)."""
+        e = BindingPointsEnv(env, packaging, monkeypatch,
+                             mixed_camera_definition())
+        status, payload = e.package(["x86_64", "arm64_jp5"])
+        assert status == 201, payload
+
+        for arch in ("x86_64", "arm64_jp5"):
+            points = {p["nodeId"]: p
+                      for p in e.compiled_pipeline(arch)["bindingPoints"]}
+            assert set(points) == {"cam", "arv"}
+
+            aravis = points["arv"]
+            assert aravis["aravisBinding"] is True
+            assert aravis["slots"] == []
+            assert aravis["parameters"] == {"camera_id": "Aravis-Fake-GV01",
+                                            "gain": 10, "exposure": 5000000}
+
+            cam = points["cam"]
+            assert "aravisBinding" not in cam
+            if arch == "x86_64":
+                # camera_source keeps its v4l2src device slot, resolving
+                # to the rendered device argument in this document.
+                (slot,) = cam["slots"]
+                assert slot["param"] == "device"
+                assert slot["arg"] == "device"
+                compiled = e.compiled_pipeline(arch)
+                element = (compiled["segments"][slot["segment"]]
+                           ["elements"][slot["element"]])
+                assert element["nodeId"] == "cam"
+                assert element["factory"] == "v4l2src"
+                assert element["args"]["device"] == "/dev/video1"
+            else:
+                assert cam["adapterBinding"] is True
+                assert cam["slots"] == []
+
+        item = e.version_item()
+        assert item["has_binding_points"] is True
+        assert {(n["node_id"], n["node_type"])
+                for n in item["camera_input_nodes"]} == {
+                    ("cam", "camera_source"),
+                    ("arv", "aravis_camera_source")}
+
+    def test_aravis_free_definition_output_is_unchanged(self, env, packaging,
+                                                        monkeypatch):
+        """An Aravis-free camera workflow's compiled document is exactly
+        the pre-feature output plus the pre-existing bindingPoints section
+        - no aravisBinding marker anywhere (Requirement 4.3)."""
+        e = BindingPointsEnv(env, packaging, monkeypatch, camera_definition())
+        status, payload = e.package(["x86_64", "arm64_jp5"])
+        assert status == 201, payload
+
+        for arch in ("x86_64", "arm64_jp5"):
+            packaged_text = e.compiled_pipeline_text(arch)
+            packaged_doc = json.loads(packaged_text)
+            binding_points = packaged_doc.pop("bindingPoints")
+            assert all("aravisBinding" not in p for p in binding_points)
+
+            expected_doc = pre_feature_compiled(env, e.workflow_id,
+                                                arch).to_dict()
+            assert packaged_doc == expected_doc
+            expected_doc["bindingPoints"] = binding_points
+            assert packaged_text == json.dumps(
+                expected_doc, sort_keys=True, indent=2, ensure_ascii=True)

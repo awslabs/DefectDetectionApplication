@@ -151,10 +151,15 @@ export function getCameraBindingHint(
 /**
  * Whether a parameter renders as the camera reference control: the
  * `camera_source` node's `device` parameter, keyed off node type +
- * parameter name — no `workflow_core` schema change (Requirement 7.1).
+ * parameter name — no `workflow_core` schema change (Requirement 7.1),
+ * and the `aravis_camera_source` node's `camera_id` parameter
+ * (aravis-camera-input Requirement 3.1).
  */
 export function isCameraReferenceParameter(typeId: string, parameterName: string): boolean {
-  return typeId === 'camera_source' && parameterName === 'device';
+  return (
+    (typeId === 'camera_source' && parameterName === 'device') ||
+    (typeId === 'aravis_camera_source' && parameterName === 'camera_id')
+  );
 }
 
 // --------------------------------------------------------------------------
@@ -210,6 +215,69 @@ export function applyCameraSelection(
   const device = cameraDeviceValue(camera);
   if (device !== null) {
     next.device = device;
+  }
+  const params = camera.params ?? {};
+  if (typeof params.gain === 'number') {
+    next.gain = params.gain;
+  }
+  if (typeof params.exposure === 'number') {
+    next.exposure = params.exposure;
+  }
+  return {
+    parameters: next,
+    hint: {
+      cameraSourceId: camera.camera_source_id,
+      cameraName: cameraDisplayName(camera),
+      sourceDeviceId,
+    },
+  };
+}
+
+// --------------------------------------------------------------------------
+// Aravis picker helpers (aravis-camera-input Requirements 3.2, 3.3)
+// --------------------------------------------------------------------------
+
+/**
+ * Whether a Camera_Source is Aravis-compatible for the
+ * `aravis_camera_source` picker (Requirement 3.2): a discovered bus
+ * camera (type `AravisDiscovered`), or a configured `Camera`-type
+ * Image_Source carrying a non-empty string `cameraId` parameter.
+ */
+export function isAravisCompatibleCamera(camera: CameraSourceEntry): boolean {
+  if (camera.type === 'AravisDiscovered') {
+    return true;
+  }
+  return camera.type === 'Camera' && cameraIdValue(camera) !== null;
+}
+
+/**
+ * The Aravis camera id a Camera_Source resolves to (`params.cameraId`
+ * as a non-empty string), or null when the source carries none
+ * (Requirement 3.3 population and 3.5 display).
+ */
+export function cameraIdValue(camera: CameraSourceEntry): string | null {
+  const cameraId = (camera.params ?? {}).cameraId;
+  return typeof cameraId === 'string' && cameraId !== '' ? cameraId : null;
+}
+
+/**
+ * Apply an Aravis_Camera_Source selection to an Aravis_Camera_Source_Node's
+ * parameters (Requirement 3.3): populates `camera_id` from the source's
+ * camera id parameter (existing value retained when the source carries
+ * none), copies `gain` and `exposure` when numerically present in the
+ * source's params, leaves all other parameters untouched, and produces
+ * the standard advisory binding hint. Pure over its inputs — mirrors
+ * `applyCameraSelection`.
+ */
+export function applyAravisCameraSelection(
+  parameters: Record<string, JsonValue>,
+  camera: CameraSourceEntry,
+  sourceDeviceId: string
+): CameraSelectionResult {
+  const next: Record<string, JsonValue> = { ...parameters };
+  const cameraId = cameraIdValue(camera);
+  if (cameraId !== null) {
+    next.camera_id = cameraId;
   }
   const params = camera.params ?? {};
   if (typeof params.gain === 'number') {

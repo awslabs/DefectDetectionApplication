@@ -1008,4 +1008,263 @@ describe('NodeConfigPanel', () => {
       });
     });
   });
+
+  // ------------------------------------------------------------------------
+  // Aravis camera reference control (aravis-camera-input task 6.2,
+  // Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 7.4)
+  // ------------------------------------------------------------------------
+
+  describe('Aravis camera reference control (aravis-camera-input)', () => {
+    /** aravis_camera_source with only the camera_id parameter, so the
+     * picker's two selects (reference device + camera) are the only
+     * selects rendered. */
+    const ARAVIS: NodeTypeDescriptor = {
+      typeId: 'aravis_camera_source',
+      category: 'input',
+      displayName: 'Aravis Camera Source',
+      inputs: [],
+      outputs: [{ name: 'out', portType: 'VideoFrames' }],
+      parameters: [
+        {
+          name: 'camera_id',
+          paramType: 'string',
+          required: true,
+          default: null,
+          constraints: { minLength: 1 },
+        },
+      ],
+      mappings: [],
+      hardwareDependent: true,
+    };
+
+    const DEVICES = [
+      { device_id: 'dev-1', usecase_id: 'uc-1', thing_name: 'edge-thing-1', status: 'HEALTHY' },
+    ];
+
+    /** Two Aravis-compatible sources and two incompatible ones. */
+    const ARAVIS_REGISTRY_CAMERAS: CameraSourceEntry[] = [
+      {
+        camera_source_id: 'arv-3fe9c0d21ab4',
+        name: 'Basler line scan',
+        type: 'AravisDiscovered',
+        params: { cameraId: 'Basler-12345678', serial: '12345678', protocol: 'GigEVision' },
+        origin: 'edge-discovered',
+        sync_status: 'synced',
+        stale: false,
+        absent: false,
+      },
+      {
+        camera_source_id: 'cfg-cam1',
+        name: 'Configured Aravis cam',
+        type: 'Camera',
+        params: { cameraId: 'Aravis-Fake-GV01', gain: 12, exposure: 200000 },
+        origin: 'edge-configured',
+        sync_status: 'synced',
+        stale: true,
+        absent: false,
+      },
+      // Incompatible: V4L2-discovered hardware.
+      {
+        camera_source_id: 'disc-9f',
+        name: 'USB webcam',
+        type: 'V4L2Discovered',
+        params: { devicePath: '/dev/video5' },
+        origin: 'edge-discovered',
+        sync_status: 'synced',
+      },
+      // Incompatible: Camera-type source without a cameraId parameter.
+      {
+        camera_source_id: 'cfg-v4l2',
+        name: 'Path-only camera',
+        type: 'Camera',
+        params: { devicePath: '/dev/video2' },
+        origin: 'edge-configured',
+        sync_status: 'synced',
+      },
+    ];
+
+    beforeEach(() => {
+      listDevices.mockResolvedValue({ devices: DEVICES, count: DEVICES.length });
+      getDeviceCameras.mockResolvedValue({
+        device_id: 'dev-1',
+        state: 'synced',
+        cameras: ARAVIS_REGISTRY_CAMERAS,
+        count: ARAVIS_REGISTRY_CAMERAS.length,
+      });
+    });
+
+    /** Opens the picker's device dropdown and selects dev-1. */
+    async function selectReferenceDevice(container: HTMLElement) {
+      const [deviceSelect, cameraSelect] = createWrapper(container).findAllSelects();
+      await waitFor(() => {
+        deviceSelect.openDropdown();
+        expect(deviceSelect.findDropdown().findOptions()).toHaveLength(1);
+      });
+      deviceSelect.selectOptionByValue('dev-1');
+      await waitFor(() => expect(getDeviceCameras).toHaveBeenCalledWith('dev-1', 'uc-1'));
+      return cameraSelect;
+    }
+
+    it('renders the camera reference control for the camera_id parameter (Requirement 3.1)', () => {
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(ARAVIS)} onParametersChange={vi.fn()} />
+      );
+
+      // The picker's two selects render instead of a plain text input.
+      expect(createWrapper(container).findAllSelects()).toHaveLength(2);
+      expect(container.querySelector('input[aria-label="camera_id"]')).toBeNull();
+      expect(
+        container.querySelector('input[aria-label="Manual entry for camera_id"]')
+      ).not.toBeNull();
+    });
+
+    it('renders unrelated Aravis parameters as ordinary controls, not the picker (Requirement 3.1)', () => {
+      const withGainExposure: NodeTypeDescriptor = {
+        ...ARAVIS,
+        parameters: [
+          ...ARAVIS.parameters,
+          {
+            name: 'gain',
+            paramType: 'int',
+            required: false,
+            default: 4,
+            constraints: { min: 0, max: 100 },
+          },
+          {
+            name: 'exposure',
+            paramType: 'int',
+            required: false,
+            default: 5000000,
+            constraints: { min: 0 },
+          },
+        ],
+      };
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(withGainExposure)} onParametersChange={vi.fn()} />
+      );
+
+      // Only camera_id gets the reference control: still exactly the
+      // picker's two selects and one manual-entry toggle.
+      expect(createWrapper(container).findAllSelects()).toHaveLength(2);
+      expect(
+        container.querySelectorAll('input[aria-label^="Manual entry for"]')
+      ).toHaveLength(1);
+      // gain/exposure render as plain numeric inputs with their defaults.
+      expect(container.querySelector('input[aria-label="gain"]')).toHaveValue(4);
+      expect(container.querySelector('input[aria-label="exposure"]')).toHaveValue(5000000);
+    });
+
+    describe('Aravis cameraOption display fields (Requirements 3.5, 7.4)', () => {
+      it('describes the source by its camera id with name, type, and sync status', () => {
+        const option = cameraOption(ARAVIS_REGISTRY_CAMERAS[0], true);
+        expect(option.value).toBe('arv-3fe9c0d21ab4');
+        expect(option.label).toBe('Basler line scan');
+        // Aravis options describe the source by camera id, not device path.
+        expect(option.description).toBe('Basler-12345678');
+        expect(option.tags).toEqual(['AravisDiscovered', 'synced']);
+        // Fresh sources carry no staleness badge.
+        expect(option.labelTag).toBeUndefined();
+      });
+
+      it('badges stale sources and tags pending sync status', () => {
+        const stalePending = cameraOption(
+          { ...ARAVIS_REGISTRY_CAMERAS[1], sync_status: 'pending' },
+          true
+        );
+        expect(stalePending.labelTag).toBe('Stale');
+        expect(stalePending.tags).toContain('pending');
+        expect(stalePending.description).toBe('Aravis-Fake-GV01');
+      });
+
+      it('falls back to the id for nameless sources and omits the description without a camera id', () => {
+        const bare = cameraOption(
+          { camera_source_id: 'arv-bare', type: 'AravisDiscovered' },
+          true
+        );
+        expect(bare.label).toBe('arv-bare');
+        expect(bare.description).toBeUndefined();
+      });
+    });
+
+    it('offers only Aravis-compatible sources, described by camera id (Requirements 3.2, 3.5)', async () => {
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(ARAVIS)} onParametersChange={vi.fn()} />
+      );
+      await waitFor(() => expect(listDevices).toHaveBeenCalledWith('uc-1'));
+
+      const cameraSelect = await selectReferenceDevice(container);
+      await waitFor(() => {
+        cameraSelect.openDropdown();
+        expect(cameraSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+
+      const dropdownText = cameraSelect.findDropdown().getElement().textContent!;
+      // Compatible entries show name, type, camera id, and sync status.
+      expect(dropdownText).toContain('Basler line scan');
+      expect(dropdownText).toContain('AravisDiscovered');
+      expect(dropdownText).toContain('Basler-12345678');
+      expect(dropdownText).toContain('synced');
+      expect(dropdownText).toContain('Configured Aravis cam');
+      expect(dropdownText).toContain('Aravis-Fake-GV01');
+      // Incompatible entries are filtered out entirely.
+      expect(dropdownText).not.toContain('USB webcam');
+      expect(dropdownText).not.toContain('Path-only camera');
+      // Staleness badge on the stale compatible source only (Req 7.4/3.5).
+      const options = cameraSelect.findDropdown().findOptions();
+      expect(options[0].getElement().textContent).not.toContain('Stale');
+      expect(options[1].getElement().textContent).toContain('Stale');
+    });
+
+    it('populates camera_id/gain/exposure and records the hint on selection (Requirement 3.3)', async () => {
+      const onParametersChange = vi.fn();
+      const onCameraSelection = vi.fn();
+      const { container } = render(
+        <NodeConfigPanel
+          node={builderNode(ARAVIS)}
+          onParametersChange={onParametersChange}
+          onCameraSelection={onCameraSelection}
+        />
+      );
+      await waitFor(() => expect(listDevices).toHaveBeenCalled());
+
+      const cameraSelect = await selectReferenceDevice(container);
+      await waitFor(() => {
+        cameraSelect.openDropdown();
+        expect(cameraSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+      cameraSelect.selectOptionByValue('cfg-cam1');
+
+      expect(onCameraSelection).toHaveBeenCalledWith(
+        'aravis_camera_source_1',
+        { camera_id: 'Aravis-Fake-GV01', gain: 12, exposure: 200000 },
+        {
+          cameraSourceId: 'cfg-cam1',
+          cameraName: 'Configured Aravis cam',
+          sourceDeviceId: 'dev-1',
+        }
+      );
+      expect(onParametersChange).not.toHaveBeenCalled();
+    });
+
+    it('retains the manual-entry toggle for a typed camera id (Requirement 3.4)', () => {
+      const onParametersChange = vi.fn();
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(ARAVIS)} onParametersChange={onParametersChange} />
+      );
+
+      const toggle = container.querySelector(
+        'input[aria-label="Manual entry for camera_id"]'
+      )!;
+      fireEvent.click(toggle);
+
+      const input = container.querySelector('input[aria-label="camera_id"]')!;
+      expect(input).toBeInTheDocument();
+      expect(createWrapper(container).findAllSelects()).toHaveLength(0);
+
+      fireEvent.change(input, { target: { value: 'Aravis-Fake-GV02' } });
+      expect(onParametersChange).toHaveBeenCalledWith('aravis_camera_source_1', {
+        camera_id: 'Aravis-Fake-GV02',
+      });
+    });
+  });
 });

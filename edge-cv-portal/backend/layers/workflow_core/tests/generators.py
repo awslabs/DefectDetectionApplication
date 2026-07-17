@@ -98,10 +98,11 @@ __all__ = [
 
 #: Input node types that emit VideoFrames (a graph always gets one so a
 #: downstream chain is guaranteed to be wireable).
-_VIDEO_INPUT_TYPES = ("camera_source", "folder_source")
+_VIDEO_INPUT_TYPES = ("camera_source", "aravis_camera_source", "folder_source")
 
 #: All input-category node types.
-_INPUT_TYPES = ("camera_source", "folder_source", "digital_input")
+_INPUT_TYPES = ("camera_source", "aravis_camera_source", "folder_source",
+                "digital_input")
 
 #: Intermediate (non-input, non-output) node types. ``conditional`` is the
 #: multi-output executor node: both of its output ports register as

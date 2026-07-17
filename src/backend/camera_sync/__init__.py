@@ -43,6 +43,7 @@ from camera_sync.hooks import (
 from camera_sync.inventory import (
     ORIGIN_EDGE_CONFIGURED,
     ORIGIN_EDGE_DISCOVERED,
+    TYPE_ARAVIS_DISCOVERED,
     TYPE_V4L2_DISCOVERED,
     CameraSourceState,
     build_inventory,
@@ -76,6 +77,7 @@ __all__ = [
     "set_active_agent",
     "ORIGIN_EDGE_CONFIGURED",
     "ORIGIN_EDGE_DISCOVERED",
+    "TYPE_ARAVIS_DISCOVERED",
     "TYPE_V4L2_DISCOVERED",
     "CameraSourceState",
     "build_inventory",

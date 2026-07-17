@@ -339,6 +339,7 @@ def _build_graph(
                 type=node_doc["type"],
                 position=Position(x=node_doc["position"]["x"], y=node_doc["position"]["y"]),
                 parameters=dict(node_doc["parameters"]),
+                data=dict(node_doc.get("data", {})),
             )
             for node_doc in document["nodes"]
         ],
