@@ -9,13 +9,12 @@
           "bash",
           "build-custom.sh",
           "aws.edgeml.dda.LocalServer.arm64JP5",
-          "NEXT_PATCH",
-          "aarch64"
+          "NEXT_PATCH"
         ]
       },
       "publish": {
         "bucket": "dda-component",
-        "region": "us-east-2"
+        "region": "us-east-1"
       }
     }
   },
