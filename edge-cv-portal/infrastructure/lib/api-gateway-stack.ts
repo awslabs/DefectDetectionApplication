@@ -794,6 +794,16 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
+    // Custom node code assist (custom-node-code-assist): prompt-to-code
+    // generation for custom Python nodes. Reuses the WorkflowGeneratorHandler
+    // bundle — the handler dispatches on resource == '/code-assist' — so no
+    // new Lambda or compute-stack change is needed.
+    const codeAssistResource = this.api.root.addResource('code-assist');
+    codeAssistResource.addMethod('POST', workflowGeneratorIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
     // Audit Logs endpoints
     const auditLogsResource = this.api.root.addResource('audit-logs');
     auditLogsResource.addMethod('GET', auditLogsIntegration, {

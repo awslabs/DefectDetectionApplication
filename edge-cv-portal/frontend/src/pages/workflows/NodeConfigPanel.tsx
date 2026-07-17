@@ -15,7 +15,17 @@
  *     `input_port_type` / `output_port_type` parameters render port-type
  *     pickers over PORT_TYPES (Requirement 2.7); changes flow into
  *     `node.data.parameters`, so the canvas port handles update via
- *     `resolvedPorts`.
+ *     `resolvedPorts`. For the custom Python node types the `code`
+ *     editor additionally gets the Code_Assistant panel below it
+ *     (custom-node-code-assist Requirements 1.1, 1.2), rendered only
+ *     for workflow-editing roles (6.1, 6.5); accepted code flows
+ *     through the same `onParametersChange` path as manual edits (2.5,
+ *     2.7). A 750 ms-debounced Import_Analyzer effect watches the
+ *     effective `code` value and reconciles the derived pip list into
+ *     the `requirements` parameter (custom-node-code-assist
+ *     Requirements 3.1, 3.5, 3.10), whose control renders as a
+ *     multiline Textarea with a read-only badge annotation list for
+ *     derived and needs-review entries (3.6, 3.7).
  *   - bool parameters render as a labeled checkbox (e.g. the
  *     mqtt_publish "AWS IoT support" option); parameters declaring
  *     `dependsOn` are shown only while the named bool parameter's
@@ -40,7 +50,8 @@
  * mqtt_publish's `payload_template` placeholders.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import Badge from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Checkbox from '@cloudscape-design/components/checkbox';
@@ -50,9 +61,10 @@ import Input from '@cloudscape-design/components/input';
 import Select, { type SelectProps } from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Textarea from '@cloudscape-design/components/textarea';
-import { apiService } from '../../services/api';
+import { apiService, type CodeAssistContract } from '../../services/api';
 import { useUsecase } from '../../contexts/UsecaseContext';
-import type { Device } from '../../types';
+import CodeAssistPanel from '../../components/code-assist/CodeAssistPanel';
+import type { Device, UserRole } from '../../types';
 import type { BuilderNode } from './builderGraph';
 import {
   applyAravisCameraSelection,
@@ -67,7 +79,14 @@ import {
   type CameraBindingHint,
   type CameraSourceEntry,
 } from './cameraReference';
+import {
+  deriveRequirements,
+  extractImports,
+  parseRequirements,
+  reconcileRequirements,
+} from './importAnalyzer';
 import { checkParameterValue } from './parameters';
+import { canEditWorkflows } from './WorkflowToolbar';
 import { PORT_TYPES, type JsonValue, type ParameterDescriptor } from './types';
 
 // --------------------------------------------------------------------------
@@ -352,6 +371,161 @@ function ExampleChips({
   );
 }
 
+// --------------------------------------------------------------------------
+// Code_Assistant integration (custom-node-code-assist Requirements 1.1, 1.2)
+// --------------------------------------------------------------------------
+
+/**
+ * Node_Contract per custom Python node type: the Code_Assistant panel
+ * renders below the `code` parameter editor only for these node types
+ * (custom-node-code-assist Requirements 1.1, 1.2), and only for roles
+ * that may edit workflows (`canEditWorkflows` — Requirements 6.1, 6.5).
+ */
+export const CODE_ASSIST_CONTRACTS: Record<string, CodeAssistContract> = {
+  custom_python: 'process_frame_or_handle',
+  custom_python_preprocess: 'process_frame',
+};
+
+// --------------------------------------------------------------------------
+// Import_Analyzer integration (custom-node-code-assist Requirements
+// 3.1, 3.5, 3.6, 3.7, 3.10)
+// --------------------------------------------------------------------------
+
+/**
+ * Debounce interval for the Import_Analyzer: the derivation runs 750 ms
+ * after the last change to the effective `code` value, comfortably
+ * inside Requirement 3.1's 2-second bound.
+ */
+export const IMPORT_ANALYSIS_DEBOUNCE_MS = 750;
+
+/** The parameter holding the node's pip requirements list. */
+const REQUIREMENTS_PARAMETER = 'requirements';
+
+/** The effective `code` text of a custom Python node, or null otherwise. */
+function effectiveCodeText(node: BuilderNode | null): string | null {
+  if (node === null || CODE_ASSIST_CONTRACTS[node.data.descriptor.typeId] === undefined) {
+    return null;
+  }
+  const descriptor = node.data.descriptor.parameters.find(
+    (parameter) => parameter.name === 'code'
+  );
+  if (descriptor === undefined) {
+    return null;
+  }
+  return textValue(effectiveParameterValue(node.data.parameters, descriptor));
+}
+
+/** The effective `requirements` text of a node (declared default honored). */
+function effectiveRequirementsText(node: BuilderNode): string {
+  const descriptor = node.data.descriptor.parameters.find(
+    (parameter) => parameter.name === REQUIREMENTS_PARAMETER
+  );
+  const effective =
+    descriptor !== undefined
+      ? effectiveParameterValue(node.data.parameters, descriptor)
+      : node.data.parameters[REQUIREMENTS_PARAMETER];
+  return textValue(effective);
+}
+
+/**
+ * The 750 ms-debounced Import_Analyzer effect (custom-node-code-assist
+ * Requirements 3.1, 3.5, 3.10): whenever the effective `code` value of
+ * a custom Python node settles, run `extractImports` →
+ * `deriveRequirements` → `reconcileRequirements(currentRequirements,
+ * derived)` and write the `requirements` parameter through
+ * `onParametersChange` — but only when the reconciled text actually
+ * differs from the current text (reconciliation is idempotent, so a
+ * clean pass writes nothing). An `{ok: false}` scan (unparseable code,
+ * Requirement 3.10) applies nothing. The latest node state and
+ * callback are read through a ref at fire time so manual requirements
+ * edits made during the debounce window are never clobbered.
+ */
+function useImportAnalysis(
+  node: BuilderNode | null,
+  onParametersChange: (nodeId: string, parameters: Record<string, JsonValue>) => void
+): void {
+  const latest = useRef({ node, onParametersChange });
+  latest.current = { node, onParametersChange };
+
+  const nodeId = node?.id ?? null;
+  const code = effectiveCodeText(node);
+
+  useEffect(() => {
+    if (nodeId === null || code === null) {
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      const current = latest.current.node;
+      if (current === null || current.id !== nodeId) {
+        return;
+      }
+      const scan = extractImports(code);
+      if (!scan.ok) {
+        // Unparseable code changes nothing (Requirement 3.10).
+        return;
+      }
+      const derived = deriveRequirements(scan.imports);
+      const currentText = effectiveRequirementsText(current);
+      const reconciled = reconcileRequirements(currentText, derived);
+      if (reconciled !== currentText) {
+        latest.current.onParametersChange(nodeId, {
+          ...current.data.parameters,
+          [REQUIREMENTS_PARAMETER]: reconciled,
+        });
+      }
+    }, IMPORT_ANALYSIS_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [nodeId, code]);
+}
+
+/** The display name of a derived requirements line: text before the marker. */
+function derivedEntryLabel(raw: string): string {
+  const hash = raw.indexOf('#');
+  const name = (hash === -1 ? raw : raw.slice(0, hash)).trim();
+  return name === '' ? raw.trim() : name;
+}
+
+/**
+ * Read-only annotation list under the `requirements` Textarea
+ * (custom-node-code-assist Requirements 3.6, 3.7): each derived
+ * (marker-carrying) entry renders with a "derived" badge, and entries
+ * whose import had no Import_Mapping additionally carry the
+ * "verify package name" warning badge — the same Cloudscape Badge
+ * styling as the node-designer badges. The raw text above stays the
+ * editing surface; this list is purely informational.
+ */
+export function RequirementsAnnotations({ text }: { text: string }) {
+  const derivedEntries = parseRequirements(text).filter((entry) => entry.derived);
+  if (derivedEntries.length === 0) {
+    return null;
+  }
+  return (
+    <ul
+      aria-label="Derived requirements"
+      style={{ listStyle: 'none', margin: '4px 0 0', padding: 0 }}
+    >
+      {derivedEntries.map((entry, index) => (
+        <li
+          key={`${index}-${entry.raw}`}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 4,
+            marginBottom: 2,
+          }}
+        >
+          <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+            {derivedEntryLabel(entry.raw)}
+          </span>
+          <Badge color="blue">derived</Badge>
+          {entry.needsReview && <Badge color="severity-medium">verify package name</Badge>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /** Parameter names that declare per-instance port types (Requirement 2.7). */
 const PORT_TYPE_PARAMETERS = ['input_port_type', 'output_port_type'];
 
@@ -454,8 +628,28 @@ interface ParameterFieldProps {
   modelOptions: ModelOptionsState;
 }
 
-function ParameterControl({ descriptor, value, onChange, modelOptions }: ParameterFieldProps) {
+function ParameterControl({ typeId, descriptor, value, onChange, modelOptions }: ParameterFieldProps) {
   const paramType = descriptor.paramType;
+
+  // The pip requirements list of the custom Python node types edits as
+  // a multiline Textarea (requirements.txt form, one entry per line —
+  // custom-node-code-assist Requirement 3.6); the derived-entry badge
+  // annotations render below it in ParameterField.
+  if (
+    descriptor.name === REQUIREMENTS_PARAMETER &&
+    CODE_ASSIST_CONTRACTS[typeId] !== undefined
+  ) {
+    return (
+      <Textarea
+        rows={4}
+        value={textValue(value)}
+        onChange={({ detail }) => onChange(detail.value)}
+        spellcheck={false}
+        placeholder="one pip package per line"
+        ariaLabel={descriptor.name}
+      />
+    );
+  }
 
   if (paramType === 'bool') {
     // The checkbox carries its own label (e.g. "AWS IoT support"); the
@@ -939,6 +1133,13 @@ export interface NodeConfigPanelProps {
   ) => void;
   /** Closes the panel (deselects the node); omits the close button when absent. */
   onClose?: () => void;
+  /**
+   * The acting user's role, gating the Code_Assistant panel
+   * (custom-node-code-assist Requirements 6.1, 6.5): the assistant
+   * renders only when `canEditWorkflows(role)`; Viewer/Operator (or an
+   * absent role) see no assistant entry point.
+   */
+  role?: UserRole | null;
 }
 
 export default function NodeConfigPanel({
@@ -946,17 +1147,30 @@ export default function NodeConfigPanel({
   onParametersChange,
   onCameraSelection,
   onClose,
+  role,
 }: NodeConfigPanelProps) {
   const needsModels =
     node?.data.descriptor.parameters.some((parameter) => parameter.paramType === 'model_ref') ??
     false;
   const modelOptions = useModelOptions(needsModels);
+  const { selectedUsecaseId } = useUsecase();
+
+  // Debounced Import_Analyzer on the effective `code` value of the
+  // custom Python node types (custom-node-code-assist Requirements
+  // 3.1, 3.5, 3.10); a no-op for every other node type.
+  useImportAnalysis(node, onParametersChange);
 
   if (node === null) {
     return null;
   }
 
   const { descriptor, parameters } = node.data;
+
+  // Code_Assistant below the `code` editor of the custom Python node
+  // types (custom-node-code-assist Requirements 1.1, 1.2), gated to
+  // workflow-editing roles (6.1, 6.5).
+  const codeAssistContract: CodeAssistContract | undefined =
+    CODE_ASSIST_CONTRACTS[descriptor.typeId];
 
   return (
     <aside
@@ -1025,16 +1239,48 @@ export default function NodeConfigPanel({
                   modelOptions={modelOptions}
                 />
               ) : (
-                <ParameterField
-                  key={parameter.name}
-                  typeId={descriptor.typeId}
-                  descriptor={parameter}
-                  value={effectiveParameterValue(parameters, parameter)}
-                  onChange={(value) =>
-                    onParametersChange(node.id, { ...parameters, [parameter.name]: value })
-                  }
-                  modelOptions={modelOptions}
-                />
+                <SpaceBetween key={parameter.name} size="s">
+                  <ParameterField
+                    typeId={descriptor.typeId}
+                    descriptor={parameter}
+                    value={effectiveParameterValue(parameters, parameter)}
+                    onChange={(value) =>
+                      onParametersChange(node.id, { ...parameters, [parameter.name]: value })
+                    }
+                    modelOptions={modelOptions}
+                  />
+                  {codeAssistContract !== undefined &&
+                    parameter.name === REQUIREMENTS_PARAMETER && (
+                      // Read-only badge annotations for derived and
+                      // needs-review entries under the editable
+                      // requirements Textarea (custom-node-code-assist
+                      // Requirements 3.6, 3.7).
+                      <RequirementsAnnotations
+                        text={textValue(effectiveParameterValue(parameters, parameter))}
+                      />
+                    )}
+                  {codeAssistContract !== undefined &&
+                    parameter.name === 'code' &&
+                    canEditWorkflows(role) && (
+                      // The assistant writes accepted code through the
+                      // exact channel manual edits use — the node's
+                      // parameters via onParametersChange — so canvas
+                      // markers, validation, and save behavior are
+                      // untouched, and nothing is persisted by the
+                      // panel itself (custom-node-code-assist
+                      // Requirements 2.5, 2.7).
+                      <CodeAssistPanel
+                        usecaseId={selectedUsecaseId}
+                        surface="workflow-builder"
+                        contract={codeAssistContract}
+                        context={{ nodeType: descriptor.typeId }}
+                        editorCode={textValue(effectiveParameterValue(parameters, parameter))}
+                        onAccept={(code) =>
+                          onParametersChange(node.id, { ...parameters, [parameter.name]: code })
+                        }
+                      />
+                    )}
+                </SpaceBetween>
               )
             )
         )}

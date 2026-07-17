@@ -85,6 +85,18 @@ vi.mock('../../services/api', () => {
   return { ApiError, apiService: { listUseCases } };
 });
 
+vi.mock('../../contexts/AuthContext', () => ({
+  useAuth: () => ({
+    user: {
+      user_id: 'u-1',
+      email: 'user@example.com',
+      username: 'user',
+      role: 'UseCaseAdmin',
+      is_super_user: false,
+    },
+  }),
+}));
+
 vi.mock('../../contexts/UsecaseContext', () => ({
   useUsecase: () => ({
     selectedUsecaseId: 'uc-1',

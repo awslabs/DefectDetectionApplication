@@ -43,8 +43,10 @@ import {
 } from '@cloudscape-design/components';
 import { useNavigate } from 'react-router-dom';
 import { ApiError, apiService } from '../../services/api';
+import { useAuth } from '../../contexts/AuthContext';
 import { useUsecase } from '../../contexts/UsecaseContext';
 import { UseCase } from '../../types';
+import CodeAssistPanel from '../../components/code-assist/CodeAssistPanel';
 import { nodeDesignerApi } from './api';
 import {
   ARCHITECTURE_LABELS,
@@ -87,7 +89,14 @@ const initialForm = (): WizardForm => ({
 
 export default function GeneratePanel() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
+
+  // Code_Assistant gating (custom-node-code-assist, Requirements 6.2,
+  // 6.5): the per-file panel renders only for UseCaseAdmin/PortalAdmin —
+  // the same rule that gates this page's mutating actions server-side.
+  const canUseCodeAssist =
+    user?.role === 'UseCaseAdmin' || user?.role === 'PortalAdmin';
 
   // ---------------------------------------------------------- use case
   const [useCases, setUseCases] = useState<UseCase[]>([]);
@@ -368,6 +377,17 @@ export default function GeneratePanel() {
 
   if (sessionId) {
     const paths = Object.keys(files).sort();
+    // Declared parameters forwarded as frame_hook prompt context
+    // (custom-node-code-assist, Requirement 1.3).
+    const hookParameters = form.parameters
+      .filter((parameter) => parameter.name.trim())
+      .map((parameter) => ({
+        name: parameter.name.trim(),
+        param_type: parameter.paramType,
+        ...(parameter.description.trim()
+          ? { description: parameter.description.trim() }
+          : {}),
+      }));
     return (
       <SpaceBetween size="l">
         <Header
@@ -423,16 +443,37 @@ export default function GeneratePanel() {
                 id: path,
                 label: path,
                 content: (
-                  <Textarea
-                    value={files[path]}
-                    onChange={({ detail }) => {
-                      setFiles((current) => ({ ...current, [path]: detail.value }));
-                      setEdited(true);
-                    }}
-                    rows={24}
-                    spellcheck={false}
-                    ariaLabel={`Source of ${path}`}
-                  />
+                  <SpaceBetween size="s">
+                    <Textarea
+                      value={files[path]}
+                      onChange={({ detail }) => {
+                        setFiles((current) => ({ ...current, [path]: detail.value }));
+                        setEdited(true);
+                      }}
+                      rows={24}
+                      spellcheck={false}
+                      ariaLabel={`Source of ${path}`}
+                    />
+                    {/* Per-file Code_Assistant on Python scaffold tabs only —
+                        today plugin/frame_processing_hook.py
+                        (custom-node-code-assist, Requirements 1.3, 2.5);
+                        Accept replaces exactly this file in the files map,
+                        like a manual edit. It shares no state with the
+                        whole-scaffold chat above, which stays untouched. */}
+                    {canUseCodeAssist && path.endsWith('.py') && (
+                      <CodeAssistPanel
+                        usecaseId={selectedUseCase?.value ?? null}
+                        surface="node-designer"
+                        contract="frame_hook"
+                        context={{ parameters: hookParameters }}
+                        editorCode={files[path]}
+                        onAccept={(code) => {
+                          setFiles((current) => ({ ...current, [path]: code }));
+                          setEdited(true);
+                        }}
+                      />
+                    )}
+                  </SpaceBetween>
                 ),
               }))}
             />

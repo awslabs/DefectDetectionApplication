@@ -44,6 +44,37 @@ export class ApiError extends Error {
   }
 }
 
+// Code_Assistant API types (custom-node-code-assist).
+
+/** Runtime entry-point contract of the node type being edited. */
+export type CodeAssistContract =
+  | 'process_frame'
+  | 'process_frame_or_handle'
+  | 'frame_hook';
+
+/** One `POST /code-assist` request body. */
+export interface CodeAssistRequest {
+  usecase_id: string;
+  surface: 'workflow-builder' | 'node-designer';
+  contract: CodeAssistContract;
+  /** 1..4,000 chars with at least one non-whitespace character. */
+  prompt: string;
+  /** Present iff the editor holds a non-whitespace character (2.6, 2.10). */
+  current_code?: string;
+  context?: {
+    nodeType?: string;
+    parameters?: { name: string; param_type: string; description?: string }[];
+  };
+}
+
+/** Successful code-assist result; nothing is persisted server-side. */
+export interface CodeAssistResponse {
+  code: string;
+  notes: string;
+  model_id: string;
+  contract: CodeAssistContract;
+}
+
 class ApiService {
   private get baseUrl(): string {
     return getConfig().apiUrl;
@@ -2191,6 +2222,17 @@ class ApiService {
     return this.request('/workflows/generate', {
       method: 'POST',
       body: JSON.stringify(data),
+    });
+  }
+
+  // Code_Assistant endpoint (custom-node-code-assist): synchronous,
+  // stateless code generation for one custom Python node module.
+  // Failures surface as ApiError with the envelope's code/details so
+  // describeCodeAssistError can categorize them (Requirements 5.1-5.3).
+  async codeAssist(request: CodeAssistRequest): Promise<CodeAssistResponse> {
+    return this.request('/code-assist', {
+      method: 'POST',
+      body: JSON.stringify(request),
     });
   }
 
