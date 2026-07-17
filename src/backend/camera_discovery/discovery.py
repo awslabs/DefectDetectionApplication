@@ -39,9 +39,9 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from camera_discovery import v4l2
+from camera_discovery import aravis, v4l2
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +184,16 @@ class CameraDiscovery:
     device); when it yields a valid ``CameraDiscoveryIntervalSeconds``
     value, that overrides the ``start()`` interval (Requirement 2.3).
 
+    ``aravis_enumerator`` is an optional zero-argument callable returning
+    the Aravis bus cameras, forwarded to
+    :func:`camera_discovery.aravis.enumerate_aravis` on every periodic
+    pass (``None`` uses that function's default lazy import of
+    ``aravis_functions.getCameras()`` — aravis-camera-input Requirements
+    2.1, 2.7). Aravis stable ids flow through the same tracked-snapshot
+    diff as V4L2 ids: same present/absent semantics, same ``absent_since``
+    timestamps, ``on_change`` only on change, one timer for both families
+    (aravis-camera-input Requirement 2.5).
+
     ``clock`` returns the current time in seconds since the epoch
     (``time.time`` by default); injectable so tests control absence
     timestamps.
@@ -194,9 +204,11 @@ class CameraDiscovery:
         v4l2_io=None,
         config_provider: Optional[Callable[[], Optional[Mapping[str, Any]]]] = None,
         clock: Callable[[], float] = time.time,
+        aravis_enumerator: Optional[Callable[[], Sequence[Any]]] = None,
     ):
         self._io = v4l2_io if v4l2_io is not None else v4l2.V4l2Io()
         self._config_provider = config_provider
+        self._aravis_enumerator = aravis_enumerator
         self._clock = clock
         self._tracked: Dict[str, TrackedCamera] = {}
         self._latest_failures: Tuple[Dict[str, str], ...] = ()
@@ -279,12 +291,26 @@ class CameraDiscovery:
         """Run one enumeration + diff pass, firing ``on_change`` if the
         inventory changed; returns the resulting tracked snapshot.
 
+        Each pass runs the V4L2 enumeration and the Aravis enumeration
+        (aravis-camera-input Requirement 2.1) and diffs the combined
+        result against the tracked inventory in one step — Aravis stable
+        ids get the identical absence semantics, and there is no second
+        timer (aravis-camera-input Requirements 2.5, 2.7). Downstream
+        consumers distinguish the families by the tracked entry's camera
+        object type (:class:`DiscoveredCamera` vs
+        :class:`camera_discovery.aravis.DiscoveredAravisCamera`).
+
         This is the loop body — callable directly by tests (and by callers
         wanting an immediate refresh). Never raises: enumeration failures
-        are already absorbed by :meth:`enumerate`, and an ``on_change``
-        callback error is logged without killing the loop (11.2).
+        are already absorbed by :meth:`enumerate` and
+        :func:`camera_discovery.aravis.enumerate_aravis`, and an
+        ``on_change`` callback error is logged without killing the loop
+        (11.2).
         """
         result = self.enumerate()
+        aravis_result = aravis.enumerate_aravis(self._aravis_enumerator)
+        result.cameras.extend(aravis_result.cameras)
+        result.failures.extend(aravis_result.failures)
         now_ms = int(self._clock() * 1000)
 
         with self._lock:

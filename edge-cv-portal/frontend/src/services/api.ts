@@ -1979,11 +1979,12 @@ class ApiService {
       model_id: string;
       region: string;
       max_tokens: number;
-      temperature: number;
-      top_p: number;
+      // null means "unset": the sampling parameter is omitted at invocation.
+      temperature: number | null;
+      top_p: number | null;
       timeout_seconds: number;
     };
-    defaults: Record<string, string | number>;
+    defaults: Record<string, string | number | null>;
     max_timeout_seconds: number;
   }> {
     return this.request('/data-accounts/bedrock-configuration');
@@ -2005,8 +2006,10 @@ class ApiService {
     model_id?: string;
     region?: string;
     max_tokens?: number;
-    temperature?: number;
-    top_p?: number;
+    // An explicit null unsets the sampling parameter (the backend merges
+    // provided keys, so omitting the key keeps the current value).
+    temperature?: number | null;
+    top_p?: number | null;
     timeout_seconds?: number;
   }): Promise<{
     message: string;
@@ -2014,8 +2017,8 @@ class ApiService {
       model_id: string;
       region: string;
       max_tokens: number;
-      temperature: number;
-      top_p: number;
+      temperature: number | null;
+      top_p: number | null;
       timeout_seconds: number;
     };
   }> {

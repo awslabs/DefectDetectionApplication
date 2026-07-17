@@ -253,6 +253,96 @@ class TestTypeAndOverride:
 
 
 # ==========================================================================
+# Aravis type compatibility and override constraints
+# (aravis-camera-input task 8.1 — Requirements 5.2, 5.3, 5.4)
+# ==========================================================================
+
+def aravis_node(node_id="n1"):
+    return camera_node(node_id, "aravis_camera_source")
+
+
+class TestAravisTypeAndOverride:
+    def test_aravis_binding_to_aravis_discovered_accepted(self, deployments):
+        """An aravis_camera_source node binds to a discovered bus camera
+        (5.2)."""
+        errors, warnings = deployments.validate_camera_bindings(
+            version_item([aravis_node()]), ["line-a"],
+            {"line-a": snapshot({"arv-1": registry_entry("AravisDiscovered")})},
+            {"line-a": {"n1": {"cameraSourceId": "arv-1"}}}, [])
+        assert errors == []
+        assert warnings == []
+
+    def test_aravis_binding_to_configured_camera_accepted(self, deployments):
+        """A configured Camera-type Image_Source (Aravis-backed) is a
+        valid binding for the Aravis node (5.2)."""
+        errors, _ = deployments.validate_camera_bindings(
+            version_item([aravis_node()]), ["line-a"],
+            {"line-a": snapshot({"cfg-1": registry_entry("Camera")})},
+            {"line-a": {"n1": {"cameraSourceId": "cfg-1"}}}, [])
+        assert errors == []
+
+    @pytest.mark.parametrize("source_type", [
+        "V4L2Discovered", "ICam", "NvidiaCSI", "Folder", "RTSP"])
+    def test_aravis_binding_to_incompatible_type_rejected(
+            self, deployments, source_type):
+        """Anything that is not Aravis-backed is rejected with
+        CAMERA_TYPE_INCOMPATIBLE (5.2)."""
+        errors, _ = deployments.validate_camera_bindings(
+            version_item([aravis_node()]), ["line-a"],
+            {"line-a": snapshot({"src-1": registry_entry(source_type)})},
+            {"line-a": {"n1": {"cameraSourceId": "src-1"}}}, [])
+        [error] = errors
+        assert error["code"] == deployments.CAMERA_ERROR_TYPE_INCOMPATIBLE
+        assert error["sourceType"] == source_type
+        assert error["nodeType"] == "aravis_camera_source"
+
+    def test_camera_source_binding_to_aravis_discovered_accepted(
+            self, deployments):
+        """A registered GenICam camera is a legitimate camera-backed
+        source for the generic camera_source node (5.3)."""
+        errors, _ = deployments.validate_camera_bindings(
+            version_item([camera_node()]), ["line-a"],
+            {"line-a": snapshot({"arv-1": registry_entry("AravisDiscovered")})},
+            {"line-a": {"n1": {"cameraSourceId": "arv-1"}}}, [])
+        assert errors == []
+
+    def test_valid_aravis_override_accepted(self, deployments):
+        """Override values within the aravis_camera_source descriptor's
+        declared constraints are accepted (5.4)."""
+        errors, warnings = deployments.validate_camera_bindings(
+            version_item([aravis_node()]), ["line-a"],
+            {"line-a": snapshot({})},
+            {"line-a": {"n1": {"override": {"camera_id": "Aravis-Fake-GV01",
+                                            "gain": 8,
+                                            "exposure": 100000}}}}, [])
+        assert errors == []
+        assert warnings == []
+
+    def test_aravis_override_with_empty_camera_id_rejected(self, deployments):
+        """camera_id declares min_length 1 in the catalog (5.4)."""
+        errors, _ = deployments.validate_camera_bindings(
+            version_item([aravis_node()]), ["line-a"],
+            {"line-a": snapshot({})},
+            {"line-a": {"n1": {"override": {"camera_id": ""}}}}, [])
+        [error] = errors
+        assert error["code"] == deployments.CAMERA_ERROR_OVERRIDE_INVALID
+        assert error["parameter"] == "camera_id"
+        assert error["violation"] == "PARAM_MIN_LENGTH"
+
+    def test_aravis_override_with_out_of_range_gain_rejected(self, deployments):
+        """gain declares max 100 in the catalog (5.4)."""
+        errors, _ = deployments.validate_camera_bindings(
+            version_item([aravis_node()]), ["line-a"],
+            {"line-a": snapshot({})},
+            {"line-a": {"n1": {"override": {"camera_id": "Basler-12345678",
+                                            "gain": 500}}}}, [])
+        [error] = errors
+        assert error["code"] == deployments.CAMERA_ERROR_OVERRIDE_INVALID
+        assert error["parameter"] == "gain"
+        assert error["violation"] == "PARAM_MAX"
+
+
+# ==========================================================================
 # Degraded-source and never-synced warnings (9.3, 8.8)
 # ==========================================================================
 

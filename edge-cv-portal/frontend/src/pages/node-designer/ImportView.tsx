@@ -84,6 +84,7 @@ import {
   incompatiblePlatformWarnings,
   isModuleListingUnavailable,
   PlatformWarning,
+  moduleSelectionIncomplete,
   moduleSelectionSummary,
   pluginDocsUrl,
   pluginSelectionError,
@@ -228,9 +229,9 @@ export default function ImportView() {
 
   // --- module plugin selection (import enhancement): a chosen official
   // module's individual plugins load from GET /plugin-modules?module=
-  // and the user picks the subset to import (default: all selected).
-  // Loading is non-blocking: on failure a warning shows and the import
-  // proceeds with the full plugin set.
+  // and the user opts in to the subset to import (default: none
+  // selected). Loading is non-blocking: on failure a warning shows and
+  // the import proceeds with the full plugin set.
   const [modulePlugins, setModulePlugins] = useState<ModulePluginEntry[] | null>(null);
   const [modulePluginsLoading, setModulePluginsLoading] = useState(false);
   const [modulePluginsWarning, setModulePluginsWarning] = useState<string | null>(null);
@@ -254,8 +255,8 @@ export default function ImportView() {
         }
         const plugins = response.plugins || [];
         setModulePlugins(plugins);
-        // Default: ALL plugins selected (whole-module import).
-        setSelectedModulePlugins(allPluginNames(plugins));
+        // Default: none selected — the user opts in explicitly.
+        setSelectedModulePlugins([]);
       } catch (err: any) {
         if (!cancelled) {
           // Non-blocking: selection is an enhancement, never a blocker.
@@ -313,16 +314,17 @@ export default function ImportView() {
 
   // A loaded plugin list requires at least one selected plugin; an
   // unavailable or empty list never blocks the import.
-  const moduleSelectionIncomplete =
-    source === 'module' &&
-    modulePluginNames.length > 0 &&
-    selectedModulePlugins.length === 0;
+  const selectionIncomplete = moduleSelectionIncomplete(
+    source,
+    modulePluginNames,
+    selectedModulePlugins
+  );
 
   const formComplete =
     !!selectedUseCase?.value &&
     !!effectiveRepoUrl &&
     architectures.length > 0 &&
-    !moduleSelectionIncomplete;
+    !selectionIncomplete;
 
   // Act on a settled import record (from the initial response or a
   // poll): 'failed' shows the recorded finding (4.5),
@@ -840,9 +842,10 @@ export default function ImportView() {
                   )}
                 </SpaceBetween>
               </FormField>
-              {/* Plugin selection for the chosen module (default: all).
-                  An unavailable plugin list never blocks the import:
-                  the warning shows and the full set imports. */}
+              {/* Plugin selection for the chosen module (default: none
+                  selected — the user opts in explicitly). An unavailable
+                  plugin list never blocks the import: the warning shows
+                  and the full set imports. */}
               {chosenModule && modulePluginsWarning && (
                 <Alert type="warning" header="Plugin list unavailable">
                   {modulePluginsWarning} — the import will include the
@@ -855,7 +858,7 @@ export default function ImportView() {
               {chosenModule && modulePlugins && modulePlugins.length > 0 && (
                 <FormField
                   label="Plugins to import"
-                  description="Choose which of the module's plugins to import and build; all plugins are selected by default."
+                  description="Choose which of the module's plugins to import and build. No plugins are selected by default — select individual plugins or use Select all to import the whole module."
                   errorText={
                     selectedModulePlugins.length === 0
                       ? 'Select at least one plugin to import'

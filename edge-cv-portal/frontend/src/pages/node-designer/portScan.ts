@@ -12,6 +12,7 @@
  * selection reuses `pickElement` from `scan.ts` unchanged so the
  * Port_Scan and Parameter_Scan always agree on the factory (6.6).
  */
+import { isDefaultPortArrangement } from './declaration';
 import type { PortForm } from './declaration';
 
 /**
@@ -56,22 +57,18 @@ export interface UnmappedPad {
 
 /**
  * Untouched_Defaults detection (6.1): exactly the wizard-supplied
- * initial lists — one input named "in" and one output named "out",
- * both VideoFrames. Any rename, retype, addition, or removal makes
- * the lists user-edited.
+ * initial lists. The wizards seed the default rows from the selected
+ * palette category (defaultPortsForCategory,
+ * workflow-designer-bugfixes Bug 2), so "untouched" is generalized to
+ * the default arrangement of any category — today's in/out pair equals
+ * the preprocessing defaults and keeps counting as untouched. Any
+ * rename, retype, addition, or removal makes the lists user-edited.
  */
 export function isUntouchedDefaults(
   inputs: PortForm[],
   outputs: PortForm[]
 ): boolean {
-  return (
-    inputs.length === 1 &&
-    outputs.length === 1 &&
-    inputs[0].name === 'in' &&
-    inputs[0].portType === 'VideoFrames' &&
-    outputs[0].name === 'out' &&
-    outputs[0].portType === 'VideoFrames'
-  );
+  return isDefaultPortArrangement(inputs, outputs);
 }
 
 /** The result of applying Port_Suggestions to the port lists. */

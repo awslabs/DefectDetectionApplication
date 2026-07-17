@@ -8,11 +8,14 @@
  * only assemble the shape and provide the light client-side checks the
  * wizard needs for step gating.
  */
+import { CATEGORIES } from './types';
 import type {
+  NodeCategory,
   ParameterDeclaration,
   PortDeclaration,
   ScaffoldDeclaration,
 } from './types';
+import { CATEGORY_ARRANGEMENTS } from './portGuidance';
 
 // ------------------------------------------------------------- form state
 
@@ -65,6 +68,73 @@ export const emptyParameter = (): ParameterForm => ({
   example: '',
   enumValues: '',
 });
+
+// --------------------------------------------- category default ports
+
+/**
+ * The default port rows the wizards seed for one palette category,
+ * derived from the category's typical arrangement
+ * (CATEGORY_ARRANGEMENTS in portGuidance.ts;
+ * workflow-designer-bugfixes Bug 2, Requirements 2.4, 2.5):
+ *
+ * - `input`: no inputs, one VideoFrames "out"
+ * - `preprocessing`: one VideoFrames "in", one VideoFrames "out"
+ *   (byte-identical to the wizards' historical seeds)
+ * - `inference`: one VideoFrames "in", one InferenceMeta "out"
+ * - `post_processing`: one InferenceMeta "in", one EventSignal "out"
+ * - `output`: one VideoFrames "in" (the seeded representative of
+ *   "at least one input of any type"), no outputs
+ * - unknown category: the preprocessing shape (today's seeds)
+ *
+ * Every seeded row carries a non-empty name so `portsStepErrors` stays
+ * clean on the untouched defaults, and each concrete arrangement
+ * yields `guidanceDivergence === null`.
+ */
+export function defaultPortsForCategory(category: string): {
+  inputs: PortForm[];
+  outputs: PortForm[];
+} {
+  const arrangement = Object.prototype.hasOwnProperty.call(
+    CATEGORY_ARRANGEMENTS,
+    category
+  )
+    ? CATEGORY_ARRANGEMENTS[category as NodeCategory]
+    : CATEGORY_ARRANGEMENTS.preprocessing;
+  const inputs: PortForm[] =
+    arrangement.inputs === 'at-least-one'
+      ? [{ name: 'in', portType: 'VideoFrames' }]
+      : arrangement.inputs.map((portType) => ({ name: 'in', portType }));
+  const outputs: PortForm[] = arrangement.outputs.map((portType) => ({
+    name: 'out',
+    portType,
+  }));
+  return { inputs, outputs };
+}
+
+const samePortRows = (a: readonly PortForm[], b: readonly PortForm[]) =>
+  a.length === b.length &&
+  a.every(
+    (port, i) => port.name === b[i].name && port.portType === b[i].portType
+  );
+
+/**
+ * Generalized Untouched_Defaults detection (workflow-designer-bugfixes
+ * Bug 2): true exactly when the rows deep-equal
+ * `defaultPortsForCategory(c)` for some palette category `c`. Any
+ * rename, retype, addition, or removal makes the rows user-edited.
+ */
+export function isDefaultPortArrangement(
+  inputs: PortForm[],
+  outputs: PortForm[]
+): boolean {
+  return CATEGORIES.some((category) => {
+    const defaults = defaultPortsForCategory(category);
+    return (
+      samePortRows(defaults.inputs, inputs) &&
+      samePortRows(defaults.outputs, outputs)
+    );
+  });
+}
 
 // ------------------------------------------------------------ conversions
 

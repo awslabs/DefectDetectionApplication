@@ -28,6 +28,7 @@ function descriptor(
 const CATALOG: NodeTypeDescriptor[] = [
   descriptor('camera_source', 'input', 'Camera source'),
   descriptor('crop', 'preprocessing', 'Crop'),
+  descriptor('custom_python_preprocess', 'preprocessing', 'Custom Python (Frames)'),
   descriptor('model_inference', 'inference', 'Model inference'),
   descriptor('inference_filter', 'post_processing', 'Inference filter'),
   descriptor('mqtt_publish', 'output', 'MQTT publish'),
@@ -49,6 +50,14 @@ describe('NodePalette', () => {
     expect(within(inputSection).getByText('Camera source')).toBeInTheDocument();
     const outputSection = screen.getByRole('region', { name: 'Output' });
     expect(within(outputSection).getByText('MQTT publish')).toBeInTheDocument();
+  });
+
+  it('renders the custom_python_preprocess node in the Preprocessing section (custom-python-frames Requirement 7.1)', () => {
+    render(<NodePalette catalog={CATALOG} />);
+    const preprocessingSection = screen.getByRole('region', { name: 'Preprocessing' });
+    expect(within(preprocessingSection).getByText('Custom Python (Frames)')).toBeInTheDocument();
+    // It appears only under Preprocessing, not in any other section.
+    expect(screen.getAllByText('Custom Python (Frames)')).toHaveLength(1);
   });
 
   it('sets the node type id as the drag payload', () => {

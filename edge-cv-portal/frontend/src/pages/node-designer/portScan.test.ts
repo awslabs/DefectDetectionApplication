@@ -88,10 +88,23 @@ describe('isUntouchedDefaults (6.1)', () => {
     ).toBe(false);
   });
 
-  it('rejects a removed row on either side', () => {
-    expect(isUntouchedDefaults([], untouchedDefaultOutputs())).toBe(false);
-    expect(isUntouchedDefaults(untouchedDefaultInputs(), [])).toBe(false);
-  });
+  it(
+    "treats a removal landing on another category's defaults as untouched " +
+      '(generalized detection, workflow-designer-bugfixes Bug 2)',
+    () => {
+      // Untouched_Defaults is generalized to the default arrangement of
+      // any palette category (isDefaultPortArrangement): no inputs + one
+      // VideoFrames "out" equals the input category's defaults, and one
+      // VideoFrames "in" + no outputs equals the output category's —
+      // both count as untouched so Port_Scan's replace-over-defaults
+      // semantics stay coherent with the category-driven seeding.
+      expect(isUntouchedDefaults([], untouchedDefaultOutputs())).toBe(true);
+      expect(isUntouchedDefaults(untouchedDefaultInputs(), [])).toBe(true);
+
+      // A removal landing on no category's defaults stays user-edited.
+      expect(isUntouchedDefaults([], [])).toBe(false);
+    }
+  );
 });
 
 describe('removalBlockReason (6.9)', () => {

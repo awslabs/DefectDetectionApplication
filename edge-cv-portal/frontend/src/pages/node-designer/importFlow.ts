@@ -382,15 +382,35 @@ export function pluginSelectionError(
 //
 // When an official module is chosen, its individual plugins load from
 // GET /plugin-modules?module=<name> and the form offers a selection
-// (default: all) before the import. The chosen subset serializes to
-// the import request's selected_plugins; a full selection serializes
-// to nothing (absent = whole module, today's behavior). Loading the
-// list is a non-blocking enhancement: on failure the import proceeds
-// with the full set.
+// (default: none selected — the user opts in explicitly) before the
+// import. The chosen subset serializes to the import request's
+// selected_plugins; a full selection serializes to nothing (absent =
+// whole module, today's behavior). Loading the list is a non-blocking
+// enhancement: on failure the import proceeds with the full set.
 
 /** The plugin names of a module plugin list, in listing order. */
 export function allPluginNames(plugins: ModulePluginEntry[]): string[] {
   return plugins.map((plugin) => plugin.name);
+}
+
+/**
+ * The explicit-selection gate for the module import path: a loaded
+ * (non-empty) plugin list requires at least one selected plugin before
+ * the import proceeds. True exactly when the source is the module
+ * listing, plugins are available, and nothing is selected yet. An
+ * unavailable or empty plugin list never blocks (whole-module
+ * fallback), and manual repository URL imports are never gated.
+ */
+export function moduleSelectionIncomplete(
+  source: 'module' | 'manual',
+  availableNames: string[],
+  selectedNames: string[]
+): boolean {
+  return (
+    source === 'module' &&
+    availableNames.length > 0 &&
+    selectedNames.length === 0
+  );
 }
 
 /**

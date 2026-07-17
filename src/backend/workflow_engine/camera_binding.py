@@ -37,6 +37,13 @@ same stable ids the Portal registry shows).
   never substitute into the document — they yield ``adapter_assignments``
   (node id -> resolved camera parameters) consumed by the executor when
   it connects the camera adapter to the appsrc.
+- Aravis binding points (``aravisBinding: true``, empty slots — the
+  aravis-camera-input feature, Requirements 6.1, 6.2, 6.3) likewise never
+  substitute into the document: a resolved ``cameraSourceId`` or
+  constraint-valid ``override`` binding contributes to
+  ``aravis_assignments`` (same shape as ``adapter_assignments``),
+  consumed by the executor's Aravis frame feed. Missing ids and override
+  violations follow the same invalid path as every other binding point.
 - A document without ``bindingPoints`` (every pre-feature component), or
   a registration with no bindings supplied, is returned unchanged — the
   compiled-in parameter values run exactly as before (10.5, 11.1).
@@ -53,8 +60,10 @@ STATUS_INVALID = "invalid"
 
 #: Inventory parameter keys whose values land in a differently named node
 #: parameter: the ``build_inventory`` reported shape calls the V4L2 node
-#: path ``devicePath`` while the camera_source node declares ``device``.
-_PARAM_ALIASES = {"devicePath": "device"}
+#: path ``devicePath`` while the camera_source node declares ``device``,
+#: and the Aravis camera identity ``cameraId`` while the
+#: aravis_camera_source node declares ``camera_id``.
+_PARAM_ALIASES = {"devicePath": "device", "cameraId": "camera_id"}
 
 
 @dataclass(frozen=True)
@@ -66,15 +75,19 @@ class ResolutionResult:
     ``missing`` lists every binding whose ``cameraSourceId`` has no local
     inventory entry (design shape ``{nodeId, cameraSourceId}``),
     ``adapter_assignments`` maps adapter-fed node ids to their resolved
-    camera parameters, and ``errors`` carries one human-readable reason
-    per problem (missing sources and override constraint violations) for
-    the watcher's invalid-registration reason.
+    camera parameters, ``aravis_assignments`` maps Aravis-fed node ids to
+    theirs (same shape, kept distinct so the executor can tell the JP4/5
+    camera adapter apart from the Aravis frame feed), and ``errors``
+    carries one human-readable reason per problem (missing sources and
+    override constraint violations) for the watcher's
+    invalid-registration reason.
     """
 
     document: Dict[str, Any]
     status: str
     missing: Tuple[Dict[str, str], ...] = ()
     adapter_assignments: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    aravis_assignments: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     errors: Tuple[str, ...] = ()
 
 
@@ -99,6 +112,7 @@ def resolve_bindings(document: Dict[str, Any],
     missing: List[Dict[str, str]] = []
     errors: List[str] = []
     adapter_assignments: Dict[str, Dict[str, Any]] = {}
+    aravis_assignments: Dict[str, Dict[str, Any]] = {}
 
     for point in binding_points:
         if not isinstance(point, Mapping):
@@ -133,7 +147,15 @@ def resolve_bindings(document: Dict[str, Any],
             # Unrecognized binding shape: leave the compiled defaults.
             continue
 
-        if point.get("adapterBinding") is True:
+        if point.get("aravisBinding") is True:
+            # Aravis: the executor's frame feed grabs from the camera
+            # manager; the binding selects which camera id it grabs, not
+            # an element arg (aravis-camera-input Requirements 6.1, 6.2).
+            aravis_assignments[node_id] = {
+                "cameraSourceId": camera_source_id,
+                "params": values,
+            }
+        elif point.get("adapterBinding") is True:
             # JP4/JP5: the executor's camera adapter feeds the appsrc; the
             # binding selects which camera it connects, not an element arg.
             adapter_assignments[node_id] = {
@@ -149,6 +171,7 @@ def resolve_bindings(document: Dict[str, Any],
         status=status,
         missing=tuple(missing),
         adapter_assignments=adapter_assignments,
+        aravis_assignments=aravis_assignments,
         errors=tuple(errors),
     )
 

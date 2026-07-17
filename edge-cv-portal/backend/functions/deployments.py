@@ -1660,10 +1660,16 @@ CAMERA_WARNING_LEGACY_PATH = 'COMPILED_PATH_UNREGISTERED'   # 9.5
 #: Camera_Source types (registry ``type`` attribute) compatible with each
 #: built-in Camera_Input_Node type. camera_source captures from a device
 #: camera (v4l2src, the JP4/5 camera adapter, or the JP6 CSI host
-#: service), so folder and network-stream sources cannot back it.
+#: service), so folder and network-stream sources cannot back it; a
+#: registered GenICam camera (AravisDiscovered) is a legitimate
+#: camera-backed source for it on the adapter-fed architectures
+#: (aravis-camera-input Requirement 5.3). aravis_camera_source must bind
+#: to an Aravis-backed source: a discovered bus camera or a configured
+#: Camera-type Image_Source (aravis-camera-input Requirement 5.2).
 _CAMERA_COMPATIBLE_SOURCE_TYPES = {
     'camera_source': frozenset({'Camera', 'ICam', 'NvidiaCSI',
-                                'V4L2Discovered'}),
+                                'V4L2Discovered', 'AravisDiscovered'}),
+    'aravis_camera_source': frozenset({'Camera', 'AravisDiscovered'}),
 }
 
 #: Camera_Source types that are never a camera. Custom camera-backed node

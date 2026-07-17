@@ -368,3 +368,100 @@ class TestMetaStamping:
         entry = camera_item(items, "cfg-a")
         assert entry["usecase_id"] == usecase_id
         assert entry["last_reported_at"] == 1730000042000
+
+
+def aravis_discovered(version, camera_id="Aravis-Fake-GV01"):
+    """An AravisDiscovered Camera_Source exactly as the Edge_Sync_Agent
+    reports it (aravis-camera-input: build_inventory discovered-only
+    entry shape)."""
+    return {
+        "version": version,
+        "name": "Aravis Fake GV",
+        "type": "AravisDiscovered",
+        "origin": "edge-discovered",
+        "params": {
+            "cameraId": camera_id,
+            "serial": "SN-0001",
+            "protocol": "GigEVision",
+            "address": "192.168.1.20",
+        },
+        "capabilities": {"aravis": {
+            "model": "Fake GV",
+            "address": "192.168.1.20",
+            "physicalId": "eth0",
+            "protocol": "GigEVision",
+            "serial": "SN-0001",
+            "vendor": "Aravis",
+        }},
+    }
+
+
+class TestAravisDiscoveredIngestion:
+    """Registry ingestion of AravisDiscovered reports (aravis-camera-input
+    Requirement 7.3): the existing reduce_report/handler path stores the
+    new type verbatim without changes to existing Camera_Source types."""
+
+    def test_aravis_discovered_entry_stored_verbatim(self, ingest_env, env):
+        """An AravisDiscovered entry flows through the ingest handler as
+        one more opaque type string: every declared field lands in the
+        registry exactly as reported (Req 7.3)."""
+        usecase_id = env.create_usecase()
+        thing_name = register_device(ingest_env, usecase_id)
+        csid = "arv-3fe9c0d21ab4"
+        incoming = aravis_discovered(1)
+        record = make_record(thing_name, report(
+            {csid: incoming}, reported_at=1730000000000))
+
+        result = ingest_env.module.handler({"Records": [record]}, None)
+
+        assert result == {"batchItemFailures": []}
+        entry = camera_item(device_items(ingest_env, thing_name), csid)
+        assert entry is not None
+        assert entry["camera_source_id"] == csid
+        assert entry["name"] == incoming["name"]
+        assert entry["type"] == "AravisDiscovered"
+        assert entry["origin"] == "edge-discovered"
+        assert entry["params"] == incoming["params"]
+        assert entry["capabilities"] == incoming["capabilities"]
+        assert entry["version"] == 1
+        assert entry["sync_status"] == "synced"
+        assert entry["usecase_id"] == usecase_id
+        assert entry["last_reported_at"] == 1730000000000
+
+    def test_existing_types_unaffected_by_aravis_entries(
+            self, ingest_env, env):
+        """A report carrying AravisDiscovered entries alongside existing
+        types stores the existing-type entries exactly as a report without
+        the Aravis entries does (Req 7.3)."""
+        usecase_id = env.create_usecase()
+        with_aravis = register_device(ingest_env, usecase_id)
+        without_aravis = register_device(ingest_env, usecase_id)
+        classic = {
+            "cfg-a": camera(2, "line-1"),
+            "disc-9a1b2c3d4e5f": camera(
+                1, "usb-cam", "/dev/video2",
+                origin="edge-discovered", type="V4L2Discovered"),
+        }
+        mixed = dict(classic)
+        mixed["arv-3fe9c0d21ab4"] = aravis_discovered(1)
+
+        ingest_env.module.handler({"Records": [
+            make_record(with_aravis, report(mixed,
+                                            reported_at=1730000000000)),
+            make_record(without_aravis, report(classic,
+                                               reported_at=1730000000000)),
+        ]}, None)
+
+        items_with = device_items(ingest_env, with_aravis)
+        items_without = device_items(ingest_env, without_aravis)
+
+        def strip_device(item):
+            return {k: v for k, v in item.items() if k != "device_id"}
+
+        # The Aravis entry is stored; every existing-type entry is
+        # byte-identical to the Aravis-free ingestion of the same report.
+        assert camera_item(items_with, "arv-3fe9c0d21ab4") is not None
+        assert camera_item(items_without, "arv-3fe9c0d21ab4") is None
+        for csid in classic:
+            assert strip_device(camera_item(items_with, csid)) == \
+                strip_device(camera_item(items_without, csid))

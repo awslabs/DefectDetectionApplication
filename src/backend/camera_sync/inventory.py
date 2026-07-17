@@ -28,6 +28,22 @@ Edge_Sync_Agent reports to the Portal:
   never appears both merged into a configured entry and as a separate
   discovered entry.
 
+Aravis branch (feature aravis-camera-input, Requirements 2.1, 2.3, 2.4,
+7.2), structurally parallel to the device-path merge:
+
+- A configured Image_Source of type ``Camera`` whose ``cameraId`` equals a
+  tracked Aravis camera's ``camera_id`` merges into ONE entry under
+  ``cfg-{imageSourceId}``: configured params, ``capabilities.aravis``
+  identity metadata, ``discovered: True``, and the tracked absent state
+  (Requirement 2.4).
+- Unmerged Aravis cameras yield ``AravisDiscovered`` / ``edge-discovered``
+  entries under their ``arv-`` stable ids (Requirements 2.1, 2.3).
+- Families are distinguished by the tracked entry's camera object type
+  (:class:`camera_discovery.aravis.DiscoveredAravisCamera` vs
+  :class:`camera_discovery.DiscoveredCamera`); inputs containing no Aravis
+  cameras produce output identical to the pre-feature merge
+  (Requirement 7.2).
+
 ``build_inventory`` is pure: it accepts plain data (Image_Source model or
 ORM objects — anything attribute- or dict-shaped — and a
 ``DiscoveryResult`` or ``InventorySnapshot``) and returns a deterministic,
@@ -36,12 +52,22 @@ sorted list of :class:`CameraSourceState`.
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from camera_discovery.aravis import DiscoveredAravisCamera
+
 ORIGIN_EDGE_CONFIGURED = "edge-configured"
 ORIGIN_EDGE_DISCOVERED = "edge-discovered"
 
 #: Reported ``type`` for discovered-only hardware (design: ImageSourceType
 #: values + "V4L2Discovered").
 TYPE_V4L2_DISCOVERED = "V4L2Discovered"
+
+#: Reported ``type`` for discovered-only Aravis (GenICam) bus cameras
+#: (aravis-camera-input Requirement 2.1).
+TYPE_ARAVIS_DISCOVERED = "AravisDiscovered"
+
+#: The configured Image_Source ``type`` whose ``cameraId`` references an
+#: Aravis camera (merge key for Requirement 2.4).
+_ARAVIS_BACKED_SOURCE_TYPE = "Camera"
 
 
 @dataclass(frozen=True)
@@ -76,16 +102,22 @@ def build_inventory(image_sources, discovery_result) -> List[CameraSourceState]:
     """
     tracked = _normalize_discovery(discovery_result)
 
-    # Discovered cameras indexed by device path; a present camera wins over
-    # an absent one claiming the same path (post-renumbering leftovers).
+    # Discovered V4L2 cameras indexed by device path, and Aravis cameras
+    # indexed by camera id; a present camera wins over an absent one
+    # claiming the same key (post-renumbering leftovers).
     by_path: Dict[str, Tuple[str, Any, bool, Optional[int]]] = {}
+    by_camera_id: Dict[str, Tuple[str, Any, bool, Optional[int]]] = {}
     for stable_id in sorted(tracked):
         camera, absent, absent_since = tracked[stable_id]
-        existing = by_path.get(camera.device_path)
+        if isinstance(camera, DiscoveredAravisCamera):
+            index, key = by_camera_id, camera.camera_id
+        else:
+            index, key = by_path, camera.device_path
+        existing = index.get(key)
         if existing is not None and not existing[2]:
-            continue  # keep the present camera already claiming this path
+            continue  # keep the present camera already claiming this key
         if existing is None or (existing[2] and not absent):
-            by_path[camera.device_path] = (stable_id, camera, absent, absent_since)
+            index[key] = (stable_id, camera, absent, absent_since)
 
     merged_stable_ids = set()
     entries: List[CameraSourceState] = []
@@ -100,41 +132,87 @@ def build_inventory(image_sources, discovery_result) -> List[CameraSourceState]:
             if candidate[0] not in merged_stable_ids:
                 match = candidate
 
+        # Aravis merge by camera id (aravis-camera-input Requirement 2.4):
+        # a configured Camera-type Image_Source whose cameraId equals a
+        # tracked Aravis camera's id merges into this configured entry.
+        aravis_match = None
+        if _source_type(source) == _ARAVIS_BACKED_SOURCE_TYPE:
+            camera_id = _get(source, "cameraId")
+            if camera_id and str(camera_id) in by_camera_id:
+                candidate = by_camera_id[str(camera_id)]
+                if candidate[0] not in merged_stable_ids:
+                    aravis_match = candidate
+
         params = _configured_params(source, device_path)
+        if match is None and aravis_match is None:
+            entries.append(
+                CameraSourceState(
+                    camera_source_id=configured_camera_source_id(image_source_id),
+                    name=_get(source, "name") or "",
+                    type=_source_type(source),
+                    origin=ORIGIN_EDGE_CONFIGURED,
+                    params=params,
+                )
+            )
+            continue
+
+        capabilities: Dict[str, Any] = {}
+        absent = False
+        absent_since: Optional[int] = None
         if match is not None:
             stable_id, camera, absent, absent_since = match
             merged_stable_ids.add(stable_id)
-            entries.append(
-                CameraSourceState(
-                    camera_source_id=configured_camera_source_id(image_source_id),
-                    name=_get(source, "name") or "",
-                    type=_source_type(source),
-                    origin=ORIGIN_EDGE_CONFIGURED,
-                    params=params,
-                    capabilities=_capabilities(camera),
-                    discovered=True,
-                    absent=absent,
-                    absent_since=absent_since,
-                )
+            capabilities = _capabilities(camera)
+        if aravis_match is not None:
+            aravis_stable_id, aravis_camera, aravis_absent, aravis_absent_since = (
+                aravis_match
             )
-        else:
-            entries.append(
-                CameraSourceState(
-                    camera_source_id=configured_camera_source_id(image_source_id),
-                    name=_get(source, "name") or "",
-                    type=_source_type(source),
-                    origin=ORIGIN_EDGE_CONFIGURED,
-                    params=params,
-                )
+            merged_stable_ids.add(aravis_stable_id)
+            capabilities["aravis"] = _aravis_identity(aravis_camera)
+            if match is None:
+                absent = aravis_absent
+                absent_since = aravis_absent_since
+        entries.append(
+            CameraSourceState(
+                camera_source_id=configured_camera_source_id(image_source_id),
+                name=_get(source, "name") or "",
+                type=_source_type(source),
+                origin=ORIGIN_EDGE_CONFIGURED,
+                params=params,
+                capabilities=capabilities,
+                discovered=True,
+                absent=absent,
+                absent_since=absent_since,
             )
+        )
 
     for stable_id in sorted(tracked):
         if stable_id in merged_stable_ids:
             continue
         camera, absent, absent_since = tracked[stable_id]
-        # A camera whose path merged under a different stable id (absent
-        # leftover displaced by a present camera) still reports separately —
-        # its stable id is what bindings reference.
+        # A camera whose merge key merged under a different stable id
+        # (absent leftover displaced by a present camera) still reports
+        # separately — its stable id is what bindings reference.
+        if isinstance(camera, DiscoveredAravisCamera):
+            entries.append(
+                CameraSourceState(
+                    camera_source_id=stable_id,
+                    name=f"{camera.vendor} {camera.model}",
+                    type=TYPE_ARAVIS_DISCOVERED,
+                    origin=ORIGIN_EDGE_DISCOVERED,
+                    params={
+                        "cameraId": camera.camera_id,
+                        "serial": camera.serial,
+                        "protocol": camera.protocol,
+                        "address": camera.address,
+                    },
+                    capabilities={"aravis": _aravis_identity(camera)},
+                    discovered=True,
+                    absent=absent,
+                    absent_since=absent_since,
+                )
+            )
+            continue
         entries.append(
             CameraSourceState(
                 camera_source_id=stable_id,
@@ -229,6 +307,19 @@ def _configured_params(source, device_path: Optional[str]) -> Dict[str, Any]:
         if value is not None:
             params[param_key] = value
     return params
+
+
+def _aravis_identity(camera) -> Dict[str, Any]:
+    """The discovered Aravis identity metadata reported under
+    ``capabilities.aravis`` (aravis-camera-input Requirement 2.3)."""
+    return {
+        "model": camera.model,
+        "address": camera.address,
+        "physicalId": camera.physical_id,
+        "protocol": camera.protocol,
+        "serial": camera.serial,
+        "vendor": camera.vendor,
+    }
 
 
 def _capabilities(camera) -> Dict[str, Any]:

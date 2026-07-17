@@ -238,6 +238,52 @@ CAMERA_SOURCE = NodeTypeDescriptor(
     hardware_dependent=True,
 )
 
+ARAVIS_CAMERA_SOURCE = NodeTypeDescriptor(
+    type_id="aravis_camera_source",
+    category=CATEGORY_INPUT,
+    display_name="Aravis Camera Source",
+    inputs=[],
+    outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
+    parameters=[
+        ParameterDescriptor("camera_id", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="Aravis (GenICam) camera identifier "
+                                        "as enumerated on the edge device, "
+                                        "e.g. Aravis-Fake-GV01 or "
+                                        "Basler-12345678.",
+                            examples=["Aravis-Fake-GV01", "Basler-12345678"]),
+        ParameterDescriptor("gain", "int", required=False, default=4,
+                            constraints={"min": 0, "max": 100},
+                            description="Sensor gain (0-100) applied through "
+                                        "the camera manager. Higher values "
+                                        "brighten the image but add noise; "
+                                        "e.g. 4.",
+                            examples=[4, 10]),
+        ParameterDescriptor("exposure", "int", required=False, default=5000000,
+                            constraints={"min": 0},
+                            description="Sensor exposure time in nanoseconds "
+                                        "applied through the camera manager, "
+                                        "e.g. 5000000 (5 ms).",
+                            examples=[5000000, 16000000]),
+    ],
+    # Aravis acquisition happens in the LocalServer process through the
+    # camera manager (no aravissrc element ships in the DDA images):
+    # every physical architecture compiles an appsrc-headed chain the
+    # executor feeds a camera-manager-grabbed frame into, the classic
+    # Camera-type Frame_Feed model. The appsrc name is compile-time
+    # rendered per node ({nodeId} derived by the compiler) so
+    # multi-camera documents stay addressable. Simulation: fed from the
+    # Test_Dataset like camera_source (Requirement 12.6).
+    mappings=_same_on_device_archs(
+        element_chain=[
+            _element("appsrc", name="appsrc_{nodeId}"),
+            _element("videoconvert"),
+        ],
+        plugin_dependencies=["app", "videoconvertscale"],
+    ) + [_dataset_fed_sim_source()],
+    hardware_dependent=True,
+)
+
 FOLDER_SOURCE = NodeTypeDescriptor(
     type_id="folder_source",
     category=CATEGORY_INPUT,
@@ -437,6 +483,44 @@ FORMAT_CONVERT = NodeTypeDescriptor(
     hardware_dependent=False,
 )
 
+CUSTOM_PYTHON_PREPROCESS = NodeTypeDescriptor(
+    type_id="custom_python_preprocess",
+    category=CATEGORY_PREPROCESSING,
+    display_name="Custom Python (Frames)",
+    inputs=[PortDescriptor("in", PORT_TYPE_VIDEO_FRAMES)],
+    outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
+    parameters=[
+        ParameterDescriptor("code", "code", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="Python run for every video frame. "
+                                        "Define process_frame(frame, "
+                                        "metadata) and return the processed "
+                                        "frame; frame is a NumPy uint8 array "
+                                        "(rows x cols x channels) and "
+                                        "cv2/np are pre-imported. Return "
+                                        "None to pass the frame through. "
+                                        "Helpers: import dda_frames for "
+                                        "frame_info(), load_image(path or "
+                                        "s3:// URI), to_array(), to_bytes().",
+                            examples=["def process_frame(frame, metadata):\n"
+                                      "    return cv2.GaussianBlur(frame, (5, 5), 0)"]),
+        ParameterDescriptor("requirements", "string", required=False, default="",
+                            constraints={},
+                            description="Extra pip packages the code needs, "
+                                        "one per line in requirements.txt "
+                                        "form.",
+                            examples=["scikit-image==0.24.0"]),
+    ],
+    # Same emlpython bridge element and packaged plugin dependency as the
+    # custom_python post-processing node (Requirement 1.4); the compiler
+    # derives {python_handler_path} per node id, so no compiler changes.
+    mappings=_same_on_all_archs(
+        element_chain=[_element("emlpython", **{"handler-path": "{python_handler_path}"})],
+        plugin_dependencies=["dda-emlpython"],
+    ),
+    hardware_dependent=False,
+)
+
 # --------------------------------------------------------------------------
 # Model inference node type (Requirement 2.3)
 # --------------------------------------------------------------------------
@@ -607,12 +691,19 @@ CUSTOM_PYTHON = NodeTypeDescriptor(
     parameters=[
         ParameterDescriptor("code", "code", required=True, default=None,
                             constraints={"min_length": 1},
-                            description="Python source run for every item "
-                                        "passing through the node; define "
-                                        "process(data, metadata) and return "
-                                        "the (possibly modified) data.",
-                            examples=["def process(data, metadata):\n"
-                                      "    return data"]),
+                            description="Python run for every item passing "
+                                        "through the node. Define "
+                                        "process_frame(frame, metadata) to "
+                                        "work with video frames as NumPy "
+                                        "arrays (cv2/np pre-imported; import "
+                                        "dda_frames for helpers), or "
+                                        "handle(frame_bytes, metadata) -> "
+                                        "(frame_bytes, metadata) to work "
+                                        "with raw bytes.",
+                            examples=["def process_frame(frame, metadata):\n"
+                                      "    return frame",
+                                      "def handle(frame_bytes, metadata):\n"
+                                      "    return frame_bytes, metadata"]),
         ParameterDescriptor("requirements", "string", required=False, default="",
                             constraints={},
                             description="Extra pip packages the code needs, "
@@ -932,12 +1023,14 @@ CAPTURE = NodeTypeDescriptor(
 
 NODE_CATALOG = (
     CAMERA_SOURCE,
+    ARAVIS_CAMERA_SOURCE,
     FOLDER_SOURCE,
     DIGITAL_INPUT,
     DEWARP,
     ROTATE,
     CROP,
     FORMAT_CONVERT,
+    CUSTOM_PYTHON_PREPROCESS,
     MODEL_INFERENCE,
     BEDROCK_INFERENCE,
     CUSTOM_PYTHON,

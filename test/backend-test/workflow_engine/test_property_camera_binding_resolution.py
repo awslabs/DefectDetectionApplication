@@ -213,10 +213,13 @@ def _resolution_cases(draw):
 def _model_resolved_values(entry):
     """Requirement 10.1: the bound source's resolved parameter values,
     with the reported ``devicePath`` resolving the node's ``device``
-    parameter. Exact because the inventory generator never emits ``None``
-    values or a literal ``device`` key."""
+    parameter (and ``cameraId`` aliasing ``camera_id``, the
+    aravis-camera-input addition to ``_PARAM_ALIASES``). Exact because
+    the inventory generator never emits ``None`` values or a literal
+    ``device``/``camera_id`` key."""
     values = dict(entry.params)
     values["device"] = values["devicePath"]
+    values["camera_id"] = values["cameraId"]
     return values
 
 

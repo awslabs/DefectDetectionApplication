@@ -90,9 +90,14 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
             from workflow_engine.pipeline_executor import register_workflow_executor
 
             # Post-run output bindings: digital output / MQTT / OPC UA
-            # (Requirements 9.4, 9.5, 9.6; task 12.4).
+            # (Requirements 9.4, 9.5, 9.6; task 12.4). The binding
+            # resolution provider hands the executor the watcher's cached
+            # Camera_Binding resolutions so runs execute the substituted
+            # document and the Aravis frame feed sees resolved
+            # assignments (aravis-camera-input Requirement 6.4).
             _executor_instance = register_workflow_executor(
-                post_run_handler=OutputBindingProcessor()
+                post_run_handler=OutputBindingProcessor(),
+                binding_resolution_provider=watcher.binding_resolution,
             )
         except Exception:  # noqa: BLE001 - never take LocalServer down
             logger.exception(

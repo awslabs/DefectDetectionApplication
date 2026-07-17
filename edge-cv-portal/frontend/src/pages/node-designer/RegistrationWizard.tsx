@@ -42,7 +42,15 @@ import {
   PORT_TYPES,
   PluginVersionDetail,
 } from './types';
-import { emptyParameter, emptyPort, detailsStepErrors, parametersStepErrors, portsStepErrors } from './declaration';
+import {
+  defaultPortsForCategory,
+  detailsStepErrors,
+  emptyParameter,
+  emptyPort,
+  isDefaultPortArrangement,
+  parametersStepErrors,
+  portsStepErrors,
+} from './declaration';
 import type { ParameterForm, PortForm, WizardForm } from './declaration';
 import ParameterScanPanel, {
   ParameterScanMergeResult,
@@ -135,8 +143,7 @@ export default function RegistrationWizard() {
             name: detail.name,
             description: detail.description || '',
             category: 'preprocessing',
-            inputs: [{ ...emptyPort(), name: 'in' }],
-            outputs: [{ ...emptyPort(), name: 'out' }],
+            ...defaultPortsForCategory('preprocessing'),
             parameters: [],
             mappings: initialMappings(successfulBuildArchs(detail.artifacts), factory),
             hardwareDependent: false,
@@ -462,9 +469,19 @@ export default function RegistrationWizard() {
                   <Select
                     selectedOption={{ label: form.category, value: form.category }}
                     options={CATEGORIES.map((c) => ({ label: c, value: c }))}
-                    onChange={({ detail }) =>
-                      patch({ category: detail.selectedOption.value || form.category })
-                    }
+                    onChange={({ detail }) => {
+                      const category =
+                        detail.selectedOption.value || form.category;
+                      // Untouched default port rows follow the selected
+                      // category's typical arrangement; user-edited rows
+                      // are preserved exactly (workflow-designer-bugfixes
+                      // Bug 2, Req 2.4, 2.5, 3.6).
+                      if (isDefaultPortArrangement(form.inputs, form.outputs)) {
+                        patch({ category, ...defaultPortsForCategory(category) });
+                      } else {
+                        patch({ category });
+                      }
+                    }}
                   />
                 </FormField>
                 <FormField

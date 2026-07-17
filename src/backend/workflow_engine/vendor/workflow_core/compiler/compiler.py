@@ -484,6 +484,11 @@ def _effective_parameters(node: Node, descriptor: NodeTypeDescriptor) -> Dict[st
 def _derived_values(node: Node, parameters: Dict[str, Any]) -> Dict[str, Any]:
     """Placeholder values the compiler derives per node."""
     derived: Dict[str, Any] = {
+        # The node's own id, for per-node element naming in mapping
+        # templates (e.g. aravis_camera_source's appsrc name
+        # ``appsrc_{nodeId}``) so multi-node documents render unique
+        # element names.
+        "nodeId": node.id,
         # Custom Python handler artifact path (packaging layout, task 7.1).
         "python_handler_path": "python/{0}/handler.py".format(node.id),
         # Per-node element name for simulation stub sources so the test

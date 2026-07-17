@@ -43,10 +43,26 @@ API thread and never on the Pipeline_Configuration path (Requirements
    the document's ``executorBindings`` to the post-run handler — the hook
    task 12.4 (output bindings) plugs into.
 
+Camera_Binding resolution and the Aravis frame feed (aravis-camera-input
+Requirements 6.4, 6.5, 6.6): an injectable ``binding_resolution_provider``
+(wired at engine startup to the watcher's ``binding_resolution()``
+accessor) supplies the registration's resolved Camera_Bindings. When a
+resolution exists the executor runs its slot-substituted document;
+provider absence or failure falls back to the on-disk document, logged,
+never failing a run for documents that don't need bindings. Before the
+pipeline starts, ``plan_aravis_feeds`` plans the document's Aravis frame
+feed; the executor grabs one frame through the camera manager and pushes
+it into the compiled appsrc through the existing
+``run_pipeline(launch_string, frame_data)`` Frame_Feed — the classic
+Camera-type execution model. Planning and grab failures fail the run
+with ``failing_node_id`` set to the Aravis node; documents with no
+Aravis binding points take the exact pre-feature call path.
+
 Any exception anywhere in a run is contained: the execution row is marked
 failed and nothing propagates (Requirement 13.7).
 """
 
+import copy
 import json
 import logging
 import os
@@ -57,6 +73,7 @@ from typing import Callable, Optional
 
 from workflow_engine import executor as executor_hook
 from workflow_engine import python_bridge, rendering
+from workflow_engine.aravis_feed import AravisFeedError, plan_aravis_feeds
 from workflow_engine.output_bindings import BedrockInferenceProcessor
 from workflow_engine.discovery import (
     COMPILED_PIPELINE_FILE,
@@ -106,6 +123,20 @@ def _default_pipeline_manager_factory():
     return GstPipelineManager()
 
 
+def _default_frame_grabber(camera_id, config):
+    """One Aravis frame through the existing Camera_Manager.
+
+    Imported lazily — exactly like ``_default_pipeline_manager_factory``
+    and ``GstPipelineManager`` — so this module (and its tests) stay
+    importable without the ``gi``/Aravis runtime. Uses the cached,
+    persistent connection model ``get_camera_frame`` provides
+    (aravis-camera-input Requirement 6.4).
+    """
+    from utils import camera_manager
+
+    return camera_manager.get_camera_frame(camera_id, config)
+
+
 class WorkflowExecutor:
     """Executes pending workflow runs dispatched by the executor hook."""
 
@@ -116,6 +147,8 @@ class WorkflowExecutor:
         post_run_handler: Optional[PostRunHandler] = None,
         bridged_pipeline_runner: Optional[Callable] = None,
         bedrock_processor: Optional[BedrockInferenceProcessor] = None,
+        binding_resolution_provider: Optional[Callable] = None,
+        frame_grabber: Optional[Callable] = None,
     ) -> None:
         if session_factory is None:
             # Imported lazily so the module is importable without the
@@ -140,6 +173,17 @@ class WorkflowExecutor:
         # merges {is_anomalous, confidence} into the tag values the
         # post-run handler gates on. Injectable for tests without boto3.
         self._bedrock_processor = bedrock_processor or BedrockInferenceProcessor()
+        # Camera_Binding resolution lookup: registration id ->
+        # Optional[ResolutionResult] (the watcher's binding_resolution()
+        # accessor in production). When it returns a resolution the run
+        # executes the resolution's substituted document; None (or a
+        # provider failure, logged) falls back to the on-disk document
+        # (aravis-camera-input Requirement 6.4).
+        self._binding_resolution_provider = binding_resolution_provider
+        # One Aravis frame per planned feed: (camera_id, config) ->
+        # {'data','height','width'}. Injectable for tests without the
+        # gi/Aravis runtime (Requirements 6.4, 6.5).
+        self._frame_grabber = frame_grabber or _default_frame_grabber
 
     def set_post_run_handler(self, handler: Optional[PostRunHandler]) -> None:
         """Register the post-pipeline output-binding processor (task 12.4)."""
@@ -185,6 +229,43 @@ class WorkflowExecutor:
             document, load_error = self._load_compiled_document(registration)
             if load_error is not None:
                 self._finish_failed(session, execution, error=load_error)
+                return
+
+            # Camera_Binding resolution (aravis-camera-input Requirement
+            # 6.4): when the provider carries a resolution for this
+            # registration, the run executes its slot-substituted document
+            # (a private copy — the watcher's cache is never mutated);
+            # otherwise the on-disk document runs exactly as before.
+            resolution = self._binding_resolution(registration)
+            if resolution is not None and isinstance(
+                getattr(resolution, "document", None), dict
+            ):
+                document = copy.deepcopy(resolution.document)
+
+            # Aravis frame feed (Requirements 6.4, 6.5, 6.6): plan the
+            # document's Aravis feed, grab its frame through the camera
+            # manager, and point the compiled appsrc at the Frame_Feed.
+            # Planning and grab failures fail this run with the Aravis
+            # node identified; Aravis-free documents plan zero feeds and
+            # take the exact pre-feature path.
+            try:
+                frame_data = self._prepare_aravis_frame_feed(
+                    document, resolution
+                )
+            except AravisFeedError as e:
+                logger.error(
+                    "Workflow execution %s failed in the Aravis frame feed "
+                    "(node %s): %s",
+                    execution_id,
+                    e.node_id or "unidentified",
+                    e,
+                )
+                self._finish_failed(
+                    session,
+                    execution,
+                    error=str(e),
+                    failing_node_id=e.node_id,
+                )
                 return
 
             # Custom_Python_Node bridges (Requirement 9.8): replace each
@@ -242,6 +323,17 @@ class WorkflowExecutor:
                     if bridge_specs:
                         tag_values = self._run_bridged(
                             registration, bridge_specs, launch_string
+                        )
+                    elif frame_data is not None:
+                        # Aravis Frame_Feed: run_pipeline locates the
+                        # appsrc, wraps the grabbed frame, pushes it and
+                        # sends EOS — the classic Camera-type execution
+                        # model (Requirement 6.4).
+                        manager = self._pipeline_manager_factory()
+                        tag_values = manager.run_pipeline(
+                            launch_string,
+                            frame_data,
+                            latency_metrics=_NullLatencyMetrics(),
                         )
                     else:
                         manager = self._pipeline_manager_factory()
@@ -344,6 +436,109 @@ class WorkflowExecutor:
         finally:
             for bridge in bridges:
                 bridge.stop()
+
+    # ------------------------------------------------------------------
+    # Camera_Binding resolution + Aravis frame feed (aravis-camera-input)
+    # ------------------------------------------------------------------
+
+    def _binding_resolution(self, registration: WorkflowRegistration):
+        """The registration's latest Camera_Binding resolution, or None.
+
+        A provider failure is logged and falls back to the on-disk
+        document — it never takes a run down for documents that don't
+        need bindings (design error-handling table)."""
+        if self._binding_resolution_provider is None:
+            return None
+        try:
+            return self._binding_resolution_provider(registration.id)
+        except Exception:  # noqa: BLE001 - provider isolation
+            logger.exception(
+                "Binding resolution provider failed for %s; running the "
+                "on-disk document",
+                registration.id,
+            )
+            return None
+
+    def _prepare_aravis_frame_feed(self, document: dict, resolution):
+        """Plan the document's Aravis feed, grab its frame, and point the
+        compiled appsrc at the Frame_Feed.
+
+        Returns the grabbed ``{'data','height','width'}`` frame, or None
+        when the document has no Aravis binding points (the pre-feature
+        path, Requirement 6.6). Raises :class:`AravisFeedError` (with the
+        node id) on planning and grab failures (Requirement 6.5).
+        """
+        feeds = plan_aravis_feeds(document, resolution)
+        if not feeds:
+            return None
+        feed = feeds[0]
+        try:
+            frame_data = self._frame_grabber(feed.camera_id, feed.config)
+        except Exception as e:  # noqa: BLE001 - attributed to the node
+            raise AravisFeedError(
+                feed.node_id,
+                "frame grab from Aravis camera '{0}' failed: {1}".format(
+                    feed.camera_id, e
+                ),
+            )
+        if not isinstance(frame_data, dict):
+            raise AravisFeedError(
+                feed.node_id,
+                "Aravis camera '{0}' returned no frame".format(feed.camera_id),
+            )
+        self._point_appsrc_at_frame_feed(document, feed, frame_data)
+        logger.info(
+            "Aravis frame feed planned for node %s: camera '%s' (%dx%d)",
+            feed.node_id,
+            feed.camera_id,
+            frame_data.get("width") or 0,
+            frame_data.get("height") or 0,
+        )
+        return frame_data
+
+    @staticmethod
+    def _point_appsrc_at_frame_feed(document: dict, feed, frame_data: dict) -> None:
+        """Aim ``GstPipelineManager``'s Frame_Feed at the node's appsrc.
+
+        ``run_pipeline`` locates the feed's appsrc by the element name
+        ``appsrc`` and derives its caps from the launch string's ``caps=``
+        clause plus the frame's width/height — exactly the classic
+        Camera-type execution model. The compiled document names the
+        element ``appsrc_{nodeId}`` and renders no caps, so the planned
+        feed's element (unique per the single-Frame_Feed contract) is
+        renamed and given base caps derived from the grabbed frame.
+        """
+        for segment in document.get("segments", []):
+            for element in segment.get("elements", []):
+                if (
+                    element.get("nodeId") == feed.node_id
+                    and element.get("factory") == "appsrc"
+                ):
+                    args = element.setdefault("args", {})
+                    args["name"] = "appsrc"
+                    args["caps"] = WorkflowExecutor._frame_caps(frame_data)
+                    return
+        raise AravisFeedError(
+            feed.node_id,
+            "compiled document renders no appsrc element for the node",
+        )
+
+    @staticmethod
+    def _frame_caps(frame_data: dict) -> str:
+        """Base appsrc caps for a grabbed frame; ``run_pipeline`` appends
+        the frame's width/height. The pixel format is derived from the
+        payload size per pixel (Aravis mono cameras produce GRAY8, color
+        pipelines RGB/RGBA), defaulting to GRAY8."""
+        formats = {1: "GRAY8", 3: "RGB", 4: "RGBA"}
+        width = frame_data.get("width") or 0
+        height = frame_data.get("height") or 0
+        data = frame_data.get("data")
+        pixel_format = "GRAY8"
+        if width and height and data is not None:
+            pixels = width * height
+            if len(data) % pixels == 0:
+                pixel_format = formats.get(len(data) // pixels, "GRAY8")
+        return "video/x-raw,format={0}".format(pixel_format)
 
     #: Placeholder the compiler leaves in bedrock_inference capture
     #: paths for the executor to resolve per run.
@@ -479,6 +674,7 @@ def register_workflow_executor(
     session_factory: Optional[Callable] = None,
     pipeline_manager_factory: Optional[Callable] = None,
     post_run_handler: Optional[PostRunHandler] = None,
+    binding_resolution_provider: Optional[Callable] = None,
 ) -> WorkflowExecutor:
     """Create a WorkflowExecutor and register it as THE executor hook.
 
@@ -489,6 +685,7 @@ def register_workflow_executor(
         session_factory=session_factory,
         pipeline_manager_factory=pipeline_manager_factory,
         post_run_handler=post_run_handler,
+        binding_resolution_provider=binding_resolution_provider,
     )
     executor_hook.set_executor(instance.execute)
     logger.info("WorkflowExecutor registered as the workflow executor")

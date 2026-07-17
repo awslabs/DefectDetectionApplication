@@ -12,6 +12,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import createWrapper from '@cloudscape-design/components/test-utils/dom';
 import CreateWizard from './CreateWizard';
 
 const {
@@ -242,5 +243,81 @@ describe('CreateWizard', () => {
     // Zip download of the complete scaffold project (1.5).
     fireEvent.click(screen.getByRole('button', { name: 'Download zip' }));
     expect(downloadZipMock).toHaveBeenCalledWith(SCAFFOLD_FILES, 'Blur-Regions');
+  });
+});
+
+/**
+ * Category-driven default ports (workflow-designer-bugfixes Bug 2,
+ * Requirements 1.4, 2.4, 2.5, 2.6).
+ *
+ * BUG CONDITION EXPLORATION (task 4): these tests encode the EXPECTED
+ * behavior and are expected to FAIL on the unfixed code — the wizard
+ * seeds one "in" input and one "out" output regardless of the selected
+ * palette category (isBugCondition2 in the workflow-designer-bugfixes
+ * design). They validate the fix when they pass.
+ */
+describe('CreateWizard category-driven default ports (workflow-designer-bugfixes Bug 2)', () => {
+  /** Select the palette category on the details step ([0] use case, [1] category). */
+  function selectCategory(container: HTMLElement, category: string) {
+    const categorySelect = createWrapper(container).findAllSelects()[1];
+    categorySelect.openDropdown();
+    categorySelect.selectOptionByValue(category);
+  }
+
+  it('presents no input rows and one VideoFrames output after selecting the input category on untouched defaults (1.4, 2.4, 2.5)', async () => {
+    const { container } = render(<CreateWizard />);
+    await waitFor(() => expect(listUseCases).toHaveBeenCalled());
+
+    fillName(container, 'Camera Source');
+    selectCategory(container, 'input');
+    clickNext();
+    await screen.findByText('Input ports');
+
+    // Input (source) nodes: no input port rows (2.4).
+    expect(screen.getByText('No inputs declared.')).toBeInTheDocument();
+    expect(container.querySelectorAll('input[placeholder="in"]')).toHaveLength(0);
+
+    // Exactly one VideoFrames output with a non-empty name (2.4).
+    const outputNames = container.querySelectorAll('input[placeholder="out"]');
+    expect(outputNames).toHaveLength(1);
+    expect((outputNames[0] as HTMLInputElement).value.trim()).not.toBe('');
+    const typeSelects = createWrapper(container).findAllSelects();
+    expect(typeSelects).toHaveLength(1);
+    expect(typeSelects[0].findTrigger().getElement().textContent).toContain(
+      'VideoFrames'
+    );
+  });
+
+  it('presents one input row and no output rows after selecting the output category on untouched defaults (1.5, 2.5)', async () => {
+    const { container } = render(<CreateWizard />);
+    await waitFor(() => expect(listUseCases).toHaveBeenCalled());
+
+    fillName(container, 'Alert Publisher');
+    selectCategory(container, 'output');
+    clickNext();
+    await screen.findByText('Input ports');
+
+    // Output (sink) nodes: at least one input, no outputs (2.5).
+    expect(screen.getByText('No outputs declared.')).toBeInTheDocument();
+    expect(container.querySelectorAll('input[placeholder="out"]')).toHaveLength(0);
+    const inputNames = container.querySelectorAll('input[placeholder="in"]');
+    expect(inputNames).toHaveLength(1);
+    expect((inputNames[0] as HTMLInputElement).value.trim()).not.toBe('');
+  });
+
+  it("states the selected category's input/output requirements on the ports step (2.6)", async () => {
+    const { container } = render(<CreateWizard />);
+    await waitFor(() => expect(listUseCases).toHaveBeenCalled());
+
+    fillName(container, 'Camera Source');
+    selectCategory(container, 'input');
+    clickNext();
+    await screen.findByText('Input ports');
+
+    // The design's fix interface: PortGuidancePanel states the per-kind
+    // requirements under data-testid="port-guidance-requirements".
+    const requirements = screen.getByTestId('port-guidance-requirements');
+    expect(requirements.textContent).toMatch(/inputs/i);
+    expect(requirements.textContent).toMatch(/outputs/i);
   });
 });

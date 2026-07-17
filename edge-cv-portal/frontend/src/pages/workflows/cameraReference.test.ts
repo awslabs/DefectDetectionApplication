@@ -9,10 +9,13 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  applyAravisCameraSelection,
   applyCameraSelection,
   cameraDeviceValue,
+  cameraIdValue,
   defaultManualEntry,
   getCameraBindingHint,
+  isAravisCompatibleCamera,
   isCameraReferenceParameter,
   type CameraSourceEntry,
 } from './cameraReference';
@@ -35,6 +38,13 @@ describe('isCameraReferenceParameter', () => {
     expect(isCameraReferenceParameter('camera_source', 'device')).toBe(true);
     expect(isCameraReferenceParameter('camera_source', 'gain')).toBe(false);
     expect(isCameraReferenceParameter('folder_source', 'device')).toBe(false);
+  });
+
+  it('matches the aravis_camera_source camera_id parameter (Requirement 3.1)', () => {
+    expect(isCameraReferenceParameter('aravis_camera_source', 'camera_id')).toBe(true);
+    expect(isCameraReferenceParameter('aravis_camera_source', 'gain')).toBe(false);
+    expect(isCameraReferenceParameter('aravis_camera_source', 'device')).toBe(false);
+    expect(isCameraReferenceParameter('camera_source', 'camera_id')).toBe(false);
   });
 });
 
@@ -82,6 +92,107 @@ describe('applyCameraSelection (Requirement 7.2)', () => {
     const input = { device: '/dev/video0' };
     applyCameraSelection(input, CAMERA, 'edge-device-1');
     expect(input).toEqual({ device: '/dev/video0' });
+  });
+});
+
+const ARAVIS_DISCOVERED: CameraSourceEntry = {
+  camera_source_id: 'arv-1a2b3c4d5e6f',
+  name: 'Basler acA1920',
+  type: 'AravisDiscovered',
+  params: { cameraId: 'Basler-40123456', serial: '40123456', protocol: 'GigEVision' },
+  origin: 'edge-discovered',
+  sync_status: 'synced',
+};
+
+describe('isAravisCompatibleCamera (Requirement 3.2)', () => {
+  it('accepts AravisDiscovered entries and Camera entries with a cameraId', () => {
+    expect(isAravisCompatibleCamera(ARAVIS_DISCOVERED)).toBe(true);
+    // The configured CAMERA fixture carries params.cameraId: 'cam-1'.
+    expect(isAravisCompatibleCamera(CAMERA)).toBe(true);
+    // AravisDiscovered is compatible even without params.
+    expect(
+      isAravisCompatibleCamera({ camera_source_id: 'arv-x', type: 'AravisDiscovered' })
+    ).toBe(true);
+  });
+
+  it('rejects other types and Camera entries without a non-empty cameraId', () => {
+    expect(isAravisCompatibleCamera({ camera_source_id: 'v4l', type: 'V4L2Discovered' })).toBe(
+      false
+    );
+    expect(
+      isAravisCompatibleCamera({ camera_source_id: 'rtsp', type: 'RTSP', params: { url: 'u' } })
+    ).toBe(false);
+    expect(isAravisCompatibleCamera({ camera_source_id: 'c', type: 'Camera' })).toBe(false);
+    expect(
+      isAravisCompatibleCamera({ camera_source_id: 'c', type: 'Camera', params: { cameraId: '' } })
+    ).toBe(false);
+    expect(
+      isAravisCompatibleCamera({ camera_source_id: 'c', type: 'Camera', params: { cameraId: 7 } })
+    ).toBe(false);
+  });
+});
+
+describe('cameraIdValue', () => {
+  it('returns the non-empty string cameraId or null', () => {
+    expect(cameraIdValue(ARAVIS_DISCOVERED)).toBe('Basler-40123456');
+    expect(cameraIdValue(CAMERA)).toBe('cam-1');
+    expect(cameraIdValue({ camera_source_id: 'x' })).toBeNull();
+    expect(cameraIdValue({ camera_source_id: 'x', params: { cameraId: '' } })).toBeNull();
+    expect(cameraIdValue({ camera_source_id: 'x', params: { cameraId: 42 } })).toBeNull();
+  });
+});
+
+describe('applyAravisCameraSelection (Requirement 3.3)', () => {
+  it('populates camera_id, gain, and exposure and records the hint', () => {
+    const source: CameraSourceEntry = {
+      ...ARAVIS_DISCOVERED,
+      params: { cameraId: 'Basler-40123456', gain: 12, exposure: 250000 },
+    };
+    const { parameters, hint } = applyAravisCameraSelection(
+      { camera_id: 'old-cam', mode: 'auto' },
+      source,
+      'edge-device-1'
+    );
+    expect(parameters).toEqual({
+      camera_id: 'Basler-40123456',
+      mode: 'auto',
+      gain: 12,
+      exposure: 250000,
+    });
+    expect(hint).toEqual({
+      cameraSourceId: 'arv-1a2b3c4d5e6f',
+      cameraName: 'Basler acA1920',
+      sourceDeviceId: 'edge-device-1',
+    });
+  });
+
+  it('skips absent or non-numeric gain/exposure and leaves other parameters untouched', () => {
+    const source: CameraSourceEntry = {
+      camera_source_id: 'arv-2',
+      name: '',
+      type: 'AravisDiscovered',
+      params: { cameraId: 'cam-9', gain: 'high' },
+    };
+    const { parameters, hint } = applyAravisCameraSelection(
+      { camera_id: '', gain: 4, custom: true },
+      source,
+      'edge-device-2'
+    );
+    expect(parameters).toEqual({ camera_id: 'cam-9', gain: 4, custom: true });
+    // Nameless sources fall back to the id for the hint's display name.
+    expect(hint.cameraName).toBe('arv-2');
+  });
+
+  it('retains the existing camera_id when the source carries none', () => {
+    const bare: CameraSourceEntry = { camera_source_id: 'arv-3', type: 'AravisDiscovered' };
+    const { parameters } = applyAravisCameraSelection({ camera_id: 'cam-kept' }, bare, 'd');
+    expect(parameters.camera_id).toBe('cam-kept');
+  });
+
+  it('does not mutate the input parameters (pure)', () => {
+    const input = { camera_id: 'cam-old' };
+    applyAravisCameraSelection(input, ARAVIS_DISCOVERED, 'edge-device-1');
+    expect(input).toEqual({ camera_id: 'cam-old' });
   });
 });
 

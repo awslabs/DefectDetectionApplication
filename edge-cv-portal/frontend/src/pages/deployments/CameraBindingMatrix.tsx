@@ -40,6 +40,7 @@ import {
   getBindingCell,
   BindingSelections,
 } from './cameraBindings';
+import { isAravisCompatibleCamera } from '../workflows/cameraReference';
 
 export interface CameraBindingMatrixProps {
   context: CameraBindingContext;
@@ -68,7 +69,16 @@ function BindingCellControl({
 }) {
   const target = context.targets[device];
   const neverSynced = target?.state === 'never-synced';
-  const cameras = target?.cameras ?? [];
+  const allCameras = target?.cameras ?? [];
+  // An aravis_camera_source row offers only Aravis-compatible sources —
+  // the same predicate the Workflow_Builder picker uses — so users are
+  // not offered bindings the validator would reject (aravis-camera-input
+  // Requirement 5.1). Hint pre-selection is unaffected: the cell state
+  // is seeded upstream by initialBindingSelections.
+  const cameras =
+    node.node_type === 'aravis_camera_source'
+      ? allCameras.filter(isAravisCompatibleCamera)
+      : allCameras;
 
   // Never-synced targets are restricted to manual override (8.8).
   if (neverSynced) {

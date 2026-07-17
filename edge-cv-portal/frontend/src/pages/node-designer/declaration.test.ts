@@ -8,9 +8,11 @@ import {
   architecturesStepErrors,
   buildDeclaration,
   convertParameterValue,
+  defaultPortsForCategory,
   detailsStepErrors,
   emptyParameter,
   emptyPort,
+  isDefaultPortArrangement,
   parametersStepErrors,
   portsStepErrors,
   typeIdFromName,
@@ -151,5 +153,78 @@ describe('step validation', () => {
     const errors = parametersStepErrors(form);
     expect(errors.some((e) => e.includes('description'))).toBe(true);
     expect(errors.some((e) => e.includes('example'))).toBe(true);
+  });
+});
+
+/**
+ * Category-driven default port seeds (workflow-designer-bugfixes
+ * Bug 2, Requirements 2.4, 2.5, 3.6, 3.10).
+ */
+describe('defaultPortsForCategory', () => {
+  it('seeds each palette category with its typical arrangement (2.4, 2.5)', () => {
+    expect(defaultPortsForCategory('input')).toEqual({
+      inputs: [],
+      outputs: [{ name: 'out', portType: 'VideoFrames' }],
+    });
+    expect(defaultPortsForCategory('preprocessing')).toEqual({
+      inputs: [{ name: 'in', portType: 'VideoFrames' }],
+      outputs: [{ name: 'out', portType: 'VideoFrames' }],
+    });
+    expect(defaultPortsForCategory('inference')).toEqual({
+      inputs: [{ name: 'in', portType: 'VideoFrames' }],
+      outputs: [{ name: 'out', portType: 'InferenceMeta' }],
+    });
+    expect(defaultPortsForCategory('post_processing')).toEqual({
+      inputs: [{ name: 'in', portType: 'InferenceMeta' }],
+      outputs: [{ name: 'out', portType: 'EventSignal' }],
+    });
+    expect(defaultPortsForCategory('output')).toEqual({
+      inputs: [{ name: 'in', portType: 'VideoFrames' }],
+      outputs: [],
+    });
+  });
+
+  it("falls back to the preprocessing shape (today's seeds) for unknown categories", () => {
+    expect(defaultPortsForCategory('unknown')).toEqual(
+      defaultPortsForCategory('preprocessing')
+    );
+    expect(defaultPortsForCategory('')).toEqual(
+      defaultPortsForCategory('preprocessing')
+    );
+  });
+});
+
+describe('isDefaultPortArrangement', () => {
+  it("answers true for every category's default arrangement", () => {
+    for (const category of [
+      'input',
+      'preprocessing',
+      'inference',
+      'post_processing',
+      'output',
+    ]) {
+      const { inputs, outputs } = defaultPortsForCategory(category);
+      expect(isDefaultPortArrangement(inputs, outputs)).toBe(true);
+    }
+  });
+
+  it('answers false once the rows are edited (rename, retype, add, remove)', () => {
+    const { inputs, outputs } = defaultPortsForCategory('preprocessing');
+    expect(
+      isDefaultPortArrangement(
+        [{ ...inputs[0], name: 'video' }],
+        outputs
+      )
+    ).toBe(false);
+    expect(
+      isDefaultPortArrangement(
+        [{ ...inputs[0], portType: 'EventSignal' }],
+        outputs
+      )
+    ).toBe(false);
+    expect(
+      isDefaultPortArrangement([...inputs, { name: 'aux', portType: 'VideoFrames' }], outputs)
+    ).toBe(false);
+    expect(isDefaultPortArrangement([], [])).toBe(false);
   });
 });

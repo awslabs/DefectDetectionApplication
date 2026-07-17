@@ -203,4 +203,63 @@ describe('BedrockConfigurationSettings', () => {
     });
     expect(await screen.findByText('Bedrock configuration saved')).toBeInTheDocument();
   });
+
+  it('loads a stored null temperature and top_p as blank fields (Bugfix Requirement 2.3)', async () => {
+    setAuthRole('PortalAdmin');
+    getBedrockConfiguration.mockResolvedValue({
+      bedrock_configuration: { ...STORED_CONFIG, temperature: null, top_p: null },
+      defaults: {},
+      max_timeout_seconds: 60,
+    });
+    render(<BedrockConfigurationSettings />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Timeout seconds')).toHaveValue(60);
+    });
+    // Unset sampling parameters render as blank inputs, not "null".
+    expect(screen.getByLabelText('Temperature')).toHaveValue(null);
+    expect(screen.getByLabelText('Top P')).toHaveValue(null);
+  });
+
+  it('accepts blank temperature and top_p and saves them as explicit null (Bugfix Requirement 2.3)', async () => {
+    setAuthRole('PortalAdmin');
+    render(<BedrockConfigurationSettings />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Temperature')).toHaveValue(0.2);
+    });
+
+    fireEvent.change(screen.getByLabelText('Temperature'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('Top P'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+    await waitFor(() => {
+      expect(updateBedrockConfiguration).toHaveBeenCalledWith({
+        model_id: STORED_CONFIG.model_id,
+        region: STORED_CONFIG.region,
+        max_tokens: 4096,
+        temperature: null,
+        top_p: null,
+        timeout_seconds: 60,
+      });
+    });
+    expect(screen.queryByText('Temperature must be between 0 and 1')).toBeNull();
+    expect(screen.queryByText('Top P must be between 0 and 1')).toBeNull();
+    expect(await screen.findByText('Bedrock configuration saved')).toBeInTheDocument();
+  });
+
+  it('keeps rejecting a non-blank out-of-range temperature and top_p without calling the API', async () => {
+    setAuthRole('PortalAdmin');
+    render(<BedrockConfigurationSettings />);
+    await waitFor(() => {
+      expect(screen.getByLabelText('Temperature')).toHaveValue(0.2);
+    });
+
+    fireEvent.change(screen.getByLabelText('Temperature'), { target: { value: '1.5' } });
+    fireEvent.change(screen.getByLabelText('Top P'), { target: { value: '-0.1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+    expect(await screen.findByText('Temperature must be between 0 and 1')).toBeInTheDocument();
+    expect(await screen.findByText('Top P must be between 0 and 1')).toBeInTheDocument();
+    expect(updateBedrockConfiguration).not.toHaveBeenCalled();
+  });
 });
