@@ -1,5 +1,5 @@
 {
-  "src/backend/Dockerfile": "39c84cd56785ebde117b730d1210a3421168da6d823c124f02238efc3e242659",
+  "src/backend/Dockerfile": "9628805f6de05ee3147de30e18aed07ca896296c7c6bddadec5587bc3af02481",
   "src/docker-compose.yaml": "a8182bc06b22a76e385076161a4ba59374c53fe8d18c2adf17d2655cc01f5cd6",
   "src/edgemlsdk/Dockerfile": "445856d488bd00aa911a4eaaac4cb26f39796eb8de3bcd14adf17f512fcc2d6c",
   "src/frontend/Dockerfile": "dbbe0cc69e1a34431c734950cb23fe8a0623fe7482d42cc6144b98610f3e0e8a"

@@ -101,6 +101,8 @@ COPY data_models ./data_models
 COPY camera_discovery ./camera_discovery
 COPY camera_sync ./camera_sync
 COPY workflow_engine ./workflow_engine
+COPY local_auth ./local_auth
+COPY user_accounts_sync ./user_accounts_sync
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY dda_triton ./dda_triton
