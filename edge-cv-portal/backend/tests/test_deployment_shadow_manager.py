@@ -13,18 +13,26 @@ never mirrored to IoT Core. The Portal then reported "Device has no
 camera registry shadow to refresh from" and devices stayed
 "Never synced".
 
-The fix auto-includes aws.greengrass.ShadowManager (unpinned, like the
-unpinned-Nucleus fallback — it is already an implicit dependency of the
-LocalServer component with VersionRequirement >=2.2.0) with a
-``synchronize`` configurationUpdate merge whenever a deployment carries a
-LocalServer component (``needs_nucleus``), unless the caller already
-supplies ShadowManager themselves.
+The fix auto-includes aws.greengrass.ShadowManager with a ``synchronize``
+configurationUpdate merge whenever a deployment carries a LocalServer
+component (``needs_nucleus``), unless the caller already supplies
+ShadowManager themselves.
+
+Follow-up bugfix: the auto-included entry was originally unpinned (no
+``componentVersion``), which the real greengrassv2 CreateDeployment API
+rejects ("Missing required parameter in
+components.aws.greengrass.ShadowManager: componentVersion"). The entry is
+now pinned — to the newest public version compatible with the device's
+running Nucleus, falling back to SHADOW_MANAGER_VERSION — and the
+FakeGreengrass fake enforces the real API's per-component componentVersion
+requirement so an unpinned entry can't slip through again.
 """
 import json
 import sys
 import uuid
 
 import pytest
+from botocore.exceptions import ParamValidationError
 
 from test_workflow_packaging_deployment_integration import (
     ACCOUNT_ID, FakeGreengrass, FakeIot)
@@ -102,8 +110,9 @@ def sm_env(env, deployments, monkeypatch):
 class TestShadowManagerAutoInclude:
     def test_local_server_deployment_auto_includes_shadow_manager(self, sm_env):
         """A deployment carrying a LocalServer component auto-includes
-        aws.greengrass.ShadowManager (unpinned) with the synchronize merge
-        config for the two camera-registry-sync named shadows."""
+        aws.greengrass.ShadowManager, pinned to a concrete version, with the
+        synchronize merge config for the two camera-registry-sync named
+        shadows."""
         status, payload = sm_env.deploy_components(
             [LOCAL_SERVER_COMPONENT], target_devices=["line-a-camera-01"])
 
@@ -112,9 +121,12 @@ class TestShadowManagerAutoInclude:
         assert "aws.greengrass.ShadowManager" in call["components"]
 
         shadow_manager = call["components"]["aws.greengrass.ShadowManager"]
-        # Unpinned: ShadowManager is an implicit dependency of LocalServer
-        # (VersionRequirement >=2.2.0); Greengrass resolves the version.
-        assert "componentVersion" not in shadow_manager
+        # Pinned: the real CreateDeployment API requires componentVersion on
+        # every component entry and rejects unpinned entries. With no
+        # resolvable running Nucleus the static fallback pin is used.
+        assert shadow_manager.get("componentVersion")
+        assert (shadow_manager["componentVersion"]
+                == sm_env.deployments.SHADOW_MANAGER_VERSION)
 
         merged = json.loads(shadow_manager["configurationUpdate"]["merge"])
         assert merged == EXPECTED_SYNC_CONFIG
@@ -122,7 +134,7 @@ class TestShadowManagerAutoInclude:
         # Reported to the caller alongside the other auto-included entries.
         [entry] = [e for e in payload["auto_included"]
                    if e["component_name"] == "aws.greengrass.ShadowManager"]
-        assert entry["component_version"] == "auto"
+        assert entry["component_version"] == shadow_manager["componentVersion"]
         assert "dda-camera-registry" in entry["reason"]
         assert "dda-camera-bindings" in entry["reason"]
 
@@ -142,6 +154,21 @@ class TestShadowManagerAutoInclude:
             "componentVersion": "2.3.5"}
         assert [e for e in payload["auto_included"]
                 if e["component_name"] == "aws.greengrass.ShadowManager"] == []
+
+    def test_fake_rejects_component_without_version_like_real_api(self):
+        """Regression guard for the fake itself: the real CreateDeployment
+        API rejects any component entry lacking componentVersion, so the
+        FakeGreengrass fake must too — otherwise an unpinned auto-include
+        slips through the tests again."""
+        gg = FakeGreengrass()
+        with pytest.raises(ParamValidationError, match="componentVersion"):
+            gg.create_deployment(
+                targetArn=f"arn:aws:iot:us-east-1:{ACCOUNT_ID}:thing/dev-1",
+                deploymentName="unpinned",
+                components={"aws.greengrass.ShadowManager": {
+                    "configurationUpdate": {"merge": "{}"}}})
+        # The rejected call is not recorded as submitted.
+        assert gg.create_deployment_calls == []
 
     def test_not_included_without_local_server_component(self, sm_env):
         """Deployments with no DDA/LocalServer component (needs_nucleus
