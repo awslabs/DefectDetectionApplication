@@ -64,6 +64,20 @@ WORKFLOW_COMPONENT_PREFIX = 'dda.workflow.'
 # LocalServer Greengrass components are named aws.edgeml.dda.LocalServer.<arch>
 LOCAL_SERVER_COMPONENT_PREFIX = 'aws.edgeml.dda.LocalServer'
 
+# Named shadows the camera-registry-sync feature keeps in sync between the
+# device and IoT Core. These must match the edge-side constants:
+# - src/backend/camera_sync/agent.py (SHADOW_NAME): the Edge_Sync_Agent
+#   writes camera registry reports to this named shadow via ShadowManager
+#   IPC (device -> cloud).
+# - src/backend/workflow_engine/camera_binding_store.py
+#   (BINDINGS_SHADOW_NAME): the workflow engine reads camera bindings from
+#   this named shadow (cloud -> device).
+# Without a ShadowManager `synchronize` configuration listing them, these
+# local shadows never mirror to IoT Core and the Portal sees devices as
+# "Never synced".
+CAMERA_REGISTRY_SHADOW_NAME = 'dda-camera-registry'
+CAMERA_BINDINGS_SHADOW_NAME = 'dda-camera-bindings'
+
 # Minimum LocalServer component version a Workflow_Component requires
 # (Requirement 8.4). The Component_Packager writes this same value into each
 # packaged component's manifest.json (minLocalServerVersion) from the same
@@ -944,6 +958,46 @@ def create_deployment(body, user):
             logger.info(f"Auto-included aws.edgeml.dda.InferenceUploader with S3 bucket {s3_bucket}, interval {upload_interval}s")
         elif not enable_inference_uploader:
             logger.info("InferenceUploader not included - disabled in UseCase configuration")
+        
+        # Auto-include ShadowManager with a synchronization config for the
+        # camera-registry-sync named shadows. ShadowManager is already an
+        # implicit dependency of the LocalServer component (VersionRequirement
+        # >=2.2.0), but without an explicit `synchronize` configuration it runs
+        # with its default config and the dda-camera-registry /
+        # dda-camera-bindings local shadows never mirror to IoT Core
+        # (devices stay "Never synced" in the Portal). Left unpinned (no
+        # componentVersion, mirroring the unpinned-Nucleus fallback) so
+        # Greengrass resolves a version compatible with the LocalServer
+        # dependency constraint.
+        if needs_nucleus and 'aws.greengrass.ShadowManager' not in components_map:
+            shadow_manager_config = {
+                'synchronize': {
+                    'direction': 'betweenDeviceAndCloud',
+                    'coreThing': {
+                        'classic': True,
+                        'namedShadows': [
+                            CAMERA_REGISTRY_SHADOW_NAME,
+                            CAMERA_BINDINGS_SHADOW_NAME
+                        ]
+                    }
+                }
+            }
+            components_map['aws.greengrass.ShadowManager'] = {
+                'configurationUpdate': {
+                    'merge': json.dumps(shadow_manager_config)
+                }
+            }
+            auto_included.append({
+                'component_name': 'aws.greengrass.ShadowManager',
+                'component_version': 'auto',
+                'reason': (f'Syncs the {CAMERA_REGISTRY_SHADOW_NAME} and '
+                           f'{CAMERA_BINDINGS_SHADOW_NAME} named shadows with '
+                           'IoT Core for camera registry synchronization')
+            })
+            logger.info(
+                "Auto-included aws.greengrass.ShadowManager (unpinned) with "
+                f"synchronization for named shadows: {CAMERA_REGISTRY_SHADOW_NAME}, "
+                f"{CAMERA_BINDINGS_SHADOW_NAME}")
         
         # Determine target ARN (iot_client and running_nucleus were resolved above)
         # Greengrass deployments must target thing groups, not individual things
