@@ -14,9 +14,11 @@
  * each fetch and only repopulated on success, so a load failure renders an
  * error alert and never a partial or stale list (Requirement 2.5).
  *
- * Management actions (Requirements 3.x, 4.x, 5.x) are offered through the
- * table header's actions slot on the selected account: password change,
- * forgot-password, and role change modals (see UserManagerModals.tsx).
+ * Management actions (Requirements 3.x, 4.x, 5.x, 12.x, 13.x, 14.x) are
+ * offered through the table header's actions slot: password change,
+ * forgot-password, role change, disable/enable, and delete modals on the
+ * selected account, and a Create User modal that needs no selection (see
+ * UserManagerModals.tsx).
  * Successful actions surface a dismissible flashbar naming the account
  * (3.4) and re-fetch the account list (5.7). Below the account table, the
  * edge sync panel (UserManagerSyncPanel.tsx) shows the per-device account
@@ -40,6 +42,9 @@ import type { AdminAccount } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { getErrorMessage } from '../../utils/errorHandling';
 import {
+  CreateUserModal,
+  DeleteModal,
+  DisableEnableModal,
   ForgotPasswordModal,
   PasswordModal,
   RoleModal,
@@ -47,7 +52,14 @@ import {
 import UserManagerSyncPanel from './UserManagerSyncPanel';
 
 /** Which action modal is open, if any. */
-type ActiveModal = 'password' | 'forgot-password' | 'role' | null;
+type ActiveModal =
+  | 'create'
+  | 'password'
+  | 'forgot-password'
+  | 'role'
+  | 'disable-enable'
+  | 'delete'
+  | null;
 
 /** One display row of the accounts table (Requirement 2.1). */
 export interface AccountRow {
@@ -141,13 +153,13 @@ export default function UserManager() {
    * and re-fetch the account list so changed attributes — e.g. a new
    * Portal_Role — are displayed (Requirement 5.7).
    */
-  const pushFlash = (message: string) => {
+  const pushFlash = (message: string, type: 'success' | 'error' = 'success') => {
     const id = `um-flash-${Date.now()}-${Math.random()}`;
     setFlashItems((items) => [
       ...items,
       {
         id,
-        type: 'success',
+        type,
         content: message,
         dismissible: true,
         onDismiss: () =>
@@ -159,6 +171,19 @@ export default function UserManager() {
   const handleActionSuccess = (message: string) => {
     setActiveModal(null);
     pushFlash(message);
+    loadAccounts();
+  };
+
+  /**
+   * Error path that still requires a list refresh: a not-found deletion
+   * (Requirement 14.11) and a partial verifier-cleanup failure where the
+   * account itself was deleted (Requirement 14.10). The modal closes,
+   * the message is surfaced in an error flashbar, and the account list
+   * is re-fetched.
+   */
+  const handleActionErrorWithRefresh = (message: string) => {
+    setActiveModal(null);
+    pushFlash(message, 'error');
     loadAccounts();
   };
 
@@ -225,6 +250,29 @@ export default function UserManager() {
                     onClick={() => setActiveModal('role')}
                   >
                     Change role
+                  </Button>
+                  <Button
+                    disabled={!selectedAccount}
+                    onClick={() => setActiveModal('disable-enable')}
+                  >
+                    {/* Label follows the selected account's current state:
+                        an enabled account is offered Disable, a disabled
+                        account Enable (Requirements 13.2, 13.3). */}
+                    {selectedAccount && !selectedAccount.enabled
+                      ? 'Enable'
+                      : 'Disable'}
+                  </Button>
+                  <Button
+                    disabled={!selectedAccount}
+                    onClick={() => setActiveModal('delete')}
+                  >
+                    Delete
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onClick={() => setActiveModal('create')}
+                  >
+                    Create user
                   </Button>
                 </SpaceBetween>
               }
@@ -306,6 +354,12 @@ export default function UserManager() {
         />
       )}
 
+      {activeModal === 'create' && (
+        <CreateUserModal
+          onSuccess={handleActionSuccess}
+          onDismiss={() => setActiveModal(null)}
+        />
+      )}
       {selectedAccount && activeModal === 'password' && (
         <PasswordModal
           account={selectedAccount}
@@ -324,6 +378,21 @@ export default function UserManager() {
         <RoleModal
           account={selectedAccount}
           onSuccess={handleActionSuccess}
+          onDismiss={() => setActiveModal(null)}
+        />
+      )}
+      {selectedAccount && activeModal === 'disable-enable' && (
+        <DisableEnableModal
+          account={selectedAccount}
+          onSuccess={handleActionSuccess}
+          onDismiss={() => setActiveModal(null)}
+        />
+      )}
+      {selectedAccount && activeModal === 'delete' && (
+        <DeleteModal
+          account={selectedAccount}
+          onSuccess={handleActionSuccess}
+          onErrorWithRefresh={handleActionErrorWithRefresh}
           onDismiss={() => setActiveModal(null)}
         />
       )}

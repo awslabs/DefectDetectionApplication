@@ -311,6 +311,102 @@ Implementation proceeds in four parallel streams that share no files: portal bac
 - [x] 12. Final checkpoint
   - Ensure all tests pass, ask the user if questions arise.
 
+- [x] 13. Backend account life-cycle handlers (`user_admin.py`)
+  - [x] 13.1 Extend the shared-layer audit action types
+    - Add `account_create`, `account_disable`, `account_enable`, and `account_delete` to the shared-layer `USER_ACCOUNT_AUDIT_ACTIONS` so the strict audit helpers accept the new action types with `resource_type='user_account'` and the existing denylist sanitization
+    - _Requirements: 6.1, 12.11, 14.8_
+
+  - [x] 13.2 Implement `validate_create_request` and `POST /api/v1/admin/users`
+    - Pure function `validate_create_request(body)`: all three fields present and non-empty (rejections name the missing field), email consisting of a non-empty local part, `@`, and a non-empty domain containing at least one dot, role in the five defined Portal_Role values; a rejection performs no User_Pool call
+    - Flow: validate → audit-pending (`account_create`) → `admin_create_user` with `custom:role`, `email`, `email_verified=true`, and the Cognito-native email invitation (D12 — no SES, no portal-generated password, no verifier capture) → audit-final carrying the created account's `{username, email, role}`
+    - `UsernameExistsException` → 409 "username already exists" with no account created or modified; other Cognito errors → 502 "account was not created" with no partial record (creation is atomic), audit-final `failure`
+    - _Requirements: 12.1, 12.3, 12.5, 12.6, 12.7, 12.8, 12.9, 12.11_
+
+  - [x] 13.3 Implement `POST /api/v1/admin/users/{username}/disable` and `/enable`
+    - Both endpoints read the current `Enabled` state via `admin_get_user` first; already-in-requested-state → 200 no-op returning the current state with no Cognito mutation, no audit-pending write, and no sync staging (13.6)
+    - Disable: last-PortalAdmin guard (shared predicate, D14) → 409 + reason with the rejected attempt audited before any mutation (13.9); then audit-pending (`account_disable`) → `admin_disable_user` → mark sync staging pending with `enabled: false` → audit-final
+    - Enable: audit-pending (`account_enable`) → `admin_enable_user` → mark sync staging pending with `enabled: true` → audit-final
+    - Cognito failure → 502 "action failed" with the state unchanged and audit-final `failure` (13.7)
+    - _Requirements: 13.2, 13.3, 13.6, 13.7, 13.9, 7.2, 7.8_
+
+  - [x] 13.4 Implement `DELETE /api/v1/admin/users/{username}`
+    - Flow (D13 ordering): `admin_get_user` captures username/email/role for the audit entry (14.8) and maps `UserNotFoundException` → 404 with nothing modified (14.11) → last-PortalAdmin guard → 409 + reason with the rejected attempt audited (14.3, 14.4) → audit-pending (`account_delete`) → `admin_delete_user` → delete the `dda-portal-edge-credentials` record → mark sync staging pending with `enabled: false, deleted: true` → audit-final
+    - A Cognito failure aborts before the verifier record is touched (14.6); a verifier-delete failure after a successful Cognito delete retains the record for a subsequent attempt, finalizes the audit entry with a partial-cleanup detail, and returns an error stating the account was deleted but its verifier record was not removed (14.10)
+    - _Requirements: 14.2, 14.3, 14.4, 14.5, 14.6, 14.8, 14.10, 14.11, 7.8_
+
+  - [ ]* 13.5 Write property test for the account-creation validation gate
+    - **Property 24: Account creation validation gate**
+    - Arbitrary payloads (missing/empty/populated fields, arbitrary email and role strings): `admin_create_user` invoked iff the payload is valid, carrying exactly the submitted username, email, and role; every rejection performs no User_Pool call and identifies the offending field
+    - Hypothesis, min 100 iterations, tag `Feature: portal-user-manager, Property 24`
+    - **Validates: Requirements 12.1, 12.6, 12.7, 12.8**
+
+  - [ ]* 13.6 Write property test for duplicate-username rejection
+    - **Property 25: Duplicate usernames never create or modify accounts**
+    - Arbitrary pool populations and valid payloads (recording fake `cognito-idp` client raising `UsernameExistsException` for existing usernames): creation succeeds iff the username is new; duplicates → 409 with zero account creations or modifications
+    - Hypothesis, min 100 iterations, tag `Feature: portal-user-manager, Property 25`
+    - **Validates: Requirements 12.5**
+
+  - [ ]* 13.7 Write property test for disable/enable state transitions
+    - **Property 26: Disable/enable transitions are exact**
+    - Arbitrary current states × confirmed disable/enable actions: `admin_disable_user`/`admin_enable_user` invoked and every configured device's staged sync set marked pending with the new state iff the requested state differs; already-in-requested-state → no User_Pool mutation and no sync staging
+    - Hypothesis, min 100 iterations, tag `Feature: portal-user-manager, Property 26`
+    - **Validates: Requirements 13.2, 13.3, 13.6**
+
+  - [ ]* 13.8 Write property test for deletion effects
+    - **Property 27: Deletion removes the account, its verifier, and stages the removal**
+    - Accounts with/without verifier records × injected fault patterns (none, Cognito delete failure, verifier-record delete failure): fault-free deletion removes the account and its verifier record and stages `enabled: false, deleted: true` on every configured device; a Cognito failure leaves both untouched; a verifier-delete failure retains the record and reports the partial cleanup
+    - Hypothesis, min 100 iterations, tag `Feature: portal-user-manager, Property 27`
+    - **Validates: Requirements 14.2, 14.5, 14.6, 14.10, 7.8**
+
+  - [ ]* 13.9 Extend the Property 9 test to cover disable and delete actions
+    - **Property 9: Last-PortalAdmin guard** (extended scope)
+    - Arbitrary account populations (roles × enabled flags) with the action space extended to role-change, disable, and delete: rejected iff zero enabled PortalAdmins would remain
+    - Hypothesis, min 100 iterations, tag `Feature: portal-user-manager, Property 9`
+    - **Validates: Requirements 5.3, 13.9, 14.3**
+
+  - [ ]* 13.10 Extend the Property 10 test to cover the new action types
+    - **Property 10: Audit completeness** (extended scope)
+    - Action space extended to account creation, disable, enable, and deletion: exactly one finalized entry per successful action; creations and deletions carry the account's username, email, and role (for deletions, the values at the time of deletion); rejected disable/delete attempts carry the acting administrator, affected account, and rejection reason
+    - Hypothesis, min 100 iterations, tag `Feature: portal-user-manager, Property 10`
+    - **Validates: Requirements 5.4, 5.5, 6.1, 6.2, 12.11, 13.9, 14.4, 14.8**
+
+  - [ ]* 13.11 Write unit tests for the new backend error paths
+    - Creation Cognito failure → 502 with no account or partial record remaining (12.9); disable/enable Cognito failure → 502 with the state unchanged (13.7); delete of a nonexistent account → 404 with nothing modified (14.11)
+    - _Requirements: 12.9, 13.7, 14.11_
+
+- [x] 14. Checkpoint - backend account life-cycle
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 15. Infrastructure (ComputeStack IAM extension)
+  - [x] 15.1 Extend the `user_admin.py` Cognito IAM grants
+    - Add `cognito-idp:AdminCreateUser`, `AdminEnableUser`, `AdminDisableUser`, and `AdminDeleteUser` to the existing pool-scoped `user_admin` policy statement in `edge-cv-portal/infrastructure/lib/compute-stack.ts`; no new resources required
+    - _Requirements: 12.1, 13.2, 13.3, 14.2_
+
+  - [ ]* 15.2 Write CDK snapshot assertion for the extended grants
+    - Assert the extended `cognito-idp:AdminCreateUser/AdminEnableUser/AdminDisableUser/AdminDeleteUser` actions on the `user_admin.py`-scoped policy in the ComputeStack tests
+    - _Requirements: 12.1, 13.2, 13.3, 14.2_
+
+- [x] 16. Frontend account life-cycle modals
+  - [x] 16.1 Implement the Create User modal
+    - In `UserManagerModals.tsx` (or a new modal file), wired into `UserManager.tsx`: username, email, and role fields with the role a `Select` restricted to the five defined roles (12.2); client-side pre-checks mirroring the server validation (non-empty fields, email shape) with submit disabled until valid; server rejection reasons (duplicate username, invalid email, missing field) surfaced verbatim in the modal
+    - Success flashbar states an invitation with a temporary password was sent to the account's email — never the value — and the list re-fetches to include the new account (12.10)
+    - _Requirements: 12.2, 12.5, 12.6, 12.7, 12.10_
+
+  - [x] 16.2 Implement the disable/enable confirm modal
+    - Explicit confirmation naming the affected account by username before submission (13.1); on success a confirmation identifying the account + list re-fetch (13.8); an already-in-requested-state response simply re-fetches to show the current state (13.6); rejection reasons (last-PortalAdmin guard, 5.3) and failures (13.7) shown in the modal
+    - _Requirements: 13.1, 13.6, 13.7, 13.8, 5.3_
+
+  - [x] 16.3 Implement the delete confirm modal
+    - Explicit confirmation naming the affected account by username (14.1); cancel/dismiss submits nothing (14.9); on success a confirmation identifying the deleted account + list re-fetch without it (14.7); rejection reasons (last-PortalAdmin guard, 14.3), not-found with list refresh (14.11), and partial verifier-cleanup errors (14.10) surfaced in the modal or flashbar
+    - _Requirements: 14.1, 14.3, 14.7, 14.9, 14.10, 14.11_
+
+  - [ ]* 16.4 Write unit tests for the new modal behaviors
+    - Create User role options and success confirmation + refresh (12.2, 12.10); disable/enable/delete confirmations naming the account and firing no call before confirmation (13.1, 14.1); cancel/dismiss submits nothing (14.9); success confirmation + refresh (13.8, 14.7); disable/enable failure message (13.7); not-found delete path with list refresh (14.11)
+    - _Requirements: 12.2, 12.10, 13.1, 13.7, 13.8, 14.1, 14.7, 14.9, 14.11_
+
+- [x] 17. Final checkpoint - account life-cycle
+  - Ensure all tests pass, ask the user if questions arise.
+
 ## Notes
 
 - Tasks marked with `*` are optional and can be skipped for faster MVP
@@ -318,6 +414,8 @@ Implementation proceeds in four parallel streams that share no files: portal bac
 - Each property test lives in its own test file so parallel waves never write the same file
 - Property 12 has a portal build-side test (3.3) and an edge apply-side test (10.2) since the two codebases cannot import each other
 - Cognito `FORCE_CHANGE_PASSWORD` semantics (4.2, 4.6) and role-in-fresh-JWT (5.8) are documented Cognito behaviors verified manually during rollout, not coding tasks
+- Cognito-native account life-cycle behavior — invitation delivery with a policy-conformant temporary password (12.3), forced password change at first sign-in (12.4), and sign-in/token-issuance refusal for disabled accounts including refresh (13.4, 13.5) — is likewise documented behavior verified manually during rollout, not a coding task
+- Tasks 13–17 extend already-implemented-and-deployed code: 13.9 and 13.10 extend the existing Property 9 and Property 10 test scopes (same tags, extended action generators) rather than adding new properties
 - No new test tooling is required: Hypothesis exists in `edge-cv-portal/backend/tests` and `test/backend-test`; fast-check + Vitest exist in `edge-cv-portal/frontend`
 
 ## Task Dependency Graph
@@ -334,7 +432,12 @@ Implementation proceeds in four parallel streams that share no files: portal bac
     { "id": 6, "tasks": ["3.2", "3.3", "3.4"] },
     { "id": 7, "tasks": ["3.5"] },
     { "id": 8, "tasks": ["3.6", "5.1"] },
-    { "id": 9, "tasks": ["5.2"] }
+    { "id": 9, "tasks": ["5.2"] },
+    { "id": 10, "tasks": ["13.1", "15.1", "16.1"] },
+    { "id": 11, "tasks": ["13.2", "15.2", "16.2"] },
+    { "id": 12, "tasks": ["13.3", "13.5", "13.6", "16.3"] },
+    { "id": 13, "tasks": ["13.4", "13.7", "16.4"] },
+    { "id": 14, "tasks": ["13.8", "13.9", "13.10", "13.11"] }
   ]
 }
 ```

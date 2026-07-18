@@ -15,6 +15,11 @@
  *   preselected (5.2); rejection reasons (incl. last-PortalAdmin guard)
  *   shown in the modal (5.3); success reported for the parent to confirm
  *   and re-fetch (5.7).
+ * - DeleteModal (Requirements 14.1-14.3, 14.7, 14.9-14.11): explicit
+ *   confirmation naming the account; cancel submits nothing; success
+ *   reported with the account name; the last-PortalAdmin rejection shown
+ *   in the modal; not-found and partial verifier-cleanup errors handed
+ *   to the parent for an error flashbar plus list refresh.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,6 +27,8 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import createWrapper from '@cloudscape-design/components/test-utils/dom';
 import {
   checkPasswordPolicy,
+  classifyDeleteError,
+  DeleteModal,
   ForgotPasswordModal,
   PasswordModal,
   PORTAL_ROLES,
@@ -29,15 +36,25 @@ import {
 } from './UserManagerModals';
 import type { AdminAccount } from '../../services/api';
 
-const { setAdminUserPassword, sendAdminForgotPassword, setAdminUserRole } =
-  vi.hoisted(() => ({
-    setAdminUserPassword: vi.fn(),
-    sendAdminForgotPassword: vi.fn(),
-    setAdminUserRole: vi.fn(),
-  }));
+const {
+  setAdminUserPassword,
+  sendAdminForgotPassword,
+  setAdminUserRole,
+  deleteAdminUser,
+} = vi.hoisted(() => ({
+  setAdminUserPassword: vi.fn(),
+  sendAdminForgotPassword: vi.fn(),
+  setAdminUserRole: vi.fn(),
+  deleteAdminUser: vi.fn(),
+}));
 
 vi.mock('../../services/api', () => ({
-  apiService: { setAdminUserPassword, sendAdminForgotPassword, setAdminUserRole },
+  apiService: {
+    setAdminUserPassword,
+    sendAdminForgotPassword,
+    setAdminUserRole,
+    deleteAdminUser,
+  },
 }));
 
 const ACCOUNT: AdminAccount = {
@@ -343,6 +360,131 @@ describe('RoleModal', () => {
     fireEvent.click(changeButton());
 
     expect(await screen.findByText(reason)).toBeInTheDocument();
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+});
+
+/** A 404 as thrown by the API client's simple error envelope path. */
+function notFoundError(message = 'User not found'): Error {
+  return Object.assign(new Error(message), { status: 404 });
+}
+
+describe('classifyDeleteError', () => {
+  it('classifies an HTTP 404 as not-found (Requirement 14.11)', () => {
+    expect(classifyDeleteError(notFoundError())).toBe('not-found');
+  });
+
+  it('classifies a partial verifier-cleanup message (Requirement 14.10)', () => {
+    expect(
+      classifyDeleteError(
+        new Error(
+          'The account was deleted but its verifier record was not removed'
+        )
+      )
+    ).toBe('partial-cleanup');
+  });
+
+  it('classifies a rejection with the account unchanged as other (Requirement 14.3)', () => {
+    expect(
+      classifyDeleteError(
+        Object.assign(new Error('Deletion rejected'), { status: 409 })
+      )
+    ).toBe('other');
+    expect(classifyDeleteError(new Error('deletion failed'))).toBe('other');
+    expect(classifyDeleteError(undefined)).toBe('other');
+  });
+});
+
+describe('DeleteModal', () => {
+  function renderModal(
+    onSuccess = vi.fn(),
+    onErrorWithRefresh = vi.fn(),
+    onDismiss = vi.fn()
+  ) {
+    render(
+      <DeleteModal
+        account={ACCOUNT}
+        onSuccess={onSuccess}
+        onErrorWithRefresh={onErrorWithRefresh}
+        onDismiss={onDismiss}
+      />
+    );
+    return { onSuccess, onErrorWithRefresh, onDismiss };
+  }
+
+  const deleteButton = () =>
+    screen.getByRole('button', { name: 'Delete account' });
+
+  it('asks for explicit confirmation naming the account by username (Requirement 14.1)', () => {
+    renderModal();
+
+    expect(screen.getByText('Delete account operator1')).toBeInTheDocument();
+    expect(deleteAdminUser).not.toHaveBeenCalled();
+  });
+
+  it('submits nothing on cancel (Requirement 14.9)', () => {
+    const { onDismiss } = renderModal();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    expect(deleteAdminUser).not.toHaveBeenCalled();
+  });
+
+  it('reports success identifying the deleted account for the parent to confirm and re-fetch (Requirements 14.2, 14.7)', async () => {
+    deleteAdminUser.mockResolvedValue({ message: 'deleted' });
+    const { onSuccess, onErrorWithRefresh } = renderModal();
+
+    fireEvent.click(deleteButton());
+
+    await waitFor(() =>
+      expect(deleteAdminUser).toHaveBeenCalledWith('operator1')
+    );
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.stringContaining('operator1')
+    );
+    expect(onErrorWithRefresh).not.toHaveBeenCalled();
+  });
+
+  it('shows the last-PortalAdmin rejection reason in the modal (Requirement 14.3)', async () => {
+    const reason =
+      'Cannot delete the last remaining enabled PortalAdmin account';
+    deleteAdminUser.mockRejectedValue(
+      Object.assign(new Error(reason), { status: 409 })
+    );
+    const { onSuccess, onErrorWithRefresh } = renderModal();
+
+    fireEvent.click(deleteButton());
+
+    expect(await screen.findByText(reason)).toBeInTheDocument();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onErrorWithRefresh).not.toHaveBeenCalled();
+  });
+
+  it('hands a not-found error to the parent for an error flashbar and list refresh (Requirement 14.11)', async () => {
+    deleteAdminUser.mockRejectedValue(notFoundError());
+    const { onSuccess, onErrorWithRefresh } = renderModal();
+
+    fireEvent.click(deleteButton());
+
+    await waitFor(() => expect(onErrorWithRefresh).toHaveBeenCalledTimes(1));
+    const message: string = onErrorWithRefresh.mock.calls[0][0];
+    expect(message).toContain('operator1');
+    expect(message.toLowerCase()).toContain('not found');
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it('hands a partial verifier-cleanup error to the parent for an error flashbar and list refresh (Requirement 14.10)', async () => {
+    const partialMessage =
+      'The account was deleted but its verifier record was not removed';
+    deleteAdminUser.mockRejectedValue(new Error(partialMessage));
+    const { onSuccess, onErrorWithRefresh } = renderModal();
+
+    fireEvent.click(deleteButton());
+
+    await waitFor(() =>
+      expect(onErrorWithRefresh).toHaveBeenCalledWith(partialMessage)
+    );
     expect(onSuccess).not.toHaveBeenCalled();
   });
 });

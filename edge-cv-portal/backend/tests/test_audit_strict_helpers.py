@@ -59,7 +59,9 @@ class TestRecordAuditEventStrict:
     def test_supported_action_types_and_results(self, shared, audit_table):
         assert shared.USER_ACCOUNT_RESOURCE_TYPE == "user_account"
         assert set(shared.USER_ACCOUNT_AUDIT_ACTIONS) == {
-            "password_change", "forgot_password", "role_change"}
+            "password_change", "forgot_password", "role_change",
+            "account_create", "account_disable",
+            "account_enable", "account_delete"}
         assert set(shared.AUDIT_RESULTS) == {
             "pending", "success", "failure", "rejected"}
         for action in shared.USER_ACCOUNT_AUDIT_ACTIONS:

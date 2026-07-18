@@ -158,7 +158,9 @@ def log_audit_event(user_id: str, action: str, resource_type: str,
 # then the entry is finalized to its terminal result afterwards.
 
 # Action types recorded against user accounts by the User Manager.
-USER_ACCOUNT_AUDIT_ACTIONS = ('password_change', 'forgot_password', 'role_change')
+USER_ACCOUNT_AUDIT_ACTIONS = ('password_change', 'forgot_password', 'role_change',
+                              'account_create', 'account_disable',
+                              'account_enable', 'account_delete')
 
 # Resource type used for user-account audit entries.
 USER_ACCOUNT_RESOURCE_TYPE = 'user_account'

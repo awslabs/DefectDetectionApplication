@@ -1,7 +1,8 @@
 """
 User Admin handler for Edge CV Portal
-PortalAdmin-only Cognito account management: listing, password change,
-forgot-password (temporary password), role change, and edge account sync.
+PortalAdmin-only Cognito account management: listing, creation, password
+change, forgot-password (temporary password), role change,
+disable/enable, and edge account sync.
 
 Routed under /api/v1/admin/* behind the existing jwt_authorizer (requests
 without a valid JWT are rejected before this Lambda runs). Every handler
@@ -70,6 +71,49 @@ VERIFIER_HASH_BYTES = 32
 # The five defined Portal_Role values (Requirement 5.2)
 PORTAL_ROLES = ('PortalAdmin', 'UseCaseAdmin', 'DataScientist',
                 'Operator', 'Viewer')
+
+
+def validate_create_request(body: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """
+    Pure validation gate for account creation (Requirements 12.6-12.8).
+
+    Returns None when the payload is valid, otherwise a rejection
+    {'field', 'message'} identifying the offending field:
+
+    - username, email, and role must all be present and non-empty (12.7)
+    - the email must consist of a non-empty local part, an '@'
+      separator, and a non-empty domain containing at least one dot (12.6)
+    - the role must be one of the five defined Portal_Role values (12.8)
+
+    Only a payload passing every check may reach admin_create_user; a
+    rejection performs no User_Pool call (callers return before any
+    Cognito interaction).
+    """
+    body = body or {}
+    for field in ('username', 'email', 'role'):
+        value = body.get(field)
+        if not isinstance(value, str) or not value:
+            return {
+                'field': field,
+                'message': f'{field} is required and must be non-empty',
+            }
+
+    parts = body['email'].split('@')
+    if len(parts) != 2 or not parts[0] or not parts[1] or '.' not in parts[1]:
+        return {
+            'field': 'email',
+            'message': 'email address is invalid: it must consist of a '
+                       'non-empty local part, an @ separator, and a '
+                       'non-empty domain containing at least one dot',
+        }
+
+    if body['role'] not in PORTAL_ROLES:
+        return {
+            'field': 'role',
+            'message': f"role must be one of: {', '.join(PORTAL_ROLES)}",
+        }
+
+    return None
 
 
 def generate_temp_password(length: int = 16) -> str:
@@ -230,9 +274,13 @@ def handler(event, context):
     Handle user admin requests
 
     GET  /api/v1/admin/users - List Cognito accounts
+    POST /api/v1/admin/users - Create a Cognito account
     POST /api/v1/admin/users/{username}/password - Set account password
     POST /api/v1/admin/users/{username}/forgot-password - Email a temporary password
     PUT  /api/v1/admin/users/{username}/role - Change account role
+    POST /api/v1/admin/users/{username}/disable - Disable an account
+    POST /api/v1/admin/users/{username}/enable - Enable an account
+    DELETE /api/v1/admin/users/{username} - Delete an account
     GET  /api/v1/admin/edge-sync/devices - Per-device sync status
     POST /api/v1/admin/edge-sync/devices/{deviceId} - Stage and trigger a sync
     """
@@ -253,6 +301,8 @@ def handler(event, context):
 
         if http_method == 'GET' and path.endswith('/admin/users'):
             return list_accounts(event)
+        elif http_method == 'POST' and path.endswith('/admin/users'):
+            return create_account(event)
         elif http_method == 'GET' and path.endswith('/edge-sync/devices'):
             return list_sync_devices(event)
         elif http_method == 'POST' and '/edge-sync/devices/' in path:
@@ -263,6 +313,12 @@ def handler(event, context):
             return forgot_password(event)
         elif http_method == 'PUT' and path.endswith('/role'):
             return change_role(event)
+        elif http_method == 'POST' and path.endswith('/disable'):
+            return disable_account(event)
+        elif http_method == 'POST' and path.endswith('/enable'):
+            return enable_account(event)
+        elif http_method == 'DELETE' and '/admin/users/' in path:
+            return delete_account(event)
 
         return create_response(404, {'error': 'Not found'})
 
@@ -364,6 +420,125 @@ def _username_from_path(event) -> str:
         return unquote(segments[segments.index('users') + 1])
     except (ValueError, IndexError):
         return ''
+
+
+@require_portal_admin
+def create_account(event):
+    """
+    POST /api/v1/admin/users
+
+    Body {username, email, role}. Flow (audit-before-effect, D10):
+    validate_create_request (12.6, 12.7, 12.8 - a rejection performs no
+    User_Pool call) -> audit-pending (account_create) ->
+    admin_create_user with custom:role, email, email_verified=true and
+    the Cognito-native email invitation (D12 - default MessageAction, no
+    SES, no portal-generated password, no verifier capture) ->
+    audit-final carrying the created account's {username, email, role}
+    (12.11).
+
+    Error mapping: UsernameExistsException -> 409 "username already
+    exists" with no account created or modified (12.5); other Cognito
+    errors -> 502 "account was not created" with no partial record
+    (creation is atomic on the Cognito side, 12.9), audit-final failure.
+    A pending-audit write failure -> 500 "action not applied" with
+    Cognito untouched (6.4, 6.5).
+
+    _Requirements: 12.1, 12.3, 12.5, 12.6, 12.7, 12.8, 12.9, 12.11_
+    """
+    try:
+        body = json.loads(event.get('body') or '{}')
+    except (json.JSONDecodeError, TypeError):
+        return create_response(400, {'error': 'Invalid JSON body'})
+
+    if not isinstance(body, dict):
+        return create_response(400, {'error': 'Invalid JSON body'})
+
+    # Pure validation gate: a rejection returns before any User_Pool
+    # call, so no account or partial record can exist (12.6-12.8).
+    rejection = validate_create_request(body)
+    if rejection is not None:
+        return create_response(400, {
+            'error': 'Invalid account request',
+            'field': rejection['field'],
+            'message': rejection['message'],
+        })
+
+    username = body['username']
+    email = body['email']
+    role = body['role']
+
+    acting_user = get_user_from_event(event)
+
+    # Audit-before-effect: the pending entry must be recorded before
+    # Cognito is touched; if it cannot be, the action is not applied
+    # (Req 6.4, 6.5).
+    try:
+        audit_event_id = record_audit_event_strict(
+            acting_user['user_id'], 'account_create',
+            USER_ACCOUNT_RESOURCE_TYPE, username,
+            details={'email': email, 'role': role},
+        )
+    except Exception as e:
+        logger.error(
+            f"Pending audit write failed; account creation for "
+            f"{username} not applied: {e}")
+        return create_response(500, {
+            'error': 'Audit log unavailable',
+            'message': 'The action was not applied',
+        })
+
+    # Cognito-native invitation (D12): the default MessageAction sends
+    # the invitation email with a Cognito-generated policy-conformant
+    # temporary password (12.3); the portal never holds it, so no
+    # verifier is captured at creation.
+    try:
+        cognito_client.admin_create_user(
+            UserPoolId=USER_POOL_ID,
+            Username=username,
+            UserAttributes=[
+                {'Name': 'email', 'Value': email},
+                {'Name': 'email_verified', 'Value': 'true'},
+                {'Name': 'custom:role', 'Value': role},
+            ],
+            DesiredDeliveryMediums=['EMAIL'],
+        )
+    except ClientError as e:
+        error = e.response.get('Error', {})
+        code = error.get('Code', '')
+        message = error.get('Message', str(e))
+
+        if code == 'UsernameExistsException':
+            # Duplicate username: nothing was created or modified (12.5).
+            finalize_audit_event(audit_event_id, 'failure',
+                                 {'reason': 'username already exists'})
+            return create_response(409, {
+                'error': 'username already exists',
+                'message': f'An account with the username {username} '
+                           f'already exists',
+            })
+
+        # Any other Cognito failure: creation is atomic, so no account
+        # or partial record remains in the User_Pool (12.9).
+        logger.error(f"admin_create_user failed for {username}: {message}")
+        finalize_audit_event(audit_event_id, 'failure',
+                             {'reason': message})
+        return create_response(502, {'error': 'account was not created'})
+
+    # Audit-final carries the created account's username, email, and
+    # role (12.11).
+    finalize_audit_event(audit_event_id, 'success', {
+        'username': username,
+        'email': email,
+        'role': role,
+    })
+
+    return create_response(201, {
+        'message': f'Account created for {username}; an invitation with '
+                   f'a temporary password was sent to {email}',
+        'username': username,
+        'email': email,
+        'role': role,
+    })
 
 
 def _store_verifier(username: str, password: str):
@@ -858,6 +1033,375 @@ def change_role(event):
         'username': username,
         'previous_role': previous_role,
         'role': new_role,
+    })
+
+
+def _set_account_enabled(event, target_enabled: bool):
+    """
+    Shared implementation for the disable/enable endpoints (task 13.3).
+
+    Flow (design): admin_get_user reads the current Enabled state first
+    - already in the requested state -> 200 no-op returning the current
+    state with no Cognito mutation, no audit-pending write, and no sync
+    staging (13.6). Disable additionally runs the last-PortalAdmin
+    guard (shared predicate, D14): disabling the last remaining enabled
+    PortalAdmin -> 409 + the reason with the rejected attempt audited
+    before any mutation (13.9). Otherwise: audit-pending
+    (account_disable / account_enable) -> admin_disable_user /
+    admin_enable_user (13.2, 13.3) -> mark sync staging pending with
+    the new enabled state (7.2; disable also satisfies 7.8's
+    mark-as-disabled-on-next-sync) -> audit-final.
+
+    Error mapping: UserNotFoundException -> 404; other Cognito failures
+    -> 502 "action failed" with the state unchanged and the audit entry
+    finalized to failure (13.7). A pending-audit write failure -> 500
+    "action not applied" with Cognito untouched (6.4, 6.5).
+
+    _Requirements: 13.2, 13.3, 13.6, 13.7, 13.9, 7.2, 7.8_
+    """
+    action = 'account_enable' if target_enabled else 'account_disable'
+    verb = 'enable' if target_enabled else 'disable'
+    state_word = 'enabled' if target_enabled else 'disabled'
+
+    username = _username_from_path(event)
+    if not username:
+        return create_response(400, {'error': 'Username is required'})
+
+    # Current state first (13.6): the enabled flag, plus the role for
+    # the last-PortalAdmin guard on disable.
+    try:
+        user = cognito_client.admin_get_user(
+            UserPoolId=USER_POOL_ID, Username=username)
+    except ClientError as e:
+        error = e.response.get('Error', {})
+        if error.get('Code') == 'UserNotFoundException':
+            return create_response(404, {'error': 'User not found'})
+        message = error.get('Message', str(e))
+        logger.error(f"admin_get_user failed for {username}: {message}")
+        return create_response(502, {'error': 'action failed'})
+
+    current_enabled = bool(user.get('Enabled', False))
+
+    if current_enabled == target_enabled:
+        # Already in the requested state: 200 no-op returning the
+        # current state - no Cognito mutation, no audit-pending write,
+        # no sync staging (13.6).
+        return create_response(200, {
+            'message': f'{username} is already {state_word}',
+            'username': username,
+            'enabled': current_enabled,
+            'changed': False,
+        })
+
+    acting_user = get_user_from_event(event)
+
+    # Last-PortalAdmin guard on disable (D14, 5.3, 13.9): disabling
+    # reduces the enabled-PortalAdmin count exactly like a role change
+    # away from PortalAdmin. Here current_enabled is True (the states
+    # differ), so the target counts toward the enabled pool iff its
+    # role is PortalAdmin.
+    if not target_enabled:
+        attrs = {a['Name']: a['Value']
+                 for a in user.get('UserAttributes', [])}
+        if (attrs.get('custom:role') or 'Viewer') == 'PortalAdmin':
+            try:
+                admin_count = _count_enabled_portal_admins()
+            except ClientError as e:
+                message = e.response.get('Error', {}).get(
+                    'Message', str(e))
+                logger.error(
+                    f"last-PortalAdmin guard count failed for "
+                    f"{username}: {message}")
+                return create_response(502, {'error': 'action failed'})
+
+            if admin_count <= 1:
+                reason = (f'{username} is the last remaining enabled '
+                          f'PortalAdmin account; the portal must retain '
+                          f'at least one enabled PortalAdmin')
+                # The rejected attempt is audited before any mutation
+                # (13.9); if it cannot be recorded, the action is
+                # reported as not applied (6.4).
+                try:
+                    record_audit_event_strict(
+                        acting_user['user_id'], action,
+                        USER_ACCOUNT_RESOURCE_TYPE, username,
+                        result='rejected',
+                        details={'reason': reason},
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Rejected-attempt audit write failed for "
+                        f"{username}: {e}")
+                    return create_response(500, {
+                        'error': 'Audit log unavailable',
+                        'message': 'The action was not applied',
+                    })
+                return create_response(409, {
+                    'error': 'Disable rejected',
+                    'message': reason,
+                })
+
+    # Audit-before-effect: the pending entry must be recorded before
+    # Cognito is touched; if it cannot be, the action is not applied
+    # (Req 6.4, 6.5).
+    try:
+        audit_event_id = record_audit_event_strict(
+            acting_user['user_id'], action,
+            USER_ACCOUNT_RESOURCE_TYPE, username,
+        )
+    except Exception as e:
+        logger.error(
+            f"Pending audit write failed; {verb} for "
+            f"{username} not applied: {e}")
+        return create_response(500, {
+            'error': 'Audit log unavailable',
+            'message': 'The action was not applied',
+        })
+
+    try:
+        if target_enabled:
+            cognito_client.admin_enable_user(
+                UserPoolId=USER_POOL_ID, Username=username)
+        else:
+            cognito_client.admin_disable_user(
+                UserPoolId=USER_POOL_ID, Username=username)
+    except ClientError as e:
+        error = e.response.get('Error', {})
+        code = error.get('Code', '')
+        message = error.get('Message', str(e))
+
+        if code == 'UserNotFoundException':
+            finalize_audit_event(audit_event_id, 'failure',
+                                 {'reason': 'user not found'})
+            return create_response(404, {'error': 'User not found'})
+
+        # Any other Cognito failure: the state is unchanged (13.7).
+        logger.error(
+            f"admin_{verb}_user failed for {username}: {message}")
+        finalize_audit_event(audit_event_id, 'failure',
+                             {'reason': message})
+        return create_response(502, {'error': 'action failed'})
+
+    # The enabled/disabled state is a synchronized account attribute:
+    # refresh every device's staged set and mark it pending (7.2;
+    # disable also satisfies 7.8's mark-as-disabled-on-next-sync).
+    _mark_account_change_pending(username, {'enabled': target_enabled})
+
+    finalize_audit_event(audit_event_id, 'success',
+                         {'enabled': target_enabled})
+
+    return create_response(200, {
+        'message': f'{username} has been {state_word}',
+        'username': username,
+        'enabled': target_enabled,
+        'changed': True,
+    })
+
+
+@require_portal_admin
+def disable_account(event):
+    """
+    POST /api/v1/admin/users/{username}/disable
+
+    _Requirements: 13.2, 13.6, 13.7, 13.9, 7.2, 7.8_
+    """
+    return _set_account_enabled(event, target_enabled=False)
+
+
+@require_portal_admin
+def enable_account(event):
+    """
+    POST /api/v1/admin/users/{username}/enable
+
+    _Requirements: 13.3, 13.6, 13.7, 7.2_
+    """
+    return _set_account_enabled(event, target_enabled=True)
+
+
+@require_portal_admin
+def delete_account(event):
+    """
+    DELETE /api/v1/admin/users/{username}
+
+    Flow (D13 ordering): admin_get_user captures the username, email,
+    and role for the audit entry (14.8) and maps UserNotFoundException
+    -> 404 with nothing modified (14.11) -> last-PortalAdmin guard
+    (shared predicate, D14): deleting the last remaining enabled
+    PortalAdmin -> 409 + the reason with the rejected attempt audited
+    (14.3, 14.4) -> audit-pending (account_delete) -> admin_delete_user
+    (14.2) -> delete the edge-credentials verifier record (14.5) ->
+    mark sync staging pending with enabled=false, deleted=true (7.8)
+    -> audit-final.
+
+    Error mapping: a Cognito failure aborts before the verifier record
+    is touched - account and verifier record unchanged, audit-final
+    failure (14.6). A verifier-delete failure after a successful
+    Cognito delete retains the record for a subsequent attempt,
+    finalizes the audit entry with a partial-cleanup detail, and
+    returns an error stating the account was deleted but its verifier
+    record was not removed (14.10). A pending-audit write failure ->
+    500 "action not applied" with Cognito untouched (6.4, 6.5).
+
+    _Requirements: 14.2, 14.3, 14.4, 14.5, 14.6, 14.8, 14.10, 14.11, 7.8_
+    """
+    username = _username_from_path(event)
+    if not username:
+        return create_response(400, {'error': 'Username is required'})
+
+    # Current state first: username/email/role for the audit entry
+    # (14.8), the role and enabled flag for the last-PortalAdmin guard.
+    # A missing account -> 404 with nothing modified (14.11).
+    try:
+        user = cognito_client.admin_get_user(
+            UserPoolId=USER_POOL_ID, Username=username)
+    except ClientError as e:
+        error = e.response.get('Error', {})
+        if error.get('Code') == 'UserNotFoundException':
+            return create_response(404, {
+                'error': 'User not found',
+                'message': f'The account {username} was not found',
+            })
+        message = error.get('Message', str(e))
+        logger.error(f"admin_get_user failed for {username}: {message}")
+        return create_response(502, {'error': 'deletion failed'})
+
+    attrs = {a['Name']: a['Value'] for a in user.get('UserAttributes', [])}
+    email = attrs.get('email', '')
+    role = attrs.get('custom:role') or 'Viewer'
+    target_enabled = bool(user.get('Enabled', False))
+
+    acting_user = get_user_from_event(event)
+
+    # Last-PortalAdmin guard (D14, 14.3): deleting an enabled
+    # PortalAdmin reduces the enabled-PortalAdmin count exactly like a
+    # role change away from PortalAdmin or a disable.
+    if role == 'PortalAdmin' and target_enabled:
+        try:
+            admin_count = _count_enabled_portal_admins()
+        except ClientError as e:
+            message = e.response.get('Error', {}).get('Message', str(e))
+            logger.error(
+                f"last-PortalAdmin guard count failed for {username}: "
+                f"{message}")
+            return create_response(502, {'error': 'deletion failed'})
+
+        if admin_count <= 1:
+            reason = (f'{username} is the last remaining enabled '
+                      f'PortalAdmin account; the portal must retain at '
+                      f'least one enabled PortalAdmin')
+            # The rejected attempt is itself audited (14.4); if it
+            # cannot be recorded, the action is reported as not
+            # applied (6.4).
+            try:
+                record_audit_event_strict(
+                    acting_user['user_id'], 'account_delete',
+                    USER_ACCOUNT_RESOURCE_TYPE, username,
+                    result='rejected',
+                    details={'reason': reason},
+                )
+            except Exception as e:
+                logger.error(
+                    f"Rejected-attempt audit write failed for "
+                    f"{username}: {e}")
+                return create_response(500, {
+                    'error': 'Audit log unavailable',
+                    'message': 'The action was not applied',
+                })
+            return create_response(409, {
+                'error': 'Deletion rejected',
+                'message': reason,
+            })
+
+    # Audit-before-effect: the pending entry must be recorded before
+    # Cognito is touched; if it cannot be, the action is not applied
+    # (Req 6.4, 6.5). The entry carries the account's email and role
+    # at the time of deletion (14.8).
+    try:
+        audit_event_id = record_audit_event_strict(
+            acting_user['user_id'], 'account_delete',
+            USER_ACCOUNT_RESOURCE_TYPE, username,
+            details={'email': email, 'role': role},
+        )
+    except Exception as e:
+        logger.error(
+            f"Pending audit write failed; deletion of "
+            f"{username} not applied: {e}")
+        return create_response(500, {
+            'error': 'Audit log unavailable',
+            'message': 'The action was not applied',
+        })
+
+    # Cognito delete first (D13): a failure here aborts before the
+    # verifier record is touched, leaving the account and its
+    # Edge_Credential_Verifier record unchanged (14.6).
+    try:
+        cognito_client.admin_delete_user(
+            UserPoolId=USER_POOL_ID, Username=username)
+    except ClientError as e:
+        error = e.response.get('Error', {})
+        code = error.get('Code', '')
+        message = error.get('Message', str(e))
+
+        if code == 'UserNotFoundException':
+            finalize_audit_event(audit_event_id, 'failure',
+                                 {'reason': 'user not found'})
+            return create_response(404, {
+                'error': 'User not found',
+                'message': f'The account {username} was not found',
+            })
+
+        logger.error(f"admin_delete_user failed for {username}: {message}")
+        finalize_audit_event(audit_event_id, 'failure',
+                             {'reason': message})
+        return create_response(502, {'error': 'deletion failed'})
+
+    # The account is deleted from the User_Pool: mark it disabled and
+    # deleted in every device's staged sync set regardless of what the
+    # verifier cleanup does next (7.8; failures inside are logged,
+    # never raised).
+    _mark_account_change_pending(username, {'enabled': False,
+                                            'deleted': True})
+
+    # Verifier record cleanup (14.5). A failure after the successful
+    # Cognito delete retains the record for a subsequent attempt,
+    # finalizes the audit entry with a partial-cleanup detail, and
+    # reports that the account was deleted but its verifier record was
+    # not removed (14.10).
+    try:
+        dynamodb.Table(EDGE_CREDENTIALS_TABLE).delete_item(
+            Key={'username': username.lower()})
+    except Exception as e:
+        logger.error(
+            f"Edge-credentials record delete failed for {username} "
+            f"after a successful Cognito delete: {e}")
+        finalize_audit_event(audit_event_id, 'success', {
+            'email': email,
+            'role': role,
+            'partial_cleanup': 'the account was deleted from the user '
+                               'pool but its credential record was not '
+                               'removed; it is retained for a '
+                               'subsequent removal attempt',
+        })
+        return create_response(502, {
+            'error': 'partial deletion',
+            'message': f'The account {username} was deleted but its '
+                       f'verifier record was not removed; it will be '
+                       f'removed on a subsequent attempt',
+        })
+
+    # Audit-final records the deleted account's username, email, and
+    # role at the time of deletion (14.8).
+    finalize_audit_event(audit_event_id, 'success', {
+        'email': email,
+        'role': role,
+    })
+
+    return create_response(200, {
+        'message': f'Account {username} has been deleted',
+        'username': username,
+        'email': email,
+        'role': role,
+        'deleted': True,
     })
 
 

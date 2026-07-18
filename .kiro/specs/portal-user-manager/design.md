@@ -4,8 +4,8 @@
 
 This feature adds an admin-only User Manager tool to the Edge CV Portal and an optional local cached login capability to the LocalServer edge component. It has four cooperating parts:
 
-1. **User_Manager (portal frontend)** — a new PortalAdmin-only page reached from the settings dropdown in the top navigation. It lists all Cognito accounts with client-side filtering, and offers password change (permanent/temporary), forgot-password (temporary password by email), and role change actions, plus a per-device account-sync panel.
-2. **User admin API (portal backend)** — a new Lambda module exposing PortalAdmin-only endpoints that perform Cognito admin operations (`list_users`, `admin_set_user_password`, `admin_update_user_attributes`, `admin_enable_user`/`admin_disable_user`) with a strict audit-before-effect protocol, a last-PortalAdmin guard, and credential-verifier capture at password-set time.
+1. **User_Manager (portal frontend)** — a new PortalAdmin-only page reached from the settings dropdown in the top navigation. It lists all Cognito accounts with client-side filtering, and offers account creation (invitation with temporary password), password change (permanent/temporary), forgot-password (temporary password by email), role change, disable/enable, and delete actions, plus a per-device account-sync panel.
+2. **User admin API (portal backend)** — a new Lambda module exposing PortalAdmin-only endpoints that perform Cognito admin operations (`list_users`, `admin_create_user`, `admin_set_user_password`, `admin_update_user_attributes`, `admin_enable_user`/`admin_disable_user`, `admin_delete_user`) with a strict audit-before-effect protocol, a last-PortalAdmin guard, and credential-verifier capture at password-set time.
 3. **Account_Sync_Service** — portal-to-edge account delivery over a new per-thing named IoT shadow `dda-user-accounts`, following the transport pattern established by the camera-registry-sync feature (portal writes `desired`, edge applies and writes a `reported` ack, an IoT topic rule → SQS → Lambda ingests acks). A DynamoDB sync-state table tracks pending changes and last sync status per device; an EventBridge 5-minute schedule drives retries and 60-second ack-timeout failure marking.
 4. **Local_Login on the edge** — a new `local_auth` subsystem in the LocalServer FastAPI backend: a credential cache file holding salted one-way verifiers, a login endpoint issuing HMAC-signed 12-hour session tokens, per-account lockout, and a per-request authorization dependency implementing the (Local_Login_Configuration × Existing_Token_Auth) decision matrix. The local React web UI gains a login screen shown only when local login is enabled. Everything is gated by a Greengrass component-configuration flag that defaults to disabled, preserving today's open-access behavior exactly.
 
@@ -15,6 +15,8 @@ This feature adds an admin-only User Manager tool to the Edge CV Portal and an o
 - **Password policy** (AuthStack): minimum length 12, requires lowercase, uppercase, digits, and symbols. Cognito enforces it on `admin_set_user_password` (`InvalidPasswordException`); the portal's temporary-password generator must conform to it.
 - **Cognito never exposes password material.** There is no API or trigger that yields a hash suitable for offline verification. The only place the Portal_Backend ever holds a plaintext password is the User Manager password-set flow, so that is where credential verifiers are computed (design decision D3 below).
 - **Cognito cannot email a temporary password to an existing CONFIRMED user.** `admin_create_user` invitations only apply to new users; `admin_reset_user_password` sends a confirmation *code*, not a temporary password. The forgot-password flow therefore generates a policy-conformant temporary password in the Lambda, applies it with `admin_set_user_password(Permanent=False)` (which forces a password change at next sign-in, Requirement 4.2), and delivers it by email through Amazon SES.
+- **For *new* users, Cognito's native invitation flow does everything Requirement 12 asks for.** `admin_create_user` with an `email` attribute generates a pool-policy-conformant temporary password and emails the invitation itself (12.3 — no SES involvement needed), places the account in `FORCE_CHANGE_PASSWORD` so the first sign-in must set a new password (12.4), fails atomically with `UsernameExistsException` on duplicates (12.5), and never leaves a partial record on failure (12.9 — the API call is atomic).
+- **Disabled-user token refusal is native Cognito behavior.** A user disabled via `admin_disable_user` receives `NotAuthorizedException` on every authentication flow, including refresh-token grants — Cognito rejects sign-in (13.4) and all new JWT issuance including refresh (13.5) with no portal code involved. Requirement 13.5 is therefore documented behavior, not a coding task.
 - **Sync transport precedent** (camera-registry-sync): per-thing named shadow, `desired` written by the portal, edge agent (`src/backend/camera_sync/agent.py`) using the existing `IoTShadowAccessor` (IPC) and MQTT `SubscriptionHandler` for delta notifications, plus an IoT topic rule on the shadow's `update/documents` topic routed to SQS → Lambda for the portal-bound direction. The LocalServer recipe already grants shadow IPC/MQTT access for `$aws/things/*/shadow/name/*`, so no new device permissions are needed.
 - **Edge auth wiring today**: `utils/auth.py:validate_token` validates bearer tokens remotely against an OAuth introspect endpoint; `endpoints/route/access_log_router.py:get_api_router()` decides *at import time* whether routers carry `Depends(validate_token)`, keyed on the presence of `authorization_settings.json` (`utils.is_authorization_enabled_on_station()`). The decision matrix requires a per-request dependency instead.
 - **Component configuration via IPC**: the flask-app already calls Greengrass IPC `GetConfiguration` (`defect_detection_config.py`, `feature_configs_utils.py`), so the LocalServer can read `LocalLoginEnabled` from its own component configuration and re-poll it periodically.
@@ -35,6 +37,9 @@ This feature adds an admin-only User Manager tool to the Edge CV Portal and an o
 | D9 | Lockout state (8.10) | In-memory per-username counter in the LocalServer process (5 consecutive failures → 15-minute lockout) | Single-process server; requirement does not demand persistence across restarts, and file-persisting failure counters adds write-amplification for no security gain at this threat level |
 | D10 | Audit-before-effect (6.4) | Two-phase audit write: `put_item` a `pending` entry (raising variant) *before* the Cognito call; abort the action if it fails; update to `success`/`failure` after | The only ordering that guarantees "audit unrecordable ⇒ action not applied" without distributed transactions |
 | D11 | Temporary password delivery | SES `SendEmail` from a deployment-configured verified sender identity | Cognito cannot deliver a temp password to an existing user (research finding); SES is the standard portal-account mail path. The sender address becomes a ComputeStack parameter |
+| D12 | Account creation invitation | Cognito-native `admin_create_user` invitation (no SES, no portal-generated password) | For new users Cognito itself generates the policy-conformant temporary password, emails the invitation, and enforces `FORCE_CHANGE_PASSWORD` at first sign-in — 12.3/12.4 for free, and the portal never holds the invitation password (consistent with D3: a new account becomes edge-login-capable only once an admin sets its password through the User Manager) |
+| D13 | Deletion ordering vs. verifier cleanup | Cognito `admin_delete_user` first, then delete the `dda-portal-edge-credentials` record; a verifier-delete failure after a successful Cognito delete reports a partial-cleanup error and retains the record for a later attempt | This ordering makes 14.6 structural (a Cognito failure aborts before the verifier is touched) and makes the 14.10 partial-failure branch explicit and recoverable rather than silent |
+| D14 | Last-PortalAdmin guard scope | The existing guard (paginate + count enabled PortalAdmins) is applied unchanged to disable and delete actions, alongside role changes | One shared predicate keeps 5.3, 13.9, and 14.3 behaviorally identical; disable and delete both reduce the enabled-PortalAdmin count exactly like a role change away from PortalAdmin |
 
 ## Architecture
 
@@ -43,7 +48,7 @@ graph TB
     subgraph Portal frontend
         DD[Settings dropdown<br/>PortalAdmin-only item] --> UM[UserManager page<br/>/admin/user-manager]
         UM --> LIST[Account table + filter]
-        UM --> ACT[Password / Forgot / Role modals]
+        UM --> ACT[Create / Password / Forgot / Role /<br/>Disable-Enable / Delete modals]
         UM --> SYNC[Edge sync panel<br/>per-device status]
     end
 
@@ -134,6 +139,9 @@ Exemptions in every configuration: `POST /local-auth/login`, `GET /local-auth/st
 - **Password modal**: password + confirm fields, a required `RadioGroup` (permanent / temporary — no default selection, submit disabled until chosen, 3.2), client-side policy pre-check mirroring the pool policy, server errors surfaced verbatim including the violated policy rule (3.3). Success flashbar names the account (3.4).
 - **Forgot-password action**: confirmation modal; on success shows "temporary password sent to the account's registered email" without ever receiving the password value from the API (4.3); surfaces no-verified-email and delivery errors (4.4, 4.5).
 - **Role modal**: `Select` restricted to the five defined roles with the current role preselected (5.2); on success shows confirmation and re-fetches the list (5.7); rejection reasons (including the last-PortalAdmin guard, 5.3) shown in the modal.
+- **Create User modal** (`UserManagerModals.tsx`): username, email, and role fields, the role a `Select` restricted to the five defined roles (12.2); client-side pre-checks mirror the server validation (non-empty fields, email shape per 12.6) with submit disabled until valid; server rejection reasons (duplicate username 12.5, invalid email 12.6, missing field 12.7) surfaced verbatim in the modal. Success flashbar states that an invitation with a temporary password was sent to the account's email — the password value is never present in the API response — and the list re-fetches to include the new account (12.10).
+- **Disable/Enable confirm modal**: explicit confirmation naming the affected account by username before submission (13.1); on success shows a confirmation identifying the account and re-fetches the list (13.8); an already-in-requested-state response simply re-fetches to show the current state (13.6); rejection reasons (last-PortalAdmin guard for disable, 5.3/13.9) and failures (13.7) shown in the modal.
+- **Delete confirm modal**: explicit confirmation naming the affected account by username (14.1); cancel/dismiss submits nothing (14.9); on success shows a confirmation identifying the deleted account and re-fetches the list without it (14.7); rejection reasons (last-PortalAdmin guard, 14.3), not-found (14.11), and partial verifier-cleanup errors (14.10) surfaced in the modal or flashbar.
 - **Edge sync panel**: device list from `GET /api/v1/admin/edge-sync/devices` showing last sync status + timestamp per device (7.4); a sync action with account multi-select posts to `POST /api/v1/admin/edge-sync/devices/{deviceId}` (7.1).
 
 ### 2. Portal backend — `user_admin.py` Lambda
@@ -143,9 +151,13 @@ New function `edge-cv-portal/backend/functions/user_admin.py`, shared layer reus
 | Endpoint | Operation |
 |---|---|
 | `GET /api/v1/admin/users` | Cognito `list_users` (paginate all), join with the edge-credentials table for the `edgeCapable` flag. Returns username, email, `email_verified`, `custom:role` (default `Viewer`), `UserStatus`, `Enabled` |
+| `POST /api/v1/admin/users` | Body `{username, email, role}`. Validate (all fields present and non-empty 12.7, email shape 12.6, role in the five defined values 12.8) → audit-pending → `admin_create_user` with `custom:role`, `email`, `email_verified=true`, default email invitation (D12) → audit-final. `UsernameExistsException` → 409 "username already exists" (12.5) |
 | `POST /api/v1/admin/users/{username}/password` | Body `{password, permanent: bool}`. Audit-pending → `admin_set_user_password(Permanent=permanent)` → verifier capture → audit-final |
 | `POST /api/v1/admin/users/{username}/forgot-password` | Verified-email check → generate temp password → audit-pending → `admin_set_user_password(Permanent=False)` → SES email → verifier capture → audit-final |
 | `PUT /api/v1/admin/users/{username}/role` | Body `{role}`. Validate against the five roles → last-admin guard → audit-pending → `admin_update_user_attributes(custom:role)` → audit-final (records previous and new role, 5.4) |
+| `POST /api/v1/admin/users/{username}/disable` | `admin_get_user` → already disabled: no-op 200 with the current state, no mutation (13.6) → last-admin guard (D14, 13.9) → audit-pending → `admin_disable_user` (13.2) → mark sync staging pending with `enabled: false` (7.2, 7.8) → audit-final |
+| `POST /api/v1/admin/users/{username}/enable` | `admin_get_user` → already enabled: no-op 200, no mutation (13.6) → audit-pending → `admin_enable_user` (13.3) → mark sync staging pending with `enabled: true` (7.2) → audit-final |
+| `DELETE /api/v1/admin/users/{username}` | `admin_get_user` (captures username/email/role for the audit entry, 14.8; `UserNotFoundException` → 404, 14.11) → last-admin guard (D14, 14.3/14.4) → audit-pending → `admin_delete_user` (14.2) → delete the `dda-portal-edge-credentials` record (14.5, D13) → mark sync staging pending with `enabled: false, deleted: true` (7.8) → audit-final |
 | `GET /api/v1/admin/edge-sync/devices` | Devices table join with sync-state table: per-device `lastSyncStatus`, `lastSyncAt`, `pendingChanges` |
 | `POST /api/v1/admin/edge-sync/devices/{deviceId}` | Body `{usernames: [...]}`. Stages the selected account records + fresh `syncId` in the sync-state table and invokes the sync Lambda for an immediate attempt |
 
@@ -156,7 +168,13 @@ New function `edge-cv-portal/backend/functions/user_admin.py`, shared layer reus
 3. `finalize_audit_event(..., result='success' | 'failure', details)` — details carry previous/new role for role changes (5.4) and rejection reasons for rejected attempts (5.5). Details **never** include passwords, hashes, or temporary password values (6.3); the helper drops keys matching a denylist (`password`, `verifier`, `hash`, `temp*`) defensively.
 4. Self-service actions record the affected account as the acting user (6.2) — acting identity always comes from the validated JWT claims, which for self-service *is* the account holder.
 
-**Last-PortalAdmin guard (5.3)** — Cognito `list_users` cannot filter on custom attributes, so the guard paginates the pool and counts users with `custom:role == 'PortalAdmin'` and `Enabled == true`. If the action would reduce that count to zero (role change away from PortalAdmin, or disable, targeting the last such account), reject with 409 and an explanatory reason, and record the rejected attempt in the audit log (5.5).
+**Last-PortalAdmin guard (5.3, 13.9, 14.3)** — Cognito `list_users` cannot filter on custom attributes, so the guard paginates the pool and counts users with `custom:role == 'PortalAdmin'` and `Enabled == true`. If the action would reduce that count to zero (role change away from PortalAdmin, disable, or **delete**, targeting the last such account), reject with 409 and an explanatory reason, and record the rejected attempt in the audit log (5.5, 13.9, 14.4). The same shared predicate serves all three action types (D14).
+
+**Account creation validation (12.6–12.8)** — a pure function `validate_create_request(body)` gates the create endpoint: all three fields present and non-empty (rejections name the missing field, 12.7), email consisting of a non-empty local part, `@`, and a non-empty domain containing at least one dot (12.6), and role in the five defined Portal_Role values (12.8). Only a payload passing all checks reaches `admin_create_user` — a rejection performs no User_Pool call, so no account or partial record can exist (12.5 duplicate rejection is likewise atomic on the Cognito side, 12.9). Creation records an `account_create` audit entry carrying the created account's username, email, and role (12.11). No verifier is captured at creation — the invitation password is never held by the portal (D12); the account becomes edge-login-capable when an administrator later sets its password (D3).
+
+**Disable/enable state transitions (13.2, 13.3, 13.6)** — both endpoints read the account's current `Enabled` state first: when the account is already in the requested state, the handler returns success with the current state and performs no Cognito mutation, no audit-pending write, and no sync staging (13.6). Otherwise the standard audit-before-effect flow runs, and the enabled/disabled flag — a synchronized account attribute — triggers `_mark_account_change_pending` so every configured device's staged set carries the new state (7.2; disable additionally satisfies 7.8's mark-as-disabled-on-next-sync).
+
+**Deletion flow (D13)** — `admin_get_user` first captures the username, email, and role for the audit entry (14.8) and maps a missing account to 404 without any mutation (14.11); then the guard, audit-pending, `admin_delete_user`, verifier-record delete, and sync staging (`enabled: false, deleted: true`, 7.8) run in that order. A Cognito failure aborts before the verifier record is touched (14.6); a verifier-delete failure after the Cognito delete finalizes the audit entry with a partial-cleanup detail, retains the verifier record for a subsequent attempt, and returns an error stating the account was deleted but its verifier record was not removed (14.10).
 
 **Temporary password generator** — pure function `generate_temp_password(length=16)`: guarantees ≥1 character from each required class (lower, upper, digit, symbol) and length ≥ the pool minimum (12), assembled with `secrets.choice` and shuffled with `secrets.SystemRandom().shuffle` (4.1).
 
@@ -174,7 +192,7 @@ One Lambda with three entry paths (mirroring `camera_sync.py`'s style):
 
 The desired document always carries the **complete selected account set** (not a diff), so duplicate or out-of-order delivery is idempotent, and a sync with zero changes is simply a desired write whose content equals the previous one — acked and reported successful (7.5). Account disable/delete in the portal marks the account `enabled: false` in the staged set (delete also flags `deleted: true` for eventual cache pruning), never removing the record silently (7.8). Payloads contain only `{username, email, role, enabled, verifier?}` — never plaintext passwords (7.3, guaranteed structurally: the sync path has no access to plaintext). The builder validates the rendered document against the 8 KB shadow size limit and fails the sync with an explicit reason if exceeded.
 
-**New infrastructure (ComputeStack additions)**: `dda-portal-edge-credentials` and `dda-portal-account-sync` DynamoDB tables, the ack SQS queue + DLQ, the IoT topic rule, the EventBridge schedule, SES send permission + sender-address parameter, and `cognito-idp:AdminSetUserPassword/AdminUpdateUserAttributes/ListUsers/AdminGetUser` grants scoped to the pool for `user_admin.py` only.
+**New infrastructure (ComputeStack additions)**: `dda-portal-edge-credentials` and `dda-portal-account-sync` DynamoDB tables, the ack SQS queue + DLQ, the IoT topic rule, the EventBridge schedule, SES send permission + sender-address parameter, and `cognito-idp:AdminSetUserPassword/AdminUpdateUserAttributes/ListUsers/AdminGetUser` grants scoped to the pool for `user_admin.py` only. The account life-cycle actions (Requirements 12–14) extend the same `user_admin.py`-scoped policy with `cognito-idp:AdminCreateUser/AdminEnableUser/AdminDisableUser/AdminDeleteUser` — no new resources are required.
 
 ### 4. Edge sync agent — `src/backend/user_accounts_sync/agent.py`
 
@@ -291,13 +309,15 @@ LocalLoginEnabled: "false"   # per-device override via deployment configuration 
 
 ### Audit log entry (existing table, new action types)
 
-`action ∈ {password_change, forgot_password, role_change}`, `resource_type = 'user_account'`, `resource_id = <affected username>`, `result ∈ {pending, success, failure, rejected}`, `details` (role changes: `{previousRole, newRole}`; rejections: `{reason}`) — details sanitized by denylist (6.3).
+`action ∈ {password_change, forgot_password, role_change, account_create, account_disable, account_enable, account_delete}`, `resource_type = 'user_account'`, `resource_id = <affected username>`, `result ∈ {pending, success, failure, rejected}`, `details` (role changes: `{previousRole, newRole}`; account creation and deletion: `{username, email, role}` — for deletion, the values at the time of deletion, 14.8; rejections: `{reason}`) — details sanitized by denylist (6.3).
 
 ## Correctness Properties
 
 *A property is a characteristic or behavior that should hold true across all valid executions of a system — essentially, a formal statement about what the system should do. Properties serve as the bridge between human-readable specifications and machine-verifiable correctness guarantees.*
 
 The prework consolidated overlapping acceptance criteria: the nine decision-matrix criteria (8.1, 8.9, 9.1, 9.3, 9.4, 10.1, 10.2, 10.4, 10.5) collapse into one quantified matrix property; token issuance/validation/corruption (8.2, 8.5, 8.7) collapse into one life-cycle property; audit criteria (5.4, 5.5, 6.1, 6.2) collapse into one completeness property; sync-state criteria (7.4, 7.5, 7.6, 7.9) collapse into one reducer property; and the filter criteria (2.2, 2.3, 2.4) collapse into one filter property.
+
+The Requirements 12–14 additions consolidate the same way: the creation-validation criteria (12.1 pass-through, 12.6, 12.7, 12.8) collapse into one validation-gate property (24); the disable/enable transition criteria (13.2, 13.3, 13.6) collapse into one transition property (26); the deletion criteria (14.2, 14.5, 14.6, 14.10 plus the 7.8 staging effect) collapse into one deletion-effect property (27); the last-PortalAdmin criteria for disable and delete (13.9's guard aspect, 14.3) extend the existing Property 9 rather than adding a new one; and the new audit criteria (12.11, 13.9, 14.4, 14.8) extend the existing Property 10's action set. Cognito-native behavior (invitation delivery and forced password change, 12.3/12.4; sign-in and token-issuance refusal for disabled accounts including refresh, 13.4/13.5) is documented behavior verified once during rollout, not a property.
 
 ### Property 1: PortalAdmin role gate in the portal UI
 
@@ -349,15 +369,15 @@ The prework consolidated overlapping acceptance criteria: the nine decision-matr
 
 ### Property 9: Last-PortalAdmin guard
 
-*For any* population of accounts with roles and enabled flags, and any role-change or disable action, the guard rejects the action if and only if applying it would leave zero enabled PortalAdmin accounts.
+*For any* population of accounts with roles and enabled flags, and any role-change, disable, or delete action, the guard rejects the action if and only if applying it would leave zero enabled PortalAdmin accounts.
 
-**Validates: Requirements 5.3**
+**Validates: Requirements 5.3, 13.9, 14.3**
 
 ### Property 10: Audit completeness
 
-*For any* user management action (password change, forgot-password, role change) and any acting/affected identities, completing the action successfully records exactly one finalized audit entry carrying the acting user, the affected account, the action type, and the completion timestamp; role changes additionally carry the previous and new role; rejected attempts record an entry carrying the acting administrator, the affected account, and the rejection reason; and when the acting identity equals the affected account (self-service), the entry's acting user is the affected account.
+*For any* user management action (password change, forgot-password, role change, account creation, account disable, account enable, account deletion) and any acting/affected identities, completing the action successfully records exactly one finalized audit entry carrying the acting user, the affected account, the action type, and the completion timestamp; role changes additionally carry the previous and new role; account creations and deletions additionally carry the account's username, email, and role (for deletions, the values at the time of deletion); rejected attempts record an entry carrying the acting administrator, the affected account, and the rejection reason; and when the acting identity equals the affected account (self-service), the entry's acting user is the affected account.
 
-**Validates: Requirements 5.4, 5.5, 6.1, 6.2**
+**Validates: Requirements 5.4, 5.5, 6.1, 6.2, 12.11, 13.9, 14.4, 14.8**
 
 ### Property 11: Audit failure blocks the action
 
@@ -437,6 +457,30 @@ The prework consolidated overlapping acceptance criteria: the nine decision-matr
 
 **Validates: Requirements 11.4**
 
+### Property 24: Account creation validation gate
+
+*For any* create-account payload (arbitrary combinations of missing, empty, and populated username/email/role values, arbitrary email strings, and arbitrary role strings), the handler invokes `admin_create_user` if and only if the payload has a non-empty username, an email consisting of a non-empty local part followed by `@` followed by a non-empty domain containing at least one dot, and a role among the five defined Portal_Role values — and when it does, the call carries exactly the submitted username, email, and role; every rejection performs no User_Pool call and identifies the offending field.
+
+**Validates: Requirements 12.1, 12.6, 12.7, 12.8**
+
+### Property 25: Duplicate usernames never create or modify accounts
+
+*For any* pool population and any valid create-account payload, creation succeeds if and only if the submitted username does not match an existing account; when the username exists, the handler reports the duplicate and performs no account creation or modification of any account.
+
+**Validates: Requirements 12.5**
+
+### Property 26: Disable/enable transitions are exact
+
+*For any* account with any current enabled/disabled state and any confirmed disable or enable action, the handler invokes the corresponding User_Pool state change (`admin_disable_user`/`admin_enable_user`) and marks every configured device's staged sync set pending with the new state if and only if the requested state differs from the current state; when the account is already in the requested state, no User_Pool mutation and no sync staging occurs.
+
+**Validates: Requirements 13.2, 13.3, 13.6**
+
+### Property 27: Deletion removes the account, its verifier, and stages the removal
+
+*For any* account (with or without a stored Edge_Credential_Verifier record) and any injected fault pattern (none, User_Pool delete failure, verifier-record delete failure): a fault-free confirmed deletion deletes the account from the User_Pool, deletes the account's verifier record, and marks every configured device's staged sync set pending with the account disabled and flagged deleted; a User_Pool failure leaves both the account and the verifier record unchanged; and a verifier-record failure after a successful User_Pool delete retains the verifier record and reports that the account was deleted but its verifier record was not removed.
+
+**Validates: Requirements 14.2, 14.5, 14.6, 14.10, 7.8**
+
 ## Error Handling
 
 ### Portal backend
@@ -450,7 +494,15 @@ The prework consolidated overlapping acceptance criteria: the nine decision-matr
 | Forgot-password: `email_verified != true` | 400 before any generation or delivery (4.4) |
 | SES send failure | Error returned; `admin_set_user_password` is only called *after* a successful send, so credentials are preserved (4.5) |
 | Strict audit `put_item` failure | 500 "action not applied"; Cognito never called (6.4, 6.5) |
-| Last-PortalAdmin violation | 409 with the reason; rejected attempt audited (5.3, 5.5) |
+| Last-PortalAdmin violation | 409 with the reason; rejected attempt audited (5.3, 5.5; also disable 13.9 and delete 14.3/14.4 per D14) |
+| Create: invalid/missing field or role | 400 identifying the offending field before any Cognito call (12.6, 12.7, 12.8) |
+| Create: `UsernameExistsException` | 409 "username already exists"; no account created or modified — the Cognito call is atomic (12.5) |
+| Create: other Cognito errors | 502 "account was not created"; no account or partial record remains (12.9); audit finalized `failure` |
+| Disable/enable: already in requested state | 200 no-op with the current state; no mutation, no sync staging (13.6) |
+| Disable/enable: Cognito failure | 502 "action failed"; state unchanged (13.7); audit finalized `failure` |
+| Delete: `UserNotFoundException` | 404 "account not found"; nothing modified; UI refreshes the list (14.11) |
+| Delete: Cognito failure | 502 "deletion failed"; account and verifier record untouched — verifier delete only runs after a successful Cognito delete (14.6, D13) |
+| Delete: verifier-record delete failure after Cognito delete | Error reporting the account deleted but its verifier record not removed; record retained for a subsequent attempt (14.10) |
 | Sync document exceeds shadow size limit | Sync marked `failed` with an explicit size reason; pending changes retained |
 | Shadow write failure | Sync marked `failed` with the error; retried on the 5-minute schedule (7.6, 7.7) |
 | No ack within 60 s | `failed` / `device unreachable`; pending retained and retried (7.9) |
@@ -484,20 +536,22 @@ Feature: portal-user-manager, Property {number}: {property_text}
 Placement:
 
 - **Portal frontend (fast-check + Vitest)**: Properties 1, 3, 4 — exercised against the exported pure helpers (`filterAccounts`, table row-model builder, dropdown item builder) and component renders parameterized by role.
-- **Portal backend (Hypothesis + pytest, moto/mocked Cognito per the existing `conftest.py` session-stack pattern)**: Properties 2, 5–15 — handlers exercised through synthesized API Gateway events with a faked `cognito-idp` client (recording calls, injecting `InvalidPasswordException` etc.), moto DynamoDB for audit/credential/sync tables, and the pure functions (`generate_temp_password`, `make_verifier`, `build_sync_document`, sync-state reducer) tested directly.
+- **Portal backend (Hypothesis + pytest, moto/mocked Cognito per the existing `conftest.py` session-stack pattern)**: Properties 2, 5–15, 24–27 — handlers exercised through synthesized API Gateway events with a faked `cognito-idp` client (recording calls, injecting `InvalidPasswordException`, `UsernameExistsException`, `UserNotFoundException`, and generic faults), moto DynamoDB for audit/credential/sync tables, and the pure functions (`generate_temp_password`, `make_verifier`, `validate_create_request`, `build_sync_document`, sync-state reducer) tested directly.
 - **Edge (Hypothesis + pytest in `test/backend-test/local_auth/`)**: Properties 12 (edge apply side), 16–23 — pure modules (`session_tokens`, `credential_cache`, `lockout`, config parsing) with injected clocks and tmp-path cache files; Property 19 drives `authorize_request` through FastAPI's dependency system with a stubbed remote introspection.
 
 Mocks keep all property tests pure and fast: no real Cognito, SES, IoT, or network calls occur in any property test (the PBKDF2 iteration count is parameterized down in generators to keep 100+ iterations quick, with one example test at the production count).
 
 ### Example-based unit tests
 
-Cover the concrete scenarios classified as examples in the prework: dropdown navigation (1.3), unauthenticated redirect (1.6), list-load failure UI (2.5), password modal permanence selection required (3.2), success confirmation (3.4), generic-failure paths (3.5, 5.6), forgot-password guards (4.4, 4.5), role modal options/preselection (5.2), confirmation + refresh (5.7), offline login verification under a no-network guard (8.4), the SPA `LoginGate` in both states (8.8, 9.2), runtime config flip between requests (11.2), and the 11.3 diagnostic log message.
+Cover the concrete scenarios classified as examples in the prework: dropdown navigation (1.3), unauthenticated redirect (1.6), list-load failure UI (2.5), password modal permanence selection required (3.2), success confirmation (3.4), generic-failure paths (3.5, 5.6), forgot-password guards (4.4, 4.5), role modal options/preselection (5.2), confirmation + refresh (5.7), offline login verification under a no-network guard (8.4), the SPA `LoginGate` in both states (8.8, 9.2), runtime config flip between requests (11.2), and the 11.3 diagnostic log message. For the account life-cycle additions: the Create User modal's role options and success confirmation + refresh (12.2, 12.10), creation Cognito-failure path (12.9), disable/enable/delete confirmation modals naming the account and firing no call before confirmation (13.1, 14.1), cancel/dismiss submits nothing (14.9), success confirmation + refresh (13.8, 14.7), disable/enable failure message (13.7), and the not-found delete path with list refresh (14.11).
 
 ### Integration and smoke tests
 
 - jwt_authorizer attachment on the new admin routes (1.7) — infrastructure snapshot assertion in the CDK tests.
 - EventBridge `rate(5 minutes)` schedule and IoT topic rule → SQS wiring (7.7) — CDK snapshot assertions.
 - Cognito `FORCE_CHANGE_PASSWORD` semantics (4.2, 4.6) and role-in-fresh-JWT (5.8) — documented Cognito behavior; verified once manually against a deployed pool during rollout.
+- Cognito-native account life-cycle behavior — `admin_create_user` invitation email with a policy-conformant temporary password (12.3), forced password change at the new account's first sign-in (12.4), and refusal of sign-in and all new JWT issuance (including refresh) for disabled accounts (13.4, 13.5) — documented Cognito behavior; verified once manually against a deployed pool during rollout.
+- The extended `cognito-idp:AdminCreateUser/AdminEnableUser/AdminDisableUser/AdminDeleteUser` grants on the `user_admin.py`-scoped IAM policy — CDK snapshot assertion in the ComputeStack tests.
 - Component-configuration read at startup (11.1) — single smoke test with mocked Greengrass IPC.
 
 ### Regression safety

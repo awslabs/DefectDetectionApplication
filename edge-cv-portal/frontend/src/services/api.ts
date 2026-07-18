@@ -174,7 +174,13 @@ class ApiService {
             error.error.details
           );
         }
-        throw new Error(error.error || `HTTP ${response.status}`);
+        // Simple error envelope {error: string, ...}: carry the HTTP
+        // status so callers can branch on it (e.g. the delete-account
+        // not-found path, portal-user-manager Requirement 14.11).
+        throw new ApiError(
+          error.error || `HTTP ${response.status}`,
+          response.status
+        );
       }
 
       return response.json();
@@ -221,6 +227,24 @@ class ApiService {
   }
 
   /**
+   * Create a new portal user account (`user_admin.py`, portal-user-manager
+   * Requirement 12.1). Cognito emails the invitation with a temporary
+   * password itself — the value never appears in the response (12.10).
+   * A 409 indicates the username already exists (12.5); a 400 identifies
+   * the invalid email or missing field (12.6, 12.7).
+   */
+  async createAdminUser(body: {
+    username: string;
+    email: string;
+    role: string;
+  }): Promise<{ message: string }> {
+    return this.request<{ message: string }>('/admin/users', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
    * Set a new password on an account with the selected permanence
    * (`user_admin.py`, portal-user-manager Requirements 3.1, 3.2). A 400
    * response carries the violated Password_Policy rule verbatim (3.3).
@@ -260,6 +284,52 @@ class ApiService {
     return this.request<{ message: string }>(
       `/admin/users/${encodeURIComponent(username)}/role`,
       { method: 'PUT', body: JSON.stringify({ role }) }
+    );
+  }
+
+  /**
+   * Disable an account (`user_admin.py`, portal-user-manager Requirement
+   * 13.2). An already-disabled account is a 200 no-op returning the
+   * current state (13.6). A 409 response carries the rejection reason,
+   * e.g. the last-PortalAdmin guard (5.3, 13.9); other failures are a 502
+   * with the state unchanged (13.7).
+   */
+  async disableAdminUser(
+    username: string
+  ): Promise<{ message: string; enabled?: boolean }> {
+    return this.request<{ message: string; enabled?: boolean }>(
+      `/admin/users/${encodeURIComponent(username)}/disable`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Enable an account (`user_admin.py`, portal-user-manager Requirement
+   * 13.3). An already-enabled account is a 200 no-op returning the
+   * current state (13.6); other failures are a 502 with the state
+   * unchanged (13.7).
+   */
+  async enableAdminUser(
+    username: string
+  ): Promise<{ message: string; enabled?: boolean }> {
+    return this.request<{ message: string; enabled?: boolean }>(
+      `/admin/users/${encodeURIComponent(username)}/enable`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Delete an account (`user_admin.py`, portal-user-manager Requirement
+   * 14.2). A 409 carries the rejection reason, e.g. the last-PortalAdmin
+   * guard (14.3); a 404 means the account no longer exists in the user
+   * pool (14.11); a partial verifier-cleanup failure returns an error
+   * stating the account was deleted but its verifier record was not
+   * removed (14.10); other failures leave the account unchanged (14.6).
+   */
+  async deleteAdminUser(username: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}`,
+      { method: 'DELETE' }
     );
   }
 

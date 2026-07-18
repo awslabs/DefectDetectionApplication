@@ -1242,6 +1242,8 @@ export class ComputeStack extends cdk.Stack {
     // Cognito admin operations scoped to the portal user pool and granted
     // ONLY to user_admin.py (task 5.1): account listing/inspection,
     // password set (permanent/temporary), and custom:role updates.
+    // Extended (task 15.1) with account life-cycle operations: creation,
+    // enable/disable, and deletion.
     userAdminHandler.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
@@ -1249,6 +1251,10 @@ export class ComputeStack extends cdk.Stack {
         'cognito-idp:AdminUpdateUserAttributes',
         'cognito-idp:ListUsers',
         'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminCreateUser',
+        'cognito-idp:AdminEnableUser',
+        'cognito-idp:AdminDisableUser',
+        'cognito-idp:AdminDeleteUser',
       ],
       resources: [props.userPool.userPoolArn],
     }));

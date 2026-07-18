@@ -2,7 +2,7 @@
 
 ## Introduction
 
-This feature adds a User Manager tool to the Edge CV Portal, reachable from the settings dropdown in the top navigation and visible only to Portal Administrators. The tool lets administrators manage portal user accounts: change passwords, trigger a forgot-password flow that issues a temporary password, and change user roles. Accounts managed in the portal can be synchronized to the LocalServer edge component so that, when a configuration option is enabled, operators can log in locally on the edge device using cached credentials even while the internet connection is down. When the local-login configuration is disabled, edge access remains open (unauthenticated) exactly as it works today, and the existing bearer/JWT token support on the edge remains functional in all cases.
+This feature adds a User Manager tool to the Edge CV Portal, reachable from the settings dropdown in the top navigation and visible only to Portal Administrators. The tool lets administrators manage portal user accounts: create new accounts, change passwords, trigger a forgot-password flow that issues a temporary password, change user roles, and disable, re-enable, or delete accounts. Accounts managed in the portal can be synchronized to the LocalServer edge component so that, when a configuration option is enabled, operators can log in locally on the edge device using cached credentials even while the internet connection is down. When the local-login configuration is disabled, edge access remains open (unauthenticated) exactly as it works today, and the existing bearer/JWT token support on the edge remains functional in all cases.
 
 The portal already authenticates users through an Amazon Cognito user pool with role-based access control (roles include PortalAdmin, UseCaseAdmin, DataScientist, Operator, Viewer). The LocalServer edge component already supports optional token-based authorization: when an authorization settings file is present, API requests require a valid bearer token; when absent, access is open.
 
@@ -18,6 +18,7 @@ The portal already authenticates users through an Amazon Cognito user pool with 
 - **LocalServer**: The Greengrass edge component (FastAPI backend and local React web UI) that runs on the edge device.
 - **Account_Sync_Service**: The mechanism that transfers user account records (including credential verifiers and roles) from the Portal to the LocalServer.
 - **Local_Credential_Cache**: The store on the edge device that holds synchronized account records used for local login.
+- **Edge_Credential_Verifier**: The salted, one-way credential verifier record that the Portal stores for an account and includes in sync payloads so that the LocalServer can verify Local_Login passwords.
 - **Local_Login**: Authentication performed by the LocalServer against the Local_Credential_Cache without requiring internet connectivity.
 - **Local_Login_Configuration**: The edge-side configuration setting that enables or disables Local_Login on a given edge device.
 - **Existing_Token_Auth**: The LocalServer's current bearer-token authorization mechanism, enabled by the presence of the authorization settings file.
@@ -98,7 +99,7 @@ The portal already authenticates users through an Amazon Cognito user pool with 
 
 #### Acceptance Criteria
 
-1. WHEN a password change, forgot-password action, or role change completes successfully, THE Portal_Backend SHALL record exactly one audit log entry containing the identity of the acting user, the identity of the affected account, the action type, and the date and time at which the action completed.
+1. WHEN a password change, forgot-password action, role change, account creation, account disable action, account enable action, or account deletion completes successfully, THE Portal_Backend SHALL record exactly one audit log entry containing the identity of the acting user, the identity of the affected account, the action type, and the date and time at which the action completed.
 2. IF a user management action is initiated by the account holder rather than an administrator (such as a self-service forgot-password action), THEN THE Portal_Backend SHALL record the affected account's identity as the acting user in the audit log entry.
 3. THE Portal_Backend SHALL exclude password values, password hashes, and Temporary_Password values from audit log entries.
 4. IF the audit log entry for a user management action cannot be recorded, THEN THE Portal_Backend SHALL reject the user management action and leave the affected account in its state prior to the action.
@@ -171,3 +172,55 @@ The portal already authenticates users through an Amazon Cognito user pool with 
 2. WHEN the Local_Login_Configuration is changed on a running edge device, THE LocalServer SHALL apply the new state to all subsequent web UI and API requests within 60 seconds of the change, without requiring reinstallation of the LocalServer component.
 3. IF the Local_Login_Configuration is enabled and the Local_Credential_Cache contains no enabled accounts, THEN THE LocalServer SHALL reject each login attempt with an authentication error and SHALL log a diagnostic message indicating that no synchronized accounts are available.
 4. IF the Local_Login_Configuration value is absent from or unreadable in the component configuration, THEN THE LocalServer SHALL treat the Local_Login_Configuration as disabled.
+
+### Requirement 12: Account Creation
+
+**User Story:** As a Portal_Administrator, I want to create new user accounts from the User_Manager, so that new users can be given portal access without leaving the portal.
+
+#### Acceptance Criteria
+
+1. WHEN a Portal_Administrator submits a new account with a username, an email address, and a Portal_Role, THE Portal_Backend SHALL create the account in the User_Pool with the submitted username, email address, and Portal_Role.
+2. THE User_Manager SHALL offer only the defined Portal_Role values (PortalAdmin, UseCaseAdmin, DataScientist, Operator, Viewer) as the role choice for a new account.
+3. WHEN THE Portal_Backend creates an account in the User_Pool, THE User_Pool SHALL deliver an invitation containing a Temporary_Password that conforms to the Password_Policy to the account's email address.
+4. WHEN a newly created account signs in with its Temporary_Password, THE User_Pool SHALL require the account to set a new password conforming to the Password_Policy before granting access.
+5. IF the submitted username matches an existing account in the User_Pool, THEN THE Portal_Backend SHALL reject the creation without creating or modifying any account, and THE User_Manager SHALL display an error message indicating that the username already exists.
+6. IF the submitted email address does not consist of a non-empty local part, followed by an '@' separator, followed by a non-empty domain containing at least one dot, THEN THE Portal_Backend SHALL reject the creation without creating an account, and THE User_Manager SHALL display an error message identifying the email address as invalid.
+7. IF the submitted account is missing a username, email address, or Portal_Role, or any of these values is empty, THEN THE Portal_Backend SHALL reject the creation without creating an account, and THE User_Manager SHALL display an error message identifying the missing field.
+8. IF the submitted Portal_Role is not one of the five defined Portal_Role values (PortalAdmin, UseCaseAdmin, DataScientist, Operator, Viewer), THEN THE Portal_Backend SHALL reject the creation without creating an account.
+9. IF the User_Pool operation fails during account creation, THEN THE Portal_Backend SHALL report the failure with no account or partial account record remaining in the User_Pool, and THE User_Manager SHALL display an error message indicating that the account was not created.
+10. WHEN an account creation completes successfully, THE User_Manager SHALL display a confirmation indicating that an invitation with a Temporary_Password was sent to the account's email address, without displaying the Temporary_Password value, and SHALL refresh the displayed account list to include the new account.
+11. WHEN an account creation completes successfully, THE Portal_Backend SHALL record the creation in the portal audit log with the acting administrator and the created account's username, email address, and Portal_Role.
+
+### Requirement 13: Account Disable and Enable
+
+**User Story:** As a Portal_Administrator, I want to disable and re-enable user accounts, so that I can suspend a user's access without deleting the account.
+
+#### Acceptance Criteria
+
+1. WHEN a Portal_Administrator initiates a disable or enable action for an account, THE User_Manager SHALL require explicit confirmation identifying the affected account by username before submitting the action.
+2. WHEN a Portal_Administrator confirms a disable action for an enabled account, THE Portal_Backend SHALL mark the account as disabled in the User_Pool.
+3. WHEN a Portal_Administrator confirms an enable action for a disabled account, THE Portal_Backend SHALL mark the account as enabled in the User_Pool.
+4. WHILE an account is marked disabled in the User_Pool, THE User_Pool SHALL reject sign-in attempts for that account with an authentication error.
+5. WHILE an account is marked disabled in the User_Pool, THE User_Pool SHALL reject requests to issue new JWT tokens for that account, including requests made through token refresh.
+6. IF a confirmed disable or enable action targets an account that is already in the requested enabled/disabled state, THEN THE Portal_Backend SHALL make no change to the account and THE User_Manager SHALL refresh the displayed account list to show the account's current state.
+7. IF the User_Pool operation fails during a disable or enable action, THEN THE Portal_Backend SHALL leave the account's enabled/disabled state unchanged and THE User_Manager SHALL display an error message indicating that the action failed.
+8. WHEN a disable or enable action completes successfully, THE User_Manager SHALL display a confirmation identifying the affected account and refresh the displayed account list to show the account's new enabled/disabled state.
+9. WHEN a disable action is rejected under Requirement 5.3 (last remaining enabled PortalAdmin account), THE Portal_Backend SHALL record an audit log entry for the rejected attempt with the acting administrator, the affected account, and the rejection reason.
+
+### Requirement 14: Account Deletion
+
+**User Story:** As a Portal_Administrator, I want to delete user accounts, so that accounts that are no longer needed are removed from the portal.
+
+#### Acceptance Criteria
+
+1. WHEN a Portal_Administrator initiates a delete action for an account, THE User_Manager SHALL require explicit confirmation identifying the affected account by username before submitting the deletion.
+2. WHEN a Portal_Administrator confirms deletion of an account, THE Portal_Backend SHALL delete the account from the User_Pool.
+3. IF a delete action targets the last remaining enabled PortalAdmin account, THEN THE Portal_Backend SHALL reject the deletion without modifying the account and THE User_Manager SHALL display the reason.
+4. WHEN a delete action is rejected because it targets the last remaining enabled PortalAdmin account, THE Portal_Backend SHALL record an audit log entry for the rejected attempt with the acting administrator, the affected account, and the rejection reason.
+5. WHEN an account is deleted from the User_Pool, THE Portal_Backend SHALL delete the account's Edge_Credential_Verifier record from portal storage.
+6. IF the User_Pool operation fails during deletion, THEN THE Portal_Backend SHALL leave the account and the account's Edge_Credential_Verifier record unchanged and THE User_Manager SHALL display an error message indicating that the deletion failed.
+7. WHEN an account deletion completes successfully, THE User_Manager SHALL display a confirmation identifying the deleted account and refresh the displayed account list without the deleted account.
+8. WHEN an account deletion completes successfully, THE Portal_Backend SHALL record the deletion in the portal audit log with the acting administrator and the deleted account's username, email address, and Portal_Role at the time of deletion.
+9. IF the Portal_Administrator cancels or dismisses the confirmation without confirming, THEN THE User_Manager SHALL NOT submit the deletion and the account SHALL remain unchanged in the User_Pool.
+10. IF the Edge_Credential_Verifier record deletion fails after the account has been deleted from the User_Pool, THEN THE Portal_Backend SHALL retain the Edge_Credential_Verifier record for removal on a subsequent attempt and THE User_Manager SHALL display an error message indicating that the account was deleted but its Edge_Credential_Verifier record was not removed.
+11. IF a confirmed deletion targets an account that no longer exists in the User_Pool, THEN THE Portal_Backend SHALL report the failure without modifying any account, and THE User_Manager SHALL display an error message indicating that the account was not found and refresh the displayed account list.

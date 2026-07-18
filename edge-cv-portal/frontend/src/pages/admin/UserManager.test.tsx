@@ -17,16 +17,27 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import UserManager, { buildAccountRows, filterAccounts } from './UserManager';
 import type { AdminAccount } from '../../services/api';
 
-const { listAdminUsers, listEdgeSyncDevices, syncEdgeDevice, useAuthMock } =
-  vi.hoisted(() => ({
-    listAdminUsers: vi.fn(),
-    listEdgeSyncDevices: vi.fn(),
-    syncEdgeDevice: vi.fn(),
-    useAuthMock: vi.fn(),
-  }));
+const {
+  listAdminUsers,
+  listEdgeSyncDevices,
+  syncEdgeDevice,
+  deleteAdminUser,
+  useAuthMock,
+} = vi.hoisted(() => ({
+  listAdminUsers: vi.fn(),
+  listEdgeSyncDevices: vi.fn(),
+  syncEdgeDevice: vi.fn(),
+  deleteAdminUser: vi.fn(),
+  useAuthMock: vi.fn(),
+}));
 
 vi.mock('../../services/api', () => ({
-  apiService: { listAdminUsers, listEdgeSyncDevices, syncEdgeDevice },
+  apiService: {
+    listAdminUsers,
+    listEdgeSyncDevices,
+    syncEdgeDevice,
+    deleteAdminUser,
+  },
 }));
 
 vi.mock('../../contexts/AuthContext', () => ({
@@ -217,6 +228,56 @@ describe('UserManager rendering', () => {
     expect(
       screen.getByText('Change password for operator1')
     ).toBeInTheDocument();
+  });
+
+  it('deletes the selected account and re-fetches the list with a confirmation (Requirement 14.7)', async () => {
+    setAuthRole('PortalAdmin');
+    deleteAdminUser.mockResolvedValue({ message: 'deleted' });
+    render(<UserManager />);
+    await waitFor(() => {
+      expect(screen.getByText('operator1')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Select operator1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    // Explicit confirmation naming the account (Requirement 14.1).
+    expect(screen.getByText('Delete account operator1')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete account' }));
+
+    await waitFor(() =>
+      expect(deleteAdminUser).toHaveBeenCalledWith('operator1')
+    );
+    // Success flashbar identifies the deleted account and the list is
+    // re-fetched without it (Requirement 14.7).
+    expect(
+      await screen.findByText('Account operator1 was deleted.')
+    ).toBeInTheDocument();
+    expect(listAdminUsers).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a not-found error in a flashbar and refreshes the list (Requirement 14.11)', async () => {
+    setAuthRole('PortalAdmin');
+    deleteAdminUser.mockRejectedValue(
+      Object.assign(new Error('User not found'), { status: 404 })
+    );
+    render(<UserManager />);
+    await waitFor(() => {
+      expect(screen.getByText('operator1')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Select operator1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete account' }));
+
+    // The error is surfaced in a flashbar and the account list is
+    // refreshed (Requirement 14.11).
+    expect(
+      await screen.findByText(/operator1 was not found/)
+    ).toBeInTheDocument();
+    expect(listAdminUsers).toHaveBeenCalledTimes(2);
+    // The confirmation modal is closed.
+    expect(screen.queryByText('Delete account operator1')).toBeNull();
   });
 
   it('renders an error alert and no account rows on load failure (Requirement 2.5)', async () => {
