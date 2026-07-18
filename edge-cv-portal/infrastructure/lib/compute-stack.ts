@@ -1235,6 +1235,11 @@ export class ComputeStack extends cdk.Stack {
 
     edgeCredentialsTable.grantReadWriteData(userAdminHandler);
     accountSyncTable.grantReadWriteData(userAdminHandler);
+    // The strict audit helpers (finalize_audit_event in the shared layer)
+    // Query the audit-log table to locate the pending entry before updating
+    // it, so user_admin needs read access on top of the shared write grant
+    // (Requirements 6.1, 6.4).
+    props.auditLogTable.grantReadData(userAdminHandler);
     // Immediate sync attempt after staging (the 5-minute schedule is the
     // fallback when the invoke fails).
     accountSyncHandler.grantInvoke(userAdminHandler);
