@@ -64,6 +64,9 @@ const dataBucketAllowlist: string[] = (app.node.tryGetContext('dataBucketAllowli
 const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   env,
   description: 'Compute and API infrastructure for Edge CV Portal',
+  // The rendered template is near CloudFormation's hard 1 MB limit; emitting
+  // it without JSON indentation keeps it well under (CDK's recommended fix).
+  suppressTemplateIndentation: true,
   userPool: authStack.userPool,
   useCasesTable: storageStack.useCasesTable,
   userRolesTable: storageStack.userRolesTable,
