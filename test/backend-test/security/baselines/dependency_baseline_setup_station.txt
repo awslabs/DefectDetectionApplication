@@ -585,7 +585,7 @@ fi
 if [ -n "$PYTHON311" ]; then
   echo "Using Python at: $PYTHON311"
   run_cmd "$PYTHON311 -m pip install --upgrade pip" || add_warning "Failed to upgrade pip"
-  run_cmd "$PYTHON311 -m pip install --force-reinstall requests==2.32.4" || add_warning "Failed to install requests"
+  run_cmd "$PYTHON311 -m pip install --force-reinstall requests==2.32.3" || add_warning "Failed to install requests"
   run_cmd "$PYTHON311 -m pip install protobuf" || add_warning "Failed to install protobuf"
 else
   add_warning "python3.11 not found. Using system python3 instead."
