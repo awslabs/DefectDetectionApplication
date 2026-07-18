@@ -4,10 +4,12 @@ Shared utilities for Edge CV Portal Lambda functions
 import json
 import os
 import logging
+import uuid
 from typing import Dict, Any, Optional, List, Set
 from datetime import datetime
 from decimal import Decimal
 import boto3
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from enum import Enum
 from functools import wraps
@@ -146,6 +148,141 @@ def log_audit_event(user_id: str, action: str, resource_type: str,
         logger.info(f"Audit event logged: {action} on {resource_type}/{resource_id}")
     except Exception as e:
         logger.error(f"Error logging audit event: {str(e)}")
+
+
+# Strict (raising) audit helpers — portal-user-manager
+#
+# Unlike log_audit_event above (which swallows errors), these helpers
+# implement the two-phase audit-before-effect protocol: a 'pending' entry
+# is written (and any failure RAISED) before the guarded operation runs,
+# then the entry is finalized to its terminal result afterwards.
+
+# Action types recorded against user accounts by the User Manager.
+USER_ACCOUNT_AUDIT_ACTIONS = ('password_change', 'forgot_password', 'role_change')
+
+# Resource type used for user-account audit entries.
+USER_ACCOUNT_RESOURCE_TYPE = 'user_account'
+
+# Valid audit results for the two-phase protocol.
+AUDIT_RESULT_PENDING = 'pending'
+AUDIT_RESULTS = ('pending', 'success', 'failure', 'rejected')
+AUDIT_FINAL_RESULTS = ('success', 'failure', 'rejected')
+
+# Denylist for audit details: 'temp*' is a prefix match (temporary
+# passwords), the others match anywhere in the key (password_hash,
+# new_password, credential_verifier, ...).
+_AUDIT_DETAILS_DENY_SUBSTRINGS = ('password', 'verifier', 'hash')
+_AUDIT_DETAILS_DENY_PREFIXES = ('temp',)
+
+
+def _is_denied_audit_detail_key(key: Any) -> bool:
+    """True when a details key must never reach the audit log."""
+    normalized = str(key).lower()
+    return (
+        any(term in normalized for term in _AUDIT_DETAILS_DENY_SUBSTRINGS)
+        or normalized.startswith(_AUDIT_DETAILS_DENY_PREFIXES)
+    )
+
+
+def sanitize_audit_details(details: Optional[Dict]) -> Dict:
+    """Drop denylisted keys (password / verifier / hash / temp*) from
+    audit details, recursively through nested dicts and lists.
+
+    Passwords, password hashes, credential verifiers, and temporary
+    password values must never be written to the audit log (Req 6.3).
+    """
+    def _sanitize(value):
+        if isinstance(value, dict):
+            return {
+                key: _sanitize(nested)
+                for key, nested in value.items()
+                if not _is_denied_audit_detail_key(key)
+            }
+        if isinstance(value, (list, tuple)):
+            return [_sanitize(nested) for nested in value]
+        return value
+
+    return _sanitize(details or {})
+
+
+def record_audit_event_strict(user_id: str, action: str, resource_type: str,
+                              resource_id: str, result: str = AUDIT_RESULT_PENDING,
+                              details: Optional[Dict] = None) -> str:
+    """Write an audit entry and RAISE on failure (strict variant of
+    log_audit_event).
+
+    First phase of the audit-before-effect protocol: call with
+    result='pending' BEFORE performing the guarded operation; if this
+    raises, the caller must abort the operation (Req 6.4, 6.5).
+
+    Returns the event_id used to finalize_audit_event() afterwards.
+    """
+    if result not in AUDIT_RESULTS:
+        raise ValueError(f"Invalid audit result: {result!r} "
+                         f"(expected one of {AUDIT_RESULTS})")
+
+    table = dynamodb.Table(AUDIT_LOG_TABLE)
+    timestamp = int(datetime.utcnow().timestamp() * 1000)
+    event_id = f"{user_id}_{timestamp}_{uuid.uuid4().hex[:8]}"
+
+    item = {
+        'event_id': event_id,
+        'timestamp': timestamp,
+        'user_id': user_id,
+        'action': action,
+        'resource_type': resource_type,
+        'resource_id': resource_id,
+        'result': result,
+        'details': sanitize_audit_details(details),
+        'ttl': timestamp + (90 * 24 * 60 * 60 * 1000)  # 90 days retention
+    }
+
+    table.put_item(Item=item)
+    logger.info(f"Strict audit event recorded ({result}): "
+                f"{action} on {resource_type}/{resource_id}")
+    return event_id
+
+
+def finalize_audit_event(event_id: str, result: str,
+                         details: Optional[Dict] = None):
+    """Second phase of the audit-before-effect protocol: move a pending
+    entry to its terminal result ('success' | 'failure' | 'rejected'),
+    merging sanitized details and stamping the completion time (Req 6.1).
+
+    Raises on lookup/update failure so callers can surface the problem.
+    """
+    if result not in AUDIT_FINAL_RESULTS:
+        raise ValueError(f"Invalid final audit result: {result!r} "
+                         f"(expected one of {AUDIT_FINAL_RESULTS})")
+
+    table = dynamodb.Table(AUDIT_LOG_TABLE)
+
+    # The table key is (event_id, timestamp); recover the range key from
+    # the partition so callers only need the event_id handle.
+    response = table.query(
+        KeyConditionExpression=Key('event_id').eq(event_id)
+    )
+    items = response.get('Items', [])
+    if not items:
+        raise ValueError(f"Audit event not found: {event_id}")
+    entry = items[0]
+
+    completed_at = int(datetime.utcnow().timestamp() * 1000)
+    merged_details = dict(entry.get('details') or {})
+    merged_details.update(sanitize_audit_details(details))
+
+    table.update_item(
+        Key={'event_id': event_id, 'timestamp': entry['timestamp']},
+        UpdateExpression='SET #result = :result, #details = :details, '
+                         'completed_at = :completed_at',
+        ExpressionAttributeNames={'#result': 'result', '#details': 'details'},
+        ExpressionAttributeValues={
+            ':result': result,
+            ':details': merged_details,
+            ':completed_at': completed_at,
+        },
+    )
+    logger.info(f"Audit event finalized ({result}): {event_id}")
 
 
 # RBAC Authorization System

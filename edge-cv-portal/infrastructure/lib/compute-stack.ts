@@ -10,11 +10,13 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
+import * as iot from 'aws-cdk-lib/aws-iot';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import { ApiGatewayStack } from './api-gateway-stack';
 import { CameraRegistryApiStack } from './camera-registry-api-stack';
+import { UserAdminApiStack } from './user-admin-api-stack';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
@@ -1024,6 +1026,247 @@ export class ComputeStack extends cdk.Stack {
     }));
 
     // ------------------------------------------------------------------
+    // Portal User Manager (portal-user-manager, task 5.1)
+    // PortalAdmin-only Cognito account management (user_admin.py) and the
+    // Account_Sync_Service portal side (account_sync.py): accounts are
+    // delivered to each edge device over the dda-user-accounts named
+    // shadow; the device acks via reported.ackSyncId, forwarded by an IoT
+    // topic rule into the SQS queue below and ingested back into the
+    // per-device sync-state table. An EventBridge rate(5 minutes)
+    // schedule drives retries and the 60-second ack-timeout sweep.
+    // ------------------------------------------------------------------
+
+    // Verified SES sender for temporary-password delivery (design D11):
+    // Cognito cannot email a temporary password to an existing CONFIRMED
+    // user, so user_admin.py sends it via SES from this address. The
+    // address (or an address on a verified domain identity) must be
+    // verified in SES in this account/region before the forgot-password
+    // flow is used; user_admin.py rejects the action when unset.
+    const sesSenderAddress = new cdk.CfnParameter(this, 'SesSenderAddress', {
+      type: 'String',
+      default: '',
+      description:
+        'Verified SES sender address for User_Manager temporary-password ' +
+        'emails (portal-user-manager design D11). Leave empty to disable ' +
+        'the forgot-password flow.',
+    });
+
+    // Credential-verifier table (design D3/D4): salted one-way PBKDF2
+    // verifiers captured by user_admin.py password flows; never contains
+    // plaintext. Read at listing time for the edgeCapable flag and by the
+    // sync staging path.
+    const edgeCredentialsTable = new dynamodb.Table(this, 'EdgeCredentialsTable', {
+      tableName: 'dda-portal-edge-credentials',
+      partitionKey: {
+        name: 'username',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Per-device account-sync state (staged account set + syncId, status,
+    // attemptAt/lastSyncAt, pendingChanges) — the Account_Sync_Service
+    // reducer state (Reqs 7.4-7.9).
+    const accountSyncTable = new dynamodb.Table(this, 'AccountSyncTable', {
+      tableName: 'dda-portal-account-sync',
+      partitionKey: {
+        name: 'device_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Dead-letter queue for ack events that repeatedly fail processing
+    // (malformed acks are also dead-lettered explicitly by the handler
+    // without blocking the batch — camera-registry-sync pattern).
+    const accountSyncAckDlq = new sqs.Queue(this, 'AccountSyncAckDLQ', {
+      queueName: 'dda-portal-account-sync-acks-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+    });
+
+    // Ack queue fed by the dda-user-accounts shadow topic rule(s). The
+    // visibility timeout is a multiple of the consumer Lambda timeout per
+    // the SQS event-source guidance.
+    const accountSyncAckQueue = new sqs.Queue(this, 'AccountSyncAckQueue', {
+      queueName: 'dda-portal-account-sync-acks',
+      visibilityTimeout: cdk.Duration.seconds(180),
+      retentionPeriod: cdk.Duration.days(4),
+      enforceSSL: true,
+      deadLetterQueue: {
+        queue: accountSyncAckDlq,
+        maxReceiveCount: 3,
+      },
+    });
+
+    // Cross-account queue policy: an IoT topic rule delivers to SQS
+    // through its rule role, an IAM principal in the account where the
+    // rule runs. Allow SendMessage from the trusted UseCase accounts
+    // (devices whose shadows live there) plus this portal account.
+    accountSyncAckQueue.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'AllowUseCaseAccountIotRuleDelivery',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['sqs:SendMessage'],
+      resources: [accountSyncAckQueue.queueArn],
+      conditions: {
+        StringEquals: {
+          'aws:PrincipalAccount': Array.from(
+            new Set([...props.trustedUseCaseAccountIds, cdk.Aws.ACCOUNT_ID])
+          ),
+        },
+      },
+    }));
+
+    // Portal-account IoT topic rule forwarding every dda-user-accounts
+    // shadow update/documents event (device acks) to the ack queue.
+    // topic(3) is the thing name in $aws/things/{thing}/shadow/... —
+    // account_sync.py's ack parser requires the injected thing_name.
+    const userAccountsShadowRuleRole = new iam.Role(this, 'UserAccountsShadowRuleRole', {
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com'),
+      description:
+        'Role for the dda-user-accounts shadow IoT topic rule to deliver ' +
+        'shadow documents events to the DDA Portal account-sync ack queue',
+    });
+    userAccountsShadowRuleRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SendAccountSyncAcks',
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:SendMessage'],
+      resources: [accountSyncAckQueue.queueArn],
+    }));
+
+    new iot.CfnTopicRule(this, 'UserAccountsShadowRule', {
+      ruleName: 'dda_user_accounts_shadow_documents',
+      topicRulePayload: {
+        sql: "SELECT *, topic(3) AS thing_name FROM '$aws/things/+/shadow/name/dda-user-accounts/update/documents'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        description:
+          'Forward dda-user-accounts shadow documents events to the DDA ' +
+          'Portal account-sync ack queue',
+        actions: [
+          {
+            sqs: {
+              queueUrl: accountSyncAckQueue.queueUrl,
+              roleArn: userAccountsShadowRuleRole.roleArn,
+              useBase64: false,
+            },
+          },
+        ],
+      },
+    });
+
+    // Account_Sync_Service Lambda (account_sync.py) — three entry paths
+    // routed by event shape: SQS records -> ack ingest, direct
+    // {action: 'sync_attempt'} invoke from user_admin.py, EventBridge
+    // scheduled event -> timeout sweep + pending-changes delivery pass.
+    // Shadow writes go through the base-role IoT grant (Get/Update
+    // ThingShadow on thing/*) or the assumed use-case role for
+    // cross-account devices (camera_registry.py pattern).
+    const accountSyncHandler = new lambda.Function(this, 'AccountSyncHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'account_sync.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('AccountSync'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-06-account-sync',
+        ACCOUNT_SYNC_TABLE: accountSyncTable.tableName,
+        ACCOUNT_SYNC_ACK_DLQ_URL: accountSyncAckDlq.queueUrl,
+      },
+      layers: [sharedLayer],
+      // The scheduled pass attempts delivery for every device with
+      // pending changes in one invocation.
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    accountSyncHandler.addEventSource(new SqsEventSource(accountSyncAckQueue, {
+      batchSize: 10,
+      reportBatchItemFailures: true,
+    }));
+
+    // The handler dead-letters malformed acks explicitly (in addition to
+    // the redrive policy above).
+    accountSyncAckDlq.grantSendMessages(accountSyncHandler);
+    accountSyncTable.grantReadWriteData(accountSyncHandler);
+
+    // Retry/timeout driver: WHILE a device has undelivered pending
+    // changes, delivery is attempted at intervals not exceeding 5 minutes
+    // (Req 7.7); the same pass marks in_progress rows older than 60 s
+    // without an ack as failed / device unreachable (Req 7.9).
+    const accountSyncScheduleRule = new events.Rule(this, 'AccountSyncScheduleRule', {
+      ruleName: 'dda-portal-account-sync-schedule',
+      description:
+        'Drives Account_Sync_Service retries and ack-timeout sweeps ' +
+        '(portal-user-manager Reqs 7.7, 7.9)',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+    });
+    accountSyncScheduleRule.addTarget(new targets.LambdaFunction(accountSyncHandler));
+
+    // User_Manager admin API Lambda (user_admin.py) — PortalAdmin-only
+    // Cognito account management behind /admin/* (routes attached by the
+    // UserAdminApiStack below). Separate function so the cognito-idp
+    // admin and SES grants stay scoped to it alone (design D1).
+    const userAdminHandler = new lambda.Function(this, 'UserAdminHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'user_admin.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('UserAdmin'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-06-user-admin',
+        EDGE_CREDENTIALS_TABLE: edgeCredentialsTable.tableName,
+        ACCOUNT_SYNC_TABLE: accountSyncTable.tableName,
+        ACCOUNT_SYNC_FUNCTION: accountSyncHandler.functionName,
+        SES_SENDER_ADDRESS: sesSenderAddress.valueAsString,
+      },
+      layers: [sharedLayer],
+      // Full-pool list_users pagination (listing + last-PortalAdmin guard).
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    edgeCredentialsTable.grantReadWriteData(userAdminHandler);
+    accountSyncTable.grantReadWriteData(userAdminHandler);
+    // Immediate sync attempt after staging (the 5-minute schedule is the
+    // fallback when the invoke fails).
+    accountSyncHandler.grantInvoke(userAdminHandler);
+
+    // Cognito admin operations scoped to the portal user pool and granted
+    // ONLY to user_admin.py (task 5.1): account listing/inspection,
+    // password set (permanent/temporary), and custom:role updates.
+    userAdminHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'cognito-idp:AdminSetUserPassword',
+        'cognito-idp:AdminUpdateUserAttributes',
+        'cognito-idp:ListUsers',
+        'cognito-idp:AdminGetUser',
+      ],
+      resources: [props.userPool.userPoolArn],
+    }));
+
+    // SES send for temporary-password delivery (design D11). Scoped to
+    // this account's verified identities: SES authorizes SendEmail
+    // against the identity of the Source address — an address identity
+    // or the domain identity covering it — so identity/* (rather than a
+    // single address ARN) keeps domain-verified senders working.
+    userAdminHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ses:SendEmail'],
+      resources: [
+        `arn:aws:ses:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:identity/*`,
+      ],
+    }));
+
+    // ------------------------------------------------------------------
     // Workflow Manager Lambda functions
     // Handler modules (workflows.py, workflow_validation.py,
     // workflow_packaging.py, workflow_generator.py, workflow_testing.py)
@@ -1559,6 +1802,22 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     // The stage re-pointing deployment inside CameraRegistryApiStack needs
     // the ApiGatewayStack's stage (and its own deployment) to exist first.
     cameraRegistryApiStack.addDependency(apiGatewayStack);
+
+    // User_Manager admin routes (portal-user-manager) in their own nested
+    // stack for the same 500-resource-limit reason; every /admin/* method
+    // is behind the JWT authorizer (Requirement 1.7).
+    const userAdminApiStack = new UserAdminApiStack(this, 'UserAdminApi', {
+      restApiId: apiGatewayStack.api.restApiId,
+      restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+      // Must match ApiGatewayStack deployOptions.stageName.
+      stageName: 'v1',
+      userPool: props.userPool,
+      userAdminHandler,
+    });
+    userAdminApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (both nested stacks
+    // deploy against the same stage).
+    userAdminApiStack.addDependency(cameraRegistryApiStack);
 
     // Custom Resource to update UseCases Lambda environment variable with API Gateway ID
     // This avoids circular dependency by updating the Lambda AFTER both resources are created

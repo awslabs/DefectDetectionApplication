@@ -17,6 +17,7 @@ ComponentConfiguration:
     AppRunnerShadowName: "appRunnerShadow"
     StationName: "DDA_Station_ARM64_JP5"
     ComponentName: "aws.edgeml.dda.LocalServer.arm64JP5"
+    LocalLoginEnabled: "false"
     accessControl:
       aws.greengrass.ShadowManager:
         'aws.edgeml.dda.LocalServer.arm64JP5:shadow:1':

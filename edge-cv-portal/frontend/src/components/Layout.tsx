@@ -5,6 +5,7 @@ import {
   TopNavigation,
   SideNavigation,
   SideNavigationProps,
+  ButtonDropdownProps,
   Modal,
   SpaceBetween,
   FormField,
@@ -14,7 +15,49 @@ import {
   Alert,
 } from '@cloudscape-design/components';
 import { useAuth } from '../contexts/AuthContext';
+import { UserRole } from '../types';
 import { getConfig, getBuildInfo } from '../config';
+
+/**
+ * Builds the items for the top-navigation settings dropdown based on the
+ * user's role (portal-user-manager Requirements 1.1, 1.2).
+ *
+ * Exported as a pure function so the role gating is directly testable:
+ * the `user-manager` item is present only for PortalAdmin users — it is
+ * omitted entirely (not merely disabled) for every other role.
+ */
+export function buildSettingsDropdownItems(
+  role: UserRole | undefined
+): ButtonDropdownProps.ItemOrGroup[] {
+  const isPortalAdmin = role === 'PortalAdmin';
+  return [
+    {
+      id: 'profile',
+      text: 'Profile',
+      disabled: true,
+    },
+    {
+      id: 'settings',
+      text: 'Settings',
+      // The settings page is PortalAdmin-only (same rule as the
+      // sidebar link); other roles see the item disabled.
+      disabled: !isPortalAdmin,
+    },
+    // The User Manager tool is PortalAdmin-only and, unlike the settings
+    // item, is omitted entirely for other roles (Requirement 1.2).
+    ...(isPortalAdmin
+      ? [{ id: 'user-manager', text: 'User Manager' }]
+      : []),
+    {
+      id: 'change-password',
+      text: 'Change Password',
+    },
+    {
+      id: 'logout',
+      text: 'Sign out',
+    },
+  ];
+}
 
 export default function Layout() {
   const navigate = useNavigate();
@@ -101,34 +144,15 @@ export default function Layout() {
             text: user?.email || user?.username || 'User',
             description: user?.role || '',
             iconName: 'user-profile',
-            items: [
-              {
-                id: 'profile',
-                text: 'Profile',
-                disabled: true,
-              },
-              {
-                id: 'settings',
-                text: 'Settings',
-                // The settings page is PortalAdmin-only (same rule as the
-                // sidebar link); other roles see the item disabled.
-                disabled: !isPortalAdmin,
-              },
-              {
-                id: 'change-password',
-                text: 'Change Password',
-              },
-              {
-                id: 'logout',
-                text: 'Sign out',
-              },
-            ],
+            items: buildSettingsDropdownItems(user?.role),
             onItemClick: async ({ detail }) => {
               if (detail.id === 'logout') {
                 await logout();
                 navigate('/login');
               } else if (detail.id === 'settings') {
                 navigate('/settings');
+              } else if (detail.id === 'user-manager') {
+                navigate('/admin/user-manager');
               } else if (detail.id === 'change-password') {
                 setShowChangePassword(true);
                 setChangePwError('');

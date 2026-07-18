@@ -109,7 +109,8 @@ from endpoints import (
     auth_info,
     download_file,
     inference_result,
-    streams
+    streams,
+    local_auth
 )
 
 # Workflow Manager engine (additive subsystem, Requirement 13)
@@ -159,6 +160,10 @@ app.include_router(auth_info.router)
 app.include_router(download_file.unauthenticated_router)
 app.include_router(inference_result.router)
 app.include_router(streams.router)
+# Local_Login endpoints (portal-user-manager): intentionally carry no auth
+# dependency — /local-auth/login and /local-auth/status must be reachable
+# without credentials (exempt from authorize_request, task 9.4).
+app.include_router(local_auth.router)
 
 
 def cleanup_workflow_digital_inputs():

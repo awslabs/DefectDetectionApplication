@@ -75,6 +75,55 @@ export interface CodeAssistResponse {
   contract: CodeAssistContract;
 }
 
+// User admin types (portal-user-manager).
+
+/**
+ * One Cognito account as returned by `GET /api/v1/admin/users`
+ * (portal-user-manager Requirement 2.1). `role` is the Portal_Role from
+ * the `custom:role` attribute (default `Viewer`); `user_status` is the
+ * Cognito status (e.g. CONFIRMED, FORCE_CHANGE_PASSWORD); `edge_capable`
+ * is true when a credential verifier has been captured for the account,
+ * making it usable for local edge login.
+ */
+export interface AdminAccount {
+  username: string;
+  email: string;
+  email_verified: boolean;
+  role: string;
+  user_status: string;
+  enabled: boolean;
+  edge_capable: boolean;
+}
+
+/** Response of `GET /api/v1/admin/users` (user_admin.py). */
+export interface AdminUsersResponse {
+  users: AdminAccount[];
+  total_count: number;
+}
+
+/**
+ * One edge device row of `GET /api/v1/admin/edge-sync/devices`
+ * (portal-user-manager Requirement 7.4): the devices table joined with
+ * the `dda-portal-account-sync` sync-state table. `lastSyncStatus` /
+ * `lastSyncAt` are absent for devices that have never been synced;
+ * `failureReason` accompanies a `failed` status (e.g. "device
+ * unreachable").
+ */
+export interface EdgeSyncDevice {
+  device_id: string;
+  lastSyncStatus?: 'pending' | 'in_progress' | 'success' | 'failed' | null;
+  /** Epoch milliseconds of the last successful sync. */
+  lastSyncAt?: number | null;
+  pendingChanges?: boolean;
+  failureReason?: string | null;
+}
+
+/** Response of `GET /api/v1/admin/edge-sync/devices` (user_admin.py). */
+export interface EdgeSyncDevicesResponse {
+  devices: EdgeSyncDevice[];
+  count: number;
+}
+
 class ApiService {
   private get baseUrl(): string {
     return getConfig().apiUrl;
@@ -159,6 +208,83 @@ class ApiService {
   // Auth endpoints
   async getCurrentUser(): Promise<{ user: User }> {
     return this.request<{ user: User }>('/auth/me');
+  }
+
+  // User admin endpoints (portal-user-manager) — PortalAdmin only.
+
+  /**
+   * All portal user accounts from the Cognito user pool
+   * (`user_admin.py`, portal-user-manager Requirement 2.1).
+   */
+  async listAdminUsers(): Promise<AdminUsersResponse> {
+    return this.request<AdminUsersResponse>('/admin/users');
+  }
+
+  /**
+   * Set a new password on an account with the selected permanence
+   * (`user_admin.py`, portal-user-manager Requirements 3.1, 3.2). A 400
+   * response carries the violated Password_Policy rule verbatim (3.3).
+   */
+  async setAdminUserPassword(
+    username: string,
+    body: { password: string; permanent: boolean }
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}/password`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Trigger the forgot-password flow: a temporary password is generated
+   * and emailed to the account's registered address; the value is never
+   * returned to the client (portal-user-manager Requirements 4.1, 4.3).
+   * A 400 response indicates the account has no verified email (4.4).
+   */
+  async sendAdminForgotPassword(username: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}/forgot-password`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Change an account's Portal_Role (`user_admin.py`, portal-user-manager
+   * Requirement 5.1). A 409 response carries the rejection reason, e.g.
+   * the last-PortalAdmin guard (5.3).
+   */
+  async setAdminUserRole(
+    username: string,
+    role: string
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}/role`,
+      { method: 'PUT', body: JSON.stringify({ role }) }
+    );
+  }
+
+  /**
+   * Edge devices with their per-device account-sync state: last sync
+   * status, last sync timestamp, and whether changes are pending
+   * (`user_admin.py`, portal-user-manager Requirement 7.4).
+   */
+  async listEdgeSyncDevices(): Promise<EdgeSyncDevicesResponse> {
+    return this.request<EdgeSyncDevicesResponse>('/admin/edge-sync/devices');
+  }
+
+  /**
+   * Stage the selected accounts for sync to an edge device and trigger
+   * an immediate sync attempt (`user_admin.py`, portal-user-manager
+   * Requirement 7.1).
+   */
+  async syncEdgeDevice(
+    deviceId: string,
+    usernames: string[]
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/edge-sync/devices/${encodeURIComponent(deviceId)}`,
+      { method: 'POST', body: JSON.stringify({ usernames }) }
+    );
   }
 
   // UseCase endpoints

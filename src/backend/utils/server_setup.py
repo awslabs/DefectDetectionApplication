@@ -237,3 +237,120 @@ try:
     ).start()
 except Exception:  # noqa: BLE001 - even thread creation must not break startup
     logger.exception("Could not start the camera registry sync thread")
+
+
+# --- user accounts sync + local login config (portal-user-manager, task 10.3) --
+#
+# The Account_Sync_Service edge agent and the Local_Login_Configuration
+# poller follow the camera-registry-sync wiring above: everything runs on
+# daemon threads behind exception guards, so a failure is logged and leaves
+# the rest of LocalServer startup untouched (the fail-safe state is simply
+# "no synced accounts / local login disabled"). Requirement 11.1.
+
+user_accounts_sync_agent = None
+
+
+def start_user_accounts_sync():
+    """Construct and start the user-accounts sync agent.
+
+    Imports are deferred so this module section stays importable in
+    environments without the feature's optional runtime pieces; awsiot
+    usage inside ``make_shadow_stream_handler`` is likewise deferred by
+    the user_accounts_sync module itself.
+
+    Returns the agent; raises on any construction or start failure — the
+    caller isolates that from server startup.
+    """
+    from user_accounts_sync import (
+        UserAccountsSyncAgent,
+        delta_topic_prefix,
+        make_shadow_stream_handler,
+    )
+    from mqtt.SubscriptionHandler import SubscriptionHandler
+
+    # Shadow I/O goes through the existing IoTShadowAccessor (the device's
+    # own IoT identity); thing name defaults to AWS_IOT_THING_NAME.
+    agent = UserAccountsSyncAgent(iot_shadow_accessor)
+
+    # Build the delta subscription pieces before starting anything, so a
+    # construction failure (e.g. the deferred awsiot import inside
+    # make_shadow_stream_handler) never leaves half-started threads behind.
+    subscription = SubscriptionHandler(
+        delta_topic_prefix(agent.thing_name, agent.shadow_name),
+        make_shadow_stream_handler(agent),
+        publish_handler,
+    )
+
+    # Startup catch-up: apply any desired sync document that arrived while
+    # the device was offline (the agent guards its own failures).
+    agent.start()
+
+    # Delta subscription for portal-originated sync documents, following
+    # the existing MQTT SubscriptionHandler pattern. subscribe() blocks to
+    # keep its stream alive, so it gets its own daemon thread.
+    def _subscribe():
+        try:
+            subscription.subscribe()
+        except Exception:  # noqa: BLE001 - subscription isolation
+            logger.exception(
+                "User-accounts shadow subscription failed; portal-originated "
+                "account syncs will not be applied until the next restart"
+            )
+
+    threading.Thread(
+        target=_subscribe,
+        name="user-accounts-sync-shadow-subscription",
+        daemon=True,
+    ).start()
+
+    return agent
+
+
+def _start_user_accounts_sync_isolated():
+    """Daemon-thread entry point: any construction or start failure is
+    logged and swallowed so LocalServer startup proceeds untouched."""
+    global user_accounts_sync_agent
+    try:
+        user_accounts_sync_agent = start_user_accounts_sync()
+        logger.info("User accounts sync started")
+    except Exception:  # noqa: BLE001 - top-level failure isolation
+        logger.exception(
+            "User accounts sync failed to start; continuing LocalServer "
+            "startup without it"
+        )
+
+
+def _start_local_login_config_isolated():
+    """Daemon-thread entry point: start the Local_Login_Configuration
+    poller (startup read + 30 s re-poll, Requirement 11.1). Any failure is
+    logged and swallowed — local login then stays in its fail-safe
+    disabled state."""
+    try:
+        from local_auth.config import get_local_login_config
+
+        get_local_login_config().start()
+        logger.info("Local login configuration poller started")
+    except Exception:  # noqa: BLE001 - top-level failure isolation
+        logger.exception(
+            "Local login configuration poller failed to start; local login "
+            "stays disabled"
+        )
+
+
+try:
+    threading.Thread(
+        target=_start_user_accounts_sync_isolated,
+        name="user-accounts-sync-startup",
+        daemon=True,
+    ).start()
+except Exception:  # noqa: BLE001 - even thread creation must not break startup
+    logger.exception("Could not start the user accounts sync thread")
+
+try:
+    threading.Thread(
+        target=_start_local_login_config_isolated,
+        name="local-login-config-startup",
+        daemon=True,
+    ).start()
+except Exception:  # noqa: BLE001 - even thread creation must not break startup
+    logger.exception("Could not start the local login configuration thread")

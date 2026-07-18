@@ -43,7 +43,7 @@ from dao.sqlite_db.sqlite_db_operations import SessionLocal
 from starlette.status import HTTP_404_NOT_FOUND
 
 # Custom Modules
-from utils.auth import validate_token
+from utils.auth import authorize_credential
 from utils.constants import SNAPSHOT_FILE_PATTERN, PREDICTION, CAPTURED_IDS_PATH_PATTERN, DDA_SYSTEM_FOLDER
 from utils import utils, inference_results_utils
 import logging
@@ -64,9 +64,12 @@ def get_db():
 
 # Following function is to handle token added in url parameter 
 def validate_token_in_query_param(token: str):
-    if utils.is_authorization_enabled_on_station():
-        # Validate token only if auth is enabled on station
-        validate_token(token)
+    # Downloads open a new browser link, so the credential arrives as a URL
+    # query parameter instead of an Authorization header. Apply the same
+    # per-request decision matrix as authorize_request: open access when both
+    # mechanisms are off, and either/or acceptance of a valid existing bearer
+    # or a valid Local_Session_Token otherwise (Requirements 10.1, 10.2).
+    authorize_credential(token)
 
 
 ### Following APIs will need separate Auth check instead of in API router, 

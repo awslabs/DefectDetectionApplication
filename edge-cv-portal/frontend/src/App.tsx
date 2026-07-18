@@ -37,6 +37,7 @@ import SimulatorView from './pages/node-designer/SimulatorView';
 import ImportView from './pages/node-designer/ImportView';
 import Settings from './pages/Settings';
 import AuditLogs from './pages/AuditLogs';
+import UserManager from './pages/admin/UserManager';
 import Login from './pages/Login';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -107,6 +108,7 @@ function App() {
                   element={<SimulatorView />}
                 />
                 <Route path="settings" element={<Settings />} />
+                <Route path="admin/user-manager" element={<UserManager />} />
                 <Route path="audit" element={<AuditLogs />} />
               </Route>
             </Routes>

@@ -20,6 +20,7 @@ ComponentConfiguration:
   DefaultConfiguration:
     StreamShadowName: "streamConfigurationShadow"
     AppRunnerShadowName: "appRunnerShadow"
+    LocalLoginEnabled: "false"
     accessControl:
       aws.greengrass.ShadowManager:
         'aws.edgeml.dda.LocalServer.amd64:shadow:1':

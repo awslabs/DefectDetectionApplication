@@ -42,6 +42,7 @@ import ResultHistory from "components/result-history/ResultHistory";
 import ResultDetails from "components/result-history/ResultDetails";
 import { DynamicRouterHashKey } from "components/layout/constants";
 import AuthProvider from "components/auth/AuthProvider";
+import LoginGate from "components/auth/LoginGate";
 import "components/auth/AuthContextProvider";
 import { AuthContextProvider } from "components/auth/AuthContextProvider";
 import ListImageSources from "components/image-source/list/ListImageSources";
@@ -192,7 +193,13 @@ const router = createBrowserRouter(
 export default function App(): JSX.Element {
   return (
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      {/* LoginGate (portal-user-manager): when local login is enabled and
+          no unexpired Local_Session_Token is held, it renders the login
+          screen instead of the app; when disabled, the app renders
+          directly with no prompt. */}
+      <LoginGate>
+        <RouterProvider router={router} />
+      </LoginGate>
     </QueryClientProvider>
   );
 }
