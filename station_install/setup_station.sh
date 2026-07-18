@@ -1285,6 +1285,38 @@ else
     fi
     echo ""
     
+    # ShadowManager cloud sync needs the IoT data-plane shadow actions on the
+    # token exchange role. Without them, its sync loop fails with
+    # ForbiddenException (403) and the dda-camera-registry /
+    # dda-camera-bindings named shadows never mirror to IoT Core — the Portal
+    # shows devices as "Never synced" and camera refresh fails with
+    # "Device has no camera registry shadow to refresh from".
+    echo "3.6 Adding ShadowManager shadow sync policy..."
+    if run_cmd "aws iam put-role-policy \
+      --role-name GreengrassV2TokenExchangeRole \
+      --policy-name ShadowManagerSyncPolicy \
+      --policy-document '{
+        \"Version\": \"2012-10-17\",
+        \"Statement\": [
+          {
+            \"Sid\": \"ShadowManagerCloudSync\",
+            \"Effect\": \"Allow\",
+            \"Action\": [
+              \"iot:GetThingShadow\",
+              \"iot:UpdateThingShadow\",
+              \"iot:DeleteThingShadow\",
+              \"iot:ListNamedShadowsForThing\"
+            ],
+            \"Resource\": \"arn:aws:iot:*:${aws_account_id}:thing/*\"
+          }
+        ]
+      }'"; then
+        echo "   ✓ ShadowManager shadow sync policy attached"
+    else
+        add_warning "Could not attach ShadowManager shadow sync policy. Camera registry sync to the Portal will fail with ForbiddenException."
+    fi
+    echo ""
+    
     # 4. Verify all policies are attached
     echo "4. Verifying role policies..."
     ATTACHED_POLICIES=$(aws iam list-attached-role-policies --role-name GreengrassV2TokenExchangeRole --query 'AttachedPolicies[].PolicyName' --output text 2>/dev/null)

@@ -64,6 +64,20 @@ WORKFLOW_COMPONENT_PREFIX = 'dda.workflow.'
 # LocalServer Greengrass components are named aws.edgeml.dda.LocalServer.<arch>
 LOCAL_SERVER_COMPONENT_PREFIX = 'aws.edgeml.dda.LocalServer'
 
+# Named shadows the camera-registry-sync feature keeps in sync between the
+# device and IoT Core. These must match the edge-side constants:
+# - src/backend/camera_sync/agent.py (SHADOW_NAME): the Edge_Sync_Agent
+#   writes camera registry reports to this named shadow via ShadowManager
+#   IPC (device -> cloud).
+# - src/backend/workflow_engine/camera_binding_store.py
+#   (BINDINGS_SHADOW_NAME): the workflow engine reads camera bindings from
+#   this named shadow (cloud -> device).
+# Without a ShadowManager `synchronize` configuration listing them, these
+# local shadows never mirror to IoT Core and the Portal sees devices as
+# "Never synced".
+CAMERA_REGISTRY_SHADOW_NAME = 'dda-camera-registry'
+CAMERA_BINDINGS_SHADOW_NAME = 'dda-camera-bindings'
+
 # Minimum LocalServer component version a Workflow_Component requires
 # (Requirement 8.4). The Component_Packager writes this same value into each
 # packaged component's manifest.json (minLocalServerVersion) from the same
@@ -89,6 +103,15 @@ MIN_NUCLEUS_VERSION = '2.4.0'  # Reference only — not used in deployment compo
 # <2.18.0, matching the ceilings of the other auto-included AWS components
 # (Cli / ShadowManager / DockerApplicationManager).
 LOG_MANAGER_VERSION = '2.3.12'
+
+# Shadow manager for named-shadow synchronization (camera-registry-sync).
+# The real CreateDeployment API requires a componentVersion on every component
+# entry ("Missing required parameter in components.aws.greengrass.ShadowManager:
+# componentVersion"), so the auto-included ShadowManager must be pinned. Like
+# LOG_MANAGER_VERSION this is the fallback pin used when the newest
+# Nucleus-compatible public version can't be resolved; 2.3.15's Nucleus ceiling
+# matches the other auto-included AWS components.
+SHADOW_MANAGER_VERSION = '2.3.15'
 
 # Components that require Nucleus to be explicitly included in deployment
 # Model components (model-*) also need Nucleus since they depend on DDA components
@@ -218,39 +241,41 @@ def _nucleus_satisfies(version, requirement):
     return True
 
 
-def resolve_log_manager_version(greengrass_client, region, running_nucleus):
-    """Return the newest aws.greengrass.LogManager version whose Nucleus
+def resolve_public_component_version(greengrass_client, region, component_name,
+                                     running_nucleus, fallback_version):
+    """Return the newest public `component_name` version whose Nucleus
     dependency is satisfied by the device's running Nucleus.
 
-    LogManager declares a Nucleus VersionRequirement (e.g. '>=2.1.0 <2.15.0').
-    Auto-including a LogManager whose ceiling excludes the device's pinned
-    Nucleus produces FAILED_NO_STATE_CHANGE / NoAvailableComponentVersion. We
-    therefore select the highest LogManager version compatible with
-    `running_nucleus`. Falls back to the static LOG_MANAGER_VERSION when the
-    running Nucleus is unknown or resolution fails (network/permission), so the
-    behavior is never worse than the previous hard-coded pin."""
+    Public AWS components (LogManager, ShadowManager, ...) declare a Nucleus
+    VersionRequirement (e.g. '>=2.1.0 <2.15.0'). Auto-including a version whose
+    ceiling excludes the device's pinned Nucleus produces
+    FAILED_NO_STATE_CHANGE / NoAvailableComponentVersion. We therefore select
+    the highest version compatible with `running_nucleus`. Falls back to the
+    static `fallback_version` when the running Nucleus is unknown or resolution
+    fails (network/permission), so the behavior is never worse than a
+    hard-coded pin."""
     if not running_nucleus:
-        return LOG_MANAGER_VERSION
+        return fallback_version
 
-    lm_arn = f"arn:aws:greengrass:{region}:aws:components:aws.greengrass.LogManager"
+    component_arn = f"arn:aws:greengrass:{region}:aws:components:{component_name}"
     candidates = []
     try:
         paginator = greengrass_client.get_paginator('list_component_versions')
-        for page in paginator.paginate(arn=lm_arn):
+        for page in paginator.paginate(arn=component_arn):
             for cv in page.get('componentVersions', []):
                 v = cv.get('componentVersion')
                 if v:
                     candidates.append(v)
     except Exception as e:
-        logger.warning(f"Could not list LogManager versions, using {LOG_MANAGER_VERSION}: {e}")
-        return LOG_MANAGER_VERSION
+        logger.warning(f"Could not list {component_name} versions, using {fallback_version}: {e}")
+        return fallback_version
 
-    # Highest LogManager version first; return the first one compatible with the
+    # Highest version first; return the first one compatible with the
     # device's running Nucleus.
-    for lm_version in sorted(candidates, key=_version_key, reverse=True):
+    for candidate_version in sorted(candidates, key=_version_key, reverse=True):
         try:
             resp = greengrass_client.get_component(
-                arn=f"{lm_arn}:versions:{lm_version}",
+                arn=f"{component_arn}:versions:{candidate_version}",
                 recipeOutputFormat='JSON'
             )
             recipe_raw = resp.get('recipe')
@@ -264,19 +289,39 @@ def resolve_log_manager_version(greengrass_client, region, running_nucleus):
             )
             if _nucleus_satisfies(running_nucleus, nucleus_req):
                 logger.info(
-                    f"Resolved LogManager {lm_version} (Nucleus requirement "
-                    f"'{nucleus_req}') for running Nucleus {running_nucleus}"
+                    f"Resolved {component_name} {candidate_version} (Nucleus "
+                    f"requirement '{nucleus_req}') for running Nucleus "
+                    f"{running_nucleus}"
                 )
-                return lm_version
+                return candidate_version
         except Exception as e:
-            logger.warning(f"Could not inspect LogManager {lm_version}: {e}")
+            logger.warning(f"Could not inspect {component_name} {candidate_version}: {e}")
             continue
 
     logger.warning(
-        f"No LogManager version found compatible with Nucleus {running_nucleus}; "
-        f"falling back to {LOG_MANAGER_VERSION}"
+        f"No {component_name} version found compatible with Nucleus "
+        f"{running_nucleus}; falling back to {fallback_version}"
     )
-    return LOG_MANAGER_VERSION
+    return fallback_version
+
+
+def resolve_log_manager_version(greengrass_client, region, running_nucleus):
+    """Newest aws.greengrass.LogManager version compatible with the device's
+    running Nucleus, falling back to the pinned LOG_MANAGER_VERSION."""
+    return resolve_public_component_version(
+        greengrass_client, region, 'aws.greengrass.LogManager',
+        running_nucleus, LOG_MANAGER_VERSION)
+
+
+def resolve_shadow_manager_version(greengrass_client, region, running_nucleus):
+    """Newest aws.greengrass.ShadowManager version compatible with the
+    device's running Nucleus, falling back to the pinned
+    SHADOW_MANAGER_VERSION. The auto-included ShadowManager must carry a
+    componentVersion: the CreateDeployment API rejects component entries
+    without one."""
+    return resolve_public_component_version(
+        greengrass_client, region, 'aws.greengrass.ShadowManager',
+        running_nucleus, SHADOW_MANAGER_VERSION)
 
 
 def handler(event, context):
@@ -944,6 +989,52 @@ def create_deployment(body, user):
             logger.info(f"Auto-included aws.edgeml.dda.InferenceUploader with S3 bucket {s3_bucket}, interval {upload_interval}s")
         elif not enable_inference_uploader:
             logger.info("InferenceUploader not included - disabled in UseCase configuration")
+        
+        # Auto-include ShadowManager with a synchronization config for the
+        # camera-registry-sync named shadows. ShadowManager is already an
+        # implicit dependency of the LocalServer component (VersionRequirement
+        # >=2.2.0), but without an explicit `synchronize` configuration it runs
+        # with its default config and the dda-camera-registry /
+        # dda-camera-bindings local shadows never mirror to IoT Core
+        # (devices stay "Never synced" in the Portal). The entry is pinned to
+        # the newest public version compatible with the device's running
+        # Nucleus (fallback SHADOW_MANAGER_VERSION): the CreateDeployment API
+        # requires componentVersion on every component entry and rejects the
+        # deployment otherwise ("Missing required parameter in
+        # components.aws.greengrass.ShadowManager: componentVersion").
+        if needs_nucleus and 'aws.greengrass.ShadowManager' not in components_map:
+            shadow_manager_config = {
+                'synchronize': {
+                    'direction': 'betweenDeviceAndCloud',
+                    'coreThing': {
+                        'classic': True,
+                        'namedShadows': [
+                            CAMERA_REGISTRY_SHADOW_NAME,
+                            CAMERA_BINDINGS_SHADOW_NAME
+                        ]
+                    }
+                }
+            }
+            shadow_manager_version = resolve_shadow_manager_version(
+                greengrass_client, region, running_nucleus
+            )
+            components_map['aws.greengrass.ShadowManager'] = {
+                'componentVersion': shadow_manager_version,
+                'configurationUpdate': {
+                    'merge': json.dumps(shadow_manager_config)
+                }
+            }
+            auto_included.append({
+                'component_name': 'aws.greengrass.ShadowManager',
+                'component_version': shadow_manager_version,
+                'reason': (f'Syncs the {CAMERA_REGISTRY_SHADOW_NAME} and '
+                           f'{CAMERA_BINDINGS_SHADOW_NAME} named shadows with '
+                           'IoT Core for camera registry synchronization')
+            })
+            logger.info(
+                f"Auto-included aws.greengrass.ShadowManager {shadow_manager_version} with "
+                f"synchronization for named shadows: {CAMERA_REGISTRY_SHADOW_NAME}, "
+                f"{CAMERA_BINDINGS_SHADOW_NAME}")
         
         # Determine target ARN (iot_client and running_nucleus were resolved above)
         # Greengrass deployments must target thing groups, not individual things

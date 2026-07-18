@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from boto3.dynamodb.conditions import Key
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ParamValidationError
 
 COMPONENTS_ROOT = "workflows/components"
 PLUGIN_PREFIX = "workflow-plugins"
@@ -85,19 +85,24 @@ class FakeGreengrass:
         self._order = []         # creation order (latest last)
         self.installed = {}      # thing_name -> [{componentName, componentVersion}]
         self.effective = {}      # thing_name -> [effectiveDeployments entries]
+        self.nucleus_versions = {}  # thing_name -> running Nucleus version
         self.create_deployment_calls = []
 
     # ------------------------------------------------------------- setup
     def register_device(self, thing_name, local_server_version=None,
-                        arch="x86_64"):
+                        arch="x86_64", nucleus_version=None):
         """A core device; with a LocalServer component when a version is
-        given, otherwise with no LocalServer installed."""
+        given, otherwise with no LocalServer installed. A `nucleus_version`
+        makes the device report a running Nucleus via get_core_device (the
+        deployment flow pins auto-included AWS components to it)."""
         self.installed.setdefault(thing_name, [])
         if local_server_version is not None:
             self.installed[thing_name].append({
                 "componentName": f"aws.edgeml.dda.LocalServer.{arch}",
                 "componentVersion": local_server_version,
             })
+        if nucleus_version is not None:
+            self.nucleus_versions[thing_name] = nucleus_version
 
     def seed_deployment(self, target_arn, components, name="pre-existing"):
         """An already-effective Greengrass deployment for a target."""
@@ -149,7 +154,32 @@ class FakeGreengrass:
                 "GetDeployment")
         return dict(record)
 
+    def get_core_device(self, coreDeviceThingName=None):
+        version = self.nucleus_versions.get(coreDeviceThingName)
+        if version is None:
+            raise ClientError(
+                {"Error": {"Code": "ResourceNotFoundException",
+                           "Message": "no such core device"}},
+                "GetCoreDevice")
+        return {"coreDeviceThingName": coreDeviceThingName,
+                "coreVersion": version}
+
     def create_deployment(self, **params):
+        # The real CreateDeployment API requires componentVersion on every
+        # component entry; a missing/empty one is rejected client-side with a
+        # ParamValidationError ("Missing required parameter in
+        # components.<name>: componentVersion"). Mirror that so unpinned
+        # entries can't slip through the fake. Known latent exception: the
+        # Nucleus auto-include's unpinned `{}` fallback (deployments.py) would
+        # also be rejected by the real API but pre-dates this validation and
+        # keeps its own fallback semantics, so it is exempted here.
+        for comp_name, comp_config in params.get("components", {}).items():
+            if comp_name == "aws.greengrass.Nucleus":
+                continue
+            if not (comp_config or {}).get("componentVersion"):
+                raise ParamValidationError(
+                    report=(f"Missing required parameter in "
+                            f"components.{comp_name}: componentVersion"))
         self.create_deployment_calls.append(params)
         deployment_id = f"dep-{uuid.uuid4()}"
         self._store(deployment_id, params["targetArn"],
