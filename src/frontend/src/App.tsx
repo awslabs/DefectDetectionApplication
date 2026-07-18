@@ -45,6 +45,8 @@ import AuthProvider from "components/auth/AuthProvider";
 import "components/auth/AuthContextProvider";
 import { AuthContextProvider } from "components/auth/AuthContextProvider";
 import ListImageSources from "components/image-source/list/ListImageSources";
+import ListDeployedWorkflows from "components/deployed-workflow/list/ListDeployedWorkflows";
+import DeployedWorkflowDetails from "components/deployed-workflow/details/DeployedWorkflowDetails";
 import ImageCapturePage from "components/image-source/image-capture/ImageCapturePage";
 import ImageCaptureResultHistory from "components/result-history/ImageCaptureResultHistory";
 import { HistoryResultPageType } from "components/result-history/types";
@@ -127,6 +129,18 @@ const router = createBrowserRouter(
             handle={{ breadcrumb: "Edit workflow" }}
           />
         </Route>
+      </Route>
+
+      <Route
+        path="deployed-workflows"
+        handle={{ breadcrumb: "Deployed workflows" }}
+      >
+        <Route index element={<ListDeployedWorkflows />} />
+        <Route
+          path=":registrationId"
+          element={<DeployedWorkflowDetails />}
+          handle={{ breadcrumb: "Deployed workflow details" }}
+        />
       </Route>
 
       <Route
