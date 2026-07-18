@@ -585,7 +585,7 @@ fi
 if [ -n "$PYTHON311" ]; then
   echo "Using Python at: $PYTHON311"
   run_cmd "$PYTHON311 -m pip install --upgrade pip" || add_warning "Failed to upgrade pip"
-  run_cmd "$PYTHON311 -m pip install --force-reinstall requests==2.32.3" || add_warning "Failed to install requests"
+  run_cmd "$PYTHON311 -m pip install --force-reinstall requests==2.32.4" || add_warning "Failed to install requests"
   run_cmd "$PYTHON311 -m pip install protobuf" || add_warning "Failed to install protobuf"
 else
   add_warning "python3.11 not found. Using system python3 instead."
@@ -1282,6 +1282,38 @@ else
         echo "   ✓ ECR access policy attached"
     else
         add_warning "Could not attach ECR access policy. Device may not be able to pull Docker-based components from ECR."
+    fi
+    echo ""
+    
+    # ShadowManager cloud sync needs the IoT data-plane shadow actions on the
+    # token exchange role. Without them, its sync loop fails with
+    # ForbiddenException (403) and the dda-camera-registry /
+    # dda-camera-bindings named shadows never mirror to IoT Core — the Portal
+    # shows devices as "Never synced" and camera refresh fails with
+    # "Device has no camera registry shadow to refresh from".
+    echo "3.6 Adding ShadowManager shadow sync policy..."
+    if run_cmd "aws iam put-role-policy \
+      --role-name GreengrassV2TokenExchangeRole \
+      --policy-name ShadowManagerSyncPolicy \
+      --policy-document '{
+        \"Version\": \"2012-10-17\",
+        \"Statement\": [
+          {
+            \"Sid\": \"ShadowManagerCloudSync\",
+            \"Effect\": \"Allow\",
+            \"Action\": [
+              \"iot:GetThingShadow\",
+              \"iot:UpdateThingShadow\",
+              \"iot:DeleteThingShadow\",
+              \"iot:ListNamedShadowsForThing\"
+            ],
+            \"Resource\": \"arn:aws:iot:*:${aws_account_id}:thing/*\"
+          }
+        ]
+      }'"; then
+        echo "   ✓ ShadowManager shadow sync policy attached"
+    else
+        add_warning "Could not attach ShadowManager shadow sync policy. Camera registry sync to the Portal will fail with ForbiddenException."
     fi
     echo ""
     
