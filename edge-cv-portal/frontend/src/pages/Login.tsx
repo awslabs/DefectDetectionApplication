@@ -26,7 +26,8 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [givenName, setGivenName] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [resetCode, setResetCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -58,8 +59,9 @@ export default function Login() {
       if (!newPassword || !confirmPassword) { setError('Please fill in all fields'); return; }
       if (newPassword !== confirmPassword) { setError('Passwords do not match'); return; }
       if (newPassword.length < 8) { setError('Password must be at least 8 characters'); return; }
-      if (!givenName.trim()) { setError('Please enter your name'); return; }
-      await completeNewPassword(newPassword, { given_name: givenName.trim() });
+      if (!firstName.trim()) { setError('Please enter your first name'); return; }
+      if (!lastName.trim()) { setError('Please enter your last name'); return; }
+      await completeNewPassword(newPassword, { given_name: firstName.trim(), family_name: lastName.trim() });
       navigate('/dashboard');
     } catch (err: any) { setError(err.message || 'Failed to set password.'); }
     finally { setLoading(false); }
@@ -127,9 +129,13 @@ export default function Login() {
           {view === 'new-password' && (
             <>
               <Alert type="info">You must set a new password before continuing.</Alert>
-              <FormField label="Your Name">
-                <Input value={givenName} onChange={({ detail }) => setGivenName(detail.value)}
-                  placeholder="Enter your name" />
+              <FormField label="First name">
+                <Input value={firstName} onChange={({ detail }) => setFirstName(detail.value)}
+                  placeholder="Enter your first name" />
+              </FormField>
+              <FormField label="Last name">
+                <Input value={lastName} onChange={({ detail }) => setLastName(detail.value)}
+                  placeholder="Enter your last name" />
               </FormField>
               <FormField label="New Password">
                 <Input type="password" value={newPassword} onChange={({ detail }) => setNewPassword(detail.value)}
