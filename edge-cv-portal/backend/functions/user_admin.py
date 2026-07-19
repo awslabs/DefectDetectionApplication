@@ -436,8 +436,13 @@ def create_account(event):
     audit-final carrying the created account's {username, email, role}
     (12.11).
 
-    Error mapping: UsernameExistsException -> 409 "username already
-    exists" with no account created or modified (12.5); other Cognito
+    Error mapping: UsernameExistsException / AliasExistsException ->
+    409 "account already exists" with the Cognito error Message passed
+    through (the pool has email as an alias attribute, so Cognito's
+    Message names the actual conflict - a duplicate username reads
+    "User account already exists" satisfying 12.5, while an email held
+    by another account reads e.g. "An account with the given email
+    already exists"); nothing is created or modified. Other Cognito
     errors -> 502 "account was not created" with no partial record
     (creation is atomic on the Cognito side, 12.9), audit-final failure.
     A pending-audit write failure -> 500 "action not applied" with
@@ -507,14 +512,17 @@ def create_account(event):
         code = error.get('Code', '')
         message = error.get('Message', str(e))
 
-        if code == 'UsernameExistsException':
-            # Duplicate username: nothing was created or modified (12.5).
+        if code in ('UsernameExistsException', 'AliasExistsException'):
+            # Account conflict: nothing was created or modified (12.5).
+            # The Cognito Message is passed through verbatim because it
+            # names the actual conflict - a duplicate username or, since
+            # email is a pool alias attribute, an email already used by
+            # another account.
             finalize_audit_event(audit_event_id, 'failure',
-                                 {'reason': 'username already exists'})
+                                 {'reason': message})
             return create_response(409, {
-                'error': 'username already exists',
-                'message': f'An account with the username {username} '
-                           f'already exists',
+                'error': 'account already exists',
+                'message': message,
             })
 
         # Any other Cognito failure: creation is atomic, so no account

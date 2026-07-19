@@ -9,7 +9,9 @@ User_Pool call), the validate -> audit-pending (account_create) ->
 admin_create_user with custom:role / email / email_verified=true and
 the Cognito-native email invitation (D12: default MessageAction, no
 SES, no portal-generated password, no verifier capture) -> audit-final
-flow, UsernameExistsException -> 409 "username already exists",
+flow, UsernameExistsException / AliasExistsException -> 409 "account
+already exists" with the Cognito Message passed through (duplicate
+username and email-alias conflict cases),
 other Cognito errors -> 502 "account was not created" with audit-final
 failure, the audit-before-effect abort, and the PortalAdmin 403 gate.
 
@@ -362,25 +364,64 @@ class TestValidationGate:
         assert fake.calls == []
 
 
-class TestDuplicateUsername:
-    def test_username_exists_maps_to_409(
+class TestAccountConflict:
+    def test_username_exists_maps_to_409_with_cognito_message(
             self, user_admin, credentials_table, audit_table,
             install_cognito):
-        """Req 12.5: UsernameExistsException -> 409 "username already
-        exists" with no account created or modified and the audit entry
-        finalized to failure."""
+        """Req 12.5: UsernameExistsException -> 409 "account already
+        exists" with the Cognito Message ("User account already exists"
+        for a true duplicate username) passed through, no account
+        created or modified, and the audit entry finalized to failure."""
         install_cognito(error=cognito_error(
             "UsernameExistsException", "User account already exists."))
         status, body = invoke(user_admin, create_event(dict(VALID_BODY)))
 
         assert status == 409
-        assert body["error"] == "username already exists"
+        assert body["error"] == "account already exists"
+        assert body["message"] == "User account already exists."
         assert credentials_table.scan()["Items"] == []
 
         entries = audit_entries(audit_table)
         assert len(entries) == 1
         assert entries[0]["result"] == "failure"
         assert entries[0]["action"] == "account_create"
+
+    def test_email_alias_conflict_passes_cognito_message_through(
+            self, user_admin, credentials_table, audit_table,
+            install_cognito):
+        """Email is an alias attribute on the pool, so a new username
+        with an email already used by another account raises
+        UsernameExistsException whose Message describes the email
+        conflict; the message is passed through so the administrator
+        sees the real reason."""
+        email_conflict = "An account with the given email already exists."
+        install_cognito(error=cognito_error(
+            "UsernameExistsException", email_conflict))
+        status, body = invoke(user_admin, create_event(dict(VALID_BODY)))
+
+        assert status == 409
+        assert body["error"] == "account already exists"
+        assert body["message"] == email_conflict
+        assert credentials_table.scan()["Items"] == []
+
+        entries = audit_entries(audit_table)
+        assert len(entries) == 1
+        assert entries[0]["result"] == "failure"
+
+    def test_alias_exists_exception_maps_to_409_with_message(
+            self, user_admin, credentials_table, audit_table,
+            install_cognito):
+        """AliasExistsException is mapped the same way: 409 with the
+        Cognito Message passed through."""
+        alias_conflict = "An account with the email already exists."
+        install_cognito(error=cognito_error(
+            "AliasExistsException", alias_conflict))
+        status, body = invoke(user_admin, create_event(dict(VALID_BODY)))
+
+        assert status == 409
+        assert body["error"] == "account already exists"
+        assert body["message"] == alias_conflict
+        assert credentials_table.scan()["Items"] == []
 
 
 class TestOtherFailures:
