@@ -91,7 +91,7 @@ int main()
     // Will be invoked when mqtt topic 'broker-test-subscription' is published too
     CHECKHR(broker->Subscribe("test-subscription", [&](IPayload* payload)
     {
-        TraceInfo("Received message: %s", payload->SerializeAsString());
+        TraceInfo("Received message: %s", payload->SerializeAsString()..c_str());
     }));
     int32_t test_subscription_cancellation_token = hr;
 
@@ -100,7 +100,7 @@ int main()
     // when a publish happens with message_id = `test_message`
     CHECKHR(broker->Subscribe("test_message", [&](IPayload* payload)
     {
-        TraceInfo("Received locally: %s", payload->SerializeAsString());
+        TraceInfo("Received locally: %s", payload->SerializeAsString().c_str());
     }));
     int32_t test_message_cancellation_token = hr;
 

@@ -73,8 +73,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     exception_name = getattr(exception_type, "__name__", None)
 
     logger.error("Uncaught Exception", exc_info=(exception_type, exception_value, exception_traceback))
-
-    return JSONResponse({'message': f"Internal Server Error. Error: '{exception_name}: {exception_value}.'", 'request_id': get_request_id()}, status_code=500)
+    return JSONResponse({'message': "Internal Server Error. Please contact admin.", 'request_id': get_request_id()}, status_code=500)
+    #return JSONResponse({'message': f"Internal Server Error. Error: '{exception_name}: {exception_value}.'", 'request_id': get_request_id()}, status_code=500)
 
 def api_exception_logger(request: Request, exc):
     url = f"{request.url.path}?{request.query_params}" if request.query_params else request.url.path
