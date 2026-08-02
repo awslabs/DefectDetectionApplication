@@ -18,7 +18,9 @@ import {
   Spinner,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 import CompilationTab from '../components/CompilationTab';
+import VllmPackagePublishSection from '../components/vllm-publish/VllmPackagePublishSection';
 import { TrainingJob } from '../types';
 
 interface Model {
@@ -53,7 +55,16 @@ interface Model {
     target: string;
     status: string;
     component_package_s3?: string;
+    supported_architectures?: string[];
   }>;
+  published_component?: {
+    component_name: string;
+    component_version: string;
+    supported_architectures: string[];
+    runtime: string;
+    component_arns: Record<string, string>;
+    published_at: number;
+  };
   hyperparameters?: Record<string, unknown>;
   instance_type?: string;
   dataset_manifest_s3?: string;
@@ -62,6 +73,7 @@ interface Model {
 export default function ModelDetail() {
   const { modelId } = useParams<{ modelId: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   
   const [model, setModel] = useState<Model | null>(null);
   const [trainingJob, setTrainingJob] = useState<TrainingJob | null>(null);
@@ -155,8 +167,24 @@ export default function ModelDetail() {
       case 'trained': return <Badge color="green">Trained</Badge>;
       case 'imported': return <Badge color="blue">Imported</Badge>;
       case 'marketplace': return <Badge color="grey">Marketplace</Badge>;
+      case 'vllm': return <Badge color="blue">Registered</Badge>;
       default: return <Badge>{source}</Badge>;
     }
+  };
+
+  // Supported Target_Architectures of a vLLM_Model_Component: preferred
+  // from the publish write-back map, falling back to the packaged
+  // component entries (Requirement 3.8)
+  const getSupportedArchitectures = (m: Model): string[] => {
+    if (m.published_component?.supported_architectures?.length) {
+      return m.published_component.supported_architectures;
+    }
+    for (const comp of m.packaged_components || []) {
+      if (comp.supported_architectures?.length) {
+        return comp.supported_architectures;
+      }
+    }
+    return [];
   };
 
   const formatTimestamp = (timestamp?: number) => {
@@ -242,7 +270,7 @@ export default function ModelDetail() {
             { label: 'Model ID', value: model.model_id },
             { label: 'Name', value: model.name },
             { label: 'Version', value: model.version },
-            { label: 'Type', value: model.model_type || 'N/A' },
+            { label: 'Type', value: model.model_type === 'vllm' ? <Badge color="blue">LLM (vLLM)</Badge> : (model.model_type || 'N/A') },
             { label: 'Stage', value: model.stage },
           ]} />
           <KeyValuePairs columns={1} items={[
@@ -254,6 +282,39 @@ export default function ModelDetail() {
           ]} />
         </ColumnLayout>
       </Container>
+
+      {model.model_type === 'vllm' && (
+        <Container
+          header={
+            <Header
+              variant="h2"
+              description="Target architectures this vLLM model component can be deployed to"
+            >
+              Supported Architectures
+            </Header>
+          }
+        >
+          {getSupportedArchitectures(model).length > 0 ? (
+            <SpaceBetween direction="horizontal" size="xs">
+              {getSupportedArchitectures(model).map((arch) => (
+                <Badge key={arch} color="blue">{arch}</Badge>
+              ))}
+            </SpaceBetween>
+          ) : (
+            <Box color="text-status-inactive">
+              Supported architectures are recorded when the model component is packaged and published.
+            </Box>
+          )}
+        </Container>
+      )}
+
+      {model.model_type === 'vllm' && (
+        <VllmPackagePublishSection
+          model={model}
+          role={user?.role}
+          onModelUpdate={setModel}
+        />
+      )}
 
       {model.metrics && Object.keys(model.metrics).length > 0 && (
         <Container header={<Header variant="h2">Model Metrics</Header>}>

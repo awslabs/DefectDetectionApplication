@@ -1,0 +1,3 @@
+# Stage the x86_64 DDA GStreamer plugin .so files here before building
+# the sandbox image (see ../README.md). Kept in git so the Docker COPY
+# succeeds with an empty plugin set.

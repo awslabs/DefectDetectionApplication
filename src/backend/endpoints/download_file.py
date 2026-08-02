@@ -43,13 +43,15 @@ from dao.sqlite_db.sqlite_db_operations import SessionLocal
 from starlette.status import HTTP_404_NOT_FOUND
 
 # Custom Modules
-from utils.auth import validate_token
+from utils.auth import authorize_credential
 from utils.constants import SNAPSHOT_FILE_PATTERN, PREDICTION, CAPTURED_IDS_PATH_PATTERN, DDA_SYSTEM_FOLDER
 from utils import utils, inference_results_utils
 import logging
 from model.workflow import Workflow
 from utils.server_setup import workflow_accessor, inference_result_accessor
 from utils.get_is_triton import get_is_triton
+from workflow_engine import run_artifacts
+from workflow_engine.models import WorkflowExecution
 
 unauthenticated_router = APIRouter()
 
@@ -64,9 +66,12 @@ def get_db():
 
 # Following function is to handle token added in url parameter 
 def validate_token_in_query_param(token: str):
-    if utils.is_authorization_enabled_on_station():
-        # Validate token only if auth is enabled on station
-        validate_token(token)
+    # Downloads open a new browser link, so the credential arrives as a URL
+    # query parameter instead of an Authorization header. Apply the same
+    # per-request decision matrix as authorize_request: open access when both
+    # mechanisms are off, and either/or acceptance of a valid existing bearer
+    # or a valid Local_Session_Token otherwise (Requirements 10.1, 10.2).
+    authorize_credential(token)
 
 
 ### Following APIs will need separate Auth check instead of in API router, 
@@ -154,6 +159,45 @@ def load_output_image_from_worflow_by_capture_id(workflowId: str, captureId: str
         status_code=HTTP_404_NOT_FOUND,
         detail=f"Server unable to load output image for Workflow id: {workflowId} and Capture id: {captureId}. Error: 'Image not found'. Check error message and try again",
     )
+
+
+@unauthenticated_router.get("/workflows/executions/{execution_id}/output-image")
+def load_workflow_execution_output_image(
+    execution_id: str, token: str = None, db: Session = Depends(get_db)
+):
+    """Serve a deployed-workflow run's base output image (Requirements 4.2,
+    4.7).
+
+    Served here on the unauthenticated_router with token-in-query so a
+    browser ``<img>`` load carries the credential as a URL parameter, matching
+    the existing capture-image serving above (the SPA cannot attach an
+    Authorization header to an image element). Reads the run's per-execution
+    artifact directory recorded on the WorkflowExecution and returns the base
+    captured frame via FileResponse. 404 when the execution or the file is
+    unavailable (R4.6)."""
+    validate_token_in_query_param(token)
+
+    execution = db.get(WorkflowExecution, execution_id)
+    if execution is None:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail=f"Workflow execution '{execution_id}' was not found",
+        )
+
+    image_path = run_artifacts.base_output_image_path(
+        execution.output_dir, execution.capture_id
+    )
+    if image_path and os.path.exists(image_path):
+        return FileResponse(image_path, media_type="image/jpeg")
+
+    raise HTTPException(
+        status_code=HTTP_404_NOT_FOUND,
+        detail=(
+            f"Server unable to load output image for execution "
+            f"'{execution_id}'. Error: 'Image not found'."
+        ),
+    )
+
 
 class RetrainInputImagesRequest(BaseModel):
     startTime: Optional[int] = None

@@ -1,0 +1,1795 @@
+"""
+Component_Packager Lambda function (Workflow Manager)
+
+Compiles a validated workflow version for the user-selected device
+architectures, assembles per-arch Workflow_Component artifacts, uploads
+them to the Use_Case account S3 bucket via the assumed cross-account
+role, and registers a Greengrass component named
+``dda.workflow.{workflowId}`` with version ``{workflowVersion}.0.0``
+(Requirements 7.1-7.5, 11.5, 13.3).
+
+Routes (API Gateway REST):
+    POST /workflows/{id}/package
+        Body: {"architectures": ["x86_64", ...], "version": N?}
+
+Per-arch artifact zip layout (discovered by LocalServer under
+/aws_dda/workflows/{workflowId}/{version}/ — Requirement 13.3):
+    manifest.json                     component + workflow metadata
+    workflow.json                     the Workflow_Definition
+    compiled_pipeline.json            Workflow_Compiler output for the arch
+    plugins/{arch}/{plugin}.so        curated plugin library artifacts (7.1)
+    python/{nodeId}/handler.py        Custom_Python_Node code (7.3)
+    python/{nodeId}/requirements.txt  Custom_Python_Node dependencies (7.3)
+
+Custom_Node_Type plugins (custom-node-designer Requirements 10.4, 11.1,
+11.2, 11.3, 16.4): compilation runs against the merged Node_Type_Catalog
+resolving the Custom_Node_Type versions pinned at workflow save (14.2).
+Compiled ``custom:{usecase}/{name}`` plugin dependencies are NEVER
+bundled inline; each resolves to its backing Plugin_Record, which is
+gated (dev lifecycle state, missing per-arch Plugin_Artifact, or missing
+Plugin_Component version reject the request identifying the
+Custom_Node_Type and arch/state), verified (streamed SHA-256 recompute +
+KMS signature verification, failing via the PackagingError path on
+either mismatch), recorded per arch in manifest.json ``pluginChecksums``
+/ ``pluginComponents``, and delivered by a Greengrass
+``ComponentDependencies`` entry on ``dda.plugin.{pluginId}`` pinned to
+the recorded Plugin_Record version. Built-in/curated plugins keep the
+inline ``plugins/{arch}/*.so`` bundling unchanged.
+
+All-or-nothing staging (Requirement 7.5): every artifact is uploaded to a
+temporary staging prefix first; only after every artifact for every
+selected architecture uploads successfully are the objects promoted to
+the final prefix and the component registered. On any failure the stage
+(and any promoted objects) are deleted, the failing artifact is reported,
+and no component version is registered.
+
+The recipe is install-only — no Run lifecycle — so deploying or removing
+a Workflow_Component never restarts LocalServer or any other component
+(Requirement 13.3).
+"""
+import base64
+import binascii
+import hashlib
+import json
+import os
+import logging
+import posixpath
+import re
+import shutil
+import tempfile
+import time
+import uuid
+import zipfile
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from decimal import Decimal
+import boto3
+from botocore.exceptions import ClientError
+
+# Import shared utilities (Lambda layer)
+import sys
+sys.path.append('/opt/python')
+from shared_utils import (
+    create_response, get_user_from_event, log_audit_event,
+    get_usecase, get_usecase_client, rbac_manager, Permission
+)
+from workflow_core.serializer import parse as parse_definition
+from workflow_core.compiler import compile as compile_workflow, CompileContext
+from workflow_core.catalog import (
+    ARCH_ARM64_JP4,
+    ARCH_ARM64_JP5,
+    ARCH_ARM64_JP6,
+    DEVICE_ARCHITECTURES,
+    VLLM_ARCHITECTURES,
+)
+from workflow_core.catalog.custom import resolve_catalog
+
+# Merged-catalog resolution + Plugin_Record persistence (same bundle)
+from node_catalog_resolution import (
+    descriptors_from_items,
+    load_registered_node_types,
+    resolution_items,
+)
+from plugin_records import get_version_item as get_plugin_record_version
+
+# Configure logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# AWS clients (portal account)
+dynamodb = boto3.resource('dynamodb')
+s3 = boto3.client('s3')
+kms = boto3.client('kms')
+
+# Environment variables
+WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
+WORKFLOW_VERSIONS_TABLE = os.environ.get('WORKFLOW_VERSIONS_TABLE')
+PORTAL_ARTIFACTS_BUCKET = os.environ.get('PORTAL_ARTIFACTS_BUCKET')
+WORKFLOWS_S3_PREFIX = os.environ.get('WORKFLOWS_S3_PREFIX', 'workflows')
+# Curated GStreamer plugin artifact library in portal S3:
+#   {WORKFLOW_PLUGIN_LIBRARY_PREFIX}/{arch}/{plugin}.so
+WORKFLOW_PLUGIN_LIBRARY_PREFIX = os.environ.get(
+    'WORKFLOW_PLUGIN_LIBRARY_PREFIX', 'workflow-plugins')
+# Minimum LocalServer component version a Workflow_Component requires
+# (surfaced in manifest.json for the deployment compatibility check, 8.4).
+#
+# LocalServer ships as independently-versioned per-architecture variants
+# (aws.edgeml.dda.LocalServer.arm64 / .arm64JP5 / .arm64JP6 / .amd64), whose
+# version lineages are NOT comparable to each other: at time of writing the
+# .arm64 variant is ~1.0.124 while .arm64JP6 is ~1.0.35. A single global
+# minimum therefore falsely blocks the JetPack variants (a JP6 device running
+# 1.0.35 can never satisfy an arm64-derived "1.0.63"). WORKFLOW_MIN_LOCAL_
+# SERVER_VERSIONS is a JSON object keyed by workflow_core arch id
+# ({"arm64_jp6": "1.0.0", ...}) giving each variant lineage its own floor;
+# archs absent from the map fall back to the scalar default below.
+MIN_LOCAL_SERVER_VERSION = os.environ.get(
+    'WORKFLOW_MIN_LOCAL_SERVER_VERSION',
+    os.environ.get('DDA_LOCAL_SERVER_VERSION', '1.0.0'))
+
+
+def _parse_min_versions_map():
+    """Per-arch minimum LocalServer versions from WORKFLOW_MIN_LOCAL_SERVER_
+    VERSIONS (JSON object). Malformed or non-object values yield {} so the
+    scalar default is used for every arch."""
+    raw = os.environ.get('WORKFLOW_MIN_LOCAL_SERVER_VERSIONS', '')
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        logging.warning(
+            'WORKFLOW_MIN_LOCAL_SERVER_VERSIONS is not valid JSON; '
+            'falling back to the scalar minimum for every arch')
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items()}
+
+
+MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map()
+
+
+def min_local_server_version_for(arch):
+    """The minimum LocalServer version for a Workflow_Component targeting
+    ``arch``: the per-arch override when configured, else the scalar
+    default. Keeps each independently-versioned LocalServer variant
+    lineage self-consistent (a JP6 package is gated against JP6 builds,
+    not the arm64 lineage)."""
+    if arch and arch in MIN_LOCAL_SERVER_VERSIONS:
+        return MIN_LOCAL_SERVER_VERSIONS[arch]
+    return MIN_LOCAL_SERVER_VERSION
+
+# Greengrass component naming (design section 6)
+WORKFLOW_COMPONENT_PREFIX = 'dda.workflow.'
+COMPONENT_PUBLISHER = 'DDA Portal Workflow Manager'
+
+# Plugin_Component naming (custom-node-designer, Requirement 16.4). Kept as
+# a local constant: plugin_components.py imports THIS module, so importing
+# it back would be circular.
+PLUGIN_COMPONENT_PREFIX = 'dda.plugin.'
+
+# Use_Case account S3 prefixes for Workflow_Component artifacts
+COMPONENT_S3_PREFIX = 'workflows/components'
+STAGING_S3_PREFIX = 'workflows/staging'
+
+# Compiler pluginDependencies prefixes (split_plugin_dependencies)
+PYTHON_DEP_PREFIX = 'python:'
+#: A Custom_Node_Type plugin dependency: custom:{usecase_id}/{plugin_name}
+#: (recorded by custom_node_types.py, Requirement 8.6). Routed to the
+#: plugin's Plugin_Component instead of inline bundling (16.4).
+CUSTOM_DEP_PREFIX = 'custom:'
+
+# The portal Plugin_Artifact signing key (custom-node-designer 10.4):
+# packaging KMS-Verifies each custom plugin artifact's recorded signature.
+PLUGIN_SIGNING_KEY_ARN = os.environ.get('PLUGIN_SIGNING_KEY_ARN')
+SIGNING_ALGORITHM = 'ECDSA_SHA_256'
+
+# Backing Plugin_Record lifecycle states allowed to package (11.3: dev is
+# rejected; anything unknown fails closed).
+PACKAGEABLE_LIFECYCLE_STATES = ('test', 'prod')
+
+# Custom-plugin packaging gate codes (11.2, 11.3, 16.4)
+GATE_RECORD_MISSING = 'PLUGIN_RECORD_NOT_FOUND'
+GATE_LIFECYCLE = 'PLUGIN_LIFECYCLE_VIOLATION'
+GATE_ARTIFACT_MISSING = 'PLUGIN_ARTIFACT_MISSING'
+GATE_COMPONENT_MISSING = 'PLUGIN_COMPONENT_MISSING'
+
+ARCH_X86_64 = 'x86_64'
+ARCH_X86_64_NVIDIA = 'x86_64_nvidia'
+
+# arch id (workflow_core) -> Greengrass platform architecture. Both x86_64
+# flavors map to Greengrass amd64; recipes disambiguate with the
+# 'runtime: nvidia' platform attribute on x86_64_nvidia manifests plus the
+# manifest ordering from recipe_manifest_order (design: x86_64_nvidia).
+ARCH_TO_GG_PLATFORM = {
+    'x86_64': 'amd64',
+    'x86_64_nvidia': 'amd64',
+    'arm64_jp4': 'aarch64',
+    'arm64_jp5': 'aarch64',
+    'arm64_jp6': 'aarch64',
+}
+
+# Where the LocalServer workflow engine discovers artifacts (13.3)
+DEVICE_WORKFLOWS_ROOT = '/aws_dda/workflows'
+
+# Polling for the registered component to become DEPLOYABLE
+COMPONENT_STATUS_MAX_ATTEMPTS = 30
+COMPONENT_STATUS_POLL_SECONDS = 2
+
+
+class PackagingError(Exception):
+    """A packaging failure attributable to one artifact (Requirement 7.5)."""
+
+    def __init__(self, artifact: str, message: str):
+        super().__init__(message)
+        self.artifact = artifact
+        self.message = message
+
+
+def decimal_to_native(obj):
+    """Convert Decimal objects from DynamoDB to native Python types"""
+    if isinstance(obj, Decimal):
+        return float(obj) if obj % 1 else int(obj)
+    elif isinstance(obj, dict):
+        return {k: decimal_to_native(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [decimal_to_native(i) for i in obj]
+    return obj
+
+
+def error_response(status_code: int, code: str, message: str, details: Optional[Dict] = None) -> Dict:
+    """Build the Workflow Manager error envelope: {error: {code, message, details}}"""
+    return create_response(status_code, {
+        'error': {
+            'code': code,
+            'message': message,
+            'details': details or {}
+        }
+    })
+
+
+def now_ms() -> int:
+    return int(datetime.utcnow().timestamp() * 1000)
+
+
+def has_workflow_permission(user: Dict, usecase_id: str, permission: Permission) -> bool:
+    """Check a workflow permission for the acting user on a Use_Case"""
+    return rbac_manager.has_permission(user['user_id'], usecase_id, permission, user_info=user)
+
+
+def not_found_response() -> Dict:
+    """Uniform 404 that never confirms whether a workflow exists (5.8)"""
+    return error_response(404, 'WORKFLOW_NOT_FOUND', 'Workflow not found')
+
+
+def forbidden_response(user: Dict, event: Dict, usecase_id: str, permissions: List[Permission]) -> Dict:
+    """Uniform 403 authorization error with a denied-access audit entry (11.4)"""
+    log_audit_event(
+        user_id=user['user_id'],
+        action='unauthorized_access',
+        resource_type='workflow',
+        resource_id=event.get('resource', 'unknown'),
+        result='denied',
+        details={
+            'required_permissions': [p.value for p in permissions],
+            'usecase_id': usecase_id,
+            'method': event.get('httpMethod'),
+            'path': event.get('path')
+        }
+    )
+    return error_response(403, 'FORBIDDEN', 'Insufficient permissions', {
+        'required_permissions': [p.value for p in permissions],
+        'usecase_id': usecase_id
+    })
+
+
+def authorize_workflow_access(user: Dict, event: Dict, item: Dict,
+                              permission: Permission) -> Optional[Dict]:
+    """
+    Authorize an operation on an existing workflow.
+
+    Returns an error response, or None when authorized. Mirrors
+    workflows.py: a user without read access to the owning Use_Case gets
+    the same 404 as for a missing workflow (no existence leak); a user
+    who can read but lacks the operation permission gets a 403.
+    """
+    usecase_id = item['usecase_id']
+    if not has_workflow_permission(user, usecase_id, Permission.WORKFLOW_READ):
+        return not_found_response()
+    if permission != Permission.WORKFLOW_READ and not has_workflow_permission(user, usecase_id, permission):
+        return forbidden_response(user, event, usecase_id, [permission])
+    return None
+
+
+def get_workflow_item(workflow_id: str) -> Optional[Dict]:
+    """Fetch a workflow metadata item, or None"""
+    table = dynamodb.Table(WORKFLOWS_TABLE)
+    response = table.get_item(Key={'workflow_id': workflow_id})
+    item = response.get('Item')
+    return decimal_to_native(item) if item else None
+
+
+def get_version_item(workflow_id: str, version: int) -> Optional[Dict]:
+    """Fetch a workflow version item, or None"""
+    table = dynamodb.Table(WORKFLOW_VERSIONS_TABLE)
+    response = table.get_item(Key={'workflow_id': workflow_id, 'version': version})
+    item = response.get('Item')
+    return decimal_to_native(item) if item else None
+
+
+def parse_body(event: Dict) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """Parse the request body; returns (body, None) or (None, error_response)"""
+    try:
+        body = json.loads(event.get('body') or '{}')
+    except (json.JSONDecodeError, TypeError):
+        return None, error_response(400, 'INVALID_JSON', 'Request body is not valid JSON')
+    if not isinstance(body, dict):
+        return None, error_response(400, 'INVALID_JSON', 'Request body must be a JSON object')
+    return body, None
+
+
+def validation_guard(version_item: Dict) -> Optional[Dict]:
+    """
+    Reject packaging unless the workflow version has a recorded passed
+    Workflow_Validator run with zero errors (Requirements 4.7, 4.10).
+
+    A version that was validated and failed gets 400 with the findings
+    reference; a version never validated (or with a stale record) gets
+    409 asking the user to validate first.
+    """
+    validation_status = version_item.get('validation_status') or {}
+    status = validation_status.get('status')
+    if status == 'passed':
+        return None
+    if status == 'failed':
+        return error_response(
+            400, 'VALIDATION_FAILED',
+            'Workflow version has validation errors and cannot be packaged',
+            {
+                'version': version_item.get('version'),
+                'findings_key': validation_status.get('findings_key'),
+                'validated_at': validation_status.get('validated_at')
+            }
+        )
+    return error_response(
+        409, 'VALIDATION_REQUIRED',
+        'Workflow version has no passed validation record; run validation before packaging',
+        {'version': version_item.get('version')}
+    )
+
+
+def load_definition(s3_key: str) -> str:
+    """Load a stored Workflow_Definition document (raw JSON) from portal S3"""
+    response = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=s3_key)
+    return response['Body'].read().decode('utf-8')
+
+
+def compiled_doc_portal_key(usecase_id: str, workflow_id: str, version: int, arch: str) -> str:
+    """Portal S3 key of a compiled pipeline document (data model: compiled docs)"""
+    return (f"{WORKFLOWS_S3_PREFIX}/{usecase_id}/{workflow_id}/versions/"
+            f"{version}/compiled/{arch}.json")
+
+
+def plugin_library_key(arch: str, plugin: str) -> str:
+    """Portal S3 key of a curated plugin library artifact"""
+    return f"{WORKFLOW_PLUGIN_LIBRARY_PREFIX}/{arch}/{plugin}.so"
+
+
+def component_name_for(workflow_id: str) -> str:
+    return f"{WORKFLOW_COMPONENT_PREFIX}{workflow_id}"
+
+
+def component_version_for(workflow_version: int) -> str:
+    """Base component version derived from the workflow version
+    (Requirement 7.2): ``{workflow_version}.0.0``. This is the FIRST package
+    of a workflow version; re-packaging bumps the MAJOR to the next free
+    ``N.0.0`` (see next_component_version) because Greengrass component
+    versions are immutable and its on-device store reliably re-installs a new
+    major but can leave a patch/minor bump stale."""
+    return f"{int(workflow_version)}.0.0"
+
+
+def _existing_component_versions(greengrass, component_name: str) -> set:
+    """Every registered version string of ``component_name`` in the Use_Case
+    account, or an empty set when the component does not exist yet. Resolves
+    the component ARN via list_components (no account id needed) then pages
+    list_component_versions."""
+    arn = None
+    try:
+        for page in greengrass.get_paginator('list_components').paginate(
+                scope='PRIVATE'):
+            for comp in page.get('components', []):
+                if comp.get('componentName') == component_name:
+                    arn = comp.get('arn')
+                    break
+            if arn:
+                break
+    except ClientError as e:
+        logger.warning('Could not list components while resolving next version '
+                       'for %s: %s', component_name, e)
+        return set()
+    if not arn:
+        return set()
+    versions = set()
+    try:
+        for page in greengrass.get_paginator('list_component_versions').paginate(
+                arn=arn):
+            for v in page.get('componentVersions', []):
+                if v.get('componentVersion'):
+                    versions.add(v['componentVersion'])
+    except ClientError as e:
+        logger.warning('Could not list versions of %s: %s', component_name, e)
+    return versions
+
+
+def next_component_version(greengrass, component_name: str,
+                           workflow_version: int) -> str:
+    """The next component version for (re-)packaging a workflow version, as a
+    MAJOR-only ``N.0.0`` bump.
+
+    Greengrass component versions are immutable, so re-packaging an unchanged
+    workflow version cannot reuse ``{workflow_version}.0.0``. A patch bump
+    (``{v}.0.1``) registers cloud-side but Greengrass's on-device component
+    store can leave the previous artifact in place across a patch/minor
+    revision, so the LocalServer workflow watcher keeps scanning the stale
+    files (observed on JP6: a re-packaged workflow stays "invalid" against the
+    old manifest). The model/vLLM components work around the same behavior by
+    versioning major-only and always publishing the next major
+    (next_vllm_component_version); mirror that here so every (re-)package is a
+    clean new major Greengrass reliably re-installs.
+
+    Returns ``N.0.0`` where N is the greater of the workflow version and one
+    past the highest existing major — so the FIRST package of workflow v3 is
+    still ``3.0.0`` (workflow-version traceability preserved; the true workflow
+    version also lives in the manifest ``workflowVersion`` and the recipe
+    config), and each re-package strictly increases the major (3.0.0 -> 4.0.0
+    -> ...)."""
+    existing = _existing_component_versions(greengrass, component_name)
+    highest_major = 0
+    for v in existing:
+        match = re.match(r'^(\d+)\.', str(v))
+        if match:
+            highest_major = max(highest_major, int(match.group(1)))
+    major = max(int(workflow_version), highest_major + 1)
+    return f"{major}.0.0"
+
+
+def zip_artifact_name(arch: str) -> str:
+    return f"workflow-{arch}.zip"
+
+
+# --------------------------------------------------------------------------
+# Artifact assembly
+# --------------------------------------------------------------------------
+
+#: Node types whose per-node code and declared pip dependencies ship as
+#: python/{nodeId}/handler.py + requirements.txt in every architecture
+#: artifact zip and are listed together in the manifest's
+#: customPythonNodeIds (custom-python-frames Requirements 2.4, 2.5).
+CUSTOM_PYTHON_NODE_TYPES = ('custom_python', 'custom_python_preprocess')
+
+
+def gather_custom_python_nodes(graph) -> List[Dict]:
+    """Custom_Python_Nodes whose code + declared dependencies ship in the
+    Workflow_Component artifacts (Requirement 7.3; both Custom Python node
+    types — custom-python-frames Requirements 2.4, 2.5)"""
+    nodes = []
+    for node in graph.nodes:
+        if node.type in CUSTOM_PYTHON_NODE_TYPES:
+            nodes.append({
+                'node_id': node.id,
+                'code': str(node.parameters.get('code') or ''),
+                'requirements': str(node.parameters.get('requirements') or '')
+            })
+    return nodes
+
+
+def split_plugin_dependencies(plugin_dependencies: List[str]
+                              ) -> Tuple[List[str], List[str], List[str]]:
+    """Split compiler pluginDependencies into curated GStreamer plugin
+    names (packaged inline as plugins/{arch}/*.so), custom:{usecase}/{name}
+    Custom_Node_Type plugin dependencies (delivered by Plugin_Component
+    dependency, never bundled inline — Requirement 16.4), and python:
+    runtime packages (surfaced in manifest.json for the edge executor)."""
+    gst_plugins, custom_plugins, python_packages = [], [], []
+    for dep in plugin_dependencies:
+        if dep.startswith(PYTHON_DEP_PREFIX):
+            python_packages.append(dep[len(PYTHON_DEP_PREFIX):])
+        elif dep.startswith(CUSTOM_DEP_PREFIX):
+            custom_plugins.append(dep)
+        else:
+            gst_plugins.append(dep)
+    return sorted(gst_plugins), sorted(custom_plugins), sorted(python_packages)
+
+
+# --------------------------------------------------------------------------
+# Camera_Input_Node binding points
+# (camera-registry-sync Requirements 8.6, 11.5)
+#
+# For each Camera_Input_Node the packager appends a ``bindingPoints`` entry
+# to compiled_pipeline.json mapping the node's logical parameters to the
+# rendered element arguments, and records the ``has_binding_points`` /
+# ``camera_input_nodes`` discriminator on the workflow version item. The
+# compiled elements keep their fully rendered default values, so an unbound
+# document behaves byte-identically to pre-feature output, and workflows
+# without Camera_Input_Nodes produce byte-identical documents (11.5).
+# --------------------------------------------------------------------------
+
+#: The built-in NVIDIA CSI Camera_Input_Node type. CSI capture is host-
+#: service based (nvidia-csi-capture.service stages frames + reads
+#: gain/exposure from config.json), so the binding never lands in an
+#: element argument: the binding point carries ``csiSensorBinding: true``
+#: with empty slots on every physical device architecture and the rendered
+#: gain/exposure in ``parameters``.
+CSI_CAMERA_SOURCE_TYPE_ID = 'csi_camera_source'
+
+#: The built-in ICAM (V4L2 smart camera) Camera_Input_Node type. Captured
+#: directly through ``v4l2src device={device}``, so the ``device``
+#: parameter lands in exactly one element argument: the binding point
+#: carries the generic single ``device`` slot computed by
+#: ``binding_point_slots``.
+ICAM_SOURCE_TYPE_ID = 'icam_source'
+
+#: The Aravis (GenICam) Camera_Input_Node type (aravis-camera-input
+#: Requirements 4.1, 4.2). Aravis acquisition happens in the LocalServer
+#: process through the camera manager, so the binding never lands in an
+#: element argument: the binding point carries ``aravisBinding: true``
+#: with empty slots on every physical device architecture.
+ARAVIS_CAMERA_SOURCE_TYPE_ID = 'aravis_camera_source'
+
+#: Optional Custom_Node_Type descriptor flag declaring the type
+#: camera-backed. Both the snake_case spelling from the design and the
+#: camelCase convention of custom declaration wire shapes are honored.
+CAMERA_BACKED_FLAGS = ('camera_backed', 'cameraBacked')
+
+#: An argument template value that is exactly one ``{placeholder}`` token —
+#: the only shape that lands a node parameter verbatim in an element arg.
+_SLOT_PLACEHOLDER = re.compile(r'^\{(\w+)\}$')
+
+
+def camera_backed_type_ids(node_type_items: List[Dict]) -> set:
+    """Type ids of resolved Custom_Node_Types declared camera-backed via
+    the optional ``camera_backed: true`` descriptor flag."""
+    type_ids = set()
+    for item in node_type_items or []:
+        declaration = item.get('declaration')
+        if not isinstance(declaration, dict):
+            continue
+        if any(declaration.get(flag) is True for flag in CAMERA_BACKED_FLAGS):
+            type_id = declaration.get('typeId')
+            if isinstance(type_id, str):
+                type_ids.add(type_id)
+    return type_ids
+
+
+def gather_camera_input_nodes(graph, camera_backed_types: set) -> List:
+    """The graph's Camera_Input_Nodes: csi_camera_source, icam_source and
+    aravis_camera_source nodes plus nodes of any Custom_Node_Type declared
+    camera-backed, in graph node order."""
+    return [node for node in graph.nodes
+            if node.type == CSI_CAMERA_SOURCE_TYPE_ID
+            or node.type == ICAM_SOURCE_TYPE_ID
+            or node.type == ARAVIS_CAMERA_SOURCE_TYPE_ID
+            or node.type in camera_backed_types]
+
+
+def binding_hints_from_definition(definition: Dict) -> Dict[str, Dict]:
+    """Per-node ``cameraBindingHint`` advisory data recorded by the
+    Workflow_Builder in the definition document (``nodes[].data``), keyed
+    by node id. Tolerant of definitions carrying no node data at all —
+    every pre-feature definition — so packaging them is unchanged (11.5)."""
+    hints: Dict[str, Dict] = {}
+    for node in definition.get('nodes') or []:
+        if not isinstance(node, dict):
+            continue
+        data = node.get('data')
+        hint = data.get('cameraBindingHint') if isinstance(data, dict) else None
+        node_id = node.get('id')
+        if isinstance(hint, dict) and hint and isinstance(node_id, str):
+            hints[node_id] = hint
+    return hints
+
+
+def rendered_default_parameters(node, descriptor) -> Dict[str, Any]:
+    """The parameter values rendered into the compiled document: declared
+    defaults overlaid with the node's explicit values (the compiler's
+    effective-value rule)."""
+    values = {parameter.name: parameter.default
+              for parameter in descriptor.parameters}
+    values.update(node.parameters)
+    return values
+
+
+def binding_point_slots(compiled_doc: Dict, node_id: str, mapping,
+                        parameter_names: set) -> List[Dict]:
+    """Where each of the node's parameters lands in THIS compiled document:
+    one slot per element argument whose catalog template is exactly a
+    single ``{parameter}`` placeholder (e.g. the v4l2src ``device`` arg on
+    x86_64 / x86_64_nvidia). The node's element chain appears contiguously
+    in exactly one segment (compiler Requirement 6.6), so template index k
+    addresses the k-th element of that run."""
+    if mapping is None or not mapping.element_chain:
+        return []
+    slots: List[Dict] = []
+    for segment_index, segment in enumerate(compiled_doc.get('segments') or []):
+        elements = segment.get('elements') or []
+        run_start = next((index for index, element in enumerate(elements)
+                          if element.get('nodeId') == node_id), None)
+        if run_start is None:
+            continue
+        for offset, template in enumerate(mapping.element_chain):
+            for arg in sorted(template.get('args_template') or {}):
+                value = template['args_template'][arg]
+                if not isinstance(value, str):
+                    continue
+                match = _SLOT_PLACEHOLDER.match(value)
+                if match and match.group(1) in parameter_names:
+                    slots.append({
+                        'param': match.group(1),
+                        'segment': segment_index,
+                        'element': run_start + offset,
+                        'arg': arg,
+                    })
+        break  # each node's chain lives in exactly one segment
+    return slots
+
+
+def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
+                         hints: Dict[str, Dict],
+                         descriptors_by_id: Dict) -> List[Dict]:
+    """The ``bindingPoints`` section of one architecture's compiled
+    document: nodeId, nodeType, bindingHint from the definition, rendered
+    default parameters, and arch-specific slots. csi_camera_source is
+    host-service (CSI capture) bound on every physical device architecture
+    (``csiSensorBinding: true``, empty slots) with the rendered
+    gain/exposure values in ``parameters``; the binding selects the CSI
+    sensor the capture host service stages from, never an element argument.
+    icam_source is captured directly through ``v4l2src device={device}``,
+    so it carries the generic single ``device`` slot with the rendered
+    device value. aravis_camera_source is executor-feed-bound on every
+    physical device architecture (``aravisBinding: true``, empty slots)
+    with the rendered camera_id/gain/exposure values in ``parameters``
+    (aravis-camera-input Requirement 4.2)."""
+    binding_points: List[Dict] = []
+    for node in camera_nodes:
+        descriptor = descriptors_by_id[node.type]
+        entry: Dict[str, Any] = {
+            'nodeId': node.id,
+            'nodeType': node.type,
+            'parameters': rendered_default_parameters(node, descriptor),
+            'slots': [],
+        }
+        hint = hints.get(node.id)
+        if hint:
+            entry['bindingHint'] = hint
+        if node.type == ARAVIS_CAMERA_SOURCE_TYPE_ID:
+            entry['aravisBinding'] = True
+        elif node.type == CSI_CAMERA_SOURCE_TYPE_ID:
+            entry['csiSensorBinding'] = True
+        else:
+            entry['slots'] = binding_point_slots(
+                compiled_doc, node.id, descriptor.mapping_for(arch),
+                {parameter.name for parameter in descriptor.parameters})
+        binding_points.append(entry)
+    return binding_points
+
+
+def compiled_document_json(compiled, binding_points: List[Dict]) -> str:
+    """compiled_pipeline.json content: the canonical compiler output plus
+    the ``bindingPoints`` section when the workflow has Camera_Input_Nodes.
+    With no camera nodes the output is byte-identical to the compiler's
+    own serialization (Requirement 11.5)."""
+    if not binding_points:
+        return compiled.to_json()
+    document = compiled.to_dict()
+    document['bindingPoints'] = binding_points
+    return json.dumps(document, sort_keys=True, indent=2, ensure_ascii=True)
+
+
+def _rendered_slot_value(compiled_doc: Dict, slot: Dict) -> Any:
+    """The rendered element-argument value a slot points at."""
+    try:
+        segment = compiled_doc['segments'][slot['segment']]
+        return segment['elements'][slot['element']]['args'][slot['arg']]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _dynamo_safe(obj: Any) -> Any:
+    """Floats are not storable in DynamoDB; convert them to Decimal."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {key: _dynamo_safe(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_dynamo_safe(item) for item in obj]
+    return obj
+
+
+def camera_input_nodes_record(camera_nodes: List, hints: Dict[str, Dict],
+                              arch_binding_points: Dict[str, List[Dict]],
+                              arch_compiled_docs: Dict[str, Dict]) -> List[Dict]:
+    """The ``camera_input_nodes`` version-item attribute: node id, node
+    type, binding hint, and the per-arch compiled device paths (the
+    rendered ``device`` slot values) the Deployment_Service's legacy path
+    check and binding matrix read without re-fetching compiled documents
+    from S3 (camera-registry-sync 8.6, 9.5)."""
+    records: List[Dict] = []
+    for node in camera_nodes:
+        record: Dict[str, Any] = {
+            'node_id': node.id,
+            'node_type': node.type,
+            'compiled_device_paths': {},
+        }
+        hint = hints.get(node.id)
+        if hint:
+            record['binding_hint'] = hint
+        for arch in sorted(arch_binding_points):
+            entry = next((point for point in arch_binding_points[arch]
+                          if point['nodeId'] == node.id), None)
+            if not entry:
+                continue
+            for slot in entry['slots']:
+                if slot['param'] != 'device':
+                    continue
+                value = _rendered_slot_value(arch_compiled_docs[arch], slot)
+                if isinstance(value, str):
+                    record['compiled_device_paths'][arch] = value
+        records.append(record)
+    return records
+
+
+# --------------------------------------------------------------------------
+# Custom_Node_Type plugin resolution, gates, and verification
+# (custom-node-designer Requirements 10.4, 11.1, 11.2, 11.3, 16.4)
+#
+# Everything up to load_custom_plugin_records is pure over plain dicts so
+# the gate/dependency decision logic is property-testable without AWS
+# (tasks 10.2-10.4).
+# --------------------------------------------------------------------------
+
+def plugin_component_name(plugin_id: str) -> str:
+    """The Greengrass Plugin_Component name of a Plugin_Record (16.4)"""
+    return f"{PLUGIN_COMPONENT_PREFIX}{plugin_id}"
+
+
+def plugin_version_requirement(plugin_version: int) -> str:
+    """Greengrass VersionRequirement pinning the Plugin_Record version
+    recorded by the workflow's pinned Custom_Node_Type version (16.4)."""
+    version = int(plugin_version)
+    return f">={version}.0.0 <{version + 1}.0.0"
+
+
+def custom_dependency_index(node_type_items: List[Dict]) -> Dict[str, Dict]:
+    """Map each ``custom:`` plugin dependency recorded in the resolved
+    Custom_Node_Type declarations to its CustomNodeTypes item, so a
+    compiled dependency resolves to the pinned backing Plugin_Record and
+    gate rejections can identify the Custom_Node_Type (11.2, 11.3).
+    Deterministic: items visited sorted by (node_type_id, version)."""
+    index: Dict[str, Dict] = {}
+    ordered = sorted(node_type_items,
+                     key=lambda i: (str(i.get('node_type_id')),
+                                    int(i.get('version', 0))))
+    for item in ordered:
+        declaration = item.get('declaration')
+        if not isinstance(declaration, dict):
+            continue
+        mappings = declaration.get('mappings')
+        if not isinstance(mappings, list):
+            continue
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
+                continue
+            for dep in mapping.get('pluginDependencies') or []:
+                if isinstance(dep, str) and dep.startswith(CUSTOM_DEP_PREFIX):
+                    index[dep] = item
+    return index
+
+
+def artifact_entry_complete(entry: Optional[Dict]) -> bool:
+    """A per-arch Plugin_Record artifact entry usable for packaging: a
+    succeeded build with the recorded key, checksum, and signature that
+    verification (10.4) needs."""
+    return bool(entry
+                and entry.get('buildStatus') == 'succeeded'
+                and entry.get('s3Key')
+                and entry.get('checksum')
+                and entry.get('signature'))
+
+
+def custom_plugin_gate_findings(arch_custom_deps: Dict[str, List[str]],
+                                dep_index: Dict[str, Dict],
+                                dep_records: Dict[str, Optional[Dict]]
+                                ) -> List[Dict]:
+    """
+    Evaluate the custom-plugin packaging gates (11.2, 11.3, 16.4) before
+    any artifact is assembled. Returns [] when packaging may proceed,
+    otherwise the complete list of findings, each identifying the
+    Custom_Node_Type and the offending lifecycle state or missing
+    Target_Architecture / Plugin_Component.
+
+    ``arch_custom_deps``: {arch: [custom: deps compiled for that arch]}
+    ``dep_index``: custom_dependency_index over the resolved items
+    ``dep_records``: {dep: backing Plugin_Record item or None}
+    """
+    findings: List[Dict] = []
+    dep_archs: Dict[str, List[str]] = {}
+    for arch in sorted(arch_custom_deps):
+        for dep in arch_custom_deps[arch]:
+            dep_archs.setdefault(dep, []).append(arch)
+
+    for dep in sorted(dep_archs):
+        item = dep_index.get(dep)
+        node_type_id = item.get('node_type_id') if item else None
+        record = dep_records.get(dep)
+        if not item or not record:
+            findings.append({
+                'code': GATE_RECORD_MISSING,
+                'message': (f"Custom plugin dependency '{dep}' of "
+                            f"Custom_Node_Type '{node_type_id or 'unknown'}' has no "
+                            f"resolvable backing Plugin_Record"),
+                'node_type_id': node_type_id,
+                'dependency': dep,
+            })
+            continue
+
+        plugin_id = record.get('plugin_id')
+        plugin_version = record.get('version')
+        state = record.get('lifecycle_state')
+        if state not in PACKAGEABLE_LIFECYCLE_STATES:
+            # 11.3: dev (or unknown — fail closed) lifecycle state rejects,
+            # identifying the Custom_Node_Type and its Lifecycle_State.
+            findings.append({
+                'code': GATE_LIFECYCLE,
+                'message': (f"Custom_Node_Type '{node_type_id}' is backed by "
+                            f"plugin '{plugin_id}' v{plugin_version} in lifecycle "
+                            f"state '{state}'; packaging requires test or prod"),
+                'node_type_id': node_type_id,
+                'dependency': dep,
+                'plugin_id': plugin_id,
+                'plugin_version': plugin_version,
+                'lifecycle_state': state,
+            })
+            continue
+
+        artifacts = record.get('artifacts') or {}
+        for arch in dep_archs[dep]:
+            if not artifact_entry_complete(artifacts.get(arch)):
+                # 11.2: missing per-arch Plugin_Artifact rejects, identifying
+                # the Custom_Node_Type and the missing Target_Architecture.
+                findings.append({
+                    'code': GATE_ARTIFACT_MISSING,
+                    'message': (f"Custom_Node_Type '{node_type_id}' has no built "
+                                f"Plugin_Artifact for architecture '{arch}' "
+                                f"(plugin '{plugin_id}' v{plugin_version})"),
+                    'node_type_id': node_type_id,
+                    'dependency': dep,
+                    'plugin_id': plugin_id,
+                    'plugin_version': plugin_version,
+                    'arch': arch,
+                })
+
+        component = record.get('component') or {}
+        if component.get('status') != 'registered':
+            # 16.4: the Workflow_Component depends on the Plugin_Component,
+            # so a missing registered version rejects packaging.
+            findings.append({
+                'code': GATE_COMPONENT_MISSING,
+                'message': (f"Custom_Node_Type '{node_type_id}' has no registered "
+                            f"Plugin_Component version for plugin '{plugin_id}' "
+                            f"v{plugin_version} "
+                            f"({plugin_component_name(str(plugin_id))})"),
+                'node_type_id': node_type_id,
+                'dependency': dep,
+                'plugin_id': plugin_id,
+                'plugin_version': plugin_version,
+            })
+    return findings
+
+
+# --------------------------------------------------------------------------
+# LLM_Inference_Node packaging gate + version-item discriminator
+# (vllm-triton-inference Requirements 7.1, 7.2, 8.1)
+#
+# ``llm_inference`` nodes compile only for VLLM_ARCHITECTURES, so a
+# packaging request that includes any other architecture is rejected
+# before compilation with the complete finding list (409, no component
+# version registered — 7.2). Workflows without an ``llm_inference`` node
+# always produce zero findings, keeping the pre-feature packaging path
+# untouched (8.1). On success the packager records the
+# ``has_llm_inference`` discriminator and the packaged architecture list
+# on the workflow version item — the same way the camera-binding
+# discriminator is written — so the Deployment_Service's vLLM
+# architecture gate can evaluate workflow components without re-reading
+# compiled documents from S3.
+# --------------------------------------------------------------------------
+
+#: The LLM_Inference_Node catalog type (workflow_core.catalog LLM_INFERENCE).
+LLM_INFERENCE_TYPE_ID = 'llm_inference'
+
+#: LLM packaging gate finding code (vllm-triton-inference 7.2).
+GATE_LLM_ARCH_UNSUPPORTED = 'V6_LLM_ARCH_UNSUPPORTED'
+
+
+def gather_llm_inference_node_ids(definition: Dict) -> List[str]:
+    """Ids of the definition's ``llm_inference`` nodes, in definition
+    order. Empty for every pre-feature workflow (8.1)."""
+    node_ids: List[str] = []
+    for node in definition.get('nodes') or []:
+        if isinstance(node, dict) and node.get('type') == LLM_INFERENCE_TYPE_ID:
+            node_id = node.get('id')
+            if isinstance(node_id, str):
+                node_ids.append(node_id)
+    return node_ids
+
+
+def llm_arch_gate_findings(definition: Dict, requested_archs: List[str]) -> List[Dict]:
+    """
+    The LLM architecture packaging gate (vllm-triton-inference 7.2), a
+    pure structural twin of ``custom_plugin_gate_findings``: one finding
+    ``{code: 'V6_LLM_ARCH_UNSUPPORTED', nodeId, arch}`` per
+    (``llm_inference`` node, requested architecture outside
+    ``VLLM_ARCHITECTURES``). Empty when the workflow has no
+    ``llm_inference`` node (8.1) or every requested architecture
+    supports vLLM execution.
+    """
+    llm_node_ids = gather_llm_inference_node_ids(definition)
+    if not llm_node_ids:
+        return []
+    unsupported = [arch for arch in requested_archs
+                   if arch not in VLLM_ARCHITECTURES]
+    findings: List[Dict] = []
+    for node_id in llm_node_ids:
+        for arch in unsupported:
+            findings.append({
+                'code': GATE_LLM_ARCH_UNSUPPORTED,
+                'message': (f"LLM inference node '{node_id}' cannot be "
+                            f"packaged for architecture '{arch}': vLLM "
+                            f"execution is supported only on "
+                            f"{', '.join(VLLM_ARCHITECTURES)}"),
+                'nodeId': node_id,
+                'arch': arch,
+            })
+    return findings
+
+
+def plugin_component_dependencies(dep_records: Dict[str, Optional[Dict]]) -> Dict:
+    """The Greengrass ComponentDependencies block of the Workflow_Component
+    recipe (16.4): one HARD dependency on dda.plugin.{pluginId} per distinct
+    custom plugin, pinned to the recorded Plugin_Record version."""
+    dependencies: Dict[str, Dict] = {}
+    for dep in sorted(dep_records):
+        record = dep_records[dep]
+        if not record:
+            continue
+        dependencies[plugin_component_name(str(record['plugin_id']))] = {
+            'VersionRequirement': plugin_version_requirement(record['version']),
+            'DependencyType': 'HARD',
+        }
+    return dependencies
+
+
+def recipe_manifest_order(archs) -> List[str]:
+    """Deterministic platform-manifest order: sorted, except the plain
+    x86_64 manifest is listed after the x86_64_nvidia one — both map to
+    Greengrass amd64, so attribute-less amd64 devices match plain x86_64
+    while devices declaring 'runtime: nvidia' match the more specific
+    manifest first (design: x86_64_nvidia)."""
+    ordered = sorted(archs)
+    if ARCH_X86_64 in ordered and ARCH_X86_64_NVIDIA in ordered:
+        ordered.remove(ARCH_X86_64)
+        ordered.insert(ordered.index(ARCH_X86_64_NVIDIA) + 1, ARCH_X86_64)
+    return ordered
+
+
+def load_custom_plugin_records(arch_custom_deps: Dict[str, List[str]],
+                               dep_index: Dict[str, Dict]
+                               ) -> Dict[str, Optional[Dict]]:
+    """The backing Plugin_Record of every distinct compiled custom plugin
+    dependency, resolved through the pinned Custom_Node_Type version
+    (14.2). Unresolvable dependencies map to None (gates fail closed)."""
+    records: Dict[str, Optional[Dict]] = {}
+    for deps in arch_custom_deps.values():
+        for dep in deps:
+            if dep in records:
+                continue
+            item = dep_index.get(dep)
+            if not item or item.get('plugin_id') is None \
+                    or item.get('plugin_version') is None:
+                records[dep] = None
+                continue
+            records[dep] = get_plugin_record_version(
+                item['plugin_id'], int(item['plugin_version']))
+    return records
+
+
+def verify_custom_plugin_artifact(dependency: str, node_type_id: Optional[str],
+                                  record: Dict, arch: str) -> Tuple[str, str]:
+    """
+    Stream one custom Plugin_Artifact's bytes for ``arch`` from the
+    Plugin_Library, recompute the SHA-256, and KMS-Verify the recorded
+    signature against the portal signing key (Requirement 10.4). Returns
+    ``(manifest_key, checksum)`` for the arch manifest's pluginChecksums
+    ({<pluginComponentName>/<file>: <sha256>}). Raises PackagingError —
+    the existing all-or-nothing path (stage cleanup, no partial
+    component) — on a missing artifact, checksum mismatch, or signature
+    verification failure.
+    """
+    entry = (record.get('artifacts') or {}).get(arch) or {}
+    so_key = entry['s3Key']
+    so_name = posixpath.basename(so_key)
+    component_name = plugin_component_name(str(record['plugin_id']))
+    manifest_key = f"{component_name}/{so_name}"
+    label = f"custom-plugins/{arch}/{so_name}"
+    identity = (f"Custom plugin artifact '{so_name}' for architecture '{arch}' "
+                f"(Custom_Node_Type '{node_type_id}', plugin "
+                f"'{record.get('plugin_id')}' v{record.get('version')})")
+
+    try:
+        response = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=so_key)
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        raise PackagingError(
+            label,
+            f"{identity} could not be read from the Plugin_Library "
+            f"(s3://{PORTAL_ARTIFACTS_BUCKET}/{so_key}): {code or str(e)}")
+
+    digest = hashlib.sha256()
+    body = response['Body']
+    while True:
+        chunk = body.read(1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+
+    if digest.hexdigest() != entry['checksum']:
+        raise PackagingError(
+            label,
+            f"{identity} failed checksum verification against the "
+            f"Plugin_Record (Requirement 10.4)")
+
+    try:
+        signature = base64.b64decode(entry['signature'])
+    except (TypeError, ValueError, binascii.Error):
+        signature = None
+    signature_valid = False
+    if signature:
+        try:
+            verified = kms.verify(
+                KeyId=PLUGIN_SIGNING_KEY_ARN,
+                Message=digest.digest(),
+                MessageType='DIGEST',
+                SigningAlgorithm=SIGNING_ALGORITHM,
+                Signature=signature,
+            )
+            signature_valid = bool(verified.get('SignatureValid'))
+        except ClientError as e:
+            code = e.response.get('Error', {}).get('Code', '')
+            if code != 'KMSInvalidSignatureException':
+                raise PackagingError(
+                    label,
+                    f"{identity} signature could not be verified: {code or str(e)}")
+    if not signature_valid:
+        raise PackagingError(
+            label,
+            f"{identity} failed signature verification against the portal "
+            f"signing key (Requirement 10.4)")
+
+    return manifest_key, entry['checksum']
+
+
+def build_manifest(workflow_id: str, workflow_version: int, arch: str,
+                   gst_plugins: List[str], python_packages: List[str],
+                   custom_python_nodes: List[Dict], user: Dict,
+                   plugin_checksums: Optional[Dict[str, str]] = None,
+                   plugin_components: Optional[Dict[str, str]] = None,
+                   component_version: Optional[str] = None,
+                   workflow_name: Optional[str] = None) -> Dict:
+    """manifest.json content: what WorkflowWatcher needs to register the
+    workflow and what the deployment compatibility check reads (8.4).
+
+    ``plugin_checksums`` ({<pluginComponentName>/<file>: <sha256>}) and
+    ``plugin_components`` ({<pluginComponentName>: <componentVersion>})
+    let the LocalServer plugin loader verify each Plugin_Component-
+    delivered custom plugin file and derive its install root
+    (custom-node-designer Requirements 10.4, 10.6, 11.1)."""
+    return {
+        'componentName': component_name_for(workflow_id),
+        # The resolved (possibly patch-bumped) version when provided, else the
+        # base version for the workflow version.
+        'componentVersion': component_version or component_version_for(workflow_version),
+        'workflowId': workflow_id,
+        # Human-friendly workflow name (from the workflows table) so the
+        # on-device deployed-workflows UI can label rows by name instead of the
+        # opaque workflowId. Absent/None for pre-existing packages; the edge
+        # falls back to workflowId in that case.
+        'workflowName': workflow_name,
+        'workflowVersion': int(workflow_version),
+        'targetArch': arch,
+        # Arch-scoped minimum: this package targets `arch`, so the scalar is
+        # the minimum for that variant's lineage (backward-compatible field).
+        'minLocalServerVersion': min_local_server_version_for(arch),
+        # Full per-arch map so a variant-aware device selects the floor for
+        # its own arch rather than comparing across incomparable lineages.
+        'minLocalServerVersions': dict(MIN_LOCAL_SERVER_VERSIONS),
+        'pluginDependencies': gst_plugins,
+        'pythonDependencies': python_packages,
+        'pluginChecksums': dict(plugin_checksums or {}),
+        'pluginComponents': dict(plugin_components or {}),
+        'customPythonNodeIds': [n['node_id'] for n in custom_python_nodes],
+        'packagedAt': now_ms(),
+        'packagedBy': user['user_id']
+    }
+
+
+def build_arch_zip(zip_path: str, arch: str, manifest: Dict, definition_json: str,
+                   compiled_json: str, gst_plugins: List[str],
+                   custom_python_nodes: List[Dict]) -> None:
+    """
+    Assemble one architecture's artifact zip on local disk (Requirement 7.1).
+
+    Plugin binaries are resolved from the curated plugin library in portal
+    S3; a missing or unreadable plugin artifact fails packaging with that
+    artifact identified (Requirement 7.5).
+    """
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('manifest.json', json.dumps(manifest, sort_keys=True, indent=2))
+        zf.writestr('workflow.json', definition_json)
+        zf.writestr('compiled_pipeline.json', compiled_json)
+
+        for plugin in gst_plugins:
+            library_key = plugin_library_key(arch, plugin)
+            artifact_label = f"plugins/{arch}/{plugin}.so"
+            try:
+                response = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=library_key)
+            except ClientError as e:
+                code = e.response.get('Error', {}).get('Code', '')
+                if code in ('NoSuchKey', '404'):
+                    raise PackagingError(
+                        artifact_label,
+                        f"Plugin artifact '{plugin}' for architecture '{arch}' was not "
+                        f"found in the plugin library (s3://{PORTAL_ARTIFACTS_BUCKET}/{library_key})")
+                raise PackagingError(
+                    artifact_label,
+                    f"Plugin artifact '{plugin}' for architecture '{arch}' could not be "
+                    f"read from the plugin library: {code or str(e)}")
+            # Stream the .so into the zip without holding it all in memory
+            with zf.open(artifact_label, 'w') as target:
+                body = response['Body']
+                while True:
+                    chunk = body.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    target.write(chunk)
+
+        for node in custom_python_nodes:
+            zf.writestr(f"python/{node['node_id']}/handler.py", node['code'])
+            zf.writestr(f"python/{node['node_id']}/requirements.txt", node['requirements'])
+
+
+# --------------------------------------------------------------------------
+# Use_Case account S3 staging (all-or-nothing, Requirement 7.5)
+# --------------------------------------------------------------------------
+
+def delete_prefix(s3_client, bucket: str, prefix: str) -> None:
+    """Best-effort delete of every object under a prefix (stage cleanup)"""
+    try:
+        continuation_token = None
+        while True:
+            kwargs = {'Bucket': bucket, 'Prefix': prefix}
+            if continuation_token:
+                kwargs['ContinuationToken'] = continuation_token
+            listed = s3_client.list_objects_v2(**kwargs)
+            objects = [{'Key': o['Key']} for o in listed.get('Contents', [])]
+            if objects:
+                s3_client.delete_objects(Bucket=bucket, Delete={'Objects': objects})
+            if not listed.get('IsTruncated'):
+                break
+            continuation_token = listed.get('NextContinuationToken')
+    except ClientError as e:
+        # Cleanup must never mask the original failure
+        logger.error(f"Error cleaning s3://{bucket}/{prefix}: {str(e)}")
+
+
+def stage_and_promote_artifacts(usecase_s3, bucket: str, workflow_id: str,
+                                workflow_version: int, arch_zip_paths: Dict[str, str],
+                                component_version: str
+                                ) -> Tuple[str, Dict[str, str]]:
+    """
+    Upload every arch zip to a temporary staging prefix, then promote all
+    of them to the final component prefix (Requirement 7.5).
+
+    The final prefix includes the ``component_version`` so every (re-)packaged
+    component version gets a UNIQUE artifact S3 URI. Greengrass reuses a
+    cached artifact when a new component version reuses the same URI (it keys
+    downloads/dedup on the artifact URI), which left re-packaged workflows
+    running the original on-device artifact and never re-running the Install
+    lifecycle (observed on JP6: a re-packaged workflow stayed pinned to the
+    first package's manifest). A per-version URI forces a fresh fetch + Install
+    on every re-package — matching how model components (unique artifact path
+    per publish) already behave.
+
+    Returns (final_prefix, {arch: final_key}). Raises PackagingError with
+    the failing artifact identified; the caller cleans up.
+    """
+    stage_id = uuid.uuid4().hex
+    stage_prefix = f"{STAGING_S3_PREFIX}/{workflow_id}/{workflow_version}/{stage_id}"
+    final_prefix = (f"{COMPONENT_S3_PREFIX}/{workflow_id}/{workflow_version}/"
+                    f"{component_version}")
+
+    staged_keys: Dict[str, str] = {}
+    for arch, zip_path in arch_zip_paths.items():
+        artifact_label = f"{arch}/{zip_artifact_name(arch)}"
+        stage_key = f"{stage_prefix}/{artifact_label}"
+        try:
+            with open(zip_path, 'rb') as fh:
+                usecase_s3.put_object(Bucket=bucket, Key=stage_key, Body=fh,
+                                      ContentType='application/zip')
+        except (ClientError, OSError) as e:
+            raise PackagingError(
+                artifact_label,
+                f"Failed to upload artifact '{artifact_label}' to the staging area: {str(e)}")
+        staged_keys[arch] = stage_key
+
+    # Every artifact staged successfully -> promote to the final prefix.
+    final_keys: Dict[str, str] = {}
+    for arch, stage_key in staged_keys.items():
+        artifact_label = f"{arch}/{zip_artifact_name(arch)}"
+        final_key = f"{final_prefix}/{artifact_label}"
+        try:
+            usecase_s3.copy_object(Bucket=bucket, Key=final_key,
+                                   CopySource={'Bucket': bucket, 'Key': stage_key})
+        except ClientError as e:
+            raise PackagingError(
+                artifact_label,
+                f"Failed to promote artifact '{artifact_label}' from the staging area: {str(e)}")
+        final_keys[arch] = final_key
+
+    return final_prefix, final_keys
+
+
+# --------------------------------------------------------------------------
+# Greengrass component registration (Requirements 7.2, 13.3)
+# --------------------------------------------------------------------------
+
+def build_recipe(workflow_id: str, workflow_version: int, bucket: str,
+                 final_keys: Dict[str, str],
+                 component_dependencies: Optional[Dict] = None,
+                 component_version: Optional[str] = None) -> Dict:
+    """
+    Greengrass recipe with one platform manifest per selected architecture
+    (Requirements 7.2, 7.4). Each manifest carries a one-shot ``Run``
+    lifecycle that copies the workflow artifacts under /aws_dda/workflows/
+    and exits 0 (→ FINISHED); it starts no long-lived process, so deploying
+    or removing the component never disturbs LocalServer or any other
+    component (Requirement 13.3) — the LocalServer workflow engine discovers
+    the copied files at runtime.
+
+    ``Run`` (not ``Install``) is deliberate: Greengrass re-executes the
+    ``Run`` lifecycle every time the component version changes, so a
+    re-packaged workflow's fresh manifest/artifacts overwrite the on-disk
+    copy on redeploy. An ``Install``-only generic component, by contrast, is
+    installed once and its lifecycle is not re-run on in-place version
+    updates, which left re-packaged workflows pinned to the first package's
+    on-disk manifest (observed on JP6: the device kept the original
+    ``minLocalServerVersion`` after re-packaging and never became runnable).
+
+    ``component_dependencies`` is the ComponentDependencies block
+    declaring the Plugin_Components of the workflow's Custom_Node_Types
+    (custom-node-designer Requirement 16.4); omitted when the workflow
+    uses none.
+    """
+    component_name = component_name_for(workflow_id)
+    component_version = component_version or component_version_for(workflow_version)
+    install_dir = f"{DEVICE_WORKFLOWS_ROOT}/{workflow_id}/{workflow_version}"
+
+    # Greengrass matches manifests on platform attributes. amd64 vs aarch64
+    # separates the x86 flavors from the Jetson builds; when more than one
+    # arm64 JetPack variant is packaged, a custom 'variant' attribute
+    # (declared in the device's Nucleus platform overrides) disambiguates
+    # them, and x86_64_nvidia always carries 'runtime: nvidia' (with the
+    # plain x86_64 manifest ordered after it — recipe_manifest_order).
+    arm_archs = [a for a in final_keys if ARCH_TO_GG_PLATFORM.get(a) == 'aarch64']
+    disambiguate_arm = len(arm_archs) > 1
+
+    manifests = []
+    for arch in recipe_manifest_order(final_keys):
+        platform = {'os': 'linux', 'architecture': ARCH_TO_GG_PLATFORM[arch]}
+        if disambiguate_arm and ARCH_TO_GG_PLATFORM[arch] == 'aarch64':
+            platform['variant'] = arch
+        elif arch == ARCH_X86_64_NVIDIA:
+            platform['runtime'] = 'nvidia'
+        unarchived_dir = zip_artifact_name(arch)[:-len('.zip')]
+        run_script = (
+            f"mkdir -p {install_dir} && "
+            f"cp -r {{artifacts:decompressedPath}}/{unarchived_dir}/. {install_dir}/"
+        )
+        manifests.append({
+            'Platform': platform,
+            'Lifecycle': {
+                # One-shot Run (not Install): re-executes on every component
+                # version change so a re-packaged workflow's fresh manifest
+                # overwrites the on-disk copy; exits 0 → FINISHED, starting
+                # no long-lived process (Requirement 13.3).
+                'Run': {
+                    'Script': run_script,
+                    'Timeout': 300,
+                    'requiresPrivilege': True
+                }
+            },
+            'Artifacts': [
+                {
+                    'Uri': f"s3://{bucket}/{final_keys[arch]}",
+                    'Unarchive': 'ZIP',
+                    'Permission': {
+                        'Read': 'ALL'
+                    }
+                }
+            ]
+        })
+
+    recipe = {
+        'RecipeFormatVersion': '2020-01-25',
+        'ComponentName': component_name,
+        'ComponentVersion': component_version,
+        'ComponentType': 'aws.greengrass.generic',
+        'ComponentPublisher': COMPONENT_PUBLISHER,
+        'ComponentConfiguration': {
+            'DefaultConfiguration': {
+                'WorkflowId': workflow_id,
+                'WorkflowVersion': str(workflow_version)
+            }
+        },
+        'Manifests': manifests,
+        'Lifecycle': {}
+    }
+    if component_dependencies:
+        recipe['ComponentDependencies'] = component_dependencies
+    return recipe
+
+
+def register_component(greengrass, recipe: Dict, usecase_id: str,
+                       workflow_id: str, workflow_version: int, user: Dict) -> str:
+    """
+    Register the component version in the Use_Case account Greengrass
+    registry and wait until it is DEPLOYABLE (Requirement 7.2). A version
+    that fails to become DEPLOYABLE is deleted so no partial or broken
+    component version remains (Requirement 7.5).
+    """
+    component_label = (f"component {recipe['ComponentName']} "
+                       f"v{recipe['ComponentVersion']}")
+    try:
+        response = greengrass.create_component_version(
+            inlineRecipe=json.dumps(recipe),
+            tags={
+                'dda-portal:managed': 'true',
+                'dda-portal:usecase-id': usecase_id,
+                'dda-portal:workflow-id': workflow_id,
+                'dda-portal:workflow-version': str(workflow_version),
+                'dda-portal:created-by': user['user_id']
+            }
+        )
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        if code == 'ConflictException':
+            raise PackagingError(
+                component_label,
+                f"Component version {recipe['ComponentVersion']} already exists for "
+                f"{recipe['ComponentName']}")
+        raise PackagingError(component_label,
+                             f"Component registration failed: {str(e)}")
+
+    component_arn = response['arn']
+    component_status = 'REQUESTED'
+    status_message = ''
+    for _ in range(COMPONENT_STATUS_MAX_ATTEMPTS):
+        if component_status not in ('REQUESTED', 'IN_PROGRESS'):
+            break
+        time.sleep(COMPONENT_STATUS_POLL_SECONDS)
+        status_response = greengrass.describe_component(arn=component_arn)
+        component_status = status_response['status']['componentState']
+        status_message = status_response['status'].get('message', '')
+
+    if component_status != 'DEPLOYABLE':
+        # Remove the failed registration so nothing partial exists (7.5)
+        try:
+            greengrass.delete_component(arn=component_arn)
+        except ClientError as e:
+            logger.error(f"Error deleting failed component {component_arn}: {str(e)}")
+        raise PackagingError(
+            component_label,
+            f"Component did not become DEPLOYABLE (state {component_status}): "
+            f"{status_message or 'no status message'}")
+
+    return component_arn
+
+
+# --------------------------------------------------------------------------
+# POST /workflows/{id}/package
+# --------------------------------------------------------------------------
+
+def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
+    """
+    Compile, assemble, upload, and register a Workflow_Component for the
+    user-selected architectures (Requirements 7.1-7.5, 11.5, 13.3).
+
+    Body: {"architectures": ["x86_64", "arm64_jp5", ...], "version": N?}
+    version defaults to the workflow's latest version.
+    """
+    item = get_workflow_item(workflow_id)
+    if not item:
+        return not_found_response()
+    err = authorize_workflow_access(user, event, item, Permission.WORKFLOW_PACKAGE)
+    if err:
+        return err
+
+    body, err = parse_body(event)
+    if err:
+        return err
+
+    architectures = body.get('architectures')
+    if not architectures or not isinstance(architectures, list):
+        return error_response(400, 'MISSING_FIELDS',
+                              'architectures must be a non-empty list of target architectures',
+                              {'supported_architectures': list(DEVICE_ARCHITECTURES)})
+    architectures = list(dict.fromkeys(architectures))  # dedupe, keep order
+    unsupported = [a for a in architectures if a not in DEVICE_ARCHITECTURES]
+    if unsupported:
+        return error_response(400, 'UNSUPPORTED_ARCHITECTURE',
+                              f"Unsupported architectures: {', '.join(map(str, unsupported))}",
+                              {'supported_architectures': list(DEVICE_ARCHITECTURES)})
+
+    version_param = body.get('version', item.get('latest_version', 1))
+    try:
+        version = int(version_param)
+    except (TypeError, ValueError):
+        return error_response(400, 'INVALID_VERSION', 'version must be an integer')
+
+    version_item = get_version_item(workflow_id, version)
+    if not version_item:
+        return error_response(404, 'VERSION_NOT_FOUND',
+                              f'Version {version} not found for workflow')
+
+    # Packaging requires a recorded passed validation (Requirements 4.7, 4.10)
+    err = validation_guard(version_item)
+    if err:
+        return err
+
+    usecase_id = item['usecase_id']
+    try:
+        usecase = get_usecase(usecase_id)
+    except ValueError:
+        return error_response(404, 'USECASE_NOT_FOUND', 'Use case not found')
+    usecase_bucket = usecase.get('s3_bucket')
+    if not usecase_bucket:
+        return error_response(500, 'USECASE_MISCONFIGURED',
+                              'Use case has no S3 bucket configured for component artifacts')
+
+    # Load and parse the stored Workflow_Definition
+    try:
+        definition_json = load_definition(version_item['s3_definition_key'])
+    except ClientError as e:
+        logger.error(f"Error loading definition for {workflow_id} v{version}: {str(e)}")
+        return error_response(500, 'DEFINITION_LOAD_FAILED',
+                              'Stored workflow definition could not be loaded')
+    parse_result = parse_definition(definition_json)
+    if not parse_result.ok:
+        return error_response(400, parse_result.error.code, parse_result.error.message,
+                              {'path': parse_result.error.path})
+    graph = parse_result.graph
+    definition_dict = json.loads(definition_json)
+
+    # LLM architecture packaging gate (vllm-triton-inference 7.2, 8.1):
+    # evaluated before compilation so a request mixing an llm_inference
+    # workflow with a non-vLLM architecture is rejected with the complete
+    # finding list (409) and no component version is registered. Workflows
+    # without an llm_inference node contribute zero findings.
+    llm_node_ids = gather_llm_inference_node_ids(definition_dict)
+    llm_findings = llm_arch_gate_findings(definition_dict, architectures)
+    if llm_findings:
+        return error_response(
+            409, GATE_LLM_ARCH_UNSUPPORTED, llm_findings[0]['message'],
+            {'findings': llm_findings, 'version': version,
+             'architectures': architectures})
+
+    # Merged Node_Type_Catalog resolving the Custom_Node_Type versions
+    # pinned at workflow save (custom-node-designer 14.2; built-in-only
+    # workflows resolve to the built-in catalog unchanged).
+    pinned_versions = version_item.get('custom_node_types') or {}
+    node_type_items = load_registered_node_types(usecase_id)
+    resolved_items = resolution_items(node_type_items, pinned_versions)
+    catalog = resolve_catalog(descriptors_from_items(resolved_items))
+
+    # Compile once per user-selected architecture (Requirement 7.4)
+    compile_context = CompileContext(workflow_id=workflow_id, workflow_version=str(version))
+    compiled_docs: Dict[str, Any] = {}
+    for arch in architectures:
+        result = compile_workflow(graph, arch, compile_context, simulation=False,
+                                  catalog=catalog)
+        if isinstance(result, list):
+            return error_response(400, 'COMPILATION_FAILED',
+                                  f"Workflow failed to compile for architecture '{arch}'",
+                                  {'arch': arch,
+                                   'errors': [e.to_dict() for e in result]})
+        compiled_docs[arch] = result
+
+    custom_python_nodes = gather_custom_python_nodes(graph)
+
+    # Camera_Input_Node binding points (camera-registry-sync 8.6, 11.5):
+    # one bindingPoints entry per camera node in each arch's compiled
+    # document, plus the version-item discriminator recorded on success.
+    # Workflows without camera nodes serialize byte-identically to the
+    # plain compiler output.
+    camera_nodes = gather_camera_input_nodes(
+        graph, camera_backed_type_ids(resolved_items))
+    binding_hints = binding_hints_from_definition(definition_dict)
+    descriptors_by_id = {descriptor.type_id: descriptor for descriptor in catalog}
+    arch_compiled_dicts: Dict[str, Dict] = {}
+    arch_binding_points: Dict[str, List[Dict]] = {}
+    arch_compiled_json: Dict[str, str] = {}
+    for arch, compiled in compiled_docs.items():
+        compiled_dict = compiled.to_dict()
+        binding_points = build_binding_points(
+            camera_nodes, compiled_dict, arch, binding_hints, descriptors_by_id)
+        arch_compiled_dicts[arch] = compiled_dict
+        arch_binding_points[arch] = binding_points
+        arch_compiled_json[arch] = compiled_document_json(compiled, binding_points)
+
+    # Split each arch's compiled plugin dependencies: curated plugins stay
+    # bundled inline; custom: dependencies resolve to Plugin_Components.
+    arch_gst_plugins: Dict[str, List[str]] = {}
+    arch_python_packages: Dict[str, List[str]] = {}
+    arch_custom_deps: Dict[str, List[str]] = {}
+    for arch, compiled in compiled_docs.items():
+        gst_plugins, custom_plugins, python_packages = split_plugin_dependencies(
+            compiled.plugin_dependencies)
+        arch_gst_plugins[arch] = gst_plugins
+        arch_python_packages[arch] = python_packages
+        arch_custom_deps[arch] = custom_plugins
+
+    # Custom-plugin packaging gates before any assembly (11.2, 11.3, 16.4):
+    # dev lifecycle state, a missing per-arch Plugin_Artifact, or a missing
+    # Plugin_Component version rejects with the Custom_Node_Type and the
+    # arch/state identified.
+    dep_records: Dict[str, Optional[Dict]] = {}
+    if any(arch_custom_deps.values()):
+        dep_index = custom_dependency_index(resolved_items)
+        dep_records = load_custom_plugin_records(arch_custom_deps, dep_index)
+        findings = custom_plugin_gate_findings(arch_custom_deps, dep_index,
+                                               dep_records)
+        if findings:
+            return error_response(
+                409, findings[0]['code'], findings[0]['message'],
+                {'findings': findings, 'version': version,
+                 'architectures': architectures})
+    else:
+        dep_index = {}
+    component_dependencies = plugin_component_dependencies(dep_records)
+
+    # Assemble the per-arch artifact zips locally, then run the
+    # all-or-nothing stage -> promote -> register sequence (7.1, 7.3, 7.5)
+    work_dir = tempfile.mkdtemp(prefix='workflow-packaging-')
+    usecase_s3 = None
+    final_keys: Dict[str, str] = {}
+    component_arn = None
+    staging_root = f"{STAGING_S3_PREFIX}/{workflow_id}/{version}/"
+    # Computed up front so failure cleanup can always delete any promoted
+    # objects, even when promotion itself failed partway (Requirement 7.5).
+    final_prefix = f"{COMPONENT_S3_PREFIX}/{workflow_id}/{version}"
+    try:
+        # Verify every custom Plugin_Artifact per selected architecture
+        # against its Plugin_Record — streamed SHA-256 recompute + KMS
+        # signature verification (10.4) — collecting the per-arch
+        # pluginChecksums for the manifests. Custom .so files are never
+        # bundled inline (16.4).
+        arch_plugin_checksums: Dict[str, Dict[str, str]] = {}
+        arch_plugin_components: Dict[str, Dict[str, str]] = {}
+        verified_cache: Dict[Tuple[str, str], Tuple[str, str]] = {}
+        for arch in compiled_docs:
+            arch_plugin_checksums[arch] = {}
+            arch_plugin_components[arch] = {}
+            for dep in arch_custom_deps[arch]:
+                record = dep_records[dep]
+                cache_key = (dep, arch)
+                if cache_key not in verified_cache:
+                    node_type_item = dep_index.get(dep) or {}
+                    verified_cache[cache_key] = verify_custom_plugin_artifact(
+                        dep, node_type_item.get('node_type_id'), record, arch)
+                manifest_key, checksum = verified_cache[cache_key]
+                arch_plugin_checksums[arch][manifest_key] = checksum
+                arch_plugin_components[arch][
+                    plugin_component_name(str(record['plugin_id']))] = \
+                    component_version_for(record['version'])
+
+        # Use_Case account clients via the assumed cross-account role (7.2).
+        # Created before the manifests are built so the component version can be
+        # resolved up front and stamped consistently into every manifest and
+        # the recipe.
+        session_name = f"wf-pkg-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64]
+        usecase_s3 = get_usecase_client('s3', usecase, session_name=session_name)
+        greengrass = get_usecase_client('greengrassv2', usecase, session_name=session_name)
+
+        # Greengrass component versions are immutable, so re-packaging an
+        # unchanged workflow version (e.g. after a portal config change like a
+        # new minLocalServerVersion) would collide with the existing
+        # {version}.0.0. Resolve the next major (N.0.0) now and thread it
+        # through the manifests and recipe: a major bump is what Greengrass
+        # reliably re-installs on-device (a patch/minor bump can be left stale),
+        # matching the model-component convention.
+        resolved_component_version = next_component_version(
+            greengrass, component_name_for(workflow_id), version)
+
+        arch_zip_paths: Dict[str, str] = {}
+        for arch, compiled in compiled_docs.items():
+            gst_plugins = arch_gst_plugins[arch]
+            manifest = build_manifest(
+                workflow_id, version, arch, gst_plugins,
+                arch_python_packages[arch], custom_python_nodes, user,
+                plugin_checksums=arch_plugin_checksums[arch],
+                plugin_components=arch_plugin_components[arch],
+                component_version=resolved_component_version,
+                workflow_name=item.get('name'))
+            zip_path = os.path.join(work_dir, zip_artifact_name(arch))
+            build_arch_zip(zip_path, arch, manifest, definition_json,
+                           arch_compiled_json[arch], gst_plugins,
+                           custom_python_nodes)
+            arch_zip_paths[arch] = zip_path
+
+        final_prefix, final_keys = stage_and_promote_artifacts(
+            usecase_s3, usecase_bucket, workflow_id, version, arch_zip_paths,
+            resolved_component_version)
+
+        # Register only after every artifact uploaded successfully (7.5);
+        # the recipe pins each custom plugin's Plugin_Component (16.4).
+        recipe = build_recipe(workflow_id, version, usecase_bucket, final_keys,
+                              component_dependencies=component_dependencies,
+                              component_version=resolved_component_version)
+        component_arn = register_component(greengrass, recipe, usecase_id,
+                                           workflow_id, version, user)
+    except PackagingError as e:
+        # All-or-nothing: delete the stage and any promoted artifacts,
+        # report the failing artifact, register nothing (Requirement 7.5)
+        if usecase_s3 is not None:
+            delete_prefix(usecase_s3, usecase_bucket, staging_root)
+            if final_prefix:
+                delete_prefix(usecase_s3, usecase_bucket, final_prefix)
+        log_audit_event(
+            user_id=user['user_id'],
+            action='package_workflow',
+            resource_type='workflow',
+            resource_id=workflow_id,
+            result='failure',
+            details={'usecase_id': usecase_id, 'version': version,
+                     'architectures': architectures,
+                     'failing_artifact': e.artifact, 'error': e.message}
+        )
+        logger.error(f"Packaging failed for {workflow_id} v{version} "
+                     f"at artifact {e.artifact}: {e.message}")
+        return error_response(502, 'PACKAGING_FAILED', e.message,
+                              {'failing_artifact': e.artifact,
+                               'version': version,
+                               'architectures': architectures})
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        # The stage is temporary in every outcome; on success the promoted
+        # copies under the final prefix are the component's artifacts.
+        if usecase_s3 is not None and component_arn is not None:
+            delete_prefix(usecase_s3, usecase_bucket, staging_root)
+
+    # Success bookkeeping: compiled documents to portal S3 + version record
+    compiled_arch_keys: Dict[str, str] = {}
+    for arch in compiled_docs:
+        portal_key = compiled_doc_portal_key(usecase_id, workflow_id, version, arch)
+        s3.put_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=portal_key,
+                      Body=arch_compiled_json[arch].encode('utf-8'),
+                      ContentType='application/json')
+        compiled_arch_keys[arch] = portal_key
+
+    # The dependency closure of the packaged Workflow_Component: every
+    # depended-on Plugin_Component (dda.plugin.* name -> component version)
+    # across all packaged architectures. Recorded on the version item so
+    # the Deployment_Service's pre-submit lifecycle/architecture gates can
+    # evaluate the closure without re-resolving the recipe
+    # (custom-node-designer task 10.5, Requirements 9.7, 9.8, 16.3, 16.6).
+    workflow_plugin_components: Dict[str, str] = {}
+    for arch_map in arch_plugin_components.values():
+        workflow_plugin_components.update(arch_map)
+
+    # The version-item binding discriminator (camera-registry-sync 8.6,
+    # 11.5): has_binding_points separates the strict deploy-time binding
+    # rule from legacy leniency, and camera_input_nodes feeds the binding
+    # matrix and the legacy compiled-path check (9.5) without re-reading
+    # compiled documents from S3.
+    camera_input_nodes = camera_input_nodes_record(
+        camera_nodes, binding_hints, arch_binding_points, arch_compiled_dicts)
+
+    # The version-item LLM discriminator (vllm-triton-inference 7.1, 8.5,
+    # 8.6), written the same way the camera-binding discriminator is:
+    # has_llm_inference activates the Deployment_Service's vLLM
+    # architecture gate for this workflow component, and
+    # packaged_architectures is the arch set the gate compares device
+    # architectures against (3.3) without re-reading compiled documents.
+    dynamodb.Table(WORKFLOW_VERSIONS_TABLE).update_item(
+        Key={'workflow_id': workflow_id, 'version': version},
+        UpdateExpression=('SET component_arn = :arn, compiled_arch_keys = :keys, '
+                          'plugin_components = :pc, '
+                          'has_binding_points = :hbp, '
+                          'camera_input_nodes = :cin, '
+                          'has_llm_inference = :hli, '
+                          'packaged_architectures = :pa, '
+                          'packaged_at = :at, packaged_by = :by'),
+        ExpressionAttributeValues={
+            ':arn': component_arn,
+            ':keys': compiled_arch_keys,
+            ':pc': workflow_plugin_components,
+            ':hbp': bool(camera_nodes),
+            ':cin': _dynamo_safe(camera_input_nodes),
+            ':hli': bool(llm_node_ids),
+            ':pa': architectures,
+            ':at': now_ms(),
+            ':by': user['user_id']
+        }
+    )
+
+    # Audit log entry for packaging (Requirement 11.5)
+    log_audit_event(
+        user_id=user['user_id'],
+        action='package_workflow',
+        resource_type='workflow',
+        resource_id=workflow_id,
+        result='success',
+        details={
+            'usecase_id': usecase_id,
+            'version': version,
+            'architectures': architectures,
+            'component_name': component_name_for(workflow_id),
+            'component_version': resolved_component_version,
+            'component_arn': component_arn
+        }
+    )
+
+    return create_response(201, {
+        'workflow_id': workflow_id,
+        'version': version,
+        'component_name': component_name_for(workflow_id),
+        'component_version': resolved_component_version,
+        'component_arn': component_arn,
+        'architectures': architectures,
+        'artifacts': {
+            arch: f"s3://{usecase_bucket}/{key}" for arch, key in final_keys.items()
+        }
+    })
+
+
+def handler(event: Dict, context: Any) -> Dict:
+    """Main Lambda handler - routes to the appropriate operation"""
+    try:
+        http_method = event.get('httpMethod')
+
+        # Handle CORS preflight requests
+        if http_method == 'OPTIONS':
+            return {
+                'statusCode': 200,
+                'headers': {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token',
+                    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+                    'Access-Control-Max-Age': '86400'
+                },
+                'body': ''
+            }
+
+        user = get_user_from_event(event)
+        resource = event.get('resource', '')
+        path_params = event.get('pathParameters') or {}
+        workflow_id = path_params.get('id')
+
+        if resource == '/workflows/{id}/package' and workflow_id:
+            if http_method == 'POST':
+                return package_workflow(event, user, workflow_id)
+
+        return error_response(404, 'NOT_FOUND', 'Not found')
+
+    except Exception as e:
+        logger.error(f"Handler error: {str(e)}", exc_info=True)
+        return error_response(500, 'INTERNAL_ERROR', 'Internal server error')

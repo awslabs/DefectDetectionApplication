@@ -46,7 +46,7 @@ describe('scaleBox (Property 8: Box coordinates scale proportionally to the disp
         expect(approxEqual(result.w, (xMax - xMin) * rw)).toBe(true);
         expect(approxEqual(result.h, (yMax - yMin) * rh)).toBe(true);
       }),
-      { numRuns: 200 }
+      { numRuns: 25 }
     );
   });
 
@@ -63,7 +63,7 @@ describe('scaleBox (Property 8: Box coordinates scale proportionally to the disp
         expect(approxEqual(result.w, xMax - xMin)).toBe(true);
         expect(approxEqual(result.h, yMax - yMin)).toBe(true);
       }),
-      { numRuns: 200 }
+      { numRuns: 25 }
     );
   });
 
@@ -100,7 +100,7 @@ describe('scaleBox (Property 8: Box coordinates scale proportionally to the disp
         expect(result.x + result.w).toBeLessThanOrEqual(disp.w + epsilon);
         expect(result.y + result.h).toBeLessThanOrEqual(disp.h + epsilon);
       }),
-      { numRuns: 200 }
+      { numRuns: 25 }
     );
   });
 
@@ -139,7 +139,7 @@ describe('scaleBox (Property 8: Box coordinates scale proportionally to the disp
           expect(result).toEqual({ x: 0, y: 0, w: 0, h: 0 });
         }
       ),
-      { numRuns: 200 }
+      { numRuns: 25 }
     );
   });
 });

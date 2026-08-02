@@ -26,18 +26,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 import awsiot.greengrasscoreipc
 import awsiot.greengrasscoreipc.model as model
 from fastapi import HTTPException
+from utils.ipc_client import get_ipc_client
 from data_models.common import (
     FeatureConfigurationAPIModel,
     ListFeatureConfigurationAPIModel
 )
+from dda_triton.constants import TRITON_MODEL_DIR
 from functools import lru_cache
 
 TIME_OUT=10
 import logging
 logger = logging.getLogger(__name__)
+
+
+def triton_repo_has_models(model_repo_dir: str = TRITON_MODEL_DIR) -> bool:
+    """True when the Triton model repository holds at least one model directory.
+
+    Standing up the Triton inference server against an EMPTY model repository
+    blocks indefinitely (a longstanding hang observed on the
+    ``/feature-configurations`` endpoint when no models are deployed): the
+    native ``mlops.create_triton_inference_server`` call never returns because
+    the server has nothing to load and never reaches readiness. Callers use
+    this cheap filesystem check to skip server creation entirely when no
+    models are deployed and return an empty (or vLLM-only) feature list
+    instead. A missing/unreadable repo directory means no models are deployed.
+    """
+    try:
+        return any(
+            os.path.isdir(os.path.join(model_repo_dir, entry))
+            for entry in os.listdir(model_repo_dir)
+        )
+    except OSError:
+        return False
 
 def __get_model_component_config(ipc_client, model_compoent_id=None):
     configRequest = ipc_client.new_get_configuration()  
@@ -51,9 +75,13 @@ def __get_model_component_config(ipc_client, model_compoent_id=None):
 @lru_cache
 def get_default_configs_lfv(model_id):
     try:
-        # TODO: Use ipc client from server_setup after making it multiprocess safe
-        # from utils.server_setup import ipc_client
-        ipc_client = awsiot.greengrasscoreipc.connect()
+        # Reuse the process-wide shared IPC client (DD-19576). Connecting a
+        # fresh client here and never closing it left one connection per
+        # model_id to Python GC finalization, which aborted the process with
+        # the aws-c-event-stream "Continuation ref count has gone negative"
+        # fatal assert. /feature-configurations is polled continuously, so
+        # this was the hottest offender.
+        ipc_client = get_ipc_client()
 
         default_configs = __get_model_component_config(ipc_client, model_id).value
         default_configs_dict = {
@@ -93,6 +121,86 @@ def get_features_lfv(lfv_edge_agent):
         )
     return results
 
+# --- vLLM runtime status merge (Requirements 4.6, 4.7, 4.10) ---------------
+
+#: Feature-config entry type for vLLM models (design section 9).
+VLLM_FEATURE_TYPE = "VllmModel"
+
+#: Manager model state -> the status reported through the existing device
+#: model-status mechanisms (feature-config API, shadow sync): LOADING→LOADING,
+#: READY→READY, FAILED→FAILED. STAGED models have their load request on the
+#: way (vllm_model_prep.py stages then immediately requests the load), so they
+#: report as LOADING (Requirement 4.7).
+_VLLM_STATUS_MAP = {
+    "STAGED": "LOADING",
+    "LOADING": "LOADING",
+    "READY": "READY",
+    "FAILED": "FAILED",
+}
+
+_vllm_manager = None
+
+
+def set_vllm_manager(manager):
+    """Install the started ``VllmRuntimeManager`` whose model list is merged
+    into the feature-config status (app.py calls this on vLLM-capable images,
+    mirroring ``text_generation.set_runtime``; ``None`` uninstalls it). With
+    no manager installed — vLLM-free images — feature-config behavior is
+    identical to pre-feature."""
+    global _vllm_manager
+    _vllm_manager = manager
+
+
+def get_vllm_manager():
+    """The installed vLLM runtime manager, or ``None`` on images without the
+    vLLM runtime."""
+    return _vllm_manager
+
+
+def _vllm_feature_status(status):
+    """Map a manager ``ModelStatus`` (tolerant of fakes passing plain state
+    strings) to the ``(status, failure_reason)`` the feature-config
+    mechanisms report."""
+    state = getattr(status, "state", status)
+    state_name = str(getattr(state, "value", state)).upper()
+    return _VLLM_STATUS_MAP.get(state_name, state_name), getattr(status, "reason", None)
+
+
+def get_features_vllm():
+    """Feature-config entries for every vLLM model the runtime manager
+    tracks: one ``VllmModel`` entry per model with the mapped status, the
+    backend failure reason retained for FAILED models (Requirements 4.6,
+    4.7, 4.10). Empty when no manager is installed. The manager pushes state
+    transitions synchronously, so every feature-config read observes the
+    current state — READY propagates well within the 30-second bound (4.10).
+    """
+    manager = get_vllm_manager()
+    if manager is None:
+        return []
+    results = []
+    try:
+        statuses = manager.list_models()
+    except Exception as e:
+        # A vLLM-side failure never takes down the vision model status feed
+        # (Requirement 4.6: failures are isolated).
+        logger.error(f"Failed to list vLLM models: {e}")
+        return results
+    for model_name in sorted(statuses):
+        mapped_status, reason = _vllm_feature_status(statuses[model_name])
+        default_configuration = {"modelAlias": model_name}
+        if mapped_status == "FAILED" and reason:
+            default_configuration["failureReason"] = reason
+        results.append(
+            ListFeatureConfigurationAPIModel(
+                type=VLLM_FEATURE_TYPE,
+                modelName=model_name,
+                status=mapped_status,
+                defaultConfiguration=default_configuration,
+            )
+        )
+    return results
+
+
 def get_features_triton(triton_server=None):
     results = []
     if triton_server is not None:
@@ -111,6 +219,7 @@ def get_features_triton(triton_server=None):
                     defaultConfiguration=default_configs_dict
                 )
             )
+        results.extend(get_features_vllm())
     else:
         logger.info("Triton server instance is not provided")
         raise HTTPException(

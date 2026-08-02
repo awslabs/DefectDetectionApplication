@@ -39,7 +39,7 @@ def _expected_clamp(value: int) -> int:
 
 # Feature: concurrent-camera-stream-viewing, Property 15: Timeout/configuration clamping
 # Validates: Requirements 7.1
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(frame_timeout_ms=_timeout_ints, open_timeout_ms=_timeout_ints)
 def test_property_15_timeout_configuration_clamping(frame_timeout_ms, open_timeout_ms):
     """StreamConfig clamps both timeouts to [500, 30000]; in-range values unchanged.

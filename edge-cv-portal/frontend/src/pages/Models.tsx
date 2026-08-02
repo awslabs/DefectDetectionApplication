@@ -133,9 +133,20 @@ export default function Models() {
         return <Badge color="blue">Imported</Badge>;
       case 'marketplace':
         return <Badge color="grey">Marketplace</Badge>;
+      case 'vllm':
+        return <Badge color="blue">Registered</Badge>;
       default:
         return <Badge>{source}</Badge>;
     }
+  };
+
+  // vLLM records carry model_type 'vllm' and render an LLM (vLLM) type
+  // badge distinguishing them from vision records (Requirement 1.8)
+  const getTypeCell = (modelType: string) => {
+    if (modelType === 'vllm') {
+      return <Badge color="blue">LLM (vLLM)</Badge>;
+    }
+    return modelType || 'N/A';
   };
 
   const formatTimestamp = (timestamp: number) => {
@@ -220,6 +231,12 @@ export default function Models() {
                 >
                   Manual Import
                 </Button>
+                <Button
+                  onClick={() => navigate('/models/register-llm')}
+                  disabled={!selectedUseCase}
+                >
+                  Register LLM
+                </Button>
               </SpaceBetween>
             }
           >
@@ -260,7 +277,7 @@ export default function Models() {
           {
             id: 'model_type',
             header: 'Type',
-            cell: (item) => item.model_type || 'N/A',
+            cell: (item) => getTypeCell(item.model_type),
           },
           {
             id: 'compilation',

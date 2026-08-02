@@ -55,10 +55,13 @@ EXPECTED_DDA_TRITON_COPIES = {
 }
 
 # Files copied to the aws_dda destination (Req 3.2).
+# vllm_model_prep.py was added additively by the vllm-triton-inference spec
+# (task 9.2): it is seeded to /aws_dda exactly like model_convertor.py.
 EXPECTED_AWS_DDA_COPIES = {
     (SOURCE_FOLDER + "model_convertor.py", DEST_AWS_DDA),
     (SOURCE_FOLDER + "convert_model_cleanup.py", DEST_AWS_DDA),
     (SOURCE_FOLDER + "model_conversion_requirements.txt", DEST_AWS_DDA),
+    (SOURCE_FOLDER + "vllm_model_prep.py", DEST_AWS_DDA),
 }
 
 # Resource files copied individually when the resources destination already exists.

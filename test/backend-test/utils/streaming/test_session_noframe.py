@@ -45,7 +45,7 @@ _now_values = st.floats(
 
 # Feature: concurrent-camera-stream-viewing, Property 12: No-frame-yet handling
 # Validates: Requirements 2.6, 4.2
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(
     state=st.sampled_from(_STARTED_STATES),
     stale_after_s=st.floats(

@@ -40,25 +40,29 @@ set -e
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-# Build against the DDA container interpreter. After update-alternatives, the
-# python3 alternative points at PYTHON_VERSION (default 3.11), so the produced
-# wheel is tagged for whatever python the container actually runs (cp3xx).
+# Build against the interpreter selected by PYBIN. The build step below runs
+# ORT's build driver under ${PYBIN} directly, so the produced wheel is tagged
+# (cp3xx) for exactly this interpreter — regardless of where the python3
+# alternative points. Default: python3 (JP5/x86 behavior unchanged).
 PYBIN="${PYBIN:-python3}"
 JETPACK_MAJOR="${JETPACK_MAJOR:-}"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 
 # ── Per-JetPack defaults (verified pairings) ───────────────────────────────
-#  JP5 (L4T r35): CUDA 11.4, TensorRT 8.5.2 -> onnxruntime 1.16.3.
-#                 Xavier (sm_72) + Orin (sm_87).
-#  JP6 (L4T r36): CUDA 12.2, TensorRT 8.6   -> onnxruntime 1.17.1
-#                 (first series with solid CUDA-12 support). Orin (sm_87).
+#  JP5 (L4T r35):   CUDA 11.4, TensorRT 8.5.2 -> onnxruntime 1.16.3.
+#                   Xavier (sm_72) + Orin (sm_87).
+#  JP6 (L4T r36.4): CUDA 12.6, TensorRT 10.3, cuDNN 9.3 -> onnxruntime 1.20.1
+#                   (ORT TRT-EP matrix: 1.17 supports only TRT 8.6; TRT-10
+#                   support starts at 1.18; the 1.20 line pairs with TRT 10.x
+#                   + CUDA 12.0-12.6 + cuDNN 9 — the last line whose CUDA
+#                   range matches the r36.4 base). Orin (sm_87).
 case "$JETPACK_MAJOR" in
     5)
         ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.16.3}"
         CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-72;87}"
         ;;
     6)
-        ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.17.1}"
+        ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.20.1}"
         CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-87}"
         ;;
     *)
@@ -186,11 +190,19 @@ if [ -f cmake/deps.txt ]; then
 fi
 
 # ── Build: Release wheel with CUDA + TensorRT execution providers ──────────
-# --build_wheel produces a pip-installable .whl tagged for the active python
-# (cp3xx for the container python). CMAKE_CUDA_ARCHITECTURES restricts codegen to the target Jetson SoC(s)
+# --build_wheel produces a pip-installable .whl tagged (cp3xx) for the python
+# that runs the build driver. ORT's ./build.sh is a thin wrapper that invokes
+# `python3 tools/ci_build/build.py "$@"` — i.e. whatever the python3
+# alternative points at, which on JP6 is the 3.10 DDA interpreter, NOT
+# necessarily ${PYBIN}. Run the driver under ${PYBIN} directly so the wheel's
+# tag always matches the interpreter we install into below. Pass the same
+# --build_dir the wrapper would have injected (build/Linux) so the wheel
+# lands where the install step below expects it.
+# CMAKE_CUDA_ARCHITECTURES restricts codegen to the target Jetson SoC(s)
 # to keep build time/size down.
 echo "Building (this is the long step)..."
-./build.sh \
+${PYBIN} ./tools/ci_build/build.py \
+    --build_dir build/Linux \
     --config Release \
     --update --build \
     --parallel "${ORT_BUILD_JOBS}" \
@@ -205,7 +217,7 @@ echo "Building (this is the long step)..."
         ${CUDA_HOST_COMPILER_DEFINE} \
         onnxruntime_BUILD_UNIT_TESTS=OFF
 
-# ── Install the produced wheel into python3.9 ──────────────────────────────
+# ── Install the produced wheel into the ${PYBIN} interpreter ───────────────
 WHL=$(ls build/Linux/Release/dist/onnxruntime_gpu-*-cp*-*aarch64*.whl 2>/dev/null | head -1)
 if [ -z "${WHL}" ]; then
     echo "ERROR: build produced no aarch64 onnxruntime_gpu wheel." >&2

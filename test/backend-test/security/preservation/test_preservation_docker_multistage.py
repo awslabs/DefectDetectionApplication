@@ -100,8 +100,9 @@ def test_multistage_structure_golden():
     # in a way that would make the golden meaningless).
     assert golden["edgemlsdk_jp5_stages"] == ["builder"], golden["edgemlsdk_jp5_stages"]
     assert golden["edgemlsdk_jp6_stages"] == ["builder"], golden["edgemlsdk_jp6_stages"]
-    # jp6 backend has two FROMs: the cuda114 provider then the (unnamed) runtime.
-    assert golden["backend_jp6_stages"] == ["cuda114", None], golden["backend_jp6_stages"]
+    # jp6 backend has three FROMs: the cuda114 provider, the trt8 TensorRT 8
+    # provider (Neo/DLR runtime), then the (unnamed) final runtime.
+    assert golden["backend_jp6_stages"] == ["cuda114", "trt8", None], golden["backend_jp6_stages"]
     assert cuda114_block, "expected a COPY --from=cuda114 + verification block"
     assert cuda114_block[0].startswith(
         "COPY --from=cuda114 /usr/local/cuda-11.4/targets/aarch64-linux/lib/"

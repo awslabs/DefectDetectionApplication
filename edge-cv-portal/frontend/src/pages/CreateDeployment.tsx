@@ -21,12 +21,59 @@ import {
   ColumnLayout,
   Tabs,
   Modal,
+  StatusIndicator,
 } from '@cloudscape-design/components';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { apiService } from '../services/api';
+import { apiService, ApiError } from '../services/api';
 import { UseCase } from '../types';
 import { useUsecase } from '../contexts/UsecaseContext';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
+import { LifecycleBadge } from './node-designer/badges';
+import {
+  PluginGateRejection,
+  isPluginComponent,
+  parsePluginGateRejection,
+} from './deployments/pluginComponents';
+import { ArchitectureChips, PluginGateRejectionAlert } from './deployments/PluginComponentUi';
+import {
+  VllmComponentManifest,
+  VllmGateRejection,
+  describeVllmArchEntry,
+  evaluateVllmArchGate,
+  isVllmModelComponent,
+  parseVllmGateRejection,
+} from './deployments/vllmArchGate';
+import {
+  classifyGatedComponent,
+  componentSupportedArchs,
+  describeArchIncompatibility,
+  inferComponentTargetArchs,
+  isCompatibleWithAllDevices,
+} from './deployments/archCompatibility';
+import {
+  BindingCell,
+  BindingSelections,
+  CameraBindingContext,
+  CameraBindingIssue,
+  CameraBindingWarning,
+  buildCameraBindings,
+  expectedBindingWarnings,
+  initialBindingSelections,
+  parseCameraBindingRejection,
+  parseWorkflowComponent,
+  unboundCells,
+  withBindingCell,
+} from './deployments/cameraBindings';
+import { CameraBindingMatrix } from './deployments/CameraBindingMatrix';
+import { isWorkflowComponent, workflowComponentName } from './workflows/workflowComponentName';
+
+// {workflowId: name} for resolving friendly names of packaged workflow
+// components (dda.workflow.{id}). Populated from listWorkflows when the
+// deployment picker loads so getComponentDisplayName — which is called in
+// many places (cards, dropdown, selected list, preload) — can show the
+// workflow name instead of the raw UUID. Module-level so the pure display
+// helper can consult it without threading the map through every call site.
+let workflowNameMap: Record<string, string> = {};
 
 interface ComponentSelection {
   component_name: string;
@@ -36,12 +83,20 @@ interface ComponentSelection {
   displayName?: string;
   category?: string;
   model_name?: string;
+  // Node Designer Plugin_Component fields (custom-node-designer, 16.2)
+  is_plugin_component?: boolean;
+  lifecycle_state?: string | null;
+  supported_architectures?: string[];
 }
 
 interface DeviceInfo {
   device_id: string;
   platform: string;
   architecture: string;
+  // Portal-recorded DDA Target_Architecture (Devices table) — the value
+  // the deployment architecture gates match by exact name; null when the
+  // device has none recorded (fails closed, vllm-triton-inference 3.9).
+  target_architecture?: string | null;
   status: string;
   installed_components?: Array<{ component_name: string; version: string }>;
 }
@@ -52,17 +107,39 @@ interface ComponentInfo {
   latest_version: { componentVersion: string };
   description?: string;
   model_name?: string;
+  // Backing training-jobs record id (registry tag) — joins a
+  // model-vllm-* component with its vLLM_Model_Record so the client-side
+  // architecture gate twin can read the supported set (15.3, Req 3.9).
+  training_job_id?: string;
   platforms?: Array<{ name?: string; attributes?: Record<string, string> }>;
   scope: 'PRIVATE' | 'PUBLIC';
+  // Node Designer Plugin_Component fields (custom-node-designer, 16.2):
+  // backing Plugin_Record Lifecycle_State and the Target_Architectures
+  // derived from the recipe's platform manifests (components.py).
+  is_plugin_component?: boolean;
+  lifecycle_state?: string | null;
+  supported_architectures?: string[];
 }
 
 // Helper to parse component name into friendly display name
 const getComponentDisplayName = (componentName: string, modelName?: string): string => {
+  // Packaged workflow components are named dda.workflow.{uuid}; show the
+  // friendly workflow name resolved from listWorkflows when available,
+  // falling back to the raw component name (never the model-name branch).
+  if (isWorkflowComponent(componentName)) {
+    return workflowComponentName(componentName, workflowNameMap) ?? componentName;
+  }
+
   // If it's a model component with a model name, use that
   if (modelName) {
     return modelName;
   }
   
+  // Node Designer Plugin_Components: dda.plugin.{pluginId} (16.2)
+  if (isPluginComponent(componentName)) {
+    return componentName.replace('dda.plugin.', '');
+  }
+
   // Parse common DDA component patterns
   if (componentName.startsWith('com.dda.')) {
     const parts = componentName.replace('com.dda.', '').split('.');
@@ -80,6 +157,14 @@ const getComponentDisplayName = (componentName: string, modelName?: string): str
 
 // Helper to categorize components
 const getComponentCategory = (componentName: string, modelName?: string, scope?: string): string => {
+  // Packaged workflow components (dda.workflow.{uuid}) get their own category
+  // so they are obviously identifiable rather than lumped into "Other".
+  if (isWorkflowComponent(componentName)) {
+    return 'Workflows';
+  }
+  if (isPluginComponent(componentName)) {
+    return 'Node Plugins';
+  }
   if (modelName || componentName.toLowerCase().includes('model')) {
     return 'Model Components';
   }
@@ -182,8 +267,34 @@ export default function CreateDeployment() {
   // State
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+  // Pre-submit plugin gate rejection (custom-node-designer, 16.3/16.6)
+  const [gateRejection, setGateRejection] = useState<PluginGateRejection | null>(null);
+  // Backend 409 VLLM_ARCH_UNSUPPORTED rejection (vllm-triton-inference 3.4)
+  const [vllmGateRejection, setVllmGateRejection] = useState<VllmGateRejection | null>(null);
+  // Supported Target_Architecture sets of selected model-vllm-* components,
+  // keyed by component name — read from the backing vLLM_Model_Record's
+  // published_component.supported_architectures via the model detail API
+  // (joined through the component listing's training_job_id tag). An
+  // unresolvable record maps to [] so the client-side gate twin fails
+  // closed, mirroring the backend (15.3, Requirement 3.9).
+  const [vllmComponentArchs, setVllmComponentArchs] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [showRemovalWarning, setShowRemovalWarning] = useState(false);
+
+  // Deploy-time Camera_Binding matrix state, keyed by workflow id
+  // (camera-registry-sync 12.1 — Requirements 8.1, 8.4, 8.5, 8.7-8.9,
+  // 9.2, 9.3). Contexts come from GET /deployments?view=binding-context
+  // for each selected dda.workflow.* component once targets are chosen.
+  const [bindingContexts, setBindingContexts] = useState<Record<string, CameraBindingContext>>({});
+  const [bindingSelections, setBindingSelections] = useState<Record<string, BindingSelections>>({});
+  // Warnings reported by a rejected submission (409) beyond the ones
+  // predicted client-side; confirmation checkboxes feed confirmed_warnings.
+  const [serverBindingWarnings, setServerBindingWarnings] = useState<Record<string, CameraBindingWarning[]>>({});
+  const [confirmedWarningIds, setConfirmedWarningIds] = useState<Set<string>>(new Set());
+  // Validation errors of a 409 CAMERA_BINDINGS_INVALID rejection,
+  // surfaced next to the matrix identifying node and device.
+  const [bindingErrors, setBindingErrors] = useState<Record<string, CameraBindingIssue[]>>({});
+  const [bindingContextError, setBindingContextError] = useState('');
 
   // Existing deployment for the selected target (revise mode). Greengrass
   // deployments are immutable and one-per-target; deploying again revises the
@@ -255,6 +366,90 @@ export default function CreateDeployment() {
     );
   }, [selectedComponents]);
 
+  // Resolve the supported Target_Architecture set of every selected
+  // model-vllm-* component from its backing vLLM_Model_Record
+  // (published_component.supported_architectures, written at publish
+  // time). Components whose record cannot be resolved get an empty set
+  // so the gate twin fails closed, like the backend's GSI lookup (15.3).
+  useEffect(() => {
+    // Resolve both the selected model-vllm-* components AND the catalog
+    // model-vllm-* components (private + public), so the deploy-screen
+    // arch filter can evaluate not-yet-selected vLLM components too
+    // (device-arch-compatibility 4.1). Keyed by component name and
+    // deduped against already-resolved entries; still-resolving entries
+    // stay absent (undefined) and are not hidden until they resolve.
+    const candidates = [
+      ...selectedComponents.map(c => c.component_name),
+      ...allPrivateComponents.map(c => c.component_name),
+      ...allPublicComponents.map(c => c.component_name),
+    ];
+    const pending = [...new Set(candidates)]
+      .filter(isVllmModelComponent)
+      .filter(name => !(name in vllmComponentArchs));
+    if (pending.length === 0) return;
+    let cancelled = false;
+    const resolveArchs = async () => {
+      const resolved: Record<string, string[]> = {};
+      const catalog = [...allPrivateComponents, ...allPublicComponents];
+      for (const name of pending) {
+        const trainingJobId = catalog.find(
+          c => c.component_name === name
+        )?.training_job_id;
+        if (!trainingJobId) {
+          resolved[name] = []; // unresolvable record: fail closed
+          continue;
+        }
+        try {
+          const resp = await apiService.getModel(trainingJobId);
+          resolved[name] = (
+            resp.model.published_component?.supported_architectures || []
+          ).map(String);
+        } catch (err) {
+          console.error(`Failed to load vLLM model record for ${name}:`, err);
+          resolved[name] = []; // fail closed
+        }
+      }
+      if (!cancelled) {
+        setVllmComponentArchs(prev => ({ ...prev, ...resolved }));
+      }
+    };
+    resolveArchs();
+    return () => { cancelled = true; };
+  }, [selectedComponents, allPrivateComponents, allPublicComponents, vllmComponentArchs]);
+
+  // Client-side vLLM architecture gate twin (15.3, Requirement 3.9):
+  // each selected device's recorded Target_Architecture is checked
+  // against the supported set of every selected model-vllm-* component
+  // with the same pure predicate as the backend gate (exact-name match,
+  // absent arch fails closed, jp4-specific reason). LLM-bearing workflow
+  // components cannot be checked client-side — the version-item
+  // has_llm_inference/packaged_architectures discriminators are not
+  // exposed by the workflow APIs — so those rely on the authoritative
+  // backend gate, whose 409 VLLM_ARCH_UNSUPPORTED is surfaced on submit.
+  const vllmArchWarnings = useMemo(() => {
+    if (targetType !== 'devices' || targetDevices.length === 0) return [];
+    const manifests: Record<string, VllmComponentManifest> = {};
+    for (const comp of selectedComponents) {
+      if (!isVllmModelComponent(comp.component_name)) continue;
+      const architectures = vllmComponentArchs[comp.component_name];
+      // Still resolving: contribute nothing yet (the backend gate is
+      // authoritative) rather than flash a transient warning.
+      if (architectures === undefined) continue;
+      const version = comp.component_version
+        && !['0.0.0', 'unknown', 'latest'].includes(comp.component_version)
+        ? comp.component_version
+        : null;
+      manifests[comp.component_name] = { version, architectures };
+    }
+    if (Object.keys(manifests).length === 0) return [];
+    const deviceArchs: Record<string, string | null> = {};
+    for (const opt of targetDevices) {
+      const device = allDevices.find(d => d.device_id === opt.value);
+      deviceArchs[opt.value as string] = device?.target_architecture ?? null;
+    }
+    return evaluateVllmArchGate(manifests, deviceArchs);
+  }, [selectedComponents, vllmComponentArchs, targetDevices, allDevices, targetType]);
+
   // Compute components that will be removed from each target device
   const componentsToBeRemoved = useMemo(() => {
     if (targetType !== 'devices' || targetDevices.length === 0 || selectedComponents.length === 0) return {};
@@ -288,31 +483,245 @@ export default function CreateDeployment() {
 
   const hasComponentRemovals = Object.keys(componentsToBeRemoved).length > 0;
 
+  // Selected packaged Workflow_Components (dda.workflow.*) resolved to
+  // their workflow identity (camera-registry-sync 12.1).
+  const selectedWorkflows = useMemo(() => {
+    const refs: Array<{ workflowId: string; workflowVersion: number | null }> = [];
+    for (const comp of selectedComponents) {
+      const ref = parseWorkflowComponent(comp.component_name, comp.component_version);
+      if (ref && !refs.some(r => r.workflowId === ref.workflowId)) {
+        refs.push(ref);
+      }
+    }
+    return refs;
+  }, [selectedComponents]);
+
+  // Matrix step shown only for workflow versions with Camera_Input_Nodes
+  // (binding_required) — skipped entirely otherwise (Requirement 8.9).
+  const bindingMatrices = useMemo(
+    () => Object.entries(bindingContexts).filter(([, ctx]) => ctx.binding_required),
+    [bindingContexts]
+  );
+
+  // The warnings the current matrix state needs confirmed (8.8, 9.3):
+  // client-side predictions plus any extra warnings a rejected
+  // submission reported.
+  const bindingWarningsFor = (workflowId: string): CameraBindingWarning[] => {
+    const context = bindingContexts[workflowId];
+    if (!context) return [];
+    const expected = expectedBindingWarnings(context, bindingSelections[workflowId] || {});
+    const seen = new Set(expected.map(w => w.id));
+    const extra = (serverBindingWarnings[workflowId] || []).filter(w => !seen.has(w.id));
+    return [...expected, ...extra];
+  };
+
+  // Load the binding context of every selected workflow component once a
+  // use case and deployment targets are chosen (Requirement 8.1).
+  useEffect(() => {
+    const usecaseId = selectedUseCase?.value as string | undefined;
+    const deviceNames = targetType === 'devices'
+      ? targetDevices.map(d => d.value as string)
+      : [];
+    const thingGroup = targetType === 'group' ? targetThingGroup.trim() : '';
+    if (!usecaseId || selectedWorkflows.length === 0
+        || (deviceNames.length === 0 && !thingGroup)) {
+      setBindingContexts({});
+      setBindingSelections({});
+      setServerBindingWarnings({});
+      setBindingErrors({});
+      setBindingContextError('');
+      return;
+    }
+    let cancelled = false;
+    const loadBindingContexts = async () => {
+      try {
+        setBindingContextError('');
+        const contexts: Record<string, CameraBindingContext> = {};
+        for (const workflow of selectedWorkflows) {
+          contexts[workflow.workflowId] = await apiService.getCameraBindingContext({
+            usecase_id: usecaseId,
+            workflow_id: workflow.workflowId,
+            workflow_version: workflow.workflowVersion ?? undefined,
+            target_devices: deviceNames.length > 0 ? deviceNames : undefined,
+            target_thing_group: thingGroup || undefined,
+          });
+        }
+        if (cancelled) return;
+        setBindingContexts(contexts);
+        // Seed each matrix from the hint pre-selection (8.5), keeping
+        // choices the user already made for still-present cells.
+        setBindingSelections(prev => {
+          const next: Record<string, BindingSelections> = {};
+          for (const [workflowId, context] of Object.entries(contexts)) {
+            if (context.binding_required) {
+              next[workflowId] = initialBindingSelections(context, prev[workflowId]);
+            }
+          }
+          return next;
+        });
+      } catch (err) {
+        if (cancelled) return;
+        console.error('Failed to load camera binding context:', err);
+        setBindingContexts({});
+        setBindingSelections({});
+        setBindingContextError(getErrorMessage(
+          err,
+          'Failed to load the camera binding context for the selected workflow component(s)'
+        ));
+      }
+    };
+    loadBindingContexts();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedUseCase, targetType, targetDevices, targetThingGroup, selectedWorkflows]);
+
+  const handleBindingCellChange = (workflowId: string, device: string,
+                                   nodeId: string, cell: BindingCell) => {
+    setBindingSelections(prev => ({
+      ...prev,
+      [workflowId]: withBindingCell(prev[workflowId] || {}, device, nodeId, cell),
+    }));
+  };
+
+  const handleToggleBindingWarning = (warningId: string, confirmed: boolean) => {
+    setConfirmedWarningIds(prev => {
+      const next = new Set(prev);
+      if (confirmed) {
+        next.add(warningId);
+      } else {
+        next.delete(warningId);
+      }
+      return next;
+    });
+  };
+
   // Filter and categorize components based on selected devices
-  const { recommendedComponents, compatiblePrivate, compatiblePublic, incompatibleComponents } = useMemo(() => {
+  const {
+    recommendedComponents,
+    compatiblePrivate,
+    compatiblePublic,
+    incompatibleComponents,
+    pluginComponents,
+    incompatibleGatedComponents,
+    devicesWithoutRecordedArch,
+  } = useMemo(() => {
     const hasDeviceSelection = targetType === 'devices' && targetDevices.length > 0;
-    
+
+    // Selected devices' recorded DDA Target_Architecture map (Req 3.1)
+    // and the subset with no recorded architecture (Req 3.5). Only
+    // resolvable for explicit device targets — a thing group's member
+    // architectures are not available on this screen (Req 3.7), so
+    // gated-arch filtering is skipped for groups (targetType !== 'devices').
+    const selectedDeviceTargetArchs: Record<string, string | null> = {};
+    if (hasDeviceSelection) {
+      for (const opt of targetDevices) {
+        const device = allDevices.find(d => d.device_id === opt.value);
+        selectedDeviceTargetArchs[opt.value as string] = device?.target_architecture ?? null;
+      }
+    }
+    const selectedDeviceArchList = Object.values(selectedDeviceTargetArchs);
+    const devicesMissingArch = Object.keys(selectedDeviceTargetArchs)
+      .filter(d => selectedDeviceTargetArchs[d] === null)
+      .sort();
+
+    // The recorded architectures of the selected devices, ignoring devices
+    // with none recorded (name-based JetPack filtering can only judge a
+    // device whose Target_Architecture is known).
+    const recordedDeviceArchs = selectedDeviceArchList.filter(
+      (a): a is string => a !== null
+    );
+
+    // Returns a human-readable reason when `comp` is architecture-incompatible
+    // with the selected device(s), or null when it is compatible / cannot be
+    // judged. Two sources of truth (device-arch-compatibility Req 3):
+    //   - Backend-gated components (model-vllm-* / dda.plugin.*): the recorded
+    //     supported_architectures, matched by the exact-name predicate the
+    //     backend gate applies, failing closed on a null device arch (Req 3.1,
+    //     3.2, 3.5, 5.1). A vLLM set still resolving (undefined) is not hidden
+    //     yet (design B4).
+    //   - Regular model / LocalServer components: the JetPack target inferred
+    //     from the component name (`*-jp5`, `arm64JP6`, …). The backend does
+    //     not arch-check these, but a jp5 build must not be offered for a jp6
+    //     device. Names with no JetPack token are left to the coarse
+    //     arm64/amd64 filter (kept). A device with no recorded arch cannot be
+    //     judged by name, so it does not hide these (fails open here — the
+    //     no-recorded-architecture warning covers that case for gated ones).
+    const archIncompatReason = (comp: ComponentInfo): string | null => {
+      if (!hasDeviceSelection) return null;
+      const kind = classifyGatedComponent(comp.component_name);
+      if (kind !== null) {
+        if (kind === 'vllm' && vllmComponentArchs[comp.component_name] === undefined) {
+          return null; // still resolving — do not hide yet
+        }
+        const supported = componentSupportedArchs(comp, vllmComponentArchs);
+        if (isCompatibleWithAllDevices(supported, selectedDeviceArchList)) return null;
+        return describeArchIncompatibility(comp, selectedDeviceTargetArchs, supported);
+      }
+      const inferred = inferComponentTargetArchs(comp.component_name);
+      if (inferred.length === 0) return null; // no JetPack token in the name
+      if (recordedDeviceArchs.every(a => inferred.includes(a))) return null;
+      return describeArchIncompatibility(comp, selectedDeviceTargetArchs, inferred);
+    };
+    const isArchIncompatible = (comp: ComponentInfo): boolean =>
+      archIncompatReason(comp) !== null;
+
+    // Node Designer Plugin_Components (dda.plugin.*, 16.2) are listed in
+    // their own tab with lifecycle badges and Target_Architecture chips,
+    // now subject to the exact-name Target_Architecture gate (Req 3.3):
+    // arch-incompatible plugins are excluded here and surfaced below.
+    const plugins = allPrivateComponents
+      .filter(comp => comp.is_plugin_component || isPluginComponent(comp.component_name))
+      .filter(comp => !isArchIncompatible(comp));
+    const nonPluginPrivate = allPrivateComponents.filter(
+      comp => !(comp.is_plugin_component || isPluginComponent(comp.component_name))
+    );
+
+    // A component is offered only when it passes BOTH the architecture
+    // incompatibility check (gated supported set OR name-inferred JetPack
+    // target) and, for non-gated components, the coarse arm64/amd64 filter
+    // (Req 3.3, 3.6, 5.3).
+    const passesArchFilter = (comp: ComponentInfo): boolean => {
+      if (isArchIncompatible(comp)) return false;
+      if (classifyGatedComponent(comp.component_name) !== null) return true;
+      if (!hasDeviceSelection) return true;
+      return selectedDeviceArchitectures.every(arch => isCompatibleWithDevice(comp, arch));
+    };
+
     // Filter private components
-    const filteredPrivate = allPrivateComponents.filter(comp => {
-      if (!hasDeviceSelection) return true;
-      return selectedDeviceArchitectures.every(arch => isCompatibleWithDevice(comp, arch));
-    });
-    
+    const filteredPrivate = nonPluginPrivate.filter(passesArchFilter);
+
     // Filter public components
-    const filteredPublic = allPublicComponents.filter(comp => {
-      if (!hasDeviceSelection) return true;
-      return selectedDeviceArchitectures.every(arch => isCompatibleWithDevice(comp, arch));
-    });
-    
-    // Find incompatible components
+    const filteredPublic = allPublicComponents.filter(passesArchFilter);
+
+    // Coarse arm64/amd64-incompatible NON-gated components (an x86 build on
+    // an arm device, etc.) — surfaced only as a hidden-count notice. A
+    // JetPack-major mismatch is NOT coarse-incompatible (both are arm64) and
+    // is instead collected with an explainable reason below.
+    const isCoarseIncompatible = (comp: ComponentInfo): boolean =>
+      classifyGatedComponent(comp.component_name) === null &&
+      inferComponentTargetArchs(comp.component_name).length === 0 &&
+      !selectedDeviceArchitectures.every(arch => isCompatibleWithDevice(comp, arch));
     const incompatible = hasDeviceSelection ? [
-      ...allPrivateComponents.filter(comp => !selectedDeviceArchitectures.every(arch => isCompatibleWithDevice(comp, arch))),
-      ...allPublicComponents.filter(comp => !selectedDeviceArchitectures.every(arch => isCompatibleWithDevice(comp, arch)))
+      ...nonPluginPrivate.filter(isCoarseIncompatible),
+      ...allPublicComponents.filter(isCoarseIncompatible),
     ] : [];
-    
+
+    // Every component excluded for a Target_Architecture mismatch (gated
+    // supported set OR name-inferred JetPack target), each with a
+    // per-component reason so the exclusion is explainable rather than
+    // silent (Req 3.3, 3.4).
+    const incompatibleGated = hasDeviceSelection
+      ? [...nonPluginPrivate, ...allPublicComponents,
+         ...allPrivateComponents.filter(
+           comp => comp.is_plugin_component || isPluginComponent(comp.component_name))]
+          .map(comp => ({ component: comp, reason: archIncompatReason(comp) }))
+          .filter((x): x is { component: ComponentInfo; reason: string } =>
+            x.reason !== null)
+      : [];
+
     // Build recommended components list
     const recommended: ComponentInfo[] = [];
-    
+
     // ALWAYS recommend DDA LocalServer (required infrastructure)
     // If not included in deployment, Greengrass will remove it from device
     const ddaComponentsPrivate = filteredPrivate.filter(comp => 
@@ -333,9 +742,52 @@ export default function CreateDeployment() {
       recommendedComponents: recommended,
       compatiblePrivate: filteredPrivate,
       compatiblePublic: filteredPublic,
-      incompatibleComponents: incompatible
+      incompatibleComponents: incompatible,
+      pluginComponents: plugins,
+      incompatibleGatedComponents: incompatibleGated,
+      devicesWithoutRecordedArch: devicesMissingArch,
     };
-  }, [allPrivateComponents, allPublicComponents, selectedDeviceArchitectures, targetType, targetDevices, devicesWithoutDDA]);
+  }, [allPrivateComponents, allPublicComponents, selectedDeviceArchitectures, targetType, targetDevices, allDevices, vllmComponentArchs, devicesWithoutDDA]);
+
+  // Revise-mode surfacing (device-arch-compatibility 4.3, Req 4.1-4.3):
+  // a pre-loaded gated component that is now arch-incompatible with the
+  // target device's recorded architecture is flagged in the selected-
+  // components table (keyed by arn) with the same reason detail as the
+  // exclusion grouping — WITHOUT removing it from the pre-loaded set or
+  // blocking removal/submission. Incompatible gated components can only
+  // reach the selected list via pre-load/clone (the picker excludes them),
+  // so this is effectively the revise-mode indicator.
+  const selectedComponentArchIssues = useMemo(() => {
+    if (targetType !== 'devices' || targetDevices.length === 0) return {};
+    const deviceArchs: Record<string, string | null> = {};
+    for (const opt of targetDevices) {
+      const device = allDevices.find(d => d.device_id === opt.value);
+      deviceArchs[opt.value as string] = device?.target_architecture ?? null;
+    }
+    const archList = Object.values(deviceArchs);
+    const recorded = archList.filter((a): a is string => a !== null);
+    const issues: Record<string, string> = {};
+    for (const comp of selectedComponents) {
+      const kind = classifyGatedComponent(comp.component_name);
+      if (kind !== null) {
+        // Still-resolving vLLM set: don't flag yet (mirrors the picker).
+        if (kind === 'vllm' && vllmComponentArchs[comp.component_name] === undefined) continue;
+        const supported = componentSupportedArchs(comp, vllmComponentArchs);
+        if (!isCompatibleWithAllDevices(supported, archList)) {
+          issues[comp.arn] = describeArchIncompatibility(comp, deviceArchs, supported);
+        }
+        continue;
+      }
+      // Non-gated: name-inferred JetPack target (e.g. a jp5 build on a jp6
+      // device). No token / no recorded device arch → not flagged.
+      const inferred = inferComponentTargetArchs(comp.component_name);
+      if (inferred.length === 0) continue;
+      if (!recorded.every(a => inferred.includes(a))) {
+        issues[comp.arn] = describeArchIncompatibility(comp, deviceArchs, inferred);
+      }
+    }
+    return issues;
+  }, [selectedComponents, targetDevices, allDevices, targetType, vllmComponentArchs]);
 
   // Convert components to select options with friendly names
   const componentToOption = (comp: ComponentInfo): SelectProps.Option => {
@@ -350,7 +802,9 @@ export default function CreateDeployment() {
       value: comp.arn,
       description: comp.description || category,
       tags: [comp.scope === 'PUBLIC' ? 'AWS' : 'Portal', ...archs.filter(a => a !== 'all').map(a => a.toUpperCase())],
-      labelTag: comp.model_name ? 'Model' : undefined,
+      labelTag: isWorkflowComponent(comp.component_name)
+        ? 'Workflow'
+        : (comp.model_name ? 'Model' : undefined),
     };
   };
 
@@ -461,6 +915,9 @@ export default function CreateDeployment() {
           displayName: getComponentDisplayName(match.component_name, match.model_name),
           category: getComponentCategory(match.component_name, match.model_name, match.scope),
           model_name: match.model_name,
+          is_plugin_component: match.is_plugin_component,
+          lifecycle_state: match.lifecycle_state,
+          supported_architectures: match.supported_architectures,
         });
       } else {
         // Component not found in catalog (e.g. removed) - still represent it so the
@@ -521,12 +978,22 @@ export default function CreateDeployment() {
     try {
       setLoading(true);
       
-      // Load private components, public components, and devices in parallel
-      const [privateResponse, publicResponse, devicesResponse] = await Promise.all([
+      // Load private components, public components, devices, and workflow
+      // metadata in parallel. Workflow names resolve the friendly label for
+      // packaged dda.workflow.{id} components (best-effort; a failure just
+      // leaves the raw UUID).
+      const [privateResponse, publicResponse, devicesResponse, workflowsResponse] = await Promise.all([
         apiService.listComponents({ usecase_id: selectedUseCase.value, scope: 'PRIVATE' }),
         apiService.listComponents({ usecase_id: selectedUseCase.value, scope: 'PUBLIC' }).catch(() => ({ components: [] })),
-        apiService.listDevices(selectedUseCase.value)
+        apiService.listDevices(selectedUseCase.value),
+        apiService.listWorkflows(selectedUseCase.value).catch(() => ({ workflows: [], count: 0 })),
       ]);
+
+      // Populate the module-level name map before mapping components so
+      // getComponentDisplayName resolves workflow names on this render pass.
+      workflowNameMap = Object.fromEntries(
+        (workflowsResponse.workflows || []).map((w) => [w.workflow_id, w.name])
+      );
 
       // Store raw component data for filtering
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -536,8 +1003,13 @@ export default function CreateDeployment() {
         latest_version: comp.latest_version,
         description: comp.description,
         model_name: comp.model_name,
+        training_job_id: comp.training_job_id,
         platforms: comp.platforms || comp.latest_version?.platforms || [],
-        scope: 'PRIVATE' as const
+        scope: 'PRIVATE' as const,
+        // Node Designer Plugin_Component listing fields (16.2)
+        is_plugin_component: comp.is_plugin_component || isPluginComponent(comp.component_name),
+        lifecycle_state: comp.lifecycle_state ?? null,
+        supported_architectures: comp.supported_architectures || []
       })));
       
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -557,6 +1029,7 @@ export default function CreateDeployment() {
         device_id: device.device_id,
         platform: device.platform || '',
         architecture: device.architecture || '',
+        target_architecture: device.target_architecture || null,
         status: device.status || 'UNKNOWN',
         installed_components: (device.installed_components || []).map((c: any) => ({
           component_name: c.componentName || c.component_name,
@@ -671,7 +1144,10 @@ export default function CreateDeployment() {
       scope: comp.scope,
       displayName,
       category: getComponentCategory(comp.component_name, comp.model_name, comp.scope),
-      model_name: comp.model_name
+      model_name: comp.model_name,
+      is_plugin_component: comp.is_plugin_component,
+      lifecycle_state: comp.lifecycle_state,
+      supported_architectures: comp.supported_architectures
     }]);
   };
 
@@ -737,6 +1213,8 @@ export default function CreateDeployment() {
   const executeDeployment = async () => {
     setCreating(true);
     setError('');
+    setGateRejection(null);
+    setVllmGateRejection(null);
     setShowRemovalWarning(false);
     setShowGroupConflictWarning(false);
 
@@ -755,6 +1233,39 @@ export default function CreateDeployment() {
       
       if (targetType === 'group' && !targetThingGroup.trim()) {
         throw new Error('Please enter a thing group name');
+      }
+
+      // Camera binding gates (camera-registry-sync 8.7, 9.3): every
+      // Camera_Input_Node needs a binding on every target device, and
+      // every warning needs its confirmation checkbox checked, before
+      // the deployment is submitted.
+      if (selectedWorkflows.length > 0 && bindingContextError) {
+        throw new Error(
+          'The camera binding context for the selected workflow ' +
+          'component(s) could not be loaded, so camera bindings cannot ' +
+          'be validated. Resolve the problem and try again.'
+        );
+      }
+      for (const [workflowId, context] of bindingMatrices) {
+        const missing = unboundCells(context, bindingSelections[workflowId] || {});
+        if (missing.length > 0) {
+          throw new Error(
+            `Workflow '${workflowId}' still has unbound camera input ` +
+            `node(s): ` +
+            missing
+              .map(m => `node '${m.nodeId}' on device '${m.device}'`)
+              .join('; ')
+          );
+        }
+        const unconfirmed = bindingWarningsFor(workflowId)
+          .filter(w => !confirmedWarningIds.has(w.id));
+        if (unconfirmed.length > 0) {
+          throw new Error(
+            'Camera binding warnings require confirmation before the ' +
+            'deployment can be created. Review the checkboxes in the ' +
+            'camera bindings section.'
+          );
+        }
       }
 
       const deploymentData = {
@@ -777,6 +1288,70 @@ export default function CreateDeployment() {
         }
       };
 
+      // Workflow components with Camera_Input_Nodes are submitted through
+      // the workflow deployment path (component_type: workflow) so the
+      // backend validates and delivers the Camera_Bindings (8.2, 8.6).
+      // Everything else keeps the existing generic path unchanged (8.9,
+      // 11.5). The generic deployment goes first: the workflow path
+      // revises it, merging its component set with the workflow component.
+      if (bindingMatrices.length > 0) {
+        const bindingWorkflowIds = new Set(bindingMatrices.map(([id]) => id));
+        const otherComponents = deploymentData.components.filter(c => {
+          const ref = parseWorkflowComponent(c.component_name, c.component_version);
+          return !ref || !bindingWorkflowIds.has(ref.workflowId);
+        });
+
+        let lastDeploymentId = '';
+        if (otherComponents.length > 0) {
+          const genericResponse = await apiService.createDeployment({
+            ...deploymentData,
+            components: otherComponents,
+          });
+          lastDeploymentId = genericResponse.deployment_id;
+        }
+
+        for (const [workflowId, context] of bindingMatrices) {
+          try {
+            const workflowResponse = await apiService.createWorkflowDeployment({
+              usecase_id: selectedUseCase.value as string,
+              workflow_id: workflowId,
+              workflow_version: context.workflow_version,
+              target_devices: deploymentData.target_devices,
+              target_thing_group: deploymentData.target_thing_group,
+              deployment_name: deploymentData.deployment_name,
+              rollout_config: deploymentData.rollout_config,
+              camera_bindings: buildCameraBindings(bindingSelections[workflowId] || {}),
+              confirmed_warnings: Array.from(confirmedWarningIds),
+            });
+            lastDeploymentId = workflowResponse.deployment_id;
+          } catch (err) {
+            // 409 CAMERA_BINDINGS_INVALID / CAMERA_WARNINGS_UNCONFIRMED,
+            // 503 REGISTRY_UNAVAILABLE, 502 BINDING_DELIVERY_FAILED:
+            // surface errors and warnings next to the matrix, naming the
+            // node and device (8.7, 9.2, 9.3).
+            const rejection = err instanceof ApiError
+              ? parseCameraBindingRejection(err.code, err.message, err.details)
+              : null;
+            if (!rejection) {
+              throw err;
+            }
+            setBindingErrors(prev => ({ ...prev, [workflowId]: rejection.errors }));
+            if (rejection.warnings.length > 0) {
+              setServerBindingWarnings(prev => ({ ...prev, [workflowId]: rejection.warnings }));
+            }
+            setError(rejection.message);
+            scrollToTop();
+            return;
+          }
+        }
+
+        setBindingErrors({});
+        setTimeout(() => {
+          navigate(`/deployments/${lastDeploymentId}?usecase_id=${selectedUseCase.value}`);
+        }, 500);
+        return;
+      }
+
       const response = await apiService.createDeployment(deploymentData);
       
       // Navigate to deployment detail page after successful creation
@@ -785,7 +1360,25 @@ export default function CreateDeployment() {
         navigate(`/deployments/${response.deployment_id}?usecase_id=${selectedUseCase.value}`);
       }, 500);
     } catch (err) {
-      setError(getErrorMessage(err, 'Failed to create deployment'));
+      // Pre-submit plugin gate rejections carry distinct codes so each
+      // Plugin_Component and its lifecycle violation (16.3) or
+      // unsupported architecture (16.6) can be identified.
+      const rejection = err instanceof ApiError
+        ? parsePluginGateRejection(err.code, err.message, err.details)
+        : null;
+      // 409 VLLM_ARCH_UNSUPPORTED (vllm-triton-inference 3.4): the
+      // authoritative backend gate rejected the deployment; itemize the
+      // offending (component, device) pairs.
+      const vllmRejection = err instanceof ApiError
+        ? parseVllmGateRejection(err.code, err.message, err.details)
+        : null;
+      if (rejection) {
+        setGateRejection(rejection);
+      } else if (vllmRejection) {
+        setVllmGateRejection(vllmRejection);
+      } else {
+        setError(getErrorMessage(err, 'Failed to create deployment'));
+      }
       console.error('Failed to create deployment:', err);
       scrollToTop();
     } finally {
@@ -826,6 +1419,64 @@ export default function CreateDeployment() {
         >
           <SpaceBetween size="l">
             {error && <Alert type="error" dismissible onDismiss={() => setError('')}>{error}</Alert>}
+
+            {/* Pre-submit plugin gate rejection (16.3, 16.6) */}
+            {gateRejection && (
+              <PluginGateRejectionAlert
+                rejection={gateRejection}
+                onDismiss={() => setGateRejection(null)}
+              />
+            )}
+
+            {/* Backend vLLM architecture gate rejection
+                (vllm-triton-inference 3.4/3.9) */}
+            {vllmGateRejection && (
+              <Alert
+                type="error"
+                dismissible
+                onDismiss={() => setVllmGateRejection(null)}
+                header="Deployment rejected: unsupported device architecture for vLLM"
+              >
+                <SpaceBetween size="xs">
+                  <span>{vllmGateRejection.message}</span>
+                  <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                    {vllmGateRejection.unsupported.map((entry, i) => (
+                      <li key={`${entry.component}-${entry.device}-${i}`}>
+                        {describeVllmArchEntry(entry)}
+                      </li>
+                    ))}
+                  </ul>
+                </SpaceBetween>
+              </Alert>
+            )}
+
+            {/* Client-side vLLM incompatibility warning before submit
+                (vllm-triton-inference 15.3, Requirement 3.9): each
+                selected device incompatible with a selected vLLM model
+                component, with its recorded architecture (or absence)
+                and the component's supported set. The backend gate is
+                authoritative and will reject the deployment. */}
+            {vllmArchWarnings.length > 0 && (
+              <Alert
+                type="warning"
+                header="Selected devices are incompatible with vLLM model component(s)"
+              >
+                <SpaceBetween size="xs">
+                  <span>
+                    The following target devices do not support the selected
+                    vLLM model component(s). Submitting will be rejected by
+                    deployment validation.
+                  </span>
+                  <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                    {vllmArchWarnings.map((entry, i) => (
+                      <li key={`${entry.component}-${entry.device}-${i}`}>
+                        {describeVllmArchEntry(entry)}
+                      </li>
+                    ))}
+                  </ul>
+                </SpaceBetween>
+              </Alert>
+            )}
 
             {/* Revise-mode banner */}
             {existingDeployment && (
@@ -886,6 +1537,57 @@ export default function CreateDeployment() {
                   <Alert type="info" dismissible>
                     {incompatibleComponents.length} component(s) hidden due to architecture incompatibility with selected devices.
                   </Alert>
+                )}
+
+                {/* Selected device(s) with no recorded DDA Target_Architecture
+                    (device-arch-compatibility Req 3.5): gated components fail
+                    closed for these devices, so the architecture must be
+                    recorded (via the device's Target Architecture editor, or
+                    automatically through Quick Setup) before they can be
+                    deployed. */}
+                {devicesWithoutRecordedArch.length > 0 && (
+                  <Alert
+                    type="warning"
+                    header="Selected device(s) have no recorded architecture"
+                  >
+                    <SpaceBetween size="xs">
+                      <span>
+                        The following selected device(s) have no recorded DDA
+                        Target Architecture. Architecture-gated components
+                        (vLLM model and Node plugin components) are hidden for
+                        these devices and cannot be deployed until their
+                        architecture is recorded.
+                      </span>
+                      <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                        {devicesWithoutRecordedArch.map(deviceId => (
+                          <li key={deviceId}>{deviceId}</li>
+                        ))}
+                      </ul>
+                    </SpaceBetween>
+                  </Alert>
+                )}
+
+                {/* Gated components excluded for Target_Architecture
+                    incompatibility, each with an explainable reason (device
+                    arch(s) vs supported set) so the exclusion is discoverable
+                    rather than silent (device-arch-compatibility Req 3.3, 3.4). */}
+                {incompatibleGatedComponents.length > 0 && (
+                  <ExpandableSection
+                    headerText={`Incompatible with the selected device(s) (${incompatibleGatedComponents.length})`}
+                  >
+                    <SpaceBetween size="xs">
+                      <Box color="text-body-secondary" fontSize="body-s">
+                        These components are not offered because they do not
+                        support the selected device(s)' recorded architecture.
+                        The backend deployment gate would reject them.
+                      </Box>
+                      <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                        {incompatibleGatedComponents.map(({ component, reason }) => (
+                          <li key={component.arn}>{reason}</li>
+                        ))}
+                      </ul>
+                    </SpaceBetween>
+                  </ExpandableSection>
                 )}
 
                 {/* DDA LocalServer requirement warning */}
@@ -1039,6 +1741,57 @@ export default function CreateDeployment() {
                         </SpaceBetween>
                       ),
                     },
+                    {
+                      // Node Designer Plugin_Components (dda.plugin.*):
+                      // name, version, backing Lifecycle_State badge, and
+                      // supported Target_Architecture chips (16.2).
+                      id: 'plugins',
+                      label: `Node Plugins (${pluginComponents.length})`,
+                      content: (
+                        <SpaceBetween size="s">
+                          {pluginComponents.length === 0 ? (
+                            <Box color="text-body-secondary" padding="s">
+                              No custom node plugin components found. Build a plugin in the
+                              Node Designer to make it deployable here.
+                            </Box>
+                          ) : (
+                            <ColumnLayout columns={2} variant="text-grid">
+                              {pluginComponents.map(comp => {
+                                const isSelected = selectedComponents.some(c => c.arn === comp.arn);
+                                const displayName = getComponentDisplayName(comp.component_name);
+                                const version = comp.latest_version?.componentVersion || 'latest';
+
+                                return (
+                                  <Box key={comp.arn} padding="s" variant="div">
+                                    <SpaceBetween size="xxs">
+                                      <SpaceBetween direction="horizontal" size="xs">
+                                        <Box fontWeight="bold">{displayName}</Box>
+                                        <Badge color="blue">Plugin</Badge>
+                                        <LifecycleBadge state={comp.lifecycle_state} />
+                                      </SpaceBetween>
+                                      <Box color="text-body-secondary" fontSize="body-s">
+                                        v{version} • {comp.component_name}
+                                      </Box>
+                                      <ArchitectureChips
+                                        architectures={comp.supported_architectures || []}
+                                      />
+                                      <Button
+                                        variant={isSelected ? "normal" : "primary"}
+                                        disabled={isSelected}
+                                        onClick={() => handleAddComponent(comp)}
+                                        iconName={isSelected ? "status-positive" : "add-plus"}
+                                      >
+                                        {isSelected ? 'Added' : 'Add'}
+                                      </Button>
+                                    </SpaceBetween>
+                                  </Box>
+                                );
+                              })}
+                            </ColumnLayout>
+                          )}
+                        </SpaceBetween>
+                      ),
+                    },
                   ]}
                 />
 
@@ -1074,11 +1827,37 @@ export default function CreateDeployment() {
                         id: 'name',
                         header: 'Component',
                         cell: item => (
-                          <SpaceBetween direction="horizontal" size="xs">
-                            <span>{item.displayName || item.component_name}</span>
-                            {item.category === 'Model Components' && <Badge color="green">Model</Badge>}
+                          <SpaceBetween size="xxs">
+                            <SpaceBetween direction="horizontal" size="xs">
+                              <span>{item.displayName || item.component_name}</span>
+                              {item.category === 'Model Components' && <Badge color="green">Model</Badge>}
+                              {item.is_plugin_component && (
+                                <>
+                                  <Badge color="blue">Plugin</Badge>
+                                  <LifecycleBadge state={item.lifecycle_state} />
+                                </>
+                              )}
+                            </SpaceBetween>
+                            {/* Now-incompatible pre-loaded gated component
+                                (revise mode) surfaced without being dropped
+                                (device-arch-compatibility Req 4.1-4.3). */}
+                            {selectedComponentArchIssues[item.arn] && (
+                              <StatusIndicator type="warning">
+                                {selectedComponentArchIssues[item.arn]}
+                              </StatusIndicator>
+                            )}
                           </SpaceBetween>
                         ),
+                      },
+                      {
+                        id: 'architectures',
+                        header: 'Architectures',
+                        cell: item =>
+                          item.is_plugin_component ? (
+                            <ArchitectureChips architectures={item.supported_architectures || []} />
+                          ) : (
+                            <Box color="text-body-secondary">—</Box>
+                          ),
                       },
                       {
                         id: 'technical',
@@ -1238,6 +2017,28 @@ export default function CreateDeployment() {
                 </SpaceBetween>
               </FormField>
             )}
+
+            {/* Camera binding matrix (camera-registry-sync 12.1): shown
+                only when a selected workflow component's version has
+                Camera_Input_Nodes (8.9). */}
+            {bindingContextError && (
+              <Alert type="error" header="Camera binding context unavailable">
+                {bindingContextError}
+              </Alert>
+            )}
+            {bindingMatrices.map(([workflowId, context]) => (
+              <CameraBindingMatrix
+                key={workflowId}
+                context={context}
+                selections={bindingSelections[workflowId] || {}}
+                onCellChange={(device, nodeId, cell) =>
+                  handleBindingCellChange(workflowId, device, nodeId, cell)}
+                warnings={bindingWarningsFor(workflowId)}
+                confirmedWarningIds={confirmedWarningIds}
+                onToggleWarning={handleToggleBindingWarning}
+                errors={bindingErrors[workflowId] || []}
+              />
+            ))}
 
             {/* Advanced Options */}
             <ExpandableSection headerText="Advanced Options" variant="footer">

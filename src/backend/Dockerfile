@@ -98,6 +98,20 @@ COPY defect_detection_config ./defect_detection_config
 COPY dda_logging ./dda_logging
 COPY endpoints ./endpoints
 COPY data_models ./data_models
+COPY camera_discovery ./camera_discovery
+COPY camera_sync ./camera_sync
+COPY workflow_engine ./workflow_engine
+# vllm-triton-inference (Requirements 4.1, 8.7): the companion vLLM runtime
+# package. Every new src/backend module needs a COPY line here — missing ones
+# have caused startup regressions (endpoints/text_generation.py imports
+# vllm_runtime.manager at module load). The other modules this feature adds
+# ride existing COPYs: endpoints/text_generation.py (COPY endpoints),
+# workflow_engine/llm_inference.py + vendored catalog (COPY workflow_engine),
+# dda_triton/vllm_model_prep.py (COPY dda_triton),
+# utils/feature_configs_utils.py (COPY utils), app.py (COPY app.py).
+COPY vllm_runtime ./vllm_runtime
+COPY local_auth ./local_auth
+COPY user_accounts_sync ./user_accounts_sync
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY dda_triton ./dda_triton

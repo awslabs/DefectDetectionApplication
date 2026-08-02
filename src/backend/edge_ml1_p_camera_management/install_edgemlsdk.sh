@@ -16,9 +16,14 @@
 
 set -e
 
-python3.11 -m pip install boto3
-python3.11 -m pip install "scikit-learn>=1.1.3,<1.2"
-python3.11 -m pip install dill
+# DDA backend interpreter for pip installs. Defaults to python3.11 so JP5/x86
+# callers keep identical behavior; the JP6 build overrides via DDA_PYTHON to
+# target the cp310 DDA interpreter.
+DDA_PY="${DDA_PYTHON:-python3.11}"
+
+$DDA_PY -m pip install boto3
+$DDA_PY -m pip install "scikit-learn>=1.1.3,<1.2"
+$DDA_PY -m pip install dill
 #python3.11 -m pip install edge_ml1_p_camera_management/wheels/LyraAnomaliesMaskUtils-1.0-py3-none-any.whl
 #python3.11 -m pip install edge_ml1_p_camera_management/wheels/LyraScienceProcessingUtils-1.0-py3-none-any.whl
 # Requirement(s) of LyraScienceProcessingUtils
@@ -53,7 +58,7 @@ if [ -d edgemlsdk ] && [ -f edgemlsdk/aws-c-iot.deb ]; then
 
     # Install Panorama wheel if it exists
     if [ -f edgemlsdk/panorama-1.0-py3-none-any.whl ]; then
-        python3.11 -m pip install edgemlsdk/panorama-1.0-py3-none-any.whl || echo "Warning: Failed to install panorama wheel"
+        $DDA_PY -m pip install edgemlsdk/panorama-1.0-py3-none-any.whl || echo "Warning: Failed to install panorama wheel"
     fi
 
     # Patch triton stubs with correct install if available

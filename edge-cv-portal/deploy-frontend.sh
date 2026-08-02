@@ -100,9 +100,21 @@ npm ci
 echo "Step 3: Building application..."
 npm run build
 
-# Deploy to S3
+# Deploy to S3.
+# Hashed assets are immutable and safe to cache for a year; the entry
+# point (index.html) and runtime config (config.json) must always be
+# revalidated so browsers pick up new deployments immediately instead of
+# holding a stale index.html that references deleted hashed chunks.
 echo "Step 4: Deploying to S3..."
-aws s3 sync dist/ s3://$BUCKET_NAME/ --delete
+aws s3 sync dist/ s3://$BUCKET_NAME/ --delete \
+  --exclude "index.html" --exclude "config.json" \
+  --cache-control "public, max-age=31536000, immutable"
+aws s3 cp dist/index.html s3://$BUCKET_NAME/index.html \
+  --cache-control "no-cache"
+if [ -f dist/config.json ]; then
+  aws s3 cp dist/config.json s3://$BUCKET_NAME/config.json \
+    --cache-control "no-cache"
+fi
 
 # Invalidate CloudFront cache
 echo "Step 5: Invalidating CloudFront cache..."
@@ -123,10 +135,37 @@ echo ""
 echo "Step 6: Deploying backend with CloudFront domain for auto-CORS..."
 cd "$SCRIPT_DIR/infrastructure"
 
+# The ComputeStack constructor refuses to synth an sts:AssumeRole grant on a
+# wildcard account, so trustedUseCaseAccountIds must be supplied. Default to
+# the deploying account (single-account setup); override via
+# TRUSTED_USECASE_ACCOUNT_IDS for cross-account. Same pattern as
+# infrastructure/deploy_portal_fixes.sh.
+
+# Resolve + export credentials for CDK's JS SDK (guarded so failure is non-fatal).
+if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null | grep -v AWS_CREDENTIAL_EXPIRATION); then
+  eval "$_CREDS_ENV"
+  unset _CREDS_ENV
+fi
+
+CDK_REGION="${CDK_DEFAULT_REGION:-${AWS_REGION:-us-east-1}}"
+ACCOUNT="${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text 2>/dev/null)}"
+if [ -z "$ACCOUNT" ] || [ "$ACCOUNT" = "None" ]; then
+  echo "❌ ERROR: could not resolve AWS account. Check credentials (aws sts get-caller-identity)." >&2
+  exit 1
+fi
+export CDK_DEFAULT_ACCOUNT="$ACCOUNT"
+export CDK_DEFAULT_REGION="$CDK_REGION"
+export AWS_REGION="$CDK_REGION"
+
+TRUSTED="${TRUSTED_USECASE_ACCOUNT_IDS:-$ACCOUNT}"
+
 echo "Redeploying compute stack with CloudFront domain: $CLOUDFRONT_URL"
+echo "   Trusted UseCase accounts: $TRUSTED"
 npm run build
 npx cdk deploy EdgeCVPortalComputeStack --require-approval never \
-  -c cloudFrontDomain="$CLOUDFRONT_URL"
+  -c cloudFrontDomain="$CLOUDFRONT_URL" \
+  -c "trustedUseCaseAccountIds=$TRUSTED" \
+  -c "dataBucketAllowlist=${DATA_BUCKET_ALLOWLIST:-}"
 echo "✅ Backend updated with CloudFront domain for auto-CORS configuration."
 
 echo ""

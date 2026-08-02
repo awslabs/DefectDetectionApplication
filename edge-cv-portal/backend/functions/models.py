@@ -348,6 +348,9 @@ def get_model(event: Dict, context: Any) -> Dict:
             'compilation_jobs': item.get('compilation_jobs', []),
             'packaging_status': item.get('packaging_status'),
             'packaged_components': item.get('packaged_components', []),
+            # vLLM publish write-back map: carries supported_architectures
+            # for the model detail view (vllm-triton-inference, Req 3.8)
+            'published_component': item.get('published_component'),
             'validation_result': item.get('validation_result'),
             'hyperparameters': item.get('hyperparameters', {}),
             'instance_type': item.get('instance_type'),

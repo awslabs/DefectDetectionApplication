@@ -15,6 +15,7 @@ import TrainingDetail from './pages/TrainingDetail';
 import CreateTraining from './pages/CreateTraining';
 import ImportModel from './pages/ImportModel';
 import SmartImport from './pages/SmartImport';
+import RegisterLlm from './pages/RegisterLlm';
 import Labeling from './pages/Labeling';
 import LabelingDetail from './pages/LabelingDetail';
 import CreateLabelingJob from './pages/CreateLabelingJob';
@@ -26,8 +27,18 @@ import CreateDeployment from './pages/CreateDeployment';
 import Components from './pages/Components';
 import ComponentDetail from './pages/ComponentDetail';
 import ComponentConfiguration from './pages/ComponentConfiguration';
+import WorkflowBuilder from './pages/workflows/WorkflowBuilder';
+import PluginLibrary from './pages/node-designer/PluginLibrary';
+import PluginDetail from './pages/node-designer/PluginDetail';
+import CreateWizard from './pages/node-designer/CreateWizard';
+import GeneratePanel from './pages/node-designer/GeneratePanel';
+import RegistrationWizard from './pages/node-designer/RegistrationWizard';
+import ReviewQueue from './pages/node-designer/ReviewQueue';
+import SimulatorView from './pages/node-designer/SimulatorView';
+import ImportView from './pages/node-designer/ImportView';
 import Settings from './pages/Settings';
 import AuditLogs from './pages/AuditLogs';
+import UserManager from './pages/admin/UserManager';
 import Login from './pages/Login';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -74,6 +85,7 @@ function App() {
                 <Route path="models" element={<Models />} />
                 <Route path="models/import" element={<ImportModel />} />
                 <Route path="models/smart-import" element={<SmartImport />} />
+                <Route path="models/register-llm" element={<RegisterLlm />} />
                 <Route path="models/:modelId" element={<ModelDetail />} />
                 <Route path="training" element={<Training />} />
                 <Route path="training/create" element={<CreateTraining />} />
@@ -84,7 +96,21 @@ function App() {
                 <Route path="components" element={<Components />} />
                 <Route path="components/:arn" element={<ComponentDetail />} />
                 <Route path="components/configure" element={<ComponentConfiguration />} />
+                <Route path="workflows/builder" element={<WorkflowBuilder />} />
+                <Route path="workflows/builder/:workflowId" element={<WorkflowBuilder />} />
+                <Route path="node-designer" element={<PluginLibrary />} />
+                <Route path="node-designer/create" element={<CreateWizard />} />
+                <Route path="node-designer/generate" element={<GeneratePanel />} />
+                <Route path="node-designer/import" element={<ImportView />} />
+                <Route path="node-designer/plugins/:pluginId" element={<PluginDetail />} />
+                <Route path="node-designer/plugins/:pluginId/register" element={<RegistrationWizard />} />
+                <Route path="node-designer/review" element={<ReviewQueue />} />
+                <Route
+                  path="node-designer/plugins/:pluginId/versions/:version/simulate"
+                  element={<SimulatorView />}
+                />
                 <Route path="settings" element={<Settings />} />
+                <Route path="admin/user-manager" element={<UserManager />} />
                 <Route path="audit" element={<AuditLogs />} />
               </Route>
             </Routes>

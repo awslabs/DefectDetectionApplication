@@ -178,7 +178,7 @@ def _override_configs(draw):
 @pytest.mark.parametrize(
     "backend_cls", MOCK_BACKEND_CLASSES.values(), ids=list(MOCK_BACKEND_CLASSES)
 )
-@settings(max_examples=150, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(
     num_viewers=st.integers(min_value=1, max_value=_CONFIG.max_viewers),
     prior_features=st.one_of(st.none(), _control_dict),

@@ -69,6 +69,11 @@ export interface Device {
   greengrass_version?: string;
   platform?: string;
   architecture?: string;
+  /** UseCaseAdmin-designated Test_Device flag (Devices table). */
+  test_device?: boolean;
+  /** Portal-recorded DDA Target_Architecture (Devices table), checked by
+   *  the deployment architecture gates. Null/absent fails closed. */
+  target_architecture?: string | null;
   attributes?: Record<string, string>;
   tags?: Record<string, string>;
   installed_components?: InstalledComponent[];

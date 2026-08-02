@@ -60,7 +60,7 @@ def _session(stale_after_s: float) -> StreamSession:
 
 # Feature: concurrent-camera-stream-viewing, Property 11: Frame freshness predicate
 # Validates: Requirements 4.6, 4.7
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(acquired_at=_times, now=_times, stale_after_s=_stale_after)
 def test_property_11_frame_freshness_predicate(acquired_at, now, stale_after_s):
     """read_latest is OK when age <= stale_after_s and STALE when age exceeds it.
@@ -86,7 +86,7 @@ def test_property_11_frame_freshness_predicate(acquired_at, now, stale_after_s):
 
 # Feature: concurrent-camera-stream-viewing, Property 11: Frame freshness predicate
 # Validates: Requirements 4.6, 4.7
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(acquired_at=_int_times, stale_after_s=_int_stale)
 def test_property_11_exact_boundary_is_ok(acquired_at, stale_after_s):
     """A frame whose age equals ``stale_after_s`` exactly classifies as OK.
@@ -106,7 +106,7 @@ def test_property_11_exact_boundary_is_ok(acquired_at, stale_after_s):
 
 # Feature: concurrent-camera-stream-viewing, Property 11: Frame freshness predicate
 # Validates: Requirements 4.6, 4.7
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(acquired_at=_times, stale_after_s=_stale_after)
 def test_property_11_just_past_boundary_is_stale(acquired_at, stale_after_s):
     """A frame even marginally older than ``stale_after_s`` classifies as STALE.

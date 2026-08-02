@@ -35,26 +35,40 @@ TRAINING_JOBS_TABLE = os.environ.get('TRAINING_JOBS_TABLE')
 MODELS_TABLE = os.environ.get('MODELS_TABLE')
 USECASES_TABLE = os.environ.get('USECASES_TABLE')
 
-# Platform mapping for DDA LocalServer dependencies
-PLATFORM_DEPENDENCIES = {
-    'aarch64': 'aws.edgeml.dda.LocalServer.arm64',
-    'amd64': 'aws.edgeml.dda.LocalServer.amd64'
-}
+class PublishError(Exception):
+    """A model component cannot be published as requested.
+
+    Raised (among other places) by resolve_local_server_component when a
+    model's compile target does not resolve to a known JetPack-tagged
+    LocalServer variant. publish_component turns this into a failed-publish
+    response for the offending target rather than creating a component
+    version with a wrong/ambiguous LocalServer dependency.
+    """
+    pass
+
+
+# Every LocalServer variant is explicitly JetPack/arch-tagged. The JetPack 4
+# variant is `arm64JP4` (renamed from the bare, untagged `arm64`); the bare
+# `aws.edgeml.dda.LocalServer.arm64` name is RETIRED as a produced/depended
+# name so nothing owns the ambiguous "generic aarch64" catch-all that used to
+# be stamped onto models with an unknown compile target (localserver-arch-
+# naming). Legacy bare-arm64 installs are still recognized on the READ side
+# (deployments.local_server_component_arch), but are never produced here.
+JP4_LOCAL_SERVER = 'aws.edgeml.dda.LocalServer.arm64JP4'
+_AMD64_LOCAL_SERVER = 'aws.edgeml.dda.LocalServer.amd64'
 
 # Compilation target -> DDA LocalServer component name.
-# This is more specific than PLATFORM_DEPENDENCIES because aarch64 has two
-# LocalServer variants: arm64 (JetPack 4, requires Nucleus >=2.13.0) and
-# arm64JP5 (JetPack 5, requires Nucleus >=2.4.0). A model compiled for a JP5
-# device MUST depend on the arm64JP5 variant, otherwise the deployment pulls in
-# the JP4 LocalServer and its Nucleus >=2.13.0 requirement conflicts with the
-# JP5 device's Nucleus 2.12.0.
+# aarch64 has three JetPack-tagged variants (arm64JP4/JP5/JP6). A model
+# compiled for a given JetPack device MUST depend on that JetPack's variant,
+# otherwise the deployment pulls in the wrong LocalServer, which collides on
+# port 3443 with the correct variant and crash-loops the device to BROKEN.
 TARGET_TO_LOCAL_SERVER = {
-    'jetson-xavier': 'aws.edgeml.dda.LocalServer.arm64',        # JetPack 4
+    'jetson-xavier': JP4_LOCAL_SERVER,                           # JetPack 4
     'jetson-xavier-jp5': 'aws.edgeml.dda.LocalServer.arm64JP5',  # JetPack 5
     'jetson-xavier-jp6': 'aws.edgeml.dda.LocalServer.arm64JP6',  # JetPack 6
-    'arm64-cpu': 'aws.edgeml.dda.LocalServer.arm64',
-    'x86_64-cpu': 'aws.edgeml.dda.LocalServer.amd64',
-    'x86_64-cuda': 'aws.edgeml.dda.LocalServer.amd64',
+    'arm64-cpu': JP4_LOCAL_SERVER,                               # arm64 CPU -> JP4 baseline
+    'x86_64-cpu': _AMD64_LOCAL_SERVER,
+    'x86_64-cuda': _AMD64_LOCAL_SERVER,
 }
 
 # Target to platform mapping
@@ -72,12 +86,25 @@ def resolve_local_server_component(target: str, platform: str) -> str:
     """
     Resolve the correct DDA LocalServer dependency for a model component.
 
-    Prefer the target-specific mapping (which distinguishes JetPack 4 vs 5 for
-    aarch64); fall back to the platform-level default for unknown targets.
+    Known compile targets map to their explicit JetPack-tagged (or amd64)
+    variant. x86_64 has a single LocalServer variant, so an unknown target on
+    the amd64 platform safely resolves to it. Any other unresolved target
+    (aarch64 or otherwise) FAILS CLOSED: it raises PublishError rather than
+    silently defaulting to a bare/untagged aarch64 name. This is the root-cause
+    fix for the wrong-LocalServer incident — a missing/unknown target must
+    never quietly pick a JetPack variant.
     """
-    return TARGET_TO_LOCAL_SERVER.get(
-        target,
-        PLATFORM_DEPENDENCIES.get(platform, 'aws.edgeml.dda.LocalServer')
+    name = TARGET_TO_LOCAL_SERVER.get(target)
+    if name:
+        return name
+    if platform == 'amd64':
+        return _AMD64_LOCAL_SERVER
+    raise PublishError(
+        f"Cannot resolve a LocalServer dependency for target '{target}' "
+        f"(platform '{platform}'): no known JetPack-tagged LocalServer "
+        f"variant. The model must declare a supported compile target "
+        f"(jetson-xavier, jetson-xavier-jp5, jetson-xavier-jp6, "
+        f"x86_64-cpu, x86_64-cuda, arm64-cpu)."
     )
 
 
@@ -230,6 +257,247 @@ def generate_component_recipe(
     return recipe
 
 
+# ── vLLM publish branch — pure pieces ───────────────────────────────────────
+# The predicate and the safe-name transform mirror packaging.py. This Lambda
+# is bundled with the shared layer only; importing packaging would drag in its
+# module-level dependencies (e.g. yaml), so the two small pure helpers are
+# duplicated here instead.
+
+# JetPack 5 vLLM support is feature-flagged (design: JP5_VLLM_ENABLED, default
+# off). Mirrors packaging.py: the catalog flag in workflow_core.catalog.models
+# is the source of truth mirrored by this env var at deploy time.
+JP5_VLLM_ENABLED = os.environ.get('JP5_VLLM_ENABLED', 'false').lower() == 'true'
+
+
+def vllm_supported_architectures() -> list:
+    """Supported Target_Architecture set for vLLM_Model_Components:
+    always arm64_jp6, arm64_jp5 only when JP5 support is flagged on,
+    never arm64_jp4 (2.5). Mirrors packaging.vllm_supported_architectures."""
+    archs = ['arm64_jp6']
+    if JP5_VLLM_ENABLED:
+        archs.append('arm64_jp5')
+    return archs
+
+
+def is_vllm_record(training_job: Dict) -> bool:
+    """True if this model record is a vLLM_Model_Record (LLM served through
+    the Triton vLLM backend) rather than a vision model."""
+    return training_job.get('source') == 'vllm' or \
+        str(training_job.get('model_type', '')).lower() == 'vllm'
+
+
+def _safe_model_name(model_name: str) -> str:
+    """Sanitized model name — the same transform _trigger_component_creation
+    (packaging.py) uses, so the component name matches the repository
+    directory the packager generated."""
+    return re.sub(r'[^a-zA-Z0-9-]', '-', str(model_name).lower())
+
+
+def derive_vllm_component_name(model_name: str) -> str:
+    """vLLM component naming convention: `model-vllm-{safe_model_name}`.
+
+    Passes the existing `model-` prefix validation; the `-vllm-` infix is the
+    deployment-side discriminator that triggers the vLLM architecture gate
+    (Requirement 2.4, design section 3).
+    """
+    return f"model-vllm-{_safe_model_name(model_name)}"
+
+
+def next_vllm_component_version(training_job: Dict) -> str:
+    """Next vLLM component version for a record: `N.0.0` with N = 1 + the
+    highest previously published N for this record (Requirement 2.4).
+
+    Scans every version recorded on the record's publish history
+    (`published_components` entries and, once task 4.2 lands, the
+    `published_component` map), so the derived version is strictly greater
+    than everything already sent to Greengrass — including versions from
+    failed attempts that may still exist as component versions cloud-side.
+    """
+    highest = 0
+    candidates = []
+    published_list = training_job.get('published_components') or []
+    if isinstance(published_list, list):
+        candidates.extend(
+            entry.get('component_version')
+            for entry in published_list if isinstance(entry, dict)
+        )
+    published_map = training_job.get('published_component') or {}
+    if isinstance(published_map, dict):
+        candidates.append(published_map.get('component_version'))
+    for version in candidates:
+        match = re.match(r'^(\d+)\.', str(version or ''))
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"{highest + 1}.0.0"
+
+
+def _artifact_unarchive_stem(artifact_uri: str) -> str:
+    """Directory name an unarchived Greengrass artifact gets under
+    {artifacts:decompressedPath}: the artifact filename with its archive
+    extension stripped."""
+    filename = str(artifact_uri).rstrip('/').split('/')[-1]
+    for suffix in ('.tar.gz', '.tgz', '.zip', '.tar'):
+        if filename.lower().endswith(suffix):
+            return filename[:-len(suffix)]
+    return filename
+
+
+def generate_vllm_component_recipe(
+    component_name: str,
+    component_version: str,
+    friendly_name: str,
+    platform: str,
+    artifact_s3_uri: str,
+    repo_unarchived_path: str,
+    model_name: str,
+    target: str = None,
+    s3_model_artifact: str = None,
+    supported_architectures: list = None
+) -> Dict:
+    """
+    Generate the Greengrass component recipe for a vLLM_Model_Component.
+
+    Pure — mirrors generate_component_recipe: HARD dependency on the target's
+    LocalServer variant, the same bounded /aws_dda seed-wait Startup gate
+    (here gating on vllm_model_prep.py, seeded by cp_model_conversion_files
+    exactly like model_convertor.py), then vllm_model_prep.py stages the
+    unarchived Triton_vLLM_Repository and requests the model load. Shutdown
+    runs vllm_model_prep.py --cleanup (unstage + unload). Nothing in the
+    lifecycle restarts LocalServer (Requirement 2.7).
+
+    For S3-sourced records the S3_Model_Artifact is declared as a second
+    Unarchive artifact and its decompressed path is passed to the prep script
+    as --weights_path, where the './weights' sentinel in model.json is
+    rewritten device-side (Requirement 2.2).
+
+    The component's supported Target_Architecture set and `runtime: 'vllm'`
+    are recorded (informational) in ComponentConfiguration.DefaultConfiguration
+    (Requirement 2.4, design section 3).
+    """
+    local_server_component = resolve_local_server_component(target, platform)
+    if supported_architectures is None:
+        supported_architectures = vllm_supported_architectures()
+
+    prep_cmd = (
+        f'python3 /aws_dda/vllm_model_prep.py '
+        f'--unarchived_repo_path {{artifacts:decompressedPath}}/{repo_unarchived_path}/ '
+    )
+    if s3_model_artifact:
+        weights_stem = _artifact_unarchive_stem(s3_model_artifact)
+        prep_cmd += (
+            f'--weights_path {{artifacts:decompressedPath}}/{weights_stem}/ '
+        )
+    prep_cmd += f'--model_name {model_name} --component_name {component_name}'
+
+    # Same seed-wait rationale as generate_component_recipe: the HARD
+    # dependency only guarantees LocalServer's lifecycle STARTED; the backend
+    # container seeds /aws_dda (cp_model_conversion_files) seconds-to-minutes
+    # later. Poll (bounded) for vllm_model_prep.py before invoking it.
+    startup_script = (
+        '#!/bin/bash\n'
+        '# Wait for the LocalServer backend to seed the host model-preparation\n'
+        '# scripts onto /aws_dda (cp_model_conversion_files) before running them.\n'
+        'seed_timeout=600\n'
+        'waited=0\n'
+        'while [ ! -f /aws_dda/vllm_model_prep.py ]; do\n'
+        '  if [ "$waited" -ge "$seed_timeout" ]; then\n'
+        '    echo "ERROR: LocalServer did not seed /aws_dda within ${seed_timeout}s '
+        '(vllm_model_prep.py absent). Is the LocalServer backend container running? '
+        'Failing model startup." >&2\n'
+        '    exit 1\n'
+        '  fi\n'
+        '  echo "Waiting for LocalServer to seed /aws_dda (${waited}s/${seed_timeout}s)..."\n'
+        '  sleep 5\n'
+        '  waited=$((waited + 5))\n'
+        'done\n'
+        f'{prep_cmd}\n'
+    )
+
+    artifacts = [
+        {
+            'Uri': artifact_s3_uri,
+            'Digest': '',  # Greengrass will calculate
+            'Algorithm': 'SHA-256',
+            'Unarchive': 'ZIP',
+            'Permission': {
+                'Read': 'ALL',
+                'Execute': 'ALL'
+            }
+        }
+    ]
+    if s3_model_artifact:
+        # Second Unarchive artifact: the LLM weights archive. Greengrass
+        # decompresses it under {artifacts:decompressedPath}; the prep
+        # script's --weights_path points at it (2.2).
+        artifacts.append({
+            'Uri': s3_model_artifact,
+            'Digest': '',  # Greengrass will calculate
+            'Algorithm': 'SHA-256',
+            'Unarchive': 'ZIP',
+            'Permission': {
+                'Read': 'ALL',
+                'Execute': 'ALL'
+            }
+        })
+
+    recipe = {
+        'RecipeFormatVersion': '2020-01-25',
+        'ComponentName': component_name,
+        'ComponentVersion': component_version,
+        'ComponentType': 'aws.greengrass.generic',
+        'ComponentPublisher': 'Amazon Lookout for Vision',
+        'ComponentConfiguration': {
+            'DefaultConfiguration': {
+                'Autostart': False,
+                'ModelName': friendly_name,
+                'runtime': 'vllm',
+                'supported_architectures': list(supported_architectures)
+            }
+        },
+        'ComponentDependencies': {
+            local_server_component: {
+                'VersionRequirement': '^1.0.0',
+                'DependencyType': 'HARD'
+            }
+        },
+        'Manifests': [
+            {
+                'Platform': {
+                    'os': 'linux',
+                    'architecture': platform
+                },
+                'Lifecycle': {
+                    'Startup': {
+                        'Script': startup_script,
+                        # Seed-wait (up to 600s) + repository staging both fit.
+                        'Timeout': 1800,
+                        'requiresPrivilege': True,
+                        'runWith': {
+                            'posixUser': 'root'
+                        }
+                    },
+                    'Shutdown': {
+                        'Script': (
+                            f'python3 /aws_dda/vllm_model_prep.py --cleanup '
+                            f'--model_name {model_name} '
+                            f'--component_name {component_name}'
+                        ),
+                        'Timeout': 900,
+                        'requiresPrivilege': True,
+                        'runWith': {
+                            'posixUser': 'root'
+                        }
+                    }
+                },
+                'Artifacts': artifacts
+            }
+        ],
+        'Lifecycle': {}
+    }
+
+    return recipe
+
+
 def publish_component(event: Dict, context: Any) -> Dict:
     """
     Publish Greengrass component
@@ -308,6 +576,33 @@ def publish_component(event: Dict, context: Any) -> Dict:
                     'error': f"No packaged components for requested targets: {requested_targets}"
                 })
         
+        # ── vLLM branch: naming and versioning are convention-derived ──────
+        # For vLLM_Model_Records the component name and version are not
+        # caller-chosen: the name is model-vllm-{safe_model_name} and the
+        # version is N.0.0 with N = 1 + the highest previously published N
+        # for this record (Requirement 2.4).
+        vllm_record = is_vllm_record(training_job)
+        vllm_model_name = None
+        vllm_s3_model_artifact = None
+        vllm_archs = None
+        # Component-version ARNs created during this attempt. On any vLLM
+        # publish failure these are rolled back (best effort) so the retry
+        # can re-register the same derived N.0.0 without a cloud-side
+        # conflict (Requirement 2.6).
+        vllm_created_arns = []
+        if vllm_record:
+            record_model_name = training_job.get('model_name') or component_name
+            component_name = derive_vllm_component_name(record_model_name)
+            component_version = next_vllm_component_version(training_job)
+            vllm_model_name = _safe_model_name(record_model_name)
+            model_source = training_job.get('model_source') or {}
+            vllm_s3_model_artifact = model_source.get('s3_model_artifact')
+            vllm_archs = vllm_supported_architectures()
+            logger.info(
+                f"vLLM record: publishing as {component_name} "
+                f"v{component_version}"
+            )
+
         # Get use case details
         usecase = get_usecase(usecase_id)
         
@@ -335,8 +630,14 @@ def publish_component(event: Dict, context: Any) -> Dict:
             
             # Create unique component name per target
             # e.g., model-defect-classifier-jetson-xavier, model-defect-classifier-x86-64-cpu
+            # vLLM components keep the convention-fixed name with no target
+            # suffix: model-vllm-{safe_model_name} is the deployment gate's
+            # discriminator and (task 4.2) the GSI lookup key.
             target_suffix = target.replace('_', '-')
-            target_component_name = f"{component_name}-{target_suffix}"
+            if vllm_record:
+                target_component_name = component_name
+            else:
+                target_component_name = f"{component_name}-{target_suffix}"
             
             # Extract model unarchived path from S3 URI
             # Format: s3://bucket/model_artifacts/model-uuid/uuid_greengrass_model_component.zip
@@ -345,16 +646,37 @@ def publish_component(event: Dict, context: Any) -> Dict:
             logger.info(f"Publishing component {target_component_name} for target {target} (platform: {platform})")
             
             try:
+                # Fail closed BEFORE creating any component version: an
+                # unresolved aarch64 target must never be stamped with a
+                # bare/ambiguous LocalServer dependency. resolve_local_server_
+                # component (called inside the recipe generators) raises
+                # PublishError, which is caught below and recorded as a failed
+                # target so no component version is created for it.
+                #
                 # Generate component recipe with target-specific name
-                recipe = generate_component_recipe(
-                    component_name=target_component_name,
-                    component_version=component_version,
-                    friendly_name=f"{friendly_name} ({target})",
-                    platform=platform,
-                    artifact_s3_uri=artifact_s3_uri,
-                    model_unarchived_path=model_unarchived_path,
-                    target=target
-                )
+                if vllm_record:
+                    recipe = generate_vllm_component_recipe(
+                        component_name=target_component_name,
+                        component_version=component_version,
+                        friendly_name=f"{friendly_name} ({target})",
+                        platform=platform,
+                        artifact_s3_uri=artifact_s3_uri,
+                        repo_unarchived_path=model_unarchived_path,
+                        model_name=vllm_model_name,
+                        target=target,
+                        s3_model_artifact=vllm_s3_model_artifact,
+                        supported_architectures=vllm_archs
+                    )
+                else:
+                    recipe = generate_component_recipe(
+                        component_name=target_component_name,
+                        component_version=component_version,
+                        friendly_name=f"{friendly_name} ({target})",
+                        platform=platform,
+                        artifact_s3_uri=artifact_s3_uri,
+                        model_unarchived_path=model_unarchived_path,
+                        target=target
+                    )
                 
                 logger.info(f"Creating Greengrass component: {target_component_name} v{component_version}")
                 
@@ -373,6 +695,8 @@ def publish_component(event: Dict, context: Any) -> Dict:
                 
                 component_arn = response['arn']
                 logger.info(f"Component created: {component_arn}")
+                if vllm_record:
+                    vllm_created_arns.append(component_arn)
                 
                 # Monitor component status until DEPLOYABLE
                 max_attempts = 30
@@ -410,6 +734,23 @@ def publish_component(event: Dict, context: Any) -> Dict:
                     })
                     logger.error(f"Component {target_component_name} failed to become DEPLOYABLE: {component_status}")
                 
+            except PublishError as e:
+                # Fail-closed resolver: the target does not map to a known
+                # LocalServer variant. Record a failed target and move on
+                # without creating a component version (localserver-arch-
+                # naming Requirement 2.2).
+                error_msg = str(e)
+                logger.error(
+                    f"Cannot publish component {target_component_name} for "
+                    f"{target}: {error_msg}")
+                published_components.append({
+                    'target': target,
+                    'platform': platform,
+                    'component_name': target_component_name,
+                    'component_version': component_version,
+                    'status': 'failed',
+                    'error': error_msg
+                })
             except ClientError as e:
                 error_msg = str(e)
                 logger.error(f"Error publishing component {target_component_name} for {target}: {error_msg}")
@@ -422,6 +763,56 @@ def publish_component(event: Dict, context: Any) -> Dict:
                     'error': error_msg
                 })
         
+        # ── vLLM atomicity gate (Requirements 2.6, 2.9) ─────────────────────
+        # A vLLM publish is all-or-nothing: if any target failed (or nothing
+        # was publishable at all), roll back every component version created
+        # during this attempt, write NO publish state onto the record, and
+        # report the failing step so the operation can be retried against a
+        # record still in its pre-publish state.
+        vllm_failed = [c for c in published_components
+                       if c.get('status') != 'published']
+        if vllm_record and (vllm_failed or not published_components):
+            for arn in vllm_created_arns:
+                try:
+                    greengrass.delete_component(arn=arn)
+                    logger.info(f"Rolled back component version: {arn}")
+                except Exception as cleanup_error:
+                    logger.warning(
+                        f"Rollback of component version {arn} failed "
+                        f"(may need manual cleanup): {cleanup_error}")
+
+            log_audit_event(
+                user_id=user_id,
+                action='publish_greengrass_component',
+                resource_type='training_job',
+                resource_id=training_id,
+                result='failure',
+                details={
+                    'component_name': component_name,
+                    'component_version': component_version,
+                    'runtime': 'vllm',
+                    'failed_targets': [c.get('target') for c in vllm_failed],
+                }
+            )
+            error_detail = (
+                '; '.join(
+                    f"{c.get('target')}: {c.get('error', 'unknown error')}"
+                    for c in vllm_failed)
+                or 'no packaged artifact available to publish'
+            )
+            logger.error(
+                f"vLLM publish failed for training {training_id}; record "
+                f"left in pre-publish state (retryable): {error_detail}")
+            return create_response(502, {
+                'error': f'vLLM component publish failed: {error_detail}',
+                'failed_step': 'greengrass_registration',
+                'training_id': training_id,
+                'component_name': component_name,
+                'component_version': component_version,
+                'published_components': published_components,
+                'retryable': True
+            })
+
         # Store published components in Models table
         if published_components:
             models_table = dynamodb.Table(MODELS_TABLE)
@@ -457,15 +848,53 @@ def publish_component(event: Dict, context: Any) -> Dict:
         # Update training job with published components
         table = dynamodb.Table(TRAINING_JOBS_TABLE)
         timestamp = int(datetime.utcnow().timestamp() * 1000)
-        
-        table.update_item(
-            Key={'training_id': training_id},
-            UpdateExpression='SET published_components = :components, updated_at = :updated',
-            ExpressionAttributeValues={
-                ':components': published_components,
-                ':updated': timestamp
+
+        if vllm_record:
+            # Publish metadata write-back (Requirements 2.4, 2.9): the
+            # record's published_component map carries the component
+            # name/version, the supported Target_Architecture set, and the
+            # vLLM runtime discriminator; the top-level component_name
+            # attribute is the key the deployment gate's
+            # component_name-index GSI resolves the record by (task 5.2).
+            component_arns = {
+                comp['target']: comp['component_arn']
+                for comp in published_components
+                if comp['status'] == 'published'
             }
-        )
+            published_component_map = {
+                'component_name': component_name,
+                'component_version': component_version,
+                'supported_architectures': vllm_archs,
+                'runtime': 'vllm',
+                'component_arns': component_arns,
+                'published_at': timestamp
+            }
+            table.update_item(
+                Key={'training_id': training_id},
+                UpdateExpression=(
+                    'SET published_components = :components, '
+                    'published_component = :published_component, '
+                    'component_name = :component_name, '
+                    'published = :published, '
+                    'updated_at = :updated'
+                ),
+                ExpressionAttributeValues={
+                    ':components': published_components,
+                    ':published_component': published_component_map,
+                    ':component_name': component_name,
+                    ':published': True,
+                    ':updated': timestamp
+                }
+            )
+        else:
+            table.update_item(
+                Key={'training_id': training_id},
+                UpdateExpression='SET published_components = :components, updated_at = :updated',
+                ExpressionAttributeValues={
+                    ':components': published_components,
+                    ':updated': timestamp
+                }
+            )
         
         # Log audit event
         log_audit_event(

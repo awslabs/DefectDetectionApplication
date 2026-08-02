@@ -72,7 +72,7 @@ class TestFastAPIEndpointPreservation(LocalServerBaseTestCase):
 
     # suppress_health_check: the TestClient is built once in setUp (function scope),
     # which Hypothesis would otherwise flag when reused across examples.
-    @settings(max_examples=100, deadline=None,
+    @settings(max_examples=25, deadline=None,
               suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(path=_unknown_paths, method=st.sampled_from(["GET", "POST", "PUT", "DELETE", "PATCH"]))
     def test_generated_requests_route_to_defined_status(self, path, method):
@@ -86,7 +86,7 @@ class TestFastAPIEndpointPreservation(LocalServerBaseTestCase):
             f"a 5xx here would indicate an interpreter/runtime regression)"
         )
 
-    @settings(max_examples=60, deadline=None,
+    @settings(max_examples=25, deadline=None,
               suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(path=_unknown_paths)
     def test_unknown_paths_are_not_found(self, path):

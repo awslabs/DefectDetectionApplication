@@ -26,8 +26,7 @@ from uvicorn.protocols.utils import get_path_with_query_string
 
 import logging
 
-from utils import utils
-from utils.auth import validate_token
+from utils.auth import authorize_request
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +87,10 @@ class AccessLogRoute(APIRoute):
 
 
 def get_api_router():
-    if utils.is_authorization_enabled_on_station():
-        return APIRouter(route_class=AccessLogRoute, dependencies=[Depends(validate_token)])
-    return APIRouter(route_class=AccessLogRoute)
+    # authorize_request is attached unconditionally: it evaluates the
+    # (Local_Login_Configuration x Existing_Token_Auth) decision matrix per
+    # request instead of freezing the decision at import time, so runtime
+    # configuration changes take effect without a restart (Requirement 11.2).
+    # The (disabled, not-configured) row allows every request, preserving
+    # today's open-access behavior exactly (Requirements 9.1, 9.3).
+    return APIRouter(route_class=AccessLogRoute, dependencies=[Depends(authorize_request)])

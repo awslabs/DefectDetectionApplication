@@ -55,6 +55,7 @@
     "cypress": "14.0.0",
     "eslint-config-prettier": "^8.5.0",
     "eslint-plugin-cypress": "^2.12.1",
+    "fast-check": "3.23.2",
     "husky": "^8.0.3",
     "lint-staged": "^13.2.2",
     "openapi-typescript-codegen": "^0.20.1",
@@ -70,6 +71,11 @@
     "cypress:open": "cypress open",
     "cypress:components": "cypress run --component",
     "cypress:e2e": "cypress run --e2e"
+  },
+  "jest": {
+    "transformIgnorePatterns": [
+      "node_modules/(?!axios)/"
+    ]
   },
   "eslintConfig": {
     "extends": [

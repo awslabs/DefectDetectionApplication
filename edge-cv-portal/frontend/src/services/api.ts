@@ -4,7 +4,238 @@
 import { getConfig } from '../config';
 import { UseCase, Device, User, S3Bucket } from '../types';
 import type { Capture } from '../components/ResultsViewer';
+import type {
+  NodeTypeDescriptor,
+  TestDataset,
+  TestDatasetCompletedFile,
+  TestDatasetUploadInitiation,
+  WorkflowDefinition,
+  WorkflowGenerationResult,
+  WorkflowSummary,
+  WorkflowTestRun,
+  WorkflowTestRunDetail,
+  WorkflowValidationRun,
+  WorkflowValidationStatus,
+} from '../pages/workflows/types';
+import type {
+  CameraMutationResponse,
+  CameraSourceMutationBody,
+  DeviceCameraConflictsResponse,
+  DeviceCamerasResponse,
+} from '../pages/workflows/cameraReference';
+import type { CameraBindingContext } from '../pages/deployments/cameraBindings';
 import { beginRequest, endRequest } from './loadingBus';
+
+/**
+ * Error thrown for API failures. Workflow Manager endpoints use the
+ * structured error envelope {error: {code, message, details}}; `code`
+ * and `details` are carried through so callers can act on them (e.g.
+ * the deployment ids of a rejected workflow delete, Requirement 5.6).
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status?: number,
+    public readonly code?: string,
+    public readonly details?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+// Code_Assistant API types (custom-node-code-assist).
+
+/** Runtime entry-point contract of the node type being edited. */
+export type CodeAssistContract =
+  | 'process_frame'
+  | 'process_frame_or_handle'
+  | 'frame_hook';
+
+/** One `POST /code-assist` request body. */
+export interface CodeAssistRequest {
+  usecase_id: string;
+  surface: 'workflow-builder' | 'node-designer';
+  contract: CodeAssistContract;
+  /** 1..4,000 chars with at least one non-whitespace character. */
+  prompt: string;
+  /** Present iff the editor holds a non-whitespace character (2.6, 2.10). */
+  current_code?: string;
+  context?: {
+    nodeType?: string;
+    parameters?: { name: string; param_type: string; description?: string }[];
+  };
+}
+
+/** Successful code-assist result; nothing is persisted server-side. */
+export interface CodeAssistResponse {
+  code: string;
+  notes: string;
+  model_id: string;
+  contract: CodeAssistContract;
+}
+
+// User admin types (portal-user-manager).
+
+/**
+ * One Cognito account as returned by `GET /api/v1/admin/users`
+ * (portal-user-manager Requirement 2.1). `role` is the Portal_Role from
+ * the `custom:role` attribute (default `Viewer`); `user_status` is the
+ * Cognito status (e.g. CONFIRMED, FORCE_CHANGE_PASSWORD); `edge_capable`
+ * is true when a credential verifier has been captured for the account,
+ * making it usable for local edge login.
+ */
+export interface AdminAccount {
+  username: string;
+  email: string;
+  email_verified: boolean;
+  role: string;
+  user_status: string;
+  enabled: boolean;
+  edge_capable: boolean;
+}
+
+/** Response of `GET /api/v1/admin/users` (user_admin.py). */
+export interface AdminUsersResponse {
+  users: AdminAccount[];
+  total_count: number;
+}
+
+/**
+ * One edge device row of `GET /api/v1/admin/edge-sync/devices`
+ * (portal-user-manager Requirement 7.4): the devices table joined with
+ * the `dda-portal-account-sync` sync-state table. `lastSyncStatus` /
+ * `lastSyncAt` are absent for devices that have never been synced;
+ * `failureReason` accompanies a `failed` status (e.g. "device
+ * unreachable").
+ */
+export interface EdgeSyncDevice {
+  device_id: string;
+  lastSyncStatus?: 'pending' | 'in_progress' | 'success' | 'failed' | null;
+  /** Epoch milliseconds of the last successful sync. */
+  lastSyncAt?: number | null;
+  pendingChanges?: boolean;
+  failureReason?: string | null;
+}
+
+/** Response of `GET /api/v1/admin/edge-sync/devices` (user_admin.py). */
+export interface EdgeSyncDevicesResponse {
+  devices: EdgeSyncDevice[];
+  count: number;
+}
+
+// vLLM model registration types (vllm-triton-inference).
+
+/**
+ * One validation finding from `POST /api/v1/models/vllm` (model_import.py,
+ * Requirements 1.1/1.9/1.10/1.11): a 400 response carries the complete
+ * finding list, each naming the offending field and value.
+ */
+export interface VllmRegistrationFinding {
+  field: string;
+  value: unknown;
+  reason: string;
+}
+
+/** One engine setting of `GET /api/v1/models/vllm/engine-spec`. */
+export interface VllmEngineSettingSpec {
+  default: string | number | boolean;
+  type: 'string' | 'number' | 'integer' | 'boolean';
+  accepted_values?: string[];
+  range?: string;
+  description: string;
+}
+
+/** Response of `GET /api/v1/models/vllm/engine-spec` (model_import.py). */
+export interface VllmEngineSpec {
+  description: string;
+  settings: Record<string, VllmEngineSettingSpec>;
+  source: {
+    description: string;
+    huggingface_model_id: { type: string; format: string; example: string };
+    s3_model_artifact: { type: string; format: string; example: string };
+  };
+}
+
+/**
+ * The publish write-back map on a vLLM_Model_Record
+ * (greengrass_publish.py task 4.2): carries the component identity and
+ * the supported Target_Architecture set shown on the model detail view
+ * (Requirement 3.8).
+ */
+export interface VllmPublishedComponent {
+  component_name: string;
+  component_version: string;
+  supported_architectures: string[];
+  runtime: string;
+  component_arns: Record<string, string>;
+  published_at: number;
+}
+
+// Station Quick Setup types (station-quick-setup).
+
+/** Lifecycle state of a Device_Registration (Setup_Status). */
+export type SetupStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'expired'
+  | 'failed';
+
+/**
+ * The portal-side record of a pending Station as returned by the
+ * device-registration routes (station-quick-setup Requirements 1.1, 6.3).
+ * Token material is never included — only the token expiry is surfaced.
+ */
+export interface DeviceRegistration {
+  registration_id: string;
+  usecase_id: string;
+  device_name: string;
+  device_group: string;
+  status: SetupStatus;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  /** Epoch seconds; <= creation/regeneration time + 90 min. */
+  token_expires_at: number;
+  /** Present when status is `failed`; truncated to <=1024 chars. */
+  error_summary?: string;
+}
+
+/** Body of `POST /device-registrations` (Requirement 1.1). */
+export interface RegisterDeviceInput {
+  device_name: string;
+  device_group: string;
+  usecase_id: string;
+}
+
+/**
+ * Response of `POST /device-registrations` and
+ * `POST /device-registrations/{id}/command`: the persisted registration
+ * plus the one-line Setup_Command embedding the Setup_Token and the token
+ * expiry (station-quick-setup Requirements 2.1, 2.5).
+ */
+export interface RegistrationWithCommand {
+  registration: DeviceRegistration;
+  setup_command: string;
+  token_expires_at: number;
+}
+
+/** Response of `GET /device-registrations` (Requirement 6.3). */
+export interface DeviceRegistrationsResponse {
+  registrations: DeviceRegistration[];
+  count: number;
+}
+
+/**
+ * Response of `GET /device-registrations/thing-groups`: existing IoT Thing
+ * Group names from the Use_Case account for Device_Group selection
+ * (station-quick-setup Requirement 1.7).
+ */
+export interface ThingGroupsResponse {
+  thing_groups: string[];
+  count: number;
+}
 
 class ApiService {
   private get baseUrl(): string {
@@ -47,11 +278,34 @@ class ApiService {
         }
         
         const error = await response.json().catch(() => ({ error: 'Request failed' }));
-        throw new Error(error.error || `HTTP ${response.status}`);
+        // Structured error envelope: {error: {code, message, details}}
+        if (error.error && typeof error.error === 'object') {
+          throw new ApiError(
+            error.error.message || `HTTP ${response.status}`,
+            response.status,
+            error.error.code,
+            error.error.details
+          );
+        }
+        // Simple error envelope {error: string, ...}: carry the HTTP
+        // status so callers can branch on it (e.g. the delete-account
+        // not-found path, portal-user-manager Requirement 14.11). The
+        // full parsed body rides along as `details` so callers can read
+        // sibling fields (e.g. the vLLM registration `findings` list).
+        throw new ApiError(
+          error.error || `HTTP ${response.status}`,
+          response.status,
+          undefined,
+          error
+        );
       }
 
       return response.json();
     } catch (err: any) {
+      // Structured API errors carry code/details; re-throw untouched.
+      if (err instanceof ApiError) {
+        throw err;
+      }
       // Handle Amplify/AWS errors that have a complex structure
       if (err && typeof err === 'object' && 'message' in err) {
         if (typeof err.message === 'string') {
@@ -77,6 +331,147 @@ class ApiService {
   // Auth endpoints
   async getCurrentUser(): Promise<{ user: User }> {
     return this.request<{ user: User }>('/auth/me');
+  }
+
+  // User admin endpoints (portal-user-manager) — PortalAdmin only.
+
+  /**
+   * All portal user accounts from the Cognito user pool
+   * (`user_admin.py`, portal-user-manager Requirement 2.1).
+   */
+  async listAdminUsers(): Promise<AdminUsersResponse> {
+    return this.request<AdminUsersResponse>('/admin/users');
+  }
+
+  /**
+   * Create a new portal user account (`user_admin.py`, portal-user-manager
+   * Requirement 12.1). Cognito emails the invitation with a temporary
+   * password itself — the value never appears in the response (12.10).
+   * A 409 indicates the username already exists (12.5); a 400 identifies
+   * the invalid email or missing field (12.6, 12.7).
+   */
+  async createAdminUser(body: {
+    username: string;
+    email: string;
+    role: string;
+  }): Promise<{ message: string }> {
+    return this.request<{ message: string }>('/admin/users', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Set a new password on an account with the selected permanence
+   * (`user_admin.py`, portal-user-manager Requirements 3.1, 3.2). A 400
+   * response carries the violated Password_Policy rule verbatim (3.3).
+   */
+  async setAdminUserPassword(
+    username: string,
+    body: { password: string; permanent: boolean }
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}/password`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Trigger the forgot-password flow: a temporary password is generated
+   * and emailed to the account's registered address; the value is never
+   * returned to the client (portal-user-manager Requirements 4.1, 4.3).
+   * A 400 response indicates the account has no verified email (4.4).
+   */
+  async sendAdminForgotPassword(username: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}/forgot-password`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Change an account's Portal_Role (`user_admin.py`, portal-user-manager
+   * Requirement 5.1). A 409 response carries the rejection reason, e.g.
+   * the last-PortalAdmin guard (5.3).
+   */
+  async setAdminUserRole(
+    username: string,
+    role: string
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}/role`,
+      { method: 'PUT', body: JSON.stringify({ role }) }
+    );
+  }
+
+  /**
+   * Disable an account (`user_admin.py`, portal-user-manager Requirement
+   * 13.2). An already-disabled account is a 200 no-op returning the
+   * current state (13.6). A 409 response carries the rejection reason,
+   * e.g. the last-PortalAdmin guard (5.3, 13.9); other failures are a 502
+   * with the state unchanged (13.7).
+   */
+  async disableAdminUser(
+    username: string
+  ): Promise<{ message: string; enabled?: boolean }> {
+    return this.request<{ message: string; enabled?: boolean }>(
+      `/admin/users/${encodeURIComponent(username)}/disable`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Enable an account (`user_admin.py`, portal-user-manager Requirement
+   * 13.3). An already-enabled account is a 200 no-op returning the
+   * current state (13.6); other failures are a 502 with the state
+   * unchanged (13.7).
+   */
+  async enableAdminUser(
+    username: string
+  ): Promise<{ message: string; enabled?: boolean }> {
+    return this.request<{ message: string; enabled?: boolean }>(
+      `/admin/users/${encodeURIComponent(username)}/enable`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Delete an account (`user_admin.py`, portal-user-manager Requirement
+   * 14.2). A 409 carries the rejection reason, e.g. the last-PortalAdmin
+   * guard (14.3); a 404 means the account no longer exists in the user
+   * pool (14.11); a partial verifier-cleanup failure returns an error
+   * stating the account was deleted but its verifier record was not
+   * removed (14.10); other failures leave the account unchanged (14.6).
+   */
+  async deleteAdminUser(username: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * Edge devices with their per-device account-sync state: last sync
+   * status, last sync timestamp, and whether changes are pending
+   * (`user_admin.py`, portal-user-manager Requirement 7.4).
+   */
+  async listEdgeSyncDevices(): Promise<EdgeSyncDevicesResponse> {
+    return this.request<EdgeSyncDevicesResponse>('/admin/edge-sync/devices');
+  }
+
+  /**
+   * Stage the selected accounts for sync to an edge device and trigger
+   * an immediate sync attempt (`user_admin.py`, portal-user-manager
+   * Requirement 7.1).
+   */
+  async syncEdgeDevice(
+    deviceId: string,
+    usernames: string[]
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/edge-sync/devices/${encodeURIComponent(deviceId)}`,
+      { method: 'POST', body: JSON.stringify({ usernames }) }
+    );
   }
 
   // UseCase endpoints
@@ -342,6 +737,143 @@ class ApiService {
     return this.request<{ device: Device }>(`/devices/${id}?usecase_id=${usecaseId}`);
   }
 
+  /**
+   * Record portal-managed device attributes on the Devices table: the
+   * Test_Device flag and/or the DDA Target_Architecture the deployment
+   * architecture gates check. UseCaseAdmin (node-designer:manage) only —
+   * the backend enforces the permission.
+   */
+  async updateDeviceFlags(
+    deviceId: string,
+    usecaseId: string,
+    updates: { test_device?: boolean; target_architecture?: string | null }
+  ): Promise<{
+    device_id: string;
+    usecase_id: string;
+    test_device: boolean;
+    target_architecture: string | null;
+  }> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request(`/devices/${deviceId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ usecase_id: usecaseId, ...updates }),
+    });
+  }
+
+  /**
+   * The device's Camera_Registry entries with computed staleness and the
+   * device's IoT connectivity status (camera-registry-sync Requirements
+   * 1.3, 7.1). Devices that never completed a synchronization return
+   * `state: "never-synced"` rather than a bare empty list.
+   */
+  async getDeviceCameras(deviceId: string, usecaseId: string): Promise<DeviceCamerasResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceCamerasResponse>(
+      `/devices/${deviceId}/cameras?usecase_id=${usecaseId}`
+    );
+  }
+
+  /**
+   * The device's recorded camera-sync conflict events, newest first
+   * (camera-registry-sync Requirement 6.3).
+   */
+  async getDeviceCameraConflicts(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<DeviceCameraConflictsResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceCameraConflictsResponse>(
+      `/devices/${deviceId}/cameras/conflicts?usecase_id=${usecaseId}`
+    );
+  }
+
+  /** Create a portal-managed Camera_Source (Operator, Requirement 5.1). */
+  async createDeviceCamera(
+    deviceId: string,
+    usecaseId: string,
+    body: CameraSourceMutationBody
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras?usecase_id=${usecaseId}`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Update a portal-managed Camera_Source (Operator, Requirement 5.1). */
+  async updateDeviceCamera(
+    deviceId: string,
+    cameraSourceId: string,
+    usecaseId: string,
+    body: CameraSourceMutationBody
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras/${encodeURIComponent(cameraSourceId)}?usecase_id=${usecaseId}`,
+      { method: 'PUT', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Pending-delete a portal-managed Camera_Source (Operator). */
+  async deleteDeviceCamera(
+    deviceId: string,
+    cameraSourceId: string,
+    usecaseId: string
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras/${encodeURIComponent(cameraSourceId)}?usecase_id=${usecaseId}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * Re-issue a conflict's overridden portal version as a new pending
+   * change (Operator, Requirement 6.4).
+   */
+  async reapplyCameraConflict(
+    deviceId: string,
+    conflictId: string,
+    usecaseId: string
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras/conflicts/${encodeURIComponent(conflictId)}/reapply?usecase_id=${usecaseId}`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * On-demand refresh: pulls the device's registry shadow through the
+   * same reducer as the ingest path and returns the refreshed inventory.
+   */
+  async refreshDeviceCameras(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<DeviceCamerasResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceCamerasResponse>(
+      `/devices/${deviceId}/cameras/refresh?usecase_id=${usecaseId}`,
+      { method: 'POST' }
+    );
+  }
+
   // Device Logs endpoints
   async getDeviceLogGroups(deviceId: string, usecaseId: string): Promise<{
     device_id: string;
@@ -443,6 +975,10 @@ class ApiService {
     device_id: string;
     enabled: boolean;
     component_version?: string | null;
+    device_arch?: string | null;
+    // Max SecureTunneling version deployable to this arch (e.g. '1.1.3' on
+    // JP5, where >= 2.0.0 is GLIBC-incompatible); null when uncapped.
+    secure_tunneling_max_version?: string | null;
   }> {
     return this.request(`/devices/${deviceId}/ssh-tunnel?usecase_id=${usecaseId}`);
   }
@@ -471,6 +1007,83 @@ class ApiService {
     const qs = new URLSearchParams({ usecase_id: usecaseId });
     if (lifetimeMinutes) qs.set('lifetime_minutes', String(lifetimeMinutes));
     return this.request(`/devices/${deviceId}/ssh-tunnel/open?${qs}`, { method: 'POST' });
+  }
+
+  // Device registration endpoints (station-quick-setup)
+
+  /**
+   * Register a new device from the portal, returning the created
+   * Device_Registration together with the one-line Setup_Command and its
+   * token expiry (station-quick-setup Requirement 1.1). Requires the
+   * manage-devices permission — the backend enforces it. A 400 identifies
+   * each missing/invalid field (1.2, 1.9); a 409 identifies a conflicting
+   * device name (1.3).
+   */
+  async registerDevice(
+    input: RegisterDeviceInput
+  ): Promise<RegistrationWithCommand> {
+    return this.request<RegistrationWithCommand>('/device-registrations', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  /**
+   * List the Device_Registrations for a Use_Case with their Setup_Status
+   * and token expiry, never token material (station-quick-setup
+   * Requirement 6.3).
+   */
+  async listDeviceRegistrations(
+    usecaseId: string
+  ): Promise<DeviceRegistrationsResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceRegistrationsResponse>(
+      `/device-registrations?usecase_id=${encodeURIComponent(usecaseId)}`
+    );
+  }
+
+  /**
+   * List the existing IoT Thing Group names in the Use_Case account for
+   * Device_Group selection (station-quick-setup Requirement 1.7).
+   */
+  async listThingGroups(usecaseId: string): Promise<ThingGroupsResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<ThingGroupsResponse>(
+      `/device-registrations/thing-groups?usecase_id=${encodeURIComponent(usecaseId)}`
+    );
+  }
+
+  /**
+   * Regenerate the Setup_Command for a Device_Registration, invalidating
+   * any prior Setup_Token and returning an updated command (station-quick-
+   * setup Requirements 2.5, 6.4). A 4xx indicates the registration is
+   * already `completed` (2.8).
+   */
+  async regenerateSetupCommand(
+    registrationId: string
+  ): Promise<RegistrationWithCommand> {
+    return this.request<RegistrationWithCommand>(
+      `/device-registrations/${encodeURIComponent(registrationId)}/command`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Delete a non-completed Device_Registration, invalidating its
+   * Setup_Token (station-quick-setup Requirement 6.6). A 4xx indicates the
+   * registration is `completed` and cannot be deleted (6.9).
+   */
+  async deleteDeviceRegistration(
+    registrationId: string
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/device-registrations/${encodeURIComponent(registrationId)}`,
+      { method: 'DELETE' }
+    );
   }
 
   // Training endpoints
@@ -708,7 +1321,12 @@ class ApiService {
   }
 
   // Packaging endpoints
-  async startPackaging(trainingId: string, targets?: string[], autoTriggered?: boolean): Promise<{
+  async startPackaging(
+    trainingId: string,
+    targets?: string[],
+    autoTriggered?: boolean,
+    options?: { signal?: AbortSignal }
+  ): Promise<{
     training_id: string;
     packaged_components: Array<{
       target: string;
@@ -723,6 +1341,8 @@ class ApiService {
       method: 'POST',
       // auto_triggered chains packaging -> greengrass publish (component creation).
       body: JSON.stringify({ targets, auto_triggered: autoTriggered }),
+      // Client-side abort/timeout support only; the request body is unchanged.
+      signal: options?.signal,
     });
   }
 
@@ -732,7 +1352,8 @@ class ApiService {
     componentName: string,
     componentVersion: string,
     friendlyName?: string,
-    targets?: string[]
+    targets?: string[],
+    options?: { signal?: AbortSignal }
   ): Promise<{
     training_id: string;
     component_name: string;
@@ -756,6 +1377,8 @@ class ApiService {
         friendly_name: friendlyName,
         targets,
       }),
+      // Client-side abort/timeout support only; the request body is unchanged.
+      signal: options?.signal,
     });
   }
 
@@ -1125,6 +1748,84 @@ class ApiService {
     });
   }
 
+  /**
+   * Deploy-time Camera_Binding context for the CreateDeployment binding
+   * matrix (camera-registry-sync Requirements 8.1, 8.5, 8.9): for each
+   * Camera_Input_Node of the workflow version and each target device,
+   * the device's registered Camera_Sources as binding options with
+   * hint-matching pre-selection. `binding_required: false` skips the
+   * matrix step entirely.
+   */
+  async getCameraBindingContext(params: {
+    usecase_id: string;
+    workflow_id: string;
+    workflow_version?: number;
+    target_devices?: string[];
+    target_thing_group?: string;
+  }): Promise<CameraBindingContext> {
+    const qs = new URLSearchParams({
+      view: 'binding-context',
+      usecase_id: params.usecase_id,
+      workflow_id: params.workflow_id,
+    });
+    if (params.workflow_version !== undefined) {
+      qs.set('workflow_version', String(params.workflow_version));
+    }
+    if (params.target_devices && params.target_devices.length > 0) {
+      qs.set('target_devices', params.target_devices.join(','));
+    }
+    if (params.target_thing_group) {
+      qs.set('target_thing_group', params.target_thing_group);
+    }
+    return this.request(`/deployments?${qs.toString()}`);
+  }
+
+  /**
+   * Deploy a packaged Workflow_Component (component_type: workflow) with
+   * optional deploy-time Camera_Bindings and confirmed warning ids
+   * (camera-registry-sync Requirements 8.2, 8.5, 9.3). Rejections carry
+   * structured codes: 409 CAMERA_BINDINGS_INVALID {errors, warnings},
+   * 409 CAMERA_WARNINGS_UNCONFIRMED {warnings}, 503 REGISTRY_UNAVAILABLE,
+   * and 502 BINDING_DELIVERY_FAILED.
+   */
+  async createWorkflowDeployment(data: {
+    usecase_id: string;
+    workflow_id: string;
+    workflow_version?: number;
+    target_devices?: string[];
+    target_thing_group?: string;
+    deployment_name?: string;
+    rollout_config?: {
+      auto_rollback?: boolean;
+      timeout_seconds?: number;
+    };
+    camera_bindings?: Record<
+      string,
+      Record<string, { cameraSourceId: string } | { override: Record<string, unknown> }>
+    >;
+    confirmed_warnings?: string[];
+  }): Promise<{
+    deployment_id: string;
+    iot_job_id: string;
+    iot_job_arn: string;
+    workflow_id: string;
+    workflow_version: number;
+    component_name: string;
+    component_version: string;
+    target_arn: string;
+    target_devices: string[];
+    target_thing_group?: string | null;
+    is_revision: boolean;
+    superseded_deployment_id?: string | null;
+    camera_bindings_delivered: boolean;
+    message: string;
+  }> {
+    return this.request('/deployments', {
+      method: 'POST',
+      body: JSON.stringify({ component_type: 'workflow', ...data }),
+    });
+  }
+
   async createDeploymentFromComponent(data: {
     usecase_id: string;
     component_arn: string;
@@ -1404,7 +2105,9 @@ class ApiService {
         target: string;
         status: string;
         component_package_s3?: string;
+        supported_architectures?: string[];
       }>;
+      published_component?: VllmPublishedComponent;
       validation_result?: Record<string, unknown>;
       hyperparameters?: Record<string, unknown>;
       instance_type?: string;
@@ -1496,6 +2199,39 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // vLLM model registration endpoints (vllm-triton-inference)
+
+  /**
+   * Register a vLLM_Model_Record (Requirements 1.1, 1.2). Exactly one of
+   * `huggingface_model_id` / `s3_model_artifact` must be supplied (the API
+   * enforces the XOR); a 400 rejection carries the complete finding list
+   * as `details.findings` on the thrown ApiError.
+   */
+  async registerVllmModel(data: {
+    usecase_id: string;
+    model_name: string;
+    model_version: string;
+    huggingface_model_id?: string;
+    s3_model_artifact?: string;
+    engine_configuration?: Record<string, string | number | boolean>;
+    description?: string;
+  }): Promise<{
+    training_id: string;
+    publish_eligible: boolean;
+    labeling_steps: number;
+    training_steps: number;
+  }> {
+    return this.request('/models/vllm', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Documented vLLM engine settings, defaults, and accepted ranges. */
+  async getVllmEngineSpec(): Promise<VllmEngineSpec> {
+    return this.request('/models/vllm/engine-spec');
   }
 
   // Model Converter endpoints (Smart Import)
@@ -1729,6 +2465,64 @@ class ApiService {
     });
   }
 
+  // Bedrock_Configuration endpoints (workflow-manager Requirement 10.6).
+  // No dedicated settings route exists in API Gateway, so the configuration
+  // rides the PortalAdmin-only /data-accounts/{id} routes with the reserved
+  // id 'bedrock-configuration' (handled by the data_accounts Lambda).
+  async getBedrockConfiguration(): Promise<{
+    bedrock_configuration: {
+      model_id: string;
+      region: string;
+      max_tokens: number;
+      // null means "unset": the sampling parameter is omitted at invocation.
+      temperature: number | null;
+      top_p: number | null;
+      timeout_seconds: number;
+    };
+    defaults: Record<string, string | number | null>;
+    max_timeout_seconds: number;
+  }> {
+    return this.request('/data-accounts/bedrock-configuration');
+  }
+
+  // Invokable model options (inference profiles + on-demand foundation
+  // models) for the settings-page model dropdown. An empty list with a
+  // 'permissions' hint means the backend lacks the bedrock list
+  // permissions and the UI should fall back to free-text entry.
+  async getBedrockModels(): Promise<{
+    models: { id: string; label: string }[];
+    region: string;
+    permissions?: string;
+  }> {
+    return this.request('/data-accounts/bedrock-configuration/models');
+  }
+
+  async updateBedrockConfiguration(config: {
+    model_id?: string;
+    region?: string;
+    max_tokens?: number;
+    // An explicit null unsets the sampling parameter (the backend merges
+    // provided keys, so omitting the key keeps the current value).
+    temperature?: number | null;
+    top_p?: number | null;
+    timeout_seconds?: number;
+  }): Promise<{
+    message: string;
+    bedrock_configuration: {
+      model_id: string;
+      region: string;
+      max_tokens: number;
+      temperature: number | null;
+      top_p: number | null;
+      timeout_seconds: number;
+    };
+  }> {
+    return this.request('/data-accounts/bedrock-configuration', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    });
+  }
+
   // Component Configuration endpoints
   async getComponentConfigurationSchema(componentName: string): Promise<{
     component_name: string;
@@ -1768,6 +2562,241 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // Workflow Manager endpoints
+  // Node type catalog for the Workflow_Builder Node_Palette (camelCase
+  // wire form of workflow_core.catalog, Requirement 2.8).
+  async getWorkflowNodeCatalog(
+    usecaseId?: string
+  ): Promise<{ nodeTypes: NodeTypeDescriptor[] }> {
+    // With usecase_id the Use_Case's registered Custom_Node_Types are
+    // merged in (test/prod backed only); without it the endpoint serves
+    // the built-in catalog unchanged.
+    const query = usecaseId
+      ? `?usecase_id=${encodeURIComponent(usecaseId)}`
+      : '';
+    return this.request(`/workflows/node-catalog${query}`);
+  }
+
+  // Workflow_Store API (workflows.py): CRUD, versioning, duplication
+  // (Requirements 5.1, 5.2, 5.4, 5.5, 5.7).
+  async listWorkflows(usecaseId?: string): Promise<{ workflows: WorkflowSummary[]; count: number }> {
+    const query = usecaseId ? `?usecase_id=${encodeURIComponent(usecaseId)}` : '';
+    return this.request(`/workflows${query}`);
+  }
+
+  // Create a workflow as version 1 (Requirement 5.1).
+  async createWorkflow(data: {
+    usecase_id: string;
+    name: string;
+    definition: WorkflowDefinition;
+    description?: string;
+  }): Promise<{ workflow: WorkflowSummary; version: number }> {
+    return this.request('/workflows', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Open/load a stored definition, latest version by default (Requirement 5.4).
+  async getWorkflow(
+    workflowId: string,
+    version?: number
+  ): Promise<{
+    workflow: WorkflowSummary;
+    version: number;
+    validation_status?: WorkflowValidationStatus;
+    definition: WorkflowDefinition;
+  }> {
+    const query = version !== undefined ? `?version=${version}` : '';
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}${query}`);
+  }
+
+  // Save changes as a new version; prior versions are retained (Requirement 5.2).
+  async updateWorkflow(
+    workflowId: string,
+    data: { definition: WorkflowDefinition; name?: string; description?: string }
+  ): Promise<{ workflow: WorkflowSummary; version: number }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Delete a workflow and its versions; rejected with 409 and the
+  // referencing deployment ids when active deployments exist (5.5, 5.6).
+  async deleteWorkflow(workflowId: string): Promise<{ workflow_id: string; message: string }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  // Duplicate under a new name (Requirement 5.7).
+  async duplicateWorkflow(
+    workflowId: string,
+    data: { name?: string; description?: string } = {}
+  ): Promise<{ workflow: WorkflowSummary; version: number }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/duplicate`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Version history, newest first (Requirement 5.2).
+  async listWorkflowVersions(workflowId: string): Promise<{
+    workflow_id: string;
+    latest_version: number;
+    versions: Array<{
+      version: number;
+      created_at?: number;
+      created_by?: string;
+      validation_status?: WorkflowValidationStatus;
+      component_arn?: string | null;
+    }>;
+    count: number;
+  }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/versions`);
+  }
+
+  // Run all backend Workflow_Validator checks on a stored version and
+  // return the complete findings list (Requirements 4.8, 4.9).
+  async validateWorkflow(workflowId: string, version?: number): Promise<WorkflowValidationRun> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/validate`, {
+      method: 'POST',
+      body: JSON.stringify(version !== undefined ? { version } : {}),
+    });
+  }
+
+  // Compile, assemble, upload, and register a Workflow_Component
+  // (dda.workflow.{id}) for the selected target architectures so the
+  // workflow becomes deployable from the Create Deployment screen
+  // (workflow_packaging.py, POST /workflows/{id}/package,
+  // Requirements 7.1-7.5, 11.5, 13.3). `version` defaults to the
+  // workflow's latest version. Gate rejections (unsupported/LLM arch,
+  // plugin lifecycle/arch, packaging failure) raise ApiError with the
+  // structured envelope.
+  async packageWorkflow(
+    workflowId: string,
+    data: { architectures: string[]; version?: number }
+  ): Promise<{
+    workflow_id: string;
+    version: number;
+    component_name: string;
+    component_version: string;
+    component_arn: string;
+    architectures: string[];
+    artifacts: Record<string, string>;
+  }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/package`, {
+      method: 'POST',
+      body: JSON.stringify(
+        data.version !== undefined
+          ? { architectures: data.architectures, version: data.version }
+          : { architectures: data.architectures }
+      ),
+    });
+  }
+
+  // Prompt-based workflow generation via the configured Bedrock model
+  // (workflow_generator.py, Requirements 10.2, 10.3, 10.5, 10.7).
+  // `session_id` continues an existing chat session; `current_definition`
+  // is the canvas snapshot so follow-up prompts modify rather than
+  // regenerate. Failures raise ApiError with the structured envelope
+  // codes (e.g. GENERATION_TIMEOUT, BEDROCK_*, GENERATED_DEFINITION_INVALID).
+  // `temperature` (0..1) overrides the configured model temperature for
+  // this invocation only; omitted = use the configured value.
+  async generateWorkflow(data: {
+    usecase_id: string;
+    prompt: string;
+    session_id?: string;
+    current_definition?: WorkflowDefinition;
+    temperature?: number;
+  }): Promise<WorkflowGenerationResult> {
+    return this.request('/workflows/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Code_Assistant endpoint (custom-node-code-assist): synchronous,
+  // stateless code generation for one custom Python node module.
+  // Failures surface as ApiError with the envelope's code/details so
+  // describeCodeAssistError can categorize them (Requirements 5.1-5.3).
+  async codeAssist(request: CodeAssistRequest): Promise<CodeAssistResponse> {
+    return this.request('/code-assist', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    });
+  }
+
+  // Workflow_Test_Runner endpoints (workflow_testing.py, Requirement 12)
+  // Test_Datasets scoped to the Use_Case (Requirement 12.2).
+  async listTestDatasets(usecaseId?: string): Promise<{ datasets: TestDataset[]; count: number }> {
+    const query = usecaseId ? `?usecase_id=${encodeURIComponent(usecaseId)}` : '';
+    return this.request(`/test-datasets${query}`);
+  }
+
+  // Initiate a dataset upload: declares the file set and returns presigned
+  // multipart upload URLs. No dataset record is written until finalize
+  // verifies the uploaded content (Requirements 12.3, 12.11).
+  async createTestDataset(data: {
+    usecase_id: string;
+    name: string;
+    description?: string;
+    files: Array<{ name: string; size: number; content_type?: string }>;
+  }): Promise<TestDatasetUploadInitiation> {
+    return this.request('/test-datasets', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'initiate', ...data }),
+    });
+  }
+
+  // Finalize a dataset upload: completes the multipart uploads and commits
+  // the Test_Dataset record after server-side verification (12.3, 12.11).
+  async finalizeTestDataset(data: {
+    usecase_id: string;
+    dataset_id: string;
+    name: string;
+    description?: string;
+    files: TestDatasetCompletedFile[];
+  }): Promise<{ dataset: TestDataset }> {
+    return this.request('/test-datasets', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'finalize', ...data }),
+    });
+  }
+
+  // Start a test run of a stored workflow version against a Test_Dataset
+  // (Requirement 12.4; latest version when omitted). `simulated_inference`
+  // configures the outcome injected for simulation-stubbed model
+  // inference nodes — the model itself is not executed in the cloud
+  // sandbox (Requirement 12.6); the backend defaults it when omitted.
+  async startTestRun(
+    workflowId: string,
+    data: {
+      dataset_id: string;
+      version?: number;
+      simulated_inference?: { is_anomalous: boolean; confidence: number };
+    }
+  ): Promise<{ test_run: WorkflowTestRun }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/test-runs`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Test runs of one workflow, newest first.
+  async listTestRuns(
+    workflowId: string
+  ): Promise<{ test_runs: WorkflowTestRun[]; count: number }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/test-runs`);
+  }
+
+  // Test run status plus the per-node results {nodeId, status, outputs,
+  // stubActivity, error} produced so far (Requirements 12.7, 12.10).
+  async getTestRun(testRunId: string): Promise<WorkflowTestRunDetail> {
+    return this.request(`/test-runs/${encodeURIComponent(testRunId)}`);
   }
 
   // Manifest Validator endpoints

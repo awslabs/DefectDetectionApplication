@@ -23,9 +23,13 @@ fi
 COMPONENT_NAME=$1
 VERSION=$2
 ARCHITECTURE=`uname -m`
-# Single source of truth for the DDA interpreter version. Threaded to the
-# edgemlsdk build (`-y`) and the docker-compose build args (`PYTHON_VERSION`)
-# so the version is set once. Override via the PYTHON_VERSION env var.
+# Single source of truth for the tooling/edgemlsdk interpreter version (and,
+# outside JP6, for the DDA backend as well). Threaded to the edgemlsdk build
+# (`-y`) so the cp311-linked Triton Python-backend stub stays on 3.11 on every
+# target. On JP6 the DDA backend interpreter is split off into
+# BACKEND_PYTHON_VERSION (derived below, 3.10) because the Jetson AI Lab vLLM
+# wheels are cp310-only; JP5/x86 backends keep using this value unchanged.
+# Override via the PYTHON_VERSION env var.
 PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
 export PYTHON_VERSION
 
@@ -74,10 +78,23 @@ elif echo "$COMPONENT_NAME" | grep -q "JP5"; then
     JETPACK_ARG="5"
 fi
 
+# DDA backend interpreter: 3.10 on JP6 (the Jetson AI Lab vLLM wheels are
+# cp310-only), 3.11 elsewhere ($PYTHON_VERSION — JP5/x86 behavior unchanged).
+# Threaded to the docker-compose backend build (`PYTHON_VERSION` build arg) and
+# to the in-image backend test/security-gate run below. The edgemlsdk build
+# stays on $PYTHON_VERSION regardless (the Triton stub is cp311-linked).
+if [ "$IS_JP6" = "1" ]; then
+  BACKEND_PYTHON_VERSION="${BACKEND_PYTHON_VERSION:-3.10}"
+else
+  BACKEND_PYTHON_VERSION="$PYTHON_VERSION"
+fi
+export BACKEND_PYTHON_VERSION
+
 echo "Ubuntu version: $IMAGE_VER"
 echo "Architecture: $ARCHITECTURE"
 echo "JetPack 5: $IS_JP5"
 echo "JetPack 6: $IS_JP6"
+echo "Backend python: $BACKEND_PYTHON_VERSION (edgemlsdk/tooling python: $PYTHON_VERSION)"
 # copy recipe to greengrass-build
 cp recipe.yaml ./greengrass-build/recipes
 
@@ -159,11 +176,11 @@ echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 # forces an emulated arm64 build that fails compiling Python from source
 # ("cannot compute sizeof (long double)"). x86_64 uses only `generic`.
 if [ "$ARCHITECTURE" = "x86_64" ]; then
-  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" --no-cache \
+  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" --no-cache \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 else
   docker-compose --profile tegra --profile generic -f docker-compose.yaml build \
-    --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
+    --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" \
     --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU --no-cache \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 fi
@@ -184,10 +201,12 @@ else
   # PYTHON_VERSION is passed into the container via `-e` so the single-quoted
   # bash -c body stays intact (no fragile quote-breaking in the outer shell);
   # `python${PYTHON_VERSION}` is then expanded by the container's shell at run
-  # time, resolving to the live 3.11 interpreter inside the image.
+  # time, resolving to the image's DDA backend interpreter
+  # (BACKEND_PYTHON_VERSION: 3.10 on JP6, 3.11 on JP5/x86) so the tests and
+  # security gates execute under the interpreter the backend actually runs on.
   docker run --rm \
     -v "$REPO_ROOT":/repo -w /repo \
-    -e PYTHON_VERSION="$PYTHON_VERSION" \
+    -e PYTHON_VERSION="$BACKEND_PYTHON_VERSION" \
     --entrypoint bash flask-app -c '
       set -e
       python${PYTHON_VERSION} -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures hypothesis

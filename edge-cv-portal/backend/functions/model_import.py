@@ -5,7 +5,9 @@ Allows importing pre-trained models that conform to DDA format
 """
 import json
 import os
+import re
 import logging
+from decimal import Decimal
 from typing import Dict, Any, List, Tuple
 from datetime import datetime
 import boto3
@@ -22,7 +24,7 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields
+    check_user_access, validate_required_fields, get_usecase_client
 )
 
 # Configure logging
@@ -43,6 +45,365 @@ REQUIRED_FILES = {
     'mochi.json': 'Model graph definition with input shape',
     'export_artifacts/manifest.json': 'Model metadata and compilable models info'
 }
+
+# ---------------------------------------------------------------------------
+# vLLM model registration — pure validation and defaults
+# ---------------------------------------------------------------------------
+
+# Hugging Face model identifier: {org}/{name} (e.g. "facebook/opt-125m")
+HF_MODEL_ID_RE = re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9._-]*)/[A-Za-z0-9._-]+$')
+
+# vLLM_Engine_Configuration settings, defaults, and accepted ranges.
+# The stored/serialized configuration always contains every key below;
+# unknown supplied keys are rejected (fail closed).
+ENGINE_DEFAULTS = {
+    'dtype': 'auto',
+    'gpu_memory_utilization': 0.5,
+    'max_model_len': 2048,
+    'tensor_parallel_size': 1,
+    'enforce_eager': True
+}
+
+ENGINE_DTYPE_VALUES = ('auto', 'float16', 'bfloat16', 'float32')
+
+
+def _validate_engine_setting(key: str, value: Any) -> str:
+    """Validate one known engine setting. Returns a reason string when the
+    value is outside its accepted range, or '' when the value is valid."""
+    if key == 'dtype':
+        if value not in ENGINE_DTYPE_VALUES:
+            return f"dtype must be one of {'|'.join(ENGINE_DTYPE_VALUES)}"
+    elif key == 'gpu_memory_utilization':
+        # bool is an int subclass — reject explicitly
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 'gpu_memory_utilization must be a number in (0.0, 1.0]'
+        if not (0.0 < float(value) <= 1.0):
+            return 'gpu_memory_utilization must be in (0.0, 1.0]'
+    elif key == 'max_model_len':
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 'max_model_len must be an integer >= 1'
+        if value < 1:
+            return 'max_model_len must be an integer >= 1'
+    elif key == 'tensor_parallel_size':
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 'tensor_parallel_size must be an integer >= 1'
+        if value < 1:
+            return 'tensor_parallel_size must be an integer >= 1'
+    elif key == 'enforce_eager':
+        if not isinstance(value, bool):
+            return 'enforce_eager must be a boolean'
+    return ''
+
+
+def validate_vllm_registration(body: Dict) -> List[Dict]:
+    """Validate a vLLM model registration request body.
+
+    Returns the complete list of validation findings; [] means valid.
+    - exactly one of huggingface_model_id / s3_model_artifact (1.1, 1.6, 1.9)
+    - huggingface_model_id matches HF_MODEL_ID_RE when present (1.11)
+    - s3_model_artifact is an s3:// URI ending in .tar.gz when present
+    - every supplied engine setting is a known key within its accepted
+      range (1.10) — unknown keys rejected (fail closed)
+    Each finding carries {field, value, reason}.
+    """
+    findings = []
+
+    hf_model_id = body.get('huggingface_model_id')
+    s3_artifact = body.get('s3_model_artifact')
+
+    # Source XOR: exactly one of huggingface_model_id / s3_model_artifact
+    if not hf_model_id and not s3_artifact:
+        findings.append({
+            'field': 'huggingface_model_id | s3_model_artifact',
+            'value': None,
+            'reason': 'exactly one source is required: provide either '
+                      'huggingface_model_id or s3_model_artifact'
+        })
+    elif hf_model_id and s3_artifact:
+        findings.append({
+            'field': 'huggingface_model_id | s3_model_artifact',
+            'value': {'huggingface_model_id': hf_model_id,
+                      's3_model_artifact': s3_artifact},
+            'reason': 'exactly one source must be provided, not both'
+        })
+
+    # Malformed Hugging Face model ID
+    if hf_model_id:
+        if not isinstance(hf_model_id, str) or not HF_MODEL_ID_RE.match(hf_model_id):
+            findings.append({
+                'field': 'huggingface_model_id',
+                'value': hf_model_id,
+                'reason': 'malformed Hugging Face model ID: expected '
+                          '{organization}/{model_name} (e.g. facebook/opt-125m)'
+            })
+
+    # S3 artifact must be an s3:// URI ending in .tar.gz
+    if s3_artifact:
+        if not isinstance(s3_artifact, str) or \
+                not s3_artifact.startswith('s3://') or \
+                not s3_artifact.endswith('.tar.gz'):
+            findings.append({
+                'field': 's3_model_artifact',
+                'value': s3_artifact,
+                'reason': 's3_model_artifact must be an s3:// URI ending in .tar.gz'
+            })
+
+    # Engine configuration: unknown keys rejected fail-closed,
+    # known keys validated against their accepted ranges
+    engine_configuration = body.get('engine_configuration') or {}
+    if not isinstance(engine_configuration, dict):
+        findings.append({
+            'field': 'engine_configuration',
+            'value': engine_configuration,
+            'reason': 'engine_configuration must be an object'
+        })
+    else:
+        for key, value in engine_configuration.items():
+            if key not in ENGINE_DEFAULTS:
+                findings.append({
+                    'field': f'engine_configuration.{key}',
+                    'value': value,
+                    'reason': f'unknown engine setting: {key}'
+                })
+                continue
+            reason = _validate_engine_setting(key, value)
+            if reason:
+                findings.append({
+                    'field': f'engine_configuration.{key}',
+                    'value': value,
+                    'reason': reason
+                })
+
+    return findings
+
+
+def resolve_engine_configuration(supplied: Dict) -> Dict:
+    """Overlay supplied engine settings on ENGINE_DEFAULTS.
+
+    The result contains every defined setting: supplied values keep their
+    values, omitted settings get their documented defaults (1.2, 1.3).
+    """
+    resolved = dict(ENGINE_DEFAULTS)
+    for key, value in (supplied or {}).items():
+        if key in ENGINE_DEFAULTS:
+            resolved[key] = value
+    return resolved
+
+
+def _to_dynamo_compatible(value: Any) -> Any:
+    """Recursively convert floats to Decimal for DynamoDB storage."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _to_dynamo_compatible(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_dynamo_compatible(v) for v in value]
+    return value
+
+
+def register_vllm_model(event: Dict, context: Any) -> Dict:
+    """
+    Register a vLLM model record (no labeling, no training)
+    POST /api/v1/models/vllm
+
+    Request body:
+    {
+        "usecase_id": "string",
+        "model_name": "string",
+        "model_version": "string",
+        "huggingface_model_id": "org/name",              // XOR
+        "s3_model_artifact": "s3://bucket/path.tar.gz",  // XOR
+        "engine_configuration": { ... },  // optional, partial
+        "description": "string"  // optional
+    }
+    """
+    try:
+        # Extract user info
+        user = get_user_from_event(event)
+        user_id = user['user_id']
+
+        # Parse request body
+        body = json.loads(event.get('body', '{}'))
+
+        # Validate required fields
+        required_fields = ['usecase_id', 'model_name', 'model_version']
+        error = validate_required_fields(body, required_fields)
+        if error:
+            return create_response(400, {'error': error})
+
+        usecase_id = body['usecase_id']
+        model_name = body['model_name'].strip()
+        model_version = body['model_version'].strip()
+        description = body.get('description', '')
+
+        # Check user access (DataScientist role required), matching import_model
+        if not check_user_access(user_id, usecase_id, 'DataScientist'):
+            return create_response(403, {'error': 'Insufficient permissions'})
+
+        # Validate the registration request — any finding means no record
+        # is written and nothing is marked publish-eligible (1.5)
+        findings = validate_vllm_registration(body)
+        if findings:
+            return create_response(400, {
+                'error': 'vLLM model registration validation failed',
+                'findings': findings
+            })
+
+        hf_model_id = body.get('huggingface_model_id')
+        s3_artifact = body.get('s3_model_artifact')
+
+        # Get use case details
+        usecase = get_usecase_details(usecase_id)
+
+        # For S3-sourced registrations, verify the artifact is readable from
+        # the Use_Case account BEFORE any write (1.7)
+        if s3_artifact:
+            parsed = urlparse(s3_artifact)
+            bucket = parsed.netloc
+            key = parsed.path.lstrip('/')
+            try:
+                s3_client = get_usecase_client('s3', usecase)
+                s3_client.head_object(Bucket=bucket, Key=key)
+            except ClientError as e:
+                logger.error(f"S3 model artifact not readable: {s3_artifact}: {str(e)}")
+                return create_response(400, {
+                    'error': f'S3 model artifact is not readable from the '
+                             f'use case account: {s3_artifact}',
+                    's3_model_artifact': s3_artifact
+                })
+
+        # Complete engine configuration: supplied values overlaid on defaults (1.2)
+        engine_configuration = resolve_engine_configuration(
+            body.get('engine_configuration') or {})
+
+        # Exactly one source (already validated)
+        model_source = ({'huggingface_model_id': hf_model_id} if hf_model_id
+                        else {'s3_model_artifact': s3_artifact})
+
+        # DynamoDB-compatible copy (floats as Decimal) used for both the
+        # record write and the audit event details
+        engine_configuration_ddb = _to_dynamo_compatible(engine_configuration)
+
+        # Store the vLLM_Model_Record in the training-jobs table (1.3)
+        training_id = str(uuid.uuid4())
+        table = dynamodb.Table(TRAINING_JOBS_TABLE)
+        timestamp = int(datetime.utcnow().timestamp() * 1000)
+
+        training_item = {
+            'training_id': training_id,
+            'usecase_id': usecase_id,
+            'model_name': model_name,
+            'model_version': model_version,
+            'model_type': 'vllm',
+            'source': 'vllm',
+            'description': description,
+            'status': 'Completed',  # publish-eligible immediately, like BYOM
+            'publish_eligible': True,
+            'model_source': model_source,
+            'engine_configuration': engine_configuration_ddb,
+            'created_by': user['email'],
+            'created_at': timestamp,
+            'updated_at': timestamp
+        }
+
+        table.put_item(Item=training_item)
+
+        # Log audit event
+        log_audit_event(
+            user_id=user_id,
+            action='register_vllm_model',
+            resource_type='training_job',
+            resource_id=training_id,
+            result='success',
+            details={
+                'model_name': model_name,
+                'model_version': model_version,
+                'model_source': model_source,
+                'engine_configuration': engine_configuration_ddb
+            }
+        )
+
+        logger.info(f"vLLM model registered successfully: {training_id}")
+
+        # Publish-eligible with zero labeling and zero training steps (1.4)
+        return create_response(201, {
+            'training_id': training_id,
+            'publish_eligible': True,
+            'labeling_steps': 0,
+            'training_steps': 0
+        })
+
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return create_response(400, {'error': str(e)})
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return create_response(500, {'error': 'Internal server error'})
+
+
+def get_vllm_engine_spec(event: Dict, context: Any) -> Dict:
+    """
+    Get the vLLM engine configuration specification
+    GET /api/v1/models/vllm/engine-spec
+    """
+    spec = {
+        'description': 'vLLM engine configuration settings, defaults, and '
+                       'accepted ranges. Omitted settings receive their '
+                       'documented default values at registration time.',
+        'settings': {
+            'dtype': {
+                'default': ENGINE_DEFAULTS['dtype'],
+                'type': 'string',
+                'accepted_values': list(ENGINE_DTYPE_VALUES),
+                'description': 'Data type for model weights and activations.'
+            },
+            'gpu_memory_utilization': {
+                'default': ENGINE_DEFAULTS['gpu_memory_utilization'],
+                'type': 'number',
+                'range': '(0.0, 1.0]',
+                'description': 'Fraction of GPU memory the vLLM engine may '
+                               'use. Defaults conservatively because the GPU '
+                               'is shared with vision model inference.'
+            },
+            'max_model_len': {
+                'default': ENGINE_DEFAULTS['max_model_len'],
+                'type': 'integer',
+                'range': '>= 1',
+                'description': 'Maximum model context length (prompt plus '
+                               'generated tokens).'
+            },
+            'tensor_parallel_size': {
+                'default': ENGINE_DEFAULTS['tensor_parallel_size'],
+                'type': 'integer',
+                'range': '>= 1',
+                'description': 'Number of GPUs for tensor-parallel execution.'
+            },
+            'enforce_eager': {
+                'default': ENGINE_DEFAULTS['enforce_eager'],
+                'type': 'boolean',
+                'range': 'true | false',
+                'description': 'Disable CUDA graph capture and always execute '
+                               'the model in eager mode.'
+            }
+        },
+        'source': {
+            'description': 'Exactly one source must be provided.',
+            'huggingface_model_id': {
+                'type': 'string',
+                'format': '{organization}/{model_name}',
+                'example': 'facebook/opt-125m'
+            },
+            's3_model_artifact': {
+                'type': 'string',
+                'format': 's3:// URI ending in .tar.gz',
+                'example': 's3://bucket/path/llm.tar.gz'
+            }
+        }
+    }
+
+    return create_response(200, spec)
 
 
 def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
@@ -760,6 +1121,10 @@ def handler(event: Dict, context: Any) -> Dict:
             return validate_model(event, context)
         elif http_method == 'POST' and '/models/import' in path:
             return import_model(event, context)
+        elif http_method == 'POST' and '/models/vllm' in path:
+            return register_vllm_model(event, context)
+        elif http_method == 'GET' and '/models/vllm/engine-spec' in path:
+            return get_vllm_engine_spec(event, context)
         elif http_method == 'GET' and '/models/format-spec' in path:
             return get_model_format_spec(event, context)
         else:

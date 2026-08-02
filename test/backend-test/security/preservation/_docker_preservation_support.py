@@ -80,18 +80,20 @@ IN_SCOPE_FILES = (
     EDGEMLSDK_JP6_REL,
 )
 
-# The five findings keyed to (file, 1-based line number of the FROM instruction).
-# On the FIXED tree each in-scope FROM is shifted DOWN by exactly one line by the
-# single added ``ARG BASE_REGISTRY=nvcr.io`` line (D1 4->5, D2 1->2, D3 18->19,
-# D4 19->20, D5 1->2). This +1 shift is the direct, expected consequence of the
-# added ARG line (the ONLY new line per file); the image/tag/stage and the
-# resolved default reference are unchanged.
+# The in-scope findings keyed to (file, 1-based line number of the FROM
+# instruction). D1-D5 are the original non-ECR base-image findings. D6 is the
+# Dockerfile.jp6 TensorRT 8 provider stage (``trt8``, l4t-jetpack:r35.4.1) added
+# for the Neo/DLR model runtime (device-arch-compatibility: libnvinfer.so.8); it
+# sits between the cuda114 provider (D3, line 19) and the final runtime stage
+# (D4), pushing the final FROM from line 20 down to line 33. D6 shares the
+# r35.4.1 digest already recorded for D1/D2.
 IN_SCOPE_SITES = {
     "D1": (BACKEND_JP5_REL, 5),
     "D2": (EDGEMLSDK_JP5_REL, 2),
     "D3": (BACKEND_JP6_REL, 19),
-    "D4": (BACKEND_JP6_REL, 20),
+    "D4": (BACKEND_JP6_REL, 33),
     "D5": (EDGEMLSDK_JP6_REL, 2),
+    "D6": (BACKEND_JP6_REL, 32),
 }
 
 # The verified multi-arch manifest-list digests the current mutable tags resolve
@@ -101,6 +103,9 @@ IN_SCOPE_SITES = {
 DIGESTS = {
     ("l4t-jetpack", "r35.4.1"): "sha256:d1c8e971ab994235840eacc31c4ef4173bf9156317b1bf8aabe7e01eb21b2a0e",
     ("l4t-jetpack", "r36.3.0"): "sha256:b3bbd7e3f3a0879a6672adc64aef7742ba12f9baaf1451c91215942c46e4e2fa",
+    # r36.4.0: the jp6-vllm-enablement base bump for src/backend/Dockerfile.jp6
+    # (D4). The edgemlsdk Dockerfile.jp6 (D5) stays on r36.3.0.
+    ("l4t-jetpack", "r36.4.0"): "sha256:34ccf0f3b63c6da9eee45f2e79de9bf7fdf3beda9abfd72bbf285ae9d40bb673",
     ("l4t-cuda", "11.4.19-runtime"): "sha256:fb22ff080631990dda403fd768acb384dc3745a7e516f5ed1dc4c4944898da78",
 }
 

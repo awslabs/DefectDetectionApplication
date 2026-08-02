@@ -28,6 +28,7 @@
 
 # System Modules
 import asyncio
+import importlib.util
 import logging
 import os
 import time
@@ -109,8 +110,23 @@ from endpoints import (
     auth_info,
     download_file,
     inference_result,
-    streams
+    streams,
+    local_auth
 )
+
+# Workflow Manager engine (additive subsystem, Requirement 13)
+from workflow_engine import api as workflow_engine_api
+from workflow_engine import runtime as workflow_engine_runtime
+
+# vLLM capability probe (vllm-triton-inference, Requirements 4.1, 4.2, 4.3,
+# 8.3): the companion Triton_vLLM_Runtime and the Text_Generation_API router
+# exist only on images whose build installed the vllm wheel (Dockerfile.jp6's
+# VLLM_ENABLE layer). Images without vLLM (jp4, jp5-default, x86 variants)
+# skip the import, the router registration, and the manager startup below —
+# exactly the pre-feature startup sequence.
+VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
+if VLLM_AVAILABLE:
+    from endpoints import text_generation
 
 import dao.sqlite_db.models as models
 from dao.sqlite_db.sqlite_db_operations import SessionLocal, engine
@@ -140,6 +156,12 @@ app.add_exception_handler(ImageNotFoundException, image_not_found_exception_hand
 app.add_exception_handler(GrpcException, grpc_exception_handler)
 app.add_exception_handler(AravisCameraException, aravis_camera_exception_handler)
 
+# Registered before the legacy routers so the workflow engine's fixed
+# /workflows/registrations and /workflows/executions paths take precedence
+# over the legacy /workflows/{workflowId} parameter route; behavior of the
+# existing endpoints for real workflow ids is unchanged (Requirement 13.6).
+app.include_router(workflow_engine_api.router)
+
 app.include_router(image_source.router)
 app.include_router(camera.router)
 app.include_router(system.router)
@@ -149,6 +171,15 @@ app.include_router(auth_info.router)
 app.include_router(download_file.unauthenticated_router)
 app.include_router(inference_result.router)
 app.include_router(streams.router)
+# Local_Login endpoints (portal-user-manager): intentionally carry no auth
+# dependency — /local-auth/login and /local-auth/status must be reachable
+# without credentials (exempt from authorize_request, task 9.4).
+app.include_router(local_auth.router)
+# Text_Generation_API: registered beside the existing routers only when the
+# capability probe found the vllm wheel; vLLM-free images keep the
+# pre-feature router set (Requirements 4.1, 8.3).
+if VLLM_AVAILABLE:
+    app.include_router(text_generation.router)
 
 
 def cleanup_workflow_digital_inputs():
@@ -238,6 +269,35 @@ def setup_triton():
         logger.error("[TRITON SETUP during startup FAILED]")
         logger.error(traceback.format_exc())
 
+def start_vllm_runtime():
+    """
+    Start the companion Triton_vLLM_Runtime on vLLM-capable images: the
+    VllmRuntimeManager plus its loopback model-control/generate server, then
+    install the manager into the Text_Generation_API router and the
+    feature-config status merge (Requirements 4.1, 4.2). Failures are
+    contained: the vision stack and every existing router start exactly as
+    before (Requirement 4.3).
+    """
+    if not VLLM_AVAILABLE:
+        return None
+    try:
+        from vllm_runtime.manager import VllmRuntimeManager
+        from vllm_runtime.server import VllmRuntimeServer
+        from utils import feature_configs_utils
+
+        manager = VllmRuntimeManager()
+        vllm_server = VllmRuntimeServer(manager)
+        vllm_server.start()
+        text_generation.set_runtime(manager)
+        feature_configs_utils.set_vllm_manager(manager)
+        logger.info("vLLM runtime manager started.")
+        return vllm_server
+    except Exception:
+        logger.error("[VLLM RUNTIME STARTUP FAILED]")
+        logger.error(traceback.format_exc())
+        return None
+
+
 def setup_workflow_digital_inputs():
     logger.info("Setting up digital input workflows")
     with SessionLocal() as session:
@@ -296,6 +356,16 @@ if __name__ == "__main__":  # pragma: no cover
     # add cleanup shutdown code to this function
     logger.info("Local server init.")
     on_startup()
+
+    # Start the Workflow Manager watcher (own daemon thread). Failures are
+    # contained inside start_workflow_engine: LocalServer and every
+    # Pipeline_Configuration continue exactly as before (Requirement 13.6).
+    workflow_engine_runtime.start_workflow_engine()
+
+    # Start the companion vLLM runtime (no-op on images without the vllm
+    # wheel — jp4, jp5-default, x86 — which run exactly the pre-feature
+    # startup sequence, Requirement 8.3).
+    start_vllm_runtime()
 
     # The event loop should start running continously after both FastAPI server and capture task manager
     loop = asyncio.get_event_loop()

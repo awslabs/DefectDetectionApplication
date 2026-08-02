@@ -26,3 +26,15 @@ datasets/**/*_segmentation.manifest
 
 # Downloaded test assets (fetched on demand by download-test-assets.sh; not committed)
 test-assets/
+
+# Edge test harness run artifacts (junit.xml, results.json) and per-operator device config
+harness-results/
+test/on-hardware/harness/devices.yaml
+
+# Node / frontend build artifacts
+**/node_modules/
+src/frontend/build/
+*.tsbuildinfo
+# Generated from vite.config.ts by tsc
+edge-cv-portal/frontend/vite.config.js
+edge-cv-portal/frontend/vite.config.d.ts

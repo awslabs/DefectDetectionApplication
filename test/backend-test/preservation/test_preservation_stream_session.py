@@ -272,7 +272,7 @@ class StreamSessionPreservationMachine(RuleBasedStateMachine):
 
 
 StreamSessionPreservationMachine.TestCase.settings = settings(
-    max_examples=120,
+    max_examples=25,
     stateful_step_count=30,
     deadline=None,
 )

@@ -11,8 +11,9 @@ Version: 2.0.0 - Simplified packaging without storage management utilities
 import json
 import os
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
+from decimal import Decimal
 import boto3
 from botocore.exceptions import ClientError
 import uuid
@@ -318,6 +319,177 @@ def package_onnx_component(trained_model_s3: str, s3_client, usecase: Dict) -> s
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+# ── vLLM bypass — pure pieces ───────────────────────────────────────────────
+# JetPack 5 vLLM support is feature-flagged (design: JP5_VLLM_ENABLED, default
+# off). This Lambda is bundled with the shared layer only (compute-stack.ts
+# gives PackagingHandler `layers: [sharedLayer]` — no workflow_core layer), so
+# the flag is read from the environment here; the catalog's module-level flag
+# in workflow_core.catalog.models is the source of truth mirrored by this
+# env var at deploy time.
+JP5_VLLM_ENABLED = os.environ.get('JP5_VLLM_ENABLED', 'false').lower() == 'true'
+
+
+class VllmPackagingError(Exception):
+    """Triton_vLLM_Repository generation / engine-configuration serialization
+    failure. Raised before any artifact upload so the record's published
+    state is never touched (Requirement 2.8)."""
+
+
+def is_vllm_record(training_job: Dict) -> bool:
+    """True if this model record is a vLLM_Model_Record (LLM served through
+    the Triton vLLM backend) rather than a vision model."""
+    return training_job.get('source') == 'vllm' or \
+        str(training_job.get('model_type', '')).lower() == 'vllm'
+
+
+def _decimal_to_native(obj):
+    """Convert Decimal objects from DynamoDB to native Python types"""
+    if isinstance(obj, Decimal):
+        return float(obj) if obj % 1 else int(obj)
+    elif isinstance(obj, dict):
+        return {k: _decimal_to_native(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_decimal_to_native(i) for i in obj]
+    return obj
+
+
+def _safe_model_name(model_name: str) -> str:
+    """Sanitized model name — same transform _trigger_component_creation uses
+    to derive `model-{safe_model_name}` component names, reused here so the
+    repository directory matches the eventual `model-vllm-{safe_model_name}`
+    component naming."""
+    return re.sub(r'[^a-zA-Z0-9-]', '-', str(model_name).lower())
+
+
+# Repository-relative sentinel written as the vLLM "model" reference for
+# S3-sourced records; vllm_model_prep.py rewrites it to the absolute
+# device-local weights path after Greengrass unpacks the artifact (2.2).
+VLLM_S3_MODEL_SENTINEL = './weights'
+
+# config.pbtxt for the Triton vLLM backend: backend declaration plus the
+# decoupled model transaction policy stanza the vllm_backend samples use.
+VLLM_CONFIG_PBTXT = (
+    'backend: "vllm"\n'
+    '\n'
+    'model_transaction_policy {\n'
+    '  decoupled: True\n'
+    '}\n'
+)
+
+
+def generate_vllm_repository(record: Dict) -> Dict[str, str]:
+    """Pure: vLLM_Model_Record -> {relative_path: file_content}.
+
+    Emits exactly the two files of a Triton_vLLM_Repository:
+      {model_name}/1/model.json   — the record's complete resolved
+                                    vLLM_Engine_Configuration, with "model"
+                                    set to the HF ID (HF source) or the
+                                    repository-relative './weights' sentinel
+                                    (S3 source)  (2.1-2.3)
+      {model_name}/config.pbtxt   — 'backend: "vllm"' plus the decoupled
+                                    model transaction policy stanza
+
+    Raises VllmPackagingError on any serialization failure (2.8).
+    """
+    try:
+        model_name = _safe_model_name(record.get('model_name') or '')
+        if not model_name:
+            raise ValueError('vLLM_Model_Record has no usable model_name')
+
+        engine_configuration = record.get('engine_configuration')
+        if not isinstance(engine_configuration, dict) or not engine_configuration:
+            raise ValueError(
+                'vLLM_Model_Record has no resolved engine_configuration')
+
+        model_source = record.get('model_source') or {}
+        hf_model_id = model_source.get('huggingface_model_id')
+        s3_artifact = model_source.get('s3_model_artifact')
+        if hf_model_id:
+            model_reference = hf_model_id
+        elif s3_artifact:
+            model_reference = VLLM_S3_MODEL_SENTINEL
+        else:
+            raise ValueError(
+                'vLLM_Model_Record has neither a huggingface_model_id nor '
+                'an s3_model_artifact source reference')
+
+        # DynamoDB returns numbers as Decimal — serialize them as JSON numbers.
+        model_json = dict(_decimal_to_native(engine_configuration))
+        model_json['model'] = model_reference
+
+        return {
+            f'{model_name}/1/model.json': json.dumps(model_json, indent=2),
+            f'{model_name}/config.pbtxt': VLLM_CONFIG_PBTXT,
+        }
+    except VllmPackagingError:
+        raise
+    except Exception as e:
+        raise VllmPackagingError(
+            f'Triton vLLM repository generation failed: {e}') from e
+
+
+def vllm_supported_architectures() -> List[str]:
+    """Supported Target_Architecture set for vLLM_Model_Components:
+    always arm64_jp6, arm64_jp5 only when JP5 support is flagged on,
+    never arm64_jp4 (2.5)."""
+    archs = ['arm64_jp6']
+    if JP5_VLLM_ENABLED:
+        archs.append('arm64_jp5')
+    return archs
+
+
+# Target_Architecture -> packaging target name (the `packaged_components`
+# `target` key publish and deployment consume). vLLM only ever packages
+# the Jetson targets vllm_supported_architectures() allows — never jp4.
+VLLM_ARCH_TO_TARGET = {
+    'arm64_jp6': 'jetson-xavier-jp6',
+    'arm64_jp5': 'jetson-xavier-jp5',
+}
+
+
+def package_vllm_component(record: Dict, s3_client, usecase: Dict) -> str:
+    """Assemble and upload the vLLM_Model_Component ZIP for one record.
+
+    Strict ordering (2.6, 2.8): the Triton_vLLM_Repository is generated
+    first — a VllmPackagingError raised here propagates before anything
+    is uploaded — then the tree is written to a temp dir, zipped, and
+    uploaded to `model_artifacts/model-{uuid}/…zip` in the Use_Case
+    bucket (same key scheme as the other packagers).
+
+    Returns the component package S3 URI.
+    """
+    # Generation before any upload (2.8).
+    repository_files = generate_vllm_repository(record)
+
+    temp_dir = None
+    try:
+        temp_dir = tempfile.mkdtemp(prefix="dda_vllm_pkg_")
+        payload_dir = os.path.join(temp_dir, 'payload')
+        for relative_path, content in repository_files.items():
+            file_path = os.path.join(payload_dir, relative_path)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w') as f:
+                f.write(content)
+
+        component_uuid = str(uuid.uuid4()).split('-')[-1]
+        zip_filename = f"{component_uuid}_greengrass_model_component.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _dirs, files in os.walk(payload_dir):
+                for file in files:
+                    fp = os.path.join(root, file)
+                    zipf.write(fp, os.path.relpath(fp, payload_dir))
+
+        s3_key = f"model_artifacts/model-{component_uuid}/{zip_filename}"
+        s3_uri = f"s3://{usecase['s3_bucket']}/{s3_key}"
+        logger.info(f"Uploading vLLM component package to {s3_uri}")
+        s3_client.upload_file(zip_path, usecase['s3_bucket'], s3_key)
+        return s3_uri
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def package_component(training_id: str, target: str, compiled_model_s3: str, 
                      dda_manifest: Dict, s3_client, usecase: Dict) -> str:
     """
@@ -483,6 +655,82 @@ def package_components(event: Dict, context: Any) -> Dict:
         # Allow 'system' user for auto-triggered packaging
         if user_id != 'system' and not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
+
+        # ── vLLM bypass ────────────────────────────────────────────────────
+        # vLLM_Model_Records need no Neo compilation and no trained-model
+        # artifact: the component payload is the generated Triton vLLM
+        # repository itself. Vision records (trained, imported PyTorch,
+        # imported ONNX) never enter this branch (8.2). Strict ordering —
+        # generation → upload → DynamoDB update — so a failure at any step
+        # reports the failing step and leaves the record's packaged /
+        # published state unchanged, keeping publish retryable (2.6, 2.8).
+        if is_vllm_record(training_job):
+            usecase = get_usecase(usecase_id)
+            s3_usecase = get_usecase_client(
+                's3', usecase,
+                session_name=f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64])
+
+            supported_architectures = vllm_supported_architectures()
+            vllm_targets = [VLLM_ARCH_TO_TARGET[a] for a in supported_architectures]
+            logger.info(f"vLLM record: packaging one artifact for targets {vllm_targets}")
+            try:
+                component_s3_uri = package_vllm_component(training_job, s3_usecase, usecase)
+            except VllmPackagingError as e:
+                # Repository generation / engine-configuration serialization
+                # failed: nothing was uploaded, the record is untouched (2.8).
+                logger.error(f"vLLM repository generation failed: {str(e)}")
+                return create_response(500, {
+                    'error': str(e),
+                    'failed_step': 'repository_generation',
+                })
+            except Exception as e:
+                # Artifact assembly/upload failed after generation succeeded:
+                # no packaged_components written, retryable (2.6).
+                logger.error(f"vLLM component artifact upload failed: {str(e)}")
+                return create_response(500, {
+                    'error': f"Failed to upload vLLM component artifact: {str(e)}",
+                    'failed_step': 'artifact_upload',
+                })
+
+            packaged_components = [
+                {
+                    'target': target,
+                    'component_package_s3': component_s3_uri,
+                    'status': 'packaged',
+                    'supported_architectures': supported_architectures,
+                }
+                for target in vllm_targets
+            ]
+            try:
+                table = dynamodb.Table(TRAINING_JOBS_TABLE)
+                timestamp = int(datetime.utcnow().timestamp() * 1000)
+                table.update_item(
+                    Key={'training_id': training_id},
+                    UpdateExpression='SET packaged_components = :components, updated_at = :updated',
+                    ExpressionAttributeValues={
+                        ':components': packaged_components, ':updated': timestamp},
+                )
+            except Exception as e:
+                logger.error(f"vLLM packaged_components record update failed: {str(e)}")
+                return create_response(500, {
+                    'error': f"Failed to record packaged vLLM components: {str(e)}",
+                    'failed_step': 'record_update',
+                })
+            log_audit_event(
+                user_id=user_id, action='package_components', resource_type='training_job',
+                resource_id=training_id, result='success',
+                details={'targets': vllm_targets, 'packaged_count': len(vllm_targets),
+                         'runtime': 'vllm'},
+            )
+            auto_triggered = body.get('auto_triggered', False)
+            if auto_triggered:
+                _trigger_component_creation(training_id, training_job)
+            return create_response(200, {
+                'training_id': training_id,
+                'packaged_components': packaged_components,
+                'message': f'Packaged vLLM component for {len(vllm_targets)} target(s)',
+                'component_creation_triggered': auto_triggered,
+            })
 
         # ── ONNX bypass ────────────────────────────────────────────────────
         # Imported ONNX models need no Neo compilation and no per-target

@@ -1,0 +1,46 @@
+# Edge_Test_Harness device configuration (Harness_Configuration).
+#
+# Copy to devices.yaml alongside this file (or point DDA_HARNESS_CONFIG at a
+# copy elsewhere) and select a target with DDA_HARNESS_DEVICE=<name>.
+# Any field can be overridden per-run with DDA_HARNESS_* environment variables:
+#   DDA_HARNESS_BASE_URL, DDA_HARNESS_ARCHITECTURE, DDA_HARNESS_CAPABILITIES,
+#   DDA_HARNESS_CREDENTIALS, DDA_HARNESS_MODEL_READY_S, DDA_HARNESS_VLLM_READY_S,
+#   DDA_HARNESS_GENERATE_S, DDA_HARNESS_WORKFLOW_OUTPUT_S, DDA_HARNESS_RUN_BUDGET_S,
+#   DDA_HARNESS_EXPECTED_VISION_MODELS, DDA_HARNESS_EXPECTED_VLLM_MODELS,
+#   DDA_HARNESS_EXPECTED_WORKFLOWS
+#
+# Credentials are declared as references, never as values:
+#   env:VAR_NAME     -- read the token from an environment variable at use time
+#   file:~/path      -- read the token from a file at use time
+# The harness never writes credential values into logs or results (Req 3.3).
+
+devices:
+  jp6-orinagx:
+    base_url: http://localhost:5000       # tunnel-forwarded or LAN address
+    profile:
+      architecture: arm64_jp6             # x86_64 | arm64_jp4 | arm64_jp5 | arm64_jp6
+      capabilities: [vllm, onnx_models, workflows]   # no dlr_models on JP6 (TRT10)
+    credentials: env:DDA_HARNESS_TOKEN    # omit when local auth is disabled
+    expected:
+      vision_models:
+        - model-rf-detr-seg-nano-jetson-xavier-jp6
+        - model-yolo-test-jetson-xavier-jp6
+      vllm_models:
+        - opt125m-smoke
+      workflows: []                        # empty = enumerate-only, no presence assertion
+    timeouts:
+      model_ready_s: 300
+      vllm_ready_s: 900        # engine warmup + possible HF download
+      generate_s: 120
+      workflow_output_s: 180
+      run_budget_s: 2400
+
+  jp5-xavier:
+    base_url: http://192.168.1.42:5000
+    profile:
+      architecture: arm64_jp5
+      capabilities: [dlr_models, onnx_models, workflows]
+    expected:
+      vision_models: []
+      vllm_models: []
+      workflows: []

@@ -21,9 +21,19 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { Device, InstalledComponent, DeviceDeployment } from '../types';
+import DeviceCamerasTab from '../components/DeviceCamerasTab';
 import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
 import RemoteAccessTab from '../components/RemoteAccessTab';
 import ResultsTab from '../components/ResultsTab';
+
+/** Keep in sync with devices.py TARGET_ARCHITECTURES. */
+const TARGET_ARCHITECTURE_OPTIONS = [
+  { label: 'x86_64', value: 'x86_64' },
+  { label: 'x86_64_nvidia', value: 'x86_64_nvidia' },
+  { label: 'arm64_jp4 (JetPack 4)', value: 'arm64_jp4' },
+  { label: 'arm64_jp5 (JetPack 5)', value: 'arm64_jp5' },
+  { label: 'arm64_jp6 (JetPack 6)', value: 'arm64_jp6' },
+];
 
 interface LogGroup {
   log_group_name: string;
@@ -52,6 +62,13 @@ export default function DeviceDetail() {
   const [device, setDevice] = useState<Device | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Target Architecture editor (Devices-table attribute the deployment
+  // architecture gates check; a device without one fails closed).
+  const [editingArch, setEditingArch] = useState(false);
+  const [archSelection, setArchSelection] = useState<string | null>(null);
+  const [archSaving, setArchSaving] = useState(false);
+  const [archError, setArchError] = useState<string | null>(null);
 
   const usecaseId = searchParams.get('usecase_id');
 
@@ -193,6 +210,51 @@ export default function DeviceDetail() {
       setError(err.message || 'Failed to load device');
     } finally {
       setLoading(false);
+    }
+  };
+
+  /** Suggested Target_Architecture derived from the installed LocalServer
+   *  component name suffix (e.g. ...LocalServer.arm64JP6 -> arm64_jp6). */
+  const suggestTargetArchitecture = (d: Device): string | null => {
+    const localServer = (d.installed_components || []).find((c) =>
+      c.componentName?.startsWith('aws.edgeml.dda.LocalServer')
+    );
+    if (!localServer) return null;
+    const suffix = localServer.componentName.split('.').pop() || '';
+    const map: Record<string, string> = {
+      arm64JP6: 'arm64_jp6',
+      arm64JP5: 'arm64_jp5',
+      arm64: 'arm64_jp4',
+      amd64: 'x86_64',
+    };
+    return map[suffix] ?? null;
+  };
+
+  const startEditingArch = () => {
+    if (!device) return;
+    setArchError(null);
+    setArchSelection(
+      device.target_architecture ?? suggestTargetArchitecture(device)
+    );
+    setEditingArch(true);
+  };
+
+  const saveTargetArchitecture = async () => {
+    if (!deviceId || !usecaseId) return;
+    try {
+      setArchSaving(true);
+      setArchError(null);
+      const result = await apiService.updateDeviceFlags(deviceId, usecaseId, {
+        target_architecture: archSelection,
+      });
+      setDevice((prev) =>
+        prev ? { ...prev, target_architecture: result.target_architecture } : prev
+      );
+      setEditingArch(false);
+    } catch (err: any) {
+      setArchError(err.message || 'Failed to update target architecture');
+    } finally {
+      setArchSaving(false);
     }
   };
 
@@ -361,6 +423,65 @@ export default function DeviceDetail() {
                         { label: 'Greengrass Version', value: device.greengrass_version || '-' },
                         { label: 'Platform', value: device.platform || '-' },
                         { label: 'Architecture', value: device.architecture || '-' },
+                        {
+                          label: 'Target Architecture (DDA)',
+                          value: editingArch ? (
+                            <SpaceBetween size="xs">
+                              <SpaceBetween direction="horizontal" size="xs">
+                                <Select
+                                  selectedOption={
+                                    archSelection
+                                      ? { label: archSelection, value: archSelection }
+                                      : null
+                                  }
+                                  onChange={({ detail }) =>
+                                    setArchSelection(detail.selectedOption.value ?? null)
+                                  }
+                                  options={TARGET_ARCHITECTURE_OPTIONS}
+                                  placeholder="Select architecture"
+                                  disabled={archSaving}
+                                />
+                                <Button
+                                  variant="primary"
+                                  loading={archSaving}
+                                  disabled={!archSelection}
+                                  onClick={saveTargetArchitecture}
+                                >
+                                  Save
+                                </Button>
+                                <Button
+                                  variant="link"
+                                  disabled={archSaving}
+                                  onClick={() => setEditingArch(false)}
+                                >
+                                  Cancel
+                                </Button>
+                              </SpaceBetween>
+                              {archError && (
+                                <Box color="text-status-error" fontSize="body-s">
+                                  {archError}
+                                </Box>
+                              )}
+                            </SpaceBetween>
+                          ) : (
+                            <SpaceBetween direction="horizontal" size="xs">
+                              {device.target_architecture ? (
+                                <Badge color="blue">{device.target_architecture}</Badge>
+                              ) : (
+                                <Box color="text-status-warning" variant="span">
+                                  Not recorded — vLLM/plugin deployments will be rejected
+                                </Box>
+                              )}
+                              <Button
+                                variant="inline-link"
+                                iconName="edit"
+                                onClick={startEditingArch}
+                              >
+                                Edit
+                              </Button>
+                            </SpaceBetween>
+                          ),
+                        },
                         { label: 'Last Status Update', value: formatTimestamp(device.last_status_update) },
                       ]}
                     />
@@ -498,6 +619,13 @@ export default function DeviceDetail() {
                   }
                 />
               </Container>
+            ),
+          },
+          {
+            id: 'cameras',
+            label: 'Cameras',
+            content: (
+              <DeviceCamerasTab deviceId={device.device_id} usecaseId={usecaseId || ''} />
             ),
           },
           {

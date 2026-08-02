@@ -29,6 +29,8 @@
 import logging
 import os
 import shutil
+import tempfile
+import time
 import json
 import dda_triton.model_config_pb2 as triton_model_config
 from dda_triton.constants import *
@@ -50,20 +52,121 @@ logging.basicConfig(
 )
 
 
-def start_model(model_name):
-    if wait_for_server("localhost", 5000, "StartModel"):
-        logging.info("localserver:5000 is reachable, sending start model request")
-        url = f"http://localhost:5000/feature-configurations/models/{model_name}/start"
-        headers = {"accept": "application/json"}
-        response = requests.get(url, headers=headers)
+# Load-queue hardening knobs. A model load is asynchronous: POST-ing /start
+# enqueues the load and returns 200 immediately, so a bare 200 does NOT mean the
+# model is usable. We verify the model actually reaches READY, and retry the
+# whole start if it does not, so a transient hiccup no longer requires a manual
+# LocalServer restart to recover. Values are intentionally generous because
+# DLR/Neo base models can take tens of seconds to initialise on a Jetson.
+START_MODEL_MAX_ATTEMPTS = 3
+START_MODEL_READY_TIMEOUT_S = 120
+START_MODEL_POLL_INTERVAL_S = 3
+START_MODEL_BACKOFF_S = 5
 
-        if response.status_code == 200:
-            logging.info("Model started successfully!")
+
+def _get_triton_model_state(model_name, host="localhost", port=5000, timeout=10):
+    """Return the reported Triton state for ``model_name`` (or None if unknown).
+
+    Reads the feature-configuration list and matches on ``modelName``. Tolerant
+    of transient errors — returns None rather than raising so callers can retry.
+    """
+    try:
+        url = f"http://{host}:{port}/feature-configurations"
+        response = requests.get(url, headers={"accept": "application/json"}, timeout=timeout)
+        if response.status_code != 200:
+            return None
+        for entry in response.json() or []:
+            if isinstance(entry, dict) and entry.get("modelName") == model_name:
+                return entry.get("status")
+    except Exception as e:
+        logging.debug(f"StartModel: unable to read model state for {model_name}: {e}")
+    return None
+
+
+def _wait_for_model_ready(
+    model_name,
+    host="localhost",
+    port=5000,
+    timeout=START_MODEL_READY_TIMEOUT_S,
+    interval=START_MODEL_POLL_INTERVAL_S,
+):
+    """Poll until ``model_name`` is READY (True) or a deadline passes (False).
+
+    A terminal failure state (UNAVAILABLE / FAILED) short-circuits to False so
+    the caller can retry rather than waiting out the full timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = _get_triton_model_state(model_name, host, port)
+        if state == "READY":
+            return True
+        if state in ("UNAVAILABLE", "FAILED"):
+            logging.error(f"StartModel: {model_name} entered terminal state {state}")
+            return False
+        time.sleep(interval)
+    return False
+
+
+def start_model(
+    model_name,
+    host="localhost",
+    port=5000,
+    max_attempts=START_MODEL_MAX_ATTEMPTS,
+    ready_timeout=START_MODEL_READY_TIMEOUT_S,
+    backoff=START_MODEL_BACKOFF_S,
+):
+    """Ask LocalServer to load ``model_name`` and verify it reaches READY.
+
+    Hardened against the model-load race: issuing /start only enqueues an
+    asynchronous load, so we confirm the model actually becomes READY and retry
+    the whole start (bounded, with backoff) if it does not. Failures are
+    contained — this never raises, so one model's failure to load cannot abort a
+    sibling model component's start (each model component starts its own model
+    independently). Returns True if the model is confirmed READY, else False.
+    """
+    if not wait_for_server(host, port, "StartModel"):
+        logging.error(f"StartModel: {host}:{port} is not reachable; cannot start {model_name}")
+        return False
+
+    url = f"http://{host}:{port}/feature-configurations/models/{model_name}/start"
+    headers = {"accept": "application/json"}
+
+    for attempt in range(1, max_attempts + 1):
+        # If the model is already READY (e.g. a prior attempt or a concurrent
+        # trigger loaded it), we are done.
+        if _get_triton_model_state(model_name, host, port) == "READY":
+            logging.info(f"Model {model_name} already READY")
+            return True
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+        except Exception as e:
+            logging.error(f"StartModel: attempt {attempt}/{max_attempts} request error: {e}")
+            time.sleep(backoff)
+            continue
+
+        # 200 => load enqueued. 403 => model is not in a startable state, which
+        # includes the case where it is already LOADING/READY; both mean "a load
+        # is in flight", so fall through to the readiness wait either way.
+        if response.status_code in (200, 403):
+            if _wait_for_model_ready(model_name, host, port, timeout=ready_timeout):
+                logging.info(f"Model {model_name} started successfully and is READY")
+                return True
+            logging.error(
+                f"StartModel: {model_name} not READY after attempt {attempt}/{max_attempts}"
+            )
         else:
-            logging.error(f"StartModel: Request failed with status code: {response.status_code}")
-            logging.error(response.text)
-    else:
-        logging.info("StartModel: localserver:5000 is not reachable")
+            logging.error(
+                f"StartModel: attempt {attempt}/{max_attempts} failed with status "
+                f"{response.status_code}: {response.text}"
+            )
+        if attempt < max_attempts:
+            time.sleep(backoff)
+
+    logging.error(
+        f"StartModel: gave up starting {model_name} after {max_attempts} attempts; "
+        f"model did not reach READY"
+    )
+    return False
 
 
 def clean_directory(path: str) -> bool:
@@ -109,6 +212,66 @@ def create_sym_links(src_dir: str, dst_dir: str) -> bool:
             f"Unable to create symbolic links from '{src_dir}' to '{dst_dir}' error {str(e)}"
         )
         return False
+
+
+def _atomic_publish_model_dir(model_repo_dir: str, published_name: str, build_fn) -> bool:
+    """Build a model directory off to the side and atomically swap it into place.
+
+    Triton recognizes a model as loadable from its ``config.pbtxt`` + version
+    directory, so a directory that is created and populated in place is briefly
+    observable in a half-built state (config present, ``model.py`` / artifact
+    symlinks not yet copied). A concurrent Triton poll or ``/start`` that hits
+    that window fails the Python-backend preinitialize ("model file not found")
+    and can wedge the load queue.
+
+    This helper eliminates that window: ``build_fn(staging_dir)`` fully populates
+    a hidden staging directory (which stands in for
+    ``<model_repo_dir>/<published_name>``) and returns True on success. Only then
+    is the prior published directory removed and the staging directory atomically
+    renamed into place with ``os.replace`` (atomic on the same filesystem, which
+    is guaranteed here because the staging dir is a sibling in ``model_repo_dir``).
+    On any failure the staging dir is removed and the previously published dir is
+    left untouched.
+
+    Args:
+        model_repo_dir: The Triton model repository directory.
+        published_name: The final model directory name (e.g. ``base_<model>``).
+        build_fn: Callable taking the staging directory path; returns bool.
+
+    Returns:
+        bool: True if the model directory was published atomically, else False.
+    """
+    published_path = os.path.join(model_repo_dir, published_name)
+    staging_path = None
+    try:
+        # Sibling hidden dir in the same parent => same filesystem => atomic rename.
+        staging_path = tempfile.mkdtemp(
+            prefix=f".staging-{published_name}-", dir=model_repo_dir
+        )
+    except OSError as e:
+        logging.error(f"Unable to create staging directory for '{published_name}' error {str(e)}")
+        return False
+    try:
+        if not build_fn(staging_path):
+            clean_directory(staging_path)
+            return False
+    except Exception as e:
+        logging.error(f"Exception while staging model '{published_name}': {str(e)}")
+        clean_directory(staging_path)
+        return False
+    # Swap into place: remove any existing published dir, then atomic rename.
+    try:
+        if os.path.exists(published_path) and os.path.isdir(published_path):
+            if not clean_directory(published_path):
+                logging.error(f"Unable to clean existing model dir '{published_path}'")
+                clean_directory(staging_path)
+                return False
+        os.replace(staging_path, published_path)
+    except OSError as e:
+        logging.error(f"Unable to publish model dir '{published_path}' error {str(e)}")
+        clean_directory(staging_path)
+        return False
+    return True
 
 
 def _create_base_model_config_pbtxt(model_name: str, input_shape: list) -> str:
@@ -381,67 +544,64 @@ def _create_base_model_structure(
     # _resolve_base_input_shape.
     input_shape = _resolve_base_input_shape(manifest)
     base_model_config_pbtxt = _create_base_model_config_pbtxt(model_name, input_shape)
-    # create directories
-    base_model_path = os.path.join(model_repo_dir, f"base_{model_name}")
-    # clear existing path
-    if os.path.exists(base_model_path) and os.path.isdir(base_model_path):
-        ret = clean_directory(base_model_path)
-        if not ret:
-            logging.error(f"Unable to clean directory '{base_model_path}'")
-            return False
-    try:
-        os.makedirs(base_model_path)
-        os.makedirs(os.path.join(base_model_path, model_version))
-    except OSError as e:
-        logging.error(f"Unable to create directory '{base_model_path}' error {str(e)}")
-        return False
-    # Write config.pbtxt file first.
-    try:
-        with open(os.path.join(base_model_path, "config.pbtxt"), "w", encoding="utf-8") as f:
-            f.write(base_model_config_pbtxt)
-    except OSError as e:
-        logging.error(f"Unable to write config.pbtxt file error {str(e)}")
-        return False
-    # Get working directory of this code to get the model.py file
-    working_dir = os.path.dirname(os.path.realpath(__file__))
-    model_py_path = os.path.abspath(
-        os.path.join(working_dir, "resources_for_copy", "lfv_model_template.py")
-    )
-    if not os.path.exists(model_py_path):
-        logging.error(f"Unable to find lfv_model_template.py file at '{model_py_path}'")
-        return False
-    try:
-        shutil.copy(model_py_path, os.path.join(base_model_path, model_version, "model.py"))
-    except OSError as e:
-        logging.error(f"Unable to copy model.py file error {str(e)}")
-        return False
-    # Always copy the pluggable runtime abstraction next to model.py so the
-    # template can dispatch DLR / ONNX / PyTorch engines per the manifest
-    # `runtime` field (see docs/multi-runtime-inference.md). Absent for DLR-only
-    # devices this is harmless; the DLR path is unchanged.
-    runtimes_py_path = os.path.abspath(
-        os.path.join(working_dir, "resources_for_copy", "inference_runtimes.py")
-    )
-    if os.path.exists(runtimes_py_path):
+
+    def _build(staging_path: str) -> bool:
+        # Populate the staging dir fully; config.pbtxt is written LAST so the
+        # published dir is only ever observable in a complete state.
         try:
-            shutil.copy(
-                runtimes_py_path,
-                os.path.join(base_model_path, model_version, "inference_runtimes.py"),
-            )
+            os.makedirs(os.path.join(staging_path, model_version))
         except OSError as e:
-            logging.error(f"Unable to copy inference_runtimes.py file error {str(e)}")
+            logging.error(f"Unable to create directory '{staging_path}' error {str(e)}")
             return False
-    else:
-        logging.warning(
-            f"inference_runtimes.py not found at '{runtimes_py_path}'; "
-            f"non-DLR runtimes will be unavailable"
+        # Get working directory of this code to get the model.py file
+        working_dir = os.path.dirname(os.path.realpath(__file__))
+        model_py_path = os.path.abspath(
+            os.path.join(working_dir, "resources_for_copy", "lfv_model_template.py")
         )
-    # Create symlinks for model folders
-    ret = create_sym_links(deployed_model_path, os.path.join(base_model_path, model_version))
-    if not ret:
-        logging.error(f"Unable to create symbolic links for model folders")
-        return False
-    return True
+        if not os.path.exists(model_py_path):
+            logging.error(f"Unable to find lfv_model_template.py file at '{model_py_path}'")
+            return False
+        try:
+            shutil.copy(model_py_path, os.path.join(staging_path, model_version, "model.py"))
+        except OSError as e:
+            logging.error(f"Unable to copy model.py file error {str(e)}")
+            return False
+        # Always copy the pluggable runtime abstraction next to model.py so the
+        # template can dispatch DLR / ONNX / PyTorch engines per the manifest
+        # `runtime` field (see docs/multi-runtime-inference.md). Absent for DLR-only
+        # devices this is harmless; the DLR path is unchanged.
+        runtimes_py_path = os.path.abspath(
+            os.path.join(working_dir, "resources_for_copy", "inference_runtimes.py")
+        )
+        if os.path.exists(runtimes_py_path):
+            try:
+                shutil.copy(
+                    runtimes_py_path,
+                    os.path.join(staging_path, model_version, "inference_runtimes.py"),
+                )
+            except OSError as e:
+                logging.error(f"Unable to copy inference_runtimes.py file error {str(e)}")
+                return False
+        else:
+            logging.warning(
+                f"inference_runtimes.py not found at '{runtimes_py_path}'; "
+                f"non-DLR runtimes will be unavailable"
+            )
+        # Create symlinks for model folders
+        ret = create_sym_links(deployed_model_path, os.path.join(staging_path, model_version))
+        if not ret:
+            logging.error(f"Unable to create symbolic links for model folders")
+            return False
+        # Write config.pbtxt LAST — this is what makes the model discoverable.
+        try:
+            with open(os.path.join(staging_path, "config.pbtxt"), "w", encoding="utf-8") as f:
+                f.write(base_model_config_pbtxt)
+        except OSError as e:
+            logging.error(f"Unable to write config.pbtxt file error {str(e)}")
+            return False
+        return True
+
+    return _atomic_publish_model_dir(model_repo_dir, f"base_{model_name}", _build)
 
 
 def _create_marshal_model_structure(
@@ -449,41 +609,38 @@ def _create_marshal_model_structure(
 ) -> bool:
     input_shape = _resolve_base_input_shape(manifest)
     marshal_model_config_pbtxt = _create_marshal_model_config_pbtxt(model_name, input_shape)
-    # create directories
-    marshal_model_path = os.path.join(model_repo_dir, f"marshal_{model_name}")
-    # clear existing path
-    if os.path.exists(marshal_model_path) and os.path.isdir(marshal_model_path):
-        ret = clean_directory(marshal_model_path)
-        if not ret:
-            logging.error(f"Unable to clean directory '{marshal_model_path}'")
+
+    def _build(staging_path: str) -> bool:
+        try:
+            os.makedirs(os.path.join(staging_path, model_version))
+        except OSError as e:
+            logging.error(f"Unable to create directory '{staging_path}' error {str(e)}")
             return False
-    try:
-        os.makedirs(marshal_model_path)
-        os.makedirs(os.path.join(marshal_model_path, model_version))
-    except OSError as e:
-        logging.error(f"Unable to create directory '{marshal_model_path}' error {str(e)}")
-        return False
-    # Write config.pbtxt file first.
-    try:
-        with open(os.path.join(marshal_model_path, "config.pbtxt"), "w", encoding="utf-8") as f:
-            f.write(marshal_model_config_pbtxt)
-    except OSError as e:
-        logging.error(f"Unable to write config.pbtxt file error {str(e)}")
-        return False
-    # Get working directory of this code to get the model.py file
-    working_dir = os.path.dirname(os.path.realpath(__file__))
-    model_py_path = os.path.abspath(
-        os.path.join(working_dir, "resources_for_copy", "marshal_for_capture_template.py")
-    )
-    if not os.path.exists(model_py_path):
-        logging.error(f"Unable to find marshal_for_capture_template.py file at '{model_py_path}'")
-        return False
-    try:
-        shutil.copy(model_py_path, os.path.join(marshal_model_path, model_version, "model.py"))
-    except OSError as e:
-        logging.error(f"Unable to copy model.py file error {str(e)}")
-        return False
-    return True
+        # Get working directory of this code to get the model.py file
+        working_dir = os.path.dirname(os.path.realpath(__file__))
+        model_py_path = os.path.abspath(
+            os.path.join(working_dir, "resources_for_copy", "marshal_for_capture_template.py")
+        )
+        if not os.path.exists(model_py_path):
+            logging.error(
+                f"Unable to find marshal_for_capture_template.py file at '{model_py_path}'"
+            )
+            return False
+        try:
+            shutil.copy(model_py_path, os.path.join(staging_path, model_version, "model.py"))
+        except OSError as e:
+            logging.error(f"Unable to copy model.py file error {str(e)}")
+            return False
+        # Write config.pbtxt LAST — this is what makes the model discoverable.
+        try:
+            with open(os.path.join(staging_path, "config.pbtxt"), "w", encoding="utf-8") as f:
+                f.write(marshal_model_config_pbtxt)
+        except OSError as e:
+            logging.error(f"Unable to write config.pbtxt file error {str(e)}")
+            return False
+        return True
+
+    return _atomic_publish_model_dir(model_repo_dir, f"marshal_{model_name}", _build)
 
 
 def _create_ensemble_model_structure(
@@ -491,43 +648,38 @@ def _create_ensemble_model_structure(
 ) -> bool:
     input_shape = _resolve_base_input_shape(manifest)
     ensemble_model_config_pbtxt = _create_ensemble_model_config_pbtxt(model_name, input_shape)
-    # create directories
-    ensemble_model_path = os.path.join(model_repo_dir, model_name)
-    # clear existing path
-    if os.path.exists(ensemble_model_path) and os.path.isdir(ensemble_model_path):
-        ret = clean_directory(ensemble_model_path)
-        if not ret:
-            logging.error(f"Unable to clean directory '{ensemble_model_path}'")
+
+    def _build(staging_path: str) -> bool:
+        try:
+            os.makedirs(os.path.join(staging_path, model_version))
+        except OSError as e:
+            logging.error(f"Unable to create directory '{staging_path}' error {str(e)}")
             return False
-    try:
-        os.makedirs(ensemble_model_path)
-        os.makedirs(os.path.join(ensemble_model_path, model_version))
-    except OSError as e:
-        logging.error(f"Unable to create directory '{ensemble_model_path}' error {str(e)}")
-        return False
-    # Write config.pbtxt file first.
-    try:
-        with open(os.path.join(ensemble_model_path, "config.pbtxt"), "w", encoding="utf-8") as f:
-            f.write(ensemble_model_config_pbtxt)
-    except OSError as e:
-        logging.error(f"Unable to write config.pbtxt file error {str(e)}")
-        return False
-    # Get working directory of this code to get the model.py file
-    working_dir = os.path.dirname(os.path.realpath(__file__))
-    ensemble_file_path = os.path.abspath(
-        os.path.join(working_dir, "resources_for_copy", "ensemble_model")
-    )
-    if not os.path.exists(ensemble_file_path):
-        logging.error(f"Unable to find ensemble_model file at '{ensemble_file_path}'")
-        return False
-    try:
-        shutil.copy(
-            ensemble_file_path, os.path.join(ensemble_model_path, model_version, "ensemble_model")
+        # Get working directory of this code to get the ensemble_model file
+        working_dir = os.path.dirname(os.path.realpath(__file__))
+        ensemble_file_path = os.path.abspath(
+            os.path.join(working_dir, "resources_for_copy", "ensemble_model")
         )
-    except OSError as e:
-        logging.error(f"Unable to copy ensemble_model file error {str(e)}")
-        return False
-    return True
+        if not os.path.exists(ensemble_file_path):
+            logging.error(f"Unable to find ensemble_model file at '{ensemble_file_path}'")
+            return False
+        try:
+            shutil.copy(
+                ensemble_file_path, os.path.join(staging_path, model_version, "ensemble_model")
+            )
+        except OSError as e:
+            logging.error(f"Unable to copy ensemble_model file error {str(e)}")
+            return False
+        # Write config.pbtxt LAST — this is what makes the model discoverable.
+        try:
+            with open(os.path.join(staging_path, "config.pbtxt"), "w", encoding="utf-8") as f:
+                f.write(ensemble_model_config_pbtxt)
+        except OSError as e:
+            logging.error(f"Unable to write config.pbtxt file error {str(e)}")
+            return False
+        return True
+
+    return _atomic_publish_model_dir(model_repo_dir, model_name, _build)
 
 
 def convert_to_triton_structure(

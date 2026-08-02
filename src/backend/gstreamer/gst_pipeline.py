@@ -75,7 +75,14 @@ class GstPipelineManager:
 
         return source, Gst.Buffer.new_wrapped(data)
 
-    def run_pipeline(self, pipeline_str, frame_data = None, latency_metrics = None) -> dict:
+    def run_pipeline(self, pipeline_str, frame_data = None, latency_metrics = None, status_sink = None) -> dict:
+        # ``status_sink`` is an OPTIONAL callable ``sink(element_name, kind,
+        # detail)`` the deployed-workflow executor threads in to collect
+        # per-node run status (deployed-workflow-run-observability R3). When
+        # None (every Pipeline_Configuration caller), behavior is EXACTLY as
+        # before: no extra bus messages are handled and nothing is forwarded
+        # (R8.1). Sink calls are wrapped so a sink error can never disrupt the
+        # pipeline (R8.5).
         logger.warning("Initializing GStreamer pipeline")
         parsed_tag_values = {}
         os.environ["GST_PLUGIN_PATH"] = utils.get_gst_plugins_path()
@@ -97,9 +104,48 @@ class GstPipelineManager:
         # whole flask-app hangs. Instead, capture the error here, quit the loop,
         # and raise AFTER loop.run() returns (back on this thread).
         pipeline_error = {}
+
+        def _notify_sink(element_name, kind, detail):
+            # Forward a per-node status signal to the executor's collector.
+            # Inert when no sink was passed; a sink error is swallowed so it
+            # can never disrupt the pipeline (R8.5).
+            if status_sink is None:
+                return
+            try:
+                status_sink(element_name, kind, detail)
+            except Exception:  # noqa: BLE001 - sink is best-effort, contained
+                logger.debug("status_sink raised; ignoring", exc_info=True)
+
         def on_message(bus, message):
             acceptable_messages = [Gst.MessageType.ERROR, Gst.MessageType.EOS, Gst.MessageType.TAG]
+            if status_sink is not None:
+                # Additive, sink-only bus messages: WARNING (non-fatal, drives
+                # a node's 'warning' status) and STATE_CHANGED (drives
+                # 'running'). Existing ERROR/EOS/TAG handling is unchanged.
+                acceptable_messages = acceptable_messages + [
+                    Gst.MessageType.WARNING,
+                    Gst.MessageType.STATE_CHANGED,
+                ]
             if message.type not in acceptable_messages:
+                return
+            if message.type == Gst.MessageType.WARNING:
+                # Non-fatal: never quit the loop on a warning — just log it and
+                # forward it so the collector can mark the node 'warning'.
+                warn, dbg = message.parse_warning()
+                src_name = message.src.get_name() if message.src else "unknown"
+                logger.warning("Pipeline WARNING - {} : {}".format(src_name, warn.message))
+                if dbg:
+                    logger.debug(f"Warning debug information: {dbg}")
+                _notify_sink(src_name, "warning", warn.message)
+                return
+            if message.type == Gst.MessageType.STATE_CHANGED:
+                # An element reaching PLAYING means its node is running. The
+                # pipeline/bin's own transitions map to no node and are ignored
+                # by the collector. Never affects control flow.
+                _, new_state, _ = message.parse_state_changed()
+                if new_state == Gst.State.PLAYING:
+                    src_name = message.src.get_name() if message.src else "unknown"
+                    _notify_sink(src_name, "running", None)
                 return
             if message.type == Gst.MessageType.ERROR:
                 err, dbg = message.parse_error()
@@ -151,7 +197,32 @@ class GstPipelineManager:
             ret = pipeline.set_state(Gst.State.PLAYING)
             if ret == Gst.StateChangeReturn.FAILURE:
                 logger.error("Pipeline failed to start")
-                raise PipelineExecutionException("Pipeline failed to change state to PLAYING, check logs above this.")
+                # The state change failed synchronously, so the main loop never
+                # ran and on_message never fired. Drain any ERROR the failing
+                # element already posted to the bus (e.g. a Triton "failed to
+                # load '<model>'" / "model name is valid?" error) and surface it,
+                # so the caller gets an actionable reason instead of the opaque
+                # "check logs above this".
+                detail = ""
+                try:
+                    err_msg = bus.timed_pop_filtered(0, Gst.MessageType.ERROR)
+                    if err_msg is not None:
+                        gerror, dbg = err_msg.parse_error()
+                        src = err_msg.src.get_name() if err_msg.src else "pipeline"
+                        detail = " {}: {}{}".format(
+                            src, gerror.message,
+                            " ({})".format(dbg) if dbg else "")
+                except Exception:  # noqa: BLE001 - best-effort error enrichment
+                    pass
+                try:
+                    GLib.source_remove(watchdog_id)
+                except Exception:
+                    pass
+                if detail:
+                    raise PipelineExecutionException(
+                        "Pipeline failed to change state to PLAYING -{}".format(detail))
+                raise PipelineExecutionException(
+                    "Pipeline failed to change state to PLAYING, check logs above this.")
             logger.warning("Pipeline started, waiting for Triton inference")
             if frame_data:
                 source.emit("push-buffer", gst_buffer)

@@ -23,6 +23,7 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
 - [Using the Portal](#using-the-portal)
 - [ML Workflow](#ml-workflow)
 - [Using ONNX Models](#using-onnx-models)
+- [Using LLMs (vLLM)](#using-llms-vllm)
 - [Remote Device Access (SSH)](#remote-device-access-ssh)
 - [Optional Datasets](#optional-datasets-before-model-training)
 - [Inference Results Upload](#inference-results-upload-optional)
@@ -648,7 +649,7 @@ The default LocalServer backend image installs the **CPU** ONNX Runtime. GPU
 for JetPack 5 and 6 by `gdk-component-build-and-publish.sh`:
 
 ```bash
-./gdk-component-build-and-publish.sh aarch64 6   # JP6: onnxruntime-gpu (CUDA 12.2 / TRT 8.6)
+./gdk-component-build-and-publish.sh aarch64 6   # JP6: onnxruntime-gpu (CUDA 12.6 / TRT 10.3)
 ./gdk-component-build-and-publish.sh aarch64 5   # JP5: onnxruntime-gpu (CUDA 11.4 / TRT 8.5)
 ```
 
@@ -656,6 +657,97 @@ for JetPack 5 and 6 by `gdk-component-build-and-publish.sh`:
 ~1–2 h and is memory-heavy). For a fast CPU-only image, set `ONNXRUNTIME_GPU=0`.
 JetPack 4 is CPU-only regardless. The engine auto-selects TensorRT → CUDA → CPU
 providers at load, so the same package runs on either a GPU or CPU image.
+
+## Using LLMs (vLLM)
+
+DDA can serve **large language models** on-device alongside the vision stack
+using a companion [vLLM](https://github.com/vllm-project/vllm) runtime. LLMs
+are registered from a **Hugging Face model ID** (no labeling, training, or
+compilation), packaged and published as a Greengrass model component, and
+served through device text-generation APIs and the `llm_inference` workflow
+node.
+
+**Hardware requirement**: vLLM runs on **JetPack 6 devices only**
+(`arm64_jp6`, e.g. AGX Orin). The JP6 LocalServer image installs
+`vllm==0.10.2+cu126` from the Jetson AI Lab index **by default**; the
+deployment architecture gate rejects vLLM components targeted at JP4/JP5
+devices. The full stage-by-stage validation procedure lives in
+[test/on-hardware/jp6_vllm_validation.md](test/on-hardware/jp6_vllm_validation.md).
+
+### Build requirement
+
+The default JP6 build includes vLLM — nothing extra to enable:
+
+```bash
+./gdk-component-build-and-publish.sh aarch64 6   # vLLM layer on by default (VLLM_ENABLE=1)
+```
+
+To build an explicitly vLLM-free JP6 image, pass `--build-arg VLLM_ENABLE=0`;
+the app's capability probe then runs the pre-feature (vision-only) startup
+sequence and the text-generation routes are absent.
+
+### Example: install the smoke-test model (`facebook/opt-125m`)
+
+`facebook/opt-125m` is a tiny (~250 MB) model that exercises the full
+register → publish → deploy → generate pipeline in minutes. Output quality is
+poor — it's a plumbing smoke test, not a usable assistant.
+
+1. **Register** — Portal → **Models** page → **Register LLM**:
+   - **Model Name**: `opt125m-smoke`, **Model Version**: `1.0`
+   - **Model Source**: Hugging Face model ID `facebook/opt-125m`
+   - **Engine settings**: `gpu_memory_utilization` = `0.3`,
+     `max_model_len` = `2048` (leave `dtype=auto`, `tensor_parallel_size=1`,
+     `enforce_eager` at their defaults)
+   - The model appears in the list with the **`LLM (vLLM)`** badge and is
+     immediately publish-eligible.
+
+   Alternatively, seed it from the CLI (also registers the larger
+   `Qwen/Qwen2.5-7B-Instruct` validation model; idempotent):
+
+   ```bash
+   ./test/on-hardware/register_vllm_models.py \
+     --portal-api "$PORTAL_API" --token "$TOKEN" --usecase-id "$USECASE_ID"
+   ```
+
+2. **Package + publish** — using the `training_id` returned at registration:
+
+   ```bash
+   curl -s -X POST "$PORTAL_API/api/v1/training/$TRAINING_ID/package" \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"auto_triggered": true}'
+   ```
+
+   This packages for the `jetson-xavier-jp6` target and publishes the
+   Greengrass component `model-vllm-opt125m-smoke` version `1.0.0`.
+
+3. **Deploy** — Portal → **Deployments**: target the JP6 device and add the
+   `model-vllm-opt125m-smoke` component. The device downloads the weights
+   from Hugging Face (internet access required) and loads the model without
+   restarting LocalServer.
+
+4. **Verify** — wait for READY, then generate:
+
+   ```bash
+   # serving state: "loading" then "ready"
+   curl -s http://<device>:5000/text-generation/models
+
+   # non-streaming generation
+   curl -s -X POST "http://<device>:5000/text-generation/opt125m-smoke/generate" \
+     -H "Content-Type: application/json" \
+     -d '{"prompt": "The three primary colors are", "max_tokens": 64}'
+
+   # token-by-token SSE streaming
+   curl -sN -X POST "http://<device>:5000/text-generation/opt125m-smoke/generate-stream" \
+     -H "Content-Type: application/json" \
+     -d '{"prompt": "Count from one to ten:", "max_tokens": 64}'
+   ```
+
+The low `gpu_memory_utilization=0.3` leaves GPU headroom so vision models keep
+serving alongside the LLM. For a realistic workload on a 64 GB Orin, use
+`Qwen/Qwen2.5-7B-Instruct` with `gpu_memory_utilization=0.55` and
+`max_model_len=8192`. If loading fails with CUDA OOM, lower
+`gpu_memory_utilization` and/or `max_model_len`. Full triage tables per stage:
+[test/on-hardware/jp6_vllm_validation.md](test/on-hardware/jp6_vllm_validation.md).
 
 ## Remote Device Access (SSH)
 

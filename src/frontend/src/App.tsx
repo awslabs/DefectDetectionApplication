@@ -42,9 +42,15 @@ import ResultHistory from "components/result-history/ResultHistory";
 import ResultDetails from "components/result-history/ResultDetails";
 import { DynamicRouterHashKey } from "components/layout/constants";
 import AuthProvider from "components/auth/AuthProvider";
+import LoginGate from "components/auth/LoginGate";
 import "components/auth/AuthContextProvider";
 import { AuthContextProvider } from "components/auth/AuthContextProvider";
 import ListImageSources from "components/image-source/list/ListImageSources";
+import ListDeployedWorkflows from "components/deployed-workflow/list/ListDeployedWorkflows";
+import DeployedWorkflowDetails from "components/deployed-workflow/details/DeployedWorkflowDetails";
+import RunResults from "components/deployed-workflow/results/RunResults";
+import RunLog from "components/deployed-workflow/log/RunLog";
+import RunStatusGraph from "components/deployed-workflow/graph/RunStatusGraph";
 import ImageCapturePage from "components/image-source/image-capture/ImageCapturePage";
 import ImageCaptureResultHistory from "components/result-history/ImageCaptureResultHistory";
 import { HistoryResultPageType } from "components/result-history/types";
@@ -130,6 +136,36 @@ const router = createBrowserRouter(
       </Route>
 
       <Route
+        path="deployed-workflows"
+        handle={{ breadcrumb: "Deployed workflows" }}
+      >
+        <Route index element={<ListDeployedWorkflows />} />
+        <Route
+          path=":registrationId"
+          handle={{ breadcrumb: "Deployed workflow details" }}
+        >
+          <Route index element={<DeployedWorkflowDetails />} />
+          <Route path="executions/:executionId">
+            <Route
+              path="results"
+              element={<RunResults />}
+              handle={{ breadcrumb: "Run results" }}
+            />
+            <Route
+              path="log"
+              element={<RunLog />}
+              handle={{ breadcrumb: "Run log" }}
+            />
+            <Route
+              path="graph"
+              element={<RunStatusGraph />}
+              handle={{ breadcrumb: "Run status" }}
+            />
+          </Route>
+        </Route>
+      </Route>
+
+      <Route
         path="models"
         element={<DeployedModels />}
         handle={{ breadcrumb: "Deployed models" }}
@@ -192,7 +228,13 @@ const router = createBrowserRouter(
 export default function App(): JSX.Element {
   return (
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      {/* LoginGate (portal-user-manager): when local login is enabled and
+          no unexpired Local_Session_Token is held, it renders the login
+          screen instead of the app; when disabled, the app renders
+          directly with no prompt. */}
+      <LoginGate>
+        <RouterProvider router={router} />
+      </LoginGate>
     </QueryClientProvider>
   );
 }

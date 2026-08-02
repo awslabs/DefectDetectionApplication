@@ -1,0 +1,1418 @@
+/**
+ * Component tests for the node configuration panel (Requirements 1.7,
+ * 1.8, 2.6, 2.7): form controls per parameter type with current values,
+ * inline validation errors from the constraint predicate, parameter
+ * update propagation, the model_ref select populated from the model
+ * registry filtered by Use_Case, and the Custom_Python_Node code editor
+ * plus port-type pickers.
+ */
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import createWrapper from '@cloudscape-design/components/test-utils/dom';
+import NodeConfigPanel, {
+  cameraOption,
+  modelMatchesNodeType,
+  modelSelectEmptyText,
+} from './NodeConfigPanel';
+import { WORKFLOW_NODE_TYPE, type BuilderNode } from './builderGraph';
+import type { CameraSourceEntry } from './cameraReference';
+import { PORT_TYPES, type JsonValue, type NodeTypeDescriptor } from './types';
+
+const { listModels, listDevices, getDeviceCameras, useUsecaseMock } = vi.hoisted(() => ({
+  listModels: vi.fn(),
+  listDevices: vi.fn(),
+  getDeviceCameras: vi.fn(),
+  useUsecaseMock: vi.fn(),
+}));
+
+vi.mock('../../services/api', () => ({
+  apiService: { listModels, listDevices, getDeviceCameras },
+}));
+
+vi.mock('../../contexts/UsecaseContext', () => ({
+  useUsecase: useUsecaseMock,
+}));
+
+// --------------------------------------------------------------------------
+// Fixtures
+// --------------------------------------------------------------------------
+
+const CAMERA: NodeTypeDescriptor = {
+  typeId: 'camera_source',
+  category: 'input',
+  displayName: 'Camera source',
+  inputs: [],
+  outputs: [{ name: 'out', portType: 'VideoFrames' }],
+  parameters: [
+    { name: 'device', paramType: 'string', required: true, default: null, constraints: {} },
+    {
+      name: 'gain',
+      paramType: 'int',
+      required: false,
+      default: 4,
+      constraints: { min: 0, max: 100 },
+    },
+    { name: 'flip', paramType: 'bool', required: false, default: false, constraints: {} },
+    {
+      name: 'mode',
+      paramType: 'enum',
+      required: true,
+      default: 'auto',
+      constraints: { values: ['auto', 'manual'] },
+    },
+  ],
+  mappings: [],
+  hardwareDependent: true,
+};
+
+const MODEL_INFERENCE: NodeTypeDescriptor = {
+  typeId: 'model_inference',
+  category: 'inference',
+  displayName: 'Model inference',
+  inputs: [{ name: 'in', portType: 'VideoFrames' }],
+  outputs: [{ name: 'out', portType: 'InferenceMeta' }],
+  parameters: [
+    { name: 'modelName', paramType: 'model_ref', required: true, default: null, constraints: {} },
+  ],
+  mappings: [],
+  hardwareDependent: false,
+};
+
+const MQTT_PUBLISH: NodeTypeDescriptor = {
+  typeId: 'mqtt_publish',
+  category: 'output',
+  displayName: 'MQTT Publish',
+  inputs: [{ name: 'in', portType: 'InferenceMeta' }],
+  outputs: [],
+  parameters: [
+    { name: 'broker_host', paramType: 'string', required: true, default: null, constraints: {} },
+    { name: 'topic', paramType: 'string', required: true, default: null, constraints: {} },
+    {
+      name: 'payload_template',
+      paramType: 'string',
+      required: false,
+      default: '{inference_json}',
+      constraints: {},
+    },
+    { name: 'aws_iot', paramType: 'bool', required: false, default: false, constraints: {} },
+    {
+      name: 'iot_thing_name',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+    },
+    {
+      name: 'iot_ca_cert_path',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+    },
+    {
+      name: 'iot_client_cert_path',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+    },
+    {
+      name: 'iot_private_key_path',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+    },
+  ],
+  mappings: [],
+  hardwareDependent: true,
+};
+
+const IOT_PARAMETER_NAMES = [
+  'iot_thing_name',
+  'iot_ca_cert_path',
+  'iot_client_cert_path',
+  'iot_private_key_path',
+];
+
+const CUSTOM_PYTHON: NodeTypeDescriptor = {
+  typeId: 'custom_python',
+  category: 'post_processing',
+  displayName: 'Custom Python',
+  inputs: [{ name: 'in', portType: 'VideoFrames' }],
+  outputs: [{ name: 'out', portType: 'VideoFrames' }],
+  parameters: [
+    { name: 'code', paramType: 'code', required: true, default: null, constraints: {} },
+    {
+      name: 'input_port_type',
+      paramType: 'enum',
+      required: true,
+      default: 'VideoFrames',
+      constraints: {},
+    },
+    {
+      name: 'output_port_type',
+      paramType: 'enum',
+      required: true,
+      default: 'VideoFrames',
+      constraints: {},
+    },
+  ],
+  mappings: [],
+  hardwareDependent: false,
+};
+
+const CUSTOM_PYTHON_PREPROCESS: NodeTypeDescriptor = {
+  typeId: 'custom_python_preprocess',
+  category: 'preprocessing',
+  displayName: 'Custom Python (Frames)',
+  inputs: [{ name: 'in', portType: 'VideoFrames' }],
+  outputs: [{ name: 'out', portType: 'VideoFrames' }],
+  parameters: [
+    { name: 'code', paramType: 'code', required: true, default: null, constraints: { minLength: 1 } },
+    { name: 'requirements', paramType: 'string', required: false, default: '', constraints: {} },
+  ],
+  mappings: [],
+  hardwareDependent: false,
+};
+
+function builderNode(
+  descriptor: NodeTypeDescriptor,
+  parameters: Record<string, JsonValue> = {}
+): BuilderNode {
+  return {
+    id: `${descriptor.typeId}_1`,
+    type: WORKFLOW_NODE_TYPE,
+    position: { x: 0, y: 0 },
+    data: { descriptor, parameters, validationMessages: [] },
+  };
+}
+
+beforeEach(() => {
+  listModels.mockReset();
+  listModels.mockResolvedValue({ models: [], count: 0, usecase_id: 'uc-1' });
+  listDevices.mockReset();
+  listDevices.mockResolvedValue({ devices: [], count: 0 });
+  getDeviceCameras.mockReset();
+  getDeviceCameras.mockResolvedValue({
+    device_id: 'dev-1',
+    state: 'synced',
+    cameras: [],
+    count: 0,
+  });
+  useUsecaseMock.mockReturnValue({
+    selectedUsecaseId: 'uc-1',
+    setSelectedUsecaseId: vi.fn(),
+  });
+});
+
+// --------------------------------------------------------------------------
+// Tests
+// --------------------------------------------------------------------------
+
+describe('NodeConfigPanel', () => {
+  it('renders nothing when no node is selected', () => {
+    const { container } = render(<NodeConfigPanel node={null} onParametersChange={vi.fn()} />);
+    expect(container.querySelector('aside')).toBeNull();
+  });
+
+  it('shows a compact header (no heading element) with a close button', () => {
+    const onClose = vi.fn();
+    const node = builderNode(CAMERA, { device: '/dev/video0', mode: 'auto' });
+    render(<NodeConfigPanel node={node} onParametersChange={vi.fn()} onClose={onClose} />);
+
+    // The title renders as compact text, not a large heading.
+    expect(screen.getByText('Camera source')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Camera source' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close node configuration' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits the close button when onClose is not provided', () => {
+    render(<NodeConfigPanel node={builderNode(CAMERA)} onParametersChange={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'Close node configuration' })).toBeNull();
+  });
+
+  it('renders a form control per parameter type with the current values (Requirement 1.7)', () => {
+    const node = builderNode(CAMERA, {
+      device: '/dev/video0',
+      gain: 7,
+      flip: true,
+      mode: 'manual',
+    });
+    const { container } = render(<NodeConfigPanel node={node} onParametersChange={vi.fn()} />);
+
+    expect(screen.getByRole('complementary', { name: 'Node configuration' })).toBeInTheDocument();
+    expect(screen.getByText('Camera source')).toBeInTheDocument();
+
+    const deviceInput = container.querySelector('input[aria-label="device"]');
+    expect(deviceInput).toHaveValue('/dev/video0');
+
+    const gainInput = container.querySelector('input[aria-label="gain"]');
+    expect(gainInput).toHaveValue(7);
+
+    const toggle = container.querySelector('input[type="checkbox"]');
+    expect(toggle).toBeChecked();
+
+    const select = createWrapper(container).findSelect();
+    expect(select!.findTrigger().getElement().textContent).toContain('manual');
+  });
+
+  it('shows the declared default as the current value when the parameter is unset', () => {
+    const node = builderNode(CAMERA, { device: '/dev/video0' });
+    const { container } = render(<NodeConfigPanel node={node} onParametersChange={vi.fn()} />);
+    const gainInput = container.querySelector('input[aria-label="gain"]');
+    expect(gainInput).toHaveValue(4);
+  });
+
+  it('displays inline validation errors from the constraint predicate (Requirement 1.8)', () => {
+    const node = builderNode(CAMERA, { gain: 500, mode: 'auto' });
+    render(<NodeConfigPanel node={node} onParametersChange={vi.fn()} />);
+
+    // Required string with no value.
+    expect(screen.getByText("Required parameter 'device' has no value")).toBeInTheDocument();
+    // Int above its declared maximum.
+    expect(
+      screen.getByText("Parameter 'gain' value 500 is above the maximum 100")
+    ).toBeInTheDocument();
+  });
+
+  it('propagates edits through onParametersChange', () => {
+    const onParametersChange = vi.fn();
+    const node = builderNode(CAMERA, { device: '/dev/video0', mode: 'auto' });
+    const { container } = render(
+      <NodeConfigPanel node={node} onParametersChange={onParametersChange} />
+    );
+
+    const deviceInput = container.querySelector('input[aria-label="device"]')!;
+    fireEvent.change(deviceInput, { target: { value: '/dev/video1' } });
+    expect(onParametersChange).toHaveBeenCalledWith('camera_source_1', {
+      device: '/dev/video1',
+      mode: 'auto',
+    });
+
+    const gainInput = container.querySelector('input[aria-label="gain"]')!;
+    fireEvent.change(gainInput, { target: { value: '12' } });
+    expect(onParametersChange).toHaveBeenCalledWith('camera_source_1', {
+      device: '/dev/video0',
+      gain: 12,
+      mode: 'auto',
+    });
+  });
+
+  it('populates the model_ref select from the model registry filtered by Use_Case (Requirement 2.6)', async () => {
+    listModels.mockResolvedValue({
+      models: [
+        { name: 'widget-anomaly-v3', version: '3', stage: 'production' },
+        { name: 'widget-classifier', version: '1', stage: 'staging' },
+      ],
+      count: 2,
+      usecase_id: 'uc-1',
+    });
+    const onParametersChange = vi.fn();
+    const node = builderNode(MODEL_INFERENCE);
+    const { container } = render(
+      <NodeConfigPanel node={node} onParametersChange={onParametersChange} />
+    );
+
+    await waitFor(() => expect(listModels).toHaveBeenCalledWith({ usecase_id: 'uc-1' }));
+
+    const select = createWrapper(container).findSelect()!;
+    await waitFor(() => {
+      select.openDropdown();
+      expect(select.findDropdown().findOptions()).toHaveLength(2);
+    });
+
+    expect(select.findDropdown().getElement().textContent).toContain('widget-anomaly-v3');
+    expect(select.findDropdown().getElement().textContent).toContain('widget-classifier');
+
+    select.selectOptionByValue('widget-anomaly-v3');
+    expect(onParametersChange).toHaveBeenCalledWith('model_inference_1', {
+      modelName: 'widget-anomaly-v3',
+    });
+  });
+
+  it('does not query the model registry for nodes without model_ref parameters', () => {
+    render(<NodeConfigPanel node={builderNode(CAMERA)} onParametersChange={vi.fn()} />);
+    expect(listModels).not.toHaveBeenCalled();
+  });
+
+  it('renders the Custom_Python_Node code editor and port-type pickers (Requirement 2.7)', () => {
+    const onParametersChange = vi.fn();
+    const node = builderNode(CUSTOM_PYTHON, {
+      code: 'def handle(frame): return frame',
+      input_port_type: 'VideoFrames',
+      output_port_type: 'VideoFrames',
+    });
+    const { container } = render(
+      <NodeConfigPanel node={node} onParametersChange={onParametersChange} />
+    );
+
+    // Code editor with the current code.
+    const codeEditor = container.querySelector('textarea[aria-label="code"]');
+    expect(codeEditor).toHaveValue('def handle(frame): return frame');
+    fireEvent.change(codeEditor!, { target: { value: 'def handle(frame): return None' } });
+    expect(onParametersChange).toHaveBeenCalledWith(
+      'custom_python_1',
+      expect.objectContaining({ code: 'def handle(frame): return None' })
+    );
+
+    // Port-type pickers offer the declared port types (PORT_TYPES).
+    const selects = createWrapper(container).findAllSelects();
+    expect(selects).toHaveLength(2);
+
+    const outputPicker = selects[1];
+    outputPicker.openDropdown();
+    const optionLabels = outputPicker
+      .findDropdown()
+      .findOptions()
+      .map((option) => option.getElement().textContent);
+    expect(optionLabels).toEqual([...PORT_TYPES]);
+
+    outputPicker.selectOption(2); // InferenceMeta
+    expect(onParametersChange).toHaveBeenCalledWith(
+      'custom_python_1',
+      expect.objectContaining({ output_port_type: 'InferenceMeta' })
+    );
+  });
+
+  it('renders the code editor for the custom_python_preprocess code parameter (custom-python-frames Requirement 7.2)', () => {
+    const onParametersChange = vi.fn();
+    const code = 'def process_frame(frame, metadata):\n    return cv2.GaussianBlur(frame, (5, 5), 0)';
+    const node = builderNode(CUSTOM_PYTHON_PREPROCESS, { code });
+    const { container } = render(
+      <NodeConfigPanel node={node} onParametersChange={onParametersChange} />
+    );
+
+    // Code editor with the current code.
+    const codeEditor = container.querySelector('textarea[aria-label="code"]');
+    expect(codeEditor).toHaveValue(code);
+
+    // Edits propagate through onParametersChange.
+    fireEvent.change(codeEditor!, {
+      target: { value: 'def process_frame(frame, metadata):\n    return None' },
+    });
+    expect(onParametersChange).toHaveBeenCalledWith(
+      'custom_python_preprocess_1',
+      expect.objectContaining({ code: 'def process_frame(frame, metadata):\n    return None' })
+    );
+
+    // Fixed VideoFrames ports: no per-instance port-type pickers.
+    expect(createWrapper(container).findAllSelects()).toHaveLength(0);
+  });
+
+  describe('mqtt_publish AWS IoT support (dependsOn visibility)', () => {
+    it('renders the "AWS IoT support" checkbox', () => {
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(MQTT_PUBLISH)} onParametersChange={vi.fn()} />
+      );
+      expect(screen.getByText('AWS IoT support')).toBeInTheDocument();
+      const checkbox = createWrapper(container).findCheckbox();
+      expect(checkbox).not.toBeNull();
+      expect(checkbox!.findNativeInput().getElement()).not.toBeChecked();
+    });
+
+    it('hides the iot_* fields while aws_iot is unchecked (default)', () => {
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(MQTT_PUBLISH)} onParametersChange={vi.fn()} />
+      );
+      for (const name of IOT_PARAMETER_NAMES) {
+        expect(container.querySelector(`input[aria-label="${name}"]`)).toBeNull();
+      }
+      expect(screen.queryByText('IoT thing name')).toBeNull();
+    });
+
+    it('shows the iot_* fields with their labels when aws_iot is checked', () => {
+      const { container } = render(
+        <NodeConfigPanel
+          node={builderNode(MQTT_PUBLISH, { aws_iot: true })}
+          onParametersChange={vi.fn()}
+        />
+      );
+      for (const name of IOT_PARAMETER_NAMES) {
+        expect(container.querySelector(`input[aria-label="${name}"]`)).not.toBeNull();
+      }
+      expect(screen.getByText('IoT thing name')).toBeInTheDocument();
+      expect(screen.getByText('Root CA certificate path (on device)')).toBeInTheDocument();
+      expect(screen.getByText('Client certificate path (on device)')).toBeInTheDocument();
+      expect(screen.getByText('Private key path (on device)')).toBeInTheDocument();
+    });
+
+    it('propagates checking the checkbox as aws_iot: true', () => {
+      const onParametersChange = vi.fn();
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(MQTT_PUBLISH)} onParametersChange={onParametersChange} />
+      );
+      const checkbox = createWrapper(container).findCheckbox()!;
+      fireEvent.click(checkbox.findNativeInput().getElement());
+      expect(onParametersChange).toHaveBeenCalledWith('mqtt_publish_1', { aws_iot: true });
+    });
+  });
+
+  describe('per-parameter help (PARAMETER_HELP)', () => {
+    const INFERENCE_FILTER: NodeTypeDescriptor = {
+      typeId: 'inference_filter',
+      category: 'post_processing',
+      displayName: 'Inference Filter',
+      inputs: [{ name: 'in', portType: 'InferenceMeta' }],
+      outputs: [{ name: 'out', portType: 'InferenceMeta' }],
+      parameters: [
+        { name: 'condition', paramType: 'string', required: true, default: null, constraints: {} },
+      ],
+      mappings: [],
+      hardwareDependent: false,
+    };
+
+    const CONDITIONAL: NodeTypeDescriptor = {
+      typeId: 'conditional',
+      category: 'post_processing',
+      displayName: 'Conditional',
+      inputs: [{ name: 'in', portType: 'InferenceMeta' }],
+      outputs: [
+        { name: 'true', portType: 'InferenceMeta' },
+        { name: 'false', portType: 'InferenceMeta' },
+      ],
+      parameters: [
+        { name: 'condition', paramType: 'string', required: true, default: null, constraints: {} },
+      ],
+      mappings: [],
+      hardwareDependent: false,
+    };
+
+    it('documents the inference_filter condition grammar with examples', () => {
+      render(
+        <NodeConfigPanel node={builderNode(INFERENCE_FILTER)} onParametersChange={vi.fn()} />
+      );
+
+      // The description documents the metadata fields and operators the
+      // condition evaluator actually supports.
+      const description = screen.getByText(/is_anomalous/, { selector: 'div, span' });
+      expect(description.textContent).toContain('confidence');
+      expect(description.textContent).toContain('==');
+      expect(description.textContent).toContain('&&');
+      expect(description.textContent).toContain('||');
+      expect(description.textContent).toContain('!');
+
+      // Working examples in the expandable "Examples" section.
+      fireEvent.click(screen.getByText('Show examples'));
+      const examples = screen.getByRole('list', { name: 'Examples for condition' });
+      expect(examples.textContent).toContain('is_anomalous == true');
+      expect(examples.textContent).toContain('is_anomalous == true && confidence >= 0.8');
+    });
+
+    it('documents the conditional condition two-path routing with examples', () => {
+      render(<NodeConfigPanel node={builderNode(CONDITIONAL)} onParametersChange={vi.fn()} />);
+
+      // The description explains which output receives the metadata.
+      expect(screen.getByText(/"true" output receives the metadata/)).toBeInTheDocument();
+
+      fireEvent.click(screen.getByText('Show examples'));
+      const examples = screen.getByRole('list', { name: 'Examples for condition' });
+      expect(examples.textContent).toContain('is_anomalous == true');
+      expect(examples.textContent).toContain('"true" path');
+    });
+
+    it('documents mqtt_publish payload_template placeholders', () => {
+      render(
+        <NodeConfigPanel
+          node={builderNode(MQTT_PUBLISH, {
+            broker_host: 'b',
+            topic: 't',
+            payload_template: '{inference_json}',
+          })}
+          onParametersChange={vi.fn()}
+        />
+      );
+
+      // The description names the supported placeholders.
+      expect(
+        screen.getByText(/Placeholders in curly braces are replaced/)
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Show examples'));
+      const examples = screen.getByRole('list', {
+        name: 'Examples for payload_template',
+      });
+      expect(examples.textContent).toContain('{inference_json}');
+    });
+
+    it('renders no help for parameters without a PARAMETER_HELP entry', () => {
+      render(<NodeConfigPanel node={builderNode(CAMERA)} onParametersChange={vi.fn()} />);
+      expect(screen.queryByText('Show examples')).toBeNull();
+    });
+  });
+
+  describe('catalog-served parameter descriptions', () => {
+    it('renders the descriptor description as the field help under the label', () => {
+      const withDescription: NodeTypeDescriptor = {
+        ...CAMERA,
+        parameters: [
+          {
+            name: 'device',
+            paramType: 'string',
+            required: true,
+            default: null,
+            constraints: {},
+            description: 'Camera device path on the edge device, e.g. /dev/video0.',
+          },
+        ],
+      };
+      render(<NodeConfigPanel node={builderNode(withDescription)} onParametersChange={vi.fn()} />);
+      expect(
+        screen.getByText('Camera device path on the edge device, e.g. /dev/video0.')
+      ).toBeInTheDocument();
+    });
+
+    it('prefers the catalog description over the PARAMETER_HELP fallback', () => {
+      const conditionWithCatalogDescription: NodeTypeDescriptor = {
+        typeId: 'inference_filter',
+        category: 'post_processing',
+        displayName: 'Inference Filter',
+        inputs: [{ name: 'in', portType: 'InferenceMeta' }],
+        outputs: [{ name: 'out', portType: 'InferenceMeta' }],
+        parameters: [
+          {
+            name: 'condition',
+            paramType: 'string',
+            required: true,
+            default: null,
+            constraints: {},
+            description: 'Catalog-served condition help.',
+          },
+        ],
+        mappings: [],
+        hardwareDependent: false,
+      };
+      render(
+        <NodeConfigPanel
+          node={builderNode(conditionWithCatalogDescription)}
+          onParametersChange={vi.fn()}
+        />
+      );
+      expect(screen.getByText('Catalog-served condition help.')).toBeInTheDocument();
+      // The "Show examples" section still comes from PARAMETER_HELP.
+      fireEvent.click(screen.getByText('Show examples'));
+      expect(
+        screen.getByRole('list', { name: 'Examples for condition' })
+      ).toBeInTheDocument();
+    });
+
+    it('renders bool parameter descriptions below the checkbox', () => {
+      const withBoolDescription: NodeTypeDescriptor = {
+        ...MQTT_PUBLISH,
+        parameters: [
+          {
+            name: 'aws_iot',
+            paramType: 'bool',
+            required: false,
+            default: false,
+            constraints: {},
+            description: 'Publish through AWS IoT Core instead of a plain broker.',
+          },
+        ],
+      };
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(withBoolDescription)} onParametersChange={vi.fn()} />
+      );
+      const description = screen.getByText(
+        'Publish through AWS IoT Core instead of a plain broker.'
+      );
+      expect(description).toBeInTheDocument();
+      // The description follows the checkbox in document order.
+      const checkbox = container.querySelector('input[type="checkbox"]')!;
+      expect(
+        checkbox.compareDocumentPosition(description) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+    });
+
+    it('renders long descriptions fully inside a collapsible "Syntax help" section', () => {
+      const longDescription =
+        'An expression over the inference metadata fields is_anomalous and ' +
+        'confidence evaluated by the workflow engine on every result. ' +
+        'Supports the comparisons ==, !=, >=, <=, >, <, the logic operators ' +
+        '&& (and), || (or), ! (not), and parentheses; a bare field name is ' +
+        'tested for truth. The expression must be valid before the workflow can run.';
+      expect(longDescription.length).toBeGreaterThan(200);
+      const withLongDescription: NodeTypeDescriptor = {
+        typeId: 'inference_filter',
+        category: 'post_processing',
+        displayName: 'Inference Filter',
+        inputs: [{ name: 'in', portType: 'InferenceMeta' }],
+        outputs: [{ name: 'out', portType: 'InferenceMeta' }],
+        parameters: [
+          {
+            name: 'condition',
+            paramType: 'string',
+            required: true,
+            default: null,
+            constraints: {},
+            description: longDescription,
+          },
+        ],
+        mappings: [],
+        hardwareDependent: false,
+      };
+      render(
+        <NodeConfigPanel node={builderNode(withLongDescription)} onParametersChange={vi.fn()} />
+      );
+      // Collapsible section instead of the always-visible field description.
+      fireEvent.click(screen.getByText('Syntax help'));
+      expect(screen.getByText(longDescription)).toBeInTheDocument();
+    });
+  });
+
+  describe('catalog-served parameter examples (clickable chips)', () => {
+    const DEVICE_WITH_EXAMPLES: NodeTypeDescriptor = {
+      ...CAMERA,
+      parameters: [
+        {
+          name: 'device',
+          paramType: 'string',
+          required: true,
+          default: null,
+          constraints: {},
+          examples: ['/dev/video0', '/dev/video1'],
+        },
+      ],
+    };
+
+    it('renders an "Examples:" row of chips for catalog-served examples', () => {
+      render(
+        <NodeConfigPanel node={builderNode(DEVICE_WITH_EXAMPLES)} onParametersChange={vi.fn()} />
+      );
+      const group = screen.getByRole('group', { name: 'Examples for device' });
+      expect(group.textContent).toContain('Examples:');
+      expect(screen.getByRole('button', { name: 'Use example /dev/video0' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Use example /dev/video1' })).toBeInTheDocument();
+    });
+
+    it('fills the field with the example value when a chip is clicked', () => {
+      const onParametersChange = vi.fn();
+      render(
+        <NodeConfigPanel
+          node={builderNode(DEVICE_WITH_EXAMPLES)}
+          onParametersChange={onParametersChange}
+        />
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Use example /dev/video1' }));
+      expect(onParametersChange).toHaveBeenCalledWith('camera_source_1', {
+        device: '/dev/video1',
+      });
+    });
+
+    it('truncates long example chips for display but inserts the full value', () => {
+      const longExample =
+        'is_anomalous == true && confidence >= 0.8 && !(confidence >= 0.99)';
+      const withLongExample: NodeTypeDescriptor = {
+        typeId: 'inference_filter',
+        category: 'post_processing',
+        displayName: 'Inference Filter',
+        inputs: [{ name: 'in', portType: 'InferenceMeta' }],
+        outputs: [{ name: 'out', portType: 'InferenceMeta' }],
+        parameters: [
+          {
+            name: 'condition',
+            paramType: 'string',
+            required: true,
+            default: null,
+            constraints: {},
+            examples: [longExample],
+          },
+        ],
+        mappings: [],
+        hardwareDependent: false,
+      };
+      const onParametersChange = vi.fn();
+      render(
+        <NodeConfigPanel node={builderNode(withLongExample)} onParametersChange={onParametersChange} />
+      );
+
+      const chip = screen.getByRole('button', { name: `Use example ${longExample}` });
+      // Display text is truncated with an ellipsis; the full value is in
+      // the accessible name and title.
+      expect(chip.textContent!.length).toBeLessThan(longExample.length);
+      expect(chip.textContent!.endsWith('\u2026')).toBe(true);
+      expect(chip).toHaveAttribute('title', longExample);
+
+      fireEvent.click(chip);
+      expect(onParametersChange).toHaveBeenCalledWith('inference_filter_1', {
+        condition: longExample,
+      });
+    });
+
+    it('renders no examples row for parameters without catalog examples', () => {
+      render(<NodeConfigPanel node={builderNode(CAMERA)} onParametersChange={vi.fn()} />);
+      expect(screen.queryByRole('group', { name: /Examples for/ })).toBeNull();
+    });
+  });
+
+  // ------------------------------------------------------------------------
+  // Camera reference control (camera-registry-sync task 9.3,
+  // Requirements 7.1, 7.3, 7.4, 7.5)
+  // ------------------------------------------------------------------------
+
+  describe('camera reference control (camera-registry-sync)', () => {
+    /** icam_source with only the device parameter, so the picker's two
+     * selects (reference device + camera) are the only selects rendered.
+     * The device parameter renders the camera reference control
+     * (csi-icam-input-nodes Requirement 5.2). */
+    const CAMERA_DEVICE_ONLY: NodeTypeDescriptor = {
+      ...CAMERA,
+      typeId: 'icam_source',
+      displayName: 'ICAM',
+      parameters: [
+        { name: 'device', paramType: 'string', required: true, default: null, constraints: {} },
+      ],
+    };
+
+    const DEVICES = [
+      { device_id: 'dev-1', usecase_id: 'uc-1', thing_name: 'edge-thing-1', status: 'HEALTHY' },
+      { device_id: 'dev-2', usecase_id: 'uc-1', thing_name: 'edge-thing-2', status: 'UNHEALTHY' },
+    ];
+
+    const REGISTRY_CAMERAS: CameraSourceEntry[] = [
+      {
+        camera_source_id: 'cfg-a1b2',
+        name: 'Line 1 inspection cam',
+        type: 'Camera',
+        params: { devicePath: '/dev/video2', gain: 8, exposure: 16000000 },
+        origin: 'edge-configured',
+        sync_status: 'synced',
+        stale: false,
+        absent: false,
+      },
+      {
+        camera_source_id: 'disc-9f',
+        name: 'Rear dock cam',
+        type: 'Camera',
+        params: { devicePath: '/dev/video5' },
+        origin: 'edge-discovered',
+        sync_status: 'synced',
+        stale: true,
+        absent: false,
+      },
+    ];
+
+    /** A camera_source node with the device parameter unset (and no
+     * hand-typed value), so the control starts on the reference picker. */
+    function pickerNode(advisoryData?: Record<string, JsonValue>): BuilderNode {
+      const node = builderNode(CAMERA_DEVICE_ONLY);
+      if (advisoryData !== undefined) {
+        node.data = { ...node.data, advisoryData };
+      }
+      return node;
+    }
+
+    beforeEach(() => {
+      listDevices.mockResolvedValue({ devices: DEVICES, count: DEVICES.length });
+      getDeviceCameras.mockResolvedValue({
+        device_id: 'dev-1',
+        state: 'synced',
+        cameras: REGISTRY_CAMERAS,
+        count: REGISTRY_CAMERAS.length,
+      });
+    });
+
+    describe('cameraOption display fields (Requirement 7.4)', () => {
+      it('shows name, device path, type, and sync status', () => {
+        const option = cameraOption(REGISTRY_CAMERAS[0]);
+        expect(option.value).toBe('cfg-a1b2');
+        expect(option.label).toBe('Line 1 inspection cam');
+        expect(option.description).toBe('/dev/video2');
+        expect(option.tags).toEqual(['Camera', 'synced']);
+        // Non-stale sources carry no staleness badge.
+        expect(option.labelTag).toBeUndefined();
+      });
+
+      it('badges stale sources and tags absent ones', () => {
+        expect(cameraOption(REGISTRY_CAMERAS[1]).labelTag).toBe('Stale');
+        const absent = cameraOption({ ...REGISTRY_CAMERAS[1], absent: true });
+        expect(absent.tags).toContain('absent');
+      });
+
+      it('falls back to the id for nameless sources and the url for pathless ones', () => {
+        const rtsp = cameraOption({
+          camera_source_id: 'cfg-rtsp',
+          params: { url: 'rtsp://10.0.0.5/stream' },
+        });
+        expect(rtsp.label).toBe('cfg-rtsp');
+        expect(rtsp.description).toBe('rtsp://10.0.0.5/stream');
+      });
+    });
+
+    it('renders csi_camera_source gain/exposure as plain numeric inputs (Requirement 5.3)', () => {
+      // The CSI node is not a camera-reference type: its gain/exposure
+      // render as ordinary numeric parameter inputs with no reference
+      // control (no device/camera selects).
+      const CSI: NodeTypeDescriptor = {
+        typeId: 'csi_camera_source',
+        category: 'input',
+        displayName: 'CSI Camera Input',
+        inputs: [],
+        outputs: [{ name: 'out', portType: 'VideoFrames' }],
+        parameters: [
+          {
+            name: 'gain', paramType: 'int', required: false, default: 4,
+            constraints: { min: 0, max: 100 },
+          },
+          {
+            name: 'exposure', paramType: 'int', required: false,
+            default: 5000000, constraints: { min: 0 },
+          },
+        ],
+        mappings: [],
+        hardwareDependent: true,
+      };
+      const onParametersChange = vi.fn();
+      const node = builderNode(CSI, { gain: 4, exposure: 5000000 });
+      const { container } = render(
+        <NodeConfigPanel node={node} onParametersChange={onParametersChange} />
+      );
+
+      // No camera reference control -> no selects rendered.
+      expect(createWrapper(container).findAllSelects()).toHaveLength(0);
+      const gainInput = container.querySelector('input[aria-label="gain"]')!;
+      expect(gainInput).toBeInTheDocument();
+      fireEvent.change(gainInput, { target: { value: '12' } });
+      expect(onParametersChange).toHaveBeenCalledWith('csi_camera_source_1', {
+        gain: 12,
+        exposure: 5000000,
+      });
+    });
+
+    it('populates the device selector from the use case devices and the camera dropdown from the registry (Requirement 7.1)', async () => {
+      const { container } = render(
+        <NodeConfigPanel node={pickerNode()} onParametersChange={vi.fn()} />
+      );
+
+      await waitFor(() => expect(listDevices).toHaveBeenCalledWith('uc-1'));
+
+      const [deviceSelect, cameraSelect] = createWrapper(container).findAllSelects();
+      await waitFor(() => {
+        deviceSelect.openDropdown();
+        expect(deviceSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+      expect(deviceSelect.findDropdown().getElement().textContent).toContain('edge-thing-1');
+      expect(deviceSelect.findDropdown().getElement().textContent).toContain('edge-thing-2');
+
+      // The camera dropdown stays disabled until a device is chosen.
+      expect(cameraSelect.isDisabled()).toBe(true);
+
+      deviceSelect.selectOptionByValue('dev-1');
+      await waitFor(() => expect(getDeviceCameras).toHaveBeenCalledWith('dev-1', 'uc-1'));
+
+      await waitFor(() => {
+        cameraSelect.openDropdown();
+        expect(cameraSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+      // Each option shows the source's name, path, type, and sync status.
+      const dropdownText = cameraSelect.findDropdown().getElement().textContent!;
+      expect(dropdownText).toContain('Line 1 inspection cam');
+      expect(dropdownText).toContain('/dev/video2');
+      expect(dropdownText).toContain('Camera');
+      expect(dropdownText).toContain('synced');
+    });
+
+    it('renders the staleness badge on stale cameras in the dropdown (Requirement 7.4)', async () => {
+      const { container } = render(
+        <NodeConfigPanel node={pickerNode()} onParametersChange={vi.fn()} />
+      );
+      await waitFor(() => expect(listDevices).toHaveBeenCalled());
+
+      const [deviceSelect, cameraSelect] = createWrapper(container).findAllSelects();
+      await waitFor(() => {
+        deviceSelect.openDropdown();
+        expect(deviceSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+      deviceSelect.selectOptionByValue('dev-1');
+
+      await waitFor(() => {
+        cameraSelect.openDropdown();
+        expect(cameraSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+      const options = cameraSelect.findDropdown().findOptions();
+      // The stale source (disc-9f) carries the badge; the fresh one does not.
+      expect(options[1].getElement().textContent).toContain('Stale');
+      expect(options[0].getElement().textContent).not.toContain('Stale');
+    });
+
+    describe('manual entry toggle (Requirement 7.3)', () => {
+      it('switches from the picker to the plain text input and back', () => {
+        const onParametersChange = vi.fn();
+        const { container } = render(
+          <NodeConfigPanel node={pickerNode()} onParametersChange={onParametersChange} />
+        );
+
+        // Starts on the reference picker: two selects, no plain input.
+        expect(createWrapper(container).findAllSelects()).toHaveLength(2);
+        expect(container.querySelector('input[aria-label="device"]')).toBeNull();
+
+        // Toggling manual entry shows the plain text input.
+        const toggle = container.querySelector(
+          'input[aria-label="Manual entry for device"]'
+        )!;
+        fireEvent.click(toggle);
+        const deviceInput = container.querySelector('input[aria-label="device"]')!;
+        expect(deviceInput).toBeInTheDocument();
+        expect(createWrapper(container).findAllSelects()).toHaveLength(0);
+
+        // Typed values propagate as ordinary parameter edits.
+        fireEvent.change(deviceInput, { target: { value: '/dev/video9' } });
+        expect(onParametersChange).toHaveBeenCalledWith('icam_source_1', {
+          device: '/dev/video9',
+        });
+
+        // Toggling back restores the picker.
+        fireEvent.click(toggle);
+        expect(container.querySelector('input[aria-label="device"]')).toBeNull();
+        expect(createWrapper(container).findAllSelects()).toHaveLength(2);
+      });
+
+      it('starts in manual mode for a hand-typed device value without a hint', () => {
+        const node = builderNode(CAMERA_DEVICE_ONLY, { device: '/dev/video7' });
+        const { container } = render(
+          <NodeConfigPanel node={node} onParametersChange={vi.fn()} />
+        );
+        expect(container.querySelector('input[aria-label="device"]')).toHaveValue(
+          '/dev/video7'
+        );
+        expect(createWrapper(container).findAllSelects()).toHaveLength(0);
+      });
+    });
+
+    describe('binding hint persistence (Requirement 7.5)', () => {
+      const HINT = {
+        cameraSourceId: 'cfg-a1b2',
+        cameraName: 'Line 1 inspection cam',
+        sourceDeviceId: 'dev-1',
+      };
+
+      it('reports the selection through onCameraSelection with the updated parameters and the hint', async () => {
+        const onParametersChange = vi.fn();
+        const onCameraSelection = vi.fn();
+        const { container } = render(
+          <NodeConfigPanel
+            node={pickerNode()}
+            onParametersChange={onParametersChange}
+            onCameraSelection={onCameraSelection}
+          />
+        );
+        await waitFor(() => expect(listDevices).toHaveBeenCalled());
+
+        const [deviceSelect, cameraSelect] = createWrapper(container).findAllSelects();
+        await waitFor(() => {
+          deviceSelect.openDropdown();
+          expect(deviceSelect.findDropdown().findOptions()).toHaveLength(2);
+        });
+        deviceSelect.selectOptionByValue('dev-1');
+        await waitFor(() => {
+          cameraSelect.openDropdown();
+          expect(cameraSelect.findDropdown().findOptions()).toHaveLength(2);
+        });
+        cameraSelect.selectOptionByValue('cfg-a1b2');
+
+        // The selection populates the node's parameters from the source
+        // and records the advisory hint; plain parameter edits are not
+        // routed through onParametersChange.
+        expect(onCameraSelection).toHaveBeenCalledWith(
+          'icam_source_1',
+          { device: '/dev/video2', gain: 8, exposure: 16000000 },
+          HINT
+        );
+        expect(onParametersChange).not.toHaveBeenCalled();
+      });
+
+      it('reads the hint back from node.data.advisoryData: picker pre-selected and link shown', async () => {
+        // A hand-set device value plus a hint starts on the picker (not
+        // manual entry), pre-selected to the hint's device and camera.
+        const node = builderNode(CAMERA_DEVICE_ONLY, { device: '/dev/video2' });
+        node.data = { ...node.data, advisoryData: { cameraBindingHint: HINT } };
+        const { container } = render(
+          <NodeConfigPanel node={node} onParametersChange={vi.fn()} />
+        );
+
+        expect(container.querySelector('input[aria-label="device"]')).toBeNull();
+        expect(
+          screen.getByText(/linked to Line 1 inspection cam on dev-1/)
+        ).toBeInTheDocument();
+
+        // The hint's device drives the camera fetch without user input.
+        await waitFor(() => expect(getDeviceCameras).toHaveBeenCalledWith('dev-1', 'uc-1'));
+
+        const [deviceSelect, cameraSelect] = createWrapper(container).findAllSelects();
+        await waitFor(() =>
+          expect(deviceSelect.findTrigger().getElement().textContent).toContain('edge-thing-1')
+        );
+        await waitFor(() =>
+          expect(cameraSelect.findTrigger().getElement().textContent).toContain(
+            'Line 1 inspection cam'
+          )
+        );
+      });
+    });
+  });
+
+  // ------------------------------------------------------------------------
+  // Aravis camera reference control (aravis-camera-input task 6.2,
+  // Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 7.4)
+  // ------------------------------------------------------------------------
+
+  describe('Aravis camera reference control (aravis-camera-input)', () => {
+    /** aravis_camera_source with only the camera_id parameter, so the
+     * picker's two selects (reference device + camera) are the only
+     * selects rendered. */
+    const ARAVIS: NodeTypeDescriptor = {
+      typeId: 'aravis_camera_source',
+      category: 'input',
+      displayName: 'Aravis Camera Source',
+      inputs: [],
+      outputs: [{ name: 'out', portType: 'VideoFrames' }],
+      parameters: [
+        {
+          name: 'camera_id',
+          paramType: 'string',
+          required: true,
+          default: null,
+          constraints: { minLength: 1 },
+        },
+      ],
+      mappings: [],
+      hardwareDependent: true,
+    };
+
+    const DEVICES = [
+      { device_id: 'dev-1', usecase_id: 'uc-1', thing_name: 'edge-thing-1', status: 'HEALTHY' },
+    ];
+
+    /** Two Aravis-compatible sources and two incompatible ones. */
+    const ARAVIS_REGISTRY_CAMERAS: CameraSourceEntry[] = [
+      {
+        camera_source_id: 'arv-3fe9c0d21ab4',
+        name: 'Basler line scan',
+        type: 'AravisDiscovered',
+        params: { cameraId: 'Basler-12345678', serial: '12345678', protocol: 'GigEVision' },
+        origin: 'edge-discovered',
+        sync_status: 'synced',
+        stale: false,
+        absent: false,
+      },
+      {
+        camera_source_id: 'cfg-cam1',
+        name: 'Configured Aravis cam',
+        type: 'Camera',
+        params: { cameraId: 'Aravis-Fake-GV01', gain: 12, exposure: 200000 },
+        origin: 'edge-configured',
+        sync_status: 'synced',
+        stale: true,
+        absent: false,
+      },
+      // Incompatible: V4L2-discovered hardware.
+      {
+        camera_source_id: 'disc-9f',
+        name: 'USB webcam',
+        type: 'V4L2Discovered',
+        params: { devicePath: '/dev/video5' },
+        origin: 'edge-discovered',
+        sync_status: 'synced',
+      },
+      // Incompatible: Camera-type source without a cameraId parameter.
+      {
+        camera_source_id: 'cfg-v4l2',
+        name: 'Path-only camera',
+        type: 'Camera',
+        params: { devicePath: '/dev/video2' },
+        origin: 'edge-configured',
+        sync_status: 'synced',
+      },
+    ];
+
+    beforeEach(() => {
+      listDevices.mockResolvedValue({ devices: DEVICES, count: DEVICES.length });
+      getDeviceCameras.mockResolvedValue({
+        device_id: 'dev-1',
+        state: 'synced',
+        cameras: ARAVIS_REGISTRY_CAMERAS,
+        count: ARAVIS_REGISTRY_CAMERAS.length,
+      });
+    });
+
+    /** Opens the picker's device dropdown and selects dev-1. */
+    async function selectReferenceDevice(container: HTMLElement) {
+      const [deviceSelect, cameraSelect] = createWrapper(container).findAllSelects();
+      await waitFor(() => {
+        deviceSelect.openDropdown();
+        expect(deviceSelect.findDropdown().findOptions()).toHaveLength(1);
+      });
+      deviceSelect.selectOptionByValue('dev-1');
+      await waitFor(() => expect(getDeviceCameras).toHaveBeenCalledWith('dev-1', 'uc-1'));
+      return cameraSelect;
+    }
+
+    it('renders the camera reference control for the camera_id parameter (Requirement 3.1)', () => {
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(ARAVIS)} onParametersChange={vi.fn()} />
+      );
+
+      // The picker's two selects render instead of a plain text input.
+      expect(createWrapper(container).findAllSelects()).toHaveLength(2);
+      expect(container.querySelector('input[aria-label="camera_id"]')).toBeNull();
+      expect(
+        container.querySelector('input[aria-label="Manual entry for camera_id"]')
+      ).not.toBeNull();
+    });
+
+    it('renders unrelated Aravis parameters as ordinary controls, not the picker (Requirement 3.1)', () => {
+      const withGainExposure: NodeTypeDescriptor = {
+        ...ARAVIS,
+        parameters: [
+          ...ARAVIS.parameters,
+          {
+            name: 'gain',
+            paramType: 'int',
+            required: false,
+            default: 4,
+            constraints: { min: 0, max: 100 },
+          },
+          {
+            name: 'exposure',
+            paramType: 'int',
+            required: false,
+            default: 5000000,
+            constraints: { min: 0 },
+          },
+        ],
+      };
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(withGainExposure)} onParametersChange={vi.fn()} />
+      );
+
+      // Only camera_id gets the reference control: still exactly the
+      // picker's two selects and one manual-entry toggle.
+      expect(createWrapper(container).findAllSelects()).toHaveLength(2);
+      expect(
+        container.querySelectorAll('input[aria-label^="Manual entry for"]')
+      ).toHaveLength(1);
+      // gain/exposure render as plain numeric inputs with their defaults.
+      expect(container.querySelector('input[aria-label="gain"]')).toHaveValue(4);
+      expect(container.querySelector('input[aria-label="exposure"]')).toHaveValue(5000000);
+    });
+
+    describe('Aravis cameraOption display fields (Requirements 3.5, 7.4)', () => {
+      it('describes the source by its camera id with name, type, and sync status', () => {
+        const option = cameraOption(ARAVIS_REGISTRY_CAMERAS[0], true);
+        expect(option.value).toBe('arv-3fe9c0d21ab4');
+        expect(option.label).toBe('Basler line scan');
+        // Aravis options describe the source by camera id, not device path.
+        expect(option.description).toBe('Basler-12345678');
+        expect(option.tags).toEqual(['AravisDiscovered', 'synced']);
+        // Fresh sources carry no staleness badge.
+        expect(option.labelTag).toBeUndefined();
+      });
+
+      it('badges stale sources and tags pending sync status', () => {
+        const stalePending = cameraOption(
+          { ...ARAVIS_REGISTRY_CAMERAS[1], sync_status: 'pending' },
+          true
+        );
+        expect(stalePending.labelTag).toBe('Stale');
+        expect(stalePending.tags).toContain('pending');
+        expect(stalePending.description).toBe('Aravis-Fake-GV01');
+      });
+
+      it('falls back to the id for nameless sources and omits the description without a camera id', () => {
+        const bare = cameraOption(
+          { camera_source_id: 'arv-bare', type: 'AravisDiscovered' },
+          true
+        );
+        expect(bare.label).toBe('arv-bare');
+        expect(bare.description).toBeUndefined();
+      });
+    });
+
+    it('offers only Aravis-compatible sources, described by camera id (Requirements 3.2, 3.5)', async () => {
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(ARAVIS)} onParametersChange={vi.fn()} />
+      );
+      await waitFor(() => expect(listDevices).toHaveBeenCalledWith('uc-1'));
+
+      const cameraSelect = await selectReferenceDevice(container);
+      await waitFor(() => {
+        cameraSelect.openDropdown();
+        expect(cameraSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+
+      const dropdownText = cameraSelect.findDropdown().getElement().textContent!;
+      // Compatible entries show name, type, camera id, and sync status.
+      expect(dropdownText).toContain('Basler line scan');
+      expect(dropdownText).toContain('AravisDiscovered');
+      expect(dropdownText).toContain('Basler-12345678');
+      expect(dropdownText).toContain('synced');
+      expect(dropdownText).toContain('Configured Aravis cam');
+      expect(dropdownText).toContain('Aravis-Fake-GV01');
+      // Incompatible entries are filtered out entirely.
+      expect(dropdownText).not.toContain('USB webcam');
+      expect(dropdownText).not.toContain('Path-only camera');
+      // Staleness badge on the stale compatible source only (Req 7.4/3.5).
+      const options = cameraSelect.findDropdown().findOptions();
+      expect(options[0].getElement().textContent).not.toContain('Stale');
+      expect(options[1].getElement().textContent).toContain('Stale');
+    });
+
+    it('populates camera_id/gain/exposure and records the hint on selection (Requirement 3.3)', async () => {
+      const onParametersChange = vi.fn();
+      const onCameraSelection = vi.fn();
+      const { container } = render(
+        <NodeConfigPanel
+          node={builderNode(ARAVIS)}
+          onParametersChange={onParametersChange}
+          onCameraSelection={onCameraSelection}
+        />
+      );
+      await waitFor(() => expect(listDevices).toHaveBeenCalled());
+
+      const cameraSelect = await selectReferenceDevice(container);
+      await waitFor(() => {
+        cameraSelect.openDropdown();
+        expect(cameraSelect.findDropdown().findOptions()).toHaveLength(2);
+      });
+      cameraSelect.selectOptionByValue('cfg-cam1');
+
+      expect(onCameraSelection).toHaveBeenCalledWith(
+        'aravis_camera_source_1',
+        { camera_id: 'Aravis-Fake-GV01', gain: 12, exposure: 200000 },
+        {
+          cameraSourceId: 'cfg-cam1',
+          cameraName: 'Configured Aravis cam',
+          sourceDeviceId: 'dev-1',
+        }
+      );
+      expect(onParametersChange).not.toHaveBeenCalled();
+    });
+
+    it('retains the manual-entry toggle for a typed camera id (Requirement 3.4)', () => {
+      const onParametersChange = vi.fn();
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(ARAVIS)} onParametersChange={onParametersChange} />
+      );
+
+      const toggle = container.querySelector(
+        'input[aria-label="Manual entry for camera_id"]'
+      )!;
+      fireEvent.click(toggle);
+
+      const input = container.querySelector('input[aria-label="camera_id"]')!;
+      expect(input).toBeInTheDocument();
+      expect(createWrapper(container).findAllSelects()).toHaveLength(0);
+
+      fireEvent.change(input, { target: { value: 'Aravis-Fake-GV02' } });
+      expect(onParametersChange).toHaveBeenCalledWith('aravis_camera_source_1', {
+        camera_id: 'Aravis-Fake-GV02',
+      });
+    });
+  });
+});
+
+// --------------------------------------------------------------------------
+// Per-node-type model_ref filtering (vllm-triton-inference Requirements
+// 6.2, 6.11, 8.3)
+// --------------------------------------------------------------------------
+
+describe('modelMatchesNodeType', () => {
+  it('llm_inference matches only vllm-typed records (Requirement 6.2)', () => {
+    expect(modelMatchesNodeType('llm_inference', 'vllm')).toBe(true);
+    expect(modelMatchesNodeType('llm_inference', 'anomaly_detection')).toBe(false);
+    expect(modelMatchesNodeType('llm_inference', 'object_detection')).toBe(false);
+    expect(modelMatchesNodeType('llm_inference', null)).toBe(false);
+    expect(modelMatchesNodeType('llm_inference', undefined)).toBe(false);
+  });
+
+  it('model_inference excludes vllm records but keeps every other type (Requirement 8.3)', () => {
+    expect(modelMatchesNodeType('model_inference', 'vllm')).toBe(false);
+    expect(modelMatchesNodeType('model_inference', 'anomaly_detection')).toBe(true);
+    expect(modelMatchesNodeType('model_inference', 'object_detection')).toBe(true);
+    // Pre-feature records may carry no model_type; they stay listed.
+    expect(modelMatchesNodeType('model_inference', null)).toBe(true);
+    expect(modelMatchesNodeType('model_inference', undefined)).toBe(true);
+  });
+});
+
+describe('modelSelectEmptyText', () => {
+  it('names the vLLM empty state for llm_inference (Requirement 6.11)', () => {
+    expect(modelSelectEmptyText('llm_inference')).toBe(
+      'No vLLM models are registered for this use case'
+    );
+  });
+
+  it('keeps the generic empty text for other model_ref consumers', () => {
+    expect(modelSelectEmptyText('model_inference')).toBe(
+      'No models registered for this use case'
+    );
+  });
+});
+
+describe('llm_inference model_ref select (Requirements 6.2, 6.11)', () => {
+  const LLM_INFERENCE: NodeTypeDescriptor = {
+    typeId: 'llm_inference',
+    category: 'inference',
+    displayName: 'LLM inference',
+    inputs: [{ name: 'in', portType: 'InferenceMeta' }],
+    outputs: [{ name: 'out', portType: 'InferenceMeta' }],
+    parameters: [
+      {
+        name: 'modelName',
+        paramType: 'model_ref',
+        required: true,
+        default: null,
+        constraints: {},
+      },
+    ],
+    mappings: [],
+    hardwareDependent: true,
+  };
+
+  it('offers exactly the vllm-typed records', async () => {
+    listModels.mockResolvedValue({
+      models: [
+        { name: 'vision-model', version: '1', stage: 'production', model_type: 'anomaly_detection' },
+        { name: 'llm-model', version: '1', stage: 'production', model_type: 'vllm' },
+      ],
+    });
+    const { container } = render(
+      <NodeConfigPanel node={builderNode(LLM_INFERENCE)} onParametersChange={vi.fn()} />
+    );
+
+    const select = createWrapper(container).findSelect()!;
+    await waitFor(() => {
+      select.openDropdown();
+      expect(select.findDropdown().findOptions()).toHaveLength(1);
+    });
+    expect(select.findDropdown().findOptions()[0].getElement().textContent).toContain(
+      'llm-model'
+    );
+  });
+
+  it('renders the empty vLLM indication when no vllm records exist', async () => {
+    listModels.mockResolvedValue({
+      models: [
+        { name: 'vision-model', version: '1', stage: 'production', model_type: 'anomaly_detection' },
+      ],
+    });
+    const { container } = render(
+      <NodeConfigPanel node={builderNode(LLM_INFERENCE)} onParametersChange={vi.fn()} />
+    );
+
+    const select = createWrapper(container).findSelect()!;
+    await waitFor(() => {
+      select.openDropdown();
+      expect(select.findDropdown().findOptions()).toHaveLength(0);
+    });
+    expect(select.findDropdown().getElement().textContent).toContain(
+      'No vLLM models are registered for this use case'
+    );
+  });
+});

@@ -29,6 +29,7 @@
 import awsiot.greengrasscoreipc
 from awsiot.greengrasscoreipc.model import StopComponentRequest, ListComponentsRequest, RestartComponentRequest
 from utils.constants import GG_IPC_FUTURE_TIMEOUT,LFV_AGENT_GG_COMPONENT_NAME, DDA_GG_COMPONENT_NAME_PREFIX
+from utils.ipc_client import get_ipc_client
 import logging
 logger = logging.getLogger(__name__)
 from exceptions.api.triton_exceptions import GreengrassOperationException, FileSaveException, UnarchiveFailureException
@@ -38,9 +39,14 @@ import zipfile
 from dda_triton.model_convertor import clean_directory
 import os
 import utils.constants as constants
-#TODO create a common ipc_clinet for gg related functions: https://issues.amazon.com/issues/DD-19576
+
+# All Greengrass IPC operations reuse ONE process-wide client (DD-19576).
+# Previously each function connected and close()d per call; that connect/close
+# churn tripped the aws-c-event-stream "Continuation ref count has gone
+# negative" fatal abort, killing the backend process (exit 255). The shared
+# client is never closed here — it lives for the process lifetime.
 def restart_components(components_to_restart):
-    ipc_client = awsiot.greengrasscoreipc.connect()
+    ipc_client = get_ipc_client()
     for component in components_to_restart:
         logger.info(f"Re-starting component :{component}")
         restart_component_request = RestartComponentRequest()
@@ -56,7 +62,6 @@ def restart_components(components_to_restart):
                             status_code=400,
                             message=f"Error while re-starting GG component :  {component}, due to : {restart_component_response.message}"
                         )
-    ipc_client.close()
 
 #TODO investigate usage of boolean in file directly: https://issues.amazon.com/issues/DD-19577
 def save_is_triton_value_to_file(is_triton="False"):
@@ -89,9 +94,8 @@ def list_gg_components(return_stopped_components=False, return_dda_components=Fa
     This function lists the LFV models and LFV edge agent GG components inluding their state
     """
     component_list=[]
-    # Create an IPC client
-    ipc_client = awsiot.greengrasscoreipc.connect()
-    logger.info("Created the ipc client ")
+    # Reuse the shared IPC client (never close it — see module note)
+    ipc_client = get_ipc_client()
     list_components_request = ListComponentsRequest()
     list_components_operation = ipc_client.new_list_components()
     list_components_operation.activate(list_components_request)
@@ -136,7 +140,6 @@ def list_gg_components(return_stopped_components=False, return_dda_components=Fa
     #Append LFV edge agent at the end
     if return_edge_agent:
         component_list.append(LFV_AGENT_GG_COMPONENT_NAME)
-    ipc_client.close()
     return component_list
 
 def list_all_gg_components_with_details():
@@ -148,21 +151,18 @@ def list_all_gg_components_with_details():
         [{"componentName": str, "version": str, "state": str}, ...]
     """
     components = []
-    ipc_client = awsiot.greengrasscoreipc.connect()
-    try:
-        list_components_request = ListComponentsRequest()
-        list_components_operation = ipc_client.new_list_components()
-        list_components_operation.activate(list_components_request)
-        list_components_future = list_components_operation.get_response()
-        list_components_response = list_components_future.result(GG_IPC_FUTURE_TIMEOUT)
-        for component in list_components_response.components:
-            components.append({
-                "componentName": component.component_name,
-                "version": component.version or "—",
-                "state": component.state or "UNKNOWN",
-            })
-    finally:
-        ipc_client.close()
+    ipc_client = get_ipc_client()
+    list_components_request = ListComponentsRequest()
+    list_components_operation = ipc_client.new_list_components()
+    list_components_operation.activate(list_components_request)
+    list_components_future = list_components_operation.get_response()
+    list_components_response = list_components_future.result(GG_IPC_FUTURE_TIMEOUT)
+    for component in list_components_response.components:
+        components.append({
+            "componentName": component.component_name,
+            "version": component.version or "—",
+            "state": component.state or "UNKNOWN",
+        })
     components.sort(key=lambda c: c["componentName"].lower())
     return components
 
@@ -171,8 +171,8 @@ def stop_running_component(component_name):
     """
     This function stops the GG component provided to the function as the argument
     """
-    # Create an IPC client
-    ipc_client = awsiot.greengrasscoreipc.connect()
+    # Reuse the shared IPC client (never close it — see module note)
+    ipc_client = get_ipc_client()
 
     stop_component_request = StopComponentRequest()
     stop_component_request.component_name = component_name
@@ -180,7 +180,6 @@ def stop_running_component(component_name):
     stop_component_operation.activate(stop_component_request)
     stop_component_future = stop_component_operation.get_response()
     stop_component_response = stop_component_future.result(GG_IPC_FUTURE_TIMEOUT)
-    ipc_client.close()
     if stop_component_response.stop_status == "SUCCEEDED":
         logger.info(f"Component {component_name} stopped successfully")
         return True

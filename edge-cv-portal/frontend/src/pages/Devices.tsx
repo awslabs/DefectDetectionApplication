@@ -14,10 +14,17 @@ import {
   Select,
   SelectProps,
 } from '@cloudscape-design/components';
-import { apiService } from '../services/api';
+import {
+  apiService,
+  DeviceRegistration,
+  RegistrationWithCommand,
+} from '../services/api';
 import { Device, UseCase } from '../types';
 import { useUsecase } from '../contexts/UsecaseContext';
 import { useTableSort } from '../hooks/useTableSort';
+import { getErrorMessage } from '../utils/errorHandling';
+import RegisterDeviceDialog from '../components/RegisterDeviceDialog';
+import SetupCommandDialog from '../components/SetupCommandDialog';
 
 export default function Devices() {
   const navigate = useNavigate();
@@ -25,11 +32,28 @@ export default function Devices() {
   const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   const [filteringText, setFilteringText] = useState('');
   const [selectedItems, setSelectedItems] = useState<Device[]>([]);
-  const [showRegisterModal, setShowRegisterModal] = useState(false);
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
+
+  // Device registrations (station-quick-setup Requirements 6.3, 6.4, 6.6, 6.9).
+  const [showRegisterDialog, setShowRegisterDialog] = useState(false);
+  const [setupResult, setSetupResult] = useState<RegistrationWithCommand | null>(
+    null
+  );
+  const [registrations, setRegistrations] = useState<DeviceRegistration[]>([]);
+  const [registrationsLoading, setRegistrationsLoading] = useState(false);
+  const [registrationsError, setRegistrationsError] = useState<string | null>(
+    null
+  );
+  // registration_id currently being regenerated/deleted (disables its row actions).
+  const [actioningId, setActioningId] = useState<string | null>(null);
+  // Registration pending a delete confirmation.
+  const [deleteTarget, setDeleteTarget] = useState<DeviceRegistration | null>(
+    null
+  );
+  const [deleting, setDeleting] = useState(false);
+
   // Use case management
   const [useCases, setUseCases] = useState<UseCase[]>([]);
   const [selectedUseCase, setSelectedUseCase] = useState<SelectProps.Option | null>(null);
@@ -83,12 +107,14 @@ export default function Devices() {
     loadUseCases();
   }, [selectedUsecaseId, setSelectedUsecaseId, searchParams]);
 
-  // Load devices when use case changes
+  // Load devices and registrations when the use case changes (poll on load).
   useEffect(() => {
     if (selectedUseCase?.value) {
       loadDevices();
+      loadRegistrations();
     } else {
       setDevices([]);
+      setRegistrations([]);
       setLoading(false);
     }
   }, [selectedUseCase]);
@@ -110,6 +136,84 @@ export default function Devices() {
     }
   };
 
+  // Poll the Device_Registrations for the selected Use_Case (Requirement 6.3).
+  const loadRegistrations = async () => {
+    if (!selectedUseCase?.value) {
+      setRegistrations([]);
+      return;
+    }
+    try {
+      setRegistrationsLoading(true);
+      setRegistrationsError(null);
+      const response = await apiService.listDeviceRegistrations(
+        selectedUseCase.value
+      );
+      setRegistrations(response.registrations || []);
+    } catch (err: any) {
+      console.error('Failed to load device registrations:', err);
+      setRegistrationsError(
+        getErrorMessage(err, 'Failed to load device registrations')
+      );
+      setRegistrations([]);
+    } finally {
+      setRegistrationsLoading(false);
+    }
+  };
+
+  // Refresh both the device list and the registrations panel.
+  const handleRefresh = () => {
+    loadDevices();
+    loadRegistrations();
+  };
+
+  // Regenerate the Setup_Command for a non-completed registration
+  // (Requirements 6.4, 2.5) and present the new command.
+  const handleRegenerate = async (registration: DeviceRegistration) => {
+    try {
+      setActioningId(registration.registration_id);
+      setRegistrationsError(null);
+      const result = await apiService.regenerateSetupCommand(
+        registration.registration_id
+      );
+      setSetupResult(result);
+      await loadRegistrations();
+    } catch (err: any) {
+      setRegistrationsError(
+        getErrorMessage(err, 'Failed to regenerate the setup command')
+      );
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  // Delete a non-completed registration, invalidating its token
+  // (Requirements 6.6, 6.9).
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      setDeleting(true);
+      setActioningId(deleteTarget.registration_id);
+      setRegistrationsError(null);
+      await apiService.deleteDeviceRegistration(deleteTarget.registration_id);
+      setDeleteTarget(null);
+      await loadRegistrations();
+    } catch (err: any) {
+      setRegistrationsError(
+        getErrorMessage(err, 'Failed to delete the device registration')
+      );
+    } finally {
+      setDeleting(false);
+      setActioningId(null);
+    }
+  };
+
+  // A newly created or regenerated registration should refresh the panel.
+  const handleRegistered = (result: RegistrationWithCommand) => {
+    setShowRegisterDialog(false);
+    setSetupResult(result);
+    loadRegistrations();
+  };
+
   const getStatusIndicator = (status: string) => {
     const statusLower = status?.toLowerCase() || 'unknown';
     switch (statusLower) {
@@ -123,6 +227,24 @@ export default function Devices() {
         return <StatusIndicator type="error">Error</StatusIndicator>;
       default:
         return <StatusIndicator type="info">{status || 'Unknown'}</StatusIndicator>;
+    }
+  };
+
+  // Setup_Status chip for a Device_Registration (Requirement 6.3).
+  const getRegistrationStatus = (status: DeviceRegistration['status']) => {
+    switch (status) {
+      case 'completed':
+        return <StatusIndicator type="success">Completed</StatusIndicator>;
+      case 'in_progress':
+        return <StatusIndicator type="in-progress">In progress</StatusIndicator>;
+      case 'pending':
+        return <StatusIndicator type="pending">Pending</StatusIndicator>;
+      case 'expired':
+        return <StatusIndicator type="stopped">Expired</StatusIndicator>;
+      case 'failed':
+        return <StatusIndicator type="error">Failed</StatusIndicator>;
+      default:
+        return <StatusIndicator type="info">{status}</StatusIndicator>;
     }
   };
 
@@ -164,7 +286,114 @@ export default function Devices() {
           {error}
         </Alert>
       )}
-      
+
+      {registrationsError && (
+        <Alert
+          type="error"
+          dismissible
+          onDismiss={() => setRegistrationsError(null)}
+        >
+          {registrationsError}
+        </Alert>
+      )}
+
+      {/* Device registrations panel (station-quick-setup Requirements 6.3, 6.4, 6.6, 6.9) */}
+      <Table
+        resizableColumns
+        variant="container"
+        header={
+          <Header
+            variant="h2"
+            description="Register a device to generate a one-line setup command, then track its provisioning status."
+            counter={`(${registrations.length})`}
+            actions={
+              <Button
+                variant="primary"
+                onClick={() => setShowRegisterDialog(true)}
+                disabled={!selectedUseCase}
+              >
+                Add Device
+              </Button>
+            }
+          >
+            Device Registrations
+          </Header>
+        }
+        loading={registrationsLoading}
+        items={registrations}
+        columnDefinitions={[
+          {
+            id: 'device_name',
+            header: 'Device Name',
+            cell: (item: DeviceRegistration) => item.device_name,
+          },
+          {
+            id: 'device_group',
+            header: 'Device Group',
+            cell: (item: DeviceRegistration) => item.device_group,
+          },
+          {
+            id: 'status',
+            header: 'Status',
+            cell: (item: DeviceRegistration) => getRegistrationStatus(item.status),
+          },
+          {
+            id: 'token_expires_at',
+            header: 'Token Expires',
+            // Show the token expiry only while pending/in_progress (Requirement 6.3).
+            cell: (item: DeviceRegistration) =>
+              item.status === 'pending' || item.status === 'in_progress'
+                ? new Date(item.token_expires_at * 1000).toLocaleString()
+                : '-',
+          },
+          {
+            id: 'actions',
+            header: 'Actions',
+            cell: (item: DeviceRegistration) => {
+              // Regenerate and Delete are offered only for non-completed
+              // registrations (Requirements 6.4, 6.6, 6.9).
+              if (item.status === 'completed') {
+                return '-';
+              }
+              const busy = actioningId === item.registration_id;
+              return (
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button
+                    variant="normal"
+                    loading={busy}
+                    onClick={() => handleRegenerate(item)}
+                  >
+                    Regenerate
+                  </Button>
+                  <Button
+                    variant="normal"
+                    disabled={busy}
+                    onClick={() => setDeleteTarget(item)}
+                  >
+                    Delete
+                  </Button>
+                </SpaceBetween>
+              );
+            },
+          },
+        ]}
+        empty={
+          <Box textAlign="center" color="inherit">
+            <b>No device registrations</b>
+            <Box padding={{ bottom: 's' }} variant="p" color="inherit">
+              {selectedUseCase
+                ? 'Add a device to generate a setup command for a new station.'
+                : 'Select a use case to view device registrations.'}
+            </Box>
+            {selectedUseCase && (
+              <Button onClick={() => setShowRegisterDialog(true)}>
+                Add Device
+              </Button>
+            )}
+          </Box>
+        }
+      />
+
       <Table
         resizableColumns
         header={
@@ -189,14 +418,18 @@ export default function Devices() {
                 />
                 <Button
                   iconName="refresh"
-                  onClick={loadDevices}
-                  loading={loading}
+                  onClick={handleRefresh}
+                  loading={loading || registrationsLoading}
                   disabled={!selectedUseCase}
                 >
                   Refresh
                 </Button>
-                <Button variant="primary" onClick={() => setShowRegisterModal(true)}>
-                  Register Device
+                <Button
+                  variant="primary"
+                  onClick={() => setShowRegisterDialog(true)}
+                  disabled={!selectedUseCase}
+                >
+                  Add Device
                 </Button>
               </SpaceBetween>
             }
@@ -269,106 +502,67 @@ export default function Devices() {
             <b>No devices</b>
             <Box padding={{ bottom: 's' }} variant="p" color="inherit">
               {selectedUseCase 
-                ? 'No portal-managed devices found. Devices must be set up using setup_station.sh to appear here.'
+                ? 'No portal-managed devices found. Register a device above to provision a new station.'
                 : 'Select a use case to view devices.'}
             </Box>
             {selectedUseCase && (
-              <Button onClick={() => setShowRegisterModal(true)}>Register Device</Button>
+              <Button onClick={() => setShowRegisterDialog(true)}>Add Device</Button>
             )}
           </Box>
         }
         variant="full-page"
       />
 
-      {/* Register Device Modal */}
+      {/* Register a device -> generates a one-line setup command (tasks 9.2/9.3). */}
+      <RegisterDeviceDialog
+        visible={showRegisterDialog}
+        usecaseId={selectedUseCase?.value ?? null}
+        onDismiss={() => setShowRegisterDialog(false)}
+        onRegistered={handleRegistered}
+      />
+
+      {/* Display the generated Setup_Command after create/regenerate. */}
+      {setupResult && (
+        <SetupCommandDialog
+          setupCommand={setupResult.setup_command}
+          tokenExpiresAt={setupResult.token_expires_at}
+          deviceName={setupResult.registration.device_name}
+          onDismiss={() => setSetupResult(null)}
+        />
+      )}
+
+      {/* Confirm deletion of a non-completed registration (Requirement 6.6). */}
       <Modal
-        visible={showRegisterModal}
-        onDismiss={() => setShowRegisterModal(false)}
-        header="Register Edge Device"
-        size="large"
+        visible={!!deleteTarget}
+        onDismiss={() => (deleting ? undefined : setDeleteTarget(null))}
+        header="Delete device registration"
         footer={
           <Box float="right">
-            <Button variant="primary" onClick={() => setShowRegisterModal(false)}>
-              Close
-            </Button>
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button
+                variant="link"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={handleConfirmDelete}
+                loading={deleting}
+              >
+                Delete
+              </Button>
+            </SpaceBetween>
           </Box>
         }
       >
-        <SpaceBetween size="l">
-          <Alert type="info">
-            Devices are registered using the <code>setup_station.sh</code> script which provisions 
-            the device with AWS IoT Greengrass and tags it for portal discovery.
-          </Alert>
-
-          <Box>
-            <Box variant="h3" padding={{ bottom: 's' }}>
-              Prerequisites
-            </Box>
-            <Box variant="p">
-              Before running the setup script, ensure:
-            </Box>
-            <ul>
-              <li>AWS CLI is configured with appropriate credentials</li>
-              <li>The device has Ubuntu 18.04+ or compatible Linux distribution</li>
-              <li>Root/sudo access is available on the device</li>
-            </ul>
+        <SpaceBetween size="m">
+          <Box variant="p">
+            Delete the registration for{' '}
+            <b>{deleteTarget?.device_name}</b>? This invalidates its setup
+            token, so any unused setup command will stop working.
           </Box>
-
-          <Box>
-            <Box variant="h3" padding={{ bottom: 's' }}>
-              Run Setup Script
-            </Box>
-            <Box variant="p" padding={{ bottom: 's' }}>
-              Copy the setup script to your device and run:
-            </Box>
-            <Box padding="s" color="text-body-secondary">
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px' }}>
-                {`# Copy the station_install folder to your device
-scp -r station_install/ user@device:/tmp/
-
-# SSH to the device and run setup
-ssh user@device
-cd /tmp/station_install
-sudo ./setup_station.sh us-east-1 my-device-name`}
-              </pre>
-            </Box>
-          </Box>
-
-          <Box>
-            <Box variant="h3" padding={{ bottom: 's' }}>
-              What the Script Does
-            </Box>
-            <ul>
-              <li>Installs Python 3.9, Java, Docker, and other dependencies</li>
-              <li>Downloads and installs AWS IoT Greengrass Core v2</li>
-              <li>Creates an IoT Thing and provisions certificates</li>
-              <li>Tags the IoT Thing with <code>dda-portal:managed=true</code> for portal discovery</li>
-              <li>Sets up required users, groups, and permissions</li>
-            </ul>
-          </Box>
-
-          <Box>
-            <Box variant="h3" padding={{ bottom: 's' }}>
-              After Setup
-            </Box>
-            <Box variant="p">
-              Once the script completes successfully, the device will automatically appear in this 
-              portal within a few minutes. The device status will show as "Healthy" once Greengrass 
-              is running and connected.
-            </Box>
-          </Box>
-
-          <Alert type="warning">
-            <Box variant="strong">For Existing Devices:</Box> If you have devices that were set up 
-            before the portal tagging feature, you can manually tag them:
-            <Box padding="s" color="text-body-secondary">
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px' }}>
-{`aws iot tag-resource \\
-  --resource-arn arn:aws:iot:REGION:ACCOUNT:thing/THING_NAME \\
-  --tags "Key=dda-portal:managed,Value=true"`}
-              </pre>
-            </Box>
-          </Alert>
         </SpaceBetween>
       </Modal>
     </SpaceBetween>

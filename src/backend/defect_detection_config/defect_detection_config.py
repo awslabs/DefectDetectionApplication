@@ -55,6 +55,8 @@ class DefectDetectionConfig:
         self.ipc_client = ipc_client
         self.config_cache = dict()
         self.lock = Lock()
+        # Resolved LocalServer component name, discovered once per instance.
+        self._component_name = None
 
     def get_component_config(self, name: str):
         # guarantee thread-safe when this is called by multiple threads
@@ -89,18 +91,23 @@ class DefectDetectionConfig:
         return value
     
     def get_local_server_component_name(self):
-        """Get component name based on OS architecture"""
-        arch = platform.machine().lower()
-        logger.warning(f"Detected architecture: {arch}")  # Add this to see actual value
+        """Resolve the running LocalServer component name via dynamic
+        discovery (ListComponents prefix match), cached per instance.
 
-        if arch in ['aarch64', 'arm64']:
-            return "aws.edgeml.dda.LocalServer.arm64"
-        elif arch in ['x86_64', 'amd64']:
-            return "aws.edgeml.dda.LocalServer.amd64"
-        else:
-            # Fallback to dynamic discovery
-            logger.warning(f"Unknown architecture {arch}, falling back to dynamic discovery")
-            return self.find_local_server_component_name()
+        The name cannot be derived from the CPU architecture alone: aarch64
+        alone spans three distinct components (``...LocalServer.arm64`` on
+        JP4, ``...arm64JP5``, ``...arm64JP6``). The previous hardcoded
+        arch map returned the JP4 name on every Jetson, so JP5/JP6
+        stations failed every GetConfiguration call in a retry loop.
+        """
+        if self._component_name:
+            return self._component_name
+        name = self.find_local_server_component_name()
+        if name != DDA_LOCAL_SERVER_COMPONENT:
+            # Cache only a real discovery; the bare prefix fallback means
+            # ListComponents failed, so retry discovery on the next call.
+            self._component_name = name
+        return name
     
     def find_local_server_component_name(self):
         """Find the actual LocalServer component name dynamically"""

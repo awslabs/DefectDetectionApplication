@@ -211,8 +211,9 @@ def test_run_audit_non_empty_but_disallowed_hits_empty_on_fixed_tree():
     (non-empty) while the precise ``disallowed_hits()`` gate is empty after
     D1-D5."""
     raw = audit.run_audit()
-    assert len(raw) == 5, (
-        "run_audit() must enumerate the five in-scope FROMs; got "
+    assert len(raw) == 6, (
+        "run_audit() must enumerate the six in-scope FROMs (D1-D5 + the "
+        "Dockerfile.jp6 trt8 TensorRT 8 provider stage); got "
         + "; ".join(f"{audit._rel(h.path)}:{h.lineno}" for h in raw)
     )
 

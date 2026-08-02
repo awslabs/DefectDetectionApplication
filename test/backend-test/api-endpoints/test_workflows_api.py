@@ -378,6 +378,66 @@ class TestWorkflows(LocalServerBaseTestCase):
         assert self.mock_get_inference_results_object.mock_calls[0] == object_mock_calls[0]
         assert self.mock_get_inference_results_object.mock_calls[1] == object_mock_calls[1]
 
+    # ------------------------------------------------------------------ #
+    # Deployed-workflow run observability: base output image serving
+    # (Requirements 4.2, 4.7). Served on the unauthenticated_router with
+    # token-in-query, matching the existing capture-image routes above so a
+    # browser <img> load carries the credential as a URL parameter.
+    # ------------------------------------------------------------------ #
+    def _override_download_db(self, execution):
+        from endpoints import download_file
+
+        class _FakeSession:
+            def get(self, _model, _key):
+                return execution
+
+        def _dep():
+            yield _FakeSession()
+
+        from app import app
+        app.dependency_overrides[download_file.get_db] = _dep
+
+    def test_load_workflow_execution_output_image_serves_file(self):
+        class _Exec:
+            output_dir = "/aws_dda/captures/wf-1/exec-1"
+            capture_id = "wf-1-exec-1"
+
+        self._override_download_db(_Exec())
+        # Route resolves the base image via run_artifacts and serves it; token
+        # auth is the shared open-access path (no token) as with capture images.
+        with patch(
+            "endpoints.download_file.run_artifacts.base_output_image_path",
+            return_value="test/backend-test/captured_images_for_test/test-1.jpg",
+        ) as resolve_mock:
+            response = self.client.get(
+                "/workflows/executions/exec-1/output-image"
+            )
+        resolve_mock.assert_called_once_with(
+            "/aws_dda/captures/wf-1/exec-1", "wf-1-exec-1"
+        )
+        assert response.status_code == 200, f"status_code: {response.status_code}"
+        assert response.headers["content-type"] == "image/jpeg"
+
+    def test_load_workflow_execution_output_image_unknown_execution_404(self):
+        self._override_download_db(None)
+        response = self.client.get("/workflows/executions/nope/output-image")
+        assert response.status_code == 404, f"status_code: {response.status_code}"
+
+    def test_load_workflow_execution_output_image_missing_file_404(self):
+        class _Exec:
+            output_dir = "/aws_dda/captures/wf-1/exec-1"
+            capture_id = "wf-1-exec-1"
+
+        self._override_download_db(_Exec())
+        with patch(
+            "endpoints.download_file.run_artifacts.base_output_image_path",
+            return_value=None,
+        ):
+            response = self.client.get(
+                "/workflows/executions/exec-1/output-image"
+            )
+        assert response.status_code == 404, f"status_code: {response.status_code}"
+
     @patch("utils.server_setup.inference_result_accessor.list_inference_result_data_with_capture_task_id")
     @patch("utils.server_setup.capture_task_manager.get_tasks", return_value=[{"captureTaskId": "fake-2d8b47fdadcb47859578be3e2c76e072","workflowId": "fake","interval": 5,"count": 5,"status": "Running"}])
     def test_get_capture_task_status(self, mock_get_tasks, mock_list_capture):

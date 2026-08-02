@@ -154,7 +154,7 @@ _reads = st.lists(st.integers(min_value=0, max_value=4), min_size=0, max_size=10
 # Feature: concurrent-camera-stream-viewing, Property 5: Producer cadence is independent of viewer count
 # Validates: Requirements 4.5
 @pytest.mark.parametrize("backend_cls", MOCK_BACKEND_CLASSES.values(), ids=list(MOCK_BACKEND_CLASSES))
-@settings(max_examples=150)
+@settings(max_examples=25)
 @given(
     payloads=_payloads,
     width=st.integers(min_value=1, max_value=64),

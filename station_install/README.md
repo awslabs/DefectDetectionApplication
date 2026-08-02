@@ -432,6 +432,45 @@ aws iam put-role-policy --role-name GreengrassV2TokenExchangeRole \
   }'
 ```
 
+### Shadow Cloud Sync Fails with ForbiddenException (403)
+
+**Error:** in `greengrass.log`, repeated on every shadow update:
+```
+com.aws.greengrass.shadowmanager.sync...: sync.Skipping sync request.
+{thing name=..., shadow name=dda-camera-registry}
+...SkipSyncRequestException: ...IotDataPlaneException: Service returned error
+code ForbiddenException (Service: IotDataPlane, Status Code: 403, ...)
+```
+
+**Cause:** the Greengrass installer creates `GreengrassV2IoTThingPolicy` with
+MQTT-only grants (`iot:Connect/Publish/Subscribe/Receive` + `greengrass:*`).
+The Shadow Manager component syncs named shadows (`dda-camera-registry`,
+`dda-user-accounts`, `dda-camera-bindings`) to the cloud over the **HTTP IoT
+data plane**, which requires the explicit `iot:*ThingShadow` actions. Local
+shadows keep working, so the only symptom is stale cloud/portal shadow state
+plus these log errors.
+
+**Solution:** `setup_station.sh` now adds the missing statement automatically
+("Ensuring IoT thing policy allows shadow data-plane sync"). For devices
+provisioned before this change, re-run `setup_station.sh` or apply it once
+per account manually:
+```bash
+aws iot create-policy-version --policy-name GreengrassV2IoTThingPolicy \
+  --set-as-default --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      { "Effect": "Allow",
+        "Action": ["iot:Connect", "iot:Publish", "iot:Subscribe", "iot:Receive", "greengrass:*"],
+        "Resource": "*" },
+      { "Effect": "Allow",
+        "Action": ["iot:GetThingShadow", "iot:UpdateThingShadow", "iot:DeleteThingShadow"],
+        "Resource": "arn:aws:iot:*:*:thing/${iot:Connection.Thing.ThingName}" }
+    ]
+  }'
+```
+The policy variable scopes each device to its own thing's shadows. No device
+restart is needed; the change takes effect on the next sync attempt.
+
 ### Can't Connect to Device
 
 ```bash

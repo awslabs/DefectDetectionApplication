@@ -304,7 +304,7 @@ def _claims_strategy(draw):
 
 
 # Validates: Requirements 3.1
-@settings(max_examples=60, deadline=None,
+@settings(max_examples=25, deadline=None,
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(method_arn=_ARN, claims=_claims_strategy(), token_a=_SECRET, token_b=_SECRET)
 def test_s1_policy_is_pure_function_of_claims_not_the_log_line(

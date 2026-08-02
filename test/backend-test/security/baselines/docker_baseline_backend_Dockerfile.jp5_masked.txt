@@ -153,6 +153,27 @@ RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
         pip install --no-cache-dir ${ONNXRUNTIME_SPEC}; \
     fi
 
+# ── vLLM hook (disabled by default) ────────────────────────────────────────
+# (vllm-triton-inference, Requirement 4.2) JetPack 5 conditional-support hook,
+# mirroring Dockerfile.jp6's build-arg-gated vLLM layer with VLLM_ENABLE=0:
+# with the default the RUN below installs nothing, so the JP5 image build
+# behavior is unchanged. If a viable JP5 (r35 / CUDA 11.4 / cp311 aarch64)
+# vLLM build ever materializes, enabling it is this build arg plus the
+# JP5_VLLM_ENABLED catalog flag — app.py's capability probe
+# (importlib.util.find_spec("vllm")) governs runtime behavior either way.
+ARG VLLM_ENABLE=0
+ARG VLLM_SPEC=""
+ARG VLLM_INDEX_URL=""
+RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
+        if [ -n "$VLLM_INDEX_URL" ]; then \
+            pip install --no-cache-dir --index-url ${VLLM_INDEX_URL} ${VLLM_SPEC}; \
+        else \
+            pip install --no-cache-dir ${VLLM_SPEC}; \
+        fi; \
+    else \
+        echo "vLLM layer skipped (VLLM_ENABLE=${VLLM_ENABLE}, VLLM_SPEC='${VLLM_SPEC}')"; \
+    fi
+
 # Build aravis from source (apt deps already installed above)
 RUN pip install --no-cache-dir meson ninja
 # Downgrade setuptools so g-ir-scanner can find distutils.msvccompiler (removed in setuptools>=71)
@@ -190,6 +211,19 @@ COPY defect_detection_config ./defect_detection_config
 COPY dda_logging ./dda_logging
 COPY endpoints ./endpoints
 COPY data_models ./data_models
+COPY camera_discovery ./camera_discovery
+COPY camera_sync ./camera_sync
+COPY workflow_engine ./workflow_engine
+# vllm-triton-inference (Requirements 4.1, 8.7): the companion vLLM runtime
+# package — new module, needs its own COPY (missing COPY lines have caused
+# startup regressions). The feature's other modules ride existing COPYs:
+# endpoints/text_generation.py (COPY endpoints), workflow_engine/
+# llm_inference.py + vendored catalog (COPY workflow_engine),
+# dda_triton/vllm_model_prep.py (COPY dda_triton),
+# utils/feature_configs_utils.py (COPY utils), app.py (COPY app.py).
+COPY vllm_runtime ./vllm_runtime
+COPY local_auth ./local_auth
+COPY user_accounts_sync ./user_accounts_sync
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY dda_triton ./dda_triton

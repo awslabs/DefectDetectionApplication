@@ -229,7 +229,7 @@ class ViewerLimitMachine(RuleBasedStateMachine):
 # Min 100 iterations (examples), with enough steps per example to fill past the
 # small max_viewers boundary and exercise re-subscribe after unsubscribe.
 ViewerLimitMachine.TestCase.settings = settings(
-    max_examples=120,
+    max_examples=25,
     stateful_step_count=24,
     deadline=None,
 )

@@ -1,0 +1,2 @@
+# Runtime dependencies for the workflow_core Lambda layer.
+jsonschema>=3.2,<5

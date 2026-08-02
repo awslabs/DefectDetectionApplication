@@ -1,7 +1,14 @@
 #!/bin/bash
-# Build the JP6 and JP5 LocalServer components SEQUENTIALLY via GDK.
+# Build the per-JetPack LocalServer components SEQUENTIALLY via GDK.
 #
-# Sequential is REQUIRED (see .kiro/steering/builds.md): the two targets share
+# Each JetPack target N is built as the explicitly-tagged component
+# aws.edgeml.dda.LocalServer.arm64JP${N} (COMPONENT_PREFIX + N). JetPack 4
+# therefore builds as aws.edgeml.dda.LocalServer.arm64JP4 — the explicit name
+# that replaces the retired bare aws.edgeml.dda.LocalServer.arm64 (see
+# .kiro/specs/localserver-arch-naming). JP4/JP5/JP6 all share this one naming
+# path; nothing here emits the bare untagged arm64 name.
+#
+# Sequential is REQUIRED (see .kiro/steering/builds.md): the targets share
 # greengrass-build/, custom-build/, and the docker image tags
 # (edgemlsdk / flask-app / react-webapp), so concurrent runs clobber each other
 # and corrupt model versioning. This wrapper builds one target fully before
@@ -12,6 +19,7 @@
 #   ./run_jp_builds.sh                # build JP6 then JP5 (default)
 #   TARGETS="6" ./run_jp_builds.sh    # build only JP6
 #   TARGETS="5 6" ./run_jp_builds.sh  # build JP5 then JP6
+#   TARGETS="4" ./run_jp_builds.sh    # build only JP4 (aws.edgeml.dda.LocalServer.arm64JP4)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

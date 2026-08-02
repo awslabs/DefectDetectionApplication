@@ -1,0 +1,5 @@
+# Development / test-only dependencies for the portal backend.
+# Runtime Lambda dependencies live in requirements.txt and the layer
+# requirements files; nothing here is packaged into a deployment artifact.
+pytest==8.4.2
+moto[s3,dynamodb]==5.1.22

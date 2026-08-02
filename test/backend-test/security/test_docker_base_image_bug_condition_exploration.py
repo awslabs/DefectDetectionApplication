@@ -59,6 +59,8 @@ REPO_ROOT = audit.REPO_ROOT
 # The three immutable manifest-list digests the fix pins to (design table).
 DIGEST_L4T_R3541 = "sha256:d1c8e971ab994235840eacc31c4ef4173bf9156317b1bf8aabe7e01eb21b2a0e"
 DIGEST_L4T_R3630 = "sha256:b3bbd7e3f3a0879a6672adc64aef7742ba12f9baaf1451c91215942c46e4e2fa"
+# r36.4.0: the jp6-vllm-enablement base bump for src/backend/Dockerfile.jp6 (D4).
+DIGEST_L4T_R3640 = "sha256:34ccf0f3b63c6da9eee45f2e79de9bf7fdf3beda9abfd72bbf285ae9d40bb673"
 DIGEST_CUDA_11419 = "sha256:fb22ff080631990dda403fd768acb384dc3745a7e516f5ed1dc4c4944898da78"
 
 
@@ -173,25 +175,29 @@ def test_docker_audit_returns_no_disallowed_hits():
 
 
 def test_run_audit_non_empty():
-    """The RAW ``run_audit()`` enumeration is NON-EMPTY and enumerates the five
-    in-scope ``FROM``s (D1-D5) while excluding the vendored duplicate. This is
-    the enumeration anchor and stays green before and after the fix."""
+    """The RAW ``run_audit()`` enumeration is NON-EMPTY and enumerates the six
+    in-scope ``FROM``s (D1-D5 plus the Dockerfile.jp6 TensorRT 8 provider stage)
+    while excluding the vendored duplicate. This is the enumeration anchor and
+    stays green before and after the fix."""
     all_hits = audit.run_audit()
     assert all_hits, "expected a non-empty raw enumeration of in-scope FROM lines"
 
-    # Exactly five in-scope FROMs (D1, D2, D3, D4, D5) -- unchanged by the fix.
-    assert len(all_hits) == 5, (
-        f"expected 5 in-scope FROM lines (D1-D5), got {len(all_hits)}:\n"
+    # Six in-scope FROMs: D1, D2, D3 (cuda114), D4 (final), D5, and the
+    # Dockerfile.jp6 ``trt8`` TensorRT 8 provider stage added for the Neo/DLR
+    # model runtime (device-arch-compatibility: libnvinfer.so.8).
+    assert len(all_hits) == 6, (
+        f"expected 6 in-scope FROM lines (D1-D5 + jp6 trt8 stage), got {len(all_hits)}:\n"
         + "\n".join(
             f"  {os.path.relpath(h.path, REPO_ROOT)}:{h.lineno}: {h.text.strip()}"
             for h in all_hits
         )
     )
 
-    # Each of the four in-scope files is represented; jp6 backend carries two.
+    # Each of the four in-scope files is represented; jp6 backend carries three
+    # (cuda114 provider, trt8 provider, final runtime).
     assert len(audit.hits_for(audit.BACKEND_JP5_REL, all_hits)) == 1
     assert len(audit.hits_for(audit.EDGEMLSDK_JP5_REL, all_hits)) == 1
-    assert len(audit.hits_for(audit.BACKEND_JP6_REL, all_hits)) == 2
+    assert len(audit.hits_for(audit.BACKEND_JP6_REL, all_hits)) == 3
     assert len(audit.hits_for(audit.EDGEMLSDK_JP6_REL, all_hits)) == 1
 
     # The vendored edgemlsdk/edgemlsdk/... duplicate is never enumerated.
@@ -276,19 +282,30 @@ def test_d3_backend_jp6_cuda114_from_is_parameterized_and_pinned():
 # --------------------------------------------------------------------------- #
 def test_d4_backend_jp6_final_from_is_parameterized_and_pinned():
     """D4 (Req 2.4): src/backend/Dockerfile.jp6's final runtime FROM is now
-    ``${BASE_REGISTRY}/nvidia/l4t-jetpack:r36.3.0@sha256:b3bbd7e3...e2fa`` --
-    parameterized + pinned with the ``r36.3.0`` tag retained -- and there is
+    ``${BASE_REGISTRY}/nvidia/l4t-jetpack:r36.4.0@sha256:34ccf0f3...b673`` --
+    parameterized + pinned with the ``r36.4.0`` tag retained (bumped from
+    r36.3.0 by jp6-vllm-enablement) -- and there is
     exactly ONE ``ARG BASE_REGISTRY`` in the whole file (the single shared ARG
     declared before the first FROM, no re-declaration). FIXED-TREE SECURE
     INVARIANT (flipped from the task-1 counterexample)."""
     from_lines = _from_lines(audit.BACKEND_JP6_REL)
-    assert len(from_lines) == 2, (
-        f"expected two FROMs in Dockerfile.jp6, got {len(from_lines)}"
+    assert len(from_lines) == 3, (
+        f"expected three FROMs in Dockerfile.jp6 (cuda114, trt8, final), got "
+        f"{len(from_lines)}"
     )
-    lineno, line = from_lines[1]  # the SECOND FROM is the final runtime stage
+    # The MIDDLE FROM is the TensorRT 8 provider stage (``trt8``) added for the
+    # Neo/DLR model runtime; it is registry-parameterized + digest-pinned to the
+    # JetPack 5 image (r35.4.1) whose TRT 8.5 libs are CUDA-11.4-linked.
+    trt8_lineno, trt8_line = from_lines[1]
+    print(f"\n[D4 fixed] Dockerfile.jp6 trt8:{trt8_lineno} == {trt8_line!r}")
+    _assert_secure_from(
+        trt8_line, image_tag="l4t-jetpack:r35.4.1", digest=DIGEST_L4T_R3541,
+        stage="trt8",
+    )
+    lineno, line = from_lines[-1]  # the LAST FROM is the final runtime stage
     print(f"\n[D4 fixed] Dockerfile.jp6:{lineno} == {line!r}")
     _assert_secure_from(
-        line, image_tag="l4t-jetpack:r36.3.0", digest=DIGEST_L4T_R3630, stage=None
+        line, image_tag="l4t-jetpack:r36.4.0", digest=DIGEST_L4T_R3640, stage=None
     )
 
     # Exactly ONE ARG BASE_REGISTRY in the file (shared across both FROMs, no

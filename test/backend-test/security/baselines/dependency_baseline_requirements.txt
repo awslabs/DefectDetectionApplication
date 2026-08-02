@@ -40,3 +40,9 @@ sqlalchemy==2.0.21
 alembic==1.12.1
 httpx==0.24.1
 scikit-learn>=1.1.3,<1.2
+# opcua 0.98.13 is the final release of the pure-Python `python-opcua` project
+# (import name `opcua`); it ships only as an sdist that builds an interpreter-agnostic
+# py3-none-any wheel, so it installs and imports cleanly under JP5 Python 3.11 / aarch64.
+# Required at runtime by _default_opcua_writer for the opcua_write output binding.
+# Transitive deps (cryptography, python-dateutil, pytz, aiofiles, lxml) resolve on-device.
+opcua==0.98.13

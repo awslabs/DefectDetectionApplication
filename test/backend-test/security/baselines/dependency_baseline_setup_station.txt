@@ -538,9 +538,9 @@ echo "▶ Installing Python 3.11..."
 # or 20.04 (focal, JP5) on arm64 (Jetson) — it only ships arm64 packages for
 # 22.04 (jammy, JP6). So build from source on 18.04/20.04 and use the PPA only
 # on 22.04+ (with a source-build fallback if the PPA install fails, e.g. on an
-# unexpected arch/release). In every case the SYSTEM python3 is left unchanged —
+# unexpected arch/release). In every case, do NOT change the system python3 —
 # apt and other OS tools depend on it and its C extensions (apt_pkg, etc.);
-# python3.11 is installed alongside it.
+# python3.11 is installed alongside it, leaving the SYSTEM python3 unchanged.
 case "$UBUNTU_VERSION" in
   18.04|20.04)
     echo "Detected Ubuntu $UBUNTU_VERSION - building Python 3.11 from source (deadsnakes has no prebuilt 3.11 for this release/arch)..."
@@ -932,6 +932,74 @@ echo "▶ Provisioning Greengrass Core Device..."
 # policy updates) can authenticate.
 resolve_aws_credentials || true
 
+# IoT Thing Group the Greengrass core device joins. Overridable via the
+# DDA_THING_GROUP environment variable (used by the portal quick-setup flow);
+# defaults to the historical fixed group so the script stays fully functional
+# standalone. The Greengrass provisioner creates the group when it does not exist.
+thing_group_name="${DDA_THING_GROUP:-DDA_transition_EC2_Group}"
+
+# --- Nucleus platform variant override (device-arch-compatibility) -----------
+# LocalServer ships as independently-versioned per-JetPack aarch64 variants
+# (arm64_jp4 / arm64_jp5 / arm64_jp6) that ALL report architecture "aarch64" to
+# Greengrass. A Workflow_Component packaged for more than one arm variant
+# disambiguates its per-arch manifests with a custom Nucleus platform attribute
+# `variant` (== the workflow_core arch token). Unless the device declares that
+# attribute, such a component fails to deploy ("The version of component ...
+# does not claim platform compatibility"). Seed platformOverride.variant at
+# provision time so the device matches its own variant manifest.
+#
+# The arch token is detected with the shared detect_arch.sh helper (the same
+# detection the quick-setup flow reports), so both provisioning paths agree; an
+# explicit DDA_PLATFORM_VARIANT env var overrides detection (testing / unusual
+# images). Only the aarch64 JetPack variants need the disambiguator — x86
+# flavors match on the standard architecture/runtime attributes — so the
+# override is written only for arm64_* tokens. --init-config MERGES with the
+# provisioning-generated config (per the Greengrass installer docs), so this
+# adds the single key without disturbing the provisioned connectivity config.
+gg_init_config_arg=""
+platform_variant="${DDA_PLATFORM_VARIANT:-}"
+if [ -z "$platform_variant" ]; then
+    setup_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    for _detect_arch_candidate in \
+        "${setup_script_dir}/detect_arch.sh" \
+        "${setup_script_dir}/quick_setup/detect_arch.sh"; do
+        if [ -f "$_detect_arch_candidate" ]; then
+            # shellcheck source=/dev/null
+            . "$_detect_arch_candidate"
+            break
+        fi
+    done
+    if command -v detect_target_architecture >/dev/null 2>&1; then
+        platform_variant="$(detect_target_architecture 2>/dev/null || true)"
+    fi
+fi
+case "$platform_variant" in
+    arm64_*)
+        gg_init_config_file="./GreengrassInstaller/dda-init-config.yaml"
+        if { printf '%s\n' \
+                "---" \
+                "services:" \
+                "  aws.greengrass.Nucleus:" \
+                "    configuration:" \
+                "      platformOverride:" \
+                "        variant: \"${platform_variant}\"" \
+                > "$gg_init_config_file"; } 2>/dev/null; then
+            gg_init_config_arg="--init-config ${gg_init_config_file}"
+            echo "✓ Nucleus platform variant override: ${platform_variant}"
+        else
+            add_warning "Could not write Greengrass init-config for platform variant '${platform_variant}'; multi-arch Workflow_Components may not deploy to this device"
+        fi
+        ;;
+    "")
+        add_warning "Device platform variant could not be determined; multi-arch Workflow_Components may need a manual Nucleus platformOverride.variant on this device"
+        ;;
+    *)
+        # x86_64 / x86_64_nvidia: the standard architecture/runtime platform
+        # attributes suffice; no `variant` disambiguator is required.
+        :
+        ;;
+esac
+
 JAVA_CRED_PROPS=""
 if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
     JAVA_CRED_PROPS="-Daws.accessKeyId=$AWS_ACCESS_KEY_ID -Daws.secretAccessKey=$AWS_SECRET_ACCESS_KEY"
@@ -943,10 +1011,73 @@ else
 fi
 
 if ! AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
-    run_cmd "java -Droot=/aws_dda/greengrass/v2 -Dlog.store=FILE $JAVA_CRED_PROPS -jar ./GreengrassInstaller/lib/Greengrass.jar --aws-region ${aws_region} --thing-name ${thing_name} --thing-group-name DDA_transition_EC2_Group --thing-policy-name GreengrassV2IoTThingPolicy --tes-role-name GreengrassV2TokenExchangeRole --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias --component-default-user ggc_user:ggc_group --setup-system-service true --provision true"; then
+    run_cmd "java -Droot=/aws_dda/greengrass/v2 -Dlog.store=FILE $JAVA_CRED_PROPS -jar ./GreengrassInstaller/lib/Greengrass.jar --aws-region ${aws_region} --thing-name ${thing_name} --thing-group-name ${thing_group_name} --thing-policy-name GreengrassV2IoTThingPolicy --tes-role-name GreengrassV2TokenExchangeRole --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias --component-default-user ggc_user:ggc_group ${gg_init_config_arg} --setup-system-service true --provision true"; then
     add_error "Greengrass provisioning failed"
 else
     echo "✓ Greengrass Core provisioned successfully"
+fi
+echo ""
+
+echo "▶ Ensuring IoT thing policy allows shadow data-plane sync..."
+# The Greengrass installer creates GreengrassV2IoTThingPolicy with MQTT-only
+# grants (iot:Connect/Publish/Subscribe/Receive + greengrass:*). The Shadow
+# Manager component syncs named shadows (dda-camera-registry,
+# dda-user-accounts, dda-camera-bindings) to the cloud over the HTTP IoT data
+# plane, which requires the explicit iot:*ThingShadow actions — without them
+# cloud sync fails with ForbiddenException (403) while local shadows keep
+# working, so cloud/portal shadow copies silently go stale. Idempotent: skips
+# when the default policy version already grants UpdateThingShadow; prunes the
+# oldest non-default version first when the 5-version limit is reached.
+gg_thing_policy="GreengrassV2IoTThingPolicy"
+policy_doc=$(aws iot get-policy --policy-name "$gg_thing_policy" --query policyDocument --output text 2>/dev/null || echo "")
+if [ -z "$policy_doc" ]; then
+    add_warning "Could not read $gg_thing_policy - verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow)"
+elif echo "$policy_doc" | grep -q "iot:UpdateThingShadow"; then
+    echo "✓ $gg_thing_policy already grants shadow data-plane actions"
+else
+    version_count=$(aws iot list-policy-versions --policy-name "$gg_thing_policy" --query 'length(policyVersions)' --output text 2>/dev/null || echo "0")
+    if [ "$version_count" -ge 5 ]; then
+        oldest_version=$(aws iot list-policy-versions --policy-name "$gg_thing_policy" \
+            --query 'policyVersions[?isDefaultVersion==`false`] | sort_by(@, &createDate)[0].versionId' --output text 2>/dev/null || echo "")
+        if [ -n "$oldest_version" ] && [ "$oldest_version" != "None" ]; then
+            run_cmd "aws iot delete-policy-version --policy-name $gg_thing_policy --policy-version-id $oldest_version" \
+                || add_warning "Could not prune old $gg_thing_policy version"
+        fi
+    fi
+    shadow_policy_file=$(mktemp)
+    cat > "$shadow_policy_file" <<'POLICY_EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iot:Connect",
+        "iot:Publish",
+        "iot:Subscribe",
+        "iot:Receive",
+        "greengrass:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iot:GetThingShadow",
+        "iot:UpdateThingShadow",
+        "iot:DeleteThingShadow"
+      ],
+      "Resource": "arn:aws:iot:*:*:thing/${iot:Connection.Thing.ThingName}"
+    }
+  ]
+}
+POLICY_EOF
+    if run_cmd "aws iot create-policy-version --policy-name $gg_thing_policy --policy-document file://$shadow_policy_file --set-as-default"; then
+        echo "✓ Added shadow data-plane actions to $gg_thing_policy"
+    else
+        add_warning "Could not update $gg_thing_policy with shadow permissions - shadow cloud sync will fail with 403. Add iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow manually."
+    fi
+    rm -f "$shadow_policy_file"
 fi
 echo ""
 
@@ -1282,6 +1413,38 @@ else
         echo "   ✓ ECR access policy attached"
     else
         add_warning "Could not attach ECR access policy. Device may not be able to pull Docker-based components from ECR."
+    fi
+    echo ""
+    
+    # ShadowManager cloud sync needs the IoT data-plane shadow actions on the
+    # token exchange role. Without them, its sync loop fails with
+    # ForbiddenException (403) and the dda-camera-registry /
+    # dda-camera-bindings named shadows never mirror to IoT Core — the Portal
+    # shows devices as "Never synced" and camera refresh fails with
+    # "Device has no camera registry shadow to refresh from".
+    echo "3.6 Adding ShadowManager shadow sync policy..."
+    if run_cmd "aws iam put-role-policy \
+      --role-name GreengrassV2TokenExchangeRole \
+      --policy-name ShadowManagerSyncPolicy \
+      --policy-document '{
+        \"Version\": \"2012-10-17\",
+        \"Statement\": [
+          {
+            \"Sid\": \"ShadowManagerCloudSync\",
+            \"Effect\": \"Allow\",
+            \"Action\": [
+              \"iot:GetThingShadow\",
+              \"iot:UpdateThingShadow\",
+              \"iot:DeleteThingShadow\",
+              \"iot:ListNamedShadowsForThing\"
+            ],
+            \"Resource\": \"arn:aws:iot:*:${aws_account_id}:thing/*\"
+          }
+        ]
+      }'"; then
+        echo "   ✓ ShadowManager shadow sync policy attached"
+    else
+        add_warning "Could not attach ShadowManager shadow sync policy. Camera registry sync to the Portal will fail with ForbiddenException."
     fi
     echo ""
     

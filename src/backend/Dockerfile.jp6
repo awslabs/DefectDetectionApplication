@@ -7,17 +7,30 @@ ARG BASE_REGISTRY=nvcr.io
 # are compiled against CUDA 11.4. The Neo artifact bundles its own libdlr.so
 # which dynamically links libcudart.so.11.0 (RUNPATH
 # /usr/local/cuda-11.4/targets/aarch64-linux/lib). JetPack 6 only ships CUDA
-# 12.2 (libcudart.so.12), so the model would fail to load with
+# 12.6 (libcudart.so.12), so the model would fail to load with
 # "libcudart.so.11.0: cannot open shared object file". We pull just the CUDA
 # 11.4 runtime lib from NVIDIA's official NGC l4t-cuda image at BUILD time
 # (nothing is committed to the repo) and stage it at the exact RUNPATH the
 # bundled libdlr.so expects. That path is NOT shadowed by the runtime
 # `-v /usr/local/cuda:/usr/local/cuda` host mount (which mounts /usr/local/cuda,
 # not /usr/local/cuda-11.4), so it resolves without disturbing the host CUDA 12.
-# A CUDA 12.2 driver is backward-compatible with the CUDA 11.x runtime, so the
+# A CUDA 12.6 driver is backward-compatible with the CUDA 11.x runtime, so the
 # 11.4 cudart works against JetPack 6's GPU driver.
 FROM ${BASE_REGISTRY}/nvidia/l4t-cuda:11.4.19-runtime@sha256:fb22ff080631990dda403fd768acb384dc3745a7e516f5ed1dc4c4944898da78 AS cuda114
-FROM ${BASE_REGISTRY}/nvidia/l4t-jetpack:r36.3.0@sha256:b3bbd7e3f3a0879a6672adc64aef7742ba12f9baaf1451c91215942c46e4e2fa
+# ── TensorRT 8 provider (for the Neo/DLR model runtime) ─────────────────────
+# The Neo-compiled model's bundled libdlr.so ALSO DT_NEEDs libnvinfer.so.8
+# (TensorRT 8), on top of libcudart.so.11.0. JetPack 6 ships TensorRT 10
+# (libnvinfer.so.10), so a DLR model fails to load with
+# "libnvinfer.so.8: cannot open shared object file". TensorRT 8's own
+# transitive DLA/tegra deps (libnvdla_compiler.so, libcudla.so.1, libnvos.so,
+# libcuda.so.1) are already present on the JetPack 6 device at runtime (the
+# L4T driver libs), so only the TRT 8 userspace stack must be supplied. Pull
+# the matched CUDA-11.4-linked TRT 8.5 + cuDNN 8 + cuBLAS 11 libraries from
+# the JetPack 5 image (r35.4.1) at BUILD time — their sonames (.so.8 / .so.11)
+# never collide with the base image's TRT 10 / cuDNN 9 / cuBLAS 12, so the
+# TRT10 (ONNX Runtime) and CUDA 12 (torch/vLLM) paths are undisturbed.
+FROM ${BASE_REGISTRY}/nvidia/l4t-jetpack:r35.4.1@sha256:d1c8e971ab994235840eacc31c4ef4173bf9156317b1bf8aabe7e01eb21b2a0e AS trt8
+FROM ${BASE_REGISTRY}/nvidia/l4t-jetpack:r36.4.0@sha256:34ccf0f3b63c6da9eee45f2e79de9bf7fdf3beda9abfd72bbf285ae9d40bb673
 # Re-declare after FROM so the build arg is available in the build stage.
 ARG PYTHON_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
@@ -28,6 +41,9 @@ RUN if [ -f /usr/bin/py3compile ]; then mv /usr/bin/py3compile /usr/bin/py3compi
     if [ -f /usr/bin/py3clean ]; then mv /usr/bin/py3clean /usr/bin/py3clean.bak && \
     echo '#!/bin/sh' > /usr/bin/py3clean && chmod +x /usr/bin/py3clean; fi
 
+# DDA interpreter (PYTHON_VERSION, 3.10 on JP6): resolves from the jammy main
+# archive (the deadsnakes PPA presence is harmless and is still needed for the
+# 3.11 tooling interpreter installed below).
 RUN apt-get update && \
     dpkg --configure -a || true && \
     apt-get install -f -y || true && \
@@ -36,6 +52,16 @@ RUN apt-get update && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install -y --no-install-recommends wget build-essential cmake libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-distutils
+
+# ── Tooling interpreter (CPython 3.11) ──────────────────────────────────────
+# The Jetson AI Lab vLLM wheels are cp310-only, so the DDA backend runs on
+# PYTHON_VERSION (3.10) — but the Triton Python-backend stub built by the
+# edgemlsdk image is linked against libpython3.11, so CPython 3.11 must stay
+# installed and functional alongside the DDA interpreter. Installed from
+# deadsnakes while py3compile is still disabled (same segfault avoidance as
+# the other apt layers).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3.11 python3.11-dev python3.11-venv python3.11-distutils
 
 RUN apt-get update
 
@@ -87,10 +113,36 @@ RUN apt-get update \
 RUN if [ -f /usr/bin/py3compile.bak ]; then mv /usr/bin/py3compile.bak /usr/bin/py3compile; fi && \
     if [ -f /usr/bin/py3clean.bak ]; then mv /usr/bin/py3clean.bak /usr/bin/py3clean; fi
 
-# NOW switch python3 to 3.11 — all apt installs are done, no more py3compile under 3.11
+# NOW switch python3 to the DDA interpreter (PYTHON_VERSION, 3.10 on JP6) — all
+# apt installs are done, no more py3compile under the switched python3. Every
+# `pip`/`python3` layer below targets the DDA interpreter via this alternative.
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}
+# ORDERING CONSTRAINT: get-pip.py installs the /usr/local/bin/pip console
+# script for whichever interpreter ran it LAST. The 3.11 tooling bootstrap
+# must therefore run FIRST and the DDA interpreter's bootstrap LAST, so every
+# bare `pip install` layer below deterministically targets the DDA
+# interpreter (python${PYTHON_VERSION}). With the order reversed, the later
+# layers silently build cp311 wheels (psutil, awscrt, requirements.txt, …)
+# for the ${PYTHON_VERSION} runtime and the awscrt import check fails. The
+# 3.11 stub-dependency installs below never rely on the bare `pip` script —
+# they invoke `python3.11 -m pip` explicitly.
+RUN wget -q https://bootstrap.pypa.io/get-pip.py && python3.11 get-pip.py && rm get-pip.py
 RUN wget -q https://bootstrap.pypa.io/get-pip.py && python3 get-pip.py && rm get-pip.py
+# Fail fast if the bare `pip` script does not target the DDA interpreter.
+RUN pip --version | grep -F "(python ${PYTHON_VERSION})" || \
+    (echo "ERROR: bare pip targets the wrong interpreter:" && pip --version && exit 1)
+
+# Triton Python-backend stub dependency set for the 3.11 tooling interpreter
+# (pip bootstrapped above): the closure of what executes inside the cp311
+# stub — the vision model templates (lfv_model_template.py /
+# marshal_for_capture_template.py: numpy, cv2), the inference_runtimes.py
+# lazy engines (dlr), and the lyra utility packages (numpy/sklearn/Pillow;
+# the lyra packages themselves ride PYTHONPATH=/ and need no install).
+# onnxruntime for the stub is installed by its own layer below.
+RUN python3.11 -m pip install --no-cache-dir numpy==1.24.3 opencv-python 'scikit-learn>=1.1.3,<1.2' dlr==1.10.0 Pillow==10.3.0 dill
+# Fail the build if any stub dependency does not import under 3.11.
+RUN python3.11 -c "import numpy, cv2, sklearn, dlr, PIL, dill; print('stub deps OK')"
 
 # Install pip packages (native build, no QEMU workarounds needed)
 RUN pip install --no-cache-dir pycairo==1.23.0
@@ -130,26 +182,144 @@ RUN pip install --no-cache-dir -r ./model_conversion_requirements.txt
 RUN pip install --no-cache-dir 'setuptools<81'
 
 # ── ONNX Runtime for the pluggable ONNX inference engine ───────────────────
-# The OnnxRunner in dda_triton/resources_for_copy/inference_runtimes.py runs
-# in-container under the DDA python (PYTHON_VERSION, default 3.11). Two modes,
-# selected by build-args:
+# The OnnxRunner in dda_triton/resources_for_copy/inference_runtimes.py does
+# NOT run in the DDA app process: lfv_model_template.py imports it inside the
+# Triton Python-backend stub, which the edgemlsdk build links against
+# libpython3.11. Both branches therefore target the 3.11 tooling interpreter,
+# not the PYTHON_VERSION (3.10) DDA interpreter. Two modes, selected by
+# build-args:
 #   * Default (CPU): prebuilt CPU wheel (onnxruntime 1.16.3 ships a cp311 aarch64
 #     manylinux_2_17 wheel, works on this glibc 2.35 base). Fast.
 #   * GPU (ONNXRUNTIME_GPU=1): build onnxruntime-gpu from source with the CUDA +
-#     TensorRT execution providers against the base image's CUDA 12.2 / TRT 8.6,
-#     for the PYTHON_VERSION interpreter. NVIDIA's prebuilt Jetson GPU wheels
-#     target the JetPack's native python (3.10 on r36), not ours, so a GPU build
-#     must be compiled here. This is a long, memory-heavy build, hence opt-in.
-# `pip` targets the PYTHON_VERSION interpreter (the python3 alternative).
+#     TensorRT execution providers against the base image's CUDA 12.6 / TRT 10.3,
+#     for the 3.11 stub interpreter (PYBIN=/usr/bin/python3.11). NVIDIA's
+#     prebuilt Jetson GPU wheels target the JetPack's native python (3.10 on
+#     r36), not the stub's cp311, so a GPU build must be compiled here. This is
+#     a long, memory-heavy build, hence opt-in.
 # OnnxRunner prefers TensorRT -> CUDA -> CPU providers automatically, so the
 # same code path works for either wheel. DLR-only / PyTorch-only models are
 # unaffected (engines are imported lazily per-runner).
 ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
 ARG ONNXRUNTIME_GPU=0
 RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
-        JETPACK_MAJOR=6 ./edge_ml1_p_camera_management/install_onnxruntime_gpu.sh; \
+        PYBIN=/usr/bin/python3.11 JETPACK_MAJOR=6 ./edge_ml1_p_camera_management/install_onnxruntime_gpu.sh; \
     else \
-        pip install --no-cache-dir ${ONNXRUNTIME_SPEC}; \
+        python3.11 -m pip install --no-cache-dir ${ONNXRUNTIME_SPEC}; \
+    fi
+
+# ── vLLM engine for the companion Triton_vLLM_Runtime ──────────────────────
+# (jp6-vllm-enablement, Requirements 1.1, 1.2, 1.4–1.7) Default-enabled layer
+# installing the pinned prebuilt Jetson AI Lab wheel vllm==0.10.2+cu126 for
+# the DDA interpreter (PYTHON_VERSION=3.10 — the jp6/cu126 wheels are
+# cp310-only, which is why the backend runs 3.10 on JP6). The index is used
+# as --extra-index-url so pure-python transitive deps (transformers,
+# tokenizers, …) resolve from PyPI while the +cu126 local-version wheel
+# (vllm) can only be satisfied by the Jetson index — PyPI never hosts
+# local-version specifiers, so the pin cannot be hijacked upstream. torch is
+# pinned to 2.8.0 (the version vllm 0.10.2 pairs with) and MUST come from the
+# Jetson index: both indexes host a "torch-2.8.0" wheel of the SAME version
+# string, but PyPI's is a manylinux_2_28_aarch64 CPU-only build (no
+# libtorch_cuda.so — vLLM model loads then die with "libtorch_cuda.so: cannot
+# open shared object file") while the Jetson wheel is a linux_aarch64 CUDA
+# 12.6 build. When both indexes are consulted pip prefers PyPI's manylinux
+# wheel, so torch is installed in its own step with --index-url pointing ONLY
+# at the Jetson index (no PyPI fallback), before the vllm step resolves the
+# rest. That step uses --no-deps: the Jetson index hosts only the CUDA wheels,
+# NOT torch's pure-python runtime deps (filelock, sympy, networkx, jinja2,
+# fsspec, typing-extensions), so resolving deps against the Jetson-only index
+# fails with "No matching distribution found for filelock". Installing the
+# torch wheel alone here and letting the vllm step below (which carries
+# --extra-index-url PyPI) backfill those pure-python deps keeps the CUDA torch
+# wheel un-hijackable while still satisfying torch's imports.
+# Pinning also avoids PyPI's newer aarch64 torch (>=2.13), which pulls
+# the nvidia-*-cu13 dependency family whose nvidia-cusparselt-cu13 ships no
+# aarch64 wheel, failing the pip-check verification gate below. The
+# "numpy>=1.26,<2" co-constraint caps the numpy that vllm/torch pull below
+# 2.0, protecting the cp310 ABI surface of scikit-learn<1.2 and opencv in the
+# same environment (requirements.txt itself is untouched — shared with
+# JP5/x86). The layer sits after all app-dependency layers so pip resolves
+# against the final environment, and before the aravis build so a
+# wheel-resolution failure aborts early. transformers is co-pinned to <5:
+# left floating, pip resolves transformers 5.x from PyPI, whose tokenizer
+# API drops `all_special_tokens_extended` — vllm 0.9.3's TokenizerGroup
+# still reads it, so every model load fails on-device with
+# "GPT2Tokenizer has no attribute all_special_tokens_extended" (observed on
+# jp6-orinagx with transformers 5.14.1). The >=4.51.1 floor is vllm 0.9.3's
+# own minimum. triton (the OpenAI GPU-kernel compiler, NOT the NVIDIA
+# inference server) is installed from the Jetson index in a follow-up step:
+# the Jetson vllm wheel does not declare it as a dependency, but vLLM's CUDA
+# execution path imports it at engine init — without it every model load
+# fails on-device with "No module named 'triton'" (observed on jp6-orinagx).
+# The build-host verification below cannot catch that miss: with no GPU
+# driver vLLM reports UnspecifiedPlatform and never takes the CUDA path, so
+# the import-time probe passes regardless. Hence the explicit find_spec
+# check in the verification gate. Failure is loud: no `|| true`, a
+# failed install fails the image build with the pip error in the log. Build
+# with VLLM_ENABLE=0 (or an empty VLLM_SPEC) to skip the layer; app.py's
+# capability probe (importlib.util.find_spec("vllm")) then runs the
+# pre-feature startup sequence exactly.
+# vllm is pinned to 0.9.3+cu126, NOT 0.10.2+cu126: the index's 0.10.2 wheel
+# aborts the whole process (std::bad_alloc inside torch operator registration
+# while dlopen'ing vllm/_C.abi3.so — a wheel/torch ABI incompatibility against
+# the index's current torch-2.8.0 build). The 0.9.3 wheel from the same wheel
+# batch registers its ops cleanly against torch 2.8.0 and carries the same
+# classic V0 API surface (AsyncEngineArgs/SamplingParams/AsyncLLMEngine) that
+# vllm_runtime/manager.py targets. The full-import verification gate below
+# exists precisely to catch this class of breakage at build time.
+ARG VLLM_ENABLE=1
+ARG VLLM_SPEC="vllm==0.9.3+cu126"
+ARG VLLM_INDEX_URL="https://pypi.jetson-ai-lab.io/jp6/cu126"
+# Classic V0 engine: vllm_runtime/manager.py targets AsyncLLMEngine; V1 is the
+# default engine selection since vLLM 0.8, so pin the V0 path explicitly.
+ENV VLLM_USE_V1=0
+# The Jetson CUDA torch wheel is a plain linux_aarch64 build (not manylinux):
+# unlike PyPI's manylinux wheel it does NOT vendor openblas and dynamically
+# links the JetPack system libopenblas.so.0. Install it (small, pure-C runtime
+# lib — no python packages, so no py3compile concern) before torch, or
+# `import torch` dies with "libopenblas.so.0: cannot open shared object file".
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libopenblas0 && \
+    rm -rf /var/lib/apt/lists/*
+RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
+        if [ -n "$VLLM_INDEX_URL" ]; then \
+            pip install --no-cache-dir --index-url ${VLLM_INDEX_URL} --no-deps "torch==2.8.0"; \
+        fi && \
+        pip install --no-cache-dir \
+            ${VLLM_INDEX_URL:+--extra-index-url ${VLLM_INDEX_URL}} \
+            ${VLLM_SPEC} "torch==2.8.0" "numpy>=1.26,<2" "transformers>=4.51.1,<5" && \
+        if [ -n "$VLLM_INDEX_URL" ]; then \
+            pip install --no-cache-dir --index-url ${VLLM_INDEX_URL} "triton==3.6.0"; \
+        fi; \
+    else \
+        echo "vLLM layer skipped (VLLM_ENABLE=${VLLM_ENABLE}, VLLM_SPEC='${VLLM_SPEC}')"; \
+    fi
+# Post-install verification (gated to mirror the install condition):
+#   1. the installed vllm distribution is exactly ${VLLM_SPEC}'s version —
+#      the +cu126 local-version wheel from the Jetson index (metadata check);
+#   2. FULL `import vllm` + the classic V0 API surface vllm_runtime/manager.py
+#      targets. On the driverless build host a healthy wheel degrades
+#      gracefully (WARNING about libcuda.so.1, no GPU init), while a
+#      torch-ABI-broken wheel (e.g. the index's 0.10.2+cu126 against
+#      torch-2.8.0) hard-aborts with std::bad_alloc during vllm._C operator
+#      registration — exactly the crash that took down the backend on-device,
+#      so the abort failing this RUN is the gate working;
+#   3. torch imports and is a CUDA build (torch.version.cuda set AND
+#      libtorch_cuda.so shipped — catches the PyPI CPU-only manylinux wheel
+#      shadowing the Jetson CUDA wheel);
+#   4. the app's startup dependency surface survives the vllm/torch
+#      transitive installs (catches a numpy/torch clobber);
+#   5. pip's resolver reports no broken requirements.
+# Any miss fails the build.
+RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
+        python3 -c "import importlib.metadata as md; want='${VLLM_SPEC}'.split('==')[1]; got=md.version('vllm'); assert got == want, 'vllm dist mismatch: got %s, want %s' % (got, want); print('vllm dist', got, 'OK')" && \
+        python3 -c "import vllm; from vllm import AsyncEngineArgs, SamplingParams; from vllm.engine.async_llm_engine import AsyncLLMEngine; print('vllm', vllm.__version__, 'classic API OK')" && \
+        python3 -c "import importlib.metadata as md; v=md.version('transformers'); assert int(v.split('.')[0]) < 5, 'transformers %s too new for vllm 0.9.x (needs <5)' % v; import transformers.tokenization_utils_base as b; assert hasattr(b.PreTrainedTokenizerBase, 'all_special_tokens_extended'), 'tokenizer API missing all_special_tokens_extended'; print('transformers', v, 'tokenizer API OK')" && \
+        python3 -c "import triton; print('triton', triton.__version__, 'OK (vLLM CUDA-path kernel compiler)')" && \
+        python3 -c "import os, torch; assert torch.version.cuda, 'torch is CPU-only (torch.version.cuda is None)'; lib = os.path.join(os.path.dirname(torch.__file__), 'lib', 'libtorch_cuda.so'); assert os.path.exists(lib), 'libtorch_cuda.so missing: ' + lib; print('torch', torch.__version__, 'CUDA', torch.version.cuda, 'OK')" && \
+        python3 -c "import numpy, cv2, gi, dlr, fastapi, sqlalchemy, awscrt.mqtt; print('app deps OK')" && \
+        pip check; \
+    else \
+        echo "vLLM verification skipped (VLLM_ENABLE=${VLLM_ENABLE}, VLLM_SPEC='${VLLM_SPEC}')"; \
     fi
 
 # Build aravis from source (apt deps already installed above)
@@ -157,10 +327,11 @@ RUN pip install --no-cache-dir meson ninja
 # Downgrade setuptools so g-ir-scanner can find distutils.msvccompiler (removed in setuptools>=71)
 RUN pip install --no-cache-dir 'setuptools<71'
 # Fix g-ir-scanner to use the base image's system python (its _giscanner C
-# extension is built for the distro python — 3.10 on the jammy/r36 base — not
-# the 3.11 we switch to). Detect it dynamically rather than hardcoding 3.8.
-# The exclusion grep drops the DDA interpreter (3.11) from the candidates so the
-# distro python (3.10) keeps being selected.
+# extension is built for the distro python — 3.10 on the jammy/r36 base).
+# Detect it dynamically rather than hardcoding 3.8. The exclusion grep drops
+# the 3.11 tooling interpreter (deadsnakes) from the candidates so the distro
+# python (3.10) keeps being selected — on JP6 that coincides with the DDA
+# interpreter version, which is equally correct for _giscanner.
 RUN SYS_PY=$(ls /usr/bin/python3.1? /usr/bin/python3.8 2>/dev/null | grep -v 3.11 | head -1) && \
     SYS_PY=${SYS_PY:-/usr/bin/python3.10} && \
     echo "Using system python for g-ir-scanner: $SYS_PY" && \
@@ -196,19 +367,40 @@ COPY defect_detection_config ./defect_detection_config
 COPY dda_logging ./dda_logging
 COPY endpoints ./endpoints
 COPY data_models ./data_models
+COPY camera_discovery ./camera_discovery
+COPY camera_sync ./camera_sync
+COPY workflow_engine ./workflow_engine
+# vllm-triton-inference (Requirements 4.1, 8.7): the companion vLLM runtime
+# package — new module, needs its own COPY (missing COPY lines have caused
+# startup regressions). The feature's other modules ride existing COPYs:
+# endpoints/text_generation.py (COPY endpoints), workflow_engine/
+# llm_inference.py + vendored catalog (COPY workflow_engine),
+# dda_triton/vllm_model_prep.py (COPY dda_triton),
+# utils/feature_configs_utils.py (COPY utils), app.py (COPY app.py).
+COPY vllm_runtime ./vllm_runtime
+COPY local_auth ./local_auth
+COPY user_accounts_sync ./user_accounts_sync
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY dda_triton ./dda_triton
 COPY lyra_anomalies_mask_utils ./lyra_anomalies_mask_utils
 COPY lyra_science_processing_utils ./lyra_science_processing_utils
-CMD ["python3.11", "app.py"]
+# python3 is the update-alternatives-managed DDA interpreter selected by the
+# PYTHON_VERSION build arg (3.10 on JP6) — no hardcoded interpreter binary.
+CMD ["python3", "app.py"]
 
 ## TODO: Remove copy edgemlsdk files here. Change to direct build in Docker
 # To test and build - Copy artifacts file to /src/backend/edgemlsdk
 COPY edgemlsdk ./edgemlsdk
-RUN ./edge_ml1_p_camera_management/install_edgemlsdk.sh
+# DDA_PYTHON targets the script's pip installs (boto3, scikit-learn, dill, the
+# panorama wheel) at the DDA interpreter; JP5/x86 callers omit it and keep the
+# python3.11 default.
+RUN DDA_PYTHON=python${PYTHON_VERSION} ./edge_ml1_p_camera_management/install_edgemlsdk.sh
 COPY dlr_disable_phone_home.py ./
-RUN python${PYTHON_VERSION} dlr_disable_phone_home.py
+# dlr is installed for both interpreters (DDA app under python${PYTHON_VERSION},
+# Triton stub deps under python3.11), so disable phone-home in both environments.
+RUN python${PYTHON_VERSION} dlr_disable_phone_home.py && \
+    python3.11 dlr_disable_phone_home.py
 
 # Stage the CUDA 11.4 runtime libs from the NGC l4t-cuda image at the exact
 # RUNPATH the Neo-compiled model's bundled libdlr.so expects
@@ -223,6 +415,95 @@ RUN echo "/usr/local/cuda-11.4/targets/aarch64-linux/lib" > /etc/ld.so.conf.d/cu
     ldconfig && \
     ldconfig -p | grep -i "libcudart.so.11" || \
     (echo "ERROR: libcudart.so.11 not staged" && ls -l /usr/local/cuda-11.4/targets/aarch64-linux/lib/ && exit 1)
+
+# Stage the TensorRT 8.5 userspace stack (+ cuDNN 8 / cuBLAS 11, all CUDA-11.4-
+# linked) from the JetPack 5 image so the Neo/DLR model's bundled libdlr.so can
+# resolve its libnvinfer.so.8 dependency. TRT dlopens cuDNN/cuBLAS lazily at
+# inference time, so the matched pair is staged alongside libnvinfer. Only the
+# real .so.<ver> files are copied and the sonames are recreated as symlinks in
+# the image (COPY does not follow the source symlinks). These sonames
+# (libnvinfer.so.8, libcudnn.so.8, libcublas.so.11, ...) do NOT collide with the
+# base image's TensorRT 10 / cuDNN 9 / cuBLAS 12, so the ONNX Runtime (TRT 10)
+# and torch/vLLM (CUDA 12) paths are unaffected. TRT 8's transitive DLA/tegra
+# deps (libnvdla_compiler.so, libcudla.so.1, libnvos.so, libcuda.so.1) are
+# provided by the JetPack 6 device's L4T driver libs at runtime, so they are
+# intentionally NOT baked here (a build-host load check would fail on those
+# runtime-only driver libs; correctness is verified on-device).
+COPY --from=trt8 /usr/lib/aarch64-linux-gnu/libnvinfer.so.8.5.2 \
+     /usr/lib/aarch64-linux-gnu/libnvinfer_plugin.so.8.5.2 \
+     /usr/lib/aarch64-linux-gnu/libnvonnxparser.so.8.5.2 \
+     /usr/lib/aarch64-linux-gnu/libnvparsers.so.8.5.2 \
+     /usr/lib/aarch64-linux-gnu/libnvinfer_builder_resource.so.8.5.2 \
+     /usr/lib/aarch64-linux-gnu/libcudnn.so.8.6.0 \
+     /usr/lib/aarch64-linux-gnu/libcudnn_ops_infer.so.8.6.0 \
+     /usr/lib/aarch64-linux-gnu/libcudnn_cnn_infer.so.8.6.0 \
+     /usr/lib/aarch64-linux-gnu/libcudnn_adv_infer.so.8.6.0 \
+     /opt/dda/trt8-runtime/lib/
+COPY --from=trt8 /usr/local/cuda-11.4/targets/aarch64-linux/lib/libcublas.so.11.6.6.84 \
+     /usr/local/cuda-11.4/targets/aarch64-linux/lib/libcublasLt.so.11.6.6.84 \
+     /opt/dda/trt8-runtime/lib/
+RUN cd /opt/dda/trt8-runtime/lib && \
+    ln -sf libnvinfer.so.8.5.2 libnvinfer.so.8 && \
+    ln -sf libnvinfer_plugin.so.8.5.2 libnvinfer_plugin.so.8 && \
+    ln -sf libnvonnxparser.so.8.5.2 libnvonnxparser.so.8 && \
+    ln -sf libnvparsers.so.8.5.2 libnvparsers.so.8 && \
+    ln -sf libcudnn.so.8.6.0 libcudnn.so.8 && \
+    ln -sf libcudnn_ops_infer.so.8.6.0 libcudnn_ops_infer.so.8 && \
+    ln -sf libcudnn_cnn_infer.so.8.6.0 libcudnn_cnn_infer.so.8 && \
+    ln -sf libcudnn_adv_infer.so.8.6.0 libcudnn_adv_infer.so.8 && \
+    ln -sf libcublas.so.11.6.6.84 libcublas.so.11 && \
+    ln -sf libcublasLt.so.11.6.6.84 libcublasLt.so.11 && \
+    echo "/opt/dda/trt8-runtime/lib" > /etc/ld.so.conf.d/dda-trt8.conf && \
+    ldconfig && \
+    ldconfig -p | grep -i "libnvinfer.so.8" || \
+    (echo "ERROR: libnvinfer.so.8 not staged" && ls -l /opt/dda/trt8-runtime/lib/ && exit 1)
+
+# ── CUPTI/NVTX staging for the Jetson CUDA torch wheel ──────────────────────
+# At runtime docker-compose bind-mounts the HOST's /usr/local/cuda over the
+# container's. The image's /usr/local/cuda is a symlink to /usr/local/cuda-12.6
+# and the mount resolves through it, so the ENTIRE image toolkit (cuda-12.6
+# included) is shadowed by the host's — which ships only the runtime libs, not
+# dev extras like CUPTI. The Jetson CUDA torch wheel (kineto profiler) dlopens
+# libcupti.so.12 at CUDA init, so vLLM model loads died on-device with
+# "libcupti.so.12: cannot open shared object file" while the same image passed
+# every build-host check (no mount there). Stage CUPTI + NVTX (+ the nvperf
+# libs CUPTI lazily dlopens when profiling) at a mount-proof path and register
+# it with the loader. The conf file is 00- prefixed so it sorts FIRST in
+# /etc/ld.so.conf.d glob order: ldconfig keeps one cache entry per soname
+# (first wins), and the default cuda conf entries point into the shadowed
+# /usr/local/cuda tree. Host/driver libs are unaffected — these five libs are
+# simply absent from the host toolkit.
+RUN mkdir -p /opt/nvidia/cuda-extras/lib && \
+    cp -a /usr/local/cuda-12.6/targets/aarch64-linux/lib/libcupti.so* \
+          /usr/local/cuda-12.6/targets/aarch64-linux/lib/libnvToolsExt.so* \
+          /usr/local/cuda-12.6/targets/aarch64-linux/lib/libnvperf_host.so \
+          /usr/local/cuda-12.6/targets/aarch64-linux/lib/libnvperf_target.so \
+          /opt/nvidia/cuda-extras/lib/ && \
+    echo "/opt/nvidia/cuda-extras/lib" > /etc/ld.so.conf.d/00-cuda-extras.conf && \
+    ldconfig && \
+    ldconfig -p | grep -F "libcupti.so.12 (libc6,AArch64) => /opt/nvidia/cuda-extras/lib/libcupti.so.12" || \
+    (echo "ERROR: staged libcupti.so.12 does not win the loader cache" && ldconfig -p | grep -i cupti && exit 1)
+
+# ── /usr/local/cuda: symlink -> real mount-point directory ──────────────────
+# docker-compose bind-mounts the HOST's /usr/local/cuda here. In the base
+# image /usr/local/cuda is a symlink chain to /usr/local/cuda-12.6, and Docker
+# resolves the chain when creating the mount — so the host toolkit used to
+# shadow the ENTIRE image toolkit, cuda-12.6 included. With torch/vllm built
+# against CUDA 12.6, an older host toolkit (e.g. JetPack 6.0's 12.2 libcudart,
+# which lacks cudaGetDriverEntryPointByVersion) then broke model loads:
+# "libc10_cuda.so: undefined symbol: cudaGetDriverEntryPointByVersion,
+# version libcudart.so.12". Replacing the symlink with a real, empty directory
+# makes the mount land AT /usr/local/cuda and stop there: host libs stay
+# visible exactly where JP4/JP5-era code expects them, while the image's
+# /usr/local/cuda-12.6 toolkit remains reachable. docker-compose.yaml puts
+# /usr/local/cuda-12.6/targets/aarch64-linux/lib FIRST on LD_LIBRARY_PATH
+# (tegra service) so torch resolves the 12.6 runtime it was built against;
+# driver libs (libcuda.so.1, libnvrm*) live in the tegra dirs / NVIDIA runtime
+# injection, not in the toolkit lib dir, so the host driver keeps winning.
+RUN rm /usr/local/cuda && mkdir /usr/local/cuda && \
+    ldconfig && \
+    ls /usr/local/cuda-12.6/targets/aarch64-linux/lib/libcudart.so.12 >/dev/null && \
+    echo "cuda mount-point conversion OK"
 
 #TODO:change to user to scope the permission. Currently needed to persist the TinyDB data
 USER root

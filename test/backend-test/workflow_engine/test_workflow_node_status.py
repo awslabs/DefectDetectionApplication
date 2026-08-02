@@ -1,0 +1,334 @@
+# Copyright 2025 Amazon Web Services, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Unit tests for per-node run-status collection (Task 4).
+
+Covers the ``NodeStatusCollector`` in isolation — element->node mapping, a
+fully-terminal map on completion and on failure, failing-node attribution,
+and warning capture (Requirements 3.1, 3.2, 3.4, 3.6) — plus the executor
+integration that threads the collector's sink through ``run_pipeline`` and
+persists the terminal ``node_status_json`` on both the success and failure
+paths, while the Pipeline_Configuration caller (no sink) is unchanged (R8.1).
+"""
+import json
+import os
+import time
+from unittest.mock import patch
+
+import pytest
+
+from workflow_engine_test_utils import (
+    DEVICE_ARCH,
+    make_session_factory,
+    write_artifact_set,
+)
+
+from workflow_engine import gst_plugins
+from workflow_engine import pipeline_executor
+from workflow_engine.models import WorkflowExecution, WorkflowRegistration
+from workflow_engine.node_status import (
+    NodeStatusCollector,
+    STATUS_FAILURE,
+    STATUS_PENDING,
+    STATUS_RUNNING,
+    STATUS_SUCCESS,
+    STATUS_WARNING,
+    TERMINAL_STATES,
+)
+from workflow_engine.pipeline_executor import (
+    EXECUTION_STATUS_COMPLETED,
+    EXECUTION_STATUS_FAILED,
+    EXECUTION_STATUS_PENDING,
+    WorkflowExecutor,
+)
+
+# A three-element segment: the trailing fakesink is a synthetic (nodeId=None)
+# element, so only n1/n2 participate. The launch string auto-names elements
+# videotestsrc0 / emltriton0 / fakesink0.
+COMPILED_DOC = {
+    "schemaVersion": 1,
+    "workflowId": "wf-1",
+    "workflowVersion": "3",
+    "targetArch": DEVICE_ARCH,
+    "segments": [
+        {
+            "name": "s0",
+            "elements": [
+                {"nodeId": "n1", "factory": "videotestsrc",
+                 "args": {"num-buffers": 1}},
+                {"nodeId": "n2", "factory": "emltriton",
+                 "args": {"model": "widget-anomaly-v3"}},
+                {"nodeId": None, "factory": "fakesink", "args": {}},
+            ],
+        }
+    ],
+    "executorBindings": [],
+    "pluginDependencies": [],
+}
+
+# element-name -> nodeId, as rendering.element_name_map would produce it.
+NAME_MAP = {"videotestsrc0": "n1", "emltriton0": "n2", "fakesink0": None}
+
+
+# --- NodeStatusCollector unit tests -----------------------------------------
+
+
+class TestElementToNodeMapping:
+    def test_participating_nodes_are_distinct_non_none_ids(self):
+        collector = NodeStatusCollector(
+            {"a0": "n1", "b0": "n2", "c0": "n1", "queue0": None}
+        )
+        # Duplicates collapse; None (synthetic) elements do not participate.
+        assert collector.participating_nodes() == {"n1", "n2"}
+
+    def test_every_participating_node_starts_pending(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        assert collector.status_of("n1") == STATUS_PENDING
+        assert collector.status_of("n2") == STATUS_PENDING
+
+    def test_sink_maps_element_to_node(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.sink("emltriton0", "running", None)
+        assert collector.status_of("n2") == STATUS_RUNNING
+        # n1 was not signalled and stays pending.
+        assert collector.status_of("n1") == STATUS_PENDING
+
+    def test_sink_ignores_unknown_and_synthetic_elements(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.sink("nonexistent7", "running", None)
+        collector.sink("fakesink0", "warning", "noise")  # synthetic -> None
+        assert collector.to_map() == {
+            "n1": {"status": STATUS_PENDING},
+            "n2": {"status": STATUS_PENDING},
+        }
+
+
+class TestWarningCapture:
+    def test_warning_sets_status_and_retains_detail(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.sink("emltriton0", "warning", "clipping detected")
+        entry = collector.to_map()["n2"]
+        assert entry["status"] == STATUS_WARNING
+        assert entry["detail"] == "clipping detected"
+
+    def test_success_does_not_downgrade_a_warning(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.sink("emltriton0", "warning", "clipping detected")
+        collector.mark_success_all()
+        collector.finalize()
+        result = collector.to_map()
+        assert result["n2"]["status"] == STATUS_WARNING
+        assert result["n2"]["detail"] == "clipping detected"
+        # A node with no warning still resolves to success.
+        assert result["n1"]["status"] == STATUS_SUCCESS
+
+    def test_running_never_downgrades_a_warning(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.sink("emltriton0", "warning", "clipping")
+        collector.sink("emltriton0", "running", None)
+        assert collector.status_of("n2") == STATUS_WARNING
+
+
+class TestTerminalMapOnCompletion:
+    def test_completion_yields_fully_terminal_success_map(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.mark_running_all()
+        collector.mark_success_all()
+        collector.finalize()
+        result = collector.to_map()
+        assert set(result) == {"n1", "n2"}
+        for entry in result.values():
+            assert entry["status"] in TERMINAL_STATES
+            assert entry["status"] not in (STATUS_PENDING, STATUS_RUNNING)
+        assert result["n1"]["status"] == STATUS_SUCCESS
+        assert result["n2"]["status"] == STATUS_SUCCESS
+
+    def test_finalize_resolves_leftover_pending_and_running(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.sink("videotestsrc0", "running", None)  # n1 running
+        # n2 left pending; no mark_success_all called.
+        collector.finalize()
+        result = collector.to_map()
+        assert result["n1"]["status"] == STATUS_SUCCESS
+        assert result["n2"]["status"] == STATUS_SUCCESS
+
+
+class TestTerminalMapOnFailure:
+    def test_failure_attributes_exactly_the_mapped_node(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.mark_running_all()
+        collector.mark_failure("n2", "emltriton failed to load model")
+        collector.finalize()
+        result = collector.to_map()
+        assert result["n2"]["status"] == STATUS_FAILURE
+        assert result["n2"]["detail"] == "emltriton failed to load model"
+        # The non-failing node resolves best-effort (success), never left
+        # pending/running (R3.6).
+        assert result["n1"]["status"] == STATUS_SUCCESS
+        for entry in result.values():
+            assert entry["status"] in TERMINAL_STATES
+
+    def test_none_failing_node_marks_nothing_as_failure(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.mark_running_all()
+        collector.mark_failure(None, "unattributable error")
+        collector.finalize()
+        result = collector.to_map()
+        assert all(e["status"] != STATUS_FAILURE for e in result.values())
+
+    def test_to_json_round_trips_the_map(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.mark_failure("n2", "boom")
+        collector.finalize()
+        parsed = json.loads(collector.to_json())
+        assert parsed["n2"] == {"status": STATUS_FAILURE, "detail": "boom"}
+        assert parsed["n1"] == {"status": STATUS_SUCCESS}
+
+
+# --- Executor integration ----------------------------------------------------
+
+
+class _RecordingManager:
+    """Records the status_sink it received; optionally raises to fail the run
+    or drives the sink to simulate live per-element bus signals."""
+
+    def __init__(self, tag_values=None, error=None, drive=None):
+        self.tag_values = tag_values or {}
+        self.error = error
+        self.drive = drive or []
+        self.status_sink = "unset"
+
+    def run_pipeline(self, pipeline_str, frame_data=None, latency_metrics=None,
+                     status_sink=None):
+        self.status_sink = status_sink
+        for element_name, kind, detail in self.drive:
+            status_sink(element_name, kind, detail)
+        if self.error is not None:
+            raise self.error
+        return dict(self.tag_values)
+
+
+@pytest.fixture
+def session_factory():
+    return make_session_factory()
+
+
+@pytest.fixture(autouse=True)
+def no_registry_scan():
+    with patch.object(gst_plugins, "_scan_registry", return_value=True):
+        yield
+
+
+def _seed(session_factory, artifact_path):
+    session = session_factory()
+    try:
+        session.add(WorkflowRegistration(
+            id="wf-1:3", workflow_id="wf-1", version="3", arch=DEVICE_ARCH,
+            artifact_path=str(artifact_path), status="registered",
+            registered_at=int(time.time()),
+        ))
+        session.add(WorkflowExecution(
+            id="exec-1", registration_id="wf-1:3",
+            started_at=int(time.time()), status=EXECUTION_STATUS_PENDING,
+        ))
+        session.commit()
+    finally:
+        session.close()
+    return "exec-1"
+
+
+def _get(session_factory, execution_id="exec-1"):
+    session = session_factory()
+    try:
+        return session.get(WorkflowExecution, execution_id)
+    finally:
+        session.close()
+
+
+def test_executor_passes_a_sink_and_persists_terminal_status_on_success(
+    tmp_path, session_factory
+):
+    artifact_path = write_artifact_set(tmp_path, compiled=COMPILED_DOC)
+    execution_id = _seed(session_factory, artifact_path)
+    manager = _RecordingManager(tag_values={"is_anomalous": False})
+    capture_root = str(tmp_path / "captures")
+
+    with patch.object(pipeline_executor, "_WORKFLOW_CAPTURE_ROOT", capture_root):
+        WorkflowExecutor(
+            session_factory=session_factory,
+            pipeline_manager_factory=lambda: manager,
+        ).execute(execution_id)
+
+    # A real sink (not None) was threaded into run_pipeline (R3 / R8.1).
+    assert callable(manager.status_sink)
+    row = _get(session_factory)
+    assert row.status == EXECUTION_STATUS_COMPLETED
+    status = json.loads(row.node_status_json)
+    # Exactly the participating nodeIds, all terminal success (R3.1, R3.3).
+    assert set(status) == {"n1", "n2"}
+    assert status["n1"]["status"] == STATUS_SUCCESS
+    assert status["n2"]["status"] == STATUS_SUCCESS
+
+
+def test_executor_captures_a_live_warning_on_success(tmp_path, session_factory):
+    artifact_path = write_artifact_set(tmp_path, compiled=COMPILED_DOC)
+    execution_id = _seed(session_factory, artifact_path)
+    manager = _RecordingManager(
+        tag_values={"is_anomalous": False},
+        drive=[("emltriton0", "warning", "recoverable element warning")],
+    )
+    capture_root = str(tmp_path / "captures")
+
+    with patch.object(pipeline_executor, "_WORKFLOW_CAPTURE_ROOT", capture_root):
+        WorkflowExecutor(
+            session_factory=session_factory,
+            pipeline_manager_factory=lambda: manager,
+        ).execute(execution_id)
+
+    status = json.loads(_get(session_factory).node_status_json)
+    # The warned node keeps its warning (not downgraded to success) with detail
+    # retained (R3.4); the other node is success.
+    assert status["n2"]["status"] == STATUS_WARNING
+    assert status["n2"]["detail"] == "recoverable element warning"
+    assert status["n1"]["status"] == STATUS_SUCCESS
+
+
+def test_executor_attributes_failure_to_the_failing_node(
+    tmp_path, session_factory
+):
+    artifact_path = write_artifact_set(tmp_path, compiled=COMPILED_DOC)
+    execution_id = _seed(session_factory, artifact_path)
+    # The error names the emltriton element, so it maps back to node n2.
+    manager = _RecordingManager(
+        error=RuntimeError(
+            "Pipeline failed with: could not link emltriton0 to next element."
+        )
+    )
+    capture_root = str(tmp_path / "captures")
+
+    with patch.object(pipeline_executor, "_WORKFLOW_CAPTURE_ROOT", capture_root):
+        WorkflowExecutor(
+            session_factory=session_factory,
+            pipeline_manager_factory=lambda: manager,
+        ).execute(execution_id)
+
+    row = _get(session_factory)
+    assert row.status == EXECUTION_STATUS_FAILED
+    assert row.failing_node_id == "n2"
+    status = json.loads(row.node_status_json)
+    # Exactly n2 is failure; the map is fully terminal (R3.2, R3.6).
+    assert status["n2"]["status"] == STATUS_FAILURE
+    assert "emltriton0" in status["n2"]["detail"]
+    assert status["n1"]["status"] == STATUS_SUCCESS
+    for entry in status.values():
+        assert entry["status"] in TERMINAL_STATES

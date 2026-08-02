@@ -1,0 +1,5 @@
+# Sandbox harness runtime dependencies (task 11.3).
+# GStreamer python bindings (python3-gi / python3-gst-1.0) come from apt
+# in the Dockerfile, not pip.
+boto3==1.34.162
+Pillow==10.4.0

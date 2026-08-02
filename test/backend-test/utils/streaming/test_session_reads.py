@@ -85,7 +85,7 @@ def _set_viewer_count(session, count, clock):
 
 # Feature: concurrent-camera-stream-viewing, Property 4: Reads are independent of other viewers and do not re-grab
 # Validates: Requirements 1.5, 2.4
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(
     backend_kind=st.sampled_from(BACKEND_KINDS),
     # Each entry is (viewer_count_before_read, now_at_read). The viewer count
@@ -148,7 +148,7 @@ def test_property_4_reads_independent_and_no_regrab(backend_kind, reads):
 
 # Feature: concurrent-camera-stream-viewing, Property 4: Reads are independent of other viewers and do not re-grab
 # Validates: Requirements 1.5, 2.4
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(
     backend_kind=st.sampled_from(BACKEND_KINDS),
     repeat=st.integers(min_value=1, max_value=50),

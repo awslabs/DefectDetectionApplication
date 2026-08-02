@@ -142,7 +142,16 @@ def cp_model_conversion_files():
         # marshal_for_capture_template.py). That allowlist drifted out of sync
         # with the source resources_for_copy tree and omitted
         # inference_runtimes.py, so it has been replaced by a full re-sync below.
-        files_to_copy_to_aws_dda = ["model_convertor.py", "convert_model_cleanup.py","model_conversion_requirements.txt",]
+        # vllm_model_prep.py is the vLLM model preparation script (spec:
+        # vllm-triton-inference). Seeding it to /aws_dda exactly like
+        # model_convertor.py lets the vLLM model component recipe's Startup
+        # script find it at /aws_dda/vllm_model_prep.py.
+        files_to_copy_to_aws_dda = [
+            "model_convertor.py",
+            "convert_model_cleanup.py",
+            "model_conversion_requirements.txt",
+            "vllm_model_prep.py",
+        ]
         if not os.path.exists(destination_folder_dda_triton):
             os.makedirs(destination_folder_dda_triton)
             logger.info(f"Folder {destination_folder_dda_triton} created successfully.")

@@ -81,6 +81,8 @@ SRC_AUX_AWS_DDA = [
     "model_convertor.py",
     "convert_model_cleanup.py",
     "model_conversion_requirements.txt",
+    # Added additively by the vllm-triton-inference spec (task 9.2).
+    "vllm_model_prep.py",
 ]
 
 

@@ -7,10 +7,21 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
+import * as iot from 'aws-cdk-lib/aws-iot';
+import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Construct } from 'constructs';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
+import { execFileSync } from 'child_process';
 import { ApiGatewayStack } from './api-gateway-stack';
+import { CameraRegistryApiStack } from './camera-registry-api-stack';
+import { UserAdminApiStack } from './user-admin-api-stack';
+import { QuickSetupApiStack } from './quick-setup-api-stack';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
@@ -27,7 +38,28 @@ export interface ComputeStackProps extends cdk.StackProps {
   componentsTable: dynamodb.Table;
   sharedComponentsTable: dynamodb.Table;
   dataAccountsTable: dynamodb.Table;
+  workflowsTable: dynamodb.Table;
+  workflowVersionsTable: dynamodb.Table;
+  testDatasetsTable: dynamodb.Table;
+  testRunsTable: dynamodb.Table;
+  workflowChatSessionsTable: dynamodb.Table;
+  cameraRegistryTable: dynamodb.Table;
+  /**
+   * Station Quick Setup device-registrations table
+   * (`dda-portal-device-registrations`). Backs both the Device_Registration
+   * items and the `RATELIMIT#` counters. The token-authenticated quick_setup
+   * Lambda is granted read/write on ONLY this table plus the audit log.
+   */
+  deviceRegistrationsTable: dynamodb.Table;
   portalArtifactsBucket: s3.Bucket;
+  /**
+   * Workflow_Test_Runner Step Functions state machine (test-runner stack).
+   * When provided, the WorkflowTestingHandler receives its ARN as the
+   * TEST_RUN_STATE_MACHINE_ARN environment variable and is granted
+   * StartExecution/DescribeExecution; without it the handler falls back to
+   * the portal settings table for runtime configuration.
+   */
+  testRunStateMachine?: sfn.IStateMachine;
   /**
    * CloudFront domain for the portal frontend.
    * Used to configure CORS on Data Account buckets during UseCase onboarding.
@@ -95,6 +127,147 @@ export class ComputeStack extends cdk.Stack {
       description: 'JWT validation dependencies (PyJWT, cryptography)',
     });
 
+    // Lambda Layer for the shared workflow_core package (node catalog, serializer,
+    // validator, compiler) used by the Workflow Manager Lambda functions. The
+    // layer asset ships only the python/ package directory; test/build files
+    // that live alongside it in the source tree are excluded.
+    const workflowCoreLayer = new lambda.LayerVersion(this, 'WorkflowCoreLayer', {
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/workflow_core'), {
+        exclude: [
+          'tests',
+          'tests/**',
+          '.hypothesis',
+          '.hypothesis/**',
+          '.pytest_cache',
+          '.pytest_cache/**',
+          '**/__pycache__',
+          '**/__pycache__/**',
+          'build.sh',
+          'pyproject.toml',
+          'requirements.txt',
+          'README.md',
+        ],
+      }),
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
+      description: 'workflow_core shared package (catalog, serializer, validator, compiler) for Workflow Manager',
+    });
+
+    // ---------------------------------------------------------------------
+    // Station Quick Setup bundle packaging (Requirements 4.3, 4.4, 4.5)
+    //
+    // At deploy time we package the repository's station_install/ tree
+    // (including quick_setup/) into a single self-contained installer
+    // (setup-bundle.tar.gz) and compute SHA-256 sidecars over the EXACT bytes
+    // we upload. The packaging is performed by build-quick-setup-bundle.sh so
+    // the checksums are guaranteed to be over the same bytes served to the
+    // station. Artifacts land under quick-setup/current/ in the portal
+    // artifacts bucket.
+    //
+    // The BucketDeployment custom resource only copies to the destination
+    // after a successful CloudFormation deploy; a failed deploy therefore
+    // leaves the previously published artifacts in place (Req 4.4). prune is
+    // disabled so the destination is never emptied on a partial run.
+    // ---------------------------------------------------------------------
+    const stationInstallDir = path.join(__dirname, '../../../station_install');
+    const bundleBuildScript = path.join(__dirname, '../scripts/build-quick-setup-bundle.sh');
+
+    const quickSetupBundleSource = s3deploy.Source.asset(stationInstallDir, {
+      // The bundle contents are derived purely from the station_install tree
+      // and the packaging script; hash both so the asset (and the deploy) only
+      // changes when the shipped bytes change.
+      assetHashType: cdk.AssetHashType.SOURCE,
+      bundling: {
+        // Docker fallback: any image with GNU tar + coreutils works. Local
+        // bundling (below) is used whenever the host has bash, so this image
+        // is only pulled in environments without a local shell toolchain.
+        image: cdk.DockerImage.fromRegistry('public.ecr.aws/amazonlinux/amazonlinux:2023'),
+        // Mount the packaging script into the container. CDK already mounts the
+        // asset source at /asset-input (read-only) and the output at
+        // /asset-output; the script lives outside that tree, so make it
+        // reachable at /build.
+        volumes: [
+          {
+            hostPath: path.join(__dirname, '../scripts'),
+            containerPath: '/build',
+          },
+        ],
+        command: [
+          'bash', '/build/build-quick-setup-bundle.sh', '/asset-input', '/asset-output',
+        ],
+        local: {
+          tryBundle(outputDir: string): boolean {
+            try {
+              execFileSync('bash', [bundleBuildScript, stationInstallDir, outputDir], {
+                stdio: ['ignore', 'inherit', 'inherit'],
+              });
+              return true;
+            } catch (err) {
+              // Fall back to the Docker image bundling on any local failure
+              // (e.g. bash unavailable on the build host).
+              return false;
+            }
+          },
+        },
+      },
+    });
+
+    // Exposed so ComputeStack wiring (task 8.2) can bake the bundle/bootstrap
+    // keys into the quick_setup Lambda environment.
+    const quickSetupBundleDeployment = new s3deploy.BucketDeployment(this, 'QuickSetupBundle', {
+      sources: [quickSetupBundleSource],
+      destinationBucket: props.portalArtifactsBucket,
+      destinationKeyPrefix: 'quick-setup/current/',
+      // Never empty the destination: a failed deploy must leave the prior
+      // successful artifacts intact (Req 4.4).
+      prune: false,
+      retainOnDelete: true,
+    });
+    // S3 keys of the artifacts uploaded by QuickSetupBundle under
+    // quick-setup/current/. These are baked into the Lambda environments so the
+    // quick_setup handler serves exactly the objects packaged by this
+    // deployment (Req 4.4).
+    const quickSetupBundleKey = 'quick-setup/current/setup-bundle.tar.gz';
+    const quickSetupBootstrapKey = 'quick-setup/current/bootstrap.sh';
+
+    // Compute the bundle/bootstrap SHA-256 digests at synth time so they can be
+    // baked into the Lambda environment. build-quick-setup-bundle.sh produces a
+    // reproducible tarball (stable ordering, zeroed timestamps/ownership,
+    // timestamp-free gzip), so the digests computed here match the exact bytes
+    // uploaded by QuickSetupBundle above — the checksum served to the station
+    // is over the served bytes (Req 4.5). A failed deploy leaves the previously
+    // baked env vars (and previously uploaded objects) in place (Req 4.4).
+    let quickSetupBundleSha256: string;
+    let quickSetupBootstrapSha256: string;
+    {
+      const manifestStagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dda-qs-manifest-'));
+      try {
+        execFileSync('bash', [bundleBuildScript, stationInstallDir, manifestStagingDir], {
+          stdio: ['ignore', 'inherit', 'inherit'],
+        });
+        const manifest = JSON.parse(
+          fs.readFileSync(path.join(manifestStagingDir, 'manifest.json'), 'utf-8')
+        ) as { bundle_sha256?: string; bootstrap_sha256?: string };
+        if (!manifest.bundle_sha256 || !manifest.bootstrap_sha256) {
+          throw new Error('manifest.json is missing bundle_sha256/bootstrap_sha256');
+        }
+        quickSetupBundleSha256 = manifest.bundle_sha256;
+        quickSetupBootstrapSha256 = manifest.bootstrap_sha256;
+      } catch (err) {
+        // The digests are required for the station to verify the bundle it
+        // downloads; refuse to synth a quick_setup Lambda that would serve an
+        // empty/incorrect checksum rather than silently degrade integrity.
+        throw new Error(
+          'Failed to compute Station Quick Setup bundle checksums for the ' +
+            `quick_setup Lambda environment. The packaging script (${bundleBuildScript}) ` +
+            `must run under bash at synth time. Underlying error: ${(err as Error).message}`
+        );
+      } finally {
+        fs.rmSync(manifestStagingDir, { recursive: true, force: true });
+      }
+    }
+    // quickSetupBundleDeployment is referenced below via addDependency so the
+    // QuickSetup Lambda is only reachable after the bundle is uploaded.
+
     // Base IAM Role for Lambda functions
     const createLambdaRole = (name: string) => {
       const role = new iam.Role(this, `${name}Role`, {
@@ -118,6 +291,12 @@ export class ComputeStack extends cdk.Stack {
       props.componentsTable.grantReadWriteData(role);
       props.sharedComponentsTable.grantReadWriteData(role);
       props.dataAccountsTable.grantReadWriteData(role);
+      props.workflowsTable.grantReadWriteData(role);
+      props.workflowVersionsTable.grantReadWriteData(role);
+      props.testDatasetsTable.grantReadWriteData(role);
+      props.testRunsTable.grantReadWriteData(role);
+      props.workflowChatSessionsTable.grantReadWriteData(role);
+      props.cameraRegistryTable.grantReadWriteData(role);
 
       // Grant S3 permissions for portal artifacts bucket
       props.portalArtifactsBucket.grantReadWrite(role);
@@ -429,13 +608,241 @@ export class ComputeStack extends cdk.Stack {
       SETTINGS_TABLE: props.settingsTable.tableName,
       COMPONENTS_TABLE: props.componentsTable.tableName,
       SHARED_COMPONENTS_TABLE: props.sharedComponentsTable.tableName,
+      WORKFLOWS_TABLE: props.workflowsTable.tableName,
+      WORKFLOW_VERSIONS_TABLE: props.workflowVersionsTable.tableName,
+      TEST_DATASETS_TABLE: props.testDatasetsTable.tableName,
+      TEST_RUNS_TABLE: props.testRunsTable.tableName,
+      WORKFLOW_CHAT_SESSIONS_TABLE: props.workflowChatSessionsTable.tableName,
+      CAMERA_REGISTRY_TABLE: props.cameraRegistryTable.tableName,
       PORTAL_ARTIFACTS_BUCKET: props.portalArtifactsBucket.bucketName,
+      // Workflow Manager documents (definitions, compiled docs, test datasets,
+      // test results) live in the portal artifacts bucket under
+      // workflows/{usecase_id}/... prefixes.
+      WORKFLOWS_S3_PREFIX: 'workflows',
       PORTAL_ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
       USER_POOL_ID: props.userPool.userPoolId,
       // Shared component configuration - update DDA_LOCAL_SERVER_VERSION when publishing new component versions
       DDA_LOCAL_SERVER_VERSION: '1.0.63',
+      // Per-arch minimum LocalServer version for Workflow_Components. LocalServer
+      // ships as independently-versioned per-architecture variants whose lineages
+      // are NOT comparable (the arm64 variant is ~1.0.124 while arm64JP6 is
+      // ~1.0.35), so the single DDA_LOCAL_SERVER_VERSION=1.0.63 baseline falsely
+      // blocks the JetPack variants. This map gives the arm64 JetPack lineages
+      // their own floor (workflow support ships in current field builds, which
+      // sit well below the arm64/x86 lineage numbers); archs absent here fall
+      // back to DDA_LOCAL_SERVER_VERSION. Keys are workflow_core arch ids.
+      WORKFLOW_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({
+        arm64_jp4: '1.0.0',
+        arm64_jp5: '1.0.0',
+        arm64_jp6: '1.0.0',
+      }),
       COMPONENT_BUCKET_PREFIX: 'dda-component',
     };
+
+    // ---------------------------------------------------------------------
+    // Station Quick Setup Lambdas (Requirements 4.4, 5.1, 8.1)
+    //
+    // device_registrations.py is JWT-authenticated and gets the standard
+    // portal Lambda role (createLambdaRole) plus read/write on the new
+    // registrations table. quick_setup.py is token-authenticated and gets a
+    // deliberately minimal role: it may AssumeRole the use-case cross-account
+    // roles, read the quick-setup/* artifacts, and read/write ONLY the
+    // registrations + audit tables — never the broader portal tables.
+    // ---------------------------------------------------------------------
+
+    // device_registrations Lambda (Cognito JWT + manage_devices RBAC).
+    const deviceRegistrationsRole = createLambdaRole('DeviceRegistrations');
+    props.deviceRegistrationsTable.grantReadWriteData(deviceRegistrationsRole);
+    const deviceRegistrationsHandler = new lambda.Function(this, 'DeviceRegistrationsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'device_registrations.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: deviceRegistrationsRole,
+      environment: {
+        ...lambdaEnvironment,
+        REGISTRATIONS_TABLE: props.deviceRegistrationsTable.tableName,
+        // Integrity anchor embedded in the generated Setup_Command so the
+        // station can verify the bootstrap it downloads (Req 4.8 chain).
+        QUICK_SETUP_BOOTSTRAP_SHA256: quickSetupBootstrapSha256,
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    // quick_setup Lambda (token-authenticated; AuthorizationType.NONE routes).
+    // Minimal, dedicated role — NOT createLambdaRole.
+    const quickSetupRole = new iam.Role(this, 'QuickSetupHandlerRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    // Read/write ONLY the registrations table (registration items + RATELIMIT#
+    // counters) and the audit log — never the broader portal tables.
+    props.deviceRegistrationsTable.grantReadWriteData(quickSetupRole);
+    props.auditLogTable.grantReadWriteData(quickSetupRole);
+    // Read-only on the use-cases table: get_bundle_manifest and
+    // exchange_credentials resolve the bound registration's Use_Case to obtain
+    // its AWS region, account id, cross-account role ARN, and external id
+    // (shared_utils.get_usecase). Without this the /quick-setup/bundle and
+    // /quick-setup/credentials routes fail with AccessDenied -> 503.
+    props.useCasesTable.grantReadData(quickSetupRole);
+    // Write access to the portal Devices table (dda-portal-devices) so a
+    // successful quick-setup completion can record the Station's detected DDA
+    // Target_Architecture, making the device deployment-gate-ready without a
+    // manual admin step (device-arch-compatibility Req 2.2). This is the single
+    // net-new permission in the feature and is scoped to the one portal table
+    // the gate reads. DEVICES_TABLE is already injected via lambdaEnvironment
+    // (spread into the handler environment below), so no env change is needed.
+    props.devicesTable.grantWriteData(quickSetupRole);
+    // Read-only on the quick-setup artifacts: serve the bootstrap bytes,
+    // head_object the bundle, and sign presigned GET URLs (Req 4.1, 4.10).
+    quickSetupRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject'],
+      resources: [`${props.portalArtifactsBucket.bucketArn}/quick-setup/*`],
+    }));
+    // The dedicated station-provisioning role name is FIXED so its ARN is
+    // computable here as a plain string. The role itself (created below) trusts
+    // this Lambda role, so referencing it by string ARN — rather than the
+    // construct — avoids a circular dependency between the two roles.
+    const stationProvisioningRoleName = 'DDAStationProvisioningRole';
+    const stationProvisioningRoleArn =
+      `arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/${stationProvisioningRoleName}`;
+
+    // AssumeRole to mint scoped, short-lived Provisioning_Credentials (Req 5.1):
+    //  - CROSS-account use cases assume their use-case-account DDAPortalAccessRole;
+    //  - SAME-account use cases (whose cross_account_role_arn is the account
+    //    root ARN — not assumable) assume the dedicated DDAStationProvisioningRole
+    //    in THIS account (created below, trusted only by this Lambda role).
+    // The per-device session policy narrows the issued credentials in both cases.
+    quickSetupRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['sts:AssumeRole'],
+      resources: [
+        ...props.trustedUseCaseAccountIds.map(
+          (id) => `arn:aws:iam::${id}:role/DDAPortalAccessRole`
+        ),
+        stationProvisioningRoleArn,
+      ],
+    }));
+
+    const quickSetupHandler = new lambda.Function(this, 'QuickSetupHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'quick_setup.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: quickSetupRole,
+      environment: {
+        ...lambdaEnvironment,
+        REGISTRATIONS_TABLE: props.deviceRegistrationsTable.tableName,
+        // Artifact keys + digests baked from this deployment's bundle asset so
+        // only the most recently deployed bundle is ever served (Req 4.4, 4.5).
+        QUICK_SETUP_BUNDLE_KEY: quickSetupBundleKey,
+        QUICK_SETUP_BUNDLE_SHA256: quickSetupBundleSha256,
+        QUICK_SETUP_BOOTSTRAP_KEY: quickSetupBootstrapKey,
+        QUICK_SETUP_BOOTSTRAP_SHA256: quickSetupBootstrapSha256,
+        // Same-account provisioning role assumed when a Use_Case's
+        // cross_account_role_arn is the (un-assumable) account root ARN.
+        QUICK_SETUP_PROVISIONING_ROLE_ARN: stationProvisioningRoleArn,
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+    // The bundle must be uploaded before the handler can serve it.
+    quickSetupHandler.node.addDependency(quickSetupBundleDeployment);
+
+    // Dedicated station-provisioning role for SAME-account use cases
+    // (station-quick-setup). The quick_setup Lambda assumes this role WITH the
+    // per-device least-privilege session policy (session_policy.build_session_policy)
+    // to mint the scoped, short-lived Provisioning_Credentials handed to the
+    // station. It holds the provisioning action CEILING; the session policy
+    // narrows every issuance to the single registered thing / Device_Group, so
+    // the station never receives broader access. It is trusted ONLY by the
+    // QuickSetupHandler role — no other principal may assume it. Cross-account
+    // use cases continue to use their use-case-account DDAPortalAccessRole.
+    const stationProvisioningRole = new iam.Role(this, 'StationProvisioningRole', {
+      roleName: stationProvisioningRoleName,
+      assumedBy: new iam.ArnPrincipal(quickSetupRole.roleArn),
+      description:
+        'Station Quick Setup provisioning role assumed by the quick_setup ' +
+        'Lambda (with a per-device session policy) to mint scoped, short-lived ' +
+        'station credentials for same-account use cases.',
+      maxSessionDuration: cdk.Duration.hours(1),
+    });
+    // IoT thing + Device_Group provisioning (narrowed per-device by the session
+    // policy), scoped to the thing/thinggroup resource types in this account.
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iot:CreateThing',
+        'iot:DescribeThing',
+        'iot:CreateThingGroup',
+        'iot:DescribeThingGroup',
+        'iot:AddThingToThingGroup',
+        'iot:ListThingGroupsForThing',
+      ],
+      resources: [
+        `arn:aws:iot:*:${cdk.Aws.ACCOUNT_ID}:thing/*`,
+        `arn:aws:iot:*:${cdk.Aws.ACCOUNT_ID}:thinggroup/*`,
+      ],
+    }));
+    // IoT cert/policy/endpoint/role-alias actions whose target ids are generated
+    // during provisioning (Resource '*'; never a wildcard *action*).
+    //
+    // nosec: this resource wildcard is intentional and mitigated, not an
+    // unscoped grant. iot:CreateKeysAndCertificate and iot:DescribeEndpoint are
+    // resource-less (no ARN to scope to), and the cert/policy/role-alias ids the
+    // remaining actions target are generated at provisioning time so cannot be
+    // pre-scoped in the role. This role is only assumable by the QuickSetupHandler
+    // Lambda, which assumes it with a per-device session policy that narrows every
+    // call to the specific device being provisioned (see the session-policy
+    // narrowing on the statement above). It is never attached to a station.
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iot:CreateKeysAndCertificate',
+        'iot:AttachThingPrincipal',
+        'iot:AttachPolicy',
+        'iot:CreatePolicy',
+        'iot:GetPolicy',
+        'iot:ListPolicyVersions',
+        'iot:CreatePolicyVersion',
+        'iot:DeletePolicyVersion',
+        'iot:DescribeEndpoint',
+        'iot:CreateRoleAlias',
+        'iot:DescribeRoleAlias',
+      ],
+      resources: ['*'], // nosec - see rationale above (resource-less + runtime-generated ids, session-policy narrowed)
+    }));
+    // Greengrass Token Exchange Service (TES) role setup performed by the
+    // provisioner, scoped to the GreengrassV2TokenExchangeRole* names.
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iam:GetRole',
+        'iam:CreateRole',
+        'iam:AttachRolePolicy',
+        'iam:PutRolePolicy',
+        'iam:PassRole',
+      ],
+      resources: [`arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/GreengrassV2TokenExchangeRole*`],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:CreatePolicy', 'iam:GetPolicy'],
+      resources: [`arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:policy/GreengrassV2TokenExchangeRoleAccess*`],
+    }));
+    // Tag the Greengrass core device (dda-portal:managed) during provisioning.
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['greengrass:TagResource'],
+      resources: [`arn:aws:greengrass:*:${cdk.Aws.ACCOUNT_ID}:coreDevices:*`],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['sts:GetCallerIdentity'],
+      resources: ['*'],
+    }));
 
     // UseCases Lambda Handler
     const useCasesHandler = new lambda.Function(this, 'UseCasesHandler', {
@@ -566,6 +973,26 @@ export class ComputeStack extends cdk.Stack {
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(60),
     });
+
+    // Component store limit auto-remediation sweep: detects devices whose
+    // latest deployment failed with the Nucleus "Component store size limit
+    // reached" rejection, submits a config-only revision raising
+    // componentStoreMaxSizeBytes (no artifact downloads, so it bypasses the
+    // pre-merge store check), then resubmits the blocked deployment once the
+    // remediation completes. State machine lives in deployment tags —
+    // no user intervention required (deployments.remediate_component_store_failures).
+    const storeRemediationRule = new events.Rule(this, 'StoreRemediationScheduleRule', {
+      ruleName: 'dda-portal-component-store-remediation',
+      description:
+        'Auto-remediates Greengrass "Component store size limit reached" ' +
+        'deployment failures without user intervention',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+    });
+    storeRemediationRule.addTarget(new targets.LambdaFunction(deploymentsHandler, {
+      event: events.RuleTargetInput.fromObject({
+        action: 'remediate-component-store-limit',
+      }),
+    }));
 
     // Auth Lambda Handler
     const authHandler = new lambda.Function(this, 'AuthHandler', {
@@ -853,6 +1280,572 @@ export class ComputeStack extends cdk.Stack {
 
     // Grant Audit Logs Lambda read access to the audit log table
     props.auditLogTable.grantReadData(auditLogsHandler);
+
+    // ------------------------------------------------------------------
+    // Camera Registry Sync (camera-registry-sync)
+    // Edge devices report their Camera_Source inventory into the
+    // dda-camera-registry named shadow; a per-use-case IoT topic rule on
+    // $aws/things/+/shadow/name/dda-camera-registry/update/documents
+    // (provisioned by the UseCaseAccountStack during use-case onboarding)
+    // forwards each shadow documents event to the SQS queue below, where the
+    // Portal_Sync_Service Lambda (camera_sync.py) reduces it into the
+    // dda-portal-camera-registry table.
+    // ------------------------------------------------------------------
+
+    // Dead-letter queue for shadow-report events that repeatedly fail
+    // processing (malformed/unparseable reports are also dead-lettered
+    // explicitly by the handler without blocking the batch).
+    const cameraShadowReportDlq = new sqs.Queue(this, 'CameraShadowReportDLQ', {
+      queueName: 'dda-portal-camera-shadow-reports-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+    });
+
+    // Shadow-report queue fed by the per-use-case IoT topic rules. The
+    // visibility timeout is a multiple of the consumer Lambda timeout per
+    // the SQS event-source guidance.
+    const cameraShadowReportQueue = new sqs.Queue(this, 'CameraShadowReportQueue', {
+      queueName: 'dda-portal-camera-shadow-reports',
+      visibilityTimeout: cdk.Duration.seconds(180),
+      retentionPeriod: cdk.Duration.days(4),
+      enforceSSL: true,
+      deadLetterQueue: {
+        queue: cameraShadowReportDlq,
+        maxReceiveCount: 3,
+      },
+    });
+
+    // Cross-account queue policy: an IoT topic rule delivers to SQS through
+    // its rule role, an IAM principal in the (use-case) account where the
+    // rule runs. Allow SendMessage from the trusted UseCase accounts plus
+    // this portal account (same-account use cases).
+    cameraShadowReportQueue.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'AllowUseCaseAccountIotRuleDelivery',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['sqs:SendMessage'],
+      resources: [cameraShadowReportQueue.queueArn],
+      conditions: {
+        StringEquals: {
+          'aws:PrincipalAccount': Array.from(
+            new Set([...props.trustedUseCaseAccountIds, cdk.Aws.ACCOUNT_ID])
+          ),
+        },
+      },
+    }));
+
+    // Portal_Sync_Service ingest Lambda (camera_sync.py) — consumes shadow
+    // documents events from the queue and applies the reduce_report sync
+    // reducer per camera source into the camera registry table.
+    const cameraSyncHandler = new lambda.Function(this, 'CameraSyncHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'camera_sync.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('CameraSync'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-02-14-camera-sync',
+        CAMERA_SHADOW_REPORT_DLQ_URL: cameraShadowReportDlq.queueUrl,
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    cameraSyncHandler.addEventSource(new SqsEventSource(cameraShadowReportQueue, {
+      batchSize: 10,
+      reportBatchItemFailures: true,
+    }));
+
+    // The handler dead-letters malformed reports explicitly (in addition to
+    // the redrive policy above).
+    cameraShadowReportDlq.grantSendMessages(cameraSyncHandler);
+
+    // Camera_Registry API Lambda (camera_registry.py) — device cameras
+    // read/mutate routes, conflict listing/re-apply, and on-demand refresh
+    // (GetThingShadow pull through the assumed use-case role).
+    const cameraRegistryHandler = new lambda.Function(this, 'CameraRegistryHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'camera_registry.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('CameraRegistry'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-02-14-camera-registry',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    // Deploy-time Camera_Binding delivery: deployments.py writes
+    // desired.bindings["{workflowId}/{version}"] into each target thing's
+    // dda-camera-bindings named shadow at deployment submission. IAM scopes
+    // shadow actions to the thing ARN (named shadows share the thing
+    // resource); this explicit iot-data grant keeps the camera-bindings
+    // shadow write working independently of the base-role IoT statement.
+    deploymentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iot:GetThingShadow',
+        'iot:UpdateThingShadow',
+      ],
+      resources: ['arn:aws:iot:*:*:thing/*'],
+    }));
+
+    // ------------------------------------------------------------------
+    // Portal User Manager (portal-user-manager, task 5.1)
+    // PortalAdmin-only Cognito account management (user_admin.py) and the
+    // Account_Sync_Service portal side (account_sync.py): accounts are
+    // delivered to each edge device over the dda-user-accounts named
+    // shadow; the device acks via reported.ackSyncId, forwarded by an IoT
+    // topic rule into the SQS queue below and ingested back into the
+    // per-device sync-state table. An EventBridge rate(5 minutes)
+    // schedule drives retries and the 60-second ack-timeout sweep.
+    // ------------------------------------------------------------------
+
+    // Verified SES sender for temporary-password delivery (design D11):
+    // Cognito cannot email a temporary password to an existing CONFIRMED
+    // user, so user_admin.py sends it via SES from this address. The
+    // address (or an address on a verified domain identity) must be
+    // verified in SES in this account/region before the forgot-password
+    // flow is used; user_admin.py rejects the action when unset.
+    const sesSenderAddress = new cdk.CfnParameter(this, 'SesSenderAddress', {
+      type: 'String',
+      default: '',
+      description:
+        'Verified SES sender address for User_Manager temporary-password ' +
+        'emails (portal-user-manager design D11). Leave empty to disable ' +
+        'the forgot-password flow.',
+    });
+
+    // Credential-verifier table (design D3/D4): salted one-way PBKDF2
+    // verifiers captured by user_admin.py password flows; never contains
+    // plaintext. Read at listing time for the edgeCapable flag and by the
+    // sync staging path.
+    const edgeCredentialsTable = new dynamodb.Table(this, 'EdgeCredentialsTable', {
+      tableName: 'dda-portal-edge-credentials',
+      partitionKey: {
+        name: 'username',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Per-device account-sync state (staged account set + syncId, status,
+    // attemptAt/lastSyncAt, pendingChanges) — the Account_Sync_Service
+    // reducer state (Reqs 7.4-7.9).
+    const accountSyncTable = new dynamodb.Table(this, 'AccountSyncTable', {
+      tableName: 'dda-portal-account-sync',
+      partitionKey: {
+        name: 'device_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Dead-letter queue for ack events that repeatedly fail processing
+    // (malformed acks are also dead-lettered explicitly by the handler
+    // without blocking the batch — camera-registry-sync pattern).
+    const accountSyncAckDlq = new sqs.Queue(this, 'AccountSyncAckDLQ', {
+      queueName: 'dda-portal-account-sync-acks-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+    });
+
+    // Ack queue fed by the dda-user-accounts shadow topic rule(s). The
+    // visibility timeout is a multiple of the consumer Lambda timeout per
+    // the SQS event-source guidance.
+    const accountSyncAckQueue = new sqs.Queue(this, 'AccountSyncAckQueue', {
+      queueName: 'dda-portal-account-sync-acks',
+      visibilityTimeout: cdk.Duration.seconds(180),
+      retentionPeriod: cdk.Duration.days(4),
+      enforceSSL: true,
+      deadLetterQueue: {
+        queue: accountSyncAckDlq,
+        maxReceiveCount: 3,
+      },
+    });
+
+    // Cross-account queue policy: an IoT topic rule delivers to SQS
+    // through its rule role, an IAM principal in the account where the
+    // rule runs. Allow SendMessage from the trusted UseCase accounts
+    // (devices whose shadows live there) plus this portal account.
+    accountSyncAckQueue.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'AllowUseCaseAccountIotRuleDelivery',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['sqs:SendMessage'],
+      resources: [accountSyncAckQueue.queueArn],
+      conditions: {
+        StringEquals: {
+          'aws:PrincipalAccount': Array.from(
+            new Set([...props.trustedUseCaseAccountIds, cdk.Aws.ACCOUNT_ID])
+          ),
+        },
+      },
+    }));
+
+    // Portal-account IoT topic rule forwarding every dda-user-accounts
+    // shadow update/documents event (device acks) to the ack queue.
+    // topic(3) is the thing name in $aws/things/{thing}/shadow/... —
+    // account_sync.py's ack parser requires the injected thing_name.
+    const userAccountsShadowRuleRole = new iam.Role(this, 'UserAccountsShadowRuleRole', {
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com'),
+      description:
+        'Role for the dda-user-accounts shadow IoT topic rule to deliver ' +
+        'shadow documents events to the DDA Portal account-sync ack queue',
+    });
+    userAccountsShadowRuleRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SendAccountSyncAcks',
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:SendMessage'],
+      resources: [accountSyncAckQueue.queueArn],
+    }));
+
+    new iot.CfnTopicRule(this, 'UserAccountsShadowRule', {
+      ruleName: 'dda_user_accounts_shadow_documents',
+      topicRulePayload: {
+        sql: "SELECT *, topic(3) AS thing_name FROM '$aws/things/+/shadow/name/dda-user-accounts/update/documents'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        description:
+          'Forward dda-user-accounts shadow documents events to the DDA ' +
+          'Portal account-sync ack queue',
+        actions: [
+          {
+            sqs: {
+              queueUrl: accountSyncAckQueue.queueUrl,
+              roleArn: userAccountsShadowRuleRole.roleArn,
+              useBase64: false,
+            },
+          },
+        ],
+      },
+    });
+
+    // Account_Sync_Service Lambda (account_sync.py) — three entry paths
+    // routed by event shape: SQS records -> ack ingest, direct
+    // {action: 'sync_attempt'} invoke from user_admin.py, EventBridge
+    // scheduled event -> timeout sweep + pending-changes delivery pass.
+    // Shadow writes go through the base-role IoT grant (Get/Update
+    // ThingShadow on thing/*) or the assumed use-case role for
+    // cross-account devices (camera_registry.py pattern).
+    const accountSyncHandler = new lambda.Function(this, 'AccountSyncHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'account_sync.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('AccountSync'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-06-account-sync',
+        ACCOUNT_SYNC_TABLE: accountSyncTable.tableName,
+        ACCOUNT_SYNC_ACK_DLQ_URL: accountSyncAckDlq.queueUrl,
+      },
+      layers: [sharedLayer],
+      // The scheduled pass attempts delivery for every device with
+      // pending changes in one invocation.
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    accountSyncHandler.addEventSource(new SqsEventSource(accountSyncAckQueue, {
+      batchSize: 10,
+      reportBatchItemFailures: true,
+    }));
+
+    // The handler dead-letters malformed acks explicitly (in addition to
+    // the redrive policy above).
+    accountSyncAckDlq.grantSendMessages(accountSyncHandler);
+    accountSyncTable.grantReadWriteData(accountSyncHandler);
+
+    // Retry/timeout driver: WHILE a device has undelivered pending
+    // changes, delivery is attempted at intervals not exceeding 5 minutes
+    // (Req 7.7); the same pass marks in_progress rows older than 60 s
+    // without an ack as failed / device unreachable (Req 7.9).
+    const accountSyncScheduleRule = new events.Rule(this, 'AccountSyncScheduleRule', {
+      ruleName: 'dda-portal-account-sync-schedule',
+      description:
+        'Drives Account_Sync_Service retries and ack-timeout sweeps ' +
+        '(portal-user-manager Reqs 7.7, 7.9)',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+    });
+    accountSyncScheduleRule.addTarget(new targets.LambdaFunction(accountSyncHandler));
+
+    // User_Manager admin API Lambda (user_admin.py) — PortalAdmin-only
+    // Cognito account management behind /admin/* (routes attached by the
+    // UserAdminApiStack below). Separate function so the cognito-idp
+    // admin and SES grants stay scoped to it alone (design D1).
+    const userAdminHandler = new lambda.Function(this, 'UserAdminHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'user_admin.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('UserAdmin'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-06-user-admin',
+        EDGE_CREDENTIALS_TABLE: edgeCredentialsTable.tableName,
+        ACCOUNT_SYNC_TABLE: accountSyncTable.tableName,
+        ACCOUNT_SYNC_FUNCTION: accountSyncHandler.functionName,
+        SES_SENDER_ADDRESS: sesSenderAddress.valueAsString,
+      },
+      layers: [sharedLayer],
+      // Full-pool list_users pagination (listing + last-PortalAdmin guard).
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    edgeCredentialsTable.grantReadWriteData(userAdminHandler);
+    accountSyncTable.grantReadWriteData(userAdminHandler);
+    // Immediate sync attempt after staging (the 5-minute schedule is the
+    // fallback when the invoke fails).
+    accountSyncHandler.grantInvoke(userAdminHandler);
+
+    // Cognito admin operations scoped to the portal user pool and granted
+    // ONLY to user_admin.py (task 5.1): account listing/inspection,
+    // password set (permanent/temporary), and custom:role updates.
+    // Extended (task 15.1) with account life-cycle operations: creation,
+    // enable/disable, and deletion.
+    userAdminHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'cognito-idp:AdminSetUserPassword',
+        'cognito-idp:AdminUpdateUserAttributes',
+        'cognito-idp:ListUsers',
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminCreateUser',
+        'cognito-idp:AdminEnableUser',
+        'cognito-idp:AdminDisableUser',
+        'cognito-idp:AdminDeleteUser',
+      ],
+      resources: [props.userPool.userPoolArn],
+    }));
+
+    // SES send for temporary-password delivery (design D11). Scoped to
+    // this account's verified identities: SES authorizes SendEmail
+    // against the identity of the Source address — an address identity
+    // or the domain identity covering it — so identity/* (rather than a
+    // single address ARN) keeps domain-verified senders working.
+    userAdminHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ses:SendEmail'],
+      resources: [
+        `arn:aws:ses:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:identity/*`,
+      ],
+    }));
+
+    // ------------------------------------------------------------------
+    // Workflow Manager Lambda functions
+    // Handler modules (workflows.py, workflow_validation.py,
+    // workflow_packaging.py, workflow_generator.py, workflow_testing.py)
+    // live in backend/functions alongside the existing handlers.
+    // ------------------------------------------------------------------
+
+    // Workflows Lambda Handler (Workflow_Store API - CRUD, versioning, duplicate)
+    const workflowsHandler = new lambda.Function(this, 'WorkflowsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflows.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('Workflows'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflows',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    // Workflow Validation Lambda Handler (validate endpoint + node catalog)
+    const workflowValidationHandler = new lambda.Function(this, 'WorkflowValidationHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_validation.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowValidation'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-validation',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    // Workflow Packaging Lambda Handler (Component_Packager - compile, assemble
+    // per-arch artifacts, register Greengrass Workflow_Component)
+    const workflowPackagingHandler = new lambda.Function(this, 'WorkflowPackagingHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_packaging.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowPackaging'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-packaging',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(300), // compile + multi-arch artifact staging
+      memorySize: 1024,
+      ephemeralStorageSize: cdk.Size.gibibytes(4), // plugin artifact assembly
+    });
+
+    // Workflow Generator Lambda Handler (Bedrock prompt-based generation)
+    const workflowGeneratorHandler = new lambda.Function(this, 'WorkflowGeneratorHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_generator.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowGenerator'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-generator',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      // Bedrock invocation timeout is configurable up to 60s; leave headroom
+      timeout: cdk.Duration.seconds(90),
+    });
+
+    // Grant the generator permission to invoke the configured Bedrock model via
+    // the Converse API. The model identifier is runtime configuration
+    // (Bedrock_Configuration in the settings table), so the grant covers
+    // foundation models and inference profiles rather than a fixed model ARN.
+    workflowGeneratorHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        'arn:aws:bedrock:*::foundation-model/*',
+        `arn:aws:bedrock:*:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
+
+    // ------------------------------------------------------------------
+    // Merged Node_Type_Catalog resolution (custom-node-designer task 9.2):
+    // the workflow store / validation / generator handlers read the
+    // Use_Case's registered Custom_Node_Types and the Lifecycle_State of
+    // their backing Plugin_Record versions. Those tables live in the
+    // NodeDesignerStack, which already depends on this stack's REST API —
+    // referencing its table tokens here would create a circular
+    // cross-stack reference, so the FIXED physical table names declared
+    // in node-designer-stack.ts are used instead (the same fixed-name
+    // pattern that stack uses for its simulator state machine ARN). The
+    // handlers degrade to the built-in catalog when the tables are not
+    // deployed.
+    const CUSTOM_NODE_TYPES_TABLE_NAME = 'dda-portal-custom-node-types';
+    const PLUGIN_RECORDS_TABLE_NAME = 'dda-portal-plugin-records';
+    const catalogConsumerHandlers = [
+      workflowsHandler,
+      workflowValidationHandler,
+      workflowGeneratorHandler,
+      // Component_Packager (custom-node-designer task 10.1): compiles
+      // against the merged catalog and loads the backing Plugin_Records
+      // for the custom-plugin packaging gates and artifact verification.
+      workflowPackagingHandler,
+      // Deployment_Service (custom-node-designer task 10.5): loads the
+      // backing Plugin_Records of a deployment's dependency closure for
+      // the pre-submit lifecycle and architecture gates.
+      deploymentsHandler,
+      // Component listing (custom-node-designer task 10.8): joins
+      // dda.plugin.* Plugin_Components with their backing Plugin_Record's
+      // Lifecycle_State for the deployment screen (Requirement 16.2).
+      componentsHandler,
+    ];
+    for (const handler of catalogConsumerHandlers) {
+      handler.addEnvironment('CUSTOM_NODE_TYPES_TABLE', CUSTOM_NODE_TYPES_TABLE_NAME);
+      handler.addEnvironment('PLUGIN_RECORDS_TABLE', PLUGIN_RECORDS_TABLE_NAME);
+      handler.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'dynamodb:GetItem',
+          'dynamodb:BatchGetItem',
+          'dynamodb:Query',
+          'dynamodb:Scan',
+        ],
+        resources: [
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${CUSTOM_NODE_TYPES_TABLE_NAME}`,
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${CUSTOM_NODE_TYPES_TABLE_NAME}/index/*`,
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${PLUGIN_RECORDS_TABLE_NAME}`,
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${PLUGIN_RECORDS_TABLE_NAME}/index/*`,
+        ],
+      }));
+    }
+
+    // Custom-plugin artifact verification (custom-node-designer task 10.1,
+    // Requirement 10.4): the Component_Packager KMS-Verifies each custom
+    // Plugin_Artifact signature against the portal signing key. The key
+    // lives in the NodeDesignerStack (same circular-reference constraint as
+    // the tables above), so its FIXED alias declared in
+    // node-designer-stack.ts is referenced instead of the key ARN; the
+    // grant is scoped to requests made through that alias.
+    const PLUGIN_SIGNING_KEY_ALIAS = 'alias/dda-portal/plugin-signing';
+    workflowPackagingHandler.addEnvironment(
+      'PLUGIN_SIGNING_KEY_ARN',
+      `arn:aws:kms:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:${PLUGIN_SIGNING_KEY_ALIAS}`,
+    );
+    workflowPackagingHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['kms:Verify', 'kms:DescribeKey'],
+      resources: [`arn:aws:kms:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:key/*`],
+      conditions: {
+        StringEquals: { 'kms:RequestAlias': PLUGIN_SIGNING_KEY_ALIAS },
+      },
+    }));
+
+    // The data-accounts handler serves the Bedrock model dropdown on the
+    // settings page (GET /data-accounts/bedrock-configuration/models) by
+    // listing inference profiles and foundation models. These are list
+    // actions without resource-level scoping, hence resource '*'.
+    dataAccountsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:ListFoundationModels',
+        'bedrock:ListInferenceProfiles',
+      ],
+      resources: ['*'],
+    }));
+
+    // Workflow Testing Lambda Handler (Workflow_Test_Runner API - test dataset
+    // upload/list, test run start/status/results). The Step Functions state
+    // machine and Fargate sandbox live in the test-runner stack; its ARN is
+    // wired in as TEST_RUN_STATE_MACHINE_ARN (with a settings-table fallback
+    // inside the handler for environments without the test-runner stack).
+    //
+    // Triton model staging (workflow_model_staging.py): starting a test run
+    // resolves every model_inference node's model against MODELS_TABLE,
+    // reads the CPU-variant component recipe (greengrass:GetComponent), and
+    // streams the model artifact zip from the use-case data bucket into the
+    // portal artifacts bucket for the sandbox. All of that is covered by the
+    // shared createLambdaRole grants (Greengrass components:* read, the
+    // S3 data-plane grant — bounded by dataBucketAllowlist when configured —
+    // and the models table), so NO additional IAM grant is added; the
+    // sandbox task role stays portal-artifacts-only (Requirement 12.9).
+    // The artifact copy (models can be >100 MB) is why this handler gets a
+    // longer timeout and more memory than the other workflow handlers.
+    const workflowTestingHandler = new lambda.Function(this, 'WorkflowTestingHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_testing.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowTesting'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-testing',
+        ...(props.testRunStateMachine && {
+          TEST_RUN_STATE_MACHINE_ARN: props.testRunStateMachine.stateMachineArn,
+        }),
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(300), // model artifact staging copy
+      memorySize: 1024,
+    });
+
+    // Allow the testing handler to start test-run executions and poll their
+    // status (states:StartExecution + DescribeExecution and related reads).
+    if (props.testRunStateMachine) {
+      props.testRunStateMachine.grantStartExecution(workflowTestingHandler);
+      props.testRunStateMachine.grantRead(workflowTestingHandler);
+    }
 
     // Grant SharedComponents Lambda permission to update the GDK component bucket policy
     // This is needed to add new usecase accounts to the bucket policy during onboarding
@@ -1151,6 +2144,11 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       sharedComponentsHandler,
       dataAccountsHandler,
       auditLogsHandler,
+      workflowsHandler,
+      workflowValidationHandler,
+      workflowPackagingHandler,
+      workflowGeneratorHandler,
+      workflowTestingHandler,
       lambdaEnvironment,
       createLambdaRole,
       sharedLayer,
@@ -1158,6 +2156,60 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
 
     this.api = apiGatewayStack.api;
     this.apiUrl = apiGatewayStack.apiUrl;
+
+    // Camera_Registry routes (camera-registry-sync) in their own nested
+    // stack: the ApiGateway nested stack sits at the CloudFormation
+    // 500-resource limit, so the camera routes import the Rest API and the
+    // /devices/{id} resource by id and attach there — the same pattern as
+    // NodeDesignerApiStack.
+    const cameraRegistryApiStack = new CameraRegistryApiStack(this, 'CameraRegistryApi', {
+      restApiId: apiGatewayStack.api.restApiId,
+      restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+      deviceResourceId: apiGatewayStack.deviceResourceId,
+      // Must match ApiGatewayStack deployOptions.stageName.
+      stageName: 'v1',
+      userPool: props.userPool,
+      cameraRegistryHandler,
+    });
+    // The stage re-pointing deployment inside CameraRegistryApiStack needs
+    // the ApiGatewayStack's stage (and its own deployment) to exist first.
+    cameraRegistryApiStack.addDependency(apiGatewayStack);
+
+    // User_Manager admin routes (portal-user-manager) in their own nested
+    // stack for the same 500-resource-limit reason; every /admin/* method
+    // is behind the JWT authorizer (Requirement 1.7).
+    const userAdminApiStack = new UserAdminApiStack(this, 'UserAdminApi', {
+      restApiId: apiGatewayStack.api.restApiId,
+      restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+      // Must match ApiGatewayStack deployOptions.stageName.
+      stageName: 'v1',
+      userPool: props.userPool,
+      userAdminHandler,
+    });
+    userAdminApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (both nested stacks
+    // deploy against the same stage).
+    userAdminApiStack.addDependency(cameraRegistryApiStack);
+
+    // Station Quick Setup routes (station-quick-setup) in their own nested
+    // stack for the same 500-resource-limit reason. The JWT
+    // /device-registrations routes sit behind the Cognito authorizer; the
+    // /quick-setup/* routes use AuthorizationType.NONE (Setup_Token validated
+    // in-handler) plus method-level throttling for defense-in-depth (Req 3.9).
+    const quickSetupApiStack = new QuickSetupApiStack(this, 'QuickSetupApi', {
+      restApiId: apiGatewayStack.api.restApiId,
+      restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+      // Must match ApiGatewayStack deployOptions.stageName.
+      stageName: 'v1',
+      userPool: props.userPool,
+      deviceRegistrationsHandler,
+      quickSetupHandler,
+    });
+    quickSetupApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (all nested API stacks
+    // deploy against the same 'v1' stage).
+    quickSetupApiStack.addDependency(cameraRegistryApiStack);
+    quickSetupApiStack.addDependency(userAdminApiStack);
 
     // Custom Resource to update UseCases Lambda environment variable with API Gateway ID
     // This avoids circular dependency by updating the Lambda AFTER both resources are created

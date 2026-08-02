@@ -2,6 +2,15 @@ version: "3.0"
 services:
   backend_tegra_gpu_enabled:
     network_mode: "host"
+    # Auto-recover from crashes. The backend links to the Greengrass Nucleus
+    # over the AWS CRT event-stream RPC IPC, which can hit a native fatal abort
+    # ("Continuation ref count has gone negative" in aws-c-event-stream) that
+    # SIGABRTs the whole process. Without a restart policy that abort leaves the
+    # flask-app permanently down until the component is manually restarted.
+    # `unless-stopped` re-launches the container after such a crash while the
+    # Greengrass component is running, and does not fight the component's own
+    # `docker compose down` on a normal stop (which removes the container).
+    restart: unless-stopped
     build:
       context: ./backend
       dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
@@ -55,7 +64,27 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - CUDA_HOME=/usr/local/cuda/
-      - LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CUDA_HOME/lib64/:/usr/lib/aarch64-linux-gnu/tegra:/usr/local/cuda/targets/aarch64-linux/lib/
+      # /usr/local/cuda-12.6/... leads the path on JP6 ONLY (the dir does not
+      # exist in JP4/JP5 images, where the loader silently skips it): the JP6
+      # image's /usr/local/cuda is a real mount-point dir (not a symlink), so
+      # the host CUDA mount above no longer shadows the image's cuda-12.6
+      # toolkit, and torch/vllm (built against CUDA 12.6) must resolve the
+      # 12.6 runtime libs rather than an older host toolkit (JetPack 6.0's
+      # 12.2 libcudart lacks cudaGetDriverEntryPointByVersion -> model-load
+      # failures). Driver libs (libcuda.so.1, libnvrm*) are NOT in the toolkit
+      # lib dir — they come from the tegra dir / NVIDIA runtime injection — so
+      # the host driver still wins for driver resolution.
+      # /opt/dda/trt8-runtime/lib is appended LAST (lowest precedence) for the
+      # JetPack 6 Neo/DLR TensorRT 8 stack (Dockerfile.jp6 stages TRT 8.5 there
+      # because JP6 ships TRT 10). TensorRT dlopens libnvinfer_builder_resource.
+      # so.8.5.2 by BARE filename, which searches only LD_LIBRARY_PATH + default
+      # paths — not the ldconfig-registered custom dir — so the staged dir must
+      # be on LD_LIBRARY_PATH for the DLR model to load. Its .so.8/.so.11 sonames
+      # do not collide with the base image's TRT 10 / cuDNN 9 / cuBLAS 12, and
+      # being last it cannot shadow the cuda-12.6 libs torch/vLLM resolve first.
+      # On JP4/JP5 the dir does not exist (TRT 8 is native under /usr/lib), so the
+      # loader silently skips it — harmless.
+      - LD_LIBRARY_PATH=/usr/local/cuda-12.6/targets/aarch64-linux/lib/:$LD_LIBRARY_PATH:$CUDA_HOME/lib64/:/usr/lib/aarch64-linux-gnu/tegra:/usr/local/cuda/targets/aarch64-linux/lib/:/opt/dda/trt8-runtime/lib
       - GRPC_POLL_STRATEGY=poll
       - GRPC_ENABLE_FORK_SUPPORT=1
       - PYTHONPATH=/opt/tritonserver/backends/python:/
@@ -73,6 +102,8 @@ services:
     profiles: [tegra]
   backend_generic:
     network_mode: "host"
+    # Auto-recover from crashes (see backend_tegra_gpu_enabled above).
+    restart: unless-stopped
     build:
       context: ./backend
       dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
@@ -119,6 +150,8 @@ services:
   frontend:
     build: ./frontend
     image: react-webapp
+    # Auto-recover from crashes (see backend_tegra_gpu_enabled above).
+    restart: unless-stopped
     ports:
       - "3000:80"
       - "3443:443"

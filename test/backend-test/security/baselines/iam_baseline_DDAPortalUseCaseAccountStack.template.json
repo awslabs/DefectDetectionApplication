@@ -546,10 +546,86 @@
     "aws:cdk:path": "DDAPortalUseCaseAccountStack/DDAPortalAccessRole/DefaultPolicy/Resource"
    }
   },
+  "CameraShadowRuleRole6FFE3D5D": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "iot.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "Description": "Role for the dda-camera-registry shadow IoT topic rule to deliver shadow documents events to the DDA Portal shadow-report queue",
+    "RoleName": "DDACameraShadowRuleRole"
+   },
+   "Metadata": {
+    "aws:cdk:path": "DDAPortalUseCaseAccountStack/CameraShadowRuleRole/Resource"
+   }
+  },
+  "CameraShadowRuleRoleDefaultPolicyC0A975DB": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sqs:SendMessage",
+       "Effect": "Allow",
+       "Resource": "arn:aws:sqs:us-east-1:111111111111:dda-portal-camera-shadow-reports",
+       "Sid": "SendCameraShadowReports"
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "CameraShadowRuleRoleDefaultPolicyC0A975DB",
+    "Roles": [
+     {
+      "Ref": "CameraShadowRuleRole6FFE3D5D"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "DDAPortalUseCaseAccountStack/CameraShadowRuleRole/DefaultPolicy/Resource"
+   }
+  },
+  "CameraRegistryShadowRule": {
+   "Type": "AWS::IoT::TopicRule",
+   "Properties": {
+    "RuleName": "dda_camera_registry_shadow_documents",
+    "TopicRulePayload": {
+     "Actions": [
+      {
+       "Sqs": {
+        "QueueUrl": "https://sqs.us-east-1.amazonaws.com/111111111111/dda-portal-camera-shadow-reports",
+        "RoleArn": {
+         "Fn::GetAtt": [
+          "CameraShadowRuleRole6FFE3D5D",
+          "Arn"
+         ]
+        },
+        "UseBase64": false
+       }
+      }
+     ],
+     "AwsIotSqlVersion": "2016-03-23",
+     "Description": "Forward dda-camera-registry shadow documents events to the DDA Portal camera shadow-report queue",
+     "RuleDisabled": false,
+     "Sql": "SELECT *, topic(3) AS thing_name FROM '$aws/things/+/shadow/name/dda-camera-registry/update/documents'"
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DDAPortalUseCaseAccountStack/CameraRegistryShadowRule"
+   }
+  },
   "CDKMetadata": {
    "Type": "AWS::CDK::Metadata",
    "Properties": {
-    "Analytics": "v2:deflate64:H4sIAAAAAAAA/zPSMzKy1DNUTCwv1k1OydbNyUzSqw4uSUzO1kksL47PTMzVq/ZNzEtMT00JyM/JTK7UcU7LQxUIys9JBYmCaYQiCKtWJyi1OL+0KBmsxL+0pKC0pFYnLz8lVS+rWL/MyEAPhBSzijMzdYtK80oyc1P1giA0AG/4sB2bAAAA"
+    "Analytics": "v2:deflate64:H4sIAAAAAAAA/1WLwQrCMBBEv6X3dNXcPPcsSuxd1iSVbdNsaRKLhPy7tD2IMPCGx4wEKc9wqnAJtTZD7egJ+R5RDwKX8MiEI+QLenxZc2NH+iOazv8Lxc6uduNvtLciiCM0nW95Iq2Ss0UoGzjNejtdU5xSLMKzsdCHw1seYU3VB6J6Tj7SaEHt/ALY+w5wrgAAAA=="
    },
    "Metadata": {
     "aws:cdk:path": "DDAPortalUseCaseAccountStack/CDKMetadata/Default"
@@ -557,6 +633,10 @@
   }
  },
  "Outputs": {
+  "CameraShadowReportQueueArn": {
+   "Description": "Portal SQS queue receiving dda-camera-registry shadow documents events",
+   "Value": "arn:aws:sqs:us-east-1:111111111111:dda-portal-camera-shadow-reports"
+  },
   "RoleArn": {
    "Description": "ARN of the DDA Portal access role",
    "Value": {
@@ -614,7 +694,7 @@
   },
   "StackVersion": {
    "Description": "Version of the UseCase Account stack",
-   "Value": "1.4.0",
+   "Value": "1.5.0",
    "Export": {
     "Name": "DDAUseCaseStackVersion"
    }

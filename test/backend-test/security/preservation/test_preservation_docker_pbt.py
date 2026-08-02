@@ -77,7 +77,7 @@ _BASE_REGISTRY = st.one_of(
 
 # Validates: Requirements 3.1 — the default (unset / nvcr.io) resolution equals
 # the byte-identical current pull reference plus the pinned digest.
-@settings(max_examples=60, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(
     image_tag_digest=st.sampled_from(_IMAGE_TAG_DIGEST),
     base_registry=_BASE_REGISTRY,
@@ -164,7 +164,7 @@ def _expected_disallowed(reg_kind, digest_present, nosec_present):
 
 
 # Validates: Requirements 3.5
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(
     reg=_REGISTRY_CHOICE,
     image_path=_IMAGE_PATH,

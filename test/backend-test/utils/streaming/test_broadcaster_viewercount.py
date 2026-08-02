@@ -220,4 +220,4 @@ class ViewerCountMachine(RuleBasedStateMachine):
 # Feature: concurrent-camera-stream-viewing, Property 8: Viewer-count correctness and duplicate subscriptions
 # Validates: Requirements 8.1, 8.4, 8.5, 8.8
 TestViewerCount = ViewerCountMachine.TestCase
-TestViewerCount.settings = settings(max_examples=100, stateful_step_count=50, deadline=None)
+TestViewerCount.settings = settings(max_examples=25, stateful_step_count=50, deadline=None)

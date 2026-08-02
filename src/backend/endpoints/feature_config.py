@@ -84,9 +84,19 @@ class ListFeatureConfigsResponse(RootModel):
 @router.get("/feature-configurations")
 def list_feature_configs() -> ListFeatureConfigsResponse:
     feature_configs = []
-    triton_server = __get_triton_instance()
-    if triton_server:
-        feature_configs.extend(feature_configs_utils.get_features_triton(triton_server))
+    if get_is_triton():
+        # Stand up the Triton server only when models are actually deployed:
+        # creating it against an empty model repository blocks indefinitely
+        # (longstanding hang on this endpoint when no models are deployed —
+        # the native server never reaches readiness with nothing to load).
+        # With no Triton models, skip server creation and still surface any
+        # vLLM models the runtime manager tracks.
+        if feature_configs_utils.triton_repo_has_models():
+            feature_configs.extend(
+                feature_configs_utils.get_features_triton(__get_triton_instance())
+            )
+        else:
+            feature_configs.extend(feature_configs_utils.get_features_vllm())
     else:
         feature_configs.extend(feature_configs_utils.get_features_lfv(lfv_edge_agent))
     return feature_configs

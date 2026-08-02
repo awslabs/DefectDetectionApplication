@@ -46,7 +46,7 @@ import sys
 from argparse import Namespace
 
 import pytest
-from hypothesis import given, settings, HealthCheck, example
+from hypothesis import assume, given, settings, HealthCheck, example
 from hypothesis import strategies as st
 
 import secrets_audit
@@ -208,6 +208,27 @@ def test_handler_log_does_not_contain_bearer_token():
     )
 
 
+# Placeholder token secret used ONLY to capture the benign (secret-free) log
+# scaffolding the handler emits for the canonical event. The underscores keep
+# it outside the property's Lu/Ll/Nd secret alphabet.
+_BENIGN_PLACEHOLDER_SECRET = "__benign_placeholder__"
+
+
+def _benign_handler_log_output(mod):
+    """Log output the handler emits for the canonical event when the token
+    carries NO generated secret. This is the fixed, benign scaffolding of the
+    log line (e.g. the ``methodArn`` value, the ``requestId`` key/value, the
+    'Authorization successful' line). It is captured from the REAL handler so
+    it stays in sync with the source under test."""
+    _, benign_log = _invoke_handler_capture(
+        mod,
+        _authorizer_event(
+            f"eyJhbGciOiJSUzI1NiJ9.payload.{_BENIGN_PLACEHOLDER_SECRET}"
+        ),
+    )
+    return benign_log
+
+
 @settings(max_examples=25, deadline=None,
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(secret=st.text(alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd")),
@@ -218,6 +239,16 @@ def test_handler_never_logs_secret_token_property(secret):
     line must not contain it. UNFIXED-TREE EXPECTATION: FAILS (the whole event,
     token included, is dumped to the log)."""
     mod = _load_jwt_authorizer()
+
+    # Generator guard: a generated "secret" that happens to be a substring of
+    # the benign log scaffolding (e.g. 'requestI' inside the benign 'requestId'
+    # log key) would produce a FALSE-POSITIVE counterexample — the handler
+    # would "log the secret" without ever seeing it. Reject such draws so the
+    # property only fails when the token itself reaches the log. Detection
+    # power is preserved: a REAL leak puts the secret in ``log_output`` but not
+    # in the benign baseline, so it still trips the assertion below.
+    assume(secret not in _benign_handler_log_output(mod))
+
     token = f"eyJhbGciOiJSUzI1NiJ9.payload.{secret}"
     event = _authorizer_event(token)
     _, log_output = _invoke_handler_capture(mod, event)

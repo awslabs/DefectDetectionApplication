@@ -5,6 +5,7 @@ import {
   TopNavigation,
   SideNavigation,
   SideNavigationProps,
+  ButtonDropdownProps,
   Modal,
   SpaceBetween,
   FormField,
@@ -14,7 +15,49 @@ import {
   Alert,
 } from '@cloudscape-design/components';
 import { useAuth } from '../contexts/AuthContext';
+import { UserRole } from '../types';
 import { getConfig, getBuildInfo } from '../config';
+
+/**
+ * Builds the items for the top-navigation settings dropdown based on the
+ * user's role (portal-user-manager Requirements 1.1, 1.2).
+ *
+ * Exported as a pure function so the role gating is directly testable:
+ * the `user-manager` item is present only for PortalAdmin users — it is
+ * omitted entirely (not merely disabled) for every other role.
+ */
+export function buildSettingsDropdownItems(
+  role: UserRole | undefined
+): ButtonDropdownProps.ItemOrGroup[] {
+  const isPortalAdmin = role === 'PortalAdmin';
+  return [
+    {
+      id: 'profile',
+      text: 'Profile',
+      disabled: true,
+    },
+    {
+      id: 'settings',
+      text: 'Settings',
+      // The settings page is PortalAdmin-only (same rule as the
+      // sidebar link); other roles see the item disabled.
+      disabled: !isPortalAdmin,
+    },
+    // The User Manager tool is PortalAdmin-only and, unlike the settings
+    // item, is omitted entirely for other roles (Requirement 1.2).
+    ...(isPortalAdmin
+      ? [{ id: 'user-manager', text: 'User Manager' }]
+      : []),
+    {
+      id: 'change-password',
+      text: 'Change Password',
+    },
+    {
+      id: 'logout',
+      text: 'Sign out',
+    },
+  ];
+}
 
 export default function Layout() {
   const navigate = useNavigate();
@@ -23,6 +66,16 @@ export default function Layout() {
   const config = getConfig();
   const branding = config.branding;
   const build = getBuildInfo();
+
+  // The workflow builder needs the full horizontal space, so the side
+  // navigation is collapsed by default on that route. The route only
+  // provides the default: once the user toggles the navigation the
+  // explicit choice wins for the rest of the session, whatever page
+  // they navigate to.
+  const isBuilderRoute = location.pathname.startsWith('/workflows/builder');
+  const [navigationOverride, setNavigationOverride] = useState<boolean | null>(null);
+  const navigationOpen = navigationOverride ?? !isBuilderRoute;
+
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -41,6 +94,8 @@ export default function Layout() {
     { type: 'link' as const, text: 'Training', href: '/training' },
     { type: 'link' as const, text: 'Models', href: '/models' },
     { type: 'divider' as const },
+    { type: 'link' as const, text: 'Workflows', href: '/workflows/builder' },
+    { type: 'link' as const, text: 'Node Designer', href: '/node-designer' },
     { type: 'link' as const, text: 'Components', href: '/components' },
     { type: 'link' as const, text: 'Deployments', href: '/deployments' },
     { type: 'link' as const, text: 'Devices', href: '/devices' },
@@ -49,6 +104,7 @@ export default function Layout() {
   // Admin-only items (PortalAdmin only)
   const portalAdminItems: SideNavigationProps.Item[] = [
     { type: 'divider' as const },
+    { type: 'link' as const, text: 'Plugin Review', href: '/node-designer/review' },
     { type: 'link' as const, text: 'Settings', href: '/settings' },
   ];
 
@@ -88,30 +144,15 @@ export default function Layout() {
             text: user?.email || user?.username || 'User',
             description: user?.role || '',
             iconName: 'user-profile',
-            items: [
-              {
-                id: 'profile',
-                text: 'Profile',
-                disabled: true,
-              },
-              {
-                id: 'settings',
-                text: 'Settings',
-                disabled: true,
-              },
-              {
-                id: 'change-password',
-                text: 'Change Password',
-              },
-              {
-                id: 'logout',
-                text: 'Sign out',
-              },
-            ],
+            items: buildSettingsDropdownItems(user?.role),
             onItemClick: async ({ detail }) => {
               if (detail.id === 'logout') {
                 await logout();
                 navigate('/login');
+              } else if (detail.id === 'settings') {
+                navigate('/settings');
+              } else if (detail.id === 'user-manager') {
+                navigate('/admin/user-manager');
               } else if (detail.id === 'change-password') {
                 setShowChangePassword(true);
                 setChangePwError('');
@@ -125,6 +166,16 @@ export default function Layout() {
         ]}
       />
       <AppLayout
+        // The workflow builder canvas needs the full content width: drop
+        // the AppLayout content gutters and its default max content width
+        // (the dead space between the side navigation and the node
+        // palette) on the builder route only; the builder page applies
+        // its own minimal internal padding. Every other page keeps the
+        // default Cloudscape content paddings and width.
+        disableContentPaddings={isBuilderRoute}
+        maxContentWidth={isBuilderRoute ? Number.MAX_VALUE : undefined}
+        navigationOpen={navigationOpen}
+        onNavigationChange={({ detail }) => setNavigationOverride(detail.open)}
         navigation={
           <SideNavigation
             activeHref={location.pathname}
