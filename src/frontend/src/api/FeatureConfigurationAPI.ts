@@ -19,16 +19,19 @@ import axios from "axios";
 import { APIList } from "config/Interface";
 import {
   FeatureConfiguration,
-  FeatureConfigurationType,
+  isAssignableModel,
 } from "components/workflow/types";
+
+// Re-export the shared legacy-model filter so API consumers can import it
+// from here alongside the fetchers. The canonical definition lives in
+// `components/workflow/types` next to `FeatureConfigurationType`.
+export { isAssignableModel };
 
 export async function listModels() {
   const endpoint = APIList.featureConfigurations;
   const { data } = await axios.get<FeatureConfiguration[]>(endpoint);
-  return data.filter(
-    (config: FeatureConfiguration) =>
-      config.type === FeatureConfigurationType.LFVModel || FeatureConfigurationType.TritonModel,
-  );
+  // Exclude non-assignable (VllmModel) entries; legacy workflows cannot run VLMs.
+  return data.filter(isAssignableModel);
 }
 
 export async function listFeatureConfigurations() {

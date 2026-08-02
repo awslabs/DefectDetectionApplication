@@ -131,7 +131,7 @@ export default function DeployedWorkflowDetails(): JSX.Element {
             )
           }
         >
-          {registration.workflowId}
+          {registration.name || registration.workflowId}
         </Header>
       }
     >
@@ -145,6 +145,10 @@ export default function DeployedWorkflowDetails(): JSX.Element {
 
         <Container header={<Header variant="h2">Registration details</Header>}>
           <ColumnLayout columns={3} variant="text-grid">
+            <div>
+              <Box variant="awsui-key-label">Name</Box>
+              <div>{registration.name || registration.workflowId}</div>
+            </div>
             <div>
               <Box variant="awsui-key-label">Workflow</Box>
               <div>{registration.workflowId}</div>

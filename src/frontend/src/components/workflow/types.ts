@@ -37,7 +37,8 @@ export enum Rule {
 
 export enum FeatureConfigurationType {
   LFVModel = "LFVModel",
-  TritonModel = "TritonModel"
+  TritonModel = "TritonModel",
+  VllmModel = "VllmModel"
 }
 
 export enum WorkflowOptionTags {
@@ -52,6 +53,21 @@ export interface FeatureConfiguration {
   status?: string;
   modelName: string;
   defaultConfiguration: Partial<ModelDefaultConfigs>;
+}
+
+/**
+ * Returns true for feature configurations that can be assigned to a legacy
+ * workflow. Legacy workflows cannot run vision-language / vLLM models, so
+ * `VllmModel` entries are excluded (allow-list of `LFVModel` / `TritonModel`).
+ *
+ * This is the single shared definition of the legacy-model filter, reused by
+ * `FeatureConfigurationAPI.listModels()` and the legacy workflow editor
+ * (`EditWorkflow`) so the model-option filter has one source of truth. It lives
+ * here alongside `FeatureConfigurationType` so consumers can filter without
+ * depending on the API module.
+ */
+export function isAssignableModel(config: FeatureConfiguration): boolean {
+  return config.type !== FeatureConfigurationType.VllmModel;
 }
 
 export interface InputConfiguration {
