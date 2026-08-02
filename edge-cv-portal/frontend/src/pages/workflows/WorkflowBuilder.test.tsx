@@ -397,6 +397,60 @@ describe('WorkflowBuilder validate action (Requirements 4.8, 4.9)', () => {
 });
 
 // --------------------------------------------------------------------------
+// Bug 5 exploration (Property 5: Bug Condition — workflow name shown while
+// editing; Requirements 1.5, 2.5). When a saved workflow is open, its name
+// SHALL appear at the top-of-page header so the user can tell which workflow
+// is open. This test drives the real page composition with a loaded workflow
+// carrying a distinctive name and asserts that name shows in the top header.
+//
+// EXPECTED OUTCOME ON UNFIXED CODE: FAILS. The top-of-page header is the
+// static "Workflow Builder" heading; the workflow name only appears as small
+// secondary text inside the toolbar, never in the header. Counterexample:
+// "the workflow name is absent from the top header".
+// --------------------------------------------------------------------------
+
+describe('WorkflowBuilder workflow name display (Bug 5, Requirements 1.5, 2.5)', () => {
+  // A distinctive name that is not a substring of "Workflow Builder" (and
+  // vice versa), so a header match is unambiguous.
+  const OPEN_WORKFLOW_NAME = 'Bottle cap inspection line';
+
+  beforeEach(() => {
+    getWorkflow.mockResolvedValue({
+      workflow: {
+        workflow_id: 'wf-name',
+        usecase_id: 'uc-1',
+        name: OPEN_WORKFLOW_NAME,
+        description: '',
+        created_at: 1,
+        updated_at: 1,
+        latest_version: 4,
+      },
+      version: 4,
+      definition: SAVED_DEFINITION,
+    });
+  });
+
+  it('shows the open workflow name in the top-of-page header', async () => {
+    renderBuilder('/workflows/builder/wf-name');
+
+    // The deep-linked workflow finishes loading (the toolbar surfaces the
+    // name/version as small secondary text once loaded).
+    expect(
+      await screen.findByText(`${OPEN_WORKFLOW_NAME} (v4)`)
+    ).toBeInTheDocument();
+    await waitFor(() => expect(getWorkflow).toHaveBeenCalledWith('wf-name'));
+
+    // The workflow's name must appear in the prominent top-of-page header
+    // (a heading), not only in the small toolbar status text. On unfixed
+    // code the only heading reads "Workflow Builder", so this fails —
+    // confirming the bug (the name is absent from the top header).
+    expect(
+      screen.getByRole('heading', { name: new RegExp(OPEN_WORKFLOW_NAME, 'i') })
+    ).toBeInTheDocument();
+  });
+});
+
+// --------------------------------------------------------------------------
 // Requirement 1.5: the per-node trash button deletes the node and its
 // attached connections through the canvas deletion path.
 // --------------------------------------------------------------------------

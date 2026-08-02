@@ -677,7 +677,15 @@ class TestOutputNodeTypes:
     def test_mqtt_publish_parameterization(self):
         descriptor = get_node_type("mqtt_publish")
         params = _params_by_name(descriptor)
-        assert params["broker_host"].required is True
+        # Bug 2 (workflow-manager-integration-bugfixes, Requirement 2.2):
+        # broker_host is no longer statically required so the topic-only
+        # Greengrass path is not force-failed by the missing-required check;
+        # the additive, off-by-default greengrass option is what enables that
+        # path. A publish target is instead enforced at validation time (V6).
+        assert params["broker_host"].required is False
+        assert params["greengrass"].param_type == "bool"
+        assert params["greengrass"].required is False
+        assert params["greengrass"].default is False
         assert params["topic"].required is True
         assert params["broker_port"].param_type == "int"
         assert params["broker_port"].default == 1883

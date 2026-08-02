@@ -18,16 +18,21 @@
 import { describe, it, expect } from 'vitest';
 import * as fc from 'fast-check';
 import { arePortsCompatible } from './compatibility';
+import type { Edge } from '@xyflow/react';
 import {
   connectionRejectionReason,
+  edgeIdFor,
+  isSameConnection,
   toWorkflowNode,
   WORKFLOW_NODE_TYPE,
   type BuilderNode,
+  type ConnectionEndpoints,
 } from './builderGraph';
 import { resolvedPorts } from './inlineChecks';
 import {
   CATEGORIES,
   PORT_TYPES,
+  PORT_TYPE_INFERENCE_META,
   PORT_TYPE_VIDEO_FRAMES,
   type JsonValue,
   type NodeTypeDescriptor,
@@ -278,6 +283,256 @@ describe('Property 11: Designer connection acceptance for fixed VideoFrames port
           expect(typeof reason).toBe('string');
           expect((reason as string).length).toBeGreaterThan(0);
         }
+      }),
+      { numRuns: 25 }
+    );
+  });
+});
+
+/**
+ * **Feature: workflow-manager-integration-bugfixes, Property 6: Preservation — connection acceptance unchanged outside every bug condition**
+ *
+ * Baseline behavior that the model-inference fan-out fix (Bug 3) must NOT
+ * change. `connectionRejectionReason` is a pure, stateless decision over the
+ * dragged endpoints; it never inspects a source port's existing out-degree, so
+ * fan-out is realized entirely by appending edges elsewhere. This block pins
+ * the acceptance/rejection outcomes that must remain identical:
+ *
+ *   - a connection is accepted iff the dragged source output type is compatible
+ *     with the dragged target input type (single-downstream and every further
+ *     downstream connection alike — the function is out-degree-agnostic);
+ *   - a self-connection (source id === target id) is always rejected with a
+ *     non-empty reason;
+ *   - an unknown source or target handle (not a declared port) is always
+ *     rejected with a non-empty reason;
+ *   - a model-inference output (`inference` category, `InferenceMeta` out port)
+ *     is accepted onto a compatible target and rejected onto an incompatible
+ *     one, with the same decision no matter how many downstream edges already
+ *     exist — establishing the single-downstream baseline preserved under
+ *     fan-out.
+ *
+ * **Validates: Requirements 3.3, 3.4**
+ */
+
+/** A model-inference-shaped source: `inference` category, single `InferenceMeta` out port. */
+const modelInferenceSourceArb: fc.Arbitrary<NodeInstance> = fc
+  .constantFrom('model_inference', 'bedrock_inference', 'llm_inference')
+  .map((typeId) => ({
+    descriptor: {
+      typeId,
+      category: 'inference',
+      displayName: 'Model inference',
+      inputs: [{ name: 'in', portType: PORT_TYPE_VIDEO_FRAMES }],
+      outputs: [{ name: 'out', portType: PORT_TYPE_INFERENCE_META }],
+      parameters: [],
+      mappings: [],
+      hardwareDependent: false,
+    },
+    parameters: {},
+  }));
+
+/** A downstream target declaring a single input port of a chosen type. */
+const downstreamTargetArb: fc.Arbitrary<NodeInstance> = fc
+  .constantFrom(...PORT_TYPES)
+  .map((portType) => ({
+    descriptor: {
+      typeId: 'downstream_node',
+      category: 'output',
+      displayName: 'Downstream node',
+      inputs: [{ name: 'in', portType }],
+      outputs: [],
+      parameters: [],
+      mappings: [],
+      hardwareDependent: false,
+    },
+    parameters: {},
+  }));
+
+describe('Property 6 (preservation): connection acceptance unchanged outside every bug condition', () => {
+  it('rejects a self-connection (source id === target id) with a non-empty reason', () => {
+    fc.assert(
+      fc.property(
+        instanceArb,
+        fc.string(),
+        fc.string(),
+        (instance, sourceHandle, targetHandle) => {
+          const node = builderNode('same', instance);
+
+          const reason = connectionRejectionReason(
+            { source: 'same', sourceHandle, target: 'same', targetHandle },
+            [node]
+          );
+
+          expect(typeof reason).toBe('string');
+          expect((reason as string).length).toBeGreaterThan(0);
+        }
+      ),
+      { numRuns: 25 }
+    );
+  });
+
+  it('rejects an unknown source or target handle with a non-empty reason', () => {
+    // Force at least one endpoint handle to name a port the node does not
+    // declare, so the connection can never be accepted regardless of types.
+    const unknownHandleScenarioArb = fc
+      .tuple(instanceArb, instanceArb)
+      .chain(([source, target]) =>
+        fc.record({
+          source: fc.constant(source),
+          target: fc.constant(target),
+          sourceHandle: fc.constant('__missing_source_handle__'),
+          targetHandle: handleArb(portNames(target.descriptor)),
+        })
+      );
+
+    fc.assert(
+      fc.property(
+        unknownHandleScenarioArb,
+        ({ source, target, sourceHandle, targetHandle }) => {
+          const sourceNode = builderNode('src', source);
+          const targetNode = builderNode('tgt', target);
+
+          const reason = connectionRejectionReason(
+            { source: 'src', sourceHandle, target: 'tgt', targetHandle },
+            [sourceNode, targetNode]
+          );
+
+          expect(typeof reason).toBe('string');
+          expect((reason as string).length).toBeGreaterThan(0);
+        }
+      ),
+      { numRuns: 25 }
+    );
+  });
+
+  it('accepts a model-inference output onto a compatible target and rejects an incompatible one, independent of existing out-degree (single-downstream baseline preserved)', () => {
+    fc.assert(
+      fc.property(
+        modelInferenceSourceArb,
+        downstreamTargetArb,
+        // Extra already-present edges from the same source output must not
+        // change the decision: the function is stateless over out-degree.
+        fc.array(fc.string(), { minLength: 0, maxLength: 3 }),
+        (source, target, _priorTargetIds) => {
+          const sourceNode = builderNode('inf', source);
+          const targetNode = builderNode('down', target);
+
+          const reason = connectionRejectionReason(
+            { source: 'inf', sourceHandle: 'out', target: 'down', targetHandle: 'in' },
+            [sourceNode, targetNode]
+          );
+
+          const targetType = target.descriptor.inputs[0].portType;
+          const expectedAccepted = arePortsCompatible(PORT_TYPE_INFERENCE_META, targetType);
+
+          if (expectedAccepted) {
+            expect(reason).toBeNull();
+          } else {
+            expect(typeof reason).toBe('string');
+            expect((reason as string).length).toBeGreaterThan(0);
+          }
+        }
+      ),
+      { numRuns: 25 }
+    );
+  });
+
+  // The point of Bug 3 (fan-out) is that it requires NO change to the pure
+  // connection decision: `connectionRejectionReason` is stateless over a
+  // source port's out-degree, and `edgeIdFor`/`isSameConnection` key on the
+  // full source+sourceHandle+target+targetHandle tuple, so appending a further
+  // outgoing edge from an already-connected model-inference output never
+  // collides with, dedups against, or otherwise disturbs the existing edges.
+  // These properties lock in that adding fan-out coverage leaves every
+  // accept/reject outcome exactly as it is on the unfixed code.
+
+  /** A model-inference source fanning out to a list of distinct downstream targets. */
+  const fanOutScenarioArb = fc
+    .tuple(
+      modelInferenceSourceArb,
+      fc.array(downstreamTargetArb, { minLength: 2, maxLength: 5 })
+    )
+    .map(([source, targets]) => ({ source, targets }));
+
+  it('appends each further outgoing edge from a model-inference output under a distinct id, so fan-out edges coexist without dedup collisions', () => {
+    fc.assert(
+      fc.property(fanOutScenarioArb, ({ source, targets }) => {
+        const sourceNode = builderNode('inf', source);
+        const targetNodes = targets.map((target, i) => builderNode(`down_${i}`, target));
+        const nodes = [sourceNode, ...targetNodes];
+
+        // Simulate the canvas `onConnect` append semantics: for every target
+        // whose connection is accepted, append an edge keyed by `edgeIdFor`
+        // unless an identical-tuple edge already exists (`isSameConnection`).
+        let edges: Edge[] = [];
+        const acceptedTargets: string[] = [];
+        targetNodes.forEach((targetNode) => {
+          const connection: ConnectionEndpoints = {
+            source: 'inf',
+            sourceHandle: 'out',
+            target: targetNode.id,
+            targetHandle: 'in',
+          };
+          const reason = connectionRejectionReason(connection, nodes);
+          if (reason !== null) {
+            return;
+          }
+          acceptedTargets.push(targetNode.id);
+          if (!edges.some((edge) => isSameConnection(edge, connection))) {
+            edges = [
+              ...edges,
+              {
+                id: edgeIdFor(connection),
+                source: connection.source,
+                sourceHandle: connection.sourceHandle ?? undefined,
+                target: connection.target,
+                targetHandle: connection.targetHandle ?? undefined,
+              },
+            ];
+          }
+        });
+
+        // Every accepted fan-out target produced its own edge (no dedup
+        // collision), and all edge ids are distinct — the single output port
+        // now fans out to every accepted downstream node simultaneously.
+        expect(edges.length).toBe(acceptedTargets.length);
+        expect(new Set(edges.map((edge) => edge.id)).size).toBe(edges.length);
+        edges.forEach((edge) => {
+          expect(edge.source).toBe('inf');
+          expect(edge.sourceHandle).toBe('out');
+        });
+      }),
+      { numRuns: 25 }
+    );
+  });
+
+  it('decides a further outgoing connection identically no matter how many downstream edges already exist (out-degree-agnostic)', () => {
+    fc.assert(
+      fc.property(fanOutScenarioArb, ({ source, targets }) => {
+        const sourceNode = builderNode('inf', source);
+        const targetNodes = targets.map((target, i) => builderNode(`down_${i}`, target));
+        const nodes = [sourceNode, ...targetNodes];
+
+        targetNodes.forEach((targetNode) => {
+          const connection: ConnectionEndpoints = {
+            source: 'inf',
+            sourceHandle: 'out',
+            target: targetNode.id,
+            targetHandle: 'in',
+          };
+
+          // Decision computed in isolation (source + this target only, the
+          // single-downstream baseline)...
+          const baselineReason = connectionRejectionReason(connection, [
+            sourceNode,
+            targetNode,
+          ]);
+          // ...must equal the decision computed with every other downstream
+          // node (and thus every prior fan-out edge) present.
+          const fanOutReason = connectionRejectionReason(connection, nodes);
+
+          expect(fanOutReason).toBe(baselineReason);
+        });
       }),
       { numRuns: 25 }
     );

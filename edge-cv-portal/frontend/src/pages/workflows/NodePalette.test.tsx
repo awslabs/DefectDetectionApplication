@@ -30,6 +30,7 @@ const CATALOG: NodeTypeDescriptor[] = [
   descriptor('crop', 'preprocessing', 'Crop'),
   descriptor('custom_python_preprocess', 'preprocessing', 'Custom Python (Frames)'),
   descriptor('model_inference', 'inference', 'Model inference'),
+  descriptor('llm_inference', 'inference', 'VLM/LLM Inference'),
   descriptor('inference_filter', 'post_processing', 'Inference filter'),
   descriptor('mqtt_publish', 'output', 'MQTT publish'),
 ];
@@ -58,6 +59,15 @@ describe('NodePalette', () => {
     expect(within(preprocessingSection).getByText('Custom Python (Frames)')).toBeInTheDocument();
     // It appears only under Preprocessing, not in any other section.
     expect(screen.getAllByText('Custom Python (Frames)')).toHaveLength(1);
+  });
+
+  it('renders the llm_inference node with the "VLM/LLM Inference" label (Bug 4, Requirement 2.4)', () => {
+    render(<NodePalette catalog={CATALOG} />);
+    const inferenceSection = screen.getByRole('region', { name: 'Model inference' });
+    expect(within(inferenceSection).getByText('VLM/LLM Inference')).toBeInTheDocument();
+    // The palette renders the catalog display label verbatim, so the old
+    // "LLM Inference" label no longer appears anywhere.
+    expect(screen.queryByText('LLM Inference')).not.toBeInTheDocument();
   });
 
   it('sets the node type id as the drag payload', () => {

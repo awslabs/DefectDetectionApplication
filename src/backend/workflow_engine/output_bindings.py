@@ -370,6 +370,38 @@ def _default_mqtt_publisher(
     )
 
 
+#: Greengrass IPC PublishToIoTCore supports only QoS 0 and 1; a
+#: configured qos is clamped to this maximum (mirrors the AWS IoT Core
+#: mutual-TLS path, which also caps at QoS 1).
+GREENGRASS_MAX_QOS = 1
+
+
+def _default_greengrass_publisher(topic: str, payload: str, qos: int) -> None:
+    """Publish one message through the device's Greengrass-managed MQTT
+    via the Greengrass IPC ``PublishToIoTCore`` operation.
+
+    Zero-configuration publishing: the on-device Greengrass nucleus owns
+    the connection to AWS IoT Core, so only the topic/payload/qos are
+    supplied (no broker host/port and no certificate file paths). The
+    ``awsiot.greengrasscoreipc`` client is imported lazily so this module
+    stays importable everywhere (matching the paho/opcua pattern);
+    ``qos`` is mapped to the IPC ``QOS`` enum (clamped to 0/1)."""
+    import awsiot.greengrasscoreipc
+    import awsiot.greengrasscoreipc.model as model
+
+    qos_value = model.QOS.AT_LEAST_ONCE if int(qos) >= GREENGRASS_MAX_QOS \
+        else model.QOS.AT_MOST_ONCE
+    request = model.PublishToIoTCoreRequest()
+    request.topic_name = topic
+    request.payload = payload.encode("utf-8")
+    request.qos = qos_value
+
+    ipc_client = awsiot.greengrasscoreipc.connect()
+    operation = ipc_client.new_publish_to_iot_core()
+    operation.activate(request)
+    operation.get_response().result(timeout=10.0)
+
+
 def _opcua_coerce(value: Any, variant_type: Any) -> Any:
     """Coerce a rendered binding value to the target node's OPC UA type.
 
@@ -861,10 +893,14 @@ class OutputBindingProcessor:
         dio_actuator: Optional[Callable] = None,
         mqtt_publisher: Optional[Callable] = None,
         opcua_writer: Optional[Callable] = None,
+        greengrass_publisher: Optional[Callable] = None,
     ) -> None:
         self._dio_actuator = dio_actuator or _default_dio_actuator
         self._mqtt_publisher = mqtt_publisher or _default_mqtt_publisher
         self._opcua_writer = opcua_writer or _default_opcua_writer
+        self._greengrass_publisher = (
+            greengrass_publisher or _default_greengrass_publisher
+        )
 
     def __call__(self, registration, document: dict, tag_values: dict) -> None:
         self.process(registration, document, tag_values)
@@ -1061,6 +1097,12 @@ class OutputBindingProcessor:
     ) -> None:
         """Publish the rendered payload to the configured broker (9.5).
 
+        With ``greengrass`` enabled the publish is zero-config: it goes
+        through the device's Greengrass-managed MQTT (the on-device
+        nucleus owns the AWS IoT Core connection), so only the
+        topic/payload/qos are used — no broker host/port and no
+        certificate paths.
+
         With ``aws_iot`` enabled the publish targets AWS IoT Core over
         mutual TLS: the thing name becomes the MQTT client id, the
         device-local certificate paths are passed as ``tls_set``
@@ -1076,10 +1118,19 @@ class OutputBindingProcessor:
             payload if isinstance(payload, str)
             else json.dumps(payload, default=str)
         )
-        host = str(parameters["broker_host"])
-        port = int(parameters.get("broker_port", DEFAULT_MQTT_PORT))
         topic = str(parameters["topic"])
         qos = int(parameters.get("qos", 0))
+
+        if parameters.get("greengrass"):
+            # Zero-config Greengrass-managed publishing: the on-device
+            # nucleus owns the AWS IoT Core connection, so only the
+            # topic/payload/qos are supplied (no broker host/port, no
+            # certificate paths).
+            self._greengrass_publisher(topic, payload_text, qos)
+            return
+
+        host = str(parameters["broker_host"])
+        port = int(parameters.get("broker_port", DEFAULT_MQTT_PORT))
 
         if not parameters.get("aws_iot"):
             self._mqtt_publisher(host, port, topic, payload_text, qos)

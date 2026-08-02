@@ -111,9 +111,17 @@ const STRIP_LABEL_STYLE: React.CSSProperties = {
 function BuilderCanvas({
   catalog,
   initialWorkflowId,
+  onWorkflowNameChange,
 }: {
   catalog: NodeTypeDescriptor[];
   initialWorkflowId?: string;
+  /**
+   * Notifies the outer page of the open workflow's name (or `null` when the
+   * canvas is new/unsaved) so the top-of-page header can surface it
+   * (Bug 5, Requirement 2.5). Display-only: the loaded `workflow` state and
+   * every builder action are unaffected (preservation 3.6).
+   */
+  onWorkflowNameChange?: (name: string | null) => void;
 }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<BuilderNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -127,6 +135,20 @@ function BuilderCanvas({
   const [workflow, setWorkflow] = useState<WorkflowMeta | null>(null);
   const [savedJson, setSavedJson] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Set the loaded workflow's identity and, in the same render batch,
+  // surface its name to the outer page header (Bug 5, Requirement 2.5).
+  // Notifying synchronously (rather than via an effect) keeps the header
+  // in step with the toolbar so both reflect a load/save/reset together.
+  // This is display-only and does not change load/save/validation behavior
+  // (preservation 3.6).
+  const applyWorkflowMeta = useCallback(
+    (meta: WorkflowMeta | null) => {
+      setWorkflow(meta);
+      onWorkflowNameChange?.(meta?.name ?? null);
+    },
+    [onWorkflowNameChange]
+  );
 
   // Right-hand side drawer holding the Generate and Test panels:
   // collapsed by default (slim toggle strip) so the canvas gets the
@@ -149,20 +171,20 @@ function BuilderCanvas({
 
   const onSaved = useCallback(
     (meta: WorkflowMeta) => {
-      setWorkflow(meta);
+      applyWorkflowMeta(meta);
       setSavedJson(definitionJson);
     },
-    [definitionJson]
+    [applyWorkflowMeta, definitionJson]
   );
 
   // Reset to a fresh, unsaved canvas: used after a delete and for the
   // toolbar's "New" action.
   const resetCanvas = useCallback(() => {
-    setWorkflow(null);
+    applyWorkflowMeta(null);
     setSavedJson(null);
     setNodes([]);
     setEdges([]);
-  }, [setNodes, setEdges]);
+  }, [applyWorkflowMeta, setNodes, setEdges]);
 
   // Open/load a saved workflow: render the saved nodes, positions,
   // configurations, and connections exactly as stored (Requirement 5.4).
@@ -172,7 +194,7 @@ function BuilderCanvas({
       const loaded = fromWorkflowDefinition(response.definition, catalog);
       setNodes(loaded.nodes);
       setEdges(loaded.edges);
-      setWorkflow({
+      applyWorkflowMeta({
         workflowId: response.workflow.workflow_id,
         name: response.workflow.name,
         description: response.workflow.description ?? '',
@@ -181,7 +203,7 @@ function BuilderCanvas({
       setSavedJson(JSON.stringify(toWorkflowDefinition(loaded.nodes, loaded.edges)));
       setLoadError(null);
     },
-    [catalog, setNodes, setEdges]
+    [applyWorkflowMeta, catalog, setNodes, setEdges]
   );
 
   // Deep link: /workflows/builder/{workflowId} opens the workflow on mount.
@@ -536,8 +558,20 @@ function BuilderCanvas({
 export default function WorkflowBuilder() {
   const [catalog, setCatalog] = useState<NodeTypeDescriptor[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The open workflow's name, lifted from BuilderCanvas so the top-of-page
+  // header can display which workflow is open (Bug 5, Requirement 2.5).
+  // `null` while the canvas is new/unsaved.
+  const [openWorkflowName, setOpenWorkflowName] = useState<string | null>(null);
   const { workflowId } = useParams<{ workflowId: string }>();
   const { selectedUsecaseId } = useUsecase();
+
+  // The prominent top-of-page title: the open workflow's name when one is
+  // loaded, otherwise a neutral placeholder for a new/unsaved canvas
+  // (never crashes on an empty/whitespace name).
+  const headerTitle =
+    openWorkflowName !== null && openWorkflowName.trim().length > 0
+      ? openWorkflowName
+      : 'Untitled workflow';
 
   useEffect(() => {
     let cancelled = false;
@@ -591,12 +625,12 @@ export default function WorkflowBuilder() {
           variant="h3"
           description={
             <Box fontSize="body-s" color="text-body-secondary">
-              Compose a video pipeline by dragging nodes onto the canvas and connecting their
-              ports.
+              Workflow Builder — compose a video pipeline by dragging nodes onto the canvas and
+              connecting their ports.
             </Box>
           }
         >
-          Workflow Builder
+          {headerTitle}
         </Header>
       </Box>
       {error !== null && (
@@ -612,7 +646,11 @@ export default function WorkflowBuilder() {
       )}
       {catalog !== null && (
         <ReactFlowProvider>
-          <BuilderCanvas catalog={catalog} initialWorkflowId={workflowId} />
+          <BuilderCanvas
+            catalog={catalog}
+            initialWorkflowId={workflowId}
+            onWorkflowNameChange={setOpenWorkflowName}
+          />
         </ReactFlowProvider>
       )}
     </div>

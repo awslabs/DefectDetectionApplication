@@ -145,3 +145,20 @@ class TestConditionalNodeOnTheWire:
         examples = condition["examples"]
         assert isinstance(examples, list) and len(examples) >= 3
         assert "is_anomalous == true" in examples
+
+
+class TestLlmInferenceLabelOnTheWire:
+    """Bug 4 integration check (Requirement 2.4): the node-catalog API
+    response the Node_Palette renders presents the ``llm_inference`` entry
+    with the display label "VLM/LLM Inference" while keeping its type id."""
+
+    def _node_type(self, body, type_id):
+        by_id = {n["typeId"]: n for n in body["nodeTypes"]}
+        assert type_id in by_id, sorted(by_id)
+        return by_id[type_id]
+
+    def test_llm_inference_display_label_is_vlm_llm_inference(self, validation_module):
+        body = catalog_response(validation_module)
+        llm_inference = self._node_type(body, "llm_inference")
+        assert llm_inference["displayName"] == "VLM/LLM Inference"
+        assert llm_inference["typeId"] == "llm_inference"

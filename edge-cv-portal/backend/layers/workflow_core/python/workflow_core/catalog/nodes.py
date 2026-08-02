@@ -694,12 +694,12 @@ VLLM_ARCHITECTURES = (ARCH_ARM64_JP6,) + \
 LLM_INFERENCE = NodeTypeDescriptor(
     type_id="llm_inference",
     category=CATEGORY_INFERENCE,
-    display_name="LLM Inference",
-    # The node consumes upstream inference metadata (for prompt
-    # placeholder substitution) and emits the generated text as
-    # inference metadata for downstream consumers (Requirements 6.3,
-    # 6.4).
-    inputs=[PortDescriptor("in", PORT_TYPE_INFERENCE_META)],
+    display_name="VLM/LLM Inference",
+    # As a vision-language node it takes video frames as input (a
+    # video-frame source connects directly into it) and emits the
+    # generated text as inference metadata for downstream consumers
+    # (Requirements 6.3, 6.4).
+    inputs=[PortDescriptor("in", PORT_TYPE_VIDEO_FRAMES)],
     outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
     parameters=[
         # Populated from the Use_Case's registered vLLM_Model_Records
@@ -932,7 +932,11 @@ MQTT_PUBLISH = NodeTypeDescriptor(
     inputs=[PortDescriptor("in", PORT_TYPE_INFERENCE_META)],
     outputs=[],
     parameters=[
-        ParameterDescriptor("broker_host", "string", required=True, default=None,
+        # Not statically required so a topic-only Greengrass config
+        # (greengrass=True) is not force-failed by the V4 required check;
+        # a mqtt_publish-specific validator check still rejects a config
+        # that supplies no target (no greengrass, no aws_iot, no host).
+        ParameterDescriptor("broker_host", "string", required=False, default=None,
                             constraints={"min_length": 1},
                             description="MQTT broker hostname or IP, e.g. "
                                         "10.0.0.12 or broker.local.",
@@ -965,6 +969,23 @@ MQTT_PUBLISH = NodeTypeDescriptor(
                                         "2 (exactly once; AWS IoT Core "
                                         "supports up to 1).",
                             examples=[0, 1]),
+        # Zero-config publishing through the device's Greengrass-managed
+        # MQTT: the Greengrass nucleus already holds the AWS IoT Core
+        # connection, so only the topic is needed — no broker host/port
+        # and no certificate file paths. Additive and off by default; the
+        # broker and aws_iot paths are unchanged when greengrass is off.
+        ParameterDescriptor("greengrass", "bool", required=False, default=False,
+                            constraints={},
+                            description="Publish through the device's "
+                                        "Greengrass-managed MQTT (the "
+                                        "Greengrass nucleus's AWS IoT Core "
+                                        "connection) instead of a plain "
+                                        "broker or your own AWS IoT "
+                                        "credentials. Zero configuration: "
+                                        "only the topic is required — no "
+                                        "broker host or port and no "
+                                        "certificate paths.",
+                            examples=[True]),
         # AWS IoT Core publishing over mutual TLS. Certificates are
         # referenced by file paths on the device (e.g. /greengrass/v2/...),
         # never uploaded to the portal. The iot_* fields are shown in the
@@ -1006,11 +1027,13 @@ MQTT_PUBLISH = NodeTypeDescriptor(
                                         "/greengrass/v2/privKey.key.",
                             examples=["/greengrass/v2/privKey.key"]),
     ],
-    # Executor-level MQTT client publish on pipeline completion.
+    # Executor-level MQTT client publish on pipeline completion. paho-mqtt
+    # serves the plain-broker and aws_iot paths; awsiotsdk provides the
+    # Greengrass IPC client used by the zero-config Greengrass path.
     # Simulation: recording binding, no broker contact (Requirement 12.6).
     mappings=_same_on_device_archs(
         executor_binding="mqtt_publish",
-        plugin_dependencies=["python:paho-mqtt"],
+        plugin_dependencies=["python:paho-mqtt", "python:awsiotsdk"],
     ) + [_recording_binding("mqtt_publish")],
     hardware_dependent=True,
 )

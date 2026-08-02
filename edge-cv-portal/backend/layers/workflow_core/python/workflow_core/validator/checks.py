@@ -82,6 +82,14 @@ CODE_V4_INVALID_PARAMETER_VALUE = "V4_INVALID_PARAMETER_VALUE"
 # V5 (Requirement 4.5)
 CODE_V5_UNREACHABLE_NODE = "V5_UNREACHABLE_NODE"
 
+# V6 (workflow-manager-integration-bugfixes Bug 2, Requirements 2.2, 3.2):
+# an ``mqtt_publish`` node must declare a publish target. ``broker_host``
+# is no longer statically required (so the topic-only Greengrass path is
+# not force-failed by V4), so this check keeps a target-less config
+# rejected — an error when the node enables neither ``greengrass`` nor
+# ``aws_iot`` and supplies no non-empty ``broker_host``.
+CODE_V6_MQTT_NO_TARGET = "V6_MQTT_NO_TARGET"
+
 # W1 warnings (Requirement 4.6)
 CODE_W1_OUTPUT_NODE_NO_INPUT = "W1_OUTPUT_NODE_NO_INPUT"
 CODE_W1_UNUSED_OUTPUT_PORT = "W1_UNUSED_OUTPUT_PORT"
@@ -99,6 +107,10 @@ MODEL_TYPE_VLLM = "vllm"
 #: Node type whose ``model_ref`` parameters must resolve to a
 #: ``vllm``-typed record; every other node family requires non-``vllm``.
 TYPE_LLM_INFERENCE = "llm_inference"
+
+#: Output node type that publishes over MQTT; V6 requires it to declare a
+#: publish target (Greengrass, AWS IoT Core, or a plain broker host).
+TYPE_MQTT_PUBLISH = "mqtt_publish"
 
 
 @dataclass(frozen=True)
@@ -169,6 +181,7 @@ def validate(
     findings.extend(_check_v3(graph))
     findings.extend(_check_v4(graph, typed_nodes))
     findings.extend(_check_v5(graph, typed_nodes))
+    findings.extend(_check_v6(graph, typed_nodes))
     findings.extend(_check_w1(graph, typed_nodes))
     if model_registry is not None:
         findings.extend(_check_model_references(graph, typed_nodes, model_registry))
@@ -569,6 +582,50 @@ def _check_v5(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) 
                 SEVERITY_ERROR,
                 CODE_V5_UNREACHABLE_NODE,
                 "Node '{0}' is not reachable from any input node".format(node.id),
+                node_id=node.id,
+            ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# V6: mqtt_publish must declare a publish target
+# (workflow-manager-integration-bugfixes Bug 2, Requirements 2.2, 3.2)
+# --------------------------------------------------------------------------
+
+def _check_v6(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """Every ``mqtt_publish`` node must name a publish target.
+
+    Since Bug 2 relaxed ``broker_host`` from statically-required to
+    optional (so a topic-only Greengrass config is not force-failed by
+    V4), this check keeps a target-less config rejected under a dedicated
+    code: an error when the node enables neither the Greengrass path
+    (``greengrass``) nor the AWS IoT Core path (``aws_iot``) and supplies
+    no non-empty ``broker_host``. This preserves the pre-Bug-2
+    accept/reject outcome for the plain-broker path while allowing the new
+    topic-only Greengrass config to validate. It does not double-report
+    with V4 (``broker_host`` is no longer statically required, so V4 never
+    fires for it)."""
+    findings = []
+    for node in graph.nodes:
+        if node.type != TYPE_MQTT_PUBLISH:
+            continue
+        descriptor = typed_nodes.get(node.id)
+        if descriptor is None:
+            continue
+        values = {
+            parameter.name: _effective_value(node, parameter)
+            for parameter in descriptor.parameters
+        }
+        greengrass = bool(values.get("greengrass"))
+        aws_iot = bool(values.get("aws_iot"))
+        broker_host = values.get("broker_host")
+        has_broker_host = isinstance(broker_host, str) and broker_host.strip() != ""
+        if not (greengrass or aws_iot or has_broker_host):
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V6_MQTT_NO_TARGET,
+                "Node '{0}': mqtt_publish requires a publish target — enable "
+                "'greengrass', enable 'aws_iot', or set 'broker_host'".format(node.id),
                 node_id=node.id,
             ))
     return findings

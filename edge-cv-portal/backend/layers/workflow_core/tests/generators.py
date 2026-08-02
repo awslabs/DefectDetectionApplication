@@ -248,6 +248,23 @@ def node_parameters_strategy(draw, descriptor, forced: Optional[Dict[str, Any]] 
         value = draw(valid_parameter_value_strategy(parameter))
         assert is_parameter_value_valid(parameter, value)
         parameters[parameter.name] = value
+
+    # Bug 2 (workflow-manager-integration-bugfixes, Requirements 2.2/3.2):
+    # broker_host is no longer statically required, so an mqtt_publish node
+    # with every optional parameter omitted declares no publish target and is
+    # rejected by the V6 check. That is a genuinely-invalid config, not a
+    # seeded defect, so guarantee a target here to keep the generator emitting
+    # valid mqtt_publish nodes (enable the off-by-default Greengrass path when
+    # neither aws_iot nor a non-empty broker_host is present).
+    if getattr(descriptor, "type_id", None) == "mqtt_publish":
+        broker_host = parameters.get("broker_host")
+        has_broker_host = isinstance(broker_host, str) and broker_host.strip() != ""
+        if not (
+            bool(parameters.get("greengrass"))
+            or bool(parameters.get("aws_iot"))
+            or has_broker_host
+        ):
+            parameters["greengrass"] = True
     return parameters
 
 
