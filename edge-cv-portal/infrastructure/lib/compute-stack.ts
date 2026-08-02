@@ -107,9 +107,10 @@ export class ComputeStack extends cdk.Stack {
     if (!props.trustedUseCaseAccountIds || props.trustedUseCaseAccountIds.length === 0) {
       throw new Error(
         'ComputeStack requires a non-empty trustedUseCaseAccountIds list ' +
-          '(pass -c trustedUseCaseAccountIds=<id>,<id> or the SSM parameter ' +
-          '/dda-portal/trusted-usecase-account-ids). Refusing to synth an ' +
-          'sts:AssumeRole grant on a wildcard account.'
+          '(pass -c trustedUseCaseAccountIds=<id>,<id>, set the ' +
+          'TRUSTED_USECASE_ACCOUNT_IDS environment variable, or the SSM ' +
+          'parameter /dda-portal/trusted-usecase-account-ids). Refusing to ' +
+          'synth an sts:AssumeRole grant on a wildcard account.'
       );
     }
 

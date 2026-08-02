@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
+import { execFileSync } from 'child_process';
 import * as cdk from 'aws-cdk-lib';
 import { AuthStack } from '../lib/auth-stack';
 import { StorageStack } from '../lib/storage-stack';
@@ -46,10 +47,59 @@ const testRunnerStack = new TestRunnerStack(app, 'EdgeCVPortalTestRunnerStack', 
 // to enable automatic CORS configuration on Data Account buckets
 const cloudFrontDomain = app.node.tryGetContext('cloudFrontDomain');
 // Trusted UseCase account IDs that portal Lambdas may assume DDAPortalAccessRole
-// into. Comma-separated CDK context value; absence yields an empty list, which
+// into. Resolved (in priority order) from:
+//   1. CDK context   `-c trustedUseCaseAccountIds=<id>,<id>`
+//   2. env           `TRUSTED_USECASE_ACCOUNT_IDS` (forwarded by deploy-portal.sh)
+//   3. SSM parameter `/dda-portal/trusted-usecase-account-ids`
+// A comma-separated string; absence from all three yields an empty list, which
 // the ComputeStack constructor rejects at synth time (safe default — no
-// wildcard-account fallback).
-const trustedUseCaseAccountIds: string[] = (app.node.tryGetContext('trustedUseCaseAccountIds') || '')
+// wildcard/self-account fallback). The env and SSM sources make the one-command
+// deploy flow and the ComputeStack error's advertised SSM fallback actually work
+// without editing the orchestrated deploy scripts.
+function resolveTrustedUseCaseAccountIds(): string {
+  const fromContext = app.node.tryGetContext('trustedUseCaseAccountIds');
+  if (fromContext) {
+    return String(fromContext);
+  }
+  const fromEnv = process.env.TRUSTED_USECASE_ACCOUNT_IDS;
+  if (fromEnv && fromEnv.trim().length > 0) {
+    return fromEnv;
+  }
+  // SSM fallback: the parameter the ComputeStack error message advertises.
+  // Read synchronously via the AWS CLI (already required by the deploy scripts);
+  // any failure (parameter absent, CLI/creds unavailable) leaves the list empty
+  // so the ComputeStack surfaces its explicit, actionable error.
+  try {
+    const region =
+      process.env.CDK_DEFAULT_REGION ||
+      process.env.AWS_REGION ||
+      process.env.AWS_DEFAULT_REGION ||
+      'us-east-1';
+    const value = execFileSync(
+      'aws',
+      [
+        'ssm',
+        'get-parameter',
+        '--name',
+        '/dda-portal/trusted-usecase-account-ids',
+        '--query',
+        'Parameter.Value',
+        '--output',
+        'text',
+        '--region',
+        region,
+      ],
+      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }
+    ).trim();
+    if (value && value !== 'None') {
+      return value;
+    }
+  } catch {
+    // fall through to empty
+  }
+  return '';
+}
+const trustedUseCaseAccountIds: string[] = resolveTrustedUseCaseAccountIds()
   .split(',')
   .map((id: string) => id.trim())
   .filter((id: string) => id.length > 0);
