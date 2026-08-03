@@ -29,6 +29,7 @@ from workflow_core.validator import (
     CODE_V4_INVALID_PARAMETER_VALUE,
     CODE_V4_MISSING_REQUIRED_PARAMETER,
     CODE_V5_UNREACHABLE_NODE,
+    CODE_V7_COEXISTENCE_CONFLICT,
     CODE_W1_OUTPUT_NODE_NO_INPUT,
     CODE_W1_UNUSED_OUTPUT_PORT,
     SEVERITY_ERROR,
@@ -344,6 +345,36 @@ class TestV5:
         )
         found = _by_code(validate(graph), CODE_V5_UNREACHABLE_NODE)
         assert sorted(f.node_id for f in found) == ["cap", "rot"]
+
+
+# --------------------------------------------------------------------------
+# V7: node-type coexistence conflicts
+# (portal-build-fleet-and-workflow-gates Requirement 8.2)
+# --------------------------------------------------------------------------
+
+def _aravis(node_id):
+    return _node(node_id, "aravis_camera_source", camera_id="cam-1")
+
+
+class TestV7:
+    def test_two_aravis_sources_conflict_with_finding_per_node(self):
+        """The single-frame appsrc Frame_Feed supports exactly one Aravis
+        camera source per workflow; two get one error finding each,
+        naming the full conflicting membership."""
+        graph = WorkflowGraph(nodes=[_aravis("a1"), _aravis("a2"), _capture()])
+        found = _by_code(validate(graph), CODE_V7_COEXISTENCE_CONFLICT)
+        assert sorted(f.node_id for f in found) == ["a1", "a2"]
+        assert all(f.severity == SEVERITY_ERROR for f in found)
+        assert all("'a1'" in f.message and "'a2'" in f.message for f in found)
+
+    def test_single_aravis_source_does_not_conflict(self):
+        graph = WorkflowGraph(nodes=[_aravis("a1"), _capture()],
+                              connections=[_conn("c1", "a1", "cap")])
+        assert _by_code(validate(graph), CODE_V7_COEXISTENCE_CONFLICT) == []
+
+    def test_multiple_unrestricted_sources_do_not_conflict(self):
+        graph = WorkflowGraph(nodes=[_folder("s1"), _folder("s2"), _capture()])
+        assert _by_code(validate(graph), CODE_V7_COEXISTENCE_CONFLICT) == []
 
 
 # --------------------------------------------------------------------------

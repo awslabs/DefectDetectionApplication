@@ -47,11 +47,14 @@ NODE_GEN_SESSIONS_TABLE_NAME = "test-node-gen-sessions-sampling-unset"
 BEDROCK_CONFIG_RESOURCE_ID = "bedrock-configuration"
 
 # Minimal catalog-conformant Workflow_Definition (as in
-# test_workflow_generation.py) so the generated definition validates cleanly.
+# test_workflow_generation.py) so the generated definition validates cleanly
+# and passes the Generation_Gate (csi_camera_source is a real input-category
+# catalog type; a nonexistent type would leave the graph with no input node
+# and be rejected by the gate).
 VALID_DEFINITION = {
     "schemaVersion": 1,
     "nodes": [
-        {"id": "n1", "type": "camera_source",
+        {"id": "n1", "type": "csi_camera_source",
          "position": {"x": 100, "y": 100}, "parameters": {}},
         {"id": "n2", "type": "capture",
          "position": {"x": 350, "y": 100},

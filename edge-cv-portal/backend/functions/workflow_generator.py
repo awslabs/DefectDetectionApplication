@@ -84,6 +84,19 @@ from workflow_core.catalog import NODE_CATALOG
 # (workflow_validation.py lives in the same Lambda bundle).
 from workflow_validation import descriptor_to_wire
 
+# Generation_Gate (portal-build-fleet-and-workflow-gates Requirement 8):
+# pure classification/decision logic in the same Lambda bundle. Every
+# generated definition passes the gate before it is returned or persisted;
+# session persistence happens only on accept paths.
+from generation_gate import (
+    ACTION_ACCEPT,
+    ACTION_REJECT,
+    ACTION_REPAIR,
+    build_repair_message,
+    classify as gate_classify,
+    user_readable_errors,
+)
+
 # Shared Bedrock_Configuration resolution, client cache, and inference
 # config (custom-node-code-assist Requirement 4.1): bedrock_common.py lives
 # in the same Lambda bundle, so this is a same-directory import exactly like
@@ -464,6 +477,50 @@ def invoke_generation(config: Dict, messages: List[Dict],
 
 
 # --------------------------------------------------------------------------
+# Generation_Gate response shaping (Requirements 8.3, 8.5, 8.6, 8.8)
+# --------------------------------------------------------------------------
+
+def gate_metadata(decision, repaired: bool = False,
+                  corrected_errors: Optional[List[Dict]] = None) -> Dict:
+    """The ``gate`` object attached to accept-path responses (design §8).
+
+    ``repaired``/``corrected_errors`` are supplied by the Repair_Pass
+    (task 5.2) when an automatic correction was applied (Req 8.6).
+    """
+    return {
+        'passed': True,
+        'repaired': repaired,
+        'corrected_errors': corrected_errors or [],
+        'structural_error_codes': sorted({
+            e.get('code') for e in (corrected_errors or []) if e.get('code')
+        }),
+    }
+
+
+def generation_rejected_response(structural_errors: List[Dict],
+                                 definition: Dict,
+                                 repair_attempted: bool) -> Dict:
+    """The 422 GENERATION_REJECTED envelope (Req 8.5, 8.7, 8.8).
+
+    Returned strictly before any session mutation, so the session canvas
+    snapshot and chat message history keep their prior state (8.9) and
+    the client retries with the preserved prompt.
+    """
+    return error_response(
+        422, 'GENERATION_REJECTED',
+        'The generated workflow has structural errors that prevent it from '
+        'working, so it was not applied. The canvas was left unchanged - '
+        'please retry or rephrase the prompt.',
+        {
+            'structural_errors': user_readable_errors(structural_errors,
+                                                      definition),
+            'repair_attempted': repair_attempted,
+            'prompt_preserved': True,
+        }
+    )
+
+
+# --------------------------------------------------------------------------
 # Generate endpoint
 # --------------------------------------------------------------------------
 
@@ -480,6 +537,13 @@ def generate_workflow(event: Dict, user: Dict) -> Dict:
     invocation failures return descriptive errors and persist no session
     changes, so the canvas stays untouched and the prompt can be retried
     (10.4, 10.7).
+
+    Every generated definition passes the Generation_Gate before it is
+    returned or persisted (Req 8.1): structural rejections return 422
+    GENERATION_REJECTED, validator failures return 422
+    GENERATION_VALIDATION_INCOMPLETE, and both leave the chat session and
+    canvas snapshot untouched (8.5, 8.9, 8.11). Session persistence
+    (put_snapshot + save_session) executes only on accept paths.
     """
     body, err = parse_body(event)
     if err:
@@ -590,6 +654,8 @@ def generate_workflow(event: Dict, user: Dict) -> Dict:
         return err
 
     # ------------------------------------------------- parse + validate (10.3)
+    # The unparseable-output rejection precedes any session mutation:
+    # persistence only happens on the gate's accept path below (8.10).
     result = parse_definition(json.dumps(tool_input))
     if not result.ok:
         logger.error(f"Generated definition failed to parse: "
@@ -605,16 +671,113 @@ def generate_workflow(event: Dict, user: Dict) -> Dict:
     canonical_json = serialize_graph(result.graph)
     definition = json.loads(canonical_json)
 
-    # Full Workflow_Validator run against the same merged catalog; the
-    # complete findings list accompanies the definition so the user
-    # reviews it on the canvas before any save (10.3).
-    findings = run_validator(result.graph, catalog=catalog)
-    wire_findings = [f.to_dict() for f in findings]
-    error_count = sum(1 for f in findings if f.severity == SEVERITY_ERROR)
-    warning_count = sum(1 for f in findings if f.severity == SEVERITY_WARNING)
+    # ------------------------------------------------ Generation_Gate (Req 8)
+    # Full Workflow_Validator run against the same merged catalog, wrapped
+    # fail-closed: a validator that cannot complete rejects the generation
+    # with the session untouched (8.11). The complete findings list
+    # accompanies any accepted definition so the user reviews it on the
+    # canvas before any save (10.3, 8.3).
+    try:
+        findings = run_validator(result.graph, catalog=catalog)
+        decision = gate_classify(findings, catalog)
+    except Exception as exc:  # fail closed (8.11)
+        logger.error(f"Workflow_Validator failed to complete on the generated "
+                     f"definition: {exc}", exc_info=True)
+        return error_response(
+            422, 'GENERATION_VALIDATION_INCOMPLETE',
+            'The generated workflow could not be validated, so it was not '
+            'applied. The canvas was left unchanged - please retry the prompt.',
+            {'prompt_preserved': True}
+        )
+
+    gate_repaired = False
+    gate_corrected_errors: Optional[List[Dict]] = None
+
+    if decision.action == ACTION_REPAIR:
+        # ------------------------------------------- Repair_Pass (Req 8.4)
+        # Exactly one automatic re-invocation carrying the failed
+        # definition and per-error correction instructions, appended as
+        # one additional user turn to the same Converse message list.
+        # Never more than one pass per generation request; every failure
+        # mode rejects fail-closed with the session untouched (8.7, 8.9).
+        original_errors = decision.structural_errors
+        original_definition = definition
+
+        repair_messages = messages + [
+            {'role': 'user', 'content': [{
+                'text': build_repair_message(canonical_json, original_errors)
+            }]},
+        ]
+        repaired_input, repaired_text, repair_err = invoke_generation(
+            config, repair_messages, catalog=catalog)
+        if repair_err:
+            # Repair invocation failed: reject with the ORIGINAL
+            # Structural_Errors (the Repair_Pass did not complete, 8.7).
+            return generation_rejected_response(
+                original_errors, original_definition, repair_attempted=True)
+
+        repaired_result = parse_definition(json.dumps(repaired_input))
+        if not repaired_result.ok:
+            # Repair output unparseable: the Repair_Pass did not complete,
+            # so reject with the ORIGINAL Structural_Errors (8.7, 8.10).
+            logger.error(
+                f"Repair_Pass output failed to parse: "
+                f"{repaired_result.error.code} at {repaired_result.error.path}: "
+                f"{repaired_result.error.message}")
+            return generation_rejected_response(
+                original_errors, original_definition, repair_attempted=True)
+
+        repaired_canonical_json = serialize_graph(repaired_result.graph)
+        repaired_definition = json.loads(repaired_canonical_json)
+
+        try:
+            repaired_findings = run_validator(repaired_result.graph,
+                                              catalog=catalog)
+            repaired_decision = gate_classify(repaired_findings, catalog)
+        except Exception as exc:  # fail closed (8.11)
+            # Validation of the repair result could not complete: the
+            # Repair_Pass did not complete, so reject with the ORIGINAL
+            # Structural_Errors (8.7).
+            logger.error(f"Workflow_Validator failed to complete on the "
+                         f"Repair_Pass result: {exc}", exc_info=True)
+            return generation_rejected_response(
+                original_errors, original_definition, repair_attempted=True)
+
+        if repaired_decision.action != ACTION_ACCEPT:
+            # Result still structurally broken: reject with the REMAINING
+            # Structural_Errors — no second Repair_Pass, ever (8.4, 8.7).
+            return generation_rejected_response(
+                repaired_decision.structural_errors, repaired_definition,
+                repair_attempted=True)
+
+        # Clean repaired result: continue on the accept path below with
+        # the repaired definition, its complete findings, and the repair
+        # indication (8.6). Only the original user turn and the final
+        # assistant text are persisted — repair-internal turns are not.
+        gate_repaired = True
+        gate_corrected_errors = original_errors
+        decision = repaired_decision
+        canonical_json = repaired_canonical_json
+        definition = repaired_definition
+        assistant_text = repaired_text
+
+    elif decision.action == ACTION_REJECT:
+        # Unrepairable Structural_Errors: reject before any session
+        # mutation — snapshot and message history keep their prior state
+        # and the client retries with the preserved prompt (8.5, 8.9).
+        return generation_rejected_response(
+            decision.structural_errors, definition, repair_attempted=False)
+
+    # ------------------------------------------------------ accept path (8.3)
+    wire_findings = decision.all_findings
+    error_count = sum(1 for f in wire_findings
+                      if f.get('severity') == SEVERITY_ERROR)
+    warning_count = sum(1 for f in wire_findings
+                        if f.get('severity') == SEVERITY_WARNING)
 
     # ------------------------------------------------------- persist session
-    # The generated definition becomes the session's canvas snapshot for
+    # Persistence executes only on the gate's accept path (8.1, 8.9): the
+    # accepted definition becomes the session's canvas snapshot for
     # follow-up modification prompts (10.5).
     snapshot_key = snapshot_s3_key(usecase_id, session_id)
     put_snapshot(snapshot_key, canonical_json)
@@ -639,6 +802,8 @@ def generate_workflow(event: Dict, user: Dict) -> Dict:
         'validation_passed': error_count == 0,
         'assistant_text': assistant_text,
         'model_id': config['model_id'],
+        'gate': gate_metadata(decision, repaired=gate_repaired,
+                              corrected_errors=gate_corrected_errors),
     })
 
 

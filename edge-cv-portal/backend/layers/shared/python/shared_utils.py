@@ -363,6 +363,14 @@ class Permission(Enum):
     NODE_DESIGNER_MANAGE = "node-designer:manage"
     NODE_DESIGNER_SECURITY_REVIEW = "node-designer:security-review"
     
+    # Build Fleet (portal-build-fleet-and-workflow-gates, Req 1.6, 4.10, 9.6)
+    # Build_Operator capability: submit/cancel/read Build_Jobs. Builds are
+    # not Use_Case-scoped; these permissions are checked at the 'global'
+    # scope (the allow_global pattern in rbac_middleware.py).
+    BUILDS_SUBMIT = "builds:submit"
+    BUILDS_CANCEL = "builds:cancel"
+    BUILDS_READ = "builds:read"
+    
     # System Administration
     VIEW_AUDIT_LOGS = "view_audit_logs"
     MANAGE_SETTINGS = "manage_settings"
@@ -464,6 +472,12 @@ class RBACManager:
                 # Node Designer: read-only view of Custom_Node_Types and
                 # Plugin_Records (13.3)
                 Permission.NODE_DESIGNER_READ,
+                # Build Fleet: DataScientists are Build_Operators
+                # (submit/cancel/read Build_Jobs, global scope;
+                # portal-build-fleet-and-workflow-gates Req 1.6, 4.10)
+                Permission.BUILDS_SUBMIT,
+                Permission.BUILDS_CANCEL,
+                Permission.BUILDS_READ,
             },
             
             Role.USECASE_ADMIN: {
@@ -518,6 +532,12 @@ class RBACManager:
                 Permission.NODE_DESIGNER_REGISTER,
                 Permission.NODE_DESIGNER_PROMOTE_DEMOTE,
                 Permission.NODE_DESIGNER_MANAGE,
+                # Build Fleet: UseCaseAdmins are Build_Operators
+                # (submit/cancel/read Build_Jobs, global scope;
+                # portal-build-fleet-and-workflow-gates Req 1.6, 4.10)
+                Permission.BUILDS_SUBMIT,
+                Permission.BUILDS_CANCEL,
+                Permission.BUILDS_READ,
                 # Add UseCaseAdmin-specific permissions
                 Permission.UPDATE_USECASES,
                 Permission.DELETE_USECASES,
