@@ -352,6 +352,10 @@ RUN find / -name "libpython${PYTHON_VERSION}.so.1.0" -print
 RUN apt clean -y
 
 COPY app.py ./
+# Docker healthcheck helper (edge-deploy-reliability, Defect B): compose runs
+# `python3 /healthcheck.py` as the backend healthcheck. Lands at /healthcheck.py
+# (no WORKDIR is set, so ./ is /).
+COPY healthcheck.py ./
 COPY logging.conf ./
 COPY dao ./dao
 COPY utils ./utils

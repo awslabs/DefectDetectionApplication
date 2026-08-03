@@ -69,8 +69,16 @@ Manifests:
           docker images --quiet --filter=dangling=true | xargs --no-run-if-empty docker rmi -f || true; docker load -i {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/flask-app.tar && docker load -i {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/react-webapp.tar
           chmod +x {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/host_scripts/*.sh
           bash {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/host_scripts/install_nvidia_csi_service.sh
-      Run:
+      # Health-gated lifecycle (edge-deploy-reliability, Defect B): Startup
+      # replaces the attached Run. `up -d --wait` exits 0 only when all
+      # started services pass their compose healthchecks, so Greengrass
+      # reports RUNNING only over a healthy backend; a retried Startup's
+      # `compose up` also starts existing stopped containers (the recovery
+      # path for a container the restart race managed to kill). Timeout 900s:
+      # Greengrass's 120s Startup default is far below a cold device boot.
+      Startup:
         RequiresPrivilege: true
+        Timeout: 900
         SetEnv:
           COMPONENT_WORK_PATH: "{work:path}"
           KERNEL_ROOT_PATH: "{kernel:rootPath}"
@@ -82,12 +90,20 @@ Manifests:
           bash {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/host_scripts/setup_paths.sh;
           bash {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/host_scripts/configure_usb.sh;
           export $(grep -v '^#' /tmp/.dda.env | xargs) ;
-          docker compose --profile $DOCKER_PROFILE -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/docker-compose.yaml up --no-build ;
+          docker compose --profile $DOCKER_PROFILE -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/docker-compose.yaml up -d --no-build --wait --wait-timeout 600 ;
+      # Shutdown exports /tmp/.dda.env the same way Startup does: Greengrass
+      # gives Shutdown a fresh environment, so without the export
+      # $DOCKER_PROFILE expanded empty and `--profile` consumed `-f`, making
+      # every `docker compose down` fail with "no configuration file
+      # provided: not found". ${DOCKER_PROFILE:-tegra} keeps the down working
+      # even if /tmp/.dda.env is missing (tegra is what
+      # get_nvidia_libs_versions.sh selects on this gpu+aarch64 target).
       Shutdown:
         RequiresPrivilege: true
         Script: |
           systemctl stop nvidia-csi-capture || true
-          docker compose --profile $DOCKER_PROFILE -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/docker-compose.yaml down
+          export $(grep -v '^#' /tmp/.dda.env | xargs) || true
+          docker compose --profile ${DOCKER_PROFILE:-tegra} -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/docker-compose.yaml down
     Artifacts:
       - URI: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/aws.edgeml.dda.LocalServer.arm64-aarch64.zip
         Unarchive: ZIP

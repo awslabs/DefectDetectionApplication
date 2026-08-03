@@ -111,7 +111,8 @@ from endpoints import (
     download_file,
     inference_result,
     streams,
-    local_auth
+    local_auth,
+    health
 )
 
 # Workflow Manager engine (additive subsystem, Requirement 13)
@@ -175,6 +176,11 @@ app.include_router(streams.router)
 # dependency — /local-auth/login and /local-auth/status must be reachable
 # without credentials (exempt from authorize_request, task 9.4).
 app.include_router(local_auth.router)
+# Health endpoint (edge-deploy-reliability, Defect B): unauthenticated like
+# local_auth's router (exempt from authorize_request) — the docker healthcheck
+# (healthcheck.py) probes GET /health without credentials, and the Greengrass
+# Startup `compose up -d --wait` gates RUNNING on the resulting health.
+app.include_router(health.router)
 # Text_Generation_API: registered beside the existing routers only when the
 # capability probe found the vllm wheel; vLLM-free images keep the
 # pre-feature router set (Requirements 4.1, 8.3).
@@ -190,12 +196,29 @@ def cleanup_workflow_digital_inputs():
                 terminate_digital_input_task(workflow)
 
 
+# Bound on the SIGTERM shutdown cleanup (edge-deploy-reliability, Defect A):
+# strictly below the compose stop_grace_period (120s) so the backend is never
+# SIGKILLed mid-cleanup by Docker's stop timeout.
+SHUTDOWN_CLEANUP_BUDGET_SECONDS = 20
+
+
 @app.on_event("shutdown")
 async def shutdown_event():
-    cleanup_workflow_digital_inputs()
+    def _cleanup():
+        cleanup_workflow_digital_inputs()
 
-    # On exit disconnect all cameras
-    disconnect_all_cameras()
+        # On exit disconnect all cameras
+        disconnect_all_cameras()
+
+    try:
+        await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, _cleanup),
+            timeout=SHUTDOWN_CLEANUP_BUDGET_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Shutdown cleanup exceeded %ss budget; proceeding with shutdown "
+            "(remaining cleanup is abandoned — the container is being torn "
+            "down)", SHUTDOWN_CLEANUP_BUDGET_SECONDS)
 
 def alembic_schema_migration():
     '''
@@ -339,7 +362,17 @@ async def main():
         # it is intentional for an on-device edge appliance serving the LAN UI.
         config = uvicorn.Config(app, host="0.0.0.0", port=5000, loop="asyncio", log_config="dda_logging/uvicorn_disable_logging.json")  # nosec B104
     server = uvicorn.Server(config)
-    loop.create_task(server.serve())
+    # AWAIT the server instead of detaching it as a task (edge-deploy-
+    # reliability, deterministic shutdown): uvicorn installs its own
+    # SIGTERM/SIGINT handlers and serve() RETURNS after the graceful
+    # shutdown sequence (connection drain + lifespan shutdown, i.e. our
+    # bounded shutdown_event) completes. When serve() was detached and the
+    # process parked in loop.run_forever(), nothing ever stopped the loop
+    # after shutdown finished, so on `docker stop` the process idled in
+    # epoll until the stop_grace_period SIGKILL (exit 137 at exactly 120s).
+    # Awaiting serve() makes main() — and run_until_complete below — return
+    # as soon as the graceful shutdown is done.
+    await server.serve()
 
 if __name__ == "__main__":  # pragma: no cover
     triton_instance = TritonEdgeClient.get_instance()
@@ -364,16 +397,51 @@ if __name__ == "__main__":  # pragma: no cover
 
     # Start the companion vLLM runtime (no-op on images without the vllm
     # wheel — jp4, jp5-default, x86 — which run exactly the pre-feature
-    # startup sequence, Requirement 8.3).
-    start_vllm_runtime()
+    # startup sequence, Requirement 8.3). Install the result into the /health
+    # endpoint (edge-deploy-reliability, Defect B): only a genuinely started
+    # runtime server (non-None) arms the 8901 reachability gate — a contained
+    # startup failure (None, Requirement 4.3) never flips the backend
+    # unhealthy, while a started-then-dead runtime does.
+    vllm_server = start_vllm_runtime()
+    health.set_vllm_server(vllm_server)
 
-    # The event loop should start running continously after both FastAPI server and capture task manager
+    # Run the server to completion. main() awaits uvicorn's serve(), which
+    # returns once the SIGTERM-triggered graceful shutdown (including the
+    # bounded shutdown_event cleanup) has finished — no run_forever(): the
+    # loop must stop when the server is done so the process can exit inside
+    # the compose stop_grace_period instead of being SIGKILLed (exit 137).
     loop = asyncio.get_event_loop()
+    exit_code = 0
     try:
         loop.run_until_complete(main())
-        loop.run_forever()
+    except Exception:
+        logger.error("[LOCAL SERVER CRASHED]")
+        logger.error(traceback.format_exc())
+        exit_code = 1
     finally:
-        # Close loop if any exception to prevent the resource leak.
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
+        # Stop the companion vLLM runtime server (bounded internally); the
+        # loaded engine's worker threads/processes die with the process.
+        if vllm_server is not None:
+            try:
+                vllm_server.stop()
+            except Exception:
+                logger.error(traceback.format_exc())
+        # Close loop to prevent the resource leak.
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+        except Exception:
+            logger.error(traceback.format_exc())
+        logger.info("Local server shutdown complete; exiting.")
+        # Deterministic exit (edge-deploy-reliability): every cleanup the app
+        # owns has already run (bounded shutdown_event, uvicorn connection
+        # drain, vLLM runtime stop, asyncgens, loop close). A plain return
+        # would now hang in interpreter teardown: the loaded vLLM engine,
+        # Triton client and torch/NCCL leave NON-DAEMON threads (140+
+        # observed on JP6) and child processes that block threading/
+        # multiprocessing atexit joins far past the 120s stop grace window —
+        # the incident's exit-137-at-exactly-120s shape. os._exit skips that
+        # teardown and ends the process immediately with the correct code.
+        logging.shutdown()
+        os._exit(exit_code)  # pylint: disable=protected-access
 

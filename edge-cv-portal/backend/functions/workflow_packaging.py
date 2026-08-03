@@ -36,6 +36,15 @@ either mismatch), recorded per arch in manifest.json ``pluginChecksums``
 the recorded Plugin_Record version. Built-in/curated plugins keep the
 inline ``plugins/{arch}/*.so`` bundling unchanged.
 
+Workflow dependency edges (edge-deploy-reliability Requirements 2.8,
+2.9): the recipe's ComponentDependencies additionally carries one
+unpinned HARD entry per distinct published model component the
+workflow's ``model_ref`` parameters resolve to, and one HARD entry per
+distinct LocalServer variant of the selected architectures at that
+arch's minimum-version floor — so Greengrass owns the ordering/health
+relationship between a workflow, its models, and the LocalServer
+backend that executes them.
+
 All-or-nothing staging (Requirement 7.5): every artifact is uploaded to a
 temporary staging prefix first; only after every artifact for every
 selected architecture uploads successfully are the objects promoted to
@@ -83,6 +92,7 @@ from workflow_core.catalog import (
     VLLM_ARCHITECTURES,
 )
 from workflow_core.catalog.custom import resolve_catalog
+from workflow_core.catalog.models import PARAM_TYPE_MODEL_REF
 
 # Merged-catalog resolution + Plugin_Record persistence (same bundle)
 from node_catalog_resolution import (
@@ -91,6 +101,10 @@ from node_catalog_resolution import (
     resolution_items,
 )
 from plugin_records import get_version_item as get_plugin_record_version
+# Model_Registry snapshot (same bundle): model_ref values resolve against
+# the same registry view workflow_validation.py validates them against
+# (edge-deploy-reliability Requirement 2.8).
+from model_registry_snapshot import build_model_registry_snapshot
 
 # Configure logging
 logger = logging.getLogger()
@@ -110,6 +124,11 @@ WORKFLOWS_S3_PREFIX = os.environ.get('WORKFLOWS_S3_PREFIX', 'workflows')
 #   {WORKFLOW_PLUGIN_LIBRARY_PREFIX}/{arch}/{plugin}.so
 WORKFLOW_PLUGIN_LIBRARY_PREFIX = os.environ.get(
     'WORKFLOW_PLUGIN_LIBRARY_PREFIX', 'workflow-plugins')
+# Model_Registry sources for resolving model_ref parameter values to their
+# published model components (edge-deploy-reliability 2.8): the same
+# tables/GSIs workflow_validation.py builds its resolution snapshot from.
+TRAINING_JOBS_TABLE = os.environ.get('TRAINING_JOBS_TABLE')
+MODELS_TABLE = os.environ.get('MODELS_TABLE')
 # Minimum LocalServer component version a Workflow_Component requires
 # (surfaced in manifest.json for the deployment compatibility check, 8.4).
 #
@@ -207,6 +226,20 @@ ARCH_TO_GG_PLATFORM = {
     'arm64_jp4': 'aarch64',
     'arm64_jp5': 'aarch64',
     'arm64_jp6': 'aarch64',
+}
+
+# arch id (workflow_core) -> per-architecture LocalServer component variant
+# (edge-deploy-reliability Requirement 2.9). Same fail-closed naming
+# discipline as greengrass_publish.TARGET_TO_LOCAL_SERVER: every variant is
+# explicitly JetPack/arch-tagged, the retired bare '.arm64' name is never
+# emitted, and an unknown arch raises instead of guessing a variant. Both
+# x86_64 flavors run the single amd64 LocalServer build.
+ARCH_TO_LOCAL_SERVER_COMPONENT = {
+    ARCH_ARM64_JP4: 'aws.edgeml.dda.LocalServer.arm64JP4',
+    ARCH_ARM64_JP5: 'aws.edgeml.dda.LocalServer.arm64JP5',
+    ARCH_ARM64_JP6: 'aws.edgeml.dda.LocalServer.arm64JP6',
+    ARCH_X86_64: 'aws.edgeml.dda.LocalServer.amd64',
+    ARCH_X86_64_NVIDIA: 'aws.edgeml.dda.LocalServer.amd64',
 }
 
 # Where the LocalServer workflow engine discovers artifacts (13.3)
@@ -969,6 +1002,162 @@ def plugin_component_dependencies(dep_records: Dict[str, Optional[Dict]]) -> Dic
     return dependencies
 
 
+# --------------------------------------------------------------------------
+# Workflow component dependency edges: model components + LocalServer
+# (edge-deploy-reliability Requirements 2.8, 2.9, 3.8 — Defect C)
+#
+# The registered dda.workflow.* recipe declares HARD ComponentDependencies
+# on every published model component the workflow uses (via its model_ref
+# parameters) and on the LocalServer variant of each target architecture,
+# merged with the existing dda.plugin.* entries in the packaging handler.
+# This gives Greengrass the ordering/health relationship the JP6 incident
+# lacked: the workflow (and the model components it drags in) no longer
+# deploys with no dependency edge to the LocalServer backend actually
+# executing it.
+# --------------------------------------------------------------------------
+
+def gather_model_references(definition: Dict, descriptors_by_id: Dict
+                            ) -> List[str]:
+    """The effective values of every ``model_ref``-typed parameter across
+    the definition's nodes — today ``model_inference.modelName`` and
+    ``llm_inference.modelName`` — deduplicated, in stable definition order.
+
+    Generic over ``PARAM_TYPE_MODEL_REF`` (not node-type allowlists), so
+    any future model-bound node type is covered automatically. The
+    effective value follows the validator's rule: the explicitly set value
+    when the key is present, else the declared default. Non-string/blank
+    values are validation's problem (V4 / MODEL_REF_UNRESOLVED) and are
+    skipped here.
+    """
+    references: List[str] = []
+    for node in definition.get('nodes') or []:
+        if not isinstance(node, dict):
+            continue
+        descriptor = descriptors_by_id.get(node.get('type'))
+        if descriptor is None:
+            continue
+        parameters = node.get('parameters')
+        if not isinstance(parameters, dict):
+            parameters = {}
+        for parameter in descriptor.parameters:
+            if parameter.param_type != PARAM_TYPE_MODEL_REF:
+                continue
+            if parameter.name in parameters:
+                value = parameters[parameter.name]
+            else:
+                value = parameter.default
+            if isinstance(value, str) and value and value not in references:
+                references.append(value)
+    return references
+
+
+def resolve_model_components(model_names: List[str], usecase_id: str
+                             ) -> Dict[str, Dict]:
+    """Resolve each referenced model name to its published Greengrass model
+    component through the Use_Case's Model_Registry — the same snapshot
+    workflow_validation.py resolves ``model_ref`` parameters against
+    (training-jobs table via ``usecase-training-index``, keyed by
+    ``model_name``, plus the models-table published-name aliases).
+
+    Returns ``{model_name: published_component map}``; each map carries
+    ``component_name`` (``model-vllm-...`` for vLLM records, the
+    ``model-*`` component name for vision records, written by
+    greengrass_publish.py at publish time).
+
+    FAIL CLOSED, mirroring the plugin gates: a model with no registry
+    record or no published component raises PackagingError naming the
+    model — the existing all-or-nothing path, so no component version is
+    registered. When TRAINING_JOBS_TABLE is not configured the registry
+    does not exist (pre-feature environment; validation skips model-
+    reference resolution the same way) and model dependencies are skipped.
+    """
+    if not model_names:
+        return {}
+    if not TRAINING_JOBS_TABLE:
+        logger.warning(
+            'TRAINING_JOBS_TABLE not configured; model component '
+            'dependencies are skipped for this packaging run')
+        return {}
+    snapshot = build_model_registry_snapshot(usecase_id, TRAINING_JOBS_TABLE,
+                                             MODELS_TABLE, dynamodb)
+    resolved: Dict[str, Dict] = {}
+    for name in model_names:
+        label = f"models/{name}"
+        record = snapshot.get(name)
+        if not isinstance(record, dict):
+            raise PackagingError(
+                label,
+                f"Model '{name}' referenced by the workflow has no record "
+                f"in the Use_Case model registry; it may have been removed "
+                f"since the workflow was validated")
+        published = record.get('published_component')
+        component_name = published.get('component_name') \
+            if isinstance(published, dict) else None
+        if not isinstance(component_name, str) or not component_name:
+            raise PackagingError(
+                label,
+                f"Model '{name}' referenced by the workflow has no "
+                f"published Greengrass component; publish the model before "
+                f"packaging workflows that use it")
+        resolved[name] = published
+    return resolved
+
+
+def model_component_dependencies(resolved: Dict[str, Dict]) -> Dict:
+    """One HARD ComponentDependencies entry per distinct published model
+    component of the workflow's resolved model references (2.8).
+
+    Deliberately UNPINNED ('>=0.0.0'), unlike the dda.plugin.* entries:
+    model components version independently (major-only bumps on republish)
+    and the deployment specifies the concrete version — this dependency's
+    job is the ordering/health edge, not version pinning.
+    """
+    components = sorted({published['component_name']
+                         for published in resolved.values()})
+    return {name: {'VersionRequirement': '>=0.0.0',
+                   'DependencyType': 'HARD'}
+            for name in components}
+
+
+def local_server_component_dependencies(archs) -> Dict:
+    """One HARD ComponentDependencies entry per distinct LocalServer
+    variant of the selected architectures (2.9), each carrying its arch's
+    existing minimum-version floor (min_local_server_version_for) as the
+    ``VersionRequirement`` — the same per-lineage discipline as the
+    manifest's ``minLocalServerVersion``. Both x86_64 flavors collapse to
+    the single ``...amd64`` entry. FAILS CLOSED on an unknown arch (the
+    greengrass_publish.TARGET_TO_LOCAL_SERVER naming discipline): the
+    retired bare '.arm64' name is never emitted and no variant is guessed.
+
+    Documented constraint: Greengrass ComponentDependencies is recipe-
+    GLOBAL, not per-platform-manifest, so a package spanning architectures
+    with DIFFERENT LocalServer variants emits multiple LocalServer entries,
+    which cannot co-resolve on one device. Mitigations: (a) the deployment
+    service already gates components against device architecture
+    (device-arch-compatibility / vLLM arch gates), so mixed-variant
+    deployments are rejected upstream; (b) vLLM workflows package to
+    arm64_jp6 (plus flag-gated arm64_jp5) today, making single-variant the
+    operative case.
+    """
+    dependencies: Dict[str, Dict] = {}
+    for arch in sorted(archs):
+        component_name = ARCH_TO_LOCAL_SERVER_COMPONENT.get(arch)
+        if not component_name:
+            raise PackagingError(
+                f"local-server/{arch}",
+                f"Cannot resolve a LocalServer dependency for architecture "
+                f"'{arch}': no known LocalServer variant. Supported "
+                f"architectures: "
+                f"{', '.join(sorted(ARCH_TO_LOCAL_SERVER_COMPONENT))}")
+        if component_name not in dependencies:
+            dependencies[component_name] = {
+                'VersionRequirement':
+                    '>=' + min_local_server_version_for(arch),
+                'DependencyType': 'HARD',
+            }
+    return dependencies
+
+
 def recipe_manifest_order(archs) -> List[str]:
     """Deterministic platform-manifest order: sorted, except the plain
     x86_64 manifest is listed after the x86_64_nvidia one — both map to
@@ -1564,7 +1753,6 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                  'architectures': architectures})
     else:
         dep_index = {}
-    component_dependencies = plugin_component_dependencies(dep_records)
 
     # Assemble the per-arch artifact zips locally, then run the
     # all-or-nothing stage -> promote -> register sequence (7.1, 7.3, 7.5)
@@ -1577,6 +1765,25 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # objects, even when promotion itself failed partway (Requirement 7.5).
     final_prefix = f"{COMPONENT_S3_PREFIX}/{workflow_id}/{version}"
     try:
+        # Workflow dependency edges (edge-deploy-reliability 2.8, 2.9, 3.8
+        # — Defect C): resolve the workflow's model_ref values to their
+        # published model components (fail closed on unpublished models via
+        # the PackagingError path below) and merge the model + per-arch
+        # LocalServer HARD entries with the existing dda.plugin.* entries.
+        # The three namespaces (dda.plugin.*, model-*,
+        # aws.edgeml.dda.LocalServer.*) are disjoint, so the merge cannot
+        # collide; plugin entries pass through byte-identical (3.8) and
+        # build_recipe itself is unchanged.
+        model_references = gather_model_references(definition_dict,
+                                                   descriptors_by_id)
+        resolved_models = resolve_model_components(model_references,
+                                                   usecase_id)
+        component_dependencies = {
+            **plugin_component_dependencies(dep_records),
+            **model_component_dependencies(resolved_models),
+            **local_server_component_dependencies(architectures),
+        }
+
         # Verify every custom Plugin_Artifact per selected architecture
         # against its Plugin_Record — streamed SHA-256 recompute + KMS
         # signature verification (10.4) — collecting the per-arch

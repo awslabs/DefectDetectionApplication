@@ -7,10 +7,39 @@ services:
     # ("Continuation ref count has gone negative" in aws-c-event-stream) that
     # SIGABRTs the whole process. Without a restart policy that abort leaves the
     # flask-app permanently down until the component is manually restarted.
-    # `unless-stopped` re-launches the container after such a crash while the
-    # Greengrass component is running, and does not fight the component's own
-    # `docker compose down` on a normal stop (which removes the container).
-    restart: unless-stopped
+    # `always` re-launches the container after such a crash (a strict superset
+    # of the previous `unless-stopped` for crash exits) and additionally
+    # re-launches a previously-stopped backend when the Docker daemon restarts
+    # (device reboot / dockerd restart) — one of the ways an Exited backend
+    # could otherwise persist after a deployment-restart race. It still does
+    # not fight the component's own `docker compose down` on a normal stop
+    # (which removes the container). Honest caveat: NO restart policy
+    # re-launches a docker-stopped container while the daemon runs — that
+    # recovery path is owned by the recipe Startup `compose up -d --wait`
+    # retry loop (a retried `compose up` starts existing stopped containers),
+    # which is why the two changes ship together.
+    restart: always
+    # Time Docker waits between SIGTERM and SIGKILL on stop. The backend's
+    # SIGTERM cleanup is bounded at 20s in app.py (SHUTDOWN_CLEANUP_BUDGET_
+    # SECONDS); 120s gives a 5-6x margin for slow devices under load so the
+    # backend is never SIGKILLed mid-cleanup (the incident's exit 137 at the
+    # 10s default). `docker compose stop`/`down` inherits this value as the
+    # default timeout, so the recipe Shutdown scripts need no change.
+    stop_grace_period: 120s
+    # Health gate (edge-deploy-reliability, Defect B): /healthcheck.py probes
+    # the unauthenticated GET /health endpoint on 127.0.0.1:5000, falling back
+    # to https://127.0.0.1:5443 (TLS when station authorization is enabled).
+    # Python because the image is not guaranteed to carry curl/wget; loopback
+    # works under network_mode: host. The recipe Startup's `compose up -d
+    # --wait` blocks on this healthcheck, so Greengrass reports LocalServer
+    # RUNNING only when the backend is actually healthy. start_period covers
+    # DB migration + triton setup + vLLM runtime start on a cold JP6 boot.
+    healthcheck:
+      test: ["CMD", "python3", "/healthcheck.py"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 300s
     build:
       context: ./backend
       dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
@@ -102,8 +131,18 @@ services:
     profiles: [tegra]
   backend_generic:
     network_mode: "host"
-    # Auto-recover from crashes (see backend_tegra_gpu_enabled above).
-    restart: unless-stopped
+    # Auto-recover from crashes and daemon restarts; see the restart-policy
+    # rationale on backend_tegra_gpu_enabled above.
+    restart: always
+    # See the stop_grace_period rationale on backend_tegra_gpu_enabled above.
+    stop_grace_period: 120s
+    # See the healthcheck rationale on backend_tegra_gpu_enabled above.
+    healthcheck:
+      test: ["CMD", "python3", "/healthcheck.py"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 300s
     build:
       context: ./backend
       dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
@@ -152,6 +191,16 @@ services:
     image: react-webapp
     # Auto-recover from crashes (see backend_tegra_gpu_enabled above).
     restart: unless-stopped
+    # Basic liveness probe of the nginx-served app on the container port
+    # (edge-deploy-reliability, Defect B). The react-webapp image is
+    # nginx:stable-alpine — busybox wget is available, curl is not, so the
+    # probe uses wget (exit non-zero unless nginx answers).
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     ports:
       - "3000:80"
       - "3443:443"

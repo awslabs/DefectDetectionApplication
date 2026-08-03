@@ -311,19 +311,35 @@ def stage_repository(
 # reachability before each attempt, makes deployments self-heal.
 LOAD_RETRY_BACKOFF_SECONDS = (3, 6, 12, 24, 48)
 
+#: request_load classifications (spec: edge-deploy-reliability, Defect D).
+#: LOAD_OK: HTTP 200 received. LOAD_HTTP_ERROR: an authoritative non-200
+#: HTTP response was received (single-attempt semantics — never retried).
+#: LOAD_UNREACHABLE: every attempt ended in a wait_for_server failure or a
+#: connection-level requests.RequestException with no HTTP response ever
+#: received (isBugCondition_D — the runtime was never reachable).
+LOAD_OK = "LOAD_OK"
+LOAD_HTTP_ERROR = "LOAD_HTTP_ERROR"
+LOAD_UNREACHABLE = "LOAD_UNREACHABLE"
 
-def request_load(model_name: str) -> bool:
+
+def request_load(model_name: str) -> str:
     """Request the companion runtime to load the staged model through the
     Triton model-control endpoint (Requirement 4.8). Retries transient
     connection failures with backoff (deployment races recreate the backend
     under us); an HTTP error response (e.g. 409 FAILED) is authoritative and
     is not retried — the runtime reports LOADING/READY/FAILED through the
-    device model-status mechanisms."""
+    device model-status mechanisms.
+
+    Returns a classification: ``LOAD_OK`` (HTTP 200), ``LOAD_HTTP_ERROR``
+    (authoritative non-200 HTTP response received), or ``LOAD_UNREACHABLE``
+    (no HTTP response ever received — every attempt died at the connection
+    level or the server was never reachable)."""
     port = runtime_port()
     url = "http://{}:{}/v2/repository/models/{}/load".format(
         VLLM_RUNTIME_HOST, port, model_name
     )
     attempts = len(LOAD_RETRY_BACKOFF_SECONDS) + 1
+    got_http_response = False
     for attempt in range(1, attempts + 1):
         if not wait_for_server(VLLM_RUNTIME_HOST, port, "VllmLoadModel"):
             logging.error(
@@ -332,7 +348,7 @@ def request_load(model_name: str) -> bool:
                     VLLM_RUNTIME_HOST, port, model_name
                 )
             )
-            return False
+            return LOAD_UNREACHABLE
         logging.info(
             "VllmLoadModel: requesting load of '{}' (attempt {}/{})".format(
                 model_name, attempt, attempts
@@ -350,18 +366,19 @@ def request_load(model_name: str) -> bool:
                 )
                 time.sleep(delay)
                 continue
-            return False
+            return LOAD_HTTP_ERROR if got_http_response else LOAD_UNREACHABLE
+        got_http_response = True
         if response.status_code == 200:
             logging.info("Model '{}' loaded successfully!".format(model_name))
-            return True
+            return LOAD_OK
         logging.error(
             "VllmLoadModel: Request failed with status code: {}".format(
                 response.status_code
             )
         )
         logging.error(response.text)
-        return False
-    return False
+        return LOAD_HTTP_ERROR
+    return LOAD_HTTP_ERROR if got_http_response else LOAD_UNREACHABLE
 
 
 def request_unload(model_name: str) -> bool:
@@ -458,8 +475,29 @@ def prepare(args) -> int:
     # Greengrass then fails the Startup script and restarts the component,
     # re-driving the load — matching the vision-model path's behavior. An
     # HTTP-level FAILED from the runtime also exits non-zero so the component
-    # state reflects reality instead of "healthy but never loaded".
-    if not request_load(model_name):
+    # state reflects reality instead of "healthy but never loaded". A
+    # never-reachable runtime (isBugCondition_D — no HTTP response ever
+    # received) gets an actionable diagnostic naming the likely cause: the
+    # LocalServer backend container left stopped by a deployment restart
+    # (spec: edge-deploy-reliability, Defect D, Requirement 2.10).
+    outcome = request_load(model_name)
+    if outcome == LOAD_UNREACHABLE:
+        logging.error(
+            "Model '{}' staged, but the vLLM runtime at {}:{} was never "
+            "reachable across the full retry window (~70s of connection "
+            "failures). Likely cause: the LocalServer backend container "
+            "(image 'flask-app') is not running — a deployment restart can "
+            "leave it stopped. Verify with:\n"
+            "  sudo docker ps -a --filter ancestor=flask-app   "
+            "(look for Exited)\n"
+            "  sudo docker logs <container-id>\n"
+            "and check the LocalServer component log "
+            "(/greengrass/v2/logs/aws.edgeml.dda.LocalServer.*.log). "
+            "Exiting non-zero so the component retries once the backend "
+            "is back.".format(model_name, VLLM_RUNTIME_HOST, runtime_port())
+        )
+        return 1
+    if outcome != LOAD_OK:
         logging.error(
             "Model '{}' staged but the load request did not succeed; "
             "exiting non-zero so the component retries".format(model_name)

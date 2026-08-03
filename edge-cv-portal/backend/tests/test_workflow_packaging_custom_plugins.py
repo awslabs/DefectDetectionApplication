@@ -322,19 +322,30 @@ class TestCustomPluginSuccess:
         assert manifest["pluginComponents"] == {component_name: "1.0.0"}
 
         # The recipe declares the HARD dependency pinned to the recorded
-        # Plugin_Record version (16.4).
+        # Plugin_Record version (16.4), alongside the target architecture's
+        # LocalServer variant at its minimum-version floor
+        # (edge-deploy-reliability 2.9 — every workflow recipe carries the
+        # LocalServer edge; this workflow has no model refs, so no model-*
+        # entry appears).
         recipe = json.loads(
             gg.create_component_version.call_args.kwargs["inlineRecipe"])
         assert recipe["ComponentDependencies"] == {
             component_name: {
                 "VersionRequirement": ">=1.0.0 <2.0.0",
                 "DependencyType": "HARD",
-            }
+            },
+            "aws.edgeml.dda.LocalServer.amd64": {
+                "VersionRequirement": ">=" +
+                    cenv.packaging.min_local_server_version_for("x86_64"),
+                "DependencyType": "HARD",
+            },
         }
 
     def test_workflow_without_custom_nodes_declares_no_dependencies(self, cenv):
-        """Built-in-only workflows package exactly as before: no
-        ComponentDependencies block, empty pluginChecksums."""
+        """Built-in-only workflows declare no dda.plugin.* dependencies and
+        keep empty pluginChecksums; the only ComponentDependencies entry is
+        the target architecture's LocalServer variant, which every workflow
+        recipe carries (edge-deploy-reliability 2.9)."""
         cenv.seed_curated_library(["x86_64"])
         record = cenv.seed_plugin_record()
         type_id, _ = cenv.register_node_type(record)
@@ -377,7 +388,9 @@ class TestCustomPluginSuccess:
         assert status == 201, payload
         recipe = json.loads(
             gg.create_component_version.call_args.kwargs["inlineRecipe"])
-        assert "ComponentDependencies" not in recipe
+        deps = recipe["ComponentDependencies"]
+        assert not any(name.startswith("dda.plugin.") for name in deps)
+        assert set(deps) == {"aws.edgeml.dda.LocalServer.amd64"}
         with cenv.packaged_zip("x86_64") as zf:
             manifest = json.loads(zf.read("manifest.json"))
         assert manifest["pluginChecksums"] == {}
