@@ -45,6 +45,12 @@ ComponentConfiguration:
             - "aws.greengrass#PublishToIoTCore"
           resources:
             - $aws/things/*/shadow/name/*
+        'aws.edgeml.dda.LocalServer.amd64:mqttproxy:2':
+          policyDescription: 'Allows workflow mqtt_publish output publishes: the node topic parameter is free-form user input, so no topic prefix can cover it and publish must be authorized on the wildcard resource. Deliberately publish-only; SubscribeToIoTCore is NOT broadened beyond the shadow topics in mqttproxy:1'
+          operations:
+            - "aws.greengrass#PublishToIoTCore"
+          resources:
+            - '*'
       aws.greengrass.Cli:
         'aws.edgeml.dda.LocalServer.amd64:cli:1':
           policyDescription: 'Allows access to restart and stop DDA greengrass components'

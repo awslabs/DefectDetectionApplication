@@ -32,9 +32,12 @@ import { useParams } from "react-router-dom";
 
 import {
   getWorkflowExecution,
+  getWorkflowExecutionMetadata,
   getWorkflowExecutionNodeStatus,
   getWorkflowRegistrationGraph,
+  workflowExecutionOutputImageUrl,
 } from "api/WorkflowRegistrationAPI";
+import useAuth from "components/auth/authHook";
 import { isExecutionActive } from "../presentation";
 import {
   NODE_HEIGHT,
@@ -45,6 +48,8 @@ import {
   normalizeNodePositions,
   shouldShowDetail,
 } from "./graphGeometry";
+import NodePreviewCard from "./NodePreviewCard";
+import { isOutputNode, previewViewModel } from "./previewModel";
 
 /** Poll interval for the node-status query while the run is active (R7.5). */
 export const NODE_STATUS_POLL_INTERVAL_MS = 2000;
@@ -97,6 +102,35 @@ export default function RunStatusGraph(): JSX.Element {
 
   const graph = graphQuery.data;
   const statusMap = nodeStatusQuery.data ?? {};
+
+  // Output-image URL for the capture-node thumbnail, token-aware when auth is
+  // enabled (same pattern as RunResults.tsx; output-node-preview-popover R2.1).
+  const { token, authEnabled } = useAuth();
+  const imageSrc = workflowExecutionOutputImageUrl(
+    executionId,
+    authEnabled ? token : undefined,
+  );
+
+  // Run-metadata query for the preview card (output-node-preview-popover
+  // design): fetched lazily, only when the selected node's preview actually
+  // needs metadata — an llm_inference/bedrock_inference node whose status is
+  // terminal. Computed from raw query data because hooks must run before the
+  // early returns below.
+  const selectedNode = graph?.nodes?.find((node) => node.id === selectedNodeId);
+  const selectedStatus =
+    selectedNodeId !== null ? statusMap[selectedNodeId]?.status : undefined;
+  const metadataEnabled =
+    selectedNode !== undefined &&
+    (selectedNode.type === "llm_inference" ||
+      selectedNode.type === "bedrock_inference") &&
+    (selectedStatus === "success" ||
+      selectedStatus === "warning" ||
+      selectedStatus === "failure");
+  const metadataQuery = useQuery({
+    queryKey: ["getWorkflowExecutionMetadata", executionId],
+    queryFn: () => getWorkflowExecutionMetadata(executionId),
+    enabled: metadataEnabled,
+  });
 
   if (graphQuery.isError) {
     return (
@@ -292,22 +326,48 @@ export default function RunStatusGraph(): JSX.Element {
           </SpaceBetween>
         </Container>
 
-        {/* Detail panel: shows the error/warning detail for a selected
-            failure/warning node (R7.4). */}
-        {selectedVisual && shouldShowDetail(selectedVisual.status) && (
-          <Alert
-            data-testid="node-detail"
-            type={selectedVisual.status === "failure" ? "error" : "warning"}
-            header={`${selectedVisual.id} — ${selectedVisual.status}`}
-          >
-            {selectedVisual.detail ?? "No additional detail was recorded."}
-          </Alert>
+        {/* Detail panel. Output nodes render the preview card
+            (output-node-preview-popover R1.1); non-output nodes keep the
+            exact pre-existing rendering (R1.4, R5.1, R5.2): the error/warning
+            detail for a selected failure/warning node (R7.4), a plain Box
+            otherwise. */}
+        {selectedVisual && isOutputNode(selectedVisual.type) && (
+          <NodePreviewCard
+            nodeId={selectedVisual.id}
+            registrationId={registrationId}
+            executionId={executionId}
+            viewModel={previewViewModel({
+              nodeType: selectedVisual.type,
+              nodeId: selectedVisual.id,
+              statusEntry: statusMap[selectedVisual.id],
+              hasImageResults: executionQuery.data?.hasImageResults ?? false,
+              imageSrc,
+              metadata: metadataQuery.data,
+              // A disabled query reports isLoading in react-query v4; only an
+              // actual in-flight fetch counts as loading (R3.4).
+              metadataLoading: metadataEnabled && metadataQuery.isInitialLoading,
+              metadataError: metadataQuery.isError,
+            })}
+          />
         )}
-        {selectedVisual && !shouldShowDetail(selectedVisual.status) && (
-          <Box data-testid="node-detail" variant="p">
-            {selectedVisual.id} — {selectedVisual.status}
-          </Box>
-        )}
+        {selectedVisual &&
+          !isOutputNode(selectedVisual.type) &&
+          shouldShowDetail(selectedVisual.status) && (
+            <Alert
+              data-testid="node-detail"
+              type={selectedVisual.status === "failure" ? "error" : "warning"}
+              header={`${selectedVisual.id} — ${selectedVisual.status}`}
+            >
+              {selectedVisual.detail ?? "No additional detail was recorded."}
+            </Alert>
+          )}
+        {selectedVisual &&
+          !isOutputNode(selectedVisual.type) &&
+          !shouldShowDetail(selectedVisual.status) && (
+            <Box data-testid="node-detail" variant="p">
+              {selectedVisual.id} — {selectedVisual.status}
+            </Box>
+          )}
       </SpaceBetween>
     </ContentLayout>
   );

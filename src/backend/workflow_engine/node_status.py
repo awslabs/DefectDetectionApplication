@@ -21,6 +21,9 @@ It is built from ``rendering.element_name_map(document)`` (element-name ->
 nodeId) so it maps the pipeline's bus signals (via the optional
 ``run_pipeline`` ``status_sink``) back to the workflow's nodes without any
 dependency on GStreamer — it is therefore fully testable in isolation.
+Executor-binding nodes (no pipeline element) are seeded through the
+optional ``extra_node_ids`` constructor argument so they participate in
+the same lifecycle and always reach a terminal status.
 
 Lifecycle over a run (design §3.3):
 
@@ -43,7 +46,7 @@ persisted to ``WorkflowExecution.node_status_json``.
 
 import json
 import logging
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +68,11 @@ _NON_TERMINAL_STATES = frozenset({STATUS_PENDING, STATUS_RUNNING})
 class NodeStatusCollector:
     """Accumulates per-node run status from an element-name -> nodeId map."""
 
-    def __init__(self, name_map: Optional[Dict[str, Optional[str]]] = None) -> None:
+    def __init__(
+        self,
+        name_map: Optional[Dict[str, Optional[str]]] = None,
+        extra_node_ids: Optional[Iterable[str]] = None,
+    ) -> None:
         # element-name -> nodeId (synthetic elements map to None).
         self._name_map: Dict[str, Optional[str]] = dict(name_map or {})
         # nodeId -> status; only distinct non-None nodeIds participate.
@@ -73,6 +80,16 @@ class NodeStatusCollector:
         # nodeId -> warning/error detail (retained for the status graph).
         self._details: Dict[str, str] = {}
         for node_id in self._name_map.values():
+            if node_id is not None and node_id not in self._statuses:
+                self._statuses[node_id] = STATUS_PENDING
+        # Additional participating nodes with no pipeline element — the
+        # compiled document's executorBindings node ids (llm_inference,
+        # mqtt_publish, opcua_write, digital_output, bedrock_inference,
+        # ...). Seeding them here makes them participate in
+        # mark_running_all/mark_success_all/finalize so they always reach
+        # a terminal status in node_status_json instead of staying absent
+        # (the run view resolves absent nodes to "pending").
+        for node_id in extra_node_ids or ():
             if node_id is not None and node_id not in self._statuses:
                 self._statuses[node_id] = STATUS_PENDING
 

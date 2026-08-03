@@ -320,3 +320,25 @@ def get_workflow_execution_node_status(
     unknown execution (R4.6)."""
     execution = _get_execution_or_404(execution_id, db)
     return run_artifacts.parse_node_status(execution.node_status_json)
+
+
+@router.get("/workflows/executions/{execution_id}/metadata")
+def get_workflow_execution_metadata(
+    execution_id: str, db: Session = Depends(get_db)
+) -> dict:
+    """The run's metadata JSON (Requirements 4.1, 4.2, 4.3, 5.3).
+
+    Returns the parsed ``{output_dir}/{capture_id}.json`` written by the
+    pipeline executor — the run's final tag values, including each llm
+    node's ``generated_text``/``error`` and Bedrock's merged
+    ``is_anomalous``/``confidence`` fields — so the run-status graph's
+    output preview card can render LLM text and Bedrock fields (R4.1).
+    Best-effort via ``run_artifacts.read_run_metadata``: a missing
+    ``output_dir``/``capture_id``, a missing/unreadable file, malformed
+    JSON, or a non-object top level yields ``{}`` with a 200, never a 500
+    (R4.2). 404 only for an unknown execution (R4.3). Additive route: no
+    existing route or response shape changes (R5.3)."""
+    execution = _get_execution_or_404(execution_id, db)
+    return run_artifacts.read_run_metadata(
+        execution.output_dir, execution.capture_id
+    )

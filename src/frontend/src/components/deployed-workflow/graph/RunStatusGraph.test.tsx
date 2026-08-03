@@ -30,6 +30,16 @@ import { STATUS_COLOR } from "./graphGeometry";
 
 jest.mock("api/WorkflowRegistrationAPI");
 
+// useAuth reads from the auth context/cookies which are not provided in this
+// test harness; mock it to a stable disabled-auth value (RunResults pattern).
+jest.mock("components/auth/authHook", () => ({
+  __esModule: true,
+  default: (): { token: string; authEnabled: boolean } => ({
+    token: "",
+    authEnabled: false,
+  }),
+}));
+
 const REGISTRATION_ID = "reg-1";
 const EXECUTION_ID = "exec-1";
 

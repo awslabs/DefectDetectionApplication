@@ -5,25 +5,45 @@ set -o pipefail
 # Build and publish Greengrass components using GDK
 # This script builds components and publishes them to the Greengrass component repository
 
+# ── Mode conflict guard ──────────────────────────────────────────────────────
+# SKIP_BUILD=1 skips the build (publish-only); SKIP_PUBLISH=1 skips the
+# publish (build-only). Setting both would mean "do nothing" — reject it
+# before any credential check, argument parsing, or side effect.
+if [ "${SKIP_BUILD:-0}" = "1" ] && [ "${SKIP_PUBLISH:-0}" = "1" ]; then
+    echo "❌ ERROR: SKIP_BUILD=1 and SKIP_PUBLISH=1 are mutually exclusive"
+    echo "   (together they would skip both the build and the publish)."
+    exit 1
+fi
+
 # ── Pre-flight: verify AWS credentials before the (long) build ──────────────
 # Publishing needs valid credentials. Check them up front so an expired session
 # fails in seconds rather than after a full image build + packaging (which can
 # take 10-15+ minutes). This check was on main and was dropped during the rebase.
 echo "Checking AWS credentials..."
 if ! CALLER_IDENTITY=$(aws sts get-caller-identity 2>&1); then
-    echo ""
-    echo "❌ ERROR: AWS credentials are not valid or have expired."
-    echo "   ${CALLER_IDENTITY}"
-    echo ""
-    echo "   Re-authenticate before building/publishing, e.g.:"
-    echo "     aws sso login --profile <name>"
-    echo "     aws login"
-    echo "     export AWS_PROFILE=<name>"
-    echo ""
-    echo "   (Credentials are required to publish the Greengrass component.)"
-    exit 1
+    if [ "${SKIP_PUBLISH:-0}" = "1" ]; then
+        # Build-only mode: the Build_Phase makes no AWS API calls and the
+        # Docker base images pull anonymously (nvcr.io / public.ecr.aws), so
+        # invalid or expired credentials are not fatal here.
+        echo "⚠ AWS credentials are not valid — continuing anyway (SKIP_PUBLISH=1;"
+        echo "  the build needs no AWS credentials; base images pull anonymously)."
+        echo "  Re-authenticate before publishing with SKIP_BUILD=1."
+    else
+        echo ""
+        echo "❌ ERROR: AWS credentials are not valid or have expired."
+        echo "   ${CALLER_IDENTITY}"
+        echo ""
+        echo "   Re-authenticate before building/publishing, e.g.:"
+        echo "     aws sso login --profile <name>"
+        echo "     aws login"
+        echo "     export AWS_PROFILE=<name>"
+        echo ""
+        echo "   (Credentials are required to publish the Greengrass component.)"
+        exit 1
+    fi
+else
+    echo "✓ AWS credentials valid"
 fi
-echo "✓ AWS credentials valid"
 
 # ── Propagate resolved credentials to GDK ───────────────────────────────────
 # The AWS CLI v2 bundles a modern botocore and can resolve credentials from SSO
@@ -73,6 +93,17 @@ print_step() {
 #   ./gdk-component-build-and-publish.sh aarch64 4       # ARM64 JetPack 4.6
 #   ./gdk-component-build-and-publish.sh aarch64 5       # ARM64 JetPack 5
 #   ./gdk-component-build-and-publish.sh aarch64 6       # ARM64 JetPack 6
+#
+# Environment variables:
+#   SKIP_BUILD=1    Publish-only: re-publish existing greengrass-build/ artifacts
+#                   without rebuilding (e.g. after a transient publish failure).
+#   SKIP_PUBLISH=1  Build-only: build + package the component, then exit without
+#                   publishing/tagging (no valid AWS credentials required).
+#                   Mutually exclusive with SKIP_BUILD=1.
+#
+# Examples:
+#   SKIP_PUBLISH=1 ./gdk-component-build-and-publish.sh aarch64 6   # build only
+#   SKIP_BUILD=1   ./gdk-component-build-and-publish.sh aarch64 6   # publish only
 #
 # Argument parsing is order-independent and accepts both the positional JetPack
 # number (4|5|6) and the --jp4/--jp5/--jp6 flags (kept as backward-compatible aliases).
@@ -151,10 +182,18 @@ if [ -z "$GDK_REGION" ]; then
     GDK_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 fi
 if [ -z "$GDK_REGION" ]; then
-    echo "❌ ERROR: No AWS region configured."
-    echo "   Run: aws configure set region <your-region>"
-    echo "   Or:  export AWS_REGION=<your-region>"
-    exit 1
+    if [ "${SKIP_PUBLISH:-0}" = "1" ]; then
+        # Build-only mode: gdk-config.json needs a syntactically valid
+        # publish.region, but `gdk component build` never reads it.
+        GDK_REGION="us-east-1"
+        echo "ℹ No AWS region configured — using placeholder '${GDK_REGION}' in"
+        echo "  gdk-config.json (unused during build-only)."
+    else
+        echo "❌ ERROR: No AWS region configured."
+        echo "   Run: aws configure set region <your-region>"
+        echo "   Or:  export AWS_REGION=<your-region>"
+        exit 1
+    fi
 fi
 echo "Using region: $GDK_REGION"
 
@@ -230,6 +269,19 @@ else
         echo "Full log saved to: $BUILD_LOG"
         exit 1
     fi
+fi
+
+# ── Publish gate ─────────────────────────────────────────────────────────────
+# Build-only mode: exit successfully before publish, tagging, and the
+# InferenceUploader prompt (Requirements 1.1–1.3).
+if [ "${SKIP_PUBLISH:-0}" = "1" ]; then
+    print_step "Skipping publish (SKIP_PUBLISH=1)"
+    echo "⏭  SKIP_PUBLISH=1 — build artifacts are in greengrass-build/artifacts/"
+    echo "   To publish this build later without rebuilding, run:"
+    echo "     SKIP_BUILD=1 $0 $*"
+    END_TIME=$(date +%s)
+    echo "✅ Build complete (publish skipped). Total time: $((END_TIME - START_TIME))s"
+    exit 0
 fi
 
 print_step "Publishing LocalServer component"

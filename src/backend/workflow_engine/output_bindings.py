@@ -385,7 +385,13 @@ def _default_greengrass_publisher(topic: str, payload: str, qos: int) -> None:
     supplied (no broker host/port and no certificate file paths). The
     ``awsiot.greengrasscoreipc`` client is imported lazily so this module
     stays importable everywhere (matching the paho/opcua pattern);
-    ``qos`` is mapped to the IPC ``QOS`` enum (clamped to 0/1)."""
+    ``qos`` is mapped to the IPC ``QOS`` enum (clamped to 0/1).
+
+    A nucleus denial (``UnauthorizedError``) is re-raised as a
+    ``RuntimeError`` naming the denied topic and the LocalServer
+    component's ``aws.greengrass.ipc.mqttproxy`` accessControl
+    configuration (with the recipe location) so the run error is
+    actionable instead of a bare ``UnauthorizedError``."""
     import awsiot.greengrasscoreipc
     import awsiot.greengrasscoreipc.model as model
 
@@ -399,7 +405,21 @@ def _default_greengrass_publisher(topic: str, payload: str, qos: int) -> None:
     ipc_client = awsiot.greengrasscoreipc.connect()
     operation = ipc_client.new_publish_to_iot_core()
     operation.activate(request)
-    operation.get_response().result(timeout=10.0)
+    try:
+        operation.get_response().result(timeout=10.0)
+    except model.UnauthorizedError as error:
+        raise RuntimeError(
+            "Greengrass IPC denied PublishToIoTCore for topic "
+            "'{0}': the LocalServer component's "
+            "aws.greengrass.ipc.mqttproxy accessControl configuration "
+            "does not authorize publishing to this topic. Add (or fix) a "
+            "policy entry authorizing 'aws.greengrass#PublishToIoTCore' "
+            "on a resource covering the topic in the component recipe "
+            "(recipe-arm64-jp6.yaml / recipe-arm64-jp5.yaml / "
+            "recipe-arm64.yaml / recipe-amd64.yaml, "
+            "ComponentConfiguration accessControl) and redeploy.".format(
+                topic)
+        ) from error
 
 
 def _opcua_coerce(value: Any, variant_type: Any) -> Any:
@@ -752,6 +772,18 @@ TEXT_GENERATION_URL = (
 #: recorded failure reason instead of a bare client timeout.
 LLM_GENERATION_TIMEOUT_SEC = 130
 
+#: Poll interval between generate re-POSTs while the model reports 409
+#: state='loading' (transient warm-up — the API answers 409 with a
+#: ``state`` field precisely so callers can distinguish a warming model
+#: from a failed one; see ``vllm_runtime/server.py``).
+LLM_LOADING_POLL_INTERVAL_SEC = 5
+
+#: Wall-clock budget for the 409-loading retry window: comfortably above
+#: small-model warm-up, bounded well below the executor thread's
+#: tolerance. Once exhausted, the last 409-loading response is raised as
+#: the node's terminal error.
+LLM_LOADING_BUDGET_SEC = 240
+
 #: Generation parameters forwarded from the compiled binding to the API.
 _LLM_GENERATION_PARAMETERS = ("max_tokens", "temperature", "top_p")
 
@@ -762,29 +794,53 @@ def _default_llm_invoker(
     """POST the rendered prompt to the local Text_Generation_API and
     return the generated text. ``requests`` is imported lazily so this
     module stays importable everywhere; any HTTP/validation failure is
-    raised for the processor to record as the node's error."""
+    raised for the processor to record as the node's error.
+
+    A ``409 {'state': 'loading'}`` response (transient model warm-up) is
+    re-POSTed every :data:`LLM_LOADING_POLL_INTERVAL_SEC` seconds until
+    :data:`LLM_LOADING_BUDGET_SEC` of wall clock elapses; the first 200
+    wins. A 409 with any other state, any other non-200, or budget
+    exhaustion raises the existing RuntimeError shape (the last state
+    payload included). The 200-first-attempt path stays a single POST
+    with the original URL, body, and timeout."""
     import requests
 
     body: Dict[str, Any] = {"prompt": prompt}
     for key in _LLM_GENERATION_PARAMETERS:
         if parameters.get(key) is not None:
             body[key] = parameters[key]
-    response = requests.post(
-        TEXT_GENERATION_URL.format(model_name=model_name),
-        json=body,
-        timeout=LLM_GENERATION_TIMEOUT_SEC,
-    )
-    if response.status_code != 200:
+    url = TEXT_GENERATION_URL.format(model_name=model_name)
+    deadline = time.monotonic() + LLM_LOADING_BUDGET_SEC
+    while True:
+        response = requests.post(
+            url,
+            json=body,
+            timeout=LLM_GENERATION_TIMEOUT_SEC,
+        )
+        if response.status_code == 200:
+            return str(response.json().get("generated_text", ""))
         try:
             payload = response.json()
         except ValueError:
             payload = None
+        if (
+            response.status_code == 409
+            and isinstance(payload, dict)
+            and payload.get("state") == "loading"
+            and time.monotonic() < deadline
+        ):
+            # Transient warm-up: wait for READY within the bounded budget.
+            logger.info(
+                "Text_Generation_API model '%s' is loading; retrying in "
+                "%ds", model_name, LLM_LOADING_POLL_INTERVAL_SEC,
+            )
+            time.sleep(LLM_LOADING_POLL_INTERVAL_SEC)
+            continue
         raise RuntimeError(
             "Text_Generation_API returned {0} for model '{1}': {2}".format(
                 response.status_code, model_name,
                 payload if payload is not None else (response.text or "")[:200],
             ))
-    return str(response.json().get("generated_text", ""))
 
 
 class LlmInferenceProcessor:

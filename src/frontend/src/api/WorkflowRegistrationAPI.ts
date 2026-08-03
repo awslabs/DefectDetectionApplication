@@ -192,6 +192,24 @@ export async function getWorkflowExecutionOverlay(
   return data;
 }
 
+/** The run's metadata JSON ({capture_id}.json), or {} when unavailable. */
+export type WorkflowExecutionMetadata = Record<string, unknown>;
+
+/**
+ * The run metadata (final tag values, including each LLM node's
+ * `generated_text` and Bedrock's merged fields). The backend responds 200
+ * with `{}` when the metadata artifact is unavailable, so the caller never
+ * sees an error for a missing file.
+ */
+export async function getWorkflowExecutionMetadata(
+  id: string,
+): Promise<WorkflowExecutionMetadata> {
+  const { data } = await axios.get<WorkflowExecutionMetadata>(
+    `${EXECUTIONS_ENDPOINT}/${id}/metadata`,
+  );
+  return data;
+}
+
 /** Per-node run status map for a run, addressable by nodeId. */
 export async function getWorkflowExecutionNodeStatus(
   id: string,

@@ -1107,10 +1107,14 @@ class WorkflowExecutor:
 
             # Per-node run-status collection (Requirement 3). Built from the
             # element-name -> nodeId map so bus signals (via the optional
-            # run_pipeline status_sink) map back to workflow nodes. Contained:
-            # a collector error never fails the run (R8.5), so a construction
-            # failure just leaves status collection off (collector = None).
-            collector = self._begin_node_status(name_map)
+            # run_pipeline status_sink) map back to workflow nodes, and
+            # seeded with the document's executorBindings node ids
+            # (llm_inference, mqtt_publish, ...) so binding nodes reach a
+            # terminal status too — never absent/"pending" in the run view.
+            # Contained: a collector error never fails the run (R8.5), so a
+            # construction failure just leaves status collection off
+            # (collector = None).
+            collector = self._begin_node_status(name_map, document)
 
             execution.status = EXECUTION_STATUS_RUNNING
             execution.started_at = int(time.time())
@@ -1198,6 +1202,15 @@ class WorkflowExecutor:
                 )
                 return
 
+            # Post-pipeline capture artifact repair (Defect C): a
+            # tritonless capture pipeline's broker product is a literal
+            # ".jpg" (empty buffer correlation id — only emltriton attaches
+            # one); rename empty-basename files to {capture_id}.{ext} so
+            # the frame matches run_artifacts.base_output_image_path.
+            # Correctly-named (Triton) artifacts are never touched;
+            # contained/best-effort (R8.5).
+            self._repair_capture_artifacts(execution)
+
             # Bedrock comparison inference: runs BEFORE the run is
             # finalized and before the gating/output bindings evaluate.
             # The parsed {is_anomalous, confidence} fields merge into
@@ -1247,6 +1260,13 @@ class WorkflowExecutor:
                 tag_values = self._llm_processor.process(
                     document, tag_values
                 )
+                # Truthful per-node outcomes for the llm bindings: a
+                # recorded {'error': ...} marks THAT node failed in the
+                # status map. The run-level COMPLETED decision is
+                # unchanged (binding independence, requirement 3.4);
+                # successful llm nodes are covered by mark_success_all on
+                # the success path.
+                self._mark_llm_outcomes(collector, document, tag_values)
 
             # Output bindings run BEFORE the terminal status is
             # finalized so a binding failure surfaces into the run's
@@ -1279,6 +1299,10 @@ class WorkflowExecutor:
                     failing_node_id=failing_node_id,
                     failure_detail=str(e),
                 )
+                # The run's final metadata (llm outcomes included) is
+                # still persisted on the output-binding-failure path so
+                # the artifact directory describes what the run produced.
+                self._persist_run_metadata(execution, tag_values)
                 return
 
             execution.status = EXECUTION_STATUS_COMPLETED
@@ -1287,6 +1311,10 @@ class WorkflowExecutor:
             self._persist_node_status(
                 session, execution, collector, success=True
             )
+            # Persist the run metadata JSON into the per-run artifact
+            # directory (Defect B/C: the llm generated text — or error —
+            # previously lived only in in-memory tag values).
+            self._persist_run_metadata(execution, tag_values)
             logger.info(
                 "Workflow execution %s completed; tags: %s",
                 execution_id,
@@ -1354,13 +1382,29 @@ class WorkflowExecutor:
             )
             return None
 
-    def _begin_node_status(self, name_map: dict) -> Optional[NodeStatusCollector]:
+    def _begin_node_status(
+        self, name_map: dict, document: Optional[dict] = None
+    ) -> Optional[NodeStatusCollector]:
         """Build the run's :class:`NodeStatusCollector`, contained.
 
-        A construction failure is logged and swallowed so the run proceeds
-        without per-node status collection rather than failing (R8.5)."""
+        Seeds the collector with the compiled document's
+        ``executorBindings`` node ids (llm_inference, mqtt_publish,
+        opcua_write, digital_output, bedrock_inference, ...) — these nodes
+        have no pipeline element, so without seeding they would never
+        appear in the persisted ``node_status_json`` and the run view
+        would render them "pending" forever (workflow-output-bindings-fixes
+        Defect B). A construction failure is logged and swallowed so the
+        run proceeds without per-node status collection rather than
+        failing (R8.5)."""
         try:
-            return NodeStatusCollector(name_map)
+            binding_node_ids = [
+                binding.get("nodeId")
+                for binding in (document or {}).get("executorBindings") or []
+                if isinstance(binding, dict) and binding.get("nodeId")
+            ]
+            return NodeStatusCollector(
+                name_map, extra_node_ids=binding_node_ids
+            )
         except Exception:  # noqa: BLE001 - contained per 13.7 / R8.5
             logger.exception(
                 "Could not initialize node-status collection; the run "
@@ -1412,6 +1456,141 @@ class WorkflowExecutor:
             logger.exception(
                 "Could not persist node_status_json for workflow execution "
                 "%s; the run's terminal status is unaffected",
+                execution.id,
+            )
+
+    def _mark_llm_outcomes(
+        self,
+        collector: Optional[NodeStatusCollector],
+        document: dict,
+        tag_values: dict,
+    ) -> None:
+        """Mark each failed llm_inference binding's node ``failure`` in the
+        run's status map, contained.
+
+        The LlmInferenceProcessor records a binding failure as
+        ``metadata['llm'][nodeId] == {'error': reason}`` without raising
+        (binding independence, requirement 3.4) — so without this the
+        failure would be invisible in ``node_status_json`` (Defect B).
+        Successful llm nodes are covered by ``mark_success_all`` on the
+        success path. Entirely best-effort: any error is logged and
+        swallowed so status marking never fails a run (R8.5)."""
+        if collector is None:
+            return
+        try:
+            llm_outcomes = (tag_values or {}).get("llm") or {}
+            for binding in self._llm_processor.bindings(document):
+                node_id = binding.get("nodeId")
+                outcome = llm_outcomes.get(node_id)
+                if isinstance(outcome, dict) and outcome.get("error"):
+                    collector.mark_failure(node_id, str(outcome["error"]))
+        except Exception:  # noqa: BLE001 - contained per 13.7 / R8.5
+            logger.exception(
+                "Could not mark llm binding outcomes in the node-status "
+                "map; the run's terminal status is unaffected"
+            )
+
+    def _persist_run_metadata(
+        self, execution: WorkflowExecution, tag_values: dict
+    ) -> None:
+        """Write the run metadata JSON ``{output_dir}/{capture_id}.json``,
+        contained (workflow-output-bindings-fixes Defects B and C).
+
+        Persists the JSON-serializable view of the run's final tag
+        values/metadata — notably the ``llm`` section carrying each
+        llm_inference node's ``generated_text`` or ``error`` — into the
+        per-run artifact directory, so the run's outputs have an on-disk
+        destination beside the captured image and ``run.log``. Runs
+        without a recorded ``output_dir``/``capture_id`` (non-capture
+        documents) are skipped. Entirely best-effort in the R8.5
+        containment style: a write failure is logged and swallowed and
+        never changes the run status."""
+        try:
+            output_dir = getattr(execution, "output_dir", None)
+            capture_id = getattr(execution, "capture_id", None)
+            if not output_dir or not capture_id:
+                return
+            path = os.path.join(output_dir, "{0}.json".format(capture_id))
+            with open(path, "w", encoding="utf-8") as f:
+                # default=str keeps the view serializable when tag values
+                # carry non-JSON types (best-effort stringification).
+                json.dump(tag_values or {}, f, indent=2, default=str)
+            logger.info("Persisted run metadata JSON to %s", path)
+        except Exception:  # noqa: BLE001 - contained per 13.7 / R8.5
+            logger.exception(
+                "Could not persist the run metadata JSON for workflow "
+                "execution %s; the run's terminal status is unaffected",
+                execution.id,
+            )
+
+    @staticmethod
+    def _repair_capture_artifacts(execution: WorkflowExecution) -> None:
+        """Rename empty-basename capture files to ``{capture_id}.{ext}``,
+        contained (workflow-output-bindings-fixes Defect C).
+
+        The message broker names capture files ``{c_id}.{ext}`` where
+        ``c_id`` is the GStreamer buffer correlation id — attached only by
+        ``emltriton`` (via :meth:`_inject_inference_metadata`). A tritonless
+        capture pipeline (e.g. filesrc -> ... -> emlcapture) publishes with
+        ``c_id = ""`` (``emlcapture.cpp`` SendData default), so the broker
+        writes a file literally named ``.jpg``. Repair each such
+        empty-stem file — basename exactly ``.{ext}``, one leading dot —
+        to ``{capture_id}.{ext}``, aligning the base frame with what
+        ``run_artifacts.base_output_image_path`` resolves
+        (``{output_dir}/{capture_id}.jpg``). Correctly-named files are
+        never touched, so Triton runs (whose broker products already carry
+        the capture id) are a no-op. Runs without a recorded
+        ``output_dir``/``capture_id`` are skipped. Entirely best-effort in
+        the R8.5 containment style: any scan/rename failure is logged and
+        swallowed and never changes the run status."""
+        try:
+            output_dir = getattr(execution, "output_dir", None)
+            capture_id = getattr(execution, "capture_id", None)
+            if not output_dir or not capture_id:
+                return
+            try:
+                entries = os.listdir(output_dir)
+            except OSError:
+                return
+            for name in entries:
+                # Empty stem: exactly one leading dot and a non-empty
+                # extension — the broker's `"" + ".ext"` product.
+                if not (
+                    name.startswith(".")
+                    and len(name) > 1
+                    and "." not in name[1:]
+                ):
+                    continue
+                source = os.path.join(output_dir, name)
+                if not os.path.isfile(source):
+                    continue
+                target = os.path.join(
+                    output_dir, "{0}{1}".format(capture_id, name)
+                )
+                if os.path.exists(target):
+                    logger.warning(
+                        "Not repairing capture artifact %s: %s already "
+                        "exists",
+                        source,
+                        target,
+                    )
+                    continue
+                try:
+                    os.rename(source, target)
+                    logger.info(
+                        "Repaired empty-basename capture artifact %s -> %s",
+                        source,
+                        target,
+                    )
+                except OSError:
+                    logger.exception(
+                        "Could not repair capture artifact %s; continuing",
+                        source,
+                    )
+        except Exception:  # noqa: BLE001 - contained per 13.7 / R8.5
+            logger.exception(
+                "Capture artifact repair failed for workflow execution %s; "
+                "the run's terminal status is unaffected",
                 execution.id,
             )
 

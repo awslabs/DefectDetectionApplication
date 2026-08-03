@@ -54,6 +54,7 @@ _BASE_IMAGE_SUFFIX = ".jpg"
 _OVERLAY_SUFFIX = ".overlay.jpg"
 _MASK_SUFFIX = ".mask.png"
 _JSONL_SUFFIX = ".jsonl"
+_METADATA_SUFFIX = ".json"
 
 #: Content-type markers inside the run's result ``.jsonl`` (mirrors
 #: ``utils.constants.INFERENCE_OUTPUT_MASK_CONTENT_TYPE_PREFIX`` /
@@ -307,6 +308,38 @@ def read_workflow_graph(graph_path: Optional[str]) -> Optional[dict]:
     if not isinstance(document, dict):
         return None
     return document
+
+
+def read_run_metadata(
+    output_dir: Optional[str], capture_id: Optional[str]
+) -> dict:
+    """The run's metadata JSON (``{output_dir}/{capture_id}.json``) as a
+    dict, or ``{}`` (Requirements 4.1, 4.2).
+
+    ``pipeline_executor._persist_run_metadata`` writes the run's final tag
+    values (including each llm node's ``generated_text``/``error`` and
+    Bedrock's merged ``is_anomalous``/``confidence`` fields) to
+    ``{capture_id}.json`` under the run's ``output_dir``. Best-effort and
+    contained (mirrors ``parse_node_status``): a missing
+    ``output_dir``/``capture_id``, a missing/unreadable file, malformed
+    JSON, or a top-level value that is not a JSON object all yield ``{}``
+    (200) rather than a 500 — a run without persisted metadata simply has
+    an empty object.
+    """
+    if not output_dir or not capture_id:
+        return {}
+    path = _artifact_path(output_dir, capture_id, _METADATA_SUFFIX)
+    try:
+        with open(path, "r", encoding="utf-8") as metadata_file:
+            parsed = json.load(metadata_file)
+    except (OSError, ValueError):
+        logger.debug(
+            "Could not read run metadata at %s", path, exc_info=True
+        )
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return parsed
 
 
 def parse_node_status(node_status_json: Optional[str]) -> dict:
