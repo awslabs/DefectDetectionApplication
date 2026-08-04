@@ -46,6 +46,27 @@ pgrep -af "build-custom.sh"
 If either returns a process, do **not** start another build — wait for it to
 finish (or stop it) first.
 
+**Address the security preservation gate BEFORE starting the build.** The gate
+runs late in the build (after the ~1h compile), so a stale baseline wastes the
+whole build. Pre-build check:
+
+1. See whether any preservation-tracked file changed since the last green
+   build: `git status`/`git diff` against `src/docker-compose.yaml`, the
+   backend/frontend/edgemlsdk Dockerfiles, `src/backend/requirements.txt`,
+   the recipe variants, and `station_install/setup_station.sh`.
+2. If any did, rebaseline the affected hashes NOW (see "Security preservation
+   gate" section below) and run the preservation suite in the flask-app
+   container to confirm it passes — before kicking off the build.
+3. Move `edge-cv-portal/infrastructure/cdk.out` aside (`mv cdk.out
+   cdk.out.bak-$(date +%Y%m%dT%H%M%SZ)`) — the cdk.out drift guard fails the
+   gate if unbaselined copies exist.
+4. **Do NOT run a portal deploy (deploy-portal.sh / deploy-infrastructure.sh /
+   deploy-frontend.sh) while a component build is running.** Portal deploys
+   regenerate `cdk.out` mid-build and the security gate (which runs AFTER the
+   ~1h compile) fails on the drift guard, wasting the whole build. Sequence
+   them: portal deploy fully finishes → move cdk.out aside → start the build.
+5. Only then start the build.
+
 ## CRITICAL: test new on-device edge features on real hardware before committing
 
 Any change that runs **on the edge device** (the LocalServer backend/frontend
