@@ -59,6 +59,16 @@ __all__ = ["compile", "expand_unified_inputs"]
 UNIFIED_INPUT_TYPE = "unified_input"
 UNIFIED_ACTIVATION_PORT = "activation"
 
+#: Node type ids whose ``activation`` input port is inert scaffolding:
+#: the unified input node plus the four legacy source descriptors
+#: (Requirement 7.2). ``expand_unified_inputs`` drops every connection
+#: targeting an ``activation`` port on any of these types before the
+#: validation re-run and mapping resolution; no trigger-driven
+#: activation binding is ever emitted for these ports.
+INERT_ACTIVATION_TYPE_IDS = frozenset(
+    {UNIFIED_INPUT_TYPE} | set(SOURCE_KIND_TO_SOURCE_TYPE.values())
+)
+
 #: The two-path routing executor binding (the conditional node): the
 #: compiler emits per-port gate conditions for it ("true" = the
 #: configured condition, "false" = its negation), so downstream executor
@@ -98,9 +108,10 @@ def expand_unified_inputs(
     ``SOURCE_KIND_TO_SOURCE_TYPE[source_kind]``, and only the parameters
     whose names appear on the underlying source descriptor (``source_kind``
     and any non-applicable union parameters are dropped). Every connection
-    whose target is a unified node's ``activation`` port is dropped; all
-    other nodes and connections pass through unchanged (design C5,
-    Requirements 3.6, 3.8, 3.9, 2.6).
+    targeting an ``activation`` port on a unified node or on any of the
+    four legacy source nodes (``INERT_ACTIVATION_TYPE_IDS``) is dropped;
+    all other nodes and connections pass through unchanged (design C5,
+    Requirements 3.6, 3.8, 3.9, 2.6, 7.2).
 
     Defensive on an unknown/missing ``source_kind``: the node is left as-is
     so that ``compile()``'s validation re-run reports the invalid enum
@@ -111,7 +122,10 @@ def expand_unified_inputs(
         descriptor.type_id: descriptor for descriptor in catalog
     }
 
-    expanded_unified_ids: set = set()
+    #: Original node id -> type, for the inert-activation edge drop below
+    #: (the pre-expansion type is what identifies unified/legacy sources).
+    node_types: Dict[str, str] = {node.id: node.type for node in graph.nodes}
+
     new_nodes: List[Node] = []
     for node in graph.nodes:
         if node.type != UNIFIED_INPUT_TYPE:
@@ -129,7 +143,6 @@ def expand_unified_inputs(
             new_nodes.append(copy.deepcopy(node))
             continue
 
-        expanded_unified_ids.add(node.id)
         applicable = {parameter.name for parameter in source_descriptor.parameters}
         expanded_parameters = {
             name: copy.deepcopy(value)
@@ -147,11 +160,13 @@ def expand_unified_inputs(
     new_connections: List[Connection] = []
     for connection in graph.connections:
         if (
-            connection.target.node in expanded_unified_ids
-            and connection.target.port == UNIFIED_ACTIVATION_PORT
+            connection.target.port == UNIFIED_ACTIVATION_PORT
+            and node_types.get(connection.target.node) in INERT_ACTIVATION_TYPE_IDS
         ):
-            # Drop edges into a unified node's inert activation port; the
-            # expanded source has no input ports (Requirement 3.9, P4).
+            # Drop edges into an inert activation port — on a unified node
+            # (the expanded source has no activation realization,
+            # Requirement 3.9, P4) or on a legacy source node
+            # (Requirement 7.2); no activation binding is ever emitted.
             continue
         new_connections.append(copy.deepcopy(connection))
 

@@ -2,7 +2,7 @@
 
 > Status: **DOCUMENTATION / NOT SCHEDULED**. Captures the intended overhaul of the workflow input model: a new **Triggers** stage that runs before Inputs, subscribe-side MQTT/OPC UA triggers, relocation of Digital Input into Triggers, and a unified Input node. Read `design.md` for the architecture analysis and open questions before scheduling.
 >
-> **Resolved design decisions (user, 2026-08-04):** design.md open decision **#1** (concurrency/debounce policy) — resolved as a **per-trigger `concurrency_policy` parameter, default `queue`** (see criteria 2.5, 3.4). Open decision **#7** (OPC UA subscription vs polling) — resolved as **spike true subscriptions first; polling fallback supported** if the packaged `opcua` client cannot do reliable subscriptions at the edge (see criterion 3.5). The remaining six open decisions in design.md are still unresolved.
+> **Resolved design decisions (user, 2026-08-04):** design.md open decision **#1** (concurrency/debounce policy) — resolved as **configurable per trigger node**: each `mqtt_subscribe`/`opcua_subscribe` node instance carries a `concurrency_policy` enum (`queue` default | `drop` | `debounce`) with gated companions `debounce_ms` and bounded `queue_depth` (see criteria 2.5, 3.4). Open decision **#7** (OPC UA subscription vs polling) — resolved as **spike true subscriptions first; polling fallback is a required node capability either way** via a `mode` parameter (`subscribe` default | `poll`, with gated `poll_interval_ms`) and an auto-fallback surfaced in run/component health (see criteria 3.5, 3.6). Additionally, a firm **MQTT transport-parity** requirement was added: `mqtt_subscribe` supports the same three connection paths as `mqtt_publish` — greengrass, aws_iot mutual TLS, plain broker (see criteria 2.1, 2.6–2.8). Decision #3 (retain vs replace sources) was resolved as coexist and delivered by `.kiro/specs/triggers-stage-and-unified-input/`. The remaining five open decisions in design.md (#2, #4, #5, #6, #8) are still unresolved.
 
 ## Motivation
 
@@ -24,8 +24,8 @@ This feature introduces a **Triggers** stage that precedes Inputs, with MQTT-sub
 - **Simple_Trigger link**: a trigger wired directly to an input with no Trigger_Transform — fires the input with its statically configured parameters, ignoring context.
 - **Unified_Input_Node**: a single input node type that can be configured as any non-digital source (camera / aravis / folder / CSI), replacing the need for distinct source node types in the designer palette; parameters gate on the selected source kind.
 - **Run_Activation**: the device Workflow_Engine's notion of starting one pipeline run; today implicitly source-driven, extended here to be trigger-driven.
-- **Concurrency_Policy**: a per-trigger enum parameter governing what happens when the trigger fires while a run activated by that trigger is still in flight. Values: `queue` (default — firings queue and activate sequentially), `drop` (firing is discarded), `debounce` (firings within a configured interval coalesce into one activation), `concurrent` (firing activates a run in parallel; each activation remains isolated per design.md property P2).
-- **Polling_Fallback**: the OPCUA_Subscribe_Trigger's alternate mechanism — periodic reads of the monitored node at a configurable interval — used when true OPC UA subscriptions (monitored items / data-change notifications) are unavailable or unreliable on the edge device. Trigger semantics are identical either way; only the detection mechanism differs.
+- **Concurrency_Policy**: a per-trigger-node enum parameter `concurrency_policy` governing what happens when the trigger fires while a run activated by that trigger is still in flight. Each `mqtt_subscribe`/`opcua_subscribe` node instance carries its own policy. Values: `queue` (default — firings queue, bounded by a companion `queue_depth` int parameter gated on `queue`, and activate sequentially; firings beyond the bound are discarded), `drop` (firing is discarded), `debounce` (firings within the companion `debounce_ms` interval, gated on `debounce`, coalesce into one activation).
+- **Polling_Fallback**: the OPCUA_Subscribe_Trigger's alternate value-change detection mechanism — periodic reads of the monitored node at a configurable `poll_interval_ms` — selected explicitly via the node's `mode` parameter (`poll`) or entered automatically by the device runtime when a true subscription cannot be established or proves unreliable. Trigger semantics are identical either way; only the detection mechanism differs.
 
 ## Requirements
 
@@ -41,7 +41,7 @@ This feature introduces a **Triggers** stage that precedes Inputs, with MQTT-sub
 
 ### Requirement 2: MQTT subscribe trigger
 
-2.1 THE catalog SHALL define an `mqtt_subscribe` Trigger with parameters: topic (or topic filter), qos, and the `greengrass` zero-config flag mirroring `mqtt_publish` (Greengrass-managed connection, no broker host/port/certs when greengrass=true), plus optional plain-broker/aws_iot parameters symmetric to the publish node.
+2.1 THE catalog SHALL define an `mqtt_subscribe` Trigger that supports the SAME three connection paths as the existing `mqtt_publish` output node — `greengrass` zero-config, `aws_iot` mutual TLS, and plain local broker — mirroring `mqtt_publish`'s parameter surface exactly: `topic` (string, required; topic filter), `qos` (enum), `greengrass` (bool, default false), `aws_iot` (bool, default false), `iot_thing_name`/`iot_ca_cert_path`/`iot_client_cert_path`/`iot_private_key_path` (strings, each `depends_on` `aws_iot`), and `broker_host`/`broker_port` (plain-broker path; `broker_port` default 1883). *(Transport parity with `mqtt_publish`; firm decision, user 2026-08-04.)*
 
 2.2 WHEN the workflow runs on device and `greengrass` is enabled, THE device runtime SHALL subscribe via the Greengrass IPC `SubscribeToIoTCore` operation, and a received message SHALL fire the trigger with Trigger_Context = {topic, payload, qos, timestamp}.
 
@@ -49,7 +49,13 @@ This feature introduces a **Triggers** stage that precedes Inputs, with MQTT-sub
 
 2.4 THE feature SHALL support at-least-once (qos 1) and at-most-once (qos 0) as Greengrass allows, clamping unsupported qos as the publish path does.
 
-2.5 THE `mqtt_subscribe` Trigger SHALL expose a per-trigger `concurrency_policy` enum parameter (values `queue`, `drop`, `debounce`, `concurrent`; default `queue`) governing Run_Activation when the trigger fires while a run it activated is still in flight. WHERE `debounce` is selected, THE node SHALL expose a companion debounce-interval parameter, gated on that selection. *(Resolves design.md open decision #1.)*
+2.5 THE `mqtt_subscribe` Trigger descriptor SHALL declare a per-trigger-node `concurrency_policy` enum parameter (values `queue`, `drop`, `debounce`; default `queue`) governing Run_Activation when the trigger fires while a run it activated is still in flight. WHERE `debounce` is selected, THE node SHALL expose a companion `debounce_ms` int parameter gated on that selection (`depends_on`); WHERE `queue` is selected, THE node SHALL expose a companion bounded `queue_depth` int parameter gated on that selection, with catalog-convention defaults. Each node instance carries its own policy values. *(Resolves design.md open decision #1: policy is configurable per trigger node.)*
+
+2.6 WHEN `aws_iot` is enabled, THE device runtime SHALL subscribe to AWS IoT Core over mutual TLS using the `iot_thing_name`/`iot_ca_cert_path`/`iot_client_cert_path`/`iot_private_key_path` parameters, identically to how `mqtt_publish` connects for publishing.
+
+2.7 WHEN neither `greengrass` nor `aws_iot` is enabled and `broker_host` is set, THE device runtime SHALL subscribe to the plain local broker at `broker_host`:`broker_port` via paho-mqtt, identically to how `mqtt_publish` connects for publishing.
+
+2.8 IF an `mqtt_subscribe` node configuration declares no connection target (no `greengrass`, no `aws_iot`, no `broker_host`), THEN THE Workflow_Validator SHALL reject the workflow with an actionable per-node error, mirroring the existing `mqtt_publish` must-declare-a-target validation rule.
 
 ### Requirement 3: OPC UA subscribe trigger
 
@@ -59,9 +65,11 @@ This feature introduces a **Triggers** stage that precedes Inputs, with MQTT-sub
 
 3.3 THE feature SHALL reuse the `opcua` client dependency the output node already packages; security configuration SHALL behave identically (anonymous default; user-token and/or cert signing when configured).
 
-3.4 THE `opcua_subscribe` Trigger SHALL expose the same per-trigger `concurrency_policy` enum parameter as criterion 2.5 (values `queue`, `drop`, `debounce`, `concurrent`; default `queue`), with the debounce-interval parameter gated on the `debounce` selection. *(Resolves design.md open decision #1.)*
+3.4 THE `opcua_subscribe` Trigger descriptor SHALL declare the same per-trigger-node `concurrency_policy` enum parameter as criterion 2.5 (values `queue`, `drop`, `debounce`; default `queue`), with the `debounce_ms` parameter gated on the `debounce` selection and the bounded `queue_depth` parameter gated on the `queue` selection. Each node instance carries its own policy values. *(Resolves design.md open decision #1: policy is configurable per trigger node.)*
 
-3.5 THE device runtime SHALL use a true OPC UA subscription (monitored item / data-change notification) as the value-change detection mechanism when the packaged `opcua` client supports it reliably on the target device, and SHALL fall back to Polling_Fallback (periodic reads at a configurable poll interval) when subscriptions are unavailable or unreliable. THE trigger SHALL fire with identical Trigger_Context under either mechanism, and THE device runtime SHALL log and surface which mechanism is active (including any fallback transition). *(Resolves design.md open decision #7: spike true subscriptions first; polling fallback supported.)*
+3.5 THE `opcua_subscribe` Trigger descriptor SHALL declare a `mode` enum parameter (values `subscribe`, `poll`; default `subscribe`) selecting the value-change detection mechanism, with a `poll_interval_ms` int parameter gated on the `poll` selection (`depends_on`). WHERE `mode` is `subscribe`, THE device runtime SHALL create a true OPC UA subscription (monitored item / data-change notification); WHERE `mode` is `poll`, THE device runtime SHALL perform Polling_Fallback (periodic reads at `poll_interval_ms`). THE trigger SHALL fire with identical Trigger_Context under either mechanism. *(Resolves design.md open decision #7: spike true subscriptions first; polling fallback is a required node capability regardless of spike outcome.)*
+
+3.6 WHILE `mode` is `subscribe`, IF the device runtime cannot establish a reliable OPC UA subscription (subscription creation or monitored-item registration fails, or the subscription proves unreliable at runtime), THEN THE device runtime MAY automatically fall back to Polling_Fallback, and WHEN such a fallback occurs, THE device runtime SHALL log the transition and surface the active mechanism (including the fallback) in run/component health.
 
 ### Requirement 4: Digital Input relocated to Triggers
 
@@ -70,6 +78,8 @@ This feature introduces a **Triggers** stage that precedes Inputs, with MQTT-sub
 4.2 WHEN a pre-existing workflow references `digital_input`, THE Workflow_Designer SHALL load and render it under the Triggers section without modifying the stored definition, and revalidation SHALL produce the same outcome (backward compatibility with saved graphs).
 
 4.3 Trigger_Context for Digital_Input_Trigger SHALL be {pin, edge, timestamp}.
+
+4.4 THE Digital_Input_Trigger SHALL keep its existing activation behavior without the `concurrency_policy` parameters of criteria 2.5/3.4. *(Follow-on decision, not required now: whether to later add the same per-node `concurrency_policy`/`debounce_ms`/`queue_depth` parameters to `digital_input` remains open.)*
 
 ### Requirement 5: Trigger_Transform (optional custom code before input)
 

@@ -68,6 +68,8 @@ subscription or activation model. Concretely, it:
   `PORT_TYPE_EVENT_SIGNAL` with an executor-level binding and a simulation appsrc stub.
 - **Unified_Input_Node**: the new input node type selecting among non-digital sources via
   a `source_kind` enum; emits `PORT_TYPE_VIDEO_FRAMES`.
+- **Legacy_Source_Node**: any of the four retained source descriptors
+  (`csi_camera_source`, `icam_source`, `aravis_camera_source`, `folder_source`).
 - **source_kind**: the enum parameter on the Unified_Input_Node selecting the underlying
   source (`csi_camera`, `icam`, `aravis_camera`, `folder`).
 - **Activation_Input_Port**: an optional input port on the Unified_Input_Node accepting an
@@ -161,7 +163,9 @@ camera or folder source, so that the palette is simpler while existing source no
    `icam`, `aravis_camera`, and `folder`, and whose default value is `csi_camera`.
 2. THE four existing source descriptors (`csi_camera_source`, `icam_source`,
    `aravis_camera_source`, `folder_source`) SHALL be retained in the catalog with identical
-   type_id, category, parameters, ports, and per-architecture Device_Binding mappings.
+   type_id, category, parameters, and per-architecture Device_Binding mappings, and with
+   identical output ports, plus the single optional activation input port added by
+   Requirement 7. *(amended 2026-08-04 — see Requirement 7)*
 3. THE `source_kind` enum SHALL NOT offer digital input as a selectable value.
 4. THE Unified_Input_Node descriptor SHALL declare the union of the four existing source
    descriptors' parameters, each tagged with the `source_kind` values it applies to, such
@@ -289,8 +293,45 @@ exactly as before, so that adding the Triggers scaffolding introduces no regress
 8. WHEN the catalog baseline (`catalog_baseline.json`, verified by
    `test_catalog_content.py`) is updated for this feature, THE updated baseline SHALL differ
    from the pre-feature baseline only in the `CATEGORY_TRIGGER` addition, the
-   `digital_input` category value, and the `Unified_Input_Node` descriptor addition, with
-   all other descriptor entries byte-identical.
+   `digital_input` category value, the `Unified_Input_Node` descriptor addition, and the
+   four Legacy_Source_Node activation input port declarations added by Requirement 7, with
+   all other descriptor entries byte-identical. *(amended 2026-08-04 — see Requirement 7)*
+
+### Requirement 7: Activation ports on legacy source nodes (amendment 2026-08-04)
+
+**User Story:** As a workflow author, I want the four existing source nodes to expose the
+same optional activation input port as the Unified_Input_Node, so that I can wire trigger
+scaffolding to any source node today without changing how any workflow compiles or runs.
+
+#### Acceptance Criteria
+
+1. THE Node_Type_Catalog SHALL declare, on each of the four Legacy_Source_Node descriptors
+   (`csi_camera_source`, `icam_source`, `aravis_camera_source`, `folder_source`), exactly
+   one optional `PORT_TYPE_EVENT_SIGNAL` input port named `activation` that accepts zero or
+   one connection, with semantics identical to the Unified_Input_Node
+   Activation_Input_Port.
+2. WHEN a workflow graph containing a connection targeting a Legacy_Source_Node
+   `activation` port is compiled, THE compiler SHALL drop that connection before mapping
+   resolution and SHALL emit zero trigger-driven activation bindings for that port,
+   regardless of connection state.
+3. FOR ALL Legacy_Source_Node configurations, whether the `activation` port is unconnected
+   or connected to a `CATEGORY_TRIGGER` node output, THE compiled output SHALL be identical
+   to the pre-amendment compiled output for the same workflow graph with the activation
+   connection removed.
+4. THE Workflow_Designer SHALL render the Legacy_Source_Node `activation` port as an
+   optional `PORT_TYPE_EVENT_SIGNAL` input port and SHALL allow wiring a `CATEGORY_TRIGGER`
+   node `PORT_TYPE_EVENT_SIGNAL` output to that port, and IF a workflow author attempts to
+   wire a node output whose port type is not `PORT_TYPE_EVENT_SIGNAL` to that port, THEN
+   THE Workflow_Designer SHALL reject the connection and SHALL leave the workflow graph
+   unchanged.
+5. WHEN a graph containing a connection from a `CATEGORY_TRIGGER` node
+   `PORT_TYPE_EVENT_SIGNAL` output to a Legacy_Source_Node `activation` port is validated,
+   THE Workflow_Validator SHALL treat that connection as legal stage ordering and SHALL
+   produce zero stage-ordering findings for that connection.
+6. WHEN the catalog baseline (`catalog_baseline.json`) is updated for this amendment, THE
+   baseline delta attributable to this amendment SHALL consist of exactly the four
+   `activation` input port declarations on the four Legacy_Source_Node descriptors, with
+   all other descriptor content unchanged.
 
 ## Correctness properties (for property-based testing)
 
@@ -300,6 +341,8 @@ invariants and are suitable for property-based tests over generated workflow gra
 - **P1 — Zero-trigger byte-identical (Round-trip / Invariant).** For all generated
   Zero_Trigger_Workflows, compiling and packaging with this feature produces artifacts
   byte-identical to the pre-feature baseline. (Requirements 6.1, 6.2)
+  *Note (2026-08-04): unaffected by the Requirement 7 amendment — port declarations are
+  not a compile input, and a Zero_Trigger_Workflow contains no activation edges.*
 - **P2 — digital_input relocation is behavior-preserving (Metamorphic).** For all
   architectures and all valid `digital_input` parameter combinations, the compiled
   Device_Binding after relocation equals the Device_Binding before relocation.
@@ -308,10 +351,11 @@ invariants and are suitable for property-based tests over generated workflow gra
   For every `source_kind` and every equivalent parameter set, the Unified_Input_Node compiles
   to the same Device_Binding as the corresponding existing source descriptor.
   (Requirement 3.6)
-- **P4 — Activation port is inert (Invariant).** For all Unified_Input_Node
-  configurations, connected or not, the compiled output equals the corresponding
-  always-running source output; no activation binding is emitted.
-  (Requirements 3.9, 3.10, 3.11)
+- **P4 — Activation port is inert on the unified node AND the four legacy sources
+  (Invariant).** For all Unified_Input_Node and Legacy_Source_Node configurations,
+  connected or not, the compiled output equals the corresponding always-running source
+  output; no activation binding is emitted. *(generalized 2026-08-04)*
+  (Requirements 3.9, 3.10, 3.11, 7.2, 7.3)
 - **P5 — Validator stage-ordering legality (Invariant / Error-condition).** For all generated
   graphs: a Trigger downstream of an Input, or a non-trigger source upstream of a Trigger,
   always yields an error finding; legal Trigger → Input → downstream orderings never yield a

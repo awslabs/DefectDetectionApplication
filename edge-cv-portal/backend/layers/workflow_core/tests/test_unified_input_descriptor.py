@@ -133,16 +133,19 @@ class TestUnifiedInputParameterUnion:
 
 class TestRetainedSourceDescriptors:
     def test_four_sources_present_with_identity_and_ports(self):
-        # Requirement 3.2: the retained sources keep their type_id,
-        # CATEGORY_INPUT category, no input ports, and the single
-        # VideoFrames "out" output.
+        # Requirement 3.2 (as amended by Requirement 7): the retained
+        # sources keep their type_id, CATEGORY_INPUT category, and the
+        # single VideoFrames "out" output, plus the single optional
+        # inert activation EventSignal input port added by the
+        # Requirement 7 amendment (same as unified_input's).
         for source_type in ("csi_camera_source", "icam_source",
                             "aravis_camera_source", "folder_source"):
             descriptor = get_node_type(source_type)
             assert descriptor is not None, source_type
             assert descriptor.type_id == source_type
             assert descriptor.category == CATEGORY_INPUT, source_type
-            assert descriptor.inputs == [], source_type
+            assert _ports(descriptor.inputs) == [
+                ("activation", PORT_TYPE_EVENT_SIGNAL)], source_type
             assert _ports(descriptor.outputs) == [
                 ("out", PORT_TYPE_VIDEO_FRAMES)], source_type
 

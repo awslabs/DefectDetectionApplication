@@ -44,7 +44,11 @@ from workflow_core.serializer import (
     WorkflowGraph,
 )
 from workflow_core.validator import SEVERITY_ERROR, validate
-from workflow_core.validator.checks import CODE_V4_MISSING_REQUIRED_PARAMETER
+from workflow_core.validator.checks import (
+    CODE_V2_INCOMPATIBLE_TYPES,
+    CODE_V4_MISSING_REQUIRED_PARAMETER,
+    CODE_V7_STAGE_ORDER,
+)
 
 # --------------------------------------------------------------------------
 # Graph-building helpers (mirroring test_compiler_compile.py conventions)
@@ -271,3 +275,71 @@ class TestMissingLocationDeferredToExpandedV4:
         assert all(e.code == CODE_VALIDATION_ERROR for e in result)
         assert any(e.node_id == "src" and "location" in e.message
                    for e in result)
+
+
+# --------------------------------------------------------------------------
+# Requirement 7: inert activation ports on the legacy source nodes
+# (amendment 2026-08-04 — the four retained sources carry the same
+# optional activation EventSignal input port as unified_input; the
+# compiler drops edges into it and emits no activation binding)
+# --------------------------------------------------------------------------
+
+class TestLegacySourceActivationPort:
+    def _legacy_graph(self, with_activation_edge):
+        """digital_input('trig') [-> folder_source('src').activation],
+        folder_source('src') -> capture('cap')."""
+        nodes = [
+            _node("trig", "digital_input", pin=7),
+            _node("src", "folder_source", location="/data/images"),
+            _capture(),
+        ]
+        connections = [_conn("c1", "src", "cap")]
+        if with_activation_edge:
+            connections.append(
+                _conn("a1", "trig", "src", target_port="activation"))
+        return WorkflowGraph(nodes=nodes, connections=connections)
+
+    def test_connected_activation_edge_compiles_byte_identical(self):
+        # 7.2/7.3: the digital_input.out -> folder_source.activation edge
+        # is dropped before mapping resolution — the compiled document is
+        # byte-identical to the same graph without the edge.
+        for arch in (ARCH_ARM64_JP6, ARCH_X86_64):
+            connected = _compile_ok(self._legacy_graph(True), arch)
+            unconnected = _compile_ok(self._legacy_graph(False), arch)
+            assert connected.to_dict() == unconnected.to_dict(), arch
+
+            # The feeding digital_input still emits its ordinary executor
+            # binding; no activation binding of any kind is emitted.
+            bindings = {b["nodeId"]: b for b in connected.executor_bindings}
+            assert bindings["trig"]["binding"] == "digital_input"
+            assert bindings["trig"]["parameters"]["pin"] == 7
+
+    def test_trigger_to_legacy_activation_validates_clean(self):
+        # 7.5: a trigger EventSignal output wired to a legacy source's
+        # activation port is legal stage ordering (no V7) and type-
+        # compatible (no V2) — no finding references that connection.
+        findings = validate(self._legacy_graph(True), NODE_CATALOG)
+        assert [f for f in findings if f.code == CODE_V7_STAGE_ORDER] == []
+        assert [f for f in findings
+                if f.code.startswith("V2") and f.connection_id == "a1"] == []
+
+    def test_video_frames_into_activation_is_a_v2_type_error(self):
+        # 7.4 (validator side): a VideoFrames output wired to the
+        # EventSignal activation port is an incompatible-types error.
+        graph = WorkflowGraph(
+            nodes=[
+                _node("feeder", "folder_source", location="/data/other"),
+                _node("src", "folder_source", location="/data/images"),
+                _capture(),
+            ],
+            connections=[
+                _conn("c1", "src", "cap"),
+                _conn("bad", "feeder", "src", target_port="activation"),
+            ],
+        )
+        findings = validate(graph, NODE_CATALOG)
+        v2 = [f for f in findings
+              if f.code == CODE_V2_INCOMPATIBLE_TYPES
+              and f.connection_id == "bad"]
+        assert len(v2) == 1
+        assert v2[0].severity == SEVERITY_ERROR

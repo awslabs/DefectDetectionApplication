@@ -3,7 +3,12 @@
     "category": "input",
     "display_name": "Aravis Camera Source",
     "hardware_dependent": true,
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
     "mappings": [
       {
         "arch": "x86_64",
@@ -854,7 +859,12 @@
     "category": "input",
     "display_name": "CSI Camera Input",
     "hardware_dependent": true,
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
     "mappings": [
       {
         "arch": "x86_64",
@@ -1887,7 +1897,12 @@
     "category": "input",
     "display_name": "Folder Source",
     "hardware_dependent": true,
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
     "mappings": [
       {
         "arch": "x86_64",
@@ -2332,7 +2347,12 @@
     "category": "input",
     "display_name": "ICAM",
     "hardware_dependent": true,
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
     "mappings": [
       {
         "arch": "x86_64",

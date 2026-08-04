@@ -172,7 +172,9 @@ CSI_CAMERA_SOURCE = NodeTypeDescriptor(
     type_id="csi_camera_source",
     category=CATEGORY_INPUT,
     display_name="CSI Camera Input",
-    inputs=[],
+    # Optional inert activation scaffolding port (Requirement 7): edges
+    # into it are dropped at compile time; no activation binding exists.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
     outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
     parameters=[
         ParameterDescriptor("gain", "int", required=False, default=4,
@@ -218,7 +220,9 @@ ICAM_SOURCE = NodeTypeDescriptor(
     type_id="icam_source",
     category=CATEGORY_INPUT,
     display_name="ICAM",
-    inputs=[],
+    # Optional inert activation scaffolding port (Requirement 7): edges
+    # into it are dropped at compile time; no activation binding exists.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
     outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
     parameters=[
         ParameterDescriptor("device", "string", required=True, default="/dev/video0",
@@ -246,7 +250,9 @@ ARAVIS_CAMERA_SOURCE = NodeTypeDescriptor(
     type_id="aravis_camera_source",
     category=CATEGORY_INPUT,
     display_name="Aravis Camera Source",
-    inputs=[],
+    # Optional inert activation scaffolding port (Requirement 7): edges
+    # into it are dropped at compile time; no activation binding exists.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
     outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
     parameters=[
         ParameterDescriptor("camera_id", "string", required=True, default=None,
@@ -292,7 +298,9 @@ FOLDER_SOURCE = NodeTypeDescriptor(
     type_id="folder_source",
     category=CATEGORY_INPUT,
     display_name="Folder Source",
-    inputs=[],
+    # Optional inert activation scaffolding port (Requirement 7): edges
+    # into it are dropped at compile time; no activation binding exists.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
     outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
     parameters=[
         ParameterDescriptor("location", "string", required=True, default=None,

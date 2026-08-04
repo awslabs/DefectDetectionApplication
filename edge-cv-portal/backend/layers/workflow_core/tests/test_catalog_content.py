@@ -50,8 +50,12 @@ class TestInputNodeTypes:
             descriptor = get_node_type(type_id)
             assert descriptor is not None, type_id
             assert descriptor.category == CATEGORY_INPUT
-            # Input nodes originate data: no input ports, at least one output.
-            assert descriptor.inputs == []
+            # Input nodes originate data: their only input port is the
+            # single optional inert activation scaffolding port
+            # (triggers-stage-and-unified-input Requirement 7.1); at
+            # least one output.
+            assert [(p.name, p.port_type) for p in descriptor.inputs] == [
+                ("activation", PORT_TYPE_EVENT_SIGNAL)]
             assert len(descriptor.outputs) >= 1
 
     def test_digital_input_relocated_to_triggers(self):
@@ -150,7 +154,10 @@ class TestAravisCameraSourceNodeType:
         assert descriptor.type_id == "aravis_camera_source"
         assert descriptor.category == CATEGORY_INPUT
         assert descriptor.display_name == "Aravis Camera Source"
-        assert descriptor.inputs == []
+        # Single optional inert activation scaffolding port
+        # (triggers-stage-and-unified-input Requirement 7.1).
+        assert [(p.name, p.port_type) for p in descriptor.inputs] == [
+            ("activation", PORT_TYPE_EVENT_SIGNAL)]
         assert [(port.name, port.port_type) for port in descriptor.outputs] == [
             ("out", PORT_TYPE_VIDEO_FRAMES)]
 
@@ -235,7 +242,10 @@ class TestCsiCameraSourceNodeType:
         assert descriptor.type_id == "csi_camera_source"
         assert descriptor.category == CATEGORY_INPUT
         assert descriptor.display_name == "CSI Camera Input"
-        assert descriptor.inputs == []
+        # Single optional inert activation scaffolding port
+        # (triggers-stage-and-unified-input Requirement 7.1).
+        assert [(p.name, p.port_type) for p in descriptor.inputs] == [
+            ("activation", PORT_TYPE_EVENT_SIGNAL)]
         assert [(port.name, port.port_type) for port in descriptor.outputs] == [
             ("out", PORT_TYPE_VIDEO_FRAMES)]
         assert descriptor.hardware_dependent is True
@@ -285,7 +295,10 @@ class TestIcamSourceNodeType:
         assert descriptor.type_id == "icam_source"
         assert descriptor.category == CATEGORY_INPUT
         assert descriptor.display_name == "ICAM"
-        assert descriptor.inputs == []
+        # Single optional inert activation scaffolding port
+        # (triggers-stage-and-unified-input Requirement 7.1).
+        assert [(p.name, p.port_type) for p in descriptor.inputs] == [
+            ("activation", PORT_TYPE_EVENT_SIGNAL)]
         assert [(port.name, port.port_type) for port in descriptor.outputs] == [
             ("out", PORT_TYPE_VIDEO_FRAMES)]
         assert descriptor.hardware_dependent is True
