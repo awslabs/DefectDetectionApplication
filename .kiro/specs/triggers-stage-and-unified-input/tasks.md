@@ -44,14 +44,14 @@ This spec does **not** modify the parent assessment folder
     - Copy the edited `models.py` verbatim to the vendor copy
       `src/backend/workflow_engine/vendor/workflow_core/catalog/models.py` so the two Python
       copies remain byte-identical
-    - _Requirements: 1.1, 6.5_
+    - _Requirements: 1.1, 1.2, 1.3, 6.5_
     - _Property: P7_
 
-  - [ ]* 1.2 Write example unit tests for the category constant
+  - [x]* 1.2 Write example unit tests for the category constant
     - Assert `CATEGORY_TRIGGER == "trigger"`, that it is a member of `CATEGORIES`, and that it
       appears **before** `CATEGORY_INPUT` in the tuple (add to a new
       `test_catalog_trigger_category.py` to avoid colliding with existing catalog test files)
-    - _Requirements: 1.1_
+    - _Requirements: 1.1, 1.2_
 
 - [x] 2. Relocate `digital_input` to Triggers and extend the validator (C2, C4)
   - [x] 2.1 Relocate `digital_input` to `CATEGORY_TRIGGER` (metadata-only)
@@ -79,17 +79,17 @@ This spec does **not** modify the parent assessment folder
     - Add exactly one line to `validate()` — `findings.extend(_check_v7(graph, typed_nodes))`
       after `_check_w1` — preserving the "run every check, never short-circuit, return the
       full list" contract
-    - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 2.7_
+    - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 2.7_
     - _Property: P5, P6_
 
-  - [ ]* 2.3 Write example unit tests for relocation and validator changes
+  - [x] 2.3 Write example unit tests for relocation and validator changes
     - Assert the relocated `digital_input` descriptor's `category == CATEGORY_TRIGGER` and that
       its parameters, output port, executor binding, and sim stub are unchanged (2.2–2.4)
     - Assert `_check_v7` emits a `V7_STAGE_ORDER` error for a connection targeting a trigger
       node and no `V7` finding for a legal `trigger → unified activation` edge (4.2–4.4); assert
       a `digital_input`-only graph still satisfies V1 and keeps its downstream reachable under
       V5 (2.7, 4.5)
-    - _Requirements: 2.2, 2.3, 2.4, 4.2, 4.3, 4.4, 4.5, 2.7_
+    - _Requirements: 2.2, 2.3, 2.4, 4.2, 4.3, 4.4, 4.5, 4.7, 2.7_
 
 - [x] 3. Add the `Unified_Input_Node` descriptor and source-kind map (C3)
   - [x] 3.1 Add `SOURCE_KIND_TO_SOURCE_TYPE` and the `UNIFIED_INPUT` descriptor
@@ -110,18 +110,18 @@ This spec does **not** modify the parent assessment folder
       `LLM_INFERENCE` append convention so no pre-existing descriptor shifts); leave the four
       source descriptors and the `mqtt_publish`/`opcua_write` descriptors unchanged
     - Copy the edited `nodes.py` verbatim to the vendor copy to keep the copies byte-identical
-    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.7, 3.9, 6.4, 6.5_
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.8, 3.11, 6.4, 6.5_
     - _Property: P3, P7_
 
-  - [ ]* 3.2 Write example unit tests for the unified descriptor
+  - [x]* 3.2 Write example unit tests for the unified descriptor
     - Assert `UNIFIED_INPUT.category == CATEGORY_INPUT`; `source_kind` enum values are exactly
       `csi_camera, icam, aravis_camera, folder` with no digital option (3.1, 3.3); exactly one
       `PORT_TYPE_VIDEO_FRAMES` output (3.5) and one optional `PORT_TYPE_EVENT_SIGNAL`
-      `activation` input (3.7)
+      `activation` input (3.8)
     - Assert, per `source_kind`, that the unified node's gated parameter subset matches the
       underlying source descriptor on name/type/default/constraints (3.4); assert the four
       source descriptors and `mqtt_publish`/`opcua_write` descriptors are unchanged (3.2, 6.4)
-    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.7, 6.4_
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.8, 6.4_
 
 - [x] 4. Add the compiler `expand_unified_inputs` pre-pass (C5)
   - [x] 4.1 Implement `expand_unified_inputs` and wire it into `compile()`
@@ -139,19 +139,23 @@ This spec does **not** modify the parent assessment folder
     - Vendor copy note: the compiler is not part of the byte-mirrored `catalog/` package, but
       if the device-vendored `vendor/workflow_core/compiler/compiler.py` exists, apply the
       same edit so device-side expansion matches the portal
-    - _Requirements: 3.6, 3.8, 3.9, 2.6_
+    - _Requirements: 3.6, 3.7, 3.9, 3.10, 3.11, 2.6_
     - _Property: P3, P4_
 
-  - [ ]* 4.2 Write example unit tests for expansion
+  - [x] 4.2 Write example unit tests for expansion
     - Assert a `unified_input` node with `source_kind=X` compiles to the same
       `segments`/`executorBindings`/`pluginDependencies` as a hand-placed source-`X` node with
       the same id and equivalent params (3.6); assert an unconnected activation port emits no
-      activation binding (3.8, 3.9); assert a connected activation edge is dropped and the
-      feeding `digital_input` still emits its ordinary executor binding (3.9)
+      activation binding (3.9, 3.11); assert a connected activation edge is dropped, the
+      compiled output is identical to the unconnected case, and the feeding `digital_input`
+      still emits its ordinary executor binding (3.10, 3.11)
+    - Assert that where the underlying source descriptor defines no Device_Binding for an
+      architecture, the unified node with that `source_kind` is unsupported on that
+      architecture in the same way (3.7)
     - Assert `folder` selected with blank `location` is deferred to the compile-time validation
       re-run (`V4_MISSING_REQUIRED_PARAMETER` on the expanded `folder_source`), not raised on
       the unified graph
-    - _Requirements: 3.6, 3.8, 3.9_
+    - _Requirements: 3.6, 3.7, 3.9, 3.10, 3.11_
 
 - [x] 5. Frontend designer support (C6)
   - [x] 5.1 Mirror the catalog constants in `types.ts`
@@ -159,7 +163,7 @@ This spec does **not** modify the parent assessment folder
       `export const CATEGORY_TRIGGER = 'trigger';` and place it **first** in the `CATEGORIES`
       array (`NodeCategory` derives from it); add a mirrored `SOURCE_KIND_TO_SOURCE_TYPE`
       constant matching the Python map for gating
-    - _Requirements: 1.3_
+    - _Requirements: 1.4_
 
   - [x] 5.2 Add the Triggers palette section and preserve saved-graph rendering
     - In `builderGraph.ts` `CATEGORY_META`, add a `trigger: { label: 'Triggers', color: … }`
@@ -169,39 +173,50 @@ This spec does **not** modify the parent assessment folder
     - Confirm `fromWorkflowDefinition`/`toWorkflowDefinition` still rebuild nodes purely from
       `node.type` + served descriptor so a saved `digital_input` renders under Triggers with no
       mutation of the stored definition (no migration)
-    - _Requirements: 1.4, 5.1, 5.2, 2.6_
+    - _Requirements: 1.5, 1.6, 2.8, 5.1, 5.2, 5.3, 2.6_
 
   - [x] 5.3 Gate `source_kind` parameters in `NodeConfigPanel.tsx`
     - For a `unified_input` node, compute visible parameters as `source_kind` plus the parameter
       names of `SOURCE_KIND_TO_SOURCE_TYPE[source_kind]`'s served descriptor; reuse the existing
       per-field rendering; keep `source_kind` always visible
-    - _Requirements: 5.3_
+    - _Requirements: 5.4_
 
   - [x] 5.4 Render and wire the activation port in `BuilderNodeComponent.tsx`
     - Render the optional `activation` `EventSignal` input port on the unified node and allow a
       `CATEGORY_TRIGGER` output → activation-port edge; verify the existing
       `connectionRejectionReason`/`incompatibilityReason` path already accepts
-      EventSignal↔EventSignal (no rule change needed)
-    - _Requirements: 5.4_
+      EventSignal↔EventSignal (no rule change needed) and rejects non-EventSignal outputs
+      wired to the activation port, leaving the graph unchanged
+    - _Requirements: 5.5, 5.6_
 
   - [x] 5.5 Widen `inlineChecks.ts` roots and add the stage-order mirror
     - Widen `checkV5` roots to `CATEGORY_INPUT ∪ CATEGORY_TRIGGER` and add a target-is-trigger
       stage-order mirror so inline markers match the backend validator findings for the same
-      graph, including stage-ordering findings
-    - _Requirements: 5.5_
+      graph, including stage-ordering findings; an unconnected activation port produces no
+      inline finding
+    - _Requirements: 5.7, 5.8_
 
-  - [ ]* 5.6 Write frontend example/interaction tests
-    - Assert NodePalette renders Triggers before Inputs (1.4, 5.1); a saved `digital_input`
-      renders under Triggers and `fromWorkflowDefinition → toWorkflowDefinition` preserves the
-      stored node (2.6, 5.2); `NodeConfigPanel` shows only the selected `source_kind`'s
-      parameters (5.3); `connectionRejectionReason(trigger.out → unified.activation)` is `null`
-      (5.4); and `types.ts` mirror defines `CATEGORY_TRIGGER` in `CATEGORIES` (1.3)
-    - _Requirements: 1.3, 1.4, 5.1, 5.2, 5.3, 5.4_
+  - [x] 5.6 Write frontend example/interaction tests
+    - Assert NodePalette renders Triggers before Inputs with the existing section order
+      preserved (1.5, 1.6, 5.1) and lists `digital_input` under Triggers only, not Inputs
+      (2.8); a saved `digital_input` renders under Triggers and
+      `fromWorkflowDefinition → toWorkflowDefinition` preserves the stored node byte-identically
+      on an edit-free save (2.6, 5.2, 5.3); `NodeConfigPanel` shows only the selected
+      `source_kind`'s parameters (5.4); `connectionRejectionReason(trigger.out →
+      unified.activation)` is `null` (5.5); a non-`EventSignal` output wired to the activation
+      port is rejected and the graph is unchanged (5.6); an unconnected activation port shows
+      no inline finding (5.8); and `types.ts` mirror defines `CATEGORY_TRIGGER` in
+      `CATEGORIES` (1.4)
+    - _Requirements: 1.4, 1.5, 1.6, 2.8, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.8_
 
 - [x] 6. Checkpoint - Ensure catalog, validator, compiler, and designer are consistent
   - Ensure all tests pass, ask the user if questions arise.
+  - Covered here: the catalog baseline (`catalog_baseline.json`, verified by
+    `test_catalog_content.py`) was updated with a diff scoped to exactly the
+    `CATEGORY_TRIGGER` addition, the `digital_input` category value, and the
+    `unified_input` descriptor addition, all other descriptor entries byte-identical (6.8)
 
-- [ ] 7. Property-based tests for P1–P7
+- [x] 7. Property-based tests for P1–P7
   - Use the existing tooling — **Hypothesis** for the `workflow_core` Python suite and
     **fast-check** for the frontend `*.property.test.ts` modules. Reuse the existing graph/
     parameter generators (`layers/workflow_core/tests/generators.py` and the frontend property
@@ -209,60 +224,67 @@ This spec does **not** modify the parent assessment folder
     runs **≥100 iterations** and carries the tag comment
     `Feature: triggers-stage-and-unified-input, Property {n}: {property text}`.
 
-  - [ ]* 7.1 P1 — zero-trigger workflows compile and package byte-identically
+  - [x] 7.1 P1 — zero-trigger workflows compile and package byte-identically
     - Generate Zero_Trigger_Workflows over the pre-existing node types; for each architecture
       assert `compile(...).to_dict()` bytes and the packaged artifact bytes equal a captured
-      pre-feature baseline (reuse `tests/catalog_baseline.json`-style golden capture)
+      pre-feature baseline (reuse `tests/catalog_baseline.json`-style golden capture); cover
+      legacy workflows referencing the existing source nodes so their compiled/packaged
+      artifacts stay byte-identical too (6.7)
     - **Property 1: Zero-trigger workflows compile and package byte-identically**
-    - _Requirements: 6.1, 6.2, 6.3_
+    - _Requirements: 6.1, 6.2, 6.3, 6.7_
 
-  - [ ]* 7.2 P2 — `digital_input` relocation is binding-preserving
+  - [x] 7.2 P2 — `digital_input` relocation is binding-preserving
     - Generate valid `digital_input` parameter combos (`pin`, `trigger_edge`,
       `poll_interval_ms`) × architectures; assert the emitted executor binding + parameters +
       sim stub equal the pre-relocation baseline (category has no compiler effect)
     - **Property 2: digital_input relocation is binding-preserving**
     - _Requirements: 2.5, 6.2_
 
-  - [ ]* 7.3 P3 — unified node compiles to its underlying source binding
+  - [x] 7.3 P3 — unified node compiles to its underlying source binding
     - Generate `source_kind` × valid params × architecture; compile a `unified_input` node and
       an underlying source node with the same id/params; assert equal
       `segments`/`executorBindings`/`pluginDependencies`, and assert per-`source_kind` param
-      equivalence (name/type/default/constraints) against the underlying descriptor
+      equivalence (name/type/default/constraints) against the underlying descriptor; where the
+      underlying source has no Device_Binding for an architecture, assert the unified node is
+      unsupported on that architecture in the same way (3.7)
     - **Property 3: Unified node compiles to its underlying source binding**
-    - _Requirements: 3.4, 3.6_
+    - _Requirements: 3.4, 3.6, 3.7_
 
-  - [ ]* 7.4 P4 — the activation port is inert
-    - Generate unified nodes with the activation port unconnected and connected to a
-      `digital_input` output; assert both compile to the same source output and that no
-      trigger-driven activation binding is emitted for the activation port
+  - [x] 7.4 P4 — the activation port is inert
+    - Generate unified nodes with the activation port unconnected (3.9) and connected to a
+      `digital_input` output (3.10); assert both compile to the same source output, that the
+      connected case is identical to the unconnected case, and that no trigger-driven
+      activation binding is emitted for the activation port regardless of connection
+      state (3.11)
     - **Property 4: The activation port is inert**
-    - _Requirements: 3.8, 3.9_
+    - _Requirements: 3.9, 3.10, 3.11_
 
-  - [ ]* 7.5 P5 — validator enforces stage-ordering legality
+  - [x] 7.5 P5 — validator enforces stage-ordering legality
     - Generate graphs with a connection targeting a trigger (expect a `V7_STAGE_ORDER` finding
-      naming that connection) and graphs with legal `trigger → unified activation` edges
-      (expect no `V7` finding)
+      naming that connection, with severity error under the single stable code, 4.7) and
+      graphs with legal `trigger → unified activation` edges (expect no `V7` finding)
     - **Property 5: Validator enforces stage-ordering legality**
-    - _Requirements: 4.1, 4.2, 4.3, 4.4_
+    - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.7_
 
-  - [ ]* 7.6 P6 — validator finding-set equivalence (backend + frontend parity)
-    - Generate Zero_Trigger_Workflows and `digital_input` graphs; assert the extended validator
+  - [x] 7.6 P6 — validator finding-set equivalence (backend + frontend parity)
+    - Generate Zero_Trigger_Workflows and `digital_input` graphs (including legacy saved
+      workflows referencing the existing source nodes, 6.6); assert the extended validator
       finding set equals the pre-feature baseline and that restricting to non-`V7` codes never
       drops or suppresses any V1–V6/W1 finding; mirror the parity in the frontend
-      `inlineChecks` property test (5.5)
+      `inlineChecks` property test (5.7)
     - **Property 6: Validator finding-set equivalence for zero-trigger and digital_input graphs**
-    - _Requirements: 2.7, 4.5, 4.6, 5.5_
+    - _Requirements: 2.7, 4.5, 4.6, 5.7, 6.6_
 
-  - [ ]* 7.7 P7 — catalog copies stay byte-identical (extend both mirror tests)
+  - [x] 7.7 P7 — catalog copies stay byte-identical (extend both mirror tests)
     - Extend `TestCatalogMirrorEquality` in
       `edge-cv-portal/backend/layers/workflow_core/tests/test_catalog_content.py` and
       `test/backend-test/workflow_engine/test_vendored_catalog_mirror.py` so each byte/sha256
       compares **both** `catalog/nodes.py` and `catalog/models.py` (today they only cover
       `nodes.py`); on mismatch print the exact `cp` re-sync command
     - **Property 7: Catalog copies stay byte-identical**
-    - _Requirements: 1.2, 6.5_
+    - _Requirements: 1.3, 6.5_
 
-- [~] 8. Checkpoint - Run the full suite across portal, device-vendored mirror, and frontend
+- [x] 8. Checkpoint - Run the full suite across portal, device-vendored mirror, and frontend
   - Run the portal catalog suite: `cd edge-cv-portal/backend && python3 -m pytest layers/workflow_core/tests/`
   - Run the portal backend suite: `cd edge-cv-portal/backend && python3 -m pytest tests/`
   - Run the device vendored-mirror test:
@@ -281,7 +303,7 @@ This spec does **not** modify the parent assessment folder
     and none should be run
   - Deploy the updated portal (backend `workflow_core` layer + frontend) using the repo's
     standard portal deploy path; run only with the user's explicit go-ahead
-  - _Requirements: 1.4, 5.1, 5.2, 5.3, 5.4_
+  - _Requirements: 1.5, 5.1, 5.2, 5.4, 5.5_
 
 ## Notes
 
@@ -291,8 +313,8 @@ This spec does **not** modify the parent assessment folder
   ends by copying the portal source into
   `src/backend/workflow_engine/vendor/workflow_core/catalog/`, and 7.7 extends both mirror
   tests to cover `models.py` in addition to `nodes.py`.
-- **Property → requirements traceability**: P1 (6.1–6.3), P2 (2.5, 6.2), P3 (3.4, 3.6),
-  P4 (3.8, 3.9), P5 (4.1–4.4), P6 (2.7, 4.5, 4.6, 5.5), P7 (1.2, 6.5).
+- **Property → requirements traceability**: P1 (6.1–6.3, 6.7), P2 (2.5, 6.2), P3 (3.4, 3.6, 3.7),
+  P4 (3.9, 3.10, 3.11), P5 (4.1–4.4, 4.7), P6 (2.7, 4.5, 4.6, 5.7, 6.6), P7 (1.3, 6.5).
 - **Behavior preservation**: `category` is validator/presentation metadata only — `compile()`
   keys off `type_id` + `mappings`, so the `digital_input` relocation is a compile/runtime
   no-op, and the unified node compiles by expansion into an existing source descriptor.

@@ -1,0 +1,717 @@
+{
+  "folder_capture": {
+    "arm64_jp4": {
+      "document": {
+        "executorBindings": [],
+        "pluginDependencies": [],
+        "schemaVersion": 1,
+        "segments": [
+          {
+            "elements": [
+              {
+                "args": {
+                  "blocksize": -1,
+                  "location": "/aws_dda/images/latest.jpg"
+                },
+                "factory": "filesrc",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "emexifextract",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "jpegparse",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "idct-method": 2
+                },
+                "factory": "jpegdec",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "videoconvert",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "method": "automatic"
+                },
+                "factory": "videoflip",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "idct-method": 2,
+                  "quality": 100
+                },
+                "factory": "jpegenc",
+                "nodeId": "sink"
+              },
+              {
+                "args": {
+                  "buffer-message-id": "file-target_/aws_dda/captures-jpg",
+                  "interval": 0,
+                  "meta": ""
+                },
+                "factory": "emlcapture",
+                "nodeId": "sink"
+              }
+            ],
+            "from": null,
+            "linkTo": null,
+            "name": "s0"
+          }
+        ],
+        "targetArch": "arm64_jp4",
+        "workflowId": "",
+        "workflowVersion": ""
+      },
+      "status": "ok"
+    },
+    "arm64_jp5": {
+      "document": {
+        "executorBindings": [],
+        "pluginDependencies": [],
+        "schemaVersion": 1,
+        "segments": [
+          {
+            "elements": [
+              {
+                "args": {
+                  "blocksize": -1,
+                  "location": "/aws_dda/images/latest.jpg"
+                },
+                "factory": "filesrc",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "emexifextract",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "jpegparse",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "idct-method": 2
+                },
+                "factory": "jpegdec",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "videoconvert",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "method": "automatic"
+                },
+                "factory": "videoflip",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "idct-method": 2,
+                  "quality": 100
+                },
+                "factory": "jpegenc",
+                "nodeId": "sink"
+              },
+              {
+                "args": {
+                  "buffer-message-id": "file-target_/aws_dda/captures-jpg",
+                  "interval": 0,
+                  "meta": ""
+                },
+                "factory": "emlcapture",
+                "nodeId": "sink"
+              }
+            ],
+            "from": null,
+            "linkTo": null,
+            "name": "s0"
+          }
+        ],
+        "targetArch": "arm64_jp5",
+        "workflowId": "",
+        "workflowVersion": ""
+      },
+      "status": "ok"
+    },
+    "arm64_jp6": {
+      "document": {
+        "executorBindings": [],
+        "pluginDependencies": [],
+        "schemaVersion": 1,
+        "segments": [
+          {
+            "elements": [
+              {
+                "args": {
+                  "blocksize": -1,
+                  "location": "/aws_dda/images/latest.jpg"
+                },
+                "factory": "filesrc",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "pngdec",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "videoconvert",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "idct-method": 2,
+                  "quality": 100
+                },
+                "factory": "jpegenc",
+                "nodeId": "sink"
+              },
+              {
+                "args": {
+                  "buffer-message-id": "file-target_/aws_dda/captures-jpg",
+                  "interval": 0,
+                  "meta": ""
+                },
+                "factory": "emlcapture",
+                "nodeId": "sink"
+              }
+            ],
+            "from": null,
+            "linkTo": null,
+            "name": "s0"
+          }
+        ],
+        "targetArch": "arm64_jp6",
+        "workflowId": "",
+        "workflowVersion": ""
+      },
+      "status": "ok"
+    },
+    "x86_64": {
+      "document": {
+        "executorBindings": [],
+        "pluginDependencies": [],
+        "schemaVersion": 1,
+        "segments": [
+          {
+            "elements": [
+              {
+                "args": {
+                  "blocksize": -1,
+                  "location": "/aws_dda/images/latest.jpg"
+                },
+                "factory": "filesrc",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "emexifextract",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "jpegparse",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "idct-method": 2
+                },
+                "factory": "jpegdec",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "videoconvert",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "method": "automatic"
+                },
+                "factory": "videoflip",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "idct-method": 2,
+                  "quality": 100
+                },
+                "factory": "jpegenc",
+                "nodeId": "sink"
+              },
+              {
+                "args": {
+                  "buffer-message-id": "file-target_/aws_dda/captures-jpg",
+                  "interval": 0,
+                  "meta": ""
+                },
+                "factory": "emlcapture",
+                "nodeId": "sink"
+              }
+            ],
+            "from": null,
+            "linkTo": null,
+            "name": "s0"
+          }
+        ],
+        "targetArch": "x86_64",
+        "workflowId": "",
+        "workflowVersion": ""
+      },
+      "status": "ok"
+    },
+    "x86_64_nvidia": {
+      "document": {
+        "executorBindings": [],
+        "pluginDependencies": [],
+        "schemaVersion": 1,
+        "segments": [
+          {
+            "elements": [
+              {
+                "args": {
+                  "blocksize": -1,
+                  "location": "/aws_dda/images/latest.jpg"
+                },
+                "factory": "filesrc",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "emexifextract",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "jpegparse",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "idct-method": 2
+                },
+                "factory": "jpegdec",
+                "nodeId": "src"
+              },
+              {
+                "args": {},
+                "factory": "videoconvert",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "method": "automatic"
+                },
+                "factory": "videoflip",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "idct-method": 2,
+                  "quality": 100
+                },
+                "factory": "jpegenc",
+                "nodeId": "sink"
+              },
+              {
+                "args": {
+                  "buffer-message-id": "file-target_/aws_dda/captures-jpg",
+                  "interval": 0,
+                  "meta": ""
+                },
+                "factory": "emlcapture",
+                "nodeId": "sink"
+              }
+            ],
+            "from": null,
+            "linkTo": null,
+            "name": "s0"
+          }
+        ],
+        "targetArch": "x86_64_nvidia",
+        "workflowId": "",
+        "workflowVersion": ""
+      },
+      "status": "ok"
+    }
+  },
+  "icam_inference_mqtt": {
+    "arm64_jp4": {
+      "document": {
+        "executorBindings": [
+          {
+            "binding": "mqtt_publish",
+            "downstreamNodeIds": [],
+            "nodeId": "publish",
+            "parameters": {
+              "aws_iot": false,
+              "broker_host": null,
+              "broker_port": 1883,
+              "greengrass": true,
+              "iot_ca_cert_path": null,
+              "iot_client_cert_path": null,
+              "iot_private_key_path": null,
+              "iot_thing_name": null,
+              "payload_template": "{inference_json}",
+              "qos": 0,
+              "topic": "factory/line1/inspection"
+            },
+            "upstreamNodeIds": [
+              "infer"
+            ]
+          }
+        ],
+        "pluginDependencies": [
+          "python:awsiotsdk"
+        ],
+        "schemaVersion": 1,
+        "segments": [
+          {
+            "elements": [
+              {
+                "args": {
+                  "device": "/dev/video0"
+                },
+                "factory": "v4l2src",
+                "nodeId": "cam"
+              },
+              {
+                "args": {},
+                "factory": "videoconvert",
+                "nodeId": "cam"
+              },
+              {
+                "args": {
+                  "caps": "video/x-raw,format=RGB"
+                },
+                "factory": "capsfilter",
+                "nodeId": "infer"
+              },
+              {
+                "args": {
+                  "model": "widget-anomaly-v3",
+                  "model-repo": "/aws_dda/dda_triton/triton_model_repo",
+                  "server-path": "/opt/tritonserver"
+                },
+                "factory": "emltriton",
+                "nodeId": "infer"
+              }
+            ],
+            "from": null,
+            "linkTo": null,
+            "name": "s0"
+          }
+        ],
+        "targetArch": "arm64_jp4",
+        "workflowId": "",
+        "workflowVersion": ""
+      },
+      "status": "ok"
+    },
+    "arm64_jp5": {
+      "document": {
+        "executorBindings": [
+          {
+            "binding": "mqtt_publish",
+            "downstreamNodeIds": [],
+            "nodeId": "publish",
+            "parameters": {
+              "aws_iot": false,
+              "broker_host": null,
+              "broker_port": 1883,
+              "greengrass": true,
+              "iot_ca_cert_path": null,
+              "iot_client_cert_path": null,
+              "iot_private_key_path": null,
+              "iot_thing_name": null,
+              "payload_template": "{inference_json}",
+              "qos": 0,
+              "topic": "factory/line1/inspection"
+            },
+            "upstreamNodeIds": [
+              "infer"
+            ]
+          }
+        ],
+        "pluginDependencies": [
+          "python:awsiotsdk"
+        ],
+        "schemaVersion": 1,
+        "segments": [
+          {
+            "elements": [
+              {
+                "args": {
+                  "device": "/dev/video0"
+                },
+                "factory": "v4l2src",
+                "nodeId": "cam"
+              },
+              {
+                "args": {},
+                "factory": "videoconvert",
+                "nodeId": "cam"
+              },
+              {
+                "args": {
+                  "caps": "video/x-raw,format=RGB"
+                },
+                "factory": "capsfilter",
+                "nodeId": "infer"
+              },
+              {
+                "args": {
+                  "model": "widget-anomaly-v3",
+                  "model-repo": "/aws_dda/dda_triton/triton_model_repo",
+                  "server-path": "/opt/tritonserver"
+                },
+                "factory": "emltriton",
+                "nodeId": "infer"
+              }
+            ],
+            "from": null,
+            "linkTo": null,
+            "name": "s0"
+          }
+        ],
+        "targetArch": "arm64_jp5",
+        "workflowId": "",
+        "workflowVersion": ""
+      },
+      "status": "ok"
+    },
+    "arm64_jp6": {
+      "document": {
+        "executorBindings": [
+          {
+            "binding": "mqtt_publish",
+            "downstreamNodeIds": [],
+            "nodeId": "publish",
+            "parameters": {
+              "aws_iot": false,
+              "broker_host": null,
+              "broker_port": 1883,
+              "greengrass": true,
+              "iot_ca_cert_path": null,
+              "iot_client_cert_path": null,
+              "iot_private_key_path": null,
+              "iot_thing_name": null,
+              "payload_template": "{inference_json}",
+              "qos": 0,
+              "topic": "factory/line1/inspection"
+            },
+            "upstreamNodeIds": [
+              "infer"
+            ]
+          }
+        ],
+        "pluginDependencies": [
+          "python:awsiotsdk"
+        ],
+        "schemaVersion": 1,
+        "segments": [
+          {
+            "elements": [
+              {
+                "args": {
+                  "device": "/dev/video0"
+                },
+                "factory": "v4l2src",
+                "nodeId": "cam"
+              },
+              {
+                "args": {},
+                "factory": "videoconvert",
+                "nodeId": "cam"
+              },
+              {
+                "args": {
+                  "caps": "video/x-raw,format=RGB"
+                },
+                "factory": "capsfilter",
+                "nodeId": "infer"
+              },
+              {
+                "args": {
+                  "model": "widget-anomaly-v3",
+                  "model-repo": "/aws_dda/dda_triton/triton_model_repo",
+                  "server-path": "/opt/tritonserver"
+                },
+                "factory": "emltriton",
+                "nodeId": "infer"
+              }
+            ],
+            "from": null,
+            "linkTo": null,
+            "name": "s0"
+          }
+        ],
+        "targetArch": "arm64_jp6",
+        "workflowId": "",
+        "workflowVersion": ""
+      },
+      "status": "ok"
+    },
+    "x86_64": {
+      "document": {
+        "executorBindings": [
+          {
+            "binding": "mqtt_publish",
+            "downstreamNodeIds": [],
+            "nodeId": "publish",
+            "parameters": {
+              "aws_iot": false,
+              "broker_host": null,
+              "broker_port": 1883,
+              "greengrass": true,
+              "iot_ca_cert_path": null,
+              "iot_client_cert_path": null,
+              "iot_private_key_path": null,
+              "iot_thing_name": null,
+              "payload_template": "{inference_json}",
+              "qos": 0,
+              "topic": "factory/line1/inspection"
+            },
+            "upstreamNodeIds": [
+              "infer"
+            ]
+          }
+        ],
+        "pluginDependencies": [
+          "python:awsiotsdk"
+        ],
+        "schemaVersion": 1,
+        "segments": [
+          {
+            "elements": [
+              {
+                "args": {
+                  "device": "/dev/video0"
+                },
+                "factory": "v4l2src",
+                "nodeId": "cam"
+              },
+              {
+                "args": {},
+                "factory": "videoconvert",
+                "nodeId": "cam"
+              },
+              {
+                "args": {
+                  "caps": "video/x-raw,format=RGB"
+                },
+                "factory": "capsfilter",
+                "nodeId": "infer"
+              },
+              {
+                "args": {
+                  "model": "widget-anomaly-v3",
+                  "model-repo": "/aws_dda/dda_triton/triton_model_repo",
+                  "server-path": "/opt/tritonserver"
+                },
+                "factory": "emltriton",
+                "nodeId": "infer"
+              }
+            ],
+            "from": null,
+            "linkTo": null,
+            "name": "s0"
+          }
+        ],
+        "targetArch": "x86_64",
+        "workflowId": "",
+        "workflowVersion": ""
+      },
+      "status": "ok"
+    },
+    "x86_64_nvidia": {
+      "document": {
+        "executorBindings": [
+          {
+            "binding": "mqtt_publish",
+            "downstreamNodeIds": [],
+            "nodeId": "publish",
+            "parameters": {
+              "aws_iot": false,
+              "broker_host": null,
+              "broker_port": 1883,
+              "greengrass": true,
+              "iot_ca_cert_path": null,
+              "iot_client_cert_path": null,
+              "iot_private_key_path": null,
+              "iot_thing_name": null,
+              "payload_template": "{inference_json}",
+              "qos": 0,
+              "topic": "factory/line1/inspection"
+            },
+            "upstreamNodeIds": [
+              "infer"
+            ]
+          }
+        ],
+        "pluginDependencies": [
+          "python:awsiotsdk"
+        ],
+        "schemaVersion": 1,
+        "segments": [
+          {
+            "elements": [
+              {
+                "args": {
+                  "device": "/dev/video0"
+                },
+                "factory": "v4l2src",
+                "nodeId": "cam"
+              },
+              {
+                "args": {},
+                "factory": "videoconvert",
+                "nodeId": "cam"
+              },
+              {
+                "args": {
+                  "caps": "video/x-raw,format=RGB"
+                },
+                "factory": "capsfilter",
+                "nodeId": "infer"
+              },
+              {
+                "args": {
+                  "model": "widget-anomaly-v3",
+                  "model-repo": "/aws_dda/dda_triton/triton_model_repo",
+                  "server-path": "/opt/tritonserver"
+                },
+                "factory": "emltriton",
+                "nodeId": "infer"
+              }
+            ],
+            "from": null,
+            "linkTo": null,
+            "name": "s0"
+          }
+        ],
+        "targetArch": "x86_64_nvidia",
+        "workflowId": "",
+        "workflowVersion": ""
+      },
+      "status": "ok"
+    }
+  }
+}

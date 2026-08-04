@@ -312,30 +312,68 @@ class TestIcamSourceNodeType:
 
 
 class TestCatalogMirrorEquality:
-    def test_portal_and_vendor_catalog_nodes_are_byte_identical(self):
-        # Requirement 1.6: the portal layer catalog and the edge vendor
-        # mirror carry the node identically — the two nodes.py sources
-        # stay byte-identical.
+    PORTAL_CATALOG_RELATIVE = (
+        "edge-cv-portal/backend/layers/workflow_core/python/workflow_core/"
+        "catalog")
+    VENDOR_CATALOG_RELATIVE = (
+        "src/backend/workflow_engine/vendor/workflow_core/catalog")
+
+    def _assert_mirrored(self, filename):
+        """Byte/sha256-compare a catalog file between the portal layer copy
+        (the import actually in use) and the edge vendor mirror."""
+        import hashlib
         import workflow_core.catalog.nodes as portal_nodes
 
-        portal_path = os.path.abspath(portal_nodes.__file__)
-        if portal_path.endswith(".pyc"):
-            portal_path = portal_path[:-1]
+        portal_nodes_path = os.path.abspath(portal_nodes.__file__)
+        if portal_nodes_path.endswith(".pyc"):
+            portal_nodes_path = portal_nodes_path[:-1]
+        portal_path = os.path.join(
+            os.path.dirname(portal_nodes_path), filename)
         # tests/ -> workflow_core -> layers -> backend -> edge-cv-portal
         # -> repository root
         repo_root = os.path.abspath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "..", "..", "..", "..", ".."))
         vendor_path = os.path.join(
-            repo_root, "src", "backend", "workflow_engine", "vendor",
-            "workflow_core", "catalog", "nodes.py")
+            repo_root, *self.VENDOR_CATALOG_RELATIVE.split("/"), filename)
+        assert os.path.isfile(portal_path), portal_path
         assert os.path.isfile(vendor_path), vendor_path
         with open(portal_path, "rb") as handle:
             portal_bytes = handle.read()
         with open(vendor_path, "rb") as handle:
             vendor_bytes = handle.read()
+        portal_sha = hashlib.sha256(portal_bytes).hexdigest()
+        vendor_sha = hashlib.sha256(vendor_bytes).hexdigest()
         assert portal_bytes == vendor_bytes, (
-            "portal layer and edge vendor catalog nodes.py have diverged")
+            f"portal layer and edge vendor catalog {filename} have diverged.\n"
+            f"  portal sha256={portal_sha} "
+            f"({self.PORTAL_CATALOG_RELATIVE}/{filename})\n"
+            f"  vendor sha256={vendor_sha} "
+            f"({self.VENDOR_CATALOG_RELATIVE}/{filename})\n"
+            "Re-sync with: cp "
+            f"{self.PORTAL_CATALOG_RELATIVE}/{filename} "
+            f"{self.VENDOR_CATALOG_RELATIVE}/{filename}")
+
+    def test_portal_and_vendor_catalog_nodes_are_byte_identical(self):
+        # Requirement 1.6: the portal layer catalog and the edge vendor
+        # mirror carry the node identically — the two nodes.py sources
+        # stay byte-identical.
+        # Feature: triggers-stage-and-unified-input, Property 7: Catalog copies stay byte-identical
+        self._assert_mirrored("nodes.py")
+
+    def test_portal_and_vendor_catalog_models_are_byte_identical(self):
+        # triggers-stage-and-unified-input Requirements 1.3, 6.5: the
+        # catalog data model (CATEGORY_TRIGGER, PORT_TYPE_EVENT_SIGNAL,
+        # trigger port wiring) lives in models.py, so the mirror must
+        # stay byte-identical there too.
+        # Feature: triggers-stage-and-unified-input, Property 7: Catalog copies stay byte-identical
+        self._assert_mirrored("models.py")
+
+    def test_portal_and_vendor_catalog_init_are_byte_identical(self):
+        # Defensive third file: catalog/__init__.py re-exports the
+        # public catalog surface and is mirrored in both trees.
+        # Feature: triggers-stage-and-unified-input, Property 7: Catalog copies stay byte-identical
+        self._assert_mirrored("__init__.py")
 
 
 # --------------------------------------------------------------------------
