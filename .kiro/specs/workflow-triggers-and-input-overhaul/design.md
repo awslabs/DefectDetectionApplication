@@ -1,6 +1,6 @@
 # Workflow Triggers + Input Overhaul — Design Assessment (future todo)
 
-> Status: DOCUMENTATION / NOT SCHEDULED. Architecture analysis + open questions. This is the largest workflow-model change since the node catalog was introduced; it touches the designer, catalog, validator, compiler, packager, device workflow engine, and the Greengrass recipe accessControl. Treat the "Open design decisions" section as a required pre-design review before scheduling.
+> Status: DOCUMENTATION / NOT SCHEDULED. Architecture analysis + open questions. This is the largest workflow-model change since the node catalog was introduced; it touches the designer, catalog, validator, compiler, packager, device workflow engine, and the Greengrass recipe accessControl. Treat the "Open design decisions" section as a required pre-design review before scheduling. **Update 2026-08-04:** open decisions #1 (concurrency/debounce policy) and #7 (OPC UA subscription vs polling) are now RESOLVED by the user — see the resolutions inline below and requirements criteria 2.5, 3.4, 3.5. Decisions 2–6 and 8 remain open.
 
 ## Current state (grounded)
 
@@ -30,7 +30,7 @@ The biggest shift is the **Workflow_Engine run model** on device. Today a deploy
 - serializes or bounds concurrent activations (debounce/queue policy — see open questions),
 - surfaces subscription/auth failures as actionable run/component errors.
 
-This generalizes the existing digital-input executor path (which already turns a GPIO edge into work) into a uniform trigger→activation mechanism, with the camera/folder sources becoming *activatable* rather than only free-running.
+This generalizes the existing digital-input executor path (which already turns a GPIO edge into work) into a uniform trigger→activation mechanism, with the camera/folder sources becoming *activatable* rather than only free-running. The subscription/listener layer applies each trigger's `concurrency_policy` (default `queue`) when enqueuing Run_Activations, and the OPC UA listener embeds the subscription-with-polling-fallback mechanism (resolved decision #7).
 
 ### Portal side
 
@@ -50,13 +50,13 @@ This generalizes the existing digital-input executor path (which already turns a
 
 ## Open design decisions (resolve before scheduling)
 
-1. **Concurrency / debounce policy**: if triggers fire faster than a run completes, do we queue, drop, debounce, or run concurrently? Camera capture + inference is not instantaneous. Needs an explicit per-workflow or per-trigger policy parameter.
+1. **Concurrency / debounce policy** — **RESOLVED (user, 2026-08-04)**: each `mqtt_subscribe`/`opcua_subscribe` trigger exposes a per-trigger `concurrency_policy` enum parameter — `queue` (DEFAULT), `drop`, `debounce` (with a gated debounce-interval companion parameter), `concurrent` — governing Run_Activation when the trigger fires while a run it activated is still in flight. See requirements criteria 2.5 and 3.4.
 2. **Multiple triggers, one workflow**: AND vs OR semantics? Most likely OR (any trigger activates), but a future AND/correlation is worth leaving room for. Also: can two triggers feed different inputs in one workflow (multiple activation subgraphs)?
 3. **Retain vs replace source node types**: does Unified_Input_Node *replace* the four source descriptors (migration of saved graphs) or coexist as a designer convenience that compiles to the same bindings? Migration cost vs palette clarity.
 4. **Always-running vs triggered inputs in the same workflow**: is a mixed model allowed, or is a workflow wholly one or the other? Cleaner to make "has ≥1 trigger ⇒ fully trigger-driven."
 5. **Subscription lifecycle & reconnect**: how do MQTT/OPC UA subscriptions behave across LocalServer restarts, broker disconnects, and OPC UA session drops? Reconnect/backoff policy and health surfacing (ties into edge-deploy-reliability's health model).
 6. **Trigger_Context → input override contract**: which input parameters are overridable per activation (folder path, file selection, capture count, camera selection)? Define the whitelist and validation.
-7. **OPC UA subscription vs polling**: true subscriptions (monitored items) vs periodic reads — the `opcua` client's subscription support and Xavier/edge reliability need verification (a spike, like the vLLM assessment).
+7. **OPC UA subscription vs polling** — **RESOLVED (user, 2026-08-04)**: spike true subscriptions (monitored items) FIRST; the runtime falls back to periodic polling at a configurable interval when subscriptions are unavailable or unreliable on the edge device. Trigger_Context is identical under either mechanism, and the active mechanism (including any fallback transition) is logged and surfaced. See criterion 3.5. Note the Phase 0.2 spike still validates the subscription path — the resolution removes the either/or ambiguity by mandating BOTH mechanisms with subscription preferred.
 8. **Backpressure & ordering guarantees** for high-rate MQTT topics.
 
 ## Testing strategy (high level)

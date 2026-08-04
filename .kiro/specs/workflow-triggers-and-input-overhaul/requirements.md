@@ -1,6 +1,8 @@
 # Workflow Triggers + Input Overhaul — Requirements (future todo)
 
 > Status: **DOCUMENTATION / NOT SCHEDULED**. Captures the intended overhaul of the workflow input model: a new **Triggers** stage that runs before Inputs, subscribe-side MQTT/OPC UA triggers, relocation of Digital Input into Triggers, and a unified Input node. Read `design.md` for the architecture analysis and open questions before scheduling.
+>
+> **Resolved design decisions (user, 2026-08-04):** design.md open decision **#1** (concurrency/debounce policy) — resolved as a **per-trigger `concurrency_policy` parameter, default `queue`** (see criteria 2.5, 3.4). Open decision **#7** (OPC UA subscription vs polling) — resolved as **spike true subscriptions first; polling fallback supported** if the packaged `opcua` client cannot do reliable subscriptions at the edge (see criterion 3.5). The remaining six open decisions in design.md are still unresolved.
 
 ## Motivation
 
@@ -22,6 +24,8 @@ This feature introduces a **Triggers** stage that precedes Inputs, with MQTT-sub
 - **Simple_Trigger link**: a trigger wired directly to an input with no Trigger_Transform — fires the input with its statically configured parameters, ignoring context.
 - **Unified_Input_Node**: a single input node type that can be configured as any non-digital source (camera / aravis / folder / CSI), replacing the need for distinct source node types in the designer palette; parameters gate on the selected source kind.
 - **Run_Activation**: the device Workflow_Engine's notion of starting one pipeline run; today implicitly source-driven, extended here to be trigger-driven.
+- **Concurrency_Policy**: a per-trigger enum parameter governing what happens when the trigger fires while a run activated by that trigger is still in flight. Values: `queue` (default — firings queue and activate sequentially), `drop` (firing is discarded), `debounce` (firings within a configured interval coalesce into one activation), `concurrent` (firing activates a run in parallel; each activation remains isolated per design.md property P2).
+- **Polling_Fallback**: the OPCUA_Subscribe_Trigger's alternate mechanism — periodic reads of the monitored node at a configurable interval — used when true OPC UA subscriptions (monitored items / data-change notifications) are unavailable or unreliable on the edge device. Trigger semantics are identical either way; only the detection mechanism differs.
 
 ## Requirements
 
@@ -45,6 +49,8 @@ This feature introduces a **Triggers** stage that precedes Inputs, with MQTT-sub
 
 2.4 THE feature SHALL support at-least-once (qos 1) and at-most-once (qos 0) as Greengrass allows, clamping unsupported qos as the publish path does.
 
+2.5 THE `mqtt_subscribe` Trigger SHALL expose a per-trigger `concurrency_policy` enum parameter (values `queue`, `drop`, `debounce`, `concurrent`; default `queue`) governing Run_Activation when the trigger fires while a run it activated is still in flight. WHERE `debounce` is selected, THE node SHALL expose a companion debounce-interval parameter, gated on that selection. *(Resolves design.md open decision #1.)*
+
 ### Requirement 3: OPC UA subscribe trigger
 
 3.1 THE catalog SHALL define an `opcua_subscribe` Trigger with parameters: endpoint, node id (the monitored item), sampling/publishing interval, and the same optional security parameters (username/password and/or certificate-based signing) as the existing `opcua_write` node.
@@ -52,6 +58,10 @@ This feature introduces a **Triggers** stage that precedes Inputs, with MQTT-sub
 3.2 WHEN the workflow runs on device, THE device runtime SHALL create an OPC UA subscription with a monitored item on the configured node, and a value change (data-change notification) SHALL fire the trigger with Trigger_Context = {endpoint, node_id, value, source_timestamp}.
 
 3.3 THE feature SHALL reuse the `opcua` client dependency the output node already packages; security configuration SHALL behave identically (anonymous default; user-token and/or cert signing when configured).
+
+3.4 THE `opcua_subscribe` Trigger SHALL expose the same per-trigger `concurrency_policy` enum parameter as criterion 2.5 (values `queue`, `drop`, `debounce`, `concurrent`; default `queue`), with the debounce-interval parameter gated on the `debounce` selection. *(Resolves design.md open decision #1.)*
+
+3.5 THE device runtime SHALL use a true OPC UA subscription (monitored item / data-change notification) as the value-change detection mechanism when the packaged `opcua` client supports it reliably on the target device, and SHALL fall back to Polling_Fallback (periodic reads at a configurable poll interval) when subscriptions are unavailable or unreliable. THE trigger SHALL fire with identical Trigger_Context under either mechanism, and THE device runtime SHALL log and surface which mechanism is active (including any fallback transition). *(Resolves design.md open decision #7: spike true subscriptions first; polling fallback supported.)*
 
 ### Requirement 4: Digital Input relocated to Triggers
 
