@@ -32,13 +32,15 @@ non-hardware nodes compile identically.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..catalog import ARCH_SIM, ARCHITECTURES, NODE_CATALOG, bundled_plugins_for
 from ..catalog.models import GstMapping, NodeTypeDescriptor
-from ..serializer.models import Node, WorkflowGraph
+from ..catalog.nodes import SOURCE_KIND_TO_SOURCE_TYPE
+from ..serializer.models import Connection, Node, WorkflowGraph
 from ..validator import SEVERITY_ERROR, validate
 from .models import (
     CODE_UNMAPPED_ARCHITECTURE,
@@ -49,7 +51,13 @@ from .models import (
     DEFAULT_CONTEXT_VALUES,
 )
 
-__all__ = ["compile"]
+__all__ = ["compile", "expand_unified_inputs"]
+
+#: The unified input node type id and its optional activation input port
+#: (design C3/C5). ``expand_unified_inputs`` rewrites unified nodes into
+#: their underlying source and drops edges targeting this port.
+UNIFIED_INPUT_TYPE = "unified_input"
+UNIFIED_ACTIVATION_PORT = "activation"
 
 #: The two-path routing executor binding (the conditional node): the
 #: compiler emits per-port gate conditions for it ("true" = the
@@ -75,6 +83,79 @@ BINDING_CONDITIONAL = "conditional"
 #: downstream). In simulation the node resolves to its sim stub chain
 #: (identity pass-through) and none of this applies.
 BINDING_BEDROCK_INFERENCE = "bedrock_inference"
+
+
+def expand_unified_inputs(
+    graph: WorkflowGraph,
+    catalog: Sequence[NodeTypeDescriptor] = NODE_CATALOG,
+) -> WorkflowGraph:
+    """Rewrite ``unified_input`` nodes into their underlying source nodes.
+
+    Returns a **new** :class:`WorkflowGraph` (the input graph is never
+    mutated — nodes and connections are deep-copied). Each
+    ``unified_input`` node is replaced by a synthetic node carrying the
+    **same** ``id`` and ``position``, ``type`` set to
+    ``SOURCE_KIND_TO_SOURCE_TYPE[source_kind]``, and only the parameters
+    whose names appear on the underlying source descriptor (``source_kind``
+    and any non-applicable union parameters are dropped). Every connection
+    whose target is a unified node's ``activation`` port is dropped; all
+    other nodes and connections pass through unchanged (design C5,
+    Requirements 3.6, 3.8, 3.9, 2.6).
+
+    Defensive on an unknown/missing ``source_kind``: the node is left as-is
+    so that ``compile()``'s validation re-run reports the invalid enum
+    (``V4``) and refuses to compile, rather than dereferencing the map with
+    an invalid key.
+    """
+    descriptors_by_id: Dict[str, NodeTypeDescriptor] = {
+        descriptor.type_id: descriptor for descriptor in catalog
+    }
+
+    expanded_unified_ids: set = set()
+    new_nodes: List[Node] = []
+    for node in graph.nodes:
+        if node.type != UNIFIED_INPUT_TYPE:
+            new_nodes.append(copy.deepcopy(node))
+            continue
+
+        source_kind = node.parameters.get("source_kind")
+        source_type = SOURCE_KIND_TO_SOURCE_TYPE.get(source_kind)
+        source_descriptor = (
+            descriptors_by_id.get(source_type) if source_type is not None else None
+        )
+        if source_descriptor is None:
+            # Unknown/missing source_kind: leave the node untouched so the
+            # compile-time validation re-run reports it (V4) and refuses.
+            new_nodes.append(copy.deepcopy(node))
+            continue
+
+        expanded_unified_ids.add(node.id)
+        applicable = {parameter.name for parameter in source_descriptor.parameters}
+        expanded_parameters = {
+            name: copy.deepcopy(value)
+            for name, value in node.parameters.items()
+            if name in applicable
+        }
+        new_nodes.append(Node(
+            id=node.id,
+            type=source_type,
+            position=node.position,
+            parameters=expanded_parameters,
+            data=copy.deepcopy(node.data),
+        ))
+
+    new_connections: List[Connection] = []
+    for connection in graph.connections:
+        if (
+            connection.target.node in expanded_unified_ids
+            and connection.target.port == UNIFIED_ACTIVATION_PORT
+        ):
+            # Drop edges into a unified node's inert activation port; the
+            # expanded source has no input ports (Requirement 3.9, P4).
+            continue
+        new_connections.append(copy.deepcopy(connection))
+
+    return WorkflowGraph(nodes=new_nodes, connections=new_connections)
 
 
 def compile(
@@ -105,6 +186,14 @@ def compile(
     errors, or nodes without a mapping for the architecture).
     """
     context = context or CompileContext()
+
+    # 0. Expand unified_input nodes into their underlying source nodes on a
+    #    copy of the graph (never mutating the input), before validation and
+    #    mapping resolution — so the unified type_id never reaches
+    #    mapping_for and the expanded source flows through the existing path
+    #    (design C5, Requirements 3.6, 3.8, 3.9, 2.6).
+    graph = expand_unified_inputs(graph, catalog)
+
     descriptors_by_id: Dict[str, NodeTypeDescriptor] = {
         descriptor.type_id: descriptor for descriptor in catalog
     }

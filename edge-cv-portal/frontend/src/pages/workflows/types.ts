@@ -98,6 +98,7 @@ export const PORT_TYPES = [
 
 export type PortType = (typeof PORT_TYPES)[number];
 
+export const CATEGORY_TRIGGER = 'trigger';
 export const CATEGORY_INPUT = 'input';
 export const CATEGORY_PREPROCESSING = 'preprocessing';
 export const CATEGORY_INFERENCE = 'inference';
@@ -105,6 +106,7 @@ export const CATEGORY_POST_PROCESSING = 'post_processing';
 export const CATEGORY_OUTPUT = 'output';
 
 export const CATEGORIES = [
+  CATEGORY_TRIGGER,
   CATEGORY_INPUT,
   CATEGORY_PREPROCESSING,
   CATEGORY_INFERENCE,
@@ -113,6 +115,19 @@ export const CATEGORIES = [
 ] as const;
 
 export type NodeCategory = (typeof CATEGORIES)[number];
+
+/**
+ * Maps each `unified_input` `source_kind` enum value to the existing
+ * source node type it expands to. Mirrors the Python catalog's
+ * `SOURCE_KIND_TO_SOURCE_TYPE` (the shared source of truth); used by the
+ * configuration panel to gate which source parameters are visible.
+ */
+export const SOURCE_KIND_TO_SOURCE_TYPE = {
+  csi_camera: 'csi_camera_source',
+  icam: 'icam_source',
+  aravis_camera: 'aravis_camera_source',
+  folder: 'folder_source',
+} as const;
 
 // --------------------------------------------------------------------------
 // Target architectures

@@ -1600,7 +1600,7 @@
     "type_id": "dewarp"
   },
   "digital_input": {
-    "category": "input",
+    "category": "trigger",
     "display_name": "Digital Input",
     "hardware_dependent": true,
     "inputs": [],
@@ -3384,5 +3384,137 @@
       }
     ],
     "type_id": "rotate"
+  },
+  "unified_input": {
+    "category": "input",
+    "display_name": "Input Source",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "values": [
+            "csi_camera",
+            "icam",
+            "aravis_camera",
+            "folder"
+          ]
+        },
+        "default": "folder",
+        "depends_on": null,
+        "description": "Which underlying source this input represents.",
+        "examples": [
+          "folder",
+          "csi_camera"
+        ],
+        "name": "source_kind",
+        "param_type": "enum",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 100,
+          "min": 0
+        },
+        "default": 4,
+        "depends_on": null,
+        "description": "NVIDIA CSI sensor gain (0-100) applied through the CSI capture service; e.g. 4.",
+        "examples": [
+          4,
+          10
+        ],
+        "name": "gain",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": 5000000,
+        "depends_on": null,
+        "description": "NVIDIA CSI sensor exposure time in nanoseconds, e.g. 5000000 (5 ms).",
+        "examples": [
+          5000000,
+          16000000
+        ],
+        "name": "exposure",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "/dev/video0",
+        "depends_on": null,
+        "description": "V4L2 device path of the smart (ICAM) camera on the edge device, e.g. /dev/video0.",
+        "examples": [
+          "/dev/video0",
+          "/dev/video1"
+        ],
+        "name": "device",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Aravis (GenICam) camera identifier as enumerated on the edge device, e.g. Aravis-Fake-GV01 or Basler-12345678.",
+        "examples": [
+          "Aravis-Fake-GV01",
+          "Basler-12345678"
+        ],
+        "name": "camera_id",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Path of the image file (or folder of files) to read on the device, e.g. /aws_dda/images/latest.jpg.",
+        "examples": [
+          "/aws_dda/images/latest.jpg",
+          "/aws_dda/captures"
+        ],
+        "name": "location",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "*.jpg",
+        "depends_on": null,
+        "description": "Glob pattern selecting which files in the folder are read, e.g. *.jpg.",
+        "examples": [
+          "*.jpg",
+          "line1_*.jpg"
+        ],
+        "name": "file_pattern",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "unified_input"
   }
 }

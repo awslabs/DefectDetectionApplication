@@ -9,11 +9,13 @@
  * |-------|--------------------------------------------------------|
  * | V4    | required parameters have values satisfying constraints |
  * | V5    | every node reachable from some input node (forward BFS)|
+ * | V7    | no connection targets a trigger node (stage ordering)  |
  */
 
 import { checkParameterValue, VIOLATION_REQUIRED } from './parameters';
 import {
   CATEGORY_INPUT,
+  CATEGORY_TRIGGER,
   PORT_TYPES,
   SEVERITY_ERROR,
   type JsonValue,
@@ -31,6 +33,7 @@ import {
 export const CODE_V4_MISSING_REQUIRED_PARAMETER = 'V4_MISSING_REQUIRED_PARAMETER';
 export const CODE_V4_INVALID_PARAMETER_VALUE = 'V4_INVALID_PARAMETER_VALUE';
 export const CODE_V5_UNREACHABLE_NODE = 'V5_UNREACHABLE_NODE';
+export const CODE_V7_STAGE_ORDER = 'V7_STAGE_ORDER';
 
 /** The graph slice the inline checks operate on. */
 export interface GraphLike {
@@ -176,7 +179,10 @@ export function checkV5(graph: GraphLike, catalog: NodeTypeDescriptor[]): Valida
   }
 
   const roots = graph.nodes
-    .filter((node) => typed.get(node.id)?.category === CATEGORY_INPUT)
+    .filter((node) => {
+      const category = typed.get(node.id)?.category;
+      return category === CATEGORY_INPUT || category === CATEGORY_TRIGGER;
+    })
     .map((node) => node.id);
 
   const visited = new Set(roots);
@@ -206,14 +212,50 @@ export function checkV5(graph: GraphLike, catalog: NodeTypeDescriptor[]): Valida
   return findings;
 }
 
+// --------------------------------------------------------------------------
+// V7: trigger stage ordering (Requirement 5.5, mirrors backend V7)
+// --------------------------------------------------------------------------
+
 /**
- * Run the inline mirror checks (V4 + V5) and return every finding, each
- * with the associated node identifier. The canvas turns these into
- * inline validation markers (Requirements 1.9, 1.10).
+ * Mirror of validator check V7 (illegal stage ordering). A
+ * `CATEGORY_TRIGGER` node has no input ports and may only feed an Input's
+ * activation port, so any connection whose target resolves to a trigger
+ * node is an illegal ordering — the only way to place a trigger
+ * downstream of another node. The check is target-category based, which
+ * also makes the legal `Trigger → Unified activation-port` case pass
+ * automatically (its target is the `CATEGORY_INPUT` unified node).
+ */
+export function checkV7(graph: GraphLike, catalog: NodeTypeDescriptor[]): ValidationFinding[] {
+  const typed = typedNodes(graph, catalog);
+  const findings: ValidationFinding[] = [];
+
+  for (const connection of graph.connections) {
+    const target = typed.get(connection.to.node);
+    if (target !== undefined && target.category === CATEGORY_TRIGGER) {
+      findings.push({
+        severity: SEVERITY_ERROR,
+        code: CODE_V7_STAGE_ORDER,
+        message:
+          `Connection '${connection.id}' targets trigger node ` +
+          `'${connection.to.node}': a trigger may not be downstream of any ` +
+          `node (Trigger -> Input ordering)`,
+        nodeId: null,
+        connectionId: connection.id,
+      });
+    }
+  }
+  return findings;
+}
+
+/**
+ * Run the inline mirror checks (V4 + V5 + V7) and return every finding,
+ * each with the associated node or connection identifier. The canvas
+ * turns these into inline validation markers (Requirements 1.9, 1.10,
+ * 5.5).
  */
 export function runInlineChecks(
   graph: GraphLike,
   catalog: NodeTypeDescriptor[]
 ): ValidationFinding[] {
-  return [...checkV4(graph, catalog), ...checkV5(graph, catalog)];
+  return [...checkV4(graph, catalog), ...checkV5(graph, catalog), ...checkV7(graph, catalog)];
 }

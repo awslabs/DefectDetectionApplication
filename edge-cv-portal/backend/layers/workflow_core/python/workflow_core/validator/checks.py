@@ -39,6 +39,7 @@ from ..catalog.compatibility import incompatibility_reason
 from ..catalog.models import (
     CATEGORY_INPUT,
     CATEGORY_OUTPUT,
+    CATEGORY_TRIGGER,
     NodeTypeDescriptor,
     PARAM_TYPE_MODEL_REF,
     PORT_TYPES,
@@ -89,6 +90,12 @@ CODE_V5_UNREACHABLE_NODE = "V5_UNREACHABLE_NODE"
 # rejected — an error when the node enables neither ``greengrass`` nor
 # ``aws_iot`` and supplies no non-empty ``broker_host``.
 CODE_V6_MQTT_NO_TARGET = "V6_MQTT_NO_TARGET"
+
+# V7 (triggers-stage-and-unified-input Requirements 4.2, 4.3): a
+# CATEGORY_TRIGGER node has no input ports and may only feed an Input's
+# activation port, so any connection whose target is a trigger node is an
+# illegal stage ordering (a trigger placed downstream of another node).
+CODE_V7_STAGE_ORDER = "V7_STAGE_ORDER"
 
 # W1 warnings (Requirement 4.6)
 CODE_W1_OUTPUT_NODE_NO_INPUT = "W1_OUTPUT_NODE_NO_INPUT"
@@ -183,6 +190,7 @@ def validate(
     findings.extend(_check_v5(graph, typed_nodes))
     findings.extend(_check_v6(graph, typed_nodes))
     findings.extend(_check_w1(graph, typed_nodes))
+    findings.extend(_check_v7(graph, typed_nodes))
     if model_registry is not None:
         findings.extend(_check_model_references(graph, typed_nodes, model_registry))
 
@@ -226,7 +234,7 @@ def _resolved_ports(node: Node, descriptor: NodeTypeDescriptor) -> tuple:
 def _check_v1(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
     findings = []
     categories = {descriptor.category for descriptor in typed_nodes.values()}
-    if CATEGORY_INPUT not in categories:
+    if not (categories & {CATEGORY_INPUT, CATEGORY_TRIGGER}):
         findings.append(ValidationFinding(
             SEVERITY_ERROR,
             CODE_V1_NO_INPUT_NODE,
@@ -563,7 +571,7 @@ def _check_v5(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) 
     roots = [
         node.id for node in graph.nodes
         if typed_nodes.get(node.id) is not None
-        and typed_nodes[node.id].category == CATEGORY_INPUT
+        and typed_nodes[node.id].category in (CATEGORY_INPUT, CATEGORY_TRIGGER)
     ]
 
     visited = set(roots)
@@ -627,6 +635,34 @@ def _check_v6(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) 
                 "Node '{0}': mqtt_publish requires a publish target — enable "
                 "'greengrass', enable 'aws_iot', or set 'broker_host'".format(node.id),
                 node_id=node.id,
+            ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# V7: trigger stage ordering
+# (triggers-stage-and-unified-input Requirements 4.2, 4.3)
+# --------------------------------------------------------------------------
+
+def _check_v7(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """A ``CATEGORY_TRIGGER`` node has no input ports and may only feed an
+    Input's activation port, so any connection whose target resolves to a
+    trigger node is an illegal ordering — the only way to place a trigger
+    downstream of another node. The check is target-category based, which
+    also makes the legal ``Trigger -> Unified activation-port`` case pass
+    automatically (its target is the ``CATEGORY_INPUT`` unified node)."""
+    findings = []
+    for connection in graph.connections:
+        target = typed_nodes.get(connection.target.node)
+        if target is not None and target.category == CATEGORY_TRIGGER:
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V7_STAGE_ORDER,
+                "Connection '{0}' targets trigger node '{1}': a trigger may not be "
+                "downstream of any node (Trigger -> Input ordering)".format(
+                    connection.id, connection.target.node
+                ),
+                connection_id=connection.id,
             ))
     return findings
 

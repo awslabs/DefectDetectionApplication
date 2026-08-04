@@ -557,3 +557,35 @@ Both existing mirror tests (`TestCatalogMirrorEquality` in `test_catalog_content
 a straight file copy (the tests print the exact `cp` command on failure). The TypeScript
 mirror (`types.ts`) is not byte-compared (different language) but is kept correct by the
 descriptor example tests and the P6/5.5 validator-parity property.
+
+### Catalog-baseline update procedure (Requirement 6.8)
+
+`edge-cv-portal/backend/layers/workflow_core/tests/catalog_baseline.json` pins the
+`dataclasses.asdict` serialization of every `NODE_CATALOG` descriptor, and
+`test_bug_catalog_preservation.py` asserts byte-identity against it (with per-feature,
+deliberately-scoped exclusions for intentionally changed fields — the established
+discipline from the `llm_inference`/`mqtt_publish` precedents). This feature changes the
+recorded catalog in exactly three ways, so the baseline update is a deliberate,
+reviewed step, not a blind regeneration:
+
+1. **Capture the pre-feature baseline first.** The pre-feature `catalog_baseline.json`
+   (from the commit before this feature's catalog edits) is the reference the P1/P2
+   golden-output tests and the 6.8 diff review compare against.
+2. **Regenerate** the baseline from the updated catalog with the same serialization the
+   test uses (`dataclasses.asdict` over `NODE_CATALOG`, JSON with sorted keys — see the
+   `_gen_baseline.py` convention referenced in `test_bug_catalog_preservation.py`).
+3. **Review the diff against the allowed delta set.** The regenerated baseline MUST differ
+   from the pre-feature baseline only in:
+   - the `digital_input` entry's `category` value (`"input"` → `"trigger"`), and
+   - one new `unified_input` entry (appended; no existing entry shifts because
+     `UNIFIED_INPUT` is appended to `NODE_CATALOG` after `LLM_INFERENCE`).
+   `CATEGORY_TRIGGER` itself lives in `models.py`, not in the descriptor serialization,
+   so it appears in the baseline only via `digital_input.category`. Any other diff —
+   a source descriptor, `mqtt_publish`, `opcua_write`, ordering, whitespace — is a
+   regression and blocks the update (Requirements 3.2, 6.4, 6.8).
+4. **Scope the preservation-test exclusions minimally.** Following the
+   `_MUTATED_TYPE_ID`/`_MQTT_TYPE_ID` precedent in `test_bug_catalog_preservation.py`,
+   only `digital_input.category` is excluded from the byte-identical assertion (every
+   other `digital_input` field stays pinned, backing Requirement 2.4), and
+   `unified_input` is asserted as a new entry. Everything else remains under the
+   exhaustive byte-identity check.

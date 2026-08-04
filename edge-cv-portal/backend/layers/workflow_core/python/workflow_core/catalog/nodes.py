@@ -14,6 +14,8 @@ Argument templates use ``{placeholder}`` tokens resolved at compile time:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .models import (
     ARCH_ARM64_JP4,
     ARCH_ARM64_JP5,
@@ -30,6 +32,7 @@ from .models import (
     CATEGORY_OUTPUT,
     CATEGORY_POST_PROCESSING,
     CATEGORY_PREPROCESSING,
+    CATEGORY_TRIGGER,
     GstMapping,
     NodeTypeDescriptor,
     ParameterDescriptor,
@@ -338,7 +341,7 @@ FOLDER_SOURCE = NodeTypeDescriptor(
 
 DIGITAL_INPUT = NodeTypeDescriptor(
     type_id="digital_input",
-    category=CATEGORY_INPUT,
+    category=CATEGORY_TRIGGER,
     display_name="Digital Input",
     inputs=[],
     outputs=[PortDescriptor("out", PORT_TYPE_EVENT_SIGNAL)],
@@ -1197,6 +1200,87 @@ CAPTURE = NodeTypeDescriptor(
 )
 
 # --------------------------------------------------------------------------
+# Unified input node (Requirements 3.1-3.5, 3.7, 3.9) — a single palette
+# entry whose ``source_kind`` selects which underlying frame source it
+# represents. It never compiles directly: the compiler's
+# ``expand_unified_inputs`` pre-pass rewrites each unified node into the
+# ``SOURCE_KIND_TO_SOURCE_TYPE[source_kind]`` source descriptor before
+# mapping resolution, so the unified ``type_id`` never reaches
+# ``mapping_for`` (see design C3/C5).
+# --------------------------------------------------------------------------
+
+#: Source-kind → source type map: the single source of truth for both the
+#: frontend parameter gating and the compiler expansion. Deliberately
+#: excludes ``digital_input`` — a trigger, not a selectable frame source
+#: (Requirement 3.3).
+SOURCE_KIND_TO_SOURCE_TYPE = {
+    "csi_camera": "csi_camera_source",
+    "icam": "icam_source",
+    "aravis_camera": "aravis_camera_source",
+    "folder": "folder_source",
+}
+
+#: The four retained source descriptors, keyed by their type id. Referenced
+#: directly (not via ``get_node_type``, which is defined below) so the union
+#: can be built at module import time.
+_UNIFIED_SOURCE_DESCRIPTORS = {
+    "csi_camera_source": CSI_CAMERA_SOURCE,
+    "icam_source": ICAM_SOURCE,
+    "aravis_camera_source": ARAVIS_CAMERA_SOURCE,
+    "folder_source": FOLDER_SOURCE,
+}
+
+
+def _unified_source_parameters():
+    """Union of the four source descriptors' parameters, required-relaxed.
+
+    Reuses the live ``ParameterDescriptor`` objects via
+    ``dataclasses.replace(p, required=False)`` so the unified node's
+    names/types/defaults/constraints cannot drift from the originals
+    (Requirement 3.4). Parameters are concatenated in source-kind order and
+    de-duplicated by name (only the identical ``gain``/``exposure`` collide,
+    between ``csi_camera_source`` and ``aravis_camera_source``; the first is
+    kept). The only overridden field is ``required`` → ``False``: V4 has no
+    notion of "required only when source_kind == X", so keeping the
+    underlying required flags would fail every unified node; genuine
+    required-ness is enforced at compile time by expansion into the
+    underlying descriptor, which retains ``required=True`` (see design C3/C5).
+    """
+    seen, params = {}, []
+    for type_id in SOURCE_KIND_TO_SOURCE_TYPE.values():
+        for p in _UNIFIED_SOURCE_DESCRIPTORS[type_id].parameters:
+            if p.name in seen:
+                continue
+            seen[p.name] = type_id
+            params.append(replace(p, required=False))
+    return params
+
+
+UNIFIED_INPUT = NodeTypeDescriptor(
+    type_id="unified_input",
+    category=CATEGORY_INPUT,
+    display_name="Input Source",
+    # Optional activation port: a CATEGORY_TRIGGER output may feed it, but
+    # the port is inert at compile time (Requirements 3.7, 3.9).
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
+    # Single video-frame output (Requirement 3.5).
+    outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
+    parameters=[
+        ParameterDescriptor("source_kind", "enum", required=True, default="folder",
+                            constraints={"values": list(SOURCE_KIND_TO_SOURCE_TYPE)},
+                            description="Which underlying source this input "
+                                        "represents.",
+                            examples=["folder", "csi_camera"]),
+        *_unified_source_parameters(),
+    ],
+    # Empty-but-present placeholder: the unified type never reaches
+    # ``mapping_for`` because ``expand_unified_inputs`` rewrites it into its
+    # underlying source before mapping resolution (design C3/C5).
+    mappings=[],
+    hardware_dependent=True,
+)
+
+# --------------------------------------------------------------------------
 # Catalog access
 # --------------------------------------------------------------------------
 
@@ -1223,6 +1307,9 @@ NODE_CATALOG = (
     # Appended (additive — vllm-triton-inference Requirement 8.1): every
     # pre-existing descriptor keeps its position and content.
     LLM_INFERENCE,
+    # Appended (additive — triggers-stage-and-unified-input Requirement 3.1):
+    # every pre-existing descriptor keeps its position and content.
+    UNIFIED_INPUT,
 )
 
 _CATALOG_BY_ID = {descriptor.type_id: descriptor for descriptor in NODE_CATALOG}

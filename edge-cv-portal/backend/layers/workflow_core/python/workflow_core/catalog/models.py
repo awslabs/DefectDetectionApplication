@@ -30,6 +30,7 @@ PORT_TYPES = (
 # Node categories (Requirements 2.1-2.5)
 # --------------------------------------------------------------------------
 
+CATEGORY_TRIGGER = "trigger"
 CATEGORY_INPUT = "input"
 CATEGORY_PREPROCESSING = "preprocessing"
 CATEGORY_INFERENCE = "inference"
@@ -37,6 +38,7 @@ CATEGORY_POST_PROCESSING = "post_processing"
 CATEGORY_OUTPUT = "output"
 
 CATEGORIES = (
+    CATEGORY_TRIGGER,
     CATEGORY_INPUT,
     CATEGORY_PREPROCESSING,
     CATEGORY_INFERENCE,

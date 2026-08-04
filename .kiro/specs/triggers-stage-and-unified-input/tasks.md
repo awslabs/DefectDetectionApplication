@@ -32,8 +32,8 @@ This spec does **not** modify the parent assessment folder
 
 ## Tasks
 
-- [ ] 1. Add the `CATEGORY_TRIGGER` category constant (C1)
-  - [ ] 1.1 Add `CATEGORY_TRIGGER` to `catalog/models.py` and widen `CATEGORIES` (trigger first)
+- [x] 1. Add the `CATEGORY_TRIGGER` category constant (C1)
+  - [x] 1.1 Add `CATEGORY_TRIGGER` to `catalog/models.py` and widen `CATEGORIES` (trigger first)
     - In `edge-cv-portal/backend/layers/workflow_core/python/workflow_core/catalog/models.py`,
       add `CATEGORY_TRIGGER = "trigger"` and rebuild `CATEGORIES` as
       `(CATEGORY_TRIGGER, CATEGORY_INPUT, CATEGORY_PREPROCESSING, CATEGORY_INFERENCE,
@@ -53,8 +53,8 @@ This spec does **not** modify the parent assessment folder
       `test_catalog_trigger_category.py` to avoid colliding with existing catalog test files)
     - _Requirements: 1.1_
 
-- [ ] 2. Relocate `digital_input` to Triggers and extend the validator (C2, C4)
-  - [ ] 2.1 Relocate `digital_input` to `CATEGORY_TRIGGER` (metadata-only)
+- [x] 2. Relocate `digital_input` to Triggers and extend the validator (C2, C4)
+  - [x] 2.1 Relocate `digital_input` to `CATEGORY_TRIGGER` (metadata-only)
     - In `edge-cv-portal/backend/layers/workflow_core/python/workflow_core/catalog/nodes.py`,
       change only the `DIGITAL_INPUT` descriptor's `category` from `CATEGORY_INPUT` to
       `CATEGORY_TRIGGER`; leave `pin`, `trigger_edge`, `poll_interval_ms`, the single
@@ -66,7 +66,7 @@ This spec does **not** modify the parent assessment folder
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 6.5_
     - _Property: P2, P7_
 
-  - [ ] 2.2 Widen V1/V5 root set and add the `V7_STAGE_ORDER` check
+  - [x] 2.2 Widen V1/V5 root set and add the `V7_STAGE_ORDER` check
     - In `edge-cv-portal/backend/layers/workflow_core/python/workflow_core/validator/checks.py`,
       widen the V1 presence test from `CATEGORY_INPUT in categories` to
       `categories & {CATEGORY_INPUT, CATEGORY_TRIGGER}`, and widen the V5 reachability roots
@@ -91,8 +91,8 @@ This spec does **not** modify the parent assessment folder
       V5 (2.7, 4.5)
     - _Requirements: 2.2, 2.3, 2.4, 4.2, 4.3, 4.4, 4.5, 2.7_
 
-- [ ] 3. Add the `Unified_Input_Node` descriptor and source-kind map (C3)
-  - [ ] 3.1 Add `SOURCE_KIND_TO_SOURCE_TYPE` and the `UNIFIED_INPUT` descriptor
+- [x] 3. Add the `Unified_Input_Node` descriptor and source-kind map (C3)
+  - [x] 3.1 Add `SOURCE_KIND_TO_SOURCE_TYPE` and the `UNIFIED_INPUT` descriptor
     - In `catalog/nodes.py`, add `SOURCE_KIND_TO_SOURCE_TYPE = {"csi_camera":
       "csi_camera_source", "icam": "icam_source", "aravis_camera": "aravis_camera_source",
       "folder": "folder_source"}` (excludes `digital_input`, satisfying 3.3)
@@ -123,8 +123,8 @@ This spec does **not** modify the parent assessment folder
       source descriptors and `mqtt_publish`/`opcua_write` descriptors are unchanged (3.2, 6.4)
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.7, 6.4_
 
-- [ ] 4. Add the compiler `expand_unified_inputs` pre-pass (C5)
-  - [ ] 4.1 Implement `expand_unified_inputs` and wire it into `compile()`
+- [x] 4. Add the compiler `expand_unified_inputs` pre-pass (C5)
+  - [x] 4.1 Implement `expand_unified_inputs` and wire it into `compile()`
     - In `edge-cv-portal/backend/layers/workflow_core/python/workflow_core/compiler/compiler.py`,
       add `expand_unified_inputs(graph, catalog)` returning a **new** `WorkflowGraph` (never
       mutating the input): each `unified_input` node becomes a synthetic node with the **same
@@ -153,15 +153,15 @@ This spec does **not** modify the parent assessment folder
       the unified graph
     - _Requirements: 3.6, 3.8, 3.9_
 
-- [ ] 5. Frontend designer support (C6)
-  - [ ] 5.1 Mirror the catalog constants in `types.ts`
+- [x] 5. Frontend designer support (C6)
+  - [x] 5.1 Mirror the catalog constants in `types.ts`
     - In `edge-cv-portal/frontend/src/pages/workflows/types.ts`, add
       `export const CATEGORY_TRIGGER = 'trigger';` and place it **first** in the `CATEGORIES`
       array (`NodeCategory` derives from it); add a mirrored `SOURCE_KIND_TO_SOURCE_TYPE`
       constant matching the Python map for gating
     - _Requirements: 1.3_
 
-  - [ ] 5.2 Add the Triggers palette section and preserve saved-graph rendering
+  - [x] 5.2 Add the Triggers palette section and preserve saved-graph rendering
     - In `builderGraph.ts` `CATEGORY_META`, add a `trigger: { label: 'Triggers', color: … }`
       entry so the Triggers section has a label/color (avoids the `UNKNOWN_CATEGORY_META`
       fallback); rely on `NodePalette.tsx` already mapping `CATEGORIES` in order so `trigger`
@@ -171,20 +171,20 @@ This spec does **not** modify the parent assessment folder
       mutation of the stored definition (no migration)
     - _Requirements: 1.4, 5.1, 5.2, 2.6_
 
-  - [ ] 5.3 Gate `source_kind` parameters in `NodeConfigPanel.tsx`
+  - [x] 5.3 Gate `source_kind` parameters in `NodeConfigPanel.tsx`
     - For a `unified_input` node, compute visible parameters as `source_kind` plus the parameter
       names of `SOURCE_KIND_TO_SOURCE_TYPE[source_kind]`'s served descriptor; reuse the existing
       per-field rendering; keep `source_kind` always visible
     - _Requirements: 5.3_
 
-  - [ ] 5.4 Render and wire the activation port in `BuilderNodeComponent.tsx`
+  - [x] 5.4 Render and wire the activation port in `BuilderNodeComponent.tsx`
     - Render the optional `activation` `EventSignal` input port on the unified node and allow a
       `CATEGORY_TRIGGER` output → activation-port edge; verify the existing
       `connectionRejectionReason`/`incompatibilityReason` path already accepts
       EventSignal↔EventSignal (no rule change needed)
     - _Requirements: 5.4_
 
-  - [ ] 5.5 Widen `inlineChecks.ts` roots and add the stage-order mirror
+  - [x] 5.5 Widen `inlineChecks.ts` roots and add the stage-order mirror
     - Widen `checkV5` roots to `CATEGORY_INPUT ∪ CATEGORY_TRIGGER` and add a target-is-trigger
       stage-order mirror so inline markers match the backend validator findings for the same
       graph, including stage-ordering findings
@@ -198,7 +198,7 @@ This spec does **not** modify the parent assessment folder
       (5.4); and `types.ts` mirror defines `CATEGORY_TRIGGER` in `CATEGORIES` (1.3)
     - _Requirements: 1.3, 1.4, 5.1, 5.2, 5.3, 5.4_
 
-- [ ] 6. Checkpoint - Ensure catalog, validator, compiler, and designer are consistent
+- [x] 6. Checkpoint - Ensure catalog, validator, compiler, and designer are consistent
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 7. Property-based tests for P1–P7
@@ -262,7 +262,7 @@ This spec does **not** modify the parent assessment folder
     - **Property 7: Catalog copies stay byte-identical**
     - _Requirements: 1.2, 6.5_
 
-- [ ] 8. Checkpoint - Run the full suite across portal, device-vendored mirror, and frontend
+- [~] 8. Checkpoint - Run the full suite across portal, device-vendored mirror, and frontend
   - Run the portal catalog suite: `cd edge-cv-portal/backend && python3 -m pytest layers/workflow_core/tests/`
   - Run the portal backend suite: `cd edge-cv-portal/backend && python3 -m pytest tests/`
   - Run the device vendored-mirror test:
@@ -275,7 +275,7 @@ This spec does **not** modify the parent assessment folder
     `test_property_aravis_type_compatibility`; and the `awsiot`/`panorama` collection errors
   - Ensure all other tests pass, ask the user if questions arise.
 
-- [ ] 9. Deploy the portal (portal-side; no device / LocalServer build) — REQUIRES USER COORDINATION
+- [~] 9. Deploy the portal (portal-side; no device / LocalServer build) — REQUIRES USER COORDINATION
   - This change is portal + designer only; it goes live via a **portal deploy**. Sub-feature A
     introduces no device-runtime change, so **no** device / LocalServer gdk build is required
     and none should be run

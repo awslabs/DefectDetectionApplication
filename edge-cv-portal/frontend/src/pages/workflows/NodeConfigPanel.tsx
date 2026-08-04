@@ -93,7 +93,13 @@ import {
 } from './importAnalyzer';
 import { checkParameterValue } from './parameters';
 import { canEditWorkflows } from './WorkflowToolbar';
-import { PORT_TYPES, type JsonValue, type ParameterDescriptor } from './types';
+import {
+  PORT_TYPES,
+  SOURCE_KIND_TO_SOURCE_TYPE,
+  type JsonValue,
+  type NodeTypeDescriptor,
+  type ParameterDescriptor,
+} from './types';
 
 // --------------------------------------------------------------------------
 // Parameter value helpers
@@ -137,6 +143,67 @@ export function isParameterVisible(
     return true;
   }
   return effectiveParameterValue(parameters, controlling) === true;
+}
+
+// --------------------------------------------------------------------------
+// Unified input source-parameter gating (Requirement 5.3)
+// --------------------------------------------------------------------------
+
+/**
+ * The unified input node type whose visible parameter set is driven by
+ * the selected `source_kind` rather than by bool `dependsOn` gating.
+ */
+export const UNIFIED_INPUT_TYPE_ID = 'unified_input';
+
+/** The unified input node's source-selector (enum) parameter. */
+export const SOURCE_KIND_PARAMETER = 'source_kind';
+
+/**
+ * The effective `source_kind` of a unified_input node: the explicitly
+ * set value when present, else the `source_kind` parameter's declared
+ * default (e.g. `"folder"`). Returns null when the node is not a
+ * unified_input node or carries no string source_kind value.
+ */
+export function unifiedSourceKind(node: BuilderNode): string | null {
+  if (node.data.descriptor.typeId !== UNIFIED_INPUT_TYPE_ID) {
+    return null;
+  }
+  const descriptor = node.data.descriptor.parameters.find(
+    (parameter) => parameter.name === SOURCE_KIND_PARAMETER
+  );
+  const effective =
+    descriptor !== undefined
+      ? effectiveParameterValue(node.data.parameters, descriptor)
+      : node.data.parameters[SOURCE_KIND_PARAMETER];
+  return typeof effective === 'string' ? effective : null;
+}
+
+/**
+ * The parameter names visible on a unified_input node: `source_kind`
+ * plus exactly the parameter names of the served catalog descriptor for
+ * the source type its `source_kind` expands to
+ * (`SOURCE_KIND_TO_SOURCE_TYPE`). Returns null for non-unified nodes so
+ * the caller leaves their visibility unchanged. While the served
+ * catalog has not yet loaded (or the mapped source descriptor is
+ * absent) only `source_kind` is returned, so the selector always shows.
+ */
+export function unifiedVisibleParameterNames(
+  node: BuilderNode,
+  catalog: NodeTypeDescriptor[]
+): Set<string> | null {
+  const sourceKind = unifiedSourceKind(node);
+  if (sourceKind === null) {
+    return null;
+  }
+  const visible = new Set<string>([SOURCE_KIND_PARAMETER]);
+  const sourceType = (SOURCE_KIND_TO_SOURCE_TYPE as Record<string, string>)[sourceKind];
+  const sourceDescriptor = catalog.find((entry) => entry.typeId === sourceType);
+  if (sourceDescriptor !== undefined) {
+    for (const parameter of sourceDescriptor.parameters) {
+      visible.add(parameter.name);
+    }
+  }
+  return visible;
 }
 
 /**
@@ -660,6 +727,44 @@ function useModelOptions(typeId: string | null): ModelOptionsState {
   }, [typeId, selectedUsecaseId]);
 
   return state;
+}
+
+/**
+ * The served node catalog, fetched only while a unified_input node is
+ * selected (`enabled`) so its underlying source descriptors are
+ * available for source-parameter gating (Requirement 5.3). Reuses the
+ * same node-catalog endpoint the Workflow_Builder loads the palette
+ * from, keyed by the selected Use_Case so any registered Custom_Node_
+ * Types are merged in identically. Returns an empty list until loaded
+ * or on failure; the gate then shows only `source_kind`.
+ */
+function useNodeCatalog(enabled: boolean): NodeTypeDescriptor[] {
+  const { selectedUsecaseId } = useUsecase();
+  const [catalog, setCatalog] = useState<NodeTypeDescriptor[]>([]);
+
+  useEffect(() => {
+    if (!enabled) {
+      return undefined;
+    }
+    let cancelled = false;
+    apiService
+      .getWorkflowNodeCatalog(selectedUsecaseId || undefined)
+      .then((response) => {
+        if (!cancelled) {
+          setCatalog(response.nodeTypes ?? []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCatalog([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, selectedUsecaseId]);
+
+  return catalog;
 }
 
 // --------------------------------------------------------------------------
@@ -1209,6 +1314,11 @@ export default function NodeConfigPanel({
   // Requirements 6.2, 8.3): llm_inference lists only vLLM records,
   // every other model_ref consumer excludes them.
   const modelOptions = useModelOptions(needsModels && node ? node.data.descriptor.typeId : null);
+  // Served catalog for unified_input source-parameter gating (Requirement
+  // 5.3): fetched only while a unified_input node is selected so its
+  // underlying source descriptor's parameter names can drive visibility.
+  const isUnifiedInput = node?.data.descriptor.typeId === UNIFIED_INPUT_TYPE_ID;
+  const nodeCatalog = useNodeCatalog(isUnifiedInput);
   const { selectedUsecaseId } = useUsecase();
 
   // Debounced Import_Analyzer on the effective `code` value of the
@@ -1227,6 +1337,12 @@ export default function NodeConfigPanel({
   // workflow-editing roles (6.1, 6.5).
   const codeAssistContract: CodeAssistContract | undefined =
     CODE_ASSIST_CONTRACTS[descriptor.typeId];
+
+  // For a unified_input node the visible parameters are source_kind plus
+  // exactly the served descriptor's parameters for the source type its
+  // source_kind expands to (Requirement 5.3); null for every other node
+  // type, leaving their dependsOn-based visibility unchanged.
+  const unifiedVisibleNames = unifiedVisibleParameterNames(node, nodeCatalog);
 
   return (
     <aside
@@ -1272,7 +1388,11 @@ export default function NodeConfigPanel({
           <Box color="text-body-secondary">This node has no configurable parameters.</Box>
         ) : (
           descriptor.parameters
-            .filter((parameter) => isParameterVisible(parameter, descriptor.parameters, parameters))
+            .filter(
+              (parameter) =>
+                isParameterVisible(parameter, descriptor.parameters, parameters) &&
+                (unifiedVisibleNames === null || unifiedVisibleNames.has(parameter.name))
+            )
             .map((parameter) =>
               isCameraReferenceParameter(descriptor.typeId, parameter.name) ? (
                 // The icam_source device parameter and the

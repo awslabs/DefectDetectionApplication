@@ -22,6 +22,7 @@ from workflow_core.catalog import (
     CATEGORY_OUTPUT,
     CATEGORY_POST_PROCESSING,
     CATEGORY_PREPROCESSING,
+    CATEGORY_TRIGGER,
     NODE_CATALOG,
     PORT_TYPE_EVENT_SIGNAL,
     PORT_TYPE_INFERENCE_META,
@@ -45,14 +46,22 @@ def _port_types(ports):
 
 class TestInputNodeTypes:
     def test_required_input_types_present(self):
-        for type_id in ("csi_camera_source", "icam_source", "folder_source",
-                        "digital_input"):
+        for type_id in ("csi_camera_source", "icam_source", "folder_source"):
             descriptor = get_node_type(type_id)
             assert descriptor is not None, type_id
             assert descriptor.category == CATEGORY_INPUT
             # Input nodes originate data: no input ports, at least one output.
             assert descriptor.inputs == []
             assert len(descriptor.outputs) >= 1
+
+    def test_digital_input_relocated_to_triggers(self):
+        # triggers-stage-and-unified-input: digital_input moved from
+        # CATEGORY_INPUT to CATEGORY_TRIGGER (metadata-only relocation).
+        descriptor = get_node_type("digital_input")
+        assert descriptor is not None
+        assert descriptor.category == CATEGORY_TRIGGER
+        assert descriptor.inputs == []
+        assert len(descriptor.outputs) >= 1
 
     def test_csi_camera_source_parameterization(self):
         # csi-icam-input-nodes Requirements 1.1, 1.2: gain/exposure only,
@@ -760,6 +769,7 @@ class TestCatalogCoverage:
         "model_inference", "bedrock_inference", "llm_inference",
         "custom_python", "inference_filter", "conditional",
         "digital_output", "mqtt_publish", "opcua_write", "capture",
+        "unified_input",
     }
 
     def test_catalog_contains_exactly_the_expected_types(self):
@@ -768,8 +778,8 @@ class TestCatalogCoverage:
     def test_every_palette_section_is_populated(self):
         grouped = nodes_by_category()
         assert set(grouped) == {
-            CATEGORY_INPUT, CATEGORY_PREPROCESSING, CATEGORY_INFERENCE,
-            CATEGORY_POST_PROCESSING, CATEGORY_OUTPUT,
+            CATEGORY_TRIGGER, CATEGORY_INPUT, CATEGORY_PREPROCESSING,
+            CATEGORY_INFERENCE, CATEGORY_POST_PROCESSING, CATEGORY_OUTPUT,
         }
         for category, descriptors in grouped.items():
             assert descriptors, category
