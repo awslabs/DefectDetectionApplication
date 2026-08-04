@@ -113,11 +113,39 @@ class TestDeviceCompilation:
         }
         parameters = binding["parameters"]
         assert parameters["model"] == "us.amazon.nova-lite-v1:0"
-        assert '"is_anomalous"' in parameters["prompt"]
+        # The default prompt carries only the comparison semantics; the
+        # executor appends the canonical JSON instruction in anomaly
+        # mode (bedrock-response-mode design).
+        assert "meaningfully differs" in parameters["prompt"]
+        # The response-mode toggle defaults to anomaly mode and is
+        # carried on the binding like every other parameter.
+        assert parameters["anomaly_mode"] is True
         assert parameters["region"] == "us-east-1"
         assert parameters["max_tokens"] == 256
         assert binding["upstreamNodeIds"] == ["cam", "ref"]
         assert binding["downstreamNodeIds"] == ["mqtt"]
+
+    def test_binding_carries_explicit_freeform_anomaly_mode(self):
+        # A node configured with anomaly_mode unchecked (freeform mode)
+        # compiles to a binding carrying the explicit False — the
+        # compiler copies parameters generically, no special-casing.
+        graph = _graph(
+            nodes=[
+                _node("cam", "icam_source"),
+                _node("ref", "folder_source",
+                      location="/aws_dda/ref/golden.jpg"),
+                _node("bedrock", "bedrock_inference", anomaly_mode=False),
+                _node("mqtt", "mqtt_publish", broker_host="10.0.0.12",
+                      topic="factory/line1"),
+            ],
+            connections=[
+                _connect("c1", ("cam", "out"), ("bedrock", "in")),
+                _connect("c2", ("ref", "out"), ("bedrock", "reference")),
+                _connect("c3", ("bedrock", "out"), ("mqtt", "in")),
+            ],
+        )
+        binding = _bedrock_binding(_compile_ok(graph))
+        assert binding["parameters"]["anomaly_mode"] is False
 
     def test_every_node_is_referenced_exactly_once(self):
         document = _compile_ok(two_source_graph())

@@ -3,12 +3,12 @@
     "edge-cv-portal/infrastructure/cdk.out/asset.059ba3c3f5e38ab1b92a54c9676715959ad324a82455d4730fad64a53d4c586a/audit_logs.py": "6d35b01067e9caa86d74a6913a189d974472fcbfd0dd5212c1c80ed4efb127b3"
   },
   "missing_at_capture": [],
-  "note": "Out-of-scope preservation guard for security-iam-authorization-fixes (Req 3.18). These files belong to sibling specs / generated build artifacts and MUST remain byte-for-byte unchanged by this spec.",
+  "note": "Out-of-scope preservation guard for security-iam-authorization-fixes (Req 3.18). These files belong to sibling specs / generated build artifacts and MUST remain byte-for-byte unchanged by this spec. Rebaselined: packaging.py hash updated after the completed vllm-model-name-mismatch spec intentionally added the model_naming import + _safe_model_name delegation (verified diff contains only that edit).",
   "sibling_spec_files": {
     "edge-cv-portal/backend/functions/components.py": "1edaa4877553c9bd9bbd7c03c13659c7fe66abfb57f5312fc5f4ba62113101af",
     "edge-cv-portal/backend/functions/jwt_authorizer.py": "a6346ca76c243e2c9978ee757d770f0cf2a180756a05bfc99f8abf58dceef876",
     "edge-cv-portal/backend/functions/model_converter.py": "1acab7c119908377dc6d315685126492075be0165c8dea51b5594762b2dc2738",
-    "edge-cv-portal/backend/functions/packaging.py": "03ed07a014e1fc0ed3b45d7589cba1ef72bfc4f8d1e4e1a22921edd7c990f142",
+    "edge-cv-portal/backend/functions/packaging.py": "622762b27a5774245f05ae1204ccf01f2df12d0bbb4211ca1cc464d5441c58de",
     "src/backend/app.py": "d697bafe32d514e79a2f703284b4843627c07ac297ab66ea6278b783f3fe6842",
     "src/backend/snapshot/Snapshotter.py": "a99ffc761450606da95ccea51ddd2e78dbe300997673a556b419ca3fdd8ffd2b",
     "src/backend/utils/camera_manager.py": "d88b1f3fc1f95b8ddc098a6a7eb4edf10fc7da82d5d356f14c7c31dc0b7cac59",

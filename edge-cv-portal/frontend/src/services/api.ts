@@ -172,6 +172,54 @@ export interface VllmPublishedComponent {
   published_at: number;
 }
 
+// vLLM engine-configuration types (vllm-sizing-and-packaging-errors).
+
+/**
+ * The resolved Engine_Configuration stored on a vLLM_Model_Record
+ * (dtype, gpu_memory_utilization, max_model_len, tensor_parallel_size,
+ * enforce_eager). Returned on the model detail response (Requirement 1.2)
+ * and by the engine-configuration update endpoint (Requirement 2.4).
+ */
+export type VllmEngineConfiguration = Record<string, string | number | boolean>;
+
+/** One per-architecture finding of a preflight Fit_Check evaluation. */
+export interface VllmFitCheckFinding {
+  arch: string;
+  fits: boolean;
+  budget_bytes: number;
+  required_bytes: number;
+  message: string;
+}
+
+/**
+ * Non-blocking Fit_Check result carried on registration and
+ * engine-configuration update responses (Requirements 3.4, 3.5).
+ */
+export interface VllmFitCheckResult {
+  status: 'passed' | 'warnings' | 'unverified';
+  estimate: {
+    total_bytes: number;
+    method: string;
+    detail: string;
+  } | null;
+  findings: VllmFitCheckFinding[];
+  message?: string;
+}
+
+/**
+ * Response of `PUT /api/v1/models/vllm/{training_id}/engine-configuration`
+ * (model_import.py update_vllm_engine_configuration): the complete updated
+ * configuration, a re-package/publish notice, and a fit-check result
+ * (Requirements 2.4, 3.5). A 400 rejection carries the finding list as
+ * `details.findings` on the thrown ApiError (Requirement 2.2).
+ */
+export interface VllmEngineConfigurationUpdateResponse {
+  training_id: string;
+  engine_configuration: VllmEngineConfiguration;
+  notice: string;
+  fit_check: VllmFitCheckResult;
+}
+
 // Station Quick Setup types (station-quick-setup).
 
 /** Lifecycle state of a Device_Registration (Setup_Status). */
@@ -2108,6 +2156,9 @@ class ApiService {
         supported_architectures?: string[];
       }>;
       published_component?: VllmPublishedComponent;
+      // Stored Engine_Configuration, present for vLLM records only
+      // (models.py get_model, Requirement 1.2).
+      engine_configuration?: VllmEngineConfiguration | null;
       validation_result?: Record<string, unknown>;
       hyperparameters?: Record<string, unknown>;
       instance_type?: string;
@@ -2232,6 +2283,24 @@ class ApiService {
   /** Documented vLLM engine settings, defaults, and accepted ranges. */
   async getVllmEngineSpec(): Promise<VllmEngineSpec> {
     return this.request('/models/vllm/engine-spec');
+  }
+
+  /**
+   * Update the stored Engine_Configuration of a registered vLLM model
+   * (vllm-sizing-and-packaging-errors, Requirements 2.1–2.4). Supplied
+   * settings are validated against the registration rules and overlaid
+   * onto the stored configuration; a 400 rejection carries the per-field
+   * finding list as `details.findings` on the thrown ApiError. The change
+   * takes effect only after the model is packaged and published again.
+   */
+  async updateVllmEngineConfiguration(
+    trainingId: string,
+    engineConfiguration: VllmEngineConfiguration
+  ): Promise<VllmEngineConfigurationUpdateResponse> {
+    return this.request(`/models/vllm/${trainingId}/engine-configuration`, {
+      method: 'PUT',
+      body: JSON.stringify({ engine_configuration: engineConfiguration }),
+    });
   }
 
   // Model Converter endpoints (Smart Import)

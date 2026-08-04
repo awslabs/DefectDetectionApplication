@@ -357,6 +357,12 @@ def get_model(event: Dict, context: Any) -> Dict:
             'dataset_manifest_s3': item.get('dataset_manifest_s3'),
         }
         
+        # Expose the stored vLLM engine configuration on the detail response
+        # (vllm-sizing-and-packaging-errors, Req 1.2). `item` has already been
+        # passed through decimal_to_native, so the values are JSON-safe.
+        if source == 'vllm' or item.get('model_type') == 'vllm':
+            model['engine_configuration'] = item.get('engine_configuration')
+        
         return create_response(200, {'model': model})
         
     except Exception as e:

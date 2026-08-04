@@ -576,13 +576,13 @@ MODEL_INFERENCE = NodeTypeDescriptor(
     hardware_dependent=True,
 )
 
-#: Default comparison prompt for the Bedrock Inference node. The model
-#: must answer with the JSON shape the shared condition evaluator
-#: consumes ({is_anomalous, confidence}).
+#: Default comparison prompt for the Bedrock Inference node. Carries the
+#: comparison semantics only: in anomaly mode the executor auto-appends
+#: the canonical JSON-format instruction ({is_anomalous, confidence}),
+#: so the prompt itself no longer needs to spell out the answer shape.
 BEDROCK_DEFAULT_PROMPT = (
-    "Compare the input image to the reference image. Respond with JSON: "
-    '{"is_anomalous": true|false, "confidence": 0..1} where is_anomalous '
-    "is true when the input meaningfully differs from the reference."
+    "Compare the input image to the reference image; is_anomalous is "
+    "true when the input meaningfully differs from the reference."
 )
 
 BEDROCK_INFERENCE = NodeTypeDescriptor(
@@ -615,15 +615,41 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                             default=BEDROCK_DEFAULT_PROMPT,
                             constraints={"min_length": 1},
                             description="Instruction sent to the model with "
-                                        "both images. The model must answer "
-                                        "with JSON of the shape "
-                                        '{"is_anomalous": true|false, '
-                                        '"confidence": 0..1}; those fields '
-                                        "become the inference metadata "
-                                        "(is_anomalous, confidence) driving "
-                                        "downstream filters, conditionals, "
-                                        "and outputs.",
+                                        "both images. In anomaly mode the "
+                                        "executor automatically appends the "
+                                        "JSON-format instruction "
+                                        '({"is_anomalous": true|false, '
+                                        '"confidence": 0..1}) and those '
+                                        "fields become the inference "
+                                        "metadata (is_anomalous, "
+                                        "confidence) driving downstream "
+                                        "filters, conditionals, and "
+                                        "outputs; in freeform mode the "
+                                        "prompt is sent as-is.",
                             examples=[BEDROCK_DEFAULT_PROMPT]),
+        # Response mode toggle: checked (default) keeps today's anomaly
+        # JSON verdict contract — the executor appends the canonical
+        # JSON instruction to the prompt and merges the parsed
+        # {is_anomalous, confidence} into the run metadata. Unchecked
+        # switches the node to freeform: the prompt is sent unchanged
+        # and the raw model text is recorded as bedrock_text plus
+        # bedrock.{nodeId}.text with no JSON parsing.
+        ParameterDescriptor("anomaly_mode", "bool", required=False,
+                            default=True,
+                            constraints={},
+                            description="Checked: anomaly mode — the "
+                                        "executor auto-appends the JSON "
+                                        "instruction and the model's "
+                                        "verdict (is_anomalous, "
+                                        "confidence) drives downstream "
+                                        "filters, conditionals, and "
+                                        "outputs. Unchecked: freeform mode "
+                                        "— the prompt is sent as-is and "
+                                        "the raw model text is recorded in "
+                                        "the run metadata as bedrock_text "
+                                        "(and bedrock.{nodeId}.text), with "
+                                        "no JSON parsing.",
+                            examples=[True, False]),
         ParameterDescriptor("region", "string", required=False,
                             default="us-east-1",
                             constraints={"min_length": 1},

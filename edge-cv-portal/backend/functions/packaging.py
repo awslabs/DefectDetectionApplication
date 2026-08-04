@@ -34,6 +34,11 @@ from shared_utils import (
     is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
 )
 
+# Shared model-name sanitization transform (same functions bundle):
+# single source of truth for the packaged/served name alignment
+# (vllm-model-name-mismatch Requirement 2.2).
+from model_naming import safe_model_name
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -357,8 +362,9 @@ def _safe_model_name(model_name: str) -> str:
     """Sanitized model name — same transform _trigger_component_creation uses
     to derive `model-{safe_model_name}` component names, reused here so the
     repository directory matches the eventual `model-vllm-{safe_model_name}`
-    component naming."""
-    return re.sub(r'[^a-zA-Z0-9-]', '-', str(model_name).lower())
+    component naming. Delegates to the shared single source of truth
+    (model_naming.safe_model_name, vllm-model-name-mismatch 2.2)."""
+    return safe_model_name(model_name)
 
 
 # Repository-relative sentinel written as the vLLM "model" reference for

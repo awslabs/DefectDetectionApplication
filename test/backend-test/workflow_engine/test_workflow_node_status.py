@@ -195,6 +195,46 @@ class TestTerminalMapOnFailure:
         assert parsed["n1"] == {"status": STATUS_SUCCESS}
 
 
+class TestSetDetail:
+    """set_detail records a sent-message/skipped detail without changing
+    status (output-node-sent-message feature)."""
+
+    def test_records_detail_for_tracked_node_without_changing_status(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        before = collector.status_of("n2")
+        collector.set_detail("n2", "sent to topic 't' (qos 0, plain): {}")
+        assert collector.status_of("n2") == before  # status unchanged
+        assert collector.to_map()["n2"]["detail"] == (
+            "sent to topic 't' (qos 0, plain): {}"
+        )
+
+    def test_untracked_node_is_a_noop(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.set_detail("does-not-exist", "ignored")
+        assert "does-not-exist" not in collector.to_map()
+
+    def test_none_node_and_empty_detail_are_noops(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.set_detail(None, "ignored")
+        collector.set_detail("n1", None)
+        collector.set_detail("n1", "")
+        assert "detail" not in collector.to_map()["n1"]
+
+    def test_never_overwrites_a_failure_detail(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.mark_failure("n2", "publish failed: broker unreachable")
+        collector.set_detail("n2", "sent to topic 't'")
+        entry = collector.to_map()["n2"]
+        assert entry["status"] == STATUS_FAILURE
+        assert entry["detail"] == "publish failed: broker unreachable"
+
+    def test_is_contained(self):
+        # A broken internals state must not raise out of set_detail.
+        collector = NodeStatusCollector(NAME_MAP)
+        collector._statuses = None  # force an internal error
+        collector.set_detail("n1", "detail")  # swallowed, no exception
+
+
 # --- Executor integration ----------------------------------------------------
 
 

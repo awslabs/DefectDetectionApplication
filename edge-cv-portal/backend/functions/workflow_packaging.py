@@ -58,6 +58,7 @@ a Workflow_Component never restarts LocalServer or any other component
 """
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import os
@@ -105,6 +106,11 @@ from plugin_records import get_version_item as get_plugin_record_version
 # the same registry view workflow_validation.py validates them against
 # (edge-deploy-reliability Requirement 2.8).
 from model_registry_snapshot import build_model_registry_snapshot
+# Shared model-name sanitization transform (same bundle): the ONE transform
+# greengrass_publish.py / packaging.py derive the served vLLM model name
+# with, applied here to each llm_inference node's packaged modelName so the
+# packaged name equals the served name (vllm-model-name-mismatch 2.1, 2.2).
+from model_naming import safe_model_name
 
 # Configure logging
 logger = logging.getLogger()
@@ -240,6 +246,25 @@ ARCH_TO_LOCAL_SERVER_COMPONENT = {
     ARCH_ARM64_JP6: 'aws.edgeml.dda.LocalServer.arm64JP6',
     ARCH_X86_64: 'aws.edgeml.dda.LocalServer.amd64',
     ARCH_X86_64_NVIDIA: 'aws.edgeml.dda.LocalServer.amd64',
+}
+
+# arch id (workflow_core) -> greengrass_publish.py compile-target id, for
+# reading the VISION publish shape: greengrass_publish.py writes one
+# ``published_components`` entry per compile target (``{component_name,
+# target, component_version, status}``), so resolving a vision model's
+# component name(s) for the selected architectures means matching entries
+# on these target ids (vision-model-packaging-regression 2.2). Values are
+# the exact TARGET_TO_LOCAL_SERVER / TARGET_TO_PLATFORM keys in
+# greengrass_publish.py ('jetson-xavier' is the legacy JetPack 4 id;
+# x86_64/x86_64_nvidia publish as the 'x86_64-cpu'/'x86_64-cuda' targets).
+# Same fail-closed discipline as ARCH_TO_LOCAL_SERVER_COMPONENT: an
+# unknown arch raises instead of guessing a target.
+ARCH_TO_PUBLISH_TARGET = {
+    ARCH_ARM64_JP4: 'jetson-xavier',
+    ARCH_ARM64_JP5: 'jetson-xavier-jp5',
+    ARCH_ARM64_JP6: 'jetson-xavier-jp6',
+    ARCH_X86_64: 'x86_64-cpu',
+    ARCH_X86_64_NVIDIA: 'x86_64-cuda',
 }
 
 # Where the LocalServer workflow engine discovers artifacts (13.3)
@@ -708,14 +733,18 @@ def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
 
 
 def compiled_document_json(compiled, binding_points: List[Dict]) -> str:
-    """compiled_pipeline.json content: the canonical compiler output plus
-    the ``bindingPoints`` section when the workflow has Camera_Input_Nodes.
-    With no camera nodes the output is byte-identical to the compiler's
-    own serialization (Requirement 11.5)."""
-    if not binding_points:
+    """compiled_pipeline.json content: the canonical compiler output with
+    each ``llm_inference`` executor binding's ``modelName`` rewritten to
+    the sanitized served name (vllm-model-name-mismatch 2.1), plus the
+    ``bindingPoints`` section when the workflow has Camera_Input_Nodes.
+    With no camera nodes and no llm rewrite the output is byte-identical
+    to the compiler's own serialization (camera-registry-sync 11.5;
+    vllm-model-name-mismatch 3.1, 3.2)."""
+    document, changed = rewrite_compiled_llm_model_names(compiled.to_dict())
+    if not binding_points and not changed:
         return compiled.to_json()
-    document = compiled.to_dict()
-    document['bindingPoints'] = binding_points
+    if binding_points:
+        document['bindingPoints'] = binding_points
     return json.dumps(document, sort_keys=True, indent=2, ensure_ascii=True)
 
 
@@ -986,6 +1015,91 @@ def llm_arch_gate_findings(definition: Dict, requested_archs: List[str]) -> List
     return findings
 
 
+# --------------------------------------------------------------------------
+# Packaged/served vLLM model name alignment
+# (vllm-model-name-mismatch Requirements 2.1, 2.2, 3.1, 3.2, 3.3)
+#
+# The publish pipeline serves a vLLM model under the SANITIZED registry
+# name (model_naming.safe_model_name), so the packaged artifacts must
+# carry each llm_inference node's modelName as that served name — a
+# verbatim registry name like 'Qwen2.5-7B-Instruct-AWQ' guarantees a 409
+# from the device Text_Generation_API. Both rewrites below are pure,
+# copy-on-write, and keyed STRICTLY on the llm node type: no other node
+# type or parameter is ever touched (3.2), stable names are a no-op
+# (3.1), and the ORIGINAL definition keeps feeding
+# gather_model_references so Model_Registry resolution stays keyed by
+# the original registry names (3.3).
+# --------------------------------------------------------------------------
+
+def rewrite_llm_model_names(definition: Dict,
+                            descriptors_by_id: Optional[Dict] = None) -> Dict:
+    """A deep-copied definition with each ``llm_inference`` node's
+    EFFECTIVE ``modelName`` — the explicitly set value when present, else
+    the descriptor default (the validator's effective-value rule) —
+    replaced by ``safe_model_name(value)``. Definitions without an
+    ``llm_inference`` node come back equal to the input."""
+    default = None
+    descriptor = (descriptors_by_id or {}).get(LLM_INFERENCE_TYPE_ID)
+    if descriptor is not None:
+        for parameter in descriptor.parameters:
+            if parameter.name == 'modelName':
+                default = parameter.default
+                break
+    rewritten = copy.deepcopy(definition)
+    for node in rewritten.get('nodes') or []:
+        if not isinstance(node, dict) or node.get('type') != LLM_INFERENCE_TYPE_ID:
+            continue
+        parameters = node.get('parameters')
+        if not isinstance(parameters, dict):
+            parameters = {}
+        value = parameters['modelName'] if 'modelName' in parameters else default
+        if isinstance(value, str) and value:
+            parameters['modelName'] = safe_model_name(value)
+            node['parameters'] = parameters
+    return rewritten
+
+
+def rewrite_compiled_llm_model_names(document: Dict) -> Tuple[Dict, bool]:
+    """``(document, changed)``: a compiled pipeline document with each
+    ``llm_inference`` executor binding's ``modelName`` replaced by
+    ``safe_model_name(value)``. Copy-on-write: when no binding needs a
+    rewrite the input document is returned untouched with ``changed``
+    False, so unaffected workflows keep their byte-identical
+    serialization path."""
+    def _bindings(doc):
+        bindings = doc.get('executorBindings')
+        for binding in bindings if isinstance(bindings, list) else []:
+            if not isinstance(binding, dict) or \
+                    binding.get('binding') != LLM_INFERENCE_TYPE_ID:
+                continue
+            parameters = binding.get('parameters')
+            if isinstance(parameters, dict):
+                yield parameters
+
+    if not any(isinstance(p.get('modelName'), str) and p['modelName']
+               and safe_model_name(p['modelName']) != p['modelName']
+               for p in _bindings(document)):
+        return document, False
+    rewritten = copy.deepcopy(document)
+    for parameters in _bindings(rewritten):
+        value = parameters.get('modelName')
+        if isinstance(value, str) and value:
+            parameters['modelName'] = safe_model_name(value)
+    return rewritten, True
+
+
+def packaged_workflow_definition_json(definition_json: str, definition_dict: Dict,
+                                      descriptors_by_id: Dict) -> str:
+    """The zip's ``workflow.json`` content: the stored definition with the
+    llm ``modelName`` rewrite applied. When the rewrite is a no-op the
+    stored ``definition_json`` string passes through byte-identically
+    (3.1, 3.2); only a changed definition is re-serialized."""
+    rewritten = rewrite_llm_model_names(definition_dict, descriptors_by_id)
+    if rewritten == definition_dict:
+        return definition_json
+    return json.dumps(rewritten, sort_keys=True, indent=2, ensure_ascii=True)
+
+
 def plugin_component_dependencies(dep_records: Dict[str, Optional[Dict]]) -> Dict:
     """The Greengrass ComponentDependencies block of the Workflow_Component
     recipe (16.4): one HARD dependency on dda.plugin.{pluginId} per distinct
@@ -1051,25 +1165,50 @@ def gather_model_references(definition: Dict, descriptors_by_id: Dict
     return references
 
 
-def resolve_model_components(model_names: List[str], usecase_id: str
-                             ) -> Dict[str, Dict]:
+def resolve_model_components(model_names: List[str], usecase_id: str,
+                             archs) -> Dict[str, Any]:
     """Resolve each referenced model name to its published Greengrass model
-    component through the Use_Case's Model_Registry — the same snapshot
+    component(s) through the Use_Case's Model_Registry — the same snapshot
     workflow_validation.py resolves ``model_ref`` parameters against
     (training-jobs table via ``usecase-training-index``, keyed by
     ``model_name``, plus the models-table published-name aliases).
 
-    Returns ``{model_name: published_component map}``; each map carries
-    ``component_name`` (``model-vllm-...`` for vLLM records, the
-    ``model-*`` component name for vision records, written by
-    greengrass_publish.py at publish time).
+    Both publish shapes are read (vision-model-packaging-regression
+    2.1/2.2):
+
+    - vLLM shape — ``published_component`` (singular map carrying an
+      arch-agnostic ``component_name``, written by the vLLM publish
+      path): resolved exactly as before; the map itself is the resolved
+      value.
+    - vision shape — ``published_components`` (plural, per-compile-target
+      list of ``{component_name, target, component_version, status}``
+      entries written by greengrass_publish.py): entries with
+      ``status == 'published'`` whose ``target`` matches one of the
+      selected architectures' publish targets (ARCH_TO_PUBLISH_TARGET)
+      contribute their names; the resolved value is that set of
+      component names. EVERY selected architecture must be covered by at
+      least one published entry, else PackagingError naming the model
+      AND the uncovered architecture/target (edge-deploy-reliability
+      Defect G, 2.19) — an accurate coverage error, unlike the
+      misleading 'publish the model' message, which survives only for
+      genuinely unpublished records (no singular component_name and no
+      plural entries at all).
+
+    Returns ``{model_name: resolved value}`` — the vLLM published map or
+    the vision set of component names — consumed by
+    model_component_dependencies.
 
     FAIL CLOSED, mirroring the plugin gates: a model with no registry
-    record or no published component raises PackagingError naming the
-    model — the existing all-or-nothing path, so no component version is
-    registered. When TRAINING_JOBS_TABLE is not configured the registry
-    does not exist (pre-feature environment; validation skips model-
-    reference resolution the same way) and model dependencies are skipped.
+    record, or no published component in either shape, raises
+    PackagingError naming the model — the existing all-or-nothing path,
+    so no component version is registered (2.5). A selected architecture
+    with no published vision entry raises naming the model and the
+    uncovered architecture (2.19), and an architecture with no known
+    publish target raises too (the ARCH_TO_LOCAL_SERVER_COMPONENT naming
+    discipline: never guess a target). When TRAINING_JOBS_TABLE is not
+    configured the registry does not exist (pre-feature environment;
+    validation skips model-reference resolution the same way) and model
+    dependencies are skipped.
     """
     if not model_names:
         return {}
@@ -1080,7 +1219,7 @@ def resolve_model_components(model_names: List[str], usecase_id: str
         return {}
     snapshot = build_model_registry_snapshot(usecase_id, TRAINING_JOBS_TABLE,
                                              MODELS_TABLE, dynamodb)
-    resolved: Dict[str, Dict] = {}
+    resolved: Dict[str, Any] = {}
     for name in model_names:
         label = f"models/{name}"
         record = snapshot.get(name)
@@ -1090,56 +1229,142 @@ def resolve_model_components(model_names: List[str], usecase_id: str
                 f"Model '{name}' referenced by the workflow has no record "
                 f"in the Use_Case model registry; it may have been removed "
                 f"since the workflow was validated")
+        # vLLM shape: singular published_component map — today's path.
         published = record.get('published_component')
         component_name = published.get('component_name') \
             if isinstance(published, dict) else None
-        if not isinstance(component_name, str) or not component_name:
+        if isinstance(component_name, str) and component_name:
+            resolved[name] = published
+            continue
+        # Vision shape: plural per-target published_components list.
+        published_entries = [
+            entry for entry in record.get('published_components') or []
+            if isinstance(entry, dict)
+            and entry.get('status') == 'published'
+            and isinstance(entry.get('component_name'), str)
+            and entry.get('component_name')]
+        if not published_entries:
             raise PackagingError(
                 label,
                 f"Model '{name}' referenced by the workflow has no "
                 f"published Greengrass component; publish the model before "
                 f"packaging workflows that use it")
-        resolved[name] = published
+        target_of_arch = {}
+        for arch in archs:
+            target = ARCH_TO_PUBLISH_TARGET.get(arch)
+            if not target:
+                raise PackagingError(
+                    label,
+                    f"Cannot resolve published model components for "
+                    f"architecture '{arch}': no known publish target. "
+                    f"Supported architectures: "
+                    f"{', '.join(sorted(ARCH_TO_PUBLISH_TARGET))}")
+            target_of_arch[arch] = target
+        published_targets = {entry.get('target')
+                             for entry in published_entries}
+        uncovered = sorted(arch for arch, target in target_of_arch.items()
+                           if target not in published_targets)
+        if uncovered:
+            # Fail closed naming the model AND the uncovered arch(s)
+            # (edge-deploy-reliability Defect G, 2.19): an accurate
+            # coverage error — re-publishing for the missing targets can
+            # fix it, unlike the misleading 'publish the model' message.
+            raise PackagingError(
+                label,
+                f"Model '{name}' has no published Greengrass component "
+                f"for the selected architecture(s) "
+                f"{', '.join(f'{a} (target {target_of_arch[a]})' for a in uncovered)}; "
+                f"it is published for targets "
+                f"[{', '.join(sorted(str(t) for t in published_targets))}]. "
+                f"Publish the model for every selected architecture "
+                f"before packaging workflows that use it")
+        names = {entry['component_name'] for entry in published_entries
+                 if entry.get('target') in set(target_of_arch.values())}
+        resolved[name] = names
     return resolved
 
 
-def model_component_dependencies(resolved: Dict[str, Dict]) -> Dict:
+def model_component_dependencies(resolved: Dict[str, Any]) -> Dict:
     """One HARD ComponentDependencies entry per distinct published model
     component of the workflow's resolved model references (2.8).
+
+    Consumes resolve_model_components' per-model resolved values in both
+    shapes: the singular vLLM published map (one ``component_name`` —
+    emitted exactly as before) and the vision set of per-target component
+    names. Per model: exactly one resolved name → one entry; MULTIPLE
+    distinct names (per-target vision names diverging across the selected
+    architectures) → that model's entries are OMITTED with a warning
+    naming the model and the divergent components (the Defect F
+    single-variant discipline — a recipe-global dependency block carrying
+    per-target components is undeployable on any single device, 2.4);
+    zero names (only possible with an empty architecture selection —
+    resolution fails closed on any uncovered arch, 2.19) → nothing.
+    Distinct models resolving to the SAME component name still dedupe to
+    one entry.
 
     Deliberately UNPINNED ('>=0.0.0'), unlike the dda.plugin.* entries:
     model components version independently (major-only bumps on republish)
     and the deployment specifies the concrete version — this dependency's
     job is the ordering/health edge, not version pinning.
     """
-    components = sorted({published['component_name']
-                         for published in resolved.values()})
+    components = set()
+    for model_name, value in resolved.items():
+        if isinstance(value, dict):
+            names = {value['component_name']}
+        else:
+            names = set(value)
+        if not names:
+            continue
+        if len(names) > 1:
+            logger.warning(
+                "Model '%s' resolves to multiple published components "
+                "[%s] across the selected architectures; omitting its "
+                "model dependency entries — per-target component names "
+                "diverge and a recipe-global HARD dependency on all of "
+                "them would be undeployable on any single device",
+                model_name, ', '.join(sorted(names)))
+            continue
+        components.add(next(iter(names)))
     return {name: {'VersionRequirement': '>=0.0.0',
                    'DependencyType': 'HARD'}
-            for name in components}
+            for name in sorted(components)}
 
 
 def local_server_component_dependencies(archs) -> Dict:
-    """One HARD ComponentDependencies entry per distinct LocalServer
-    variant of the selected architectures (2.9), each carrying its arch's
-    existing minimum-version floor (min_local_server_version_for) as the
-    ``VersionRequirement`` — the same per-lineage discipline as the
-    manifest's ``minLocalServerVersion``. Both x86_64 flavors collapse to
-    the single ``...amd64`` entry. FAILS CLOSED on an unknown arch (the
-    greengrass_publish.TARGET_TO_LOCAL_SERVER naming discipline): the
-    retired bare '.arm64' name is never emitted and no variant is guessed.
+    """The HARD LocalServer ComponentDependencies entry for the selected
+    architectures — emitted ONLY when they collapse to exactly one distinct
+    LocalServer variant (edge-deploy-reliability Defect F, 2.15/2.16/2.17).
 
-    Documented constraint: Greengrass ComponentDependencies is recipe-
-    GLOBAL, not per-platform-manifest, so a package spanning architectures
-    with DIFFERENT LocalServer variants emits multiple LocalServer entries,
-    which cannot co-resolve on one device. Mitigations: (a) the deployment
-    service already gates components against device architecture
-    (device-arch-compatibility / vLLM arch gates), so mixed-variant
-    deployments are rejected upstream; (b) vLLM workflows package to
-    arm64_jp6 (plus flag-gated arm64_jp5) today, making single-variant the
-    operative case.
+    Single distinct variant (any single arch, or the x86_64 +
+    x86_64_nvidia pair, which both run the single ``...amd64`` build):
+    one entry carrying the arch's existing minimum-version floor
+    (min_local_server_version_for) as the ``VersionRequirement`` — the
+    same per-lineage discipline as the manifest's
+    ``minLocalServerVersion``; when several archs collapse to the one
+    variant, the floor is the maximum of their per-arch floors. FAILS
+    CLOSED on an unknown arch (the greengrass_publish.
+    TARGET_TO_LOCAL_SERVER naming discipline): the retired bare '.arm64'
+    name is never emitted and no variant is guessed.
+
+    Multiple distinct variants: return {} and log a warning naming the
+    omitted variants. Greengrass ComponentDependencies is recipe-GLOBAL,
+    not per-platform-manifest, and Greengrass installs the full recipe
+    dependency closure regardless of the deployment document's component
+    list — so a recipe carrying HARD deps on more than one LocalServer
+    variant is undeployable on EVERY device (verified incident:
+    dda.workflow.f81a4c66 v1.0.0 packaged for arm64_jp5 + arm64_jp6;
+    deployment 44f2c596 to ryan-orin-nano failed FAILED_ROLLBACK_COMPLETE
+    with the JP5 variant broken on the JP6 device). Deployability takes
+    precedence over the LocalServer ordering/health edge, which is
+    partially restored transitively through the model components' own
+    LocalServer dependencies; model and plugin entries are unaffected
+    either way.
     """
-    dependencies: Dict[str, Dict] = {}
+    def floor_key(version):
+        return tuple(int(token) if token.isdigit() else 0
+                     for token in version.split('.'))
+
+    variant_floors: Dict[str, List[str]] = {}
     for arch in sorted(archs):
         component_name = ARCH_TO_LOCAL_SERVER_COMPONENT.get(arch)
         if not component_name:
@@ -1149,13 +1374,24 @@ def local_server_component_dependencies(archs) -> Dict:
                 f"'{arch}': no known LocalServer variant. Supported "
                 f"architectures: "
                 f"{', '.join(sorted(ARCH_TO_LOCAL_SERVER_COMPONENT))}")
-        if component_name not in dependencies:
-            dependencies[component_name] = {
-                'VersionRequirement':
-                    '>=' + min_local_server_version_for(arch),
-                'DependencyType': 'HARD',
-            }
-    return dependencies
+        variant_floors.setdefault(component_name, []).append(
+            min_local_server_version_for(arch))
+    if not variant_floors:
+        return {}
+    if len(variant_floors) > 1:
+        logger.warning(
+            'Workflow packaged for multiple LocalServer variants [%s]; '
+            'omitting LocalServer ComponentDependencies — a recipe-global '
+            'dependency closure spanning variants is undeployable on any '
+            'single device, so deployability takes precedence over the '
+            'ordering/health edge (model and plugin dependencies are '
+            'unaffected)', ', '.join(sorted(variant_floors)))
+        return {}
+    component_name, floors = next(iter(variant_floors.items()))
+    return {component_name: {
+        'VersionRequirement': '>=' + max(floors, key=floor_key),
+        'DependencyType': 'HARD',
+    }}
 
 
 def recipe_manifest_order(archs) -> List[str]:
@@ -1713,6 +1949,17 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
         graph, camera_backed_type_ids(resolved_items))
     binding_hints = binding_hints_from_definition(definition_dict)
     descriptors_by_id = {descriptor.type_id: descriptor for descriptor in catalog}
+
+    # Packaged/served vLLM model name alignment (vllm-model-name-mismatch
+    # 2.1): the zip's workflow.json carries each llm_inference node's
+    # effective modelName rewritten to the sanitized served name. The
+    # rewrite applies only to this artifact copy — the ORIGINAL
+    # definition_dict keeps feeding gather_model_references below, so
+    # Model_Registry resolution stays keyed by the original registry
+    # names (3.3).
+    packaged_definition_json = packaged_workflow_definition_json(
+        definition_json, definition_dict, descriptors_by_id)
+
     arch_compiled_dicts: Dict[str, Dict] = {}
     arch_binding_points: Dict[str, List[Dict]] = {}
     arch_compiled_json: Dict[str, str] = {}
@@ -1777,7 +2024,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
         model_references = gather_model_references(definition_dict,
                                                    descriptors_by_id)
         resolved_models = resolve_model_components(model_references,
-                                                   usecase_id)
+                                                   usecase_id, architectures)
         component_dependencies = {
             **plugin_component_dependencies(dep_records),
             **model_component_dependencies(resolved_models),
@@ -1837,7 +2084,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                 component_version=resolved_component_version,
                 workflow_name=item.get('name'))
             zip_path = os.path.join(work_dir, zip_artifact_name(arch))
-            build_arch_zip(zip_path, arch, manifest, definition_json,
+            build_arch_zip(zip_path, arch, manifest, packaged_definition_json,
                            arch_compiled_json[arch], gst_plugins,
                            custom_python_nodes)
             arch_zip_paths[arch] = zip_path

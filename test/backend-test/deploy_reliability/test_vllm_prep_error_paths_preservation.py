@@ -29,11 +29,10 @@ vllm_model_prep.py and asserted here as the golden behavior):
   * an authoritative HTTP error response from the runtime (even after
     leading connection refusals — refused-then-409 is NOT the bug
     condition) -> single-attempt semantics on the HTTP response (no retry
-    after it), the exact "VllmLoadModel: Request failed with status code:
-    {code}" + response-body messages, the exact generic terminal
-    "staged but the load request did not succeed" message, exit 1 — and
-    NEVER the never-reachable diagnostic (naming flask-app), which the
-    Defect D fix reserves for isBugCondition_D;
+    after it), the exact HTTP-error log line + raw-body debug message, the
+    exact generic terminal "staged but the load request did not succeed"
+    message, exit 1 — and NEVER the never-reachable diagnostic (naming
+    flask-app), which the Defect D fix reserves for isBugCondition_D;
   * HTTP 200 -> exit 0 with the exact "Model '{m}' loaded successfully!"
     message.
 
@@ -86,7 +85,24 @@ UNEXPECTED_ENTRIES_DEFECT = (
 WEIGHTS_FAILED_MESSAGE = (
     "Model '{model}' FAILED: weights path does not exist or is not "
     "readable: {path}")
-HTTP_ERROR_MESSAGE = "VllmLoadModel: Request failed with status code: {code}"
+# INTENTIONAL GOLDEN UPDATE (cross-spec): the vllm-sizing-and-packaging-errors
+# spec (Requirements 4.1-4.4, task 7.1) improved the authoritative HTTP-error
+# LOG FORMAT in vllm_model_prep.py — request_load now emits ONE prominent
+# ERROR line via log_load_failure() (model name, HTTP status, extracted
+# reason, staged engine args) plus the raw body at DEBUG level, replacing the
+# old two-line "VllmLoadModel: Request failed with status code: {code}" +
+# bare-body pair. That spec explicitly kept the retry/classification
+# semantics and exit codes unchanged, and this suite still asserts them
+# unchanged (attempt counts, backoff sleeps, exit codes, generic terminal
+# message, and the never-reachable diagnostic staying off this path). Only
+# the log-format goldens below were updated to the new format. The engine
+# args suffix is deterministic here: make_valid_repo's model.json declares
+# neither gpu_memory_utilization nor max_model_len.
+HTTP_ERROR_MESSAGE = (
+    "VllmLoadModel: model '{model}' FAILED to load (HTTP {code}): {reason}"
+    " | staged engine args: gpu_memory_utilization=None, max_model_len=None")
+RAW_BODY_DEBUG_MESSAGE = (
+    "VllmLoadModel: raw load-failure response body: {body}")
 GENERIC_TERMINAL_MESSAGE = (
     "Model '{model}' staged but the load request did not succeed; "
     "exiting non-zero so the component retries")
@@ -333,8 +349,11 @@ class TestHttpAndSuccessPathsUnchanged:
                            "further attempts after it)"
         assert sleeps == [prep.LOAD_RETRY_BACKOFF_SECONDS[0]], \
             "exactly the first backoff sleep precedes the second attempt"
-        assert HTTP_ERROR_MESSAGE.format(code=409) in logs.messages
-        assert "model load rejected: FAILED" in logs.messages
+        assert HTTP_ERROR_MESSAGE.format(
+            model=MODEL_NAME, code=409,
+            reason="model load rejected: FAILED") in logs.messages
+        assert RAW_BODY_DEBUG_MESSAGE.format(
+            body="model load rejected: FAILED") in logs.messages
         assert GENERIC_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
             in logs.messages
         assert UNREACHABLE_DIAGNOSTIC_MARKER not in logs.text, (
@@ -397,8 +416,9 @@ class TestHttpAndSuccessPathsUnchanged:
                 not in logs.messages
         else:
             assert exit_code == 1
-            assert HTTP_ERROR_MESSAGE.format(code=terminal_status) \
-                in logs.messages
+            assert HTTP_ERROR_MESSAGE.format(
+                model=MODEL_NAME, code=terminal_status,
+                reason="simulated runtime response") in logs.messages
             assert GENERIC_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
                 in logs.messages
 

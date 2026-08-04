@@ -389,6 +389,11 @@ EOF
     echo ""
     echo "Creating managed policy for Greengrass devices..."
     
+    # AllowBedrockInference: the workflow engine's bedrock_inference nodes invoke
+    # Bedrock from the device under the token exchange role. Foundation-model ARNs
+    # are account-less; "us."-prefixed model ids route through account inference
+    # profiles. Mirrors the live policy update already applied to the account
+    # (policy version v3, 2026-08-04).
     GREENGRASS_POLICY=$(cat <<EOF
 {
   "Version": "2012-10-17",
@@ -450,6 +455,15 @@ EOF
       ],
       "Resource": [
         "arn:aws:ecr:*:${CURRENT_ACCOUNT}:repository/dda/*"
+      ]
+    },
+    {
+      "Sid": "AllowBedrockInference",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel"],
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/*",
+        "arn:aws:bedrock:*:${CURRENT_ACCOUNT}:inference-profile/*"
       ]
     }
   ]

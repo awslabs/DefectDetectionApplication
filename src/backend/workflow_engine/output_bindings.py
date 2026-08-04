@@ -281,6 +281,22 @@ def render_template(template: Any, metadata: Dict[str, Any]) -> Any:
     return template.format_map(_LenientDict(values))
 
 
+#: Bound on the payload/value preview recorded into a node's sent-message
+#: detail (output-node-sent-message feature). The record is a preview, not an
+#: archive (Requirement 2.3).
+DETAIL_PREVIEW_LIMIT = 512
+
+
+def _preview(text: str, limit: int = DETAIL_PREVIEW_LIMIT) -> str:
+    """Truncate ``text`` to ``limit`` chars, appending an ellipsis marker when
+    it is longer. Returns the text unchanged when it fits."""
+    if text is None:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\u2026"
+
+
 # ---------------------------------------------------------------------------
 # Default clients (imported lazily; injectable for tests)
 # ---------------------------------------------------------------------------
@@ -583,6 +599,14 @@ BEDROCK_READ_TIMEOUT_SEC = 30
 #: catalog default).
 BEDROCK_DEFAULT_MODEL = "us.amazon.nova-lite-v1:0"
 
+#: Canonical JSON-format instruction the executor appends to every
+#: anomaly-mode prompt (single source of truth for the verdict answer
+#: contract): a user-customized prompt can no longer break
+#: ``parse_bedrock_answer`` by omitting the JSON shape.
+BEDROCK_JSON_INSTRUCTION = (
+    'Respond with JSON: {"is_anomalous": true|false, "confidence": 0..1}.'
+)
+
 
 class BedrockInferenceError(Exception):
     """A bedrock_inference binding failed. Carries the workflow node id
@@ -691,7 +715,20 @@ class BedrockInferenceProcessor:
         for binding in self.bindings(document):
             node_id = binding.get("nodeId")
             try:
-                metadata.update(self._run_one(binding, work_dir))
+                result = self._run_one(binding, work_dir)
+                # Freeform-mode results carry a nested 'bedrock' sub-dict
+                # ({node_id: {"text": ...}}): merge it into any existing
+                # 'bedrock' entry so multiple freeform nodes in one
+                # document keep their per-node entries (the flat
+                # 'bedrock_text' key, like flat is_anomalous/confidence,
+                # is overwritten by later nodes — the nested keys
+                # disambiguate).
+                nested = result.pop("bedrock", None)
+                metadata.update(result)
+                if nested:
+                    merged = dict(metadata.get("bedrock") or {})
+                    merged.update(nested)
+                    metadata["bedrock"] = merged
                 logger.info(
                     "Bedrock inference binding (node %s) processed", node_id
                 )
@@ -708,36 +745,89 @@ class BedrockInferenceProcessor:
     def _run_one(self, binding: dict, work_dir: Optional[str]) -> Dict[str, Any]:
         node_id = binding.get("nodeId")
         parameters = dict(binding.get("parameters") or {})
+        capture_paths = binding.get("capturePaths") or {}
         images = []
-        for port, label in (("in", "Input image"),
-                            ("reference", "Reference image")):
-            path = (binding.get("capturePaths") or {}).get(port)
-            if not path:
-                raise BedrockInferenceError(
-                    node_id,
-                    "Bedrock inference node '{0}' has no captured frame for "
-                    "its '{1}' input (the port is not fed by any video "
-                    "source)".format(node_id, port))
+
+        # The 'in' (primary) frame is required: a missing path or an
+        # unreadable file fails the node with the existing surfacing.
+        port = "in"
+        path = capture_paths.get(port)
+        if not path:
+            raise BedrockInferenceError(
+                node_id,
+                "Bedrock inference node '{0}' has no captured frame for "
+                "its '{1}' input (the port is not fed by any video "
+                "source)".format(node_id, port))
+        if work_dir:
+            path = path.replace("{work_dir}", work_dir)
+        try:
+            with open(path, "rb") as f:
+                images.append(("Input image", f.read()))
+        except OSError as e:
+            raise BedrockInferenceError(
+                node_id,
+                "Bedrock inference node '{0}' could not read the "
+                "captured '{1}' frame from {2}: {3}".format(
+                    node_id, port, path, e)) from e
+
+        # The 'reference' frame is optional: the portal compiler emits
+        # capturePaths.reference = None when the port is not fed by any
+        # video source. When the reference frame is unavailable for any
+        # reason, log the omission and proceed with single-image
+        # inference on the primary frame alone.
+        reference_path = capture_paths.get("reference")
+        if not reference_path:
+            logger.warning(
+                "Bedrock inference node '%s': reference port not fed by "
+                "any video source; performing single-image inference",
+                node_id)
+        else:
             if work_dir:
-                path = path.replace("{work_dir}", work_dir)
+                reference_path = reference_path.replace(
+                    "{work_dir}", work_dir)
             try:
-                with open(path, "rb") as f:
-                    images.append((label, f.read()))
+                with open(reference_path, "rb") as f:
+                    images.append(("Reference image", f.read()))
             except OSError as e:
-                raise BedrockInferenceError(
-                    node_id,
-                    "Bedrock inference node '{0}' could not read the "
-                    "captured '{1}' frame from {2}: {3}".format(
-                        node_id, port, path, e)) from e
+                logger.warning(
+                    "Bedrock inference node '%s': could not read the "
+                    "captured 'reference' frame from %s (%s); performing "
+                    "single-image inference", node_id, reference_path, e)
+
+        # Response mode: anomaly (default — absent/None) demands the JSON
+        # verdict and gets the canonical instruction appended; freeform
+        # (anomaly_mode: false) sends the prompt as-is and records the
+        # raw answer text (no parsing, answer format never fails).
+        # Anomaly mode ALSO records the raw answer text under the same
+        # keys freeform uses (bedrock-response-mode Requirement 5), so
+        # prompts asking for notes alongside the verdict don't silently
+        # lose that text from the run metadata.
+        anomaly_mode = _coerce(parameters.get("anomaly_mode"))
+        anomaly_mode = True if anomaly_mode is None else bool(anomaly_mode)
+
+        prompt = str(parameters.get("prompt") or "")
+        if anomaly_mode:
+            prompt = prompt + "\n\n" + BEDROCK_JSON_INSTRUCTION
 
         answer = self._invoker(
             str(parameters.get("model") or BEDROCK_DEFAULT_MODEL),
-            str(parameters.get("prompt") or ""),
+            prompt,
             images,
             str(parameters.get("region") or "us-east-1"),
             int(parameters.get("max_tokens") or 256),
         )
-        return parse_bedrock_answer(answer)
+        if anomaly_mode:
+            # An unparseable answer raises here — the existing
+            # BedrockInferenceError path — before any text is recorded
+            # (Requirement 5.3: the error message carries the excerpt).
+            verdict = parse_bedrock_answer(answer)
+            verdict["bedrock_text"] = answer
+            verdict["bedrock"] = {node_id: {"text": answer}}
+            return verdict
+        return {
+            "bedrock_text": answer,
+            "bedrock": {node_id: {"text": answer}},
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -870,7 +960,15 @@ class LlmInferenceProcessor:
         ``{'error': reason}`` and processing continues with the
         remaining bindings. Results merge progressively, so a later
         binding's prompt may reference an earlier node's output (for
-        example ``{llm.node1.generated_text}``)."""
+        example ``{llm.node1.generated_text}``).
+
+        Anomaly-mode parity (vlm-parity-run-results Requirement 1.2):
+        when a node's outcome carries a parsed verdict, its
+        ``is_anomalous``/``confidence`` are ALSO merged FLAT into the
+        metadata — exactly like Bedrock's — so downstream filters,
+        conditionals, and outputs gate on them. The nested
+        ``llm[nodeId]`` record stays complete (verdict keys included).
+        Flat keys follow the documented last-writer-wins convention."""
         metadata = dict(tag_values or {})
         bindings = self.bindings(document)
         if not bindings:
@@ -878,7 +976,11 @@ class LlmInferenceProcessor:
         metadata["llm"] = dict(metadata.get("llm") or {})
         for binding in bindings:
             node_id = binding.get("nodeId")
-            metadata["llm"][node_id] = self._run_one(binding, metadata)
+            outcome = self._run_one(binding, metadata)
+            metadata["llm"][node_id] = outcome
+            for key in ("is_anomalous", "confidence"):
+                if key in outcome:
+                    metadata[key] = outcome[key]
         return metadata
 
     def _run_one(
@@ -897,6 +999,15 @@ class LlmInferenceProcessor:
                 node_id, e.name,
             )
             return {"error": "unresolved placeholder {0}".format(e.name)}
+        # Anomaly-mode parity with Bedrock (vlm-parity-run-results
+        # Requirement 1): a truthy ``anomaly_mode`` appends the
+        # canonical JSON instruction to the RENDERED prompt and parses
+        # the answer with the shared verdict parser. Unlike Bedrock's
+        # default-True, absent/None/false stays today's freeform path
+        # byte-identical (Requirement 1.4).
+        anomaly_mode = bool(_coerce(parameters.get("anomaly_mode")))
+        if anomaly_mode:
+            prompt = prompt + "\n\n" + BEDROCK_JSON_INSTRUCTION
         try:
             text = self._invoker(
                 str(parameters.get("modelName") or ""), prompt, parameters
@@ -907,6 +1018,23 @@ class LlmInferenceProcessor:
                 "unaffected", node_id, e,
             )
             return {"error": str(e)}
+        if anomaly_mode:
+            try:
+                verdict = parse_bedrock_answer(text)
+            except ValueError as e:
+                # Recorded, never raised — the llm containment contract
+                # (Requirement 1.3). The parser's message carries the
+                # answer excerpt; the raw text is still recorded so the
+                # run metadata keeps what the model said.
+                logger.error(
+                    "LLM inference node %s failed: %s; other bindings "
+                    "are unaffected", node_id, e,
+                )
+                return {"error": str(e), "generated_text": text}
+            logger.info("LLM inference binding (node %s) processed", node_id)
+            outcome = {"generated_text": text}
+            outcome.update(verdict)
+            return outcome
         logger.info("LLM inference binding (node %s) processed", node_id)
         return {"generated_text": text}
 
@@ -958,11 +1086,52 @@ class OutputBindingProcessor:
             greengrass_publisher or _default_greengrass_publisher
         )
 
-    def __call__(self, registration, document: dict, tag_values: dict) -> None:
-        self.process(registration, document, tag_values)
+    def __call__(
+        self,
+        registration,
+        document: dict,
+        tag_values: dict,
+        detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
+    ) -> None:
+        self.process(registration, document, tag_values, detail_sink=detail_sink)
 
-    def process(self, registration, document: dict, tag_values: dict) -> None:
-        """Process every output binding independently (Requirement 13.7)."""
+    @staticmethod
+    def _emit_detail(
+        detail_sink: Optional[Callable[[Optional[str], str], None]],
+        node_id: Optional[str],
+        detail: str,
+    ) -> None:
+        """Send ``detail`` to ``detail_sink`` (node_id, detail), contained.
+
+        A None sink is a no-op (default behavior byte-identical to today); a
+        raising sink is swallowed so detail recording never affects binding
+        execution or the OutputBindingError aggregation (Requirements 3.1,
+        3.2)."""
+        if detail_sink is None:
+            return
+        try:
+            detail_sink(node_id, detail)
+        except Exception:  # noqa: BLE001 - recording is best-effort
+            logger.debug(
+                "Output binding detail_sink raised for node %s; ignored",
+                node_id, exc_info=True,
+            )
+
+    def process(
+        self,
+        registration,
+        document: dict,
+        tag_values: dict,
+        detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
+    ) -> None:
+        """Process every output binding independently (Requirement 13.7).
+
+        ``detail_sink`` (optional; default None → behavior byte-identical to
+        today) receives ``(node_id, detail)`` sent-message / skipped-outcome
+        summaries for the output-node-sent-message feature. It is invoked only
+        AROUND successful runners and on the gated/condition-skip paths, never
+        alters control flow, and a raising sink is contained (Requirement
+        3.1)."""
         bindings = document.get("executorBindings") or []
         if not bindings:
             return
@@ -1008,14 +1177,28 @@ class OutputBindingProcessor:
                         "Output binding %s (node %s) gated out by an "
                         "upstream inference filter or conditional", kind, node_id,
                     )
+                    self._emit_detail(
+                        detail_sink, node_id,
+                        "not sent: gated out by an upstream inference "
+                        "filter or conditional",
+                    )
                     continue
-                if not self._condition_allows(binding, metadata):
+                allowed, skip_detail = self._condition_result(binding, metadata)
+                if not allowed:
+                    if skip_detail is not None:
+                        self._emit_detail(detail_sink, node_id, skip_detail)
                     continue
 
-                runner(dict(binding.get("parameters") or {}), metadata)
+                # Record the SUCCESS detail ONLY after the runner returns
+                # successfully; on a runner exception nothing new is recorded
+                # (mark_failure already captured the error and set_detail
+                # refuses to overwrite failure details, Requirement 3.3).
+                detail = runner(dict(binding.get("parameters") or {}), metadata)
                 logger.info(
                     "Output binding %s (node %s) processed", kind, node_id
                 )
+                if detail:
+                    self._emit_detail(detail_sink, node_id, detail)
             except Exception as e:  # noqa: BLE001 - contained per 13.7
                 logger.exception(
                     "Output binding %s (node %s) failed; other bindings "
@@ -1111,13 +1294,20 @@ class OutputBindingProcessor:
         return False
 
     @staticmethod
-    def _condition_allows(binding: dict, metadata: Dict[str, Any]) -> bool:
+    def _condition_result(
+        binding: dict, metadata: Dict[str, Any]
+    ) -> tuple:
         """Evaluate the binding's own condition parameter, when present
-        (digital_output's actuation rule, Requirement 9.4). An absent
-        condition allows; an unevaluable one blocks."""
+        (digital_output's actuation rule, Requirement 9.4).
+
+        Returns ``(allowed, skip_detail)``: an absent condition allows
+        (``(True, None)``); a condition that evaluates false blocks with a
+        ``not sent: condition ... evaluated false`` skip detail; an
+        unevaluable one blocks with a ``... could not be evaluated`` skip
+        detail (never actuate on an unevaluable rule)."""
         condition = (binding.get("parameters") or {}).get("condition")
         if not condition:
-            return True
+            return True, None
         node_id = binding.get("nodeId")
         try:
             result = evaluate_condition(str(condition), metadata)
@@ -1126,13 +1316,19 @@ class OutputBindingProcessor:
                 "Output condition on node %s could not be evaluated: %s; "
                 "not actuating", node_id, e,
             )
-            return False
+            return False, (
+                "not sent: condition {0!r} could not be evaluated".format(
+                    condition)
+            )
         if not result:
             logger.info(
                 "Output condition on node %s evaluated false; not actuating",
                 node_id,
             )
-        return result
+            return False, (
+                "not sent: condition {0!r} evaluated false".format(condition)
+            )
+        return True, None
 
     # ------------------------------------------------------------------
     # Binding runners
@@ -1140,17 +1336,22 @@ class OutputBindingProcessor:
 
     def _run_digital_output(
         self, parameters: Dict[str, Any], metadata: Dict[str, Any]
-    ) -> None:
-        """Actuate the configured pin/signal type/pulse width (9.4)."""
-        self._dio_actuator(
-            parameters["pin"],
-            str(parameters.get("signal_type", SIGNAL_TYPE_PULSE)),
-            parameters.get("pulse_width_ms", 100),
-        )
+    ) -> Optional[str]:
+        """Actuate the configured pin/signal type/pulse width (9.4).
+
+        Returns the sent-message detail describing the actuation
+        (Requirement 1.3)."""
+        pin = parameters["pin"]
+        signal_type = str(parameters.get("signal_type", SIGNAL_TYPE_PULSE))
+        pulse_width_ms = parameters.get("pulse_width_ms", 100)
+        self._dio_actuator(pin, signal_type, pulse_width_ms)
+        if signal_type == SIGNAL_TYPE_PULSE:
+            return "pulsed pin {0} ({1}ms)".format(pin, pulse_width_ms)
+        return "set pin {0} {1}".format(pin, signal_type)
 
     def _run_mqtt_publish(
         self, parameters: Dict[str, Any], metadata: Dict[str, Any]
-    ) -> None:
+    ) -> Optional[str]:
         """Publish the rendered payload to the configured broker (9.5).
 
         With ``greengrass`` enabled the publish is zero-config: it goes
@@ -1183,14 +1384,14 @@ class OutputBindingProcessor:
             # topic/payload/qos are supplied (no broker host/port, no
             # certificate paths).
             self._greengrass_publisher(topic, payload_text, qos)
-            return
+            return self._mqtt_detail(topic, qos, "greengrass", payload_text)
 
         host = str(parameters["broker_host"])
         port = int(parameters.get("broker_port", DEFAULT_MQTT_PORT))
 
         if not parameters.get("aws_iot"):
             self._mqtt_publisher(host, port, topic, payload_text, qos)
-            return
+            return self._mqtt_detail(topic, qos, "plain", payload_text)
 
         missing = [
             name for name in AWS_IOT_REQUIRED_PARAMETERS
@@ -1211,16 +1412,28 @@ class OutputBindingProcessor:
             host, port, topic, payload_text, qos,
             str(parameters["iot_thing_name"]), tls,
         )
+        return self._mqtt_detail(topic, qos, "aws_iot", payload_text)
+
+    @staticmethod
+    def _mqtt_detail(topic: str, qos: int, path: str, payload_text: str) -> str:
+        """Compose an mqtt_publish sent-message detail (Requirement 1.1):
+        topic, qos, publish path (plain/aws_iot/greengrass), and the rendered
+        payload truncated to the preview bound (Requirement 2.3)."""
+        return "sent to topic '{0}' (qos {1}, {2}): {3}".format(
+            topic, qos, path, _preview(payload_text))
 
     def _run_opcua_write(
         self, parameters: Dict[str, Any], metadata: Dict[str, Any]
-    ) -> None:
+    ) -> Optional[str]:
         """Write the rendered value to the configured server node (9.6).
 
         When authentication parameters are configured (username/password
         and/or a security policy + client certificate), a security config is
         passed to the writer so it can authenticate; otherwise the writer is
         called with the original three-argument (anonymous) signature.
+
+        Returns the sent-message detail carrying the endpoint, node id, and
+        the rendered value (Requirement 1.2).
         """
         value = render_template(
             parameters.get("value_template") or "{is_anomalous}", metadata
@@ -1232,3 +1445,5 @@ class OutputBindingProcessor:
             self._opcua_writer(endpoint, node_id, value, security)
         else:
             self._opcua_writer(endpoint, node_id, value)
+        return "wrote {0} to {1} at {2}".format(
+            _preview(repr(value)), node_id, endpoint)

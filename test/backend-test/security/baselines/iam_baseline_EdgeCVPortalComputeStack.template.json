@@ -9,13 +9,13 @@
     ],
     "Content": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "b16346266fa950a96e4a7b12ff4b150adcbd53a8a083db5f26a5d40dc87c1dbb.zip"
+     "S3Key": "b06ad3eab63b956b73e4575c71b3249a82594855fbfc49b9d781ffe39277887d.zip"
     },
     "Description": "Shared utilities for Edge CV Portal Lambda functions - v2024-12-12-fixed-syntax"
    },
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/SharedLayer/Resource",
-    "aws:asset:path": "asset.b16346266fa950a96e4a7b12ff4b150adcbd53a8a083db5f26a5d40dc87c1dbb",
+    "aws:asset:path": "asset.b06ad3eab63b956b73e4575c71b3249a82594855fbfc49b9d781ffe39277887d",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Content"
    }
@@ -47,15 +47,1706 @@
     ],
     "Content": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "d94357cb2cf9065d36594e84695a838d6f97a470d4f6136ffcdc2008fca4b621.zip"
+     "S3Key": "b7055d4afd3a6283d9d3ec07c7dab5f6c9cd6c0bd17338a9ecf390b88b7b5a55.zip"
     },
     "Description": "workflow_core shared package (catalog, serializer, validator, compiler) for Workflow Manager"
    },
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowCoreLayer/Resource",
-    "aws:asset:path": "asset.d94357cb2cf9065d36594e84695a838d6f97a470d4f6136ffcdc2008fca4b621",
+    "aws:asset:path": "asset.b7055d4afd3a6283d9d3ec07c7dab5f6c9cd6c0bd17338a9ecf390b88b7b5a55",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Content"
+   }
+  },
+  "QuickSetupBundleAwsCliLayer384DDAC6": {
+   "Type": "AWS::Lambda::LayerVersion",
+   "Properties": {
+    "Content": {
+     "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
+     "S3Key": "c49d356cac773d491c5f7ac148995a1181498a8e289429f8612a7f7e3814f535.zip"
+    },
+    "Description": "/opt/awscli/aws"
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/QuickSetupBundle/AwsCliLayer/Resource",
+    "aws:asset:path": "asset.c49d356cac773d491c5f7ac148995a1181498a8e289429f8612a7f7e3814f535.zip",
+    "aws:asset:is-bundled": false,
+    "aws:asset:property": "Content"
+   }
+  },
+  "QuickSetupBundleCustomResourceEE45B0F4": {
+   "Type": "Custom::CDKBucketDeployment",
+   "Properties": {
+    "ServiceToken": {
+     "Fn::GetAtt": [
+      "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C81C01536",
+      "Arn"
+     ]
+    },
+    "SourceBucketNames": [
+     "cdk-hnb659fds-assets-111111111111-us-east-1"
+    ],
+    "SourceObjectKeys": [
+     "e1332585e87642c42622e593f7bb527282fb3b17b058299a6abdb9b8c5c88f58.zip"
+    ],
+    "DestinationBucketName": {
+     "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefPortalArtifactsBucket31E9D39212014EED"
+    },
+    "DestinationBucketKeyPrefix": "quick-setup/current/",
+    "WaitForDistributionInvalidation": true,
+    "RetainOnDelete": true,
+    "Prune": false,
+    "OutputObjectKeys": true
+   },
+   "UpdateReplacePolicy": "Delete",
+   "DeletionPolicy": "Delete",
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/QuickSetupBundle/CustomResource/Default"
+   }
+  },
+  "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRole89A01265": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "lambda.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "ManagedPolicyArns": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+       ]
+      ]
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/Custom::CDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C/ServiceRole/Resource"
+   }
+  },
+  "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRoleDefaultPolicy88902FDF": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "s3:GetObject*",
+        "s3:GetBucket*",
+        "s3:List*"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:s3:::cdk-hnb659fds-assets-111111111111-us-east-1",
+        "arn:aws:s3:::cdk-hnb659fds-assets-111111111111-us-east-1/*"
+       ]
+      },
+      {
+       "Action": [
+        "s3:GetObject*",
+        "s3:GetBucket*",
+        "s3:List*",
+        "s3:DeleteObject*",
+        "s3:PutObject",
+        "s3:PutObjectLegalHold",
+        "s3:PutObjectRetention",
+        "s3:PutObjectTagging",
+        "s3:PutObjectVersionTagging",
+        "s3:Abort*"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+           },
+           "/*"
+          ]
+         ]
+        }
+       ]
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRoleDefaultPolicy88902FDF",
+    "Roles": [
+     {
+      "Ref": "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRole89A01265"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/Custom::CDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C/ServiceRole/DefaultPolicy/Resource"
+   }
+  },
+  "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C81C01536": {
+   "Type": "AWS::Lambda::Function",
+   "Properties": {
+    "Code": {
+     "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
+     "S3Key": "3423a042b818e31c1e34a19d6689ab2e5f9b70fcbe9e71df66f241b20a200bd9.zip"
+    },
+    "Environment": {
+     "Variables": {
+      "AWS_CA_BUNDLE": "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+     }
+    },
+    "Handler": "index.handler",
+    "Layers": [
+     {
+      "Ref": "QuickSetupBundleAwsCliLayer384DDAC6"
+     }
+    ],
+    "Role": {
+     "Fn::GetAtt": [
+      "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRole89A01265",
+      "Arn"
+     ]
+    },
+    "Runtime": "python3.13",
+    "Timeout": 900
+   },
+   "DependsOn": [
+    "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRoleDefaultPolicy88902FDF",
+    "CustomCDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756CServiceRole89A01265"
+   ],
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/Custom::CDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C/Resource",
+    "aws:asset:path": "asset.3423a042b818e31c1e34a19d6689ab2e5f9b70fcbe9e71df66f241b20a200bd9",
+    "aws:asset:is-bundled": false,
+    "aws:asset:property": "Code"
+   }
+  },
+  "DeviceRegistrationsRoleAB537215": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "lambda.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "ManagedPolicyArns": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+       ]
+      ]
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceRegistrationsRole/Resource"
+   }
+  },
+  "DeviceRegistrationsRoleDefaultPolicyFFA79FC4": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUseCasesTable8AC05A74Arn8213834C"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUseCasesTable8AC05A74Arn8213834C"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUserRolesTable19FB5B19Arn84B216C4"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUserRolesTable19FB5B19Arn84B216C4"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDevicesTableD0A940EEArn7D39C15E"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDevicesTableD0A940EEArn7D39C15E"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttAuditLogTable8B03E3C8Arn985A1088"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttAuditLogTable8B03E3C8Arn985A1088"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTrainingJobsTableB7EEC270Arn8F49D86F"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTrainingJobsTableB7EEC270Arn8F49D86F"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingJobsTable854C7EACArn5663FC7E"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingJobsTable854C7EACArn5663FC7E"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPreLabeledDatasetsTable9AA407E3Arn16679B6C"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPreLabeledDatasetsTable9AA407E3Arn16679B6C"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttModelsTableC5E7E44AArnF38126E5"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttModelsTableC5E7E44AArnF38126E5"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeploymentsTable5D087E52Arn03A4CB49"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeploymentsTable5D087E52Arn03A4CB49"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttSettingsTable4DB0CCD0Arn1D1BE79B"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttComponentsTableB16869EDArn06B80FA0"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttComponentsTableB16869EDArn06B80FA0"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttSharedComponentsTableF0FA3720ArnC8BFE71D"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDataAccountsTable07F2C569ArnA85502A4"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDataAccountsTable07F2C569ArnA85502A4"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowsTable4E215008Arn0D44497B"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowsTable4E215008Arn0D44497B"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowVersionsTable04CEE3A6Arn4F19C3B2"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestDatasetsTable14080134ArnB2E7B23D"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestDatasetsTable14080134ArnB2E7B23D"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestRunsTableEDF9E6D0Arn3B0FC3A7"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestRunsTableEDF9E6D0Arn3B0FC3A7"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": "sagemaker:ListWorkteams",
+       "Effect": "Allow",
+       "Resource": "*"
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "DeviceRegistrationsRoleDefaultPolicyFFA79FC4",
+    "Roles": [
+     {
+      "Ref": "DeviceRegistrationsRoleAB537215"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceRegistrationsRole/DefaultPolicy/Resource"
+   }
+  },
+  "DeviceRegistrationsRoleOverflowPolicy198211C32": {
+   "Type": "AWS::IAM::ManagedPolicy",
+   "Properties": {
+    "Description": "Part of the policies for EdgeCVPortalComputeStack/DeviceRegistrationsRole",
+    "Path": "/",
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowChatSessionsTable48204025Arn737D5C79"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttCameraRegistryTable4B0A3A5BArn646129F8"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttCameraRegistryTable4B0A3A5BArn646129F8"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "s3:GetObject*",
+        "s3:GetBucket*",
+        "s3:List*",
+        "s3:DeleteObject*",
+        "s3:PutObject",
+        "s3:PutObjectLegalHold",
+        "s3:PutObjectRetention",
+        "s3:PutObjectTagging",
+        "s3:PutObjectVersionTagging",
+        "s3:Abort*"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+           },
+           "/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "sagemaker:CreateTrainingJob",
+        "sagemaker:DescribeTrainingJob",
+        "sagemaker:ListTrainingJobs",
+        "sagemaker:CreateCompilationJob",
+        "sagemaker:DescribeCompilationJob",
+        "sagemaker:ListCompilationJobs",
+        "sagemaker:CreateLabelingJob",
+        "sagemaker:DescribeLabelingJob",
+        "sagemaker:ListLabelingJobs",
+        "sagemaker:StopLabelingJob",
+        "sagemaker:DescribeWorkteam",
+        "sagemaker:AddTags"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:sagemaker:*:*:training-job/*",
+        "arn:aws:sagemaker:*:*:compilation-job/*",
+        "arn:aws:sagemaker:*:*:labeling-job/*",
+        "arn:aws:sagemaker:*:*:model/*",
+        "arn:aws:sagemaker:*:*:workteam/*"
+       ]
+      },
+      {
+       "Action": [
+        "greengrass:CreateComponentVersion",
+        "greengrass:DescribeComponent",
+        "greengrass:GetComponent",
+        "greengrass:ListComponents",
+        "greengrass:ListComponentVersions",
+        "greengrass:ListCoreDevices",
+        "greengrass:GetCoreDevice",
+        "greengrass:ListInstalledComponents",
+        "greengrass:ListEffectiveDeployments",
+        "greengrass:ListTagsForResource",
+        "greengrass:TagResource",
+        "greengrass:ListDeployments",
+        "greengrass:GetDeployment",
+        "greengrass:CreateDeployment",
+        "greengrass:CancelDeployment"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:greengrass:*:*:components:*",
+        "arn:aws:greengrass:*:*:coreDevices:*",
+        "arn:aws:greengrass:*:*:deployments:*"
+       ]
+      },
+      {
+       "Action": [
+        "iot:DescribeThing",
+        "iot:DescribeThingGroup",
+        "iot:GetThingType",
+        "iot:ListThings",
+        "iot:ListThingsInThingGroup",
+        "iot:ListThingGroups",
+        "iot:CreateThingGroup",
+        "iot:AddThingToThingGroup",
+        "iot:RemoveThingFromThingGroup",
+        "iot:CreateJob",
+        "iot:DescribeJob",
+        "iot:UpdateJob",
+        "iot:GetJobDocument",
+        "iot:ListJobs",
+        "iot:CancelJob",
+        "iot:GetThingShadow",
+        "iot:UpdateThingShadow",
+        "iot:DeleteThingShadow"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:iot:*:*:thing/*",
+        "arn:aws:iot:*:*:topic/dda/*",
+        "arn:aws:iot:*:*:job/*",
+        "arn:aws:iot:*:*:thinggroup/*"
+       ]
+      },
+      {
+       "Action": "iot:DescribeEndpoint",
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": [
+        "logs:GetLogEvents",
+        "logs:DescribeLogStreams",
+        "logs:DescribeLogGroups",
+        "logs:FilterLogEvents"
+       ],
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:iam::222222222222:role/DDAPortalAccessRole",
+        "arn:aws:iam::333333333333:role/DDAPortalAccessRole"
+       ]
+      },
+      {
+       "Action": "execute-api:Invoke",
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:execute-api:",
+          {
+           "Ref": "AWS::Region"
+          },
+          ":",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":*/*"
+         ]
+        ]
+       }
+      },
+      {
+       "Action": [
+        "s3:GetBucketCors",
+        "s3:PutBucketCors"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+       }
+      },
+      {
+       "Action": "iam:PassRole",
+       "Condition": {
+        "StringEquals": {
+         "iam:PassedToService": "sagemaker.amazonaws.com"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:iam::*:role/DDA*Role"
+      },
+      {
+       "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket",
+        "s3:CreateBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketTagging"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+           },
+           "/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketTagging"
+       ],
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+       ],
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*/*"
+      },
+      {
+       "Action": "s3:ListAllMyBuckets",
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": "tag:GetResources",
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeviceRegistrationsTableA5AE63AFArn6AE0897B"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeviceRegistrationsTableA5AE63AFArn6AE0897B"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "Roles": [
+     {
+      "Ref": "DeviceRegistrationsRoleAB537215"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceRegistrationsRole/OverflowPolicy1/Resource"
+   }
+  },
+  "DeviceRegistrationsHandler8B09EA59": {
+   "Type": "AWS::Lambda::Function",
+   "Properties": {
+    "Code": {
+     "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+    },
+    "Environment": {
+     "Variables": {
+      "USECASES_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefUseCasesTable8AC05A7473F9AE76"
+      },
+      "USER_ROLES_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefUserRolesTable19FB5B1923BFA28D"
+      },
+      "DEVICES_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefDevicesTableD0A940EE0CF6C46F"
+      },
+      "AUDIT_LOG_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefAuditLogTable8B03E3C8EAC7CA55"
+      },
+      "TRAINING_JOBS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefTrainingJobsTableB7EEC270141A34B5"
+      },
+      "LABELING_JOBS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefLabelingJobsTable854C7EAC0E834916"
+      },
+      "PRE_LABELED_DATASETS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefPreLabeledDatasetsTable9AA407E37849574D"
+      },
+      "MODELS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefModelsTableC5E7E44A1A769E23"
+      },
+      "DEPLOYMENTS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefDeploymentsTable5D087E524DE3E2DA"
+      },
+      "SETTINGS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefSettingsTable4DB0CCD0297D747B"
+      },
+      "COMPONENTS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefComponentsTableB16869EDB240BF30"
+      },
+      "SHARED_COMPONENTS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefSharedComponentsTableF0FA3720CC987BC3"
+      },
+      "WORKFLOWS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefWorkflowsTable4E215008D0FFE690"
+      },
+      "WORKFLOW_VERSIONS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefWorkflowVersionsTable04CEE3A6894B274B"
+      },
+      "TEST_DATASETS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefTestDatasetsTable14080134C04F19CE"
+      },
+      "TEST_RUNS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefTestRunsTableEDF9E6D0ABD1F461"
+      },
+      "WORKFLOW_CHAT_SESSIONS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefWorkflowChatSessionsTable4820402566C77C8A"
+      },
+      "CAMERA_REGISTRY_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefCameraRegistryTable4B0A3A5BD01D2148"
+      },
+      "PORTAL_ARTIFACTS_BUCKET": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefPortalArtifactsBucket31E9D39212014EED"
+      },
+      "WORKFLOWS_S3_PREFIX": "workflows",
+      "PORTAL_ACCOUNT_ID": {
+       "Ref": "AWS::AccountId"
+      },
+      "USER_POOL_ID": {
+       "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
+      },
+      "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
+      "COMPONENT_BUCKET_PREFIX": "dda-component",
+      "REGISTRATIONS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefDeviceRegistrationsTableA5AE63AF9541290C"
+      },
+      "QUICK_SETUP_BOOTSTRAP_SHA256": "1cb1c136bcadfe112074f11d0d4bf83610aaf3093f65146b616835aaf55e5804"
+     }
+    },
+    "Handler": "device_registrations.handler",
+    "Layers": [
+     {
+      "Ref": "SharedLayer27DFABF0"
+     }
+    ],
+    "Role": {
+     "Fn::GetAtt": [
+      "DeviceRegistrationsRoleAB537215",
+      "Arn"
+     ]
+    },
+    "Runtime": "python3.11",
+    "Timeout": 30
+   },
+   "DependsOn": [
+    "DeviceRegistrationsRoleDefaultPolicyFFA79FC4",
+    "DeviceRegistrationsRoleOverflowPolicy198211C32",
+    "DeviceRegistrationsRoleAB537215"
+   ],
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceRegistrationsHandler/Resource",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:is-bundled": false,
+    "aws:asset:property": "Code"
+   }
+  },
+  "QuickSetupHandlerRole8EACC234": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "lambda.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "ManagedPolicyArns": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+       ]
+      ]
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/QuickSetupHandlerRole/Resource"
+   }
+  },
+  "QuickSetupHandlerRoleDefaultPolicyC9FB023D": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeviceRegistrationsTableA5AE63AFArn6AE0897B"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeviceRegistrationsTableA5AE63AFArn6AE0897B"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttAuditLogTable8B03E3C8Arn985A1088"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttAuditLogTable8B03E3C8Arn985A1088"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUseCasesTable8AC05A74Arn8213834C"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUseCasesTable8AC05A74Arn8213834C"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDevicesTableD0A940EEArn7D39C15E"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDevicesTableD0A940EEArn7D39C15E"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": "s3:GetObject",
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          {
+           "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+          },
+          "/quick-setup/*"
+         ]
+        ]
+       }
+      },
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:iam::222222222222:role/DDAPortalAccessRole",
+        "arn:aws:iam::333333333333:role/DDAPortalAccessRole",
+        {
+         "Fn::Join": [
+          "",
+          [
+           "arn:aws:iam::",
+           {
+            "Ref": "AWS::AccountId"
+           },
+           ":role/DDAStationProvisioningRole"
+          ]
+         ]
+        }
+       ]
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "QuickSetupHandlerRoleDefaultPolicyC9FB023D",
+    "Roles": [
+     {
+      "Ref": "QuickSetupHandlerRole8EACC234"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/QuickSetupHandlerRole/DefaultPolicy/Resource"
+   }
+  },
+  "QuickSetupHandlerBD821331": {
+   "Type": "AWS::Lambda::Function",
+   "Properties": {
+    "Code": {
+     "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+    },
+    "Environment": {
+     "Variables": {
+      "USECASES_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefUseCasesTable8AC05A7473F9AE76"
+      },
+      "USER_ROLES_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefUserRolesTable19FB5B1923BFA28D"
+      },
+      "DEVICES_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefDevicesTableD0A940EE0CF6C46F"
+      },
+      "AUDIT_LOG_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefAuditLogTable8B03E3C8EAC7CA55"
+      },
+      "TRAINING_JOBS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefTrainingJobsTableB7EEC270141A34B5"
+      },
+      "LABELING_JOBS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefLabelingJobsTable854C7EAC0E834916"
+      },
+      "PRE_LABELED_DATASETS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefPreLabeledDatasetsTable9AA407E37849574D"
+      },
+      "MODELS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefModelsTableC5E7E44A1A769E23"
+      },
+      "DEPLOYMENTS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefDeploymentsTable5D087E524DE3E2DA"
+      },
+      "SETTINGS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefSettingsTable4DB0CCD0297D747B"
+      },
+      "COMPONENTS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefComponentsTableB16869EDB240BF30"
+      },
+      "SHARED_COMPONENTS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefSharedComponentsTableF0FA3720CC987BC3"
+      },
+      "WORKFLOWS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefWorkflowsTable4E215008D0FFE690"
+      },
+      "WORKFLOW_VERSIONS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefWorkflowVersionsTable04CEE3A6894B274B"
+      },
+      "TEST_DATASETS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefTestDatasetsTable14080134C04F19CE"
+      },
+      "TEST_RUNS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefTestRunsTableEDF9E6D0ABD1F461"
+      },
+      "WORKFLOW_CHAT_SESSIONS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefWorkflowChatSessionsTable4820402566C77C8A"
+      },
+      "CAMERA_REGISTRY_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefCameraRegistryTable4B0A3A5BD01D2148"
+      },
+      "PORTAL_ARTIFACTS_BUCKET": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefPortalArtifactsBucket31E9D39212014EED"
+      },
+      "WORKFLOWS_S3_PREFIX": "workflows",
+      "PORTAL_ACCOUNT_ID": {
+       "Ref": "AWS::AccountId"
+      },
+      "USER_POOL_ID": {
+       "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
+      },
+      "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
+      "COMPONENT_BUCKET_PREFIX": "dda-component",
+      "REGISTRATIONS_TABLE": {
+       "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefDeviceRegistrationsTableA5AE63AF9541290C"
+      },
+      "QUICK_SETUP_BUNDLE_KEY": "quick-setup/current/setup-bundle.tar.gz",
+      "QUICK_SETUP_BUNDLE_SHA256": "59063ddbfbda5198bed1229150e539dc0efc7262036b82d8bf81eb9508a63fe1",
+      "QUICK_SETUP_BOOTSTRAP_KEY": "quick-setup/current/bootstrap.sh",
+      "QUICK_SETUP_BOOTSTRAP_SHA256": "1cb1c136bcadfe112074f11d0d4bf83610aaf3093f65146b616835aaf55e5804",
+      "QUICK_SETUP_PROVISIONING_ROLE_ARN": {
+       "Fn::Join": [
+        "",
+        [
+         "arn:aws:iam::",
+         {
+          "Ref": "AWS::AccountId"
+         },
+         ":role/DDAStationProvisioningRole"
+        ]
+       ]
+      }
+     }
+    },
+    "Handler": "quick_setup.handler",
+    "Layers": [
+     {
+      "Ref": "SharedLayer27DFABF0"
+     }
+    ],
+    "Role": {
+     "Fn::GetAtt": [
+      "QuickSetupHandlerRole8EACC234",
+      "Arn"
+     ]
+    },
+    "Runtime": "python3.11",
+    "Timeout": 30
+   },
+   "DependsOn": [
+    "QuickSetupBundleAwsCliLayer384DDAC6",
+    "QuickSetupBundleCustomResourceEE45B0F4",
+    "QuickSetupHandlerRoleDefaultPolicyC9FB023D",
+    "QuickSetupHandlerRole8EACC234"
+   ],
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/QuickSetupHandler/Resource",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:is-bundled": false,
+    "aws:asset:property": "Code"
+   }
+  },
+  "StationProvisioningRole1EBC4728": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "AWS": {
+         "Fn::GetAtt": [
+          "QuickSetupHandlerRole8EACC234",
+          "Arn"
+         ]
+        }
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "Description": "Station Quick Setup provisioning role assumed by the quick_setup Lambda (with a per-device session policy) to mint scoped, short-lived station credentials for same-account use cases.",
+    "MaxSessionDuration": 3600,
+    "RoleName": "DDAStationProvisioningRole"
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/StationProvisioningRole/Resource"
+   }
+  },
+  "StationProvisioningRoleDefaultPolicyD9DAB7DD": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "iot:CreateThing",
+        "iot:DescribeThing",
+        "iot:CreateThingGroup",
+        "iot:DescribeThingGroup",
+        "iot:AddThingToThingGroup",
+        "iot:ListThingGroupsForThing"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::Join": [
+          "",
+          [
+           "arn:aws:iot:*:",
+           {
+            "Ref": "AWS::AccountId"
+           },
+           ":thing/*"
+          ]
+         ]
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           "arn:aws:iot:*:",
+           {
+            "Ref": "AWS::AccountId"
+           },
+           ":thinggroup/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "iot:CreateKeysAndCertificate",
+        "iot:AttachThingPrincipal",
+        "iot:AttachPolicy",
+        "iot:CreatePolicy",
+        "iot:GetPolicy",
+        "iot:ListPolicyVersions",
+        "iot:CreatePolicyVersion",
+        "iot:DeletePolicyVersion",
+        "iot:DescribeEndpoint",
+        "iot:CreateRoleAlias",
+        "iot:DescribeRoleAlias"
+       ],
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": [
+        "iam:GetRole",
+        "iam:CreateRole",
+        "iam:AttachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:PassRole"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:iam::",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":role/GreengrassV2TokenExchangeRole*"
+         ]
+        ]
+       }
+      },
+      {
+       "Action": [
+        "iam:CreatePolicy",
+        "iam:GetPolicy"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:iam::",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":policy/GreengrassV2TokenExchangeRoleAccess*"
+         ]
+        ]
+       }
+      },
+      {
+       "Action": "greengrass:TagResource",
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:greengrass:*:",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":coreDevices:*"
+         ]
+        ]
+       }
+      },
+      {
+       "Action": "sts:GetCallerIdentity",
+       "Effect": "Allow",
+       "Resource": "*"
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "StationProvisioningRoleDefaultPolicyD9DAB7DD",
+    "Roles": [
+     {
+      "Ref": "StationProvisioningRole1EBC4728"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/StationProvisioningRole/DefaultPolicy/Resource"
    }
   },
   "UseCasesRoleD6BF073B": {
@@ -1002,7 +2693,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -1071,6 +2762,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-08-auto-cors"
      }
@@ -1097,7 +2789,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/UseCasesHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -1991,7 +3683,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -2060,6 +3752,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2024-12-12-fixed-shared-utils"
      }
@@ -2086,7 +3779,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DevicesHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -2968,7 +4661,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -3037,6 +4730,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-19-device-logs"
      }
@@ -3063,7 +4757,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceLogsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -3945,7 +5639,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -4014,6 +5708,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-19-device-logs-analyzer"
      }
@@ -4040,7 +5735,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceLogsAnalyzerHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -5025,7 +6720,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -5094,6 +6789,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-04-deployments",
       "CUSTOM_NODE_TYPES_TABLE": "dda-portal-custom-node-types",
@@ -5123,9 +6819,55 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeploymentsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
+   }
+  },
+  "StoreRemediationScheduleRule9F64AC06": {
+   "Type": "AWS::Events::Rule",
+   "Properties": {
+    "Description": "Auto-remediates Greengrass \"Component store size limit reached\" deployment failures without user intervention",
+    "Name": "dda-portal-component-store-remediation",
+    "ScheduleExpression": "rate(5 minutes)",
+    "State": "ENABLED",
+    "Targets": [
+     {
+      "Arn": {
+       "Fn::GetAtt": [
+        "DeploymentsHandler70E83D88",
+        "Arn"
+       ]
+      },
+      "Id": "Target0",
+      "Input": "{\"action\":\"remediate-component-store-limit\"}"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/StoreRemediationScheduleRule/Resource"
+   }
+  },
+  "StoreRemediationScheduleRuleAllowEventRuleEdgeCVPortalComputeStackDeploymentsHandlerA11D9B266E1C9BD4": {
+   "Type": "AWS::Lambda::Permission",
+   "Properties": {
+    "Action": "lambda:InvokeFunction",
+    "FunctionName": {
+     "Fn::GetAtt": [
+      "DeploymentsHandler70E83D88",
+      "Arn"
+     ]
+    },
+    "Principal": "events.amazonaws.com",
+    "SourceArn": {
+     "Fn::GetAtt": [
+      "StoreRemediationScheduleRule9F64AC06",
+      "Arn"
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/StoreRemediationScheduleRule/AllowEventRuleEdgeCVPortalComputeStackDeploymentsHandlerA11D9B26"
    }
   },
   "AuthRole900B840B": {
@@ -6017,7 +7759,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -6086,6 +7828,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component"
      }
     },
@@ -6111,7 +7854,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/AuthHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -6993,7 +8736,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -7062,6 +8805,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2024-12-12-fixed-shared-utils"
      }
@@ -7088,7 +8832,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/UserManagementHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -7970,7 +9714,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -8006,7 +9750,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/JwtAuthorizerHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -8888,7 +10632,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -8957,6 +10701,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component"
      }
     },
@@ -8982,7 +10727,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DatasetsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -9864,7 +11609,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -9933,6 +11678,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component"
      }
     },
@@ -9958,7 +11704,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CapturesHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -10840,7 +12586,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -10909,6 +12655,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component"
      }
     },
@@ -10934,7 +12681,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/PreLabeledDatasetsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -11816,7 +13563,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -11885,6 +13632,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2024-12-08-v1"
      }
@@ -11911,7 +13659,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/LabelingHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -12793,7 +14541,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -12862,6 +14610,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component"
      }
     },
@@ -12887,7 +14636,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/LabelingMonitorHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -13769,7 +15518,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -13838,6 +15587,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2024-12-08-v1"
      }
@@ -13864,7 +15614,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/TrainingHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -14746,7 +16496,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -14815,6 +16565,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component"
      }
     },
@@ -14844,7 +16595,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CompilationHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -15752,7 +17503,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -15821,6 +17572,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "STORAGE_WARNING_THRESHOLD": "6442450944",
       "STORAGE_CRITICAL_THRESHOLD": "7516192768",
@@ -15857,7 +17609,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/PackagingHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -16739,7 +18491,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -16808,6 +18560,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component"
      }
     },
@@ -16833,7 +18586,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/GreengrassPublishHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -17790,7 +19543,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -17859,6 +19612,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CUSTOM_NODE_TYPES_TABLE": "dda-portal-custom-node-types",
       "PLUGIN_RECORDS_TABLE": "dda-portal-plugin-records"
@@ -17886,7 +19640,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ComponentsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -18768,7 +20522,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -18837,6 +20591,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component"
      }
     },
@@ -18862,7 +20617,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DataManagementHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -19846,7 +21601,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -19915,6 +21670,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-07-bucket-policy-update"
      }
@@ -19942,7 +21698,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/SharedComponentsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -20832,7 +22588,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -20901,6 +22657,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "DATA_ACCOUNTS_TABLE": {
        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefDataAccountsTable07F2C56902397EE5"
@@ -20929,7 +22686,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DataAccountsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -21837,7 +23594,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -21906,6 +23663,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "COMPILATION_FUNCTION_NAME": {
        "Ref": "CompilationHandler1E091806"
@@ -21939,7 +23697,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ModelImportHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -22847,7 +24605,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -22916,6 +24674,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "MODEL_IMPORT_FUNCTION_NAME": {
        "Ref": "ModelImportHandler5CA7E0F9"
@@ -22949,7 +24708,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ModelConverterHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -23831,7 +25590,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -23900,6 +25659,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-19-models-registry"
      }
@@ -23926,7 +25686,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ModelsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -24837,7 +26597,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -24906,6 +26666,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-20-audit-logs"
      }
@@ -24932,7 +26693,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/AuditLogsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -25975,7 +27736,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -26044,6 +27805,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-02-14-camera-sync",
       "CAMERA_SHADOW_REPORT_DLQ_URL": {
@@ -26073,7 +27835,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CameraSyncHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -26976,7 +28738,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -27045,6 +28807,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-02-14-camera-registry"
      }
@@ -27071,7 +28834,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CameraRegistryHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -28293,7 +30056,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -28362,6 +30125,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2026-02-06-account-sync",
       "ACCOUNT_SYNC_TABLE": {
@@ -28395,7 +30159,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/AccountSyncHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -29471,7 +31235,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -29540,6 +31304,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2026-02-06-user-admin",
       "EDGE_CREDENTIALS_TABLE": {
@@ -29579,7 +31344,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/UserAdminHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -30536,7 +32301,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -30605,6 +32370,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-25-workflows",
       "CUSTOM_NODE_TYPES_TABLE": "dda-portal-custom-node-types",
@@ -30636,7 +32402,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -31593,7 +33359,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -31662,6 +33428,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-25-workflow-validation",
       "CUSTOM_NODE_TYPES_TABLE": "dda-portal-custom-node-types",
@@ -31693,7 +33460,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowValidationHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -32698,7 +34465,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -32767,6 +34534,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-25-workflow-packaging",
       "CUSTOM_NODE_TYPES_TABLE": "dda-portal-custom-node-types",
@@ -32819,7 +34587,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowPackagingHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -33818,7 +35586,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -33887,6 +35655,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-25-workflow-generator",
       "CUSTOM_NODE_TYPES_TABLE": "dda-portal-custom-node-types",
@@ -33919,7 +35688,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowGeneratorHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -34877,7 +36646,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -34946,6 +36715,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "CODE_VERSION": "2025-01-25-workflow-testing",
       "TEST_RUN_STATE_MACHINE_ARN": {
@@ -34980,7 +36750,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowTestingHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -35905,7 +37675,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -35974,6 +37744,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "ALERT_TOPIC_ARN": {
        "Ref": "TrainingAlertTopic5C2CFA97"
@@ -36005,7 +37776,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/TrainingEventsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -36966,7 +38737,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed.zip"
+     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
     },
     "Environment": {
      "Variables": {
@@ -37035,6 +38806,7 @@
        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputRefDDAPortalUserPool51234D8CF7BF6E36"
       },
       "DDA_LOCAL_SERVER_VERSION": "1.0.63",
+      "WORKFLOW_MIN_LOCAL_SERVER_VERSIONS": "{\"arm64_jp4\":\"1.0.0\",\"arm64_jp5\":\"1.0.0\",\"arm64_jp6\":\"1.0.0\"}",
       "COMPONENT_BUCKET_PREFIX": "dda-component",
       "ALERT_TOPIC_ARN": {
        "Ref": "TrainingAlertTopic5C2CFA97"
@@ -37070,7 +38842,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CompilationEventsHandler/Resource",
-    "aws:asset:path": "asset.3e4d388799c19e2bd017950171d9e26a2465e0a07badc9981ec57c160a276aed",
+    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -37324,7 +39096,7 @@
       "Arn"
      ]
     },
-    "Timestamp": "1784961306364"
+    "Timestamp": "1785807383918"
    },
    "UpdateReplacePolicy": "Delete",
    "DeletionPolicy": "Delete",
@@ -37522,7 +39294,7 @@
        {
         "Ref": "AWS::URLSuffix"
        },
-       "/cdk-hnb659fds-assets-111111111111-us-east-1/d0af95b20ec73db599dd842068bd6730cea6eeba7087464250c5c970064d040f.json"
+       "/cdk-hnb659fds-assets-111111111111-us-east-1/74acfe5115cdfa82e78055d24ee7f930c0a5ee338498f1e7ed869cee3ccfb6b0.json"
       ]
      ]
     }
@@ -38507,6 +40279,61 @@
     "aws:asset:property": "TemplateURL"
    }
   },
+  "QuickSetupApiNestedStackQuickSetupApiNestedStackResource3ACF4400": {
+   "Type": "AWS::CloudFormation::Stack",
+   "Properties": {
+    "Parameters": {
+     "referencetoEdgeCVPortalComputeStackApiGatewayNestedStackApiGatewayNestedStackResource10A9B32AOutputsEdgeCVPortalComputeStackApiGatewayEdgeCVPortalAPI899B3E89RootResourceId": {
+      "Fn::GetAtt": [
+       "ApiGatewayNestedStackApiGatewayNestedStackResource85A55C6F",
+       "Outputs.EdgeCVPortalComputeStackApiGatewayEdgeCVPortalAPI899B3E89RootResourceId"
+      ]
+     },
+     "referencetoEdgeCVPortalComputeStackApiGatewayNestedStackApiGatewayNestedStackResource10A9B32AOutputsEdgeCVPortalComputeStackApiGatewayEdgeCVPortalAPI899B3E89Ref": {
+      "Fn::GetAtt": [
+       "ApiGatewayNestedStackApiGatewayNestedStackResource85A55C6F",
+       "Outputs.EdgeCVPortalComputeStackApiGatewayEdgeCVPortalAPI899B3E89Ref"
+      ]
+     },
+     "referencetoEdgeCVPortalComputeStackDeviceRegistrationsHandler60226F4AArn": {
+      "Fn::GetAtt": [
+       "DeviceRegistrationsHandler8B09EA59",
+       "Arn"
+      ]
+     },
+     "referencetoEdgeCVPortalComputeStackQuickSetupHandler8A9AE2BEArn": {
+      "Fn::GetAtt": [
+       "QuickSetupHandlerBD821331",
+       "Arn"
+      ]
+     }
+    },
+    "TemplateURL": {
+     "Fn::Join": [
+      "",
+      [
+       "https://s3.us-east-1.",
+       {
+        "Ref": "AWS::URLSuffix"
+       },
+       "/cdk-hnb659fds-assets-111111111111-us-east-1/fd98d27fdd4fc6a68f8264cfb0bde385e89268dce2c2d6bf330f816c28f2f75c.json"
+      ]
+     ]
+    }
+   },
+   "DependsOn": [
+    "ApiGatewayNestedStackApiGatewayNestedStackResource85A55C6F",
+    "CameraRegistryApiNestedStackCameraRegistryApiNestedStackResource6CF55D75",
+    "UserAdminApiNestedStackUserAdminApiNestedStackResourceAB494289"
+   ],
+   "UpdateReplacePolicy": "Delete",
+   "DeletionPolicy": "Delete",
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/QuickSetupApi.NestedStack/QuickSetupApi.NestedStackResource",
+    "aws:asset:path": "EdgeCVPortalComputeStackQuickSetupApiC4499F43.nested.template.json",
+    "aws:asset:property": "TemplateURL"
+   }
+  },
   "UpdateLambdaEnvServiceRole5C231C14": {
    "Type": "AWS::IAM::Role",
    "Properties": {
@@ -38615,7 +40442,7 @@
       "Outputs.EdgeCVPortalComputeStackApiGatewayEdgeCVPortalAPI899B3E89Ref"
      ]
     },
-    "Timestamp": "1784961306480"
+    "Timestamp": "1785807384035"
    },
    "DependsOn": [
     "ApiGatewayNestedStackApiGatewayNestedStackResource85A55C6F",
@@ -38630,7 +40457,7 @@
   "CDKMetadata": {
    "Type": "AWS::CDK::Metadata",
    "Properties": {
-    "Analytics": "v2:deflate64:H4sIAAAAAAAA/21RwU7DMAz9lt0zA92JI5vgtInRIq6Tm5opW5OUONlURfl3lBTYJiFF8Xv2sx07FVTVIzzM8Mxz2R3nvWohNh7lUeCZd7FH3XYIcY0juQ9yrKwRq09zw1+Ckf4n8IefT2R8Y4OTtMFhUGafw/97t+S04lwrCV7skJk8w1M2ghewDPJIfolMQqGGWNueclqxW9srOZYqE9qgwT11F/+NIwn+YohvgUKpMYFyXzKuaBLdaFDbroX4ju3UuIAklPWQmR2UrENPgvJ0DLGQ/MCQZWwYYhGJX3VKokzXeNznHdTEZSdlDHSoyZMTq8De6uvYNX4Nfgg+o/JfSRjbERz47lTdQz6zAys1d8F4pQnqyX4Dvs4eRvEBAAA="
+    "Analytics": "v2:deflate64:H4sIAAAAAAAA/2WRTU/DMAyGf8vuWYBy4rgVODExWsS1cluvypaPUierqij/HSXdp5Ci+PUj23HsjGfZC39awEjLpj0spai5Ly00BwYjVV6Cqlvg/gMmHH5wIGE0y3f6zi+F7iRao9+dbmwkF5Hv9K3e4qAEpaS3I2pbGjc0uIG+F7qLAf9pYPRceSBCS3wVDWuxl2ZSqC1fu+aA9vUCYvQJroGQCVDcF0ZiLJ7s1kjRTKmZWW1AQ4ftld+BwDC2RNwX7lTFSQyMfon7L4cusVmk+1rnxg2snTQo09bcf0M9F0oiMGEsj57pRZPeIE3cJ5edeQgsfb200MVJzWupZNxCBSM1UvDVSLkUaTEsd2SNKpDSJFPXZ30LtzCAQhsTdvrT2d7ZqNL+A9OmRb6nh2P2yONZ7EmI5eC0FQp5Mds//KBLlkECAAA="
    },
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CDKMetadata/Default"

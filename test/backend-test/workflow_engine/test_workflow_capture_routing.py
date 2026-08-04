@@ -350,6 +350,11 @@ class TestExecuteRecordsArtifactLocation:
     def test_non_capture_run_leaves_has_image_results_false(
         self, tmp_path, session_factory
     ):
+        # vlm-parity-run-results Requirement 2.3: output_dir/capture_id
+        # are now ALWAYS recorded (so metadata JSON and inference-node
+        # frames have a destination even without a File_Output
+        # terminal); has_image_results stays false for a non-capture
+        # run without persisted node frames.
         artifact_path = write_artifact_set(tmp_path, compiled=NON_CAPTURE_DOC)
         execution_id = seed_run(session_factory, artifact_path)
         manager = FakePipelineManager()
@@ -366,8 +371,9 @@ class TestExecuteRecordsArtifactLocation:
         row = get_execution(session_factory)
         assert row.status == EXECUTION_STATUS_COMPLETED
         assert bool(row.has_image_results) is False
-        assert row.output_dir is None
-        assert row.capture_id is None
+        assert row.output_dir == os.path.join(
+            capture_root, "wf-1", execution_id)
+        assert row.capture_id == "wf-1-{0}".format(execution_id)
 
     def test_tag_values_unchanged_by_routing(self, tmp_path, session_factory):
         # R1.6: routing is additive — the tag values the run produces are

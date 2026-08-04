@@ -6,6 +6,7 @@ Based on DDA_Greengrass_Component_Creator.ipynb Phase 3
 import json
 import os
 import logging
+from dataclasses import asdict
 from typing import Dict, Any, Optional
 from datetime import datetime
 import boto3
@@ -21,6 +22,17 @@ from shared_utils import (
     check_user_access, validate_required_fields,
     is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
 )
+
+# Preflight Fit_Check (vllm-sizing-and-packaging-errors Requirements 3.4,
+# 3.6, 3.7): pure sizing module bundled alongside this handler in the
+# functions asset. Imported as module attributes so tests can monkeypatch
+# the estimation/evaluation seams.
+from vllm_fit_check import estimate_weights, evaluate_fit
+
+# Shared model-name sanitization transform (same functions bundle):
+# single source of truth for the packaged/served name alignment
+# (vllm-model-name-mismatch Requirement 2.2).
+from model_naming import safe_model_name
 
 # Configure logging
 logger = logging.getLogger()
@@ -289,8 +301,9 @@ def is_vllm_record(training_job: Dict) -> bool:
 def _safe_model_name(model_name: str) -> str:
     """Sanitized model name — the same transform _trigger_component_creation
     (packaging.py) uses, so the component name matches the repository
-    directory the packager generated."""
-    return re.sub(r'[^a-zA-Z0-9-]', '-', str(model_name).lower())
+    directory the packager generated. Delegates to the shared single source
+    of truth (model_naming.safe_model_name, vllm-model-name-mismatch 2.2)."""
+    return safe_model_name(model_name)
 
 
 def derive_vllm_component_name(model_name: str) -> str:
@@ -605,7 +618,111 @@ def publish_component(event: Dict, context: Any) -> Dict:
 
         # Get use case details
         usecase = get_usecase(usecase_id)
-        
+
+        # ── vLLM preflight Fit_Check gate (Requirements 3.4, 3.6, 3.7) ──────
+        # Runs BEFORE any component registration: publish is the moment the
+        # configuration becomes deployable, so this is the fail-closed point.
+        # If the estimated weights + minimum KV cache exceed the
+        # gpu_memory_utilization × Device_Memory_Profile budget on EVERY
+        # supported Target_Architecture, the publish fails with 422 and the
+        # full sizing findings — unless the request body carries the explicit
+        # `skip_fit_check: true` override, which proceeds and is recorded in
+        # the audit event. An undeterminable Weight_Estimate never blocks:
+        # the publish proceeds with an 'unverified' annotation.
+        vllm_fit_check = None
+        vllm_fit_overridden = False
+        if vllm_record:
+            skip_fit_check = body.get('skip_fit_check') is True
+            # S3-sourced records size by the artifact object's ContentLength
+            # in the Use_Case account (the bucket model_import verified at
+            # registration). A client-construction failure degrades to an
+            # unverified estimate rather than blocking the publish.
+            s3_head = None
+            if (training_job.get('model_source') or {}).get('s3_model_artifact'):
+                try:
+                    s3_head = get_usecase_client('s3', usecase).head_object
+                except Exception as e:
+                    logger.warning(
+                        f"Could not create use-case S3 client for weight "
+                        f"estimation (fit check will be unverified): {e}")
+
+            estimate = estimate_weights(training_job, s3_head=s3_head)
+            if estimate is None:
+                # Requirement 3.4: fit could not be verified — proceed,
+                # annotated, never blocking.
+                vllm_fit_check = {
+                    'status': 'unverified',
+                    'estimate': None,
+                    'findings': [],
+                    'message': (
+                        'Model weight size could not be estimated; the fit '
+                        'check was skipped and the publish proceeds '
+                        'unverified.'),
+                }
+                logger.warning(
+                    f"vLLM fit check unverified for training {training_id}: "
+                    f"weight estimate unavailable; proceeding with publish")
+            else:
+                engine_configuration = \
+                    training_job.get('engine_configuration') or {}
+                findings = evaluate_fit(
+                    engine_configuration, estimate, vllm_archs)
+                findings_payload = [asdict(finding) for finding in findings]
+                estimate_payload = asdict(estimate)
+                every_arch_fails = bool(findings) and \
+                    all(not finding.fits for finding in findings)
+
+                if every_arch_fails and not skip_fit_check:
+                    # Requirement 3.6: fail the publish before any component
+                    # registration. The FitFinding messages carry the full
+                    # sizing statement (estimate, configured fraction,
+                    # per-architecture budget, and the raise/reduce/shrink
+                    # remediation) and the findings array lets the GUI
+                    # render them per architecture.
+                    failing_messages = ' '.join(
+                        finding.message for finding in findings)
+                    logger.error(
+                        f"vLLM publish blocked by fit check for training "
+                        f"{training_id}: {failing_messages}")
+                    return create_response(422, {
+                        'error': (
+                            f"vLLM fit check failed for every supported "
+                            f"architecture: {failing_messages}"),
+                        'fit_check': {
+                            'status': 'failed',
+                            'estimate': estimate_payload,
+                            'findings': findings_payload,
+                        },
+                        'training_id': training_id,
+                        'component_name': component_name,
+                        'component_version': component_version,
+                    })
+
+                if every_arch_fails:
+                    # Requirement 3.7: explicit skip_fit_check override —
+                    # proceed and record the override in the audit event.
+                    vllm_fit_overridden = True
+                    vllm_fit_check = {
+                        'status': 'overridden',
+                        'estimate': estimate_payload,
+                        'findings': findings_payload,
+                        'message': (
+                            'Fit check failed for every supported '
+                            'architecture but was overridden by '
+                            'skip_fit_check.'),
+                    }
+                    logger.warning(
+                        f"vLLM fit check FAILED for every supported "
+                        f"architecture but skip_fit_check was supplied; "
+                        f"proceeding with publish for training {training_id}")
+                else:
+                    all_fit = all(finding.fits for finding in findings)
+                    vllm_fit_check = {
+                        'status': 'passed' if all_fit else 'warnings',
+                        'estimate': estimate_payload,
+                        'findings': findings_payload,
+                    }
+
         # Create Greengrass client (handles both single-account and multi-account scenarios)
         greengrass = get_usecase_client(
             'greengrassv2',
@@ -781,18 +898,23 @@ def publish_component(event: Dict, context: Any) -> Dict:
                         f"Rollback of component version {arn} failed "
                         f"(may need manual cleanup): {cleanup_error}")
 
+            failure_audit_details = {
+                'component_name': component_name,
+                'component_version': component_version,
+                'runtime': 'vllm',
+                'failed_targets': [c.get('target') for c in vllm_failed],
+            }
+            if vllm_fit_overridden:
+                # Requirement 3.7: the skip_fit_check override is recorded
+                # on whichever audit event this attempt produces.
+                failure_audit_details['skip_fit_check'] = True
             log_audit_event(
                 user_id=user_id,
                 action='publish_greengrass_component',
                 resource_type='training_job',
                 resource_id=training_id,
                 result='failure',
-                details={
-                    'component_name': component_name,
-                    'component_version': component_version,
-                    'runtime': 'vllm',
-                    'failed_targets': [c.get('target') for c in vllm_failed],
-                }
+                details=failure_audit_details
             )
             error_detail = (
                 '; '.join(
@@ -897,30 +1019,41 @@ def publish_component(event: Dict, context: Any) -> Dict:
             )
         
         # Log audit event
+        success_audit_details = {
+            'component_name': component_name,
+            'component_version': component_version,
+            'targets': [c['target'] for c in published_components],
+            'published_count': len([c for c in published_components if c['status'] == 'published'])
+        }
+        if vllm_fit_overridden:
+            # Requirement 3.7: record the skip_fit_check override in the
+            # audit event for the publish it allowed to proceed.
+            success_audit_details['skip_fit_check'] = True
         log_audit_event(
             user_id=user_id,
             action='publish_greengrass_component',
             resource_type='training_job',
             resource_id=training_id,
             result='success',
-            details={
-                'component_name': component_name,
-                'component_version': component_version,
-                'targets': [c['target'] for c in published_components],
-                'published_count': len([c for c in published_components if c['status'] == 'published'])
-            }
+            details=success_audit_details
         )
         
         success_count = len([c for c in published_components if c['status'] == 'published'])
         logger.info(f"Published {success_count}/{len(published_components)} components for training {training_id}")
         
-        return create_response(200, {
+        success_body = {
             'training_id': training_id,
             'component_name': component_name,
             'component_version': component_version,
             'published_components': published_components,
             'message': f'Published {success_count} component(s) successfully'
-        })
+        }
+        if vllm_fit_check is not None:
+            # Fit_Check annotation (Requirements 3.4, 3.7): 'unverified'
+            # when the estimate could not be determined, 'overridden' when
+            # skip_fit_check bypassed an all-architecture failure.
+            success_body['fit_check'] = vllm_fit_check
+        return create_response(200, success_body)
         
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")

@@ -594,6 +594,15 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
+    // Post-import engine-configuration editing (vllm-sizing-and-packaging-errors)
+    const modelVllmTrainingResource = modelVllmResource.addResource('{training_id}');
+    const modelVllmEngineConfigResource =
+      modelVllmTrainingResource.addResource('engine-configuration');
+    modelVllmEngineConfigResource.addMethod('PUT', modelImportIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
     const modelConvertResource = modelsResource.addResource('convert');
     modelConvertResource.addMethod('POST', modelConverterIntegration, {
       authorizer,

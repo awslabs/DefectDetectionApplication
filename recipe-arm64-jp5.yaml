@@ -82,6 +82,12 @@ Manifests:
       # `compose up` also starts existing stopped containers (the recovery
       # path for a container the restart race managed to kill). Timeout 900s:
       # Greengrass's 120s Startup default is far below a cold device boot.
+      # Adoption-proof Startup (Defect E): STARTUP_EPOCH is recorded first;
+      # --force-recreate ensures the compose up never adopts a previous
+      # incarnation's (possibly still-dying) container; verify-fresh (NOT
+      # best-effort) fails Startup non-zero if any project container's
+      # StartedAt predates this Startup, so Greengrass retries instead of
+      # reporting RUNNING over a stale container.
       Startup:
         RequiresPrivilege: true
         Timeout: 900
@@ -91,12 +97,14 @@ Manifests:
           INFERENCE_COMPONENT_DECOMPRESED_PATH: "{aws.edgeml.dda.InferenceApp:artifacts:decompressedPath}"
           LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH: "{artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64"
         Script: |
+          STARTUP_EPOCH=$(date +%s)
           bash {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/host_scripts/setup_dda_users.sh ;
           bash {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/host_scripts/get_nvidia_libs_versions.sh;
           bash {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/host_scripts/setup_paths.sh;
           bash {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/host_scripts/configure_usb.sh;
           export $(grep -v '^#' /tmp/.dda.env | xargs) ;
-          docker compose --profile $DOCKER_PROFILE -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/docker-compose.yaml up -d --no-build --wait --wait-timeout 600 ;
+          docker compose --profile $DOCKER_PROFILE -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/docker-compose.yaml up -d --no-build --force-recreate --wait --wait-timeout 600 ;
+          bash {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/host_scripts/compose_lifecycle.sh verify-fresh $STARTUP_EPOCH -- --profile $DOCKER_PROFILE -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/docker-compose.yaml
       # Shutdown exports /tmp/.dda.env the same way Startup does: Greengrass
       # gives Shutdown a fresh environment, so without the export
       # $DOCKER_PROFILE expanded empty and `--profile` consumed `-f`, making
@@ -104,12 +112,21 @@ Manifests:
       # provided: not found". ${DOCKER_PROFILE:-tegra} keeps the down working
       # even if /tmp/.dda.env is missing (tegra is what
       # get_nvidia_libs_versions.sh selects on this gpu+aarch64 target).
+      # Synchronous teardown (edge-deploy-reliability, Defect E): after the
+      # down, wait-empty blocks (bounded, best-effort) until the project
+      # reports zero containers, so Shutdown does not return while a
+      # slow-dying backend (~24s post-SIGKILL GPU/Triton teardown) still
+      # exists for the next Startup to adopt. Timeout 300s: Greengrass's 15s
+      # default would truncate the wait; 300 covers the 120s stop grace plus
+      # the dying window with margin, and sits above the 240s wait bound.
       Shutdown:
         RequiresPrivilege: true
+        Timeout: 300
         Script: |
           systemctl stop nvidia-csi-capture || true
           export $(grep -v '^#' /tmp/.dda.env | xargs) || true
           docker compose --profile ${DOCKER_PROFILE:-tegra} -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/docker-compose.yaml down
+          bash {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/host_scripts/compose_lifecycle.sh wait-empty 240 -- --profile ${DOCKER_PROFILE:-tegra} -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP5-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP5/docker-compose.yaml || true
     Artifacts:
       - URI: s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/aws.edgeml.dda.LocalServer.arm64JP5-aarch64.zip
         Unarchive: ZIP

@@ -229,12 +229,38 @@ Python backend code uses `pytest` + `hypothesis` with `moto` for AWS mocking; CD
 - [x] 10. Final checkpoint - full quick-setup flow wired
   - Ensure all tests pass, ask the user if questions arise.
 
+- [ ] 11. Harden `setup_station.sh` against first-boot transients and false-alarm reporting
+  - Motivated by a real provisioning failure on a fresh JP6 Orin Nano (`ryan-orin-nano`): a first-boot apt/dpkg lock held by unattended-upgrades made the single 12-package GStreamer `apt-get install` fail, marking the entire setup failed even though Greengrass provisioning succeeded and the device came up HEALTHY (an immediate second run succeeded); the same run emitted false "Could not read GreengrassV2IoTThingPolicy" and "DDAPortalComponentAccessPolicy not found" warnings although both policies exist with correct permissions, because the checks swallowed AWS CLI/credential errors and reported them as missing policies
+
+  - [x] 11.1 Add apt/dpkg lock resilience and split the GStreamer install
+    - In `station_install/setup_station.sh`, add an `apt_wait_for_lock` helper that waits up to ~5 minutes for the apt/dpkg locks (`/var/lib/dpkg/lock-frontend`, `/var/lib/dpkg/lock`, `/var/lib/apt/lists/lock`), printing periodic progress messages while unattended-upgrades holds them, and an apt wrapper that waits for the lock, runs the apt operation, and on failure re-waits and retries once before returning failure; route every `apt-get update` / `apt-get install` invocation in the script through the wrapper
+    - Split the GStreamer step (currently one 12-package `apt-get install` around line 625): install the required core set (`libgstreamer1.0-dev`, `libgstreamer-plugins-base1.0-dev`, `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, `gstreamer1.0-libav`, `gstreamer1.0-tools`, `gstreamer1.0-x`, `gstreamer1.0-alsa`, `gstreamer1.0-gl`) as a single operation that stays `add_error` on failure, then install the optional desktop extras (`gstreamer1.0-gtk3`, `gstreamer1.0-qt5`, `gstreamer1.0-pulseaudio`) individually with failures downgraded to `add_warning`
+    - Rationale stated inline: requirements.md has no criterion covering transient apt-lock resilience; this addresses the observed first-boot failure where one transient lock marked an otherwise-healthy setup as failed
+
+  - [ ]* 11.2 Write shell tests for apt resilience and the GStreamer split
+    - `bats`-style tests alongside `station_install/quick_setup/tests/` with stubbed `apt-get`/lock probes: the wrapper waits while the lock is held and proceeds once released; a first-attempt apt failure followed by a successful retry records no error; a core-GStreamer-set failure records an error while an extras-only failure records warnings and continues
+    - Rationale stated inline: validates the 11.1 hardening behavior (no matching requirement in requirements.md)
+
+  - [ ] 11.3 Make the IoT/IAM policy checks truthful about check failures
+    - In `station_install/setup_station.sh`, gate the `GreengrassV2IoTThingPolicy` shadow-permission check and the `DDAPortalComponentAccessPolicy` attach step on the AWS CLI being installed and credentials resolving (e.g. `aws sts get-caller-identity` succeeds); both already execute after the AWS CLI install step, but they silently discard CLI/auth errors (`2>/dev/null || echo ""`) and then report the policy as missing
+    - When the check command itself fails (CLI missing, auth failure, access denied), emit a warning naming the check as inconclusive (e.g. "Could not verify GreengrassV2IoTThingPolicy — the check itself failed (AWS CLI unavailable or credentials not resolvable); verify manually") instead of the current "Could not read GreengrassV2IoTThingPolicy" / "DDAPortalComponentAccessPolicy not found. Deploy UseCaseAccountStack first."; keep the existing policy-absent wording only when the API positively confirms absence (`NoSuchEntity` / `ResourceNotFoundException`)
+    - Rationale stated inline: requirements.md has no criterion covering these warnings; on the observed device both policies existed with correct permissions and the false alarms pointed operators at the wrong fix
+
+  - [ ] 11.4 Report the specific failed step instead of a blanket failure when provisioning succeeded
+    - In `station_install/setup_station.sh`, track whether Greengrass provisioning and core-device registration succeeded separately from later package/step errors; when provisioning succeeded but a subsequent step recorded an error, make the final summary emit a line naming the specific failed step(s) (e.g. "Setup completed with ERRORS in step: GStreamer install (Greengrass provisioning and core-device registration succeeded)") so the existing `quick_setup/run.sh` summary-line pickup forwards the specific failed step to the portal `error_summary` instead of a blanket failure; keep the plain failed outcome when Greengrass provisioning itself fails
+    - _Requirements: 6.2, 7.7_
+
+  - [ ]* 11.5 Write shell tests for truthful policy checks and granular failure reporting
+    - `bats`-style tests with a stubbed `aws`: CLI-missing and auth-failure fixtures emit the inconclusive-check warning and never the policy-missing wording; a genuinely-absent-policy fixture keeps the existing warning; a run with provisioning success plus a package-step failure produces a summary naming the failed step, while a provisioning failure keeps the blanket failed outcome
+    - _Requirements: 6.2, 7.7_ (policy-check wording has no matching requirement; rationale in 11.3)
+
 ## Notes
 
 - Tasks marked with `*` are optional test tasks and can be skipped for a faster MVP; core implementation tasks are never optional.
 - Each task references the specific requirement sub-clauses it covers for traceability.
 - Property tests validate the universal correctness properties from the design (Properties 1–18), run with a minimum of 100 examples, and are placed close to the implementation they exercise so regressions surface early.
 - Unit and shell tests cover the analyzed non-property criteria (RBAC/audit failure paths, uniqueness/STS/audit failure handling, prerequisite and orchestration behavior, and truncation boundaries).
+- Task 11 is post-delivery hardening of `setup_station.sh` driven by an observed first-boot provisioning failure on a JP6 Orin Nano; where no requirement clause matches, the rationale is stated inline on the task instead of a requirement reference. Its sub-tasks all edit `setup_station.sh`, so they occupy consecutive dependency-graph waves (no dependency on tasks 1-10) rather than one parallel wave.
 - On-hardware end-to-end verification (end-state equivalence with a manual `setup_station.sh` run, idempotent re-run, credential sufficiency) is delivered by extending the existing `test/on-hardware` harness and is intentionally out of scope for this coding plan since it requires a provisioned station.
 
 ## Task Dependency Graph
@@ -250,7 +276,11 @@ Python backend code uses `pytest` + `hypothesis` with `moto` for AWS mocking; CD
     { "id": 5, "tasks": ["5.12", "5.13", "5.14", "5.15"] },
     { "id": 6, "tasks": ["8.1"] },
     { "id": 7, "tasks": ["8.2", "8.3"] },
-    { "id": 8, "tasks": ["8.4", "8.5", "9.5"] }
+    { "id": 8, "tasks": ["8.4", "8.5", "9.5"] },
+    { "id": 9, "tasks": ["11.1"] },
+    { "id": 10, "tasks": ["11.2", "11.3"] },
+    { "id": 11, "tasks": ["11.4"] },
+    { "id": 12, "tasks": ["11.5"] }
   ]
 }
 ```

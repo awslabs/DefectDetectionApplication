@@ -43,6 +43,12 @@ import types
 from _preservation_support import load_module_from_path
 
 PACKAGING_REL = "edge-cv-portal/backend/functions/packaging.py"
+# Sibling module in the same functions bundle. packaging.py does
+# ``from model_naming import safe_model_name`` (vllm-model-name-mismatch 2.2);
+# the isolated loader has no edge-cv-portal/backend/functions on sys.path, so
+# the REAL module is loaded from the same directory and injected alongside the
+# stubs. This keeps the actual production transform under test.
+MODEL_NAMING_REL = "edge-cv-portal/backend/functions/model_naming.py"
 
 
 def _shared_utils_stub():
@@ -82,6 +88,11 @@ def _make_stubs(lambda_client):
         "botocore.exceptions": exc,
         "shared_utils": _shared_utils_stub(),
         "yaml": yaml,
+        # REAL sibling module (not a stub) — resolves packaging.py's
+        # ``from model_naming import safe_model_name``.
+        "model_naming": load_module_from_path(
+            "model_naming_preservation", MODEL_NAMING_REL
+        ),
     }
 
 

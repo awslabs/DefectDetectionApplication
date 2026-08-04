@@ -13,6 +13,10 @@ The fix has four parts, each mapped to a defect in the requirements:
 3. **Workflow component dependencies** (2.8, 2.9): `workflow_packaging.py` emits ComponentDependencies with HARD dependencies on each published model component the workflow uses and on the LocalServer component matching each target architecture, merged with the existing `dda.plugin.*` dependencies.
 4. **Actionable diagnostics** (2.10): `vllm_model_prep.py` classifies a retry window that ends with pure connection-level failures (runtime never reachable) and emits an error naming the LocalServer backend container as the likely cause with concrete verification steps.
 
+**Defect E (added after on-hardware verification of A–D)**: a second verified incident on v1.0.46 (device ryan-orin-nano, JP6 Orin Nano) showed the health-gated lifecycle from Defect B has a Shutdown/Startup teardown race. After a device reboot + nucleus restart, Shutdown's `docker compose down`/kill delivered `kill` to both containers (t=1785789983); the frontend died and was destroyed within 1s and Startup's `compose up` recreated it (t=1785790004–5); but the backend takes ~24s to die after SIGKILL escalation (GPU/Triton teardown), so Startup's compose **adopted** the still-dying backend as an existing running container, the `--wait` health gate trusted its stale pre-kill 'healthy' healthcheck state ("Container ...backend_tegra_gpu_enabled-1 Running / Healthy"), and Startup exited 0. Three seconds later (t=1785790007) the old backend finished dying (stop/die/destroy) — leaving NO backend container while Greengrass reported RUNNING and the portal/API was dead. `greengrass-cli component restart` recovered it manually once the old container was fully gone.
+
+5. **Synchronous teardown + adoption-proof Startup** (2.11–2.14): a new compose-lifecycle helper script in `src/host_scripts/` (shipped with every recipe variant via the existing `build-custom.sh` host_scripts copy) gives Shutdown a bounded wait-for-zero-project-containers after `down` (with a Shutdown `Timeout` sized above worst-case teardown — the current recipes declare none, so Greengrass's 15s default truncates any wait), and gives Startup `--force-recreate` (never adopt a previous incarnation's container) plus a post-`--wait` freshness verification (every project container's StartedAt newer than the Startup script's start time) before Greengrass may see RUNNING.
+
 ## Glossary
 
 - **Bug_Condition (C)**: The condition triggering each defect — see the per-defect formal specifications in Bug Details. The umbrella condition is: a deployment restarts LocalServer while the backend's graceful shutdown exceeds the Docker stop grace window, and the surrounding layers (lifecycle health, recipe dependencies, prep-script diagnostics) fail to detect, prevent, or explain the resulting dead backend.
@@ -25,6 +29,10 @@ The fix has four parts, each mapped to a defect in the requirements:
 - **`model_ref` parameter**: Node parameter type (`workflow_core` catalog) whose value names a registered model record — `model_inference.modelName` (vision) and `llm_inference.modelName` (vLLM). The packaging flow can resolve these to published Greengrass model components via the training-jobs table (the same registry snapshot `workflow_validation.py` loads).
 - **`request_load`**: The retry loop in `src/backend/dda_triton/vllm_model_prep.py` (backoff schedule 3/6/12/24/48s, ~70s total) that POSTs the model load to the vLLM runtime and currently exits with a generic retry-exhausted message.
 - **stop grace period**: The time Docker waits between SIGTERM and SIGKILL when stopping a container; default 10s, configurable per service via `stop_grace_period` (also the default timeout used by `docker compose stop`/`down` when `-t` is not given).
+- **dying window (Defect E)**: The interval between a container receiving `kill` and its final stop/die/destroy events. Normally near-instant, but the backend's GPU/Triton teardown holds the process in kernel teardown for ~24s after SIGKILL; during this window `docker compose ps` still reports the container as an existing running service with its last-recorded healthcheck state.
+- **adoption (Defect E)**: docker compose's default behavior of leaving an existing container that matches the service's current configuration in place on `up` instead of recreating it. Adoption of a healthy steady-state container is normal; adoption of a dying previous-incarnation container is the Defect E bug condition. `--force-recreate` disables adoption entirely.
+- **compose lifecycle helper**: The new `src/host_scripts/compose_lifecycle.sh` (shipped into every component artifact by the existing `build-custom.sh` `cp -r src/host_scripts` step; host_scripts are not security-baseline-tracked). Two subcommands, both pure functions of `docker` CLI output so they are testable with a stubbed `docker` on PATH: `wait-empty` (poll `docker compose ... ps -aq` until empty, bounded timeout) and `verify-fresh` (assert every project container's `State.StartedAt` is at or after a reference epoch).
+- **Shutdown Timeout (Greengrass)**: Greengrass gives lifecycle Shutdown scripts a 15-second default timeout when the recipe declares none — the current recipes declare none, so any Shutdown wait longer than 15s is truncated.
 
 ## Bug Details
 
@@ -91,6 +99,26 @@ FUNCTION isBugCondition_D(attempts)
 END FUNCTION
 ```
 
+**Defect E — Shutdown/Startup teardown race (1.10–1.13):** manifests when Startup's `compose up` runs while a container from the previous incarnation is still in its (slow) dying window.
+
+```
+FUNCTION isBugCondition_E(cycle)
+  INPUT: cycle of type LifecycleCycle
+         {shutdownExitedWithContainersRemaining, dyingContainer, startupUp}
+  OUTPUT: boolean
+
+  RETURN cycle.shutdownExitedWithContainersRemaining          -- down/kill returned before
+                                                              -- destroy; no post-down wait,
+                                                              -- no Shutdown Timeout (15s default)
+         AND inDyingWindow(cycle.dyingContainer)              -- kill delivered, destroy pending
+                                                              -- (~24s GPU/Triton teardown)
+         AND composeAdopts(cycle.startupUp, cycle.dyingContainer)  -- seen as existing running
+         AND healthGateTrusts(staleHealthState(cycle.dyingContainer)) -- 'healthy' from before kill
+         AND startupExitCode(cycle) = 0
+         AND eventually(containerCount(project, "backend") = 0)   -- destroy completes after exit
+END FUNCTION
+```
+
 ### Examples
 
 - **Incident (Defect A + B)**: deployment restart SIGTERM at t+0 → new `compose up` starts the frontend at ~t+11s → backend SIGKILLed at t+13s (exit 137, `OOMKilled=false`), stuck `Exited(137)`; Greengrass reports LocalServer RUNNING for the rest of the incident. Expected: the backend finishes shutdown gracefully and comes back up, or LocalServer is not RUNNING until it does.
@@ -99,6 +127,9 @@ END FUNCTION
 - **Defect D**: every load attempt dies in `requests.ConnectionError` (connection refused); the final log is the generic "staged but the load request did not succeed" message. Expected: an error naming the LocalServer backend container as the likely cause and how to check it.
 - **Edge case (Defect A)**: backend shutdown completes in 2s — no kill occurs today and none may occur after the fix (preservation 3.1).
 - **Edge case (Defect D)**: attempt 1 is connection-refused but attempt 2 receives HTTP 409 — NOT the bug condition; the existing authoritative HTTP-error message must be kept (3.9).
+- **Incident (Defect E, verified via docker events on ryan-orin-nano, v1.0.46)**: reboot + nucleus restart → Shutdown kill at t=1785789983 → frontend destroyed <1s, backend enters ~24s dying window → Startup `up -d --wait` at t=1785790004–5 recreates the frontend but adopts the dying backend, prints "Running / Healthy" against its stale healthcheck state, exits 0 → backend stop/die/destroy at t=1785790007 → `docker ps -a` shows only the frontend; Greengrass RUNNING; portal dead. Cloud status showed ERRORED then RUNNING. Expected: Startup never adopts a previous incarnation's container and RUNNING implies a backend created by this Startup.
+- **Edge case (Defect E)**: Shutdown's `down` completes with all containers destroyed before it exits (fast teardown) — NOT the bug condition; Startup starts from zero containers and must behave exactly as today (3.10, 3.13).
+- **Recovery example (Defect E)**: `greengrass-cli component restart` issued after the old container fully died → Shutdown `down` (nothing to remove), Startup created both containers fresh, backend healthy, HTTP 200 — the behavior the fixed lifecycle must produce automatically.
 
 ## Expected Behavior
 
@@ -114,6 +145,10 @@ END FUNCTION
 - The gdk build/publish pipeline is unchanged except for the intended recipe and compose edits (3.7).
 - `workflow_packaging.py` keeps emitting the existing `dda.plugin.*` HARD dependencies, pinned exactly as `plugin_component_dependencies` does today, alongside the new entries (3.8).
 - `vllm_model_prep.py` keeps its exact existing messages and exit codes for repository validation defects, unresolvable weights paths, and authoritative HTTP error responses from the runtime (3.9).
+- **(Defect E)** Normal cold start is unchanged: with zero pre-existing project containers, Startup's health-gated `up -d --no-build --wait --wait-timeout 600` behaves exactly as the Defect B fix established, `--force-recreate` being a no-op when nothing exists to recreate, and the wait/verify helpers returning immediately (3.10).
+- **(Defect E)** The Defect B health-gate semantics are unchanged: RUNNING still requires all started services to pass their compose healthchecks; the freshness check is an additional gate, never a relaxation (3.11).
+- **(Defect E)** All four recipe variants stay in sync: the Shutdown wait, Shutdown Timeout, `--force-recreate`, and freshness verification are applied identically to `recipe-arm64-jp5.yaml`, `recipe-arm64-jp6.yaml`, `recipe-arm64.yaml`, and `recipe-amd64.yaml`; `gdk-config.json` and the root `recipe.yaml` are build artifacts and are never touched (3.12).
+- **(Defect E)** Fast teardowns keep Shutdown fast: the wait-for-empty loop exits as soon as `docker compose ps -aq` is empty, adding only one poll interval to the common case (3.13).
 
 **Scope:**
 
@@ -134,6 +169,13 @@ The incident evidence confirms the causal chain (this is a verified root cause, 
 4. **The attached `Run` script hides the death**: `docker compose up` (attached) stays alive while any service runs; the frontend kept it alive, so Greengrass reported RUNNING and every HARD dependency on LocalServer was satisfied against a dead backend. No healthcheck existed for Docker or Greengrass to observe otherwise (`docker compose up -d --wait` would have failed; there was nothing for it to wait on).
 5. **No dependency edges from the workflow component**: the generated `dda.workflow.*` recipe declares no dependency on `model-vllm-opt125m-smoke` or `aws.edgeml.dda.LocalServer.arm64JP6`, so Greengrass had no ordering/health relationship to enforce or to report; the failure surfaced as an unrelated-looking model component break.
 6. **Diagnostics dead-end**: ~70s of connection-refused ended in a generic retry-exhausted message; nothing pointed at the actual dead backend container.
+
+**Defect E causal chain (verified via docker events on the device; the exploratory tests confirm each structural gap on unfixed code):**
+
+7. **Shutdown is asynchronous with respect to slow teardown**: `docker compose down`'s kill escalation path returns once the kill is delivered and the daemon acknowledges, not once a container stuck in kernel-side GPU/Triton teardown reaches destroyed; and the Shutdown blocks declare no `Timeout`, so Greengrass's 15-second default truncates any longer wait the down might have attempted. Either way, Shutdown exits while the backend is still dying.
+8. **Startup adopts instead of recreating**: `docker compose up` treats the still-dying backend (kill delivered, destroy pending, `ps` still listing it as running) as an existing up-to-date service and does not recreate it. Nothing in the Startup line forces recreation.
+9. **The `--wait` health gate trusts stale state**: the adopted container's healthcheck state was 'healthy' from before the kill; `--wait` saw "Running / Healthy" and exited 0 immediately — the Defect B gate verifies health but not container freshness, so a container about to vanish passed it.
+10. **The destroy lands after RUNNING**: 3 seconds after Startup exited 0, the old backend's stop/die/destroy events completed, leaving zero backend containers behind a component Greengrass had just marked RUNNING. With no attached process and no further lifecycle activity, nothing re-created it (`restart: always` does not apply — the container was destroyed, not stopped).
 
 ## Correctness Properties
 
@@ -184,6 +226,42 @@ Property 8: Preservation - Prep script's specific error paths unchanged
 _For any_ input hitting a repository validation defect, an unresolvable weights path, or an authoritative HTTP error response from the runtime (NOT isBugCondition_D), the fixed `vllm_model_prep.py` SHALL produce the same error messages and the same exit codes as the original, and for any successful load (HTTP 200) SHALL behave identically; model components starting against a healthy backend stage and load exactly as before.
 
 **Validates: Requirements 3.2, 3.9**
+
+Property 9: Bug Condition - Startup never trusts a previous incarnation's container
+
+_For any_ lifecycle cycle in which a container from the previous incarnation still exists when Startup runs (isBugCondition_E — Shutdown exited during the container's dying window), the fixed lifecycle SHALL NOT report the component RUNNING over that container: Shutdown waits (bounded) after `down` until `docker compose ps -aq` for the project is empty and declares a Timeout sized above worst-case teardown; Startup's compose invocation uses `--force-recreate` so existing containers are never adopted; and after `--wait` succeeds, Startup verifies every project container's StartedAt is at or after the Startup script's start time, exiting non-zero (so Greengrass retries) if any container is stale or the previous incarnation's containers cannot be cleared.
+
+**Validates: Requirements 2.11, 2.12, 2.13, 2.14**
+
+Property 10: Preservation - Cold-start and health-gate semantics unchanged
+
+_For any_ lifecycle cycle where no previous-incarnation container exists when Startup runs (NOT isBugCondition_E — the normal cold start after a completed teardown), the fixed lifecycle SHALL behave identically to the Defect B lifecycle: the same health-gated `up -d --no-build --wait --wait-timeout 600` semantics (RUNNING iff all started services pass their healthchecks), `--force-recreate` a no-op with nothing to recreate, the wait and freshness helpers returning immediately (fast teardowns add at most one poll interval to Shutdown), and all four recipe variants identical to their pre-E form except for the intended Shutdown Timeout, post-down wait, `--force-recreate`, and freshness-verification edits, applied uniformly.
+
+**Validates: Requirements 3.10, 3.11, 3.12, 3.13**
+
+Property 11: Bug Condition - Packaged workflow components are deployable on every targeted device
+
+_For any_ workflow packaged with a non-empty architecture set A (isBugCondition_F when the variants of A are plural): let V = the set of distinct LocalServer variants mapped from A. The fixed `local_server_component_dependencies` SHALL emit exactly one HARD LocalServer entry (that variant, with its per-arch minimum-version floor) when |V| = 1, and SHALL emit zero LocalServer entries when |V| > 1 — so the recipe's dependency closure never contains a LocalServer variant that cannot co-resolve with the device's own variant, and the packaged component is deployable on every device matching any architecture in A. Model and plugin entries are emitted identically in both cases.
+
+**Validates: Requirements 2.15, 2.16, 2.17**
+
+Property 12: Preservation - Single-variant packaging output unchanged
+
+_For any_ workflow packaged with an architecture set collapsing to a single LocalServer variant (NOT isBugCondition_F — including the `x86_64` + `x86_64_nvidia` → `amd64` collapse), the fixed packaging output SHALL be byte-identical to the pre-F output: the same single LocalServer entry (name, version floor, HARD type), the same model and `dda.plugin.*` entries, and every other `build_recipe` field unchanged. In the multi-variant case, all fields other than the removed LocalServer entries SHALL also be unchanged.
+
+**Validates: Requirements 3.14, 3.15, 3.16**
+
+Property 13: Bug Condition - Published vision models resolve and package deployably
+
+_For any_ workflow referencing a vision model whose registry record carries per-target `published_components` entries with status `published` covering every selected architecture's publish target (isBugCondition_G — the plural-only record shape today's gate rejects), the fixed `resolve_model_components` SHALL resolve the model (no PackagingError), and the model dependency emission SHALL emit exactly one unpinned HARD entry when the covered entries collapse to one distinct component name and zero entries when they span several (never a multi-name set into the recipe-global block). A selected architecture with no published entry SHALL fail closed naming the model and the missing architecture.
+
+**Validates: Requirements 2.18, 2.19, 2.20**
+
+Property 14: Preservation - vLLM resolution and other gates unchanged
+
+_For any_ workflow referencing vLLM models (singular `published_component` records), the fixed resolution and dependency output SHALL be byte-identical to today's; records with no registry entry SHALL keep the existing "no record" error; plugin and LocalServer dependency emission SHALL be untouched.
+
+**Validates: Requirements 2.21, 3.17, 3.18, 3.19**
 
 ## Fix Implementation
 
@@ -314,6 +392,78 @@ so the component retries once the backend is back.
 
 3. **Untouched paths** (3.9): `validate_repository` defects, the weights-path FAILED message, the HTTP-error logging in `request_load`, `request_unload`/`cleanup`, and the success path keep their exact current messages and exit codes.
 
+#### 5. Synchronous teardown + adoption-proof Startup — Defect E (Requirements 2.11, 2.12, 2.13, 2.14)
+
+Chosen mechanism (from the candidate directions): **both** a synchronous Shutdown **and** a defensive Startup. The Shutdown wait shrinks the race window to near zero in the normal case; the Startup defenses are the correctness gate for anything that still slips through (a Shutdown wait timeout, a hard nucleus kill, a crashed Shutdown). `--force-recreate` is preferred over a Startup-side wait-for-zero because a blanket wait would break legitimate cold-boot cases where `restart: always` has already relaunched containers before Greengrass starts; recreation converts every pre-existing container — dying, stopped, or running — into a deterministic fresh one, and is a no-op in the normal flow where Shutdown's `down` already removed everything.
+
+**File**: `src/host_scripts/compose_lifecycle.sh` (new; shipped into every component artifact by the existing `build-custom.sh` `cp -r src/host_scripts` step, alongside `setup_paths.sh` etc.; host_scripts are not security-baseline-tracked, and `gdk-config.json`/root `recipe.yaml` are build artifacts that are never touched)
+
+**Specific Changes**:
+
+1. **`wait-empty` subcommand**: `compose_lifecycle.sh wait-empty <timeout-seconds> -- <docker compose args...>` polls `docker compose <args> ps -aq` every 2 seconds until the output is empty; exits 0 when empty (immediately if already empty — the fast-teardown/cold-start case, 3.13), exits 1 with a diagnostic listing the surviving container IDs when the bounded timeout elapses. `docker` is resolved via PATH, so the script is a pure function of stubbed CLI output in tests.
+
+2. **`verify-fresh` subcommand**: `compose_lifecycle.sh verify-fresh <since-epoch> -- <docker compose args...>` lists `docker compose <args> ps -q` and, for each container, compares `docker inspect -f '{{.State.StartedAt}}'` (parsed to epoch via `date -d`) against `<since-epoch>`; exits 0 iff every project container started at or after the reference time, exits 1 naming any stale container. This is the belt-and-braces gate behind `--force-recreate`: with recreation in force it always passes, and it catches any residual adoption path (e.g. a future compose behavior change) before Greengrass can see RUNNING (2.13).
+
+**Files**: `recipe-arm64-jp6.yaml`, `recipe-arm64-jp5.yaml`, `recipe-arm64.yaml`, `recipe-amd64.yaml` (all four variants, identical shape — 3.12; the retired bare `.arm64` variant is included to keep the set in sync, matching the Defect B treatment)
+
+3. **Shutdown — synchronous teardown (2.11)**: add `Timeout: 300` to each Shutdown block (Greengrass's 15s default truncates any teardown wait; 300s covers the 120s stop grace period plus the observed ~24s post-kill dying window with ample margin), and after the existing `docker compose ... down` line add:
+
+```
+bash .../host_scripts/compose_lifecycle.sh wait-empty 240 -- --profile ${DOCKER_PROFILE:-tegra} -f .../docker-compose.yaml || true
+```
+
+   Best-effort (`|| true`): a Shutdown that times out waiting must not wedge the lifecycle — the Startup defenses below are the authoritative gate. 240s sits inside the 300s block Timeout. The `systemctl stop nvidia-csi-capture` line (arm variants) and the `/tmp/.dda.env` export are unchanged.
+
+4. **Startup — never adopt (2.12)**: record the script's start time as the first Startup line (`STARTUP_EPOCH=$(date +%s)`), and add `--force-recreate` to the compose invocation:
+
+```
+docker compose --profile $DOCKER_PROFILE -f .../docker-compose.yaml up -d --no-build --force-recreate --wait --wait-timeout 600
+```
+
+   Recreation removes any pre-existing project container before creating the new one. For a container still in its dying window, the removal blocks until the kernel teardown completes (converting the race into a bounded wait) or fails with a removal-in-progress error — in which case `compose up` exits non-zero, Startup errors, and Greengrass retries (2.14): no silent adoption on any path. In the normal flow Shutdown's `down` (now synchronous) has already removed everything, so `--force-recreate` changes nothing (3.10). The existing `Timeout: 900` on the Startup block already accommodates the added worst-case wait.
+
+5. **Startup — freshness gate (2.13)**: after the compose up line succeeds, append:
+
+```
+bash .../host_scripts/compose_lifecycle.sh verify-fresh $STARTUP_EPOCH -- --profile $DOCKER_PROFILE -f .../docker-compose.yaml
+```
+
+   Not best-effort: a non-zero exit fails Startup so Greengrass retries rather than reporting RUNNING over a container this Startup did not create. Placed after `--wait` so it evaluates the final set of started containers.
+
+6. **Untouched**: `src/docker-compose.yaml` (no new keys — no security-baseline rebaseline needed for Defect E), the `/health` endpoint and `healthcheck.py`, the Install blocks, `SetEnv`, host setup script invocations, and the `workflow_packaging.py`/`vllm_model_prep.py` fixes from Defects C/D.
+
+#### 7. Multi-variant LocalServer dependency fix — Defect F (Requirements 2.15, 2.16, 2.17)
+
+**Location**: `edge-cv-portal/backend/functions/workflow_packaging.py::local_server_component_dependencies`
+
+The Defect C design documented the recipe-global ComponentDependencies constraint (§6 above) and relied on upstream deployment arch gates as mitigation; the verified f81a4c66 incident (deployment 44f2c596, ryan-orin-nano, `FAILED_ROLLBACK_COMPLETE`) proved the mitigation does not cover the dependency closure — Greengrass installs every HARD dependency in the recipe regardless of the deployment document's component list.
+
+Change `local_server_component_dependencies(archs)`:
+
+1. Map the selected archs to distinct LocalServer variants exactly as today (fail-closed naming, `x86_64`/`x86_64_nvidia` collapse to `amd64`).
+2. If exactly one distinct variant results: return the single entry unchanged (same name, per-arch minimum-version floor via `min_local_server_version_for`, HARD) — the Defect C behavior, byte-identical (Property 12). When multiple archs collapse to one variant, the version floor is the maximum of the per-arch floors (today's amd64 collapse already resolves to a single floor).
+3. If more than one distinct variant results: return `{}` and log a warning naming the workflow's variants (e.g. "workflow packaged for multiple LocalServer variants [arm64JP5, arm64JP6]; omitting LocalServer ComponentDependencies — deployability takes precedence over the ordering/health edge"). Model and plugin dependencies are unaffected; they still provide the transitive LocalServer health edge on devices where the model components themselves depend on LocalServer.
+4. Update the function docstring: replace the multi-variant caveat with the new single-variant-only emission rule.
+
+The merge site in the packaging handler and `build_recipe` are unchanged.
+
+**Rationale for omission over alternatives**: SOFT dependencies still install the component (same failure); per-arch workflow component names change the component naming contract portal-wide (out of scope for a bugfix); rejecting multi-arch packaging at validation time removes an existing user capability. Omission preserves deployability and loses only the LocalServer ordering edge in the multi-variant case — which is partially restored transitively through the model components' own LocalServer dependencies.
+
+#### 8. Vision model resolution fix — Defect G (Requirements 2.18–2.21)
+
+**Location**: `edge-cv-portal/backend/functions/workflow_packaging.py` — `resolve_model_components` and the model dependency call path in the packaging handler.
+
+Registry field shapes (verified against dda-portal-training-jobs):
+- vLLM records: `published_component` (singular map, `component_name` = `model-vllm-...`) — today's only supported shape.
+- Vision records: `published_components` (plural LIST of `{component_name, target, component_version, status, platform, component_arn}`), one entry per publish target (e.g. `jetson-xavier-jp5`, `jetson-xavier-jp6`), no singular field.
+
+Changes:
+
+1. **Arch→publish-target mapping**: reuse/mirror the existing target naming discipline (`greengrass_publish.py` target names: `arm64_jp4 → jetson-xavier-jp4`-style; confirm exact mapping constants from greengrass_publish/TARGET naming and deployments.py's arch↔target translation) as a module map in workflow_packaging.
+2. **`resolve_model_components(model_names, usecase, archs)`** (signature gains the selected archs): per record, first try `published_component` (singular — vLLM path, unchanged); else filter `published_components` to entries with `status == 'published'` whose `target` matches a selected architecture's publish target. Every selected arch must be covered by ≥1 entry, else PackagingError naming the model and the uncovered arch (2.19). Resolved value carries the covered entries' distinct `component_name` set.
+3. **Model dependency emission**: for singular-resolved records, emit as today. For plural-resolved records: |distinct names| == 1 → one unpinned HARD entry; > 1 → omit all entries for that model and log a warning naming the model and the per-target names (the Defect F discipline; the transitive LocalServer/health edges still exist via each per-target component's own dependencies).
+4. The misleading "publish the model" message survives only for records with a singular field lacking `component_name` AND no plural entries at all — i.e. genuinely unpublished models.
+
 ## Testing Strategy
 
 ### Validation Approach
@@ -332,10 +482,13 @@ Two phases: first surface counterexamples demonstrating each defect on UNFIXED c
 3. **Missing dependencies**: call `build_recipe` (unfixed) for a definition with an `llm_inference` model ref, arch `arm64_jp6`; assert `model-vllm-*` and `aws.edgeml.dda.LocalServer.arm64JP6` appear in ComponentDependencies — fails on unfixed code (only plugin entries)
 4. **Generic diagnostics**: run `prepare` with mocked `requests.post` raising `ConnectionError` on every attempt (and `time.sleep` stubbed); assert the output names the LocalServer backend container — fails on unfixed code (generic retry-exhausted message)
 5. **Slow-shutdown exposure**: invoke the unfixed `shutdown_event` with `terminate_digital_input_task` mocked to block 30s; measure that the handler runs past a 20s budget (may fail on unfixed code depending on timer resolution — expected to exceed)
+6. **Teardown-race lifecycle exposure (Defect E)**: parse all four recipe variants; assert each Shutdown block declares a `Timeout` and invokes the compose-lifecycle `wait-empty` helper after `down`, and each Startup uses `--force-recreate` and invokes `verify-fresh` after the health gate — fails on unfixed recipes (no Shutdown Timeout, so Greengrass's 15s default truncates any wait; bare `down`; adoption-permitting `up`; no freshness gate) (will fail on unfixed code)
+7. **Missing helper exposure (Defect E)**: assert `src/host_scripts/compose_lifecycle.sh` exists and, with a stubbed `docker` on PATH simulating the incident's dying window (`ps -aq` reporting the backend container for several polls before emptying; `inspect` reporting a StartedAt older than the reference epoch), that `wait-empty` blocks until empty and `verify-fresh` rejects the stale container — fails on unfixed code (the helper does not exist) (will fail on unfixed code)
 
 **Expected Counterexamples**:
 - Absent `stop_grace_period`/`restart: always`/healthchecks; attached Run lifecycle; ComponentDependencies without model/LocalServer entries; the literal generic message; an unbounded shutdown handler
 - Possible causes all confirmed by incident evidence: Docker stop-timeout kill, restart-policy semantics for docker-stopped containers, recipe-global RUNNING-on-attach, dependency emission limited to `dda.plugin.*`
+- (Defect E) Shutdown blocks with no Timeout and no post-down wait; Startup compose lines without `--force-recreate` or freshness verification; no compose-lifecycle helper in host_scripts — the structural gaps behind the verified adoption-of-a-dying-container event sequence
 
 ### Fix Checking
 
@@ -349,7 +502,7 @@ FOR ALL input WHERE isBugCondition_X(input) DO      -- X ∈ {A, B, C, D}
 END FOR
 ```
 
-Concretely: config tests assert Properties 1–2 over the fixed YAML (grace period ≥ 120s, `restart: always`, healthchecks present with sane parameters, every recipe variant's Startup uses `up -d --wait` with a Timeout, Shutdown unchanged, all four variants consistent); packaging tests assert Property 3 over generated recipes; prep-script tests assert Property 4 over mocked connection-failure sequences; the bounded-shutdown test asserts the handler returns within budget when cleanup blocks forever.
+Concretely: config tests assert Properties 1–2 over the fixed YAML (grace period ≥ 120s, `restart: always`, healthchecks present with sane parameters, every recipe variant's Startup uses `up -d --wait` with a Timeout, Shutdown unchanged, all four variants consistent); packaging tests assert Property 3 over generated recipes; prep-script tests assert Property 4 over mocked connection-failure sequences; the bounded-shutdown test asserts the handler returns within budget when cleanup blocks forever. For Property 9 (Defect E): config tests assert every variant's Shutdown declares a Timeout ≥ the wait-empty bound and invokes `wait-empty` after `down`, and every Startup records its start epoch, uses `--force-recreate`, and gates on `verify-fresh`; helper behavior tests with a stubbed `docker` assert `wait-empty` waits through a simulated dying window and times out non-zero when containers never clear, and `verify-fresh` exits non-zero for any container whose StartedAt predates the reference epoch (the incident's adopted-container shape).
 
 ### Preservation Checking
 
@@ -371,6 +524,8 @@ END FOR
 2. **Prep script error-path equality**: observe unfixed messages/exit codes for validation defects, bad weights paths, and HTTP 4xx/5xx (mocked), then verify the fixed script reproduces them exactly (Property 8)
 3. **Fast-shutdown equivalence**: observe that quick cleanup executes both cleanup calls in order on unfixed code, then verify the fixed handler does the same when cleanup completes within budget (Property 5)
 4. **Compose equality modulo added keys**: parse original and fixed compose files; verify deep-equality after deleting only `stop_grace_period`, `restart`, `healthcheck` (Property 6)
+5. **Recipe equality modulo the Defect E edits (Property 10)**: observe the current (post-Defect-B, pre-E) structure of all four recipe variants; verify the fixed recipes are deep-equal after removing only the Shutdown `Timeout` key, the `wait-empty` invocation line, the `STARTUP_EPOCH` line, the `--force-recreate` flag, and the `verify-fresh` line — Install, SetEnv, host setup scripts, the `--wait --wait-timeout 600` health gate, the `down` command, and the csi stop all byte-identical; `src/docker-compose.yaml` untouched by Defect E (byte-identical)
+6. **Fast-path helper behavior (Property 10)**: with a stubbed `docker` reporting zero project containers, `wait-empty` returns 0 within one poll interval and `verify-fresh` returns 0 with nothing to check — the cold-start no-op guarantee
 
 ### Unit Tests
 
@@ -381,15 +536,20 @@ END FOR
 - `local_server_component_dependencies`: each arch id maps to its exact variant name; `x86_64`+`x86_64_nvidia` collapse to one `amd64` entry; per-arch version floors applied
 - `/health` endpoint: 200 with no vLLM server set; 200 with vLLM set and 8901 accepting; 503 with vLLM set and 8901 refused (loopback stub server)
 - Bounded shutdown handler: blocking cleanup → returns within budget and logs the warning; fast cleanup → both calls executed in order
+- `compose_lifecycle.sh wait-empty` (stubbed `docker`): already-empty → immediate 0; empties after N polls → 0 after ~2N seconds; never empties → 1 at the bound with surviving IDs in the diagnostic
+- `compose_lifecycle.sh verify-fresh` (stubbed `docker`): all containers fresh → 0; any container with StartedAt before the epoch → 1 naming it; zero containers → 0; malformed inspect output → non-zero (fail closed)
 
 ### Property-Based Tests
 
 - _For any_ generated workflow definition (random model-ref sets, plugin sets, arch subsets of DEVICE_ARCHITECTURES): the fixed recipe contains a HARD entry per distinct published model component and per distinct LocalServer variant, preserves all plugin entries exactly, and equals the unfixed recipe outside ComponentDependencies (Properties 3, 7)
 - _For any_ random attempt-outcome sequence over {connection-error, http-error(code), success}: the classification is UNREACHABLE iff no HTTP response appears in the sequence prefix consumed by the loop, and the emitted message matches the classification (Properties 4, 8)
 - _For any_ random cleanup duration: the shutdown handler's runtime is ≤ budget + ε, and cleanup effects occur iff duration ≤ budget (Properties 1, 5)
+- _For any_ random dying-window length (stubbed `docker` emptying after k polls, k drawn across and beyond the timeout bound): `wait-empty` exits 0 iff the window clears within the bound and 1 otherwise, never exiting 0 with containers remaining (Property 9)
+- _For any_ random set of container StartedAt timestamps relative to a reference epoch: `verify-fresh` exits 0 iff every timestamp ≥ epoch (Properties 9, 10)
 
 ### Integration Tests
 
 - **On-hardware JP6 gate (final)**: build and publish the modified LocalServer component (gdk) and portal packaging changes; deploy to the JP6 device; while a workflow with an `llm_inference` node is running, trigger a deployment restart of LocalServer and verify: the backend is never SIGKILLed (no exit 137), or if killed is recovered by the Startup retry; Greengrass reports LocalServer RUNNING only after `docker compose ps` shows the backend healthy; `model-vllm-opt125m-smoke` never goes BROKEN; the deployment completes without `FAILED_UNABLE_TO_ROLLBACK`
 - **Dead-backend truthfulness**: on the device, `docker stop` the backend and verify the component's next lifecycle cycle fails Startup (not silent RUNNING) and the retried Startup brings the stopped container back up
 - **Recipe dependency ordering**: deploy a freshly packaged workflow component and verify in the Greengrass logs that Greengrass orders it after its model component and LocalServer (HARD edges visible in dependency resolution)
+- **On-hardware Defect E gate (rides the next LocalServer build; user-gated)**: on the JP6 device (ryan-orin-nano), reproduce the incident trigger — device reboot + nucleus restart (and a `greengrass-cli component restart` while the backend is mid-teardown) — and verify via `docker events` that the backend container is recreated (create/start events from this Startup), never adopted; `docker ps -a` shows both containers after RUNNING is reported; the portal answers HTTP 200; and a forced wait-empty timeout (simulated stuck teardown) fails Startup non-zero with a Greengrass retry rather than silent RUNNING

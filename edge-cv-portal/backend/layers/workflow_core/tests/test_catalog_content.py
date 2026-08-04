@@ -547,8 +547,23 @@ class TestBedrockInferenceNodeType:
         assert params["model"].default == "us.amazon.nova-lite-v1:0"
         assert params["prompt"].required is True
         assert params["prompt"].param_type == "string"
-        assert '"is_anomalous"' in params["prompt"].default
-        assert '"confidence"' in params["prompt"].default
+        # The default prompt carries the comparison semantics only: the
+        # executor auto-appends the canonical JSON-format instruction in
+        # anomaly mode, so the prompt no longer spells out the answer
+        # shape (bedrock-response-mode Requirement 3.3).
+        assert "meaningfully differs" in params["prompt"].default
+        assert '"is_anomalous"' not in params["prompt"].default
+        # The executor-appended JSON instruction is documented on the
+        # prompt parameter instead (Requirement 3.3).
+        assert "appends" in params["prompt"].description
+        assert '"is_anomalous"' in params["prompt"].description
+        # Response-mode toggle: bool checkbox, default True (anomaly
+        # mode), description covering both modes (Requirement 3.1).
+        assert params["anomaly_mode"].param_type == "bool"
+        assert params["anomaly_mode"].required is False
+        assert params["anomaly_mode"].default is True
+        assert "anomaly" in params["anomaly_mode"].description
+        assert "bedrock_text" in params["anomaly_mode"].description
         assert params["region"].required is False
         assert params["region"].default == "us-east-1"
         assert params["max_tokens"].param_type == "int"

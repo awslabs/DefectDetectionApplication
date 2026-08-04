@@ -5,9 +5,13 @@ import {
   Header,
   SpaceBetween,
   Box,
+  Checkbox,
   ColumnLayout,
   Badge,
   Button,
+  Form,
+  FormField,
+  Input,
   Modal,
   Alert,
   KeyValuePairs,
@@ -17,10 +21,18 @@ import {
   SelectProps,
   Spinner,
 } from '@cloudscape-design/components';
-import { apiService } from '../services/api';
+import {
+  apiService,
+  ApiError,
+  VllmEngineConfiguration,
+  VllmEngineSpec,
+  VllmFitCheckResult,
+  VllmRegistrationFinding,
+} from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import CompilationTab from '../components/CompilationTab';
 import VllmPackagePublishSection from '../components/vllm-publish/VllmPackagePublishSection';
+import { toEngineJsonValue } from './RegisterLlm';
 import { TrainingJob } from '../types';
 
 interface Model {
@@ -65,6 +77,9 @@ interface Model {
     component_arns: Record<string, string>;
     published_at: number;
   };
+  // Stored Engine_Configuration, present for vLLM records only
+  // (vllm-sizing-and-packaging-errors, Requirement 1.2).
+  engine_configuration?: VllmEngineConfiguration | null;
   hyperparameters?: Record<string, unknown>;
   instance_type?: string;
   dataset_manifest_s3?: string;
@@ -83,6 +98,18 @@ export default function ModelDetail() {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [targetStage, setTargetStage] = useState<SelectProps.Option | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+
+  // Engine_Configuration inline edit state (vllm-sizing-and-packaging-errors,
+  // Requirements 2.5, 3.5), reusing the RegisterLlm.tsx field-rendering and
+  // per-field finding patterns.
+  const [editingEngineConfig, setEditingEngineConfig] = useState(false);
+  const [engineSpec, setEngineSpec] = useState<VllmEngineSpec | null>(null);
+  const [engineValues, setEngineValues] = useState<Record<string, string | boolean>>({});
+  const [engineFieldErrors, setEngineFieldErrors] = useState<Record<string, string>>({});
+  const [engineEditError, setEngineEditError] = useState<string | null>(null);
+  const [engineSubmitting, setEngineSubmitting] = useState(false);
+  const [engineNotice, setEngineNotice] = useState<string | null>(null);
+  const [engineFitCheck, setEngineFitCheck] = useState<VllmFitCheckResult | null>(null);
 
   const loadTrainingJob = async (trainingId: string) => {
     try {
@@ -192,6 +219,207 @@ export default function ModelDetail() {
     return new Date(timestamp).toLocaleString();
   };
 
+  // vLLM_Model_Record detection, mirroring the backend's check
+  // (models.py get_model: source === 'vllm' or model_type === 'vllm').
+  const isVllmModel = (m: Model): boolean =>
+    m.source === 'vllm' || m.model_type === 'vllm';
+
+  // Render a stored engine setting value verbatim (booleans included) so
+  // the display shows exactly what the device will load with
+  // (Requirement 1.3).
+  const formatEngineSettingValue = (value: string | number | boolean): string =>
+    String(value);
+
+  // --- Engine_Configuration inline edit (Requirements 2.5, 3.5) ---
+
+  const engineFieldError = (key: string) =>
+    engineFieldErrors[`engine_configuration.${key}`];
+
+  const clearEngineFieldError = (field: string) => {
+    setEngineFieldErrors((prev) => {
+      if (!(field in prev)) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  };
+
+  // Open the inline form pre-filled with the stored values overlaid onto the
+  // engine-spec defaults (spec loaded lazily on first edit; stored keys still
+  // render as plain inputs if the spec is unavailable).
+  const startEngineEdit = async () => {
+    setEngineNotice(null);
+    setEngineFitCheck(null);
+    setEngineEditError(null);
+    setEngineFieldErrors({});
+    let spec = engineSpec;
+    if (!spec) {
+      try {
+        spec = await apiService.getVllmEngineSpec();
+        setEngineSpec(spec);
+      } catch (err) {
+        console.error('Failed to load vLLM engine spec:', err);
+      }
+    }
+    const values: Record<string, string | boolean> = {};
+    if (spec) {
+      Object.entries(spec.settings).forEach(([key, setting]) => {
+        values[key] =
+          setting.type === 'boolean'
+            ? Boolean(setting.default)
+            : String(setting.default);
+      });
+    }
+    Object.entries(model?.engine_configuration || {}).forEach(([key, value]) => {
+      values[key] = typeof value === 'boolean' ? value : String(value);
+    });
+    setEngineValues(values);
+    setEditingEngineConfig(true);
+  };
+
+  const cancelEngineEdit = () => {
+    setEditingEngineConfig(false);
+    setEngineEditError(null);
+    setEngineFieldErrors({});
+  };
+
+  const handleEngineSave = async () => {
+    if (!model) return;
+    const trainingId = model.training_job_id || model.model_id;
+    setEngineSubmitting(true);
+    setEngineEditError(null);
+    setEngineFieldErrors({});
+
+    // Convert the string/boolean form values into the JSON types the API
+    // expects; non-numeric strings pass through so the backend produces its
+    // per-field finding (same rule as RegisterLlm).
+    const engineConfiguration: VllmEngineConfiguration = {};
+    Object.entries(engineValues).forEach(([key, value]) => {
+      const specType =
+        engineSpec?.settings[key]?.type ??
+        (typeof model.engine_configuration?.[key] === 'number' ? 'number' : 'string');
+      engineConfiguration[key] = toEngineJsonValue(specType, value);
+    });
+
+    try {
+      const result = await apiService.updateVllmEngineConfiguration(
+        trainingId,
+        engineConfiguration
+      );
+      // Reflect the complete updated configuration and surface the
+      // re-package/publish notice plus any fit-check result (2.4, 3.5).
+      setModel((prev) =>
+        prev ? { ...prev, engine_configuration: result.engine_configuration } : prev
+      );
+      setEngineNotice(
+        result.notice ||
+          'Engine configuration updated. The change takes effect after the model is packaged and published again.'
+      );
+      setEngineFitCheck(result.fit_check ?? null);
+      setEditingEngineConfig(false);
+    } catch (err) {
+      console.error('Engine configuration update error:', err);
+      // Surface the API's validation findings per field (Requirement 2.5).
+      const findings =
+        err instanceof ApiError && Array.isArray(err.details?.findings)
+          ? (err.details.findings as VllmRegistrationFinding[])
+          : [];
+      if (findings.length > 0) {
+        const perField: Record<string, string> = {};
+        const unmatched: string[] = [];
+        findings.forEach((finding) => {
+          perField[finding.field] = finding.reason;
+          const key = finding.field.replace(/^engine_configuration\./, '');
+          if (!(key in engineValues)) {
+            unmatched.push(`${finding.field}: ${finding.reason}`);
+          }
+        });
+        setEngineFieldErrors(perField);
+        setEngineEditError(
+          unmatched.length > 0
+            ? `The update failed validation: ${unmatched.join('; ')}`
+            : 'The update failed validation. Fix the highlighted fields and retry.'
+        );
+      } else {
+        setEngineEditError(
+          err instanceof Error ? err.message : 'Failed to update the engine configuration'
+        );
+      }
+    } finally {
+      setEngineSubmitting(false);
+    }
+  };
+
+  // Field rendering adapted from RegisterLlm.renderEngineField (checkbox for
+  // booleans, select for enumerated settings, input otherwise).
+  const renderEngineEditField = (key: string) => {
+    const setting = engineSpec?.settings[key];
+    const value = engineValues[key];
+    const label = key.replace(/_/g, ' ');
+    const onChange = (next: string | boolean) => {
+      setEngineValues((prev) => ({ ...prev, [key]: next }));
+      clearEngineFieldError(`engine_configuration.${key}`);
+    };
+
+    if (setting?.type === 'boolean' || typeof value === 'boolean') {
+      return (
+        <FormField
+          key={key}
+          label={label}
+          description={setting?.description}
+          errorText={engineFieldError(key)}
+        >
+          <Checkbox
+            checked={Boolean(value)}
+            onChange={({ detail }) => onChange(detail.checked)}
+          >
+            {setting ? `Enabled (default: ${String(setting.default)})` : 'Enabled'}
+          </Checkbox>
+        </FormField>
+      );
+    }
+
+    if (setting?.accepted_values && setting.accepted_values.length > 0) {
+      return (
+        <FormField
+          key={key}
+          label={label}
+          description={setting.description}
+          constraintText={`Accepted values: ${setting.accepted_values.join(', ')} (default: ${setting.default})`}
+          errorText={engineFieldError(key)}
+        >
+          <Select
+            selectedOption={{ label: String(value), value: String(value) }}
+            onChange={({ detail }) => onChange(detail.selectedOption.value || '')}
+            options={setting.accepted_values.map((v) => ({ label: v, value: v }))}
+          />
+        </FormField>
+      );
+    }
+
+    return (
+      <FormField
+        key={key}
+        label={label}
+        description={setting?.description}
+        constraintText={
+          setting?.range
+            ? `Accepted range: ${setting.range} (default: ${setting.default})`
+            : setting
+              ? `Default: ${setting.default}`
+              : undefined
+        }
+        errorText={engineFieldError(key)}
+      >
+        <Input
+          value={String(value ?? '')}
+          onChange={({ detail }) => onChange(detail.value)}
+          inputMode={setting?.type === 'integer' ? 'numeric' : 'decimal'}
+        />
+      </FormField>
+    );
+  };
+
   const getPromotionOptions = (): SelectProps.Option[] => {
     if (!model) return [];
     const options: SelectProps.Option[] = [];
@@ -282,6 +510,108 @@ export default function ModelDetail() {
           ]} />
         </ColumnLayout>
       </Container>
+
+      {isVllmModel(model) && (
+        <Container
+          header={
+            <Header
+              variant="h2"
+              description="The vLLM engine settings this model is packaged and loaded with on the device"
+              actions={
+                !editingEngineConfig && (
+                  <Button onClick={startEngineEdit} disabled={engineSubmitting}>
+                    Edit
+                  </Button>
+                )
+              }
+            >
+              Engine Configuration
+            </Header>
+          }
+        >
+          <SpaceBetween size="m">
+            {engineNotice && (
+              <Alert
+                type="success"
+                dismissible
+                onDismiss={() => setEngineNotice(null)}
+              >
+                {engineNotice}
+              </Alert>
+            )}
+            {engineFitCheck?.status === 'warnings' && (
+              <Alert
+                type="warning"
+                header="Fit check warnings"
+                dismissible
+                onDismiss={() => setEngineFitCheck(null)}
+              >
+                <SpaceBetween size="xs">
+                  {engineFitCheck.findings
+                    .filter((finding) => !finding.fits)
+                    .map((finding) => (
+                      <Box key={finding.arch}>{finding.message}</Box>
+                    ))}
+                </SpaceBetween>
+              </Alert>
+            )}
+            {engineFitCheck?.status === 'unverified' && (
+              <Alert
+                type="info"
+                dismissible
+                onDismiss={() => setEngineFitCheck(null)}
+              >
+                {engineFitCheck.message ||
+                  'The model fit could not be verified: the weight size estimate is unavailable.'}
+              </Alert>
+            )}
+            {editingEngineConfig ? (
+              <Form
+                errorText={engineEditError ?? undefined}
+                actions={
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <Button onClick={cancelEngineEdit} disabled={engineSubmitting}>
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="primary"
+                      onClick={handleEngineSave}
+                      loading={engineSubmitting}
+                      disabled={engineSubmitting}
+                    >
+                      Save
+                    </Button>
+                  </SpaceBetween>
+                }
+              >
+                <SpaceBetween size="m">
+                  {engineFieldErrors['engine_configuration'] && (
+                    <Alert type="error">
+                      {engineFieldErrors['engine_configuration']}
+                    </Alert>
+                  )}
+                  {Object.keys(engineValues).map((key) => renderEngineEditField(key))}
+                </SpaceBetween>
+              </Form>
+            ) : model.engine_configuration &&
+              Object.keys(model.engine_configuration).length > 0 ? (
+              <KeyValuePairs
+                columns={3}
+                items={Object.entries(model.engine_configuration).map(
+                  ([key, value]) => ({
+                    label: key,
+                    value: formatEngineSettingValue(value),
+                  })
+                )}
+              />
+            ) : (
+              <Box color="text-status-inactive">
+                No engine configuration is stored on this model record.
+              </Box>
+            )}
+          </SpaceBetween>
+        </Container>
+      )}
 
       {model.model_type === 'vllm' && (
         <Container

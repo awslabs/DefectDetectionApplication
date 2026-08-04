@@ -321,8 +321,64 @@ LOAD_OK = "LOAD_OK"
 LOAD_HTTP_ERROR = "LOAD_HTTP_ERROR"
 LOAD_UNREACHABLE = "LOAD_UNREACHABLE"
 
+#: Markers in an extracted load-failure reason indicating vLLM could not
+#: reserve KV-cache blocks (weights already exceed the configured GPU
+#: memory fraction) — triggers the actionable remediation hint
+#: (spec: vllm-sizing-and-packaging-errors, Requirement 4.2).
+KV_CACHE_HINT_MARKERS = (
+    "No available memory for the cache blocks",
+    "gpu_memory_utilization",
+)
 
-def request_load(model_name: str) -> str:
+
+def extract_load_failure_reason(body_text: str) -> str:
+    """The human-readable reason inside a Triton model-control error body.
+
+    Triton returns ``{"error": "..."}``; the ``error`` text is returned
+    when the body is a JSON object carrying a non-empty ``error`` field,
+    otherwise the raw body text (stripped) is the reason
+    (spec: vllm-sizing-and-packaging-errors, Requirements 4.1, 4.3).
+    """
+    try:
+        parsed = json.loads(body_text)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict) and parsed.get("error"):
+        return str(parsed["error"])
+    return body_text.strip()
+
+
+def log_load_failure(model_name: str, status_code, body_text: str, engine_args=None):
+    """One prominent ERROR line for an authoritative load failure: model
+    name, HTTP status, and the extracted reason; the KV-cache remediation
+    is appended when the reason matches a marker, and the staged
+    ``gpu_memory_utilization`` / ``max_model_len`` values are included
+    when the engine args are available (spec:
+    vllm-sizing-and-packaging-errors, Requirements 4.1, 4.2, 4.3, 4.4).
+    The raw body stays available at debug level for triage."""
+    reason = extract_load_failure_reason(body_text)
+    line = "VllmLoadModel: model '{}' FAILED to load (HTTP {}): {}".format(
+        model_name, status_code, reason
+    )
+    if any(marker in reason for marker in KV_CACHE_HINT_MARKERS):
+        line += (
+            " | Remediation: the model's weights leave no GPU memory for "
+            "vLLM KV-cache blocks inside the configured "
+            "'gpu_memory_utilization' fraction — RAISE "
+            "'gpu_memory_utilization' in the model's engine configuration, "
+            "reduce 'max_model_len', or deploy a smaller model, then "
+            "re-package and re-publish."
+        )
+    if isinstance(engine_args, dict):
+        line += " | staged engine args: gpu_memory_utilization={}, max_model_len={}".format(
+            engine_args.get("gpu_memory_utilization"),
+            engine_args.get("max_model_len"),
+        )
+    logging.error(line)
+    logging.debug("VllmLoadModel: raw load-failure response body: {}".format(body_text))
+
+
+def request_load(model_name: str, engine_args=None) -> str:
     """Request the companion runtime to load the staged model through the
     Triton model-control endpoint (Requirement 4.8). Retries transient
     connection failures with backoff (deployment races recreate the backend
@@ -371,12 +427,7 @@ def request_load(model_name: str) -> str:
         if response.status_code == 200:
             logging.info("Model '{}' loaded successfully!".format(model_name))
             return LOAD_OK
-        logging.error(
-            "VllmLoadModel: Request failed with status code: {}".format(
-                response.status_code
-            )
-        )
-        logging.error(response.text)
+        log_load_failure(model_name, response.status_code, response.text, engine_args)
         return LOAD_HTTP_ERROR
     return LOAD_HTTP_ERROR if got_http_response else LOAD_UNREACHABLE
 
@@ -480,7 +531,14 @@ def prepare(args) -> int:
     # received) gets an actionable diagnostic naming the likely cause: the
     # LocalServer backend container left stopped by a deployment restart
     # (spec: edge-deploy-reliability, Defect D, Requirement 2.10).
-    outcome = request_load(model_name)
+    # The staged engine args (rewritten for S3-sourced records, verbatim
+    # otherwise) travel into the load path so an authoritative HTTP failure
+    # logs the active gpu_memory_utilization / max_model_len (spec:
+    # vllm-sizing-and-packaging-errors, Requirement 4.4).
+    staged_engine_args = (
+        rewritten_engine_args if rewritten_engine_args is not None else engine_args
+    )
+    outcome = request_load(model_name, staged_engine_args)
     if outcome == LOAD_UNREACHABLE:
         logging.error(
             "Model '{}' staged, but the vLLM runtime at {}:{} was never "

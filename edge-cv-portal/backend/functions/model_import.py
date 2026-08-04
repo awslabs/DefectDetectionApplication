@@ -7,6 +7,7 @@ import json
 import os
 import re
 import logging
+from dataclasses import asdict
 from decimal import Decimal
 from typing import Dict, Any, List, Tuple
 from datetime import datetime
@@ -26,6 +27,9 @@ from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, get_usecase_client
 )
+
+# Preflight Fit_Check (pure sizing module bundled in this functions dir)
+from vllm_fit_check import estimate_weights, evaluate_fit
 
 # Configure logging
 logger = logging.getLogger()
@@ -203,6 +207,89 @@ def _to_dynamo_compatible(value: Any) -> Any:
     return value
 
 
+def _decimal_to_native(value: Any) -> Any:
+    """Recursively convert DynamoDB Decimals back to native numbers."""
+    if isinstance(value, Decimal):
+        return int(value) if value % 1 == 0 else float(value)
+    if isinstance(value, dict):
+        return {k: _decimal_to_native(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decimal_to_native(v) for v in value]
+    return value
+
+
+# JP5 vLLM support flag: off by default (JP5 vLLM support is not shipped;
+# the env var exists so a future JP5 enablement is a deploy-time flag flip,
+# never a code change here). Mirrors packaging.py / greengrass_publish.py.
+JP5_VLLM_ENABLED = os.environ.get('JP5_VLLM_ENABLED', 'false').lower() == 'true'
+
+
+def vllm_supported_architectures() -> List[str]:
+    """Supported Target_Architecture set for vLLM_Model_Components:
+    always arm64_jp6, arm64_jp5 only when JP5 support is flagged on,
+    never arm64_jp4. Mirrors packaging.vllm_supported_architectures."""
+    archs = ['arm64_jp6']
+    if JP5_VLLM_ENABLED:
+        archs.append('arm64_jp5')
+    return archs
+
+
+def evaluate_fit_check(record: Dict) -> Dict:
+    """Evaluate the non-blocking preflight Fit_Check for a vLLM_Model_Record.
+
+    Estimates the on-GPU weight size (Hugging Face metadata or S3 artifact
+    size) and evaluates the fit against every supported Target_Architecture
+    (Requirements 3.1, 3.5). Never raises and never blocks: any estimation
+    failure degrades to status 'unverified' (Requirement 3.4).
+
+    Returns {status: 'passed'|'warnings'|'unverified',
+             estimate: {total_bytes, method, detail} | None,
+             findings: [{arch, fits, budget_bytes, required_bytes, message}]}.
+    """
+    try:
+        s3_head = None
+        model_source = record.get('model_source') or {}
+        if isinstance(model_source, dict) and model_source.get('s3_model_artifact'):
+            # S3-sourced records need a Use_Case-account client for HEAD
+            usecase = get_usecase_details(record['usecase_id'])
+            s3_head = get_usecase_client('s3', usecase).head_object
+
+        estimate = estimate_weights(record, s3_head=s3_head)
+        if estimate is None:
+            return {
+                'status': 'unverified',
+                'estimate': None,
+                'findings': [],
+                'message': 'Model weight size could not be estimated; '
+                           'the fit could not be verified.'
+            }
+
+        findings = evaluate_fit(
+            record.get('engine_configuration') or {},
+            estimate,
+            vllm_supported_architectures()
+        )
+        status = 'warnings' if any(not f.fits for f in findings) else 'passed'
+        return {
+            'status': status,
+            'estimate': {
+                'total_bytes': estimate.total_bytes,
+                'method': estimate.method,
+                'detail': estimate.detail
+            },
+            'findings': [asdict(f) for f in findings]
+        }
+    except Exception as e:  # noqa: BLE001 — the fit check never blocks (3.4)
+        logger.warning(f"Fit check evaluation failed, reporting unverified: {e}")
+        return {
+            'status': 'unverified',
+            'estimate': None,
+            'findings': [],
+            'message': 'Model weight size could not be estimated; '
+                       'the fit could not be verified.'
+        }
+
+
 def register_vllm_model(event: Dict, context: Any) -> Dict:
     """
     Register a vLLM model record (no labeling, no training)
@@ -327,12 +414,21 @@ def register_vllm_model(event: Dict, context: Any) -> Dict:
 
         logger.info(f"vLLM model registered successfully: {training_id}")
 
+        # Non-blocking preflight fit check over the just-written record
+        # against every supported Target_Architecture (Requirements 3.4,
+        # 3.5). evaluate_fit_check never raises and never blocks —
+        # registration has already succeeded regardless of the outcome.
+        fit_record = dict(training_item)
+        fit_record['engine_configuration'] = engine_configuration
+        fit_check = evaluate_fit_check(fit_record)
+
         # Publish-eligible with zero labeling and zero training steps (1.4)
         return create_response(201, {
             'training_id': training_id,
             'publish_eligible': True,
             'labeling_steps': 0,
-            'training_steps': 0
+            'training_steps': 0,
+            'fit_check': fit_check
         })
 
     except ValueError as e:
@@ -404,6 +500,155 @@ def get_vllm_engine_spec(event: Dict, context: Any) -> Dict:
     }
 
     return create_response(200, spec)
+
+
+# Path shape for the engine-configuration update endpoint (routing + fallback
+# training_id extraction when pathParameters is absent).
+VLLM_ENGINE_CONFIG_PATH_RE = re.compile(
+    r'/models/vllm/([^/]+)/engine-configuration/?$')
+
+
+def update_vllm_engine_configuration(event: Dict, context: Any) -> Dict:
+    """
+    Update the stored Engine_Configuration of a registered vLLM model
+    PUT /api/v1/models/vllm/{training_id}/engine-configuration
+
+    Request body: either the partial engine settings object directly, or
+    wrapped as {"engine_configuration": {...}}. Every supplied setting is
+    validated with the registration rules (unknown keys rejected fail
+    closed, Requirement 2.2); valid settings are overlaid onto the stored
+    configuration and written back (Requirement 2.1). The response carries
+    the complete updated configuration, a re-package/publish notice, and a
+    non-blocking fit-check result (Requirements 2.4, 3.5).
+    """
+    try:
+        user = get_user_from_event(event)
+        user_id = user['user_id']
+
+        # training_id from the path
+        path_params = event.get('pathParameters') or {}
+        training_id = path_params.get('training_id')
+        if not training_id:
+            match = VLLM_ENGINE_CONFIG_PATH_RE.search(event.get('path', ''))
+            training_id = match.group(1) if match else None
+        if not training_id:
+            return create_response(400, {
+                'error': 'training_id path parameter is required'})
+
+        # Supplied settings: accept the settings object directly or wrapped
+        # under an engine_configuration key
+        body = json.loads(event.get('body') or '{}')
+        if not isinstance(body, dict):
+            return create_response(400, {
+                'error': 'Request body must be a JSON object of engine settings'})
+        supplied = body.get('engine_configuration') \
+            if isinstance(body.get('engine_configuration'), dict) else body
+
+        # Load the record
+        table = dynamodb.Table(TRAINING_JOBS_TABLE)
+        response = table.get_item(Key={'training_id': training_id})
+        if 'Item' not in response:
+            return create_response(404, {
+                'error': f'Model {training_id} not found'})
+        record = response['Item']
+
+        # Reject non-vLLM records (Requirement 2.3)
+        if record.get('model_type') != 'vllm' and record.get('source') != 'vllm':
+            return create_response(400, {
+                'error': f'Model {training_id} is not a vLLM model record; '
+                         f'an engine configuration can only be updated on '
+                         f'vLLM models'})
+
+        # RBAC: DataScientist on the use case, mirroring registration
+        if not check_user_access(user_id, record.get('usecase_id'), 'DataScientist'):
+            return create_response(403, {'error': 'Insufficient permissions'})
+
+        # Validate every supplied setting with the registration rules —
+        # unknown keys rejected fail closed (Requirement 2.2); any finding
+        # leaves the stored configuration unchanged
+        findings = []
+        if not supplied:
+            findings.append({
+                'field': 'engine_configuration',
+                'value': supplied,
+                'reason': 'at least one engine setting must be supplied'
+            })
+        else:
+            for key, value in supplied.items():
+                if key not in ENGINE_DEFAULTS:
+                    findings.append({
+                        'field': f'engine_configuration.{key}',
+                        'value': value,
+                        'reason': f'unknown engine setting: {key}'
+                    })
+                    continue
+                reason = _validate_engine_setting(key, value)
+                if reason:
+                    findings.append({
+                        'field': f'engine_configuration.{key}',
+                        'value': value,
+                        'reason': reason
+                    })
+        if findings:
+            return create_response(400, {
+                'error': 'Engine configuration update validation failed',
+                'findings': findings
+            })
+
+        # Overlay the supplied settings onto the stored configuration
+        # (Requirement 2.1). resolve_engine_configuration backfills any
+        # missing setting with its documented default, so the result is
+        # always the complete configuration.
+        previous = resolve_engine_configuration(
+            _decimal_to_native(record.get('engine_configuration') or {}))
+        updated = dict(previous)
+        updated.update(supplied)
+
+        updated_ddb = _to_dynamo_compatible(updated)
+        timestamp = int(datetime.utcnow().timestamp() * 1000)
+        table.update_item(
+            Key={'training_id': training_id},
+            UpdateExpression='SET engine_configuration = :cfg, updated_at = :ts',
+            ExpressionAttributeValues={':cfg': updated_ddb, ':ts': timestamp}
+        )
+
+        # Audit with before/after values (Requirement 2.6)
+        log_audit_event(
+            user_id=user_id,
+            action='update_vllm_engine_configuration',
+            resource_type='training_job',
+            resource_id=training_id,
+            result='success',
+            details={
+                'model_name': record.get('model_name'),
+                'model_version': record.get('model_version'),
+                'previous_engine_configuration': _to_dynamo_compatible(previous),
+                'updated_engine_configuration': updated_ddb
+            }
+        )
+
+        logger.info(f"vLLM engine configuration updated: {training_id}")
+
+        # Non-blocking fit check against the updated configuration (3.5)
+        updated_record = dict(record)
+        updated_record['engine_configuration'] = updated
+        fit_check = evaluate_fit_check(updated_record)
+
+        return create_response(200, {
+            'training_id': training_id,
+            'engine_configuration': updated,
+            'notice': 'Engine configuration updated. The change takes '
+                      'effect only after the model is packaged and '
+                      'published again.',
+            'fit_check': fit_check
+        })
+
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return create_response(400, {'error': str(e)})
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return create_response(500, {'error': 'Internal server error'})
 
 
 def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
@@ -1125,6 +1370,8 @@ def handler(event: Dict, context: Any) -> Dict:
             return register_vllm_model(event, context)
         elif http_method == 'GET' and '/models/vllm/engine-spec' in path:
             return get_vllm_engine_spec(event, context)
+        elif http_method == 'PUT' and VLLM_ENGINE_CONFIG_PATH_RE.search(path):
+            return update_vllm_engine_configuration(event, context)
         elif http_method == 'GET' and '/models/format-spec' in path:
             return get_model_format_spec(event, context)
         else:

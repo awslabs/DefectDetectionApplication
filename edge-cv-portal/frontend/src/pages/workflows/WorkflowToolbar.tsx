@@ -357,7 +357,20 @@ export default function WorkflowToolbar({
               f.message ?? `${f.code ?? 'error'}${f.nodeId ? ` (node ${f.nodeId})` : ''}${f.arch ? ` [${f.arch}]` : ''}`)
             .join('; ');
         } else if (typeof err.details?.failing_artifact === 'string') {
-          content = `Failing artifact: ${err.details.failing_artifact}`;
+          // Compose the backend's remediation-bearing message with the
+          // failing artifact instead of overwriting it (Req 5.1).
+          const artifact = err.details.failing_artifact;
+          content = `${err.message} (failing artifact: ${artifact})`;
+          if (
+            artifact.startsWith('models/') &&
+            /no published Greengrass component/i.test(err.message)
+          ) {
+            // Unpublished-model case: point at the Models page publish
+            // action (Req 5.3).
+            content +=
+              ' — open the Models page and use Package & Publish on this ' +
+              'model, then package the workflow again.';
+          }
         }
       }
       // Greengrass component versions are immutable and the component

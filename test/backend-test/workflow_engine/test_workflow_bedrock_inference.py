@@ -38,6 +38,7 @@ from workflow_engine_test_utils import (
 from workflow_engine import gst_plugins
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
 from workflow_engine.output_bindings import (
+    BEDROCK_JSON_INSTRUCTION,
     BedrockInferenceError,
     BedrockInferenceProcessor,
     OutputBindingProcessor,
@@ -189,20 +190,31 @@ class TestParseBedrockAnswer:
 
 class TestBedrockInferenceProcessor:
     def test_merges_parsed_fields_into_tag_values(self, tmp_path):
+        """Intended contract change (bedrock-response-mode): in anomaly
+        mode (default) the executor appends the canonical JSON
+        instruction to the configured prompt, so the invoker receives
+        ``prompt + "\\n\\n" + BEDROCK_JSON_INSTRUCTION`` rather than the
+        configured prompt verbatim. Per bedrock-response-mode
+        Requirement 5, anomaly mode now ALSO records the raw answer
+        text as ``bedrock_text`` / ``bedrock.{nodeId}.text`` alongside
+        the parsed verdict."""
         write_frames(str(tmp_path))
-        invoker = RecordingInvoker(
-            answer='{"is_anomalous": true, "confidence": 0.9}')
+        answer = '{"is_anomalous": true, "confidence": 0.9}'
+        invoker = RecordingInvoker(answer=answer)
         processor = BedrockInferenceProcessor(invoker=invoker)
 
         metadata = processor.process(
             make_document(), {"existing": "kept"}, str(tmp_path))
 
         assert metadata == {
-            "existing": "kept", "is_anomalous": True, "confidence": 0.9}
+            "existing": "kept", "is_anomalous": True, "confidence": 0.9,
+            "bedrock_text": answer,
+            "bedrock": {"bedrock1": {"text": answer}}}
         assert len(invoker.calls) == 1
         call = invoker.calls[0]
         assert call["model"] == "us.amazon.nova-lite-v1:0"
-        assert call["prompt"] == "Compare the images."
+        assert call["prompt"] == (
+            "Compare the images." + "\n\n" + BEDROCK_JSON_INSTRUCTION)
         assert call["region"] == "us-east-1"
         assert call["max_tokens"] == 256
         # Both captured frames attached, input first, reference second.
@@ -212,21 +224,24 @@ class TestBedrockInferenceProcessor:
         ]
 
     def test_missing_captured_frame_fails_with_the_node(self, tmp_path):
-        # Only the input frame exists; the reference file is missing.
-        with open(os.path.join(str(tmp_path), "bedrock_frame_cam.jpg"),
+        # Only the reference frame exists; the primary 'in' file is
+        # missing — the required primary frame still fails the node.
+        with open(os.path.join(str(tmp_path), "bedrock_frame_ref.jpg"),
                   "wb") as f:
-            f.write(JPEG_BYTES_IN)
+            f.write(JPEG_BYTES_REF)
         processor = BedrockInferenceProcessor(invoker=RecordingInvoker())
 
         with pytest.raises(BedrockInferenceError) as excinfo:
             processor.process(make_document(), {}, str(tmp_path))
         assert excinfo.value.node_id == "bedrock1"
-        assert "reference" in str(excinfo.value)
+        assert "'in'" in str(excinfo.value)
 
     def test_unfed_port_fails_with_the_node(self, tmp_path):
+        # An unfed 'in' (primary) port still fails the node; the
+        # reference port is optional and covered separately below.
         binding = dict(BEDROCK_BINDING)
         binding["capturePaths"] = {
-            "in": "{work_dir}/bedrock_frame_cam.jpg", "reference": None}
+            "in": None, "reference": "{work_dir}/bedrock_frame_ref.jpg"}
         write_frames(str(tmp_path))
         processor = BedrockInferenceProcessor(invoker=RecordingInvoker())
 
@@ -235,6 +250,50 @@ class TestBedrockInferenceProcessor:
                 make_document([binding]), {}, str(tmp_path))
         assert excinfo.value.node_id == "bedrock1"
         assert "not fed" in str(excinfo.value)
+        assert "'in'" in str(excinfo.value)
+
+    def test_missing_reference_frame_falls_back_to_single_image(
+            self, tmp_path):
+        # The reference file is missing on disk: inference proceeds with
+        # the primary image alone instead of failing the run.
+        # (bedrock-response-mode Requirement 5: anomaly mode also
+        # records the raw answer text.)
+        with open(os.path.join(str(tmp_path), "bedrock_frame_cam.jpg"),
+                  "wb") as f:
+            f.write(JPEG_BYTES_IN)
+        invoker = RecordingInvoker()
+        processor = BedrockInferenceProcessor(invoker=invoker)
+
+        metadata = processor.process(make_document(), {}, str(tmp_path))
+
+        assert metadata == {
+            "is_anomalous": True, "confidence": 0.9,
+            "bedrock_text": invoker.answer,
+            "bedrock": {"bedrock1": {"text": invoker.answer}}}
+        assert len(invoker.calls) == 1
+        assert invoker.calls[0]["images"] == [("Input image", JPEG_BYTES_IN)]
+
+    def test_unfed_reference_port_falls_back_to_single_image(self, tmp_path):
+        # The compiler's unfed-reference shape (capturePaths.reference is
+        # None): inference proceeds with the primary image alone.
+        # (bedrock-response-mode Requirement 5: anomaly mode also
+        # records the raw answer text.)
+        binding = dict(BEDROCK_BINDING)
+        binding["capturePaths"] = {
+            "in": "{work_dir}/bedrock_frame_cam.jpg", "reference": None}
+        write_frames(str(tmp_path))
+        invoker = RecordingInvoker()
+        processor = BedrockInferenceProcessor(invoker=invoker)
+
+        metadata = processor.process(
+            make_document([binding]), {}, str(tmp_path))
+
+        assert metadata == {
+            "is_anomalous": True, "confidence": 0.9,
+            "bedrock_text": invoker.answer,
+            "bedrock": {"bedrock1": {"text": invoker.answer}}}
+        assert len(invoker.calls) == 1
+        assert invoker.calls[0]["images"] == [("Input image", JPEG_BYTES_IN)]
 
     def test_invoker_failure_carries_the_node_id(self, tmp_path):
         write_frames(str(tmp_path))
@@ -356,8 +415,8 @@ class TestExecutorIntegration:
         artifact_path = write_artifact_set(tmp_path, compiled=make_document())
         execution_id = seed_run(session_factory, artifact_path)
         manager = CapturingPipelineManager(tag_values={"confidence": 0.1})
-        invoker = RecordingInvoker(
-            answer='```json\n{"is_anomalous": true, "confidence": 0.93}\n```')
+        answer = '```json\n{"is_anomalous": true, "confidence": 0.93}\n```'
+        invoker = RecordingInvoker(answer=answer)
         received = []
 
         executor = WorkflowExecutor(
@@ -374,11 +433,16 @@ class TestExecutorIntegration:
         assert "bedrock_frame_cam.jpg" in manager.calls[0]
         # Bedrock ran with the captured frames and its parsed answer
         # reached the output bindings merged over the pipeline tags.
+        # (bedrock-response-mode Requirement 5: the raw answer text is
+        # recorded alongside the verdict.)
         assert invoker.calls and invoker.calls[0]["images"] == [
             ("Input image", JPEG_BYTES_IN),
             ("Reference image", JPEG_BYTES_REF),
         ]
-        assert received == [{"is_anomalous": True, "confidence": 0.93}]
+        assert received == [{
+            "is_anomalous": True, "confidence": 0.93,
+            "bedrock_text": answer,
+            "bedrock": {"bedrock1": {"text": answer}}}]
         row = get_execution(session_factory)
         assert row.status == EXECUTION_STATUS_COMPLETED
         # The per-run working directory is removed afterwards.
@@ -432,3 +496,144 @@ class TestExecutorIntegration:
         assert get_execution(session_factory).status == \
             EXECUTION_STATUS_COMPLETED
         assert "location=" not in manager.calls[0]
+
+    # -- output-node-sent-message: node_status_json carries sent/skip details
+
+    def test_run_records_mqtt_sent_detail_in_node_status(
+        self, tmp_path, session_factory
+    ):
+        import json as _json
+
+        mqtt_binding = {
+            "nodeId": "mqtt1", "binding": "mqtt_publish",
+            "parameters": {"broker_host": "b", "topic": "factory/line1",
+                           "qos": 1, "payload_template": "{inference_json}"},
+            "upstreamNodeIds": [], "downstreamNodeIds": [],
+        }
+        document = output_document([mqtt_binding])
+        artifact_path = write_artifact_set(tmp_path, compiled=document)
+        execution_id = seed_run(session_factory, artifact_path)
+        manager = CapturingPipelineManager(
+            tag_values={"is_anomalous": True, "confidence": 0.9},
+            write_files=False,
+        )
+        published = []
+        processor = OutputBindingProcessor(
+            mqtt_publisher=lambda *a, **k: published.append((a, k)))
+
+        WorkflowExecutor(
+            session_factory=session_factory,
+            pipeline_manager_factory=lambda: manager,
+            post_run_handler=processor,
+        ).execute(execution_id)
+
+        row = get_execution(session_factory)
+        assert row.status == EXECUTION_STATUS_COMPLETED
+        assert published  # the stubbed publisher fired
+        status = _json.loads(row.node_status_json)
+        assert status["mqtt1"]["status"] == "success"
+        assert "factory/line1" in status["mqtt1"]["detail"]
+        assert "(qos 1, plain)" in status["mqtt1"]["detail"]
+
+    def test_run_records_gated_skip_detail_in_node_status(
+        self, tmp_path, session_factory
+    ):
+        import json as _json
+
+        filter_binding = {
+            "nodeId": "f1", "binding": "inference_filter",
+            "parameters": {"condition": "confidence >= 0.8"},
+            "upstreamNodeIds": [], "downstreamNodeIds": ["mqtt1"],
+        }
+        mqtt_binding = {
+            "nodeId": "mqtt1", "binding": "mqtt_publish",
+            "parameters": {"broker_host": "b", "topic": "t"},
+            "upstreamNodeIds": ["f1"], "downstreamNodeIds": [],
+        }
+        document = output_document([filter_binding, mqtt_binding])
+        artifact_path = write_artifact_set(tmp_path, compiled=document)
+        execution_id = seed_run(session_factory, artifact_path)
+        # confidence 0.1 -> filter "confidence >= 0.8" fails -> mqtt gated.
+        manager = CapturingPipelineManager(
+            tag_values={"is_anomalous": True, "confidence": 0.1},
+            write_files=False,
+        )
+        published = []
+        processor = OutputBindingProcessor(
+            mqtt_publisher=lambda *a, **k: published.append((a, k)))
+
+        WorkflowExecutor(
+            session_factory=session_factory,
+            pipeline_manager_factory=lambda: manager,
+            post_run_handler=processor,
+        ).execute(execution_id)
+
+        row = get_execution(session_factory)
+        assert row.status == EXECUTION_STATUS_COMPLETED
+        assert published == []  # gated out, never published
+        status = _json.loads(row.node_status_json)
+        assert status["mqtt1"]["detail"] == (
+            "not sent: gated out by an upstream inference filter or conditional"
+        )
+
+    def test_failing_output_node_keeps_failure_detail_no_sent_detail(
+        self, tmp_path, session_factory
+    ):
+        import json as _json
+
+        mqtt_binding = {
+            "nodeId": "mqtt1", "binding": "mqtt_publish",
+            "parameters": {"broker_host": "b", "topic": "factory/line1"},
+            "upstreamNodeIds": [], "downstreamNodeIds": [],
+        }
+        document = output_document([mqtt_binding])
+        artifact_path = write_artifact_set(tmp_path, compiled=document)
+        execution_id = seed_run(session_factory, artifact_path)
+        manager = CapturingPipelineManager(
+            tag_values={"is_anomalous": True, "confidence": 0.9},
+            write_files=False,
+        )
+
+        def boom(*a, **k):
+            raise RuntimeError("broker unreachable")
+
+        processor = OutputBindingProcessor(mqtt_publisher=boom)
+
+        WorkflowExecutor(
+            session_factory=session_factory,
+            pipeline_manager_factory=lambda: manager,
+            post_run_handler=processor,
+        ).execute(execution_id)
+
+        row = get_execution(session_factory)
+        assert row.status == EXECUTION_STATUS_FAILED
+        assert row.failing_node_id == "mqtt1"
+        status = _json.loads(row.node_status_json)
+        assert status["mqtt1"]["status"] == "failure"
+        # The failure detail is retained; NO sent-message detail replaced it.
+        assert "broker unreachable" in status["mqtt1"]["detail"]
+        assert "sent to topic" not in status["mqtt1"]["detail"]
+
+
+def output_document(bindings):
+    """A minimal compiled document with a trivial pipeline plus the given
+    executor bindings (output-node-sent-message integration harness)."""
+    return {
+        "schemaVersion": 1,
+        "workflowId": "wf-1",
+        "workflowVersion": "3",
+        "targetArch": DEVICE_ARCH,
+        "segments": [
+            {
+                "name": "s0",
+                "from": None,
+                "linkTo": None,
+                "elements": [
+                    {"nodeId": "cam", "factory": "videotestsrc", "args": {}},
+                    {"nodeId": None, "factory": "fakesink", "args": {}},
+                ],
+            },
+        ],
+        "executorBindings": list(bindings),
+        "pluginDependencies": [],
+    }

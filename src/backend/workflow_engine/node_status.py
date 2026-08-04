@@ -160,6 +160,26 @@ class NodeStatusCollector:
         if detail:
             self._details[node_id] = detail
 
+    def set_detail(self, node_id: Optional[str], detail: Optional[str]) -> None:
+        """Record ``detail`` for ``node_id`` WITHOUT changing its status.
+
+        Used by output bindings to attach a sent-message / skipped-outcome
+        summary to a node (output-node-sent-message feature). No-op for a
+        None/untracked node or an empty ``detail``. NEVER overwrites a detail
+        belonging to a node whose status is ``failure`` — failure details
+        always win (Requirement 3.3). Fully contained so a recording error can
+        never fail a run (R8.5 discipline)."""
+        try:
+            if node_id is None or not detail:
+                return
+            if node_id not in self._statuses:
+                return
+            if self._statuses.get(node_id) == STATUS_FAILURE:
+                return
+            self._details[node_id] = detail
+        except Exception:  # noqa: BLE001 - collector is best-effort (R8.5)
+            logger.debug("NodeStatusCollector.set_detail ignored an error", exc_info=True)
+
     def finalize(self) -> None:
         """Resolve any remaining non-terminal node to a terminal state.
 

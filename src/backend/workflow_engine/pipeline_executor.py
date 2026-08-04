@@ -63,6 +63,7 @@ failed and nothing propagates (Requirement 13.7).
 """
 
 import copy
+import inspect
 import json
 import logging
 import os
@@ -78,6 +79,8 @@ from workflow_engine import executor as executor_hook
 from workflow_engine import python_bridge, rendering
 from workflow_engine.aravis_feed import AravisFeedError, plan_aravis_feeds
 from workflow_engine.output_bindings import (
+    BINDING_BEDROCK_INFERENCE,
+    BINDING_LLM_INFERENCE,
     BedrockInferenceProcessor,
     LlmInferenceProcessor,
     OutputBindingError,
@@ -280,6 +283,28 @@ class FrameSourceError(Exception):
     def __init__(self, message: str, node_id: Optional[str] = None) -> None:
         super().__init__(message)
         self.node_id = node_id
+        #: The directory-resolved source image behind the failure, when
+        #: known. Set by :meth:`WorkflowExecutor._stage_frame_sources` when
+        #: JP6 PNG staging fails for a folder-resolved JPEG, so ``execute()``
+        #: can relocate the bad image to ``failed/`` (mirroring the legacy
+        #: ``_move_bad_folder_image_source``) instead of letting it wedge
+        #: every subsequent run (folder-source-image-consumption Req 2.4).
+        self.source_image: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FolderFrame:
+    """One directory-resolved frame source recorded by
+    :meth:`WorkflowExecutor._stage_frame_sources`: the original JPEG
+    selected from the folder (``_oldest_image_in_folder``), the staged
+    ``.dda_decoded.png`` when the JP6 ``pngdec`` chain required one (else
+    None), and the source node id. Recorded ONLY for directory locations
+    — single-file locations are never consumed, mirroring the legacy
+    FILE-type semantics (folder-source-image-consumption Req 3.1)."""
+
+    original: str
+    staged_png: Optional[str]
+    node_id: Optional[str]
 
 
 def _oldest_image_in_folder(location: str) -> str:
@@ -558,7 +583,7 @@ class WorkflowExecutor:
         self._post_run_handler = handler
 
     @staticmethod
-    def _stage_frame_sources(document: dict) -> None:
+    def _stage_frame_sources(document: dict) -> List[FolderFrame]:
         """Resolve each file-based image source to a concrete frame file,
         mirroring the Pipeline_Configuration builder's FOLDER source
         (``_add_file_image_source``).
@@ -573,7 +598,19 @@ class WorkflowExecutor:
         Single-file locations whose decoder already matches (the JP5/x86
         ``jpegdec`` chains) are left untouched. Mutates the per-run document
         in place; raises :class:`FrameSourceError` (carrying the source
-        node id) when a source can't be resolved."""
+        node id) when a source can't be resolved.
+
+        Returns the :class:`FolderFrame` recorded for every
+        directory-resolved location, so ``execute()`` can consume the frame
+        after a successful pipeline run or relocate it to ``failed/`` on
+        failure (folder-source-image-consumption Reqs 2.1-2.5).
+        Single-file locations are NOT recorded — they are never consumed,
+        exactly like the legacy FILE-type sources (Req 3.1). When JP6 PNG
+        staging fails for a directory-resolved JPEG the raised
+        :class:`FrameSourceError` carries the resolved original path in
+        ``source_image`` so the caller can relocate the bad image (Req
+        2.4)."""
+        folder_frames: List[FolderFrame] = []
         for segment in document.get("segments", []):
             elements = segment.get("elements", [])
             if not isinstance(elements, list):
@@ -598,22 +635,162 @@ class WorkflowExecutor:
                     continue
                 node_id = element.get("nodeId")
                 resolved = location
+                staged_png: Optional[str] = None
+                from_directory = False
                 try:
                     if os.path.isdir(location):
                         resolved = _oldest_image_in_folder(location)
+                        from_directory = True
                     if expects_png and not resolved.lower().endswith(".png"):
-                        resolved = _stage_decoded_png(resolved)
+                        staged_png = _stage_decoded_png(resolved)
                 except FrameSourceError as e:
                     if e.node_id is None:
                         e.node_id = node_id
+                    if from_directory:
+                        # A directory-resolved JPEG failed to decode/stage:
+                        # hand the caller the bad image so it can be
+                        # relocated to failed/ instead of wedging every
+                        # subsequent run (Req 2.4).
+                        e.source_image = resolved
                     raise
-                if resolved != location:
+                if from_directory:
+                    folder_frames.append(FolderFrame(
+                        original=resolved,
+                        staged_png=staged_png,
+                        node_id=node_id,
+                    ))
+                final = staged_png or resolved
+                if final != location:
                     logger.info(
                         "Resolved workflow frame source '%s' to '%s'",
                         location,
-                        resolved,
+                        final,
                     )
-                    args["location"] = resolved
+                    args["location"] = final
+        return folder_frames
+
+    @staticmethod
+    def _consume_folder_frames(folder_frames: List[FolderFrame]) -> None:
+        """Delete every directory-resolved frame's staged PNG and original
+        JPEG after a successful pipeline run, mirroring the legacy
+        ``_cleanup_file_after_processing`` so the folder drains
+        (folder-source-image-consumption Reqs 2.1, 2.2, 2.3).
+
+        Runs immediately after the pipeline run returns — BEFORE the
+        Bedrock/LLM/output-binding steps — so consumption happens
+        regardless of downstream outcomes, exactly like the legacy
+        ``else`` branch. Entirely best-effort and contained: a delete
+        failure is logged per file and never fails a completed run. A
+        no-op for the empty list, so non-folder runs take the exact
+        pre-fix path."""
+        if not folder_frames:
+            return
+        try:
+            # Lazy like the other DAO/gstreamer imports so this module
+            # stays importable on hosts without the fastapi/camera stack.
+            from utils import captured_images_utils
+
+            delete_image = captured_images_utils.delete_image
+        except Exception:  # noqa: BLE001 - contained, fall back to os
+            logger.exception(
+                "captured_images_utils unavailable; consuming folder "
+                "frames via os.remove"
+            )
+            delete_image = os.remove
+        for frame in folder_frames:
+            for path in (frame.staged_png, frame.original):
+                if not path:
+                    continue
+                try:
+                    delete_image(path)
+                    logger.info(
+                        "Consumed processed folder-source file: %s", path
+                    )
+                except Exception:  # noqa: BLE001 - contained per 13.7
+                    logger.exception(
+                        "Could not consume processed folder-source file "
+                        "%s; continuing",
+                        path,
+                    )
+
+    @staticmethod
+    def _relocate_failed_folder_frames(
+        workflow_id: str, folder_frames: List[FolderFrame]
+    ) -> None:
+        """Relocate every directory-resolved frame's original JPEG to
+        ``{INFERENCE_RESULTS_DIR}/{workflow_id}/failed/`` after a failed
+        run, mirroring the legacy ``_move_bad_folder_image_source`` so a
+        bad image never wedges the folder (folder-source-image-consumption
+        Reqs 2.4, 2.5). Staged PNGs are best-effort removed.
+
+        Entirely best-effort and contained: any per-file failure is
+        logged and never masks the run's real failure. A no-op for the
+        empty list, so non-folder runs take the exact pre-fix path."""
+        if not folder_frames:
+            return
+        try:
+            from utils import constants
+
+            failed_dir = os.path.join(
+                constants.INFERENCE_RESULTS_DIR, workflow_id, "failed"
+            )
+        except Exception:  # noqa: BLE001 - contained per 13.7
+            logger.exception(
+                "Could not resolve the failed-images directory for "
+                "workflow %s; leaving folder-source images in place",
+                workflow_id,
+            )
+            return
+        if not os.path.isdir(failed_dir):
+            try:
+                # The legacy directory creation (chown/chmod to the DDA
+                # user); lazy import for host-test importability.
+                from utils import dda_user_management_utils
+
+                dda_user_management_utils.create_dda_user_directory(
+                    failed_dir
+                )
+            except Exception:  # noqa: BLE001 - contained per 13.7
+                logger.exception(
+                    "create_dda_user_directory failed for %s; falling "
+                    "back to os.makedirs",
+                    failed_dir,
+                )
+                try:
+                    os.makedirs(failed_dir, exist_ok=True)
+                except OSError:
+                    logger.exception(
+                        "Could not create the failed-images directory "
+                        "%s; leaving folder-source images in place",
+                        failed_dir,
+                    )
+                    return
+        for frame in folder_frames:
+            try:
+                relocated = os.path.join(
+                    failed_dir, os.path.basename(frame.original)
+                )
+                os.rename(frame.original, relocated)
+                logger.info(
+                    "Relocated failed folder-source image %s to %s",
+                    frame.original,
+                    relocated,
+                )
+            except Exception:  # noqa: BLE001 - contained per 13.7
+                logger.exception(
+                    "Could not relocate failed folder-source image %s; "
+                    "continuing",
+                    frame.original,
+                )
+            if frame.staged_png:
+                try:
+                    os.remove(frame.staged_png)
+                except OSError:
+                    logger.debug(
+                        "Could not remove staged PNG %s; continuing",
+                        frame.staged_png,
+                        exc_info=True,
+                    )
 
     @staticmethod
     def _prepare_csi_captures(plan: "CapturePlan", arch: str) -> None:
@@ -1018,7 +1195,7 @@ class WorkflowExecutor:
             # filesrc is handed a directory (or a raw JPEG the pngdec chain
             # can't read) and the pipeline never reaches PLAYING.
             try:
-                self._stage_frame_sources(document)
+                folder_frames = self._stage_frame_sources(document)
             except FrameSourceError as e:
                 logger.error(
                     "Workflow execution %s failed resolving its image source "
@@ -1027,6 +1204,19 @@ class WorkflowExecutor:
                     e.node_id or "unidentified",
                     e,
                 )
+                # A directory-resolved JPEG that failed to decode/stage is
+                # relocated to failed/ so it cannot wedge every subsequent
+                # run (folder-source-image-consumption Req 2.4).
+                bad_image = getattr(e, "source_image", None)
+                if bad_image:
+                    self._relocate_failed_folder_frames(
+                        registration.workflow_id,
+                        [FolderFrame(
+                            original=bad_image,
+                            staged_png=None,
+                            node_id=e.node_id,
+                        )],
+                    )
                 self._finish_failed(
                     session,
                     execution,
@@ -1075,13 +1265,21 @@ class WorkflowExecutor:
                         "continuing",
                         output_dir,
                     )
+                # ALWAYS record where the run's artifacts live — even
+                # without a File_Output terminal — so the run metadata
+                # JSON and the inference-node frames have a destination
+                # (vlm-parity-run-results Requirement 2.3; fixes
+                # Bedrock-only runs persisting nothing).
+                # ``has_image_results`` stays gated on a routed terminal
+                # capture here; ``_persist_node_frames`` additionally
+                # sets it when node frames were persisted (Req 2.4).
+                execution.capture_id = capture_id
+                execution.output_dir = output_dir
                 if self._route_capture_outputs(
                     document, output_dir, capture_id
                 ):
-                    execution.capture_id = capture_id
-                    execution.output_dir = output_dir
                     execution.has_image_results = True
-                    session.commit()
+                session.commit()
             except Exception:  # noqa: BLE001 - contained per 13.7 / R8.5
                 logger.exception(
                     "Workflow execution %s capture-output routing failed; "
@@ -1175,6 +1373,14 @@ class WorkflowExecutor:
                             status_sink=self._status_sink(collector),
                         )
             except Exception as e:  # noqa: BLE001 - contained per 13.7
+                # A failed pipeline run relocates every directory-resolved
+                # source image to failed/ so the folder still drains,
+                # mirroring the legacy except branch
+                # (folder-source-image-consumption Req 2.5). Contained and
+                # best-effort; the existing failure handling is unchanged.
+                self._relocate_failed_folder_frames(
+                    registration.workflow_id, folder_frames
+                )
                 # Bridge errors carry the Custom_Python_Node id directly
                 # (Requirement 9.8); anything else is mapped from the
                 # failing element name (Requirement 9.7).
@@ -1201,6 +1407,14 @@ class WorkflowExecutor:
                     failure_detail=str(e),
                 )
                 return
+
+            # Pipeline processing succeeded: consume every
+            # directory-resolved source image (staged PNG + original JPEG)
+            # NOW — before the Bedrock/LLM/output-binding steps — so the
+            # folder drains regardless of downstream outcomes, mirroring
+            # the legacy else-branch cleanup
+            # (folder-source-image-consumption Reqs 2.1, 2.2, 2.3).
+            self._consume_folder_frames(folder_frames)
 
             # Post-pipeline capture artifact repair (Defect C): a
             # tritonless capture pipeline's broker product is a literal
@@ -1276,7 +1490,12 @@ class WorkflowExecutor:
             # failing node id(s), and only its outcome decides the
             # terminal status.
             try:
-                self._run_post_run_handler(registration, document, tag_values)
+                self._run_post_run_handler(
+                    registration, document, tag_values,
+                    detail_sink=(
+                        collector.set_detail if collector is not None else None
+                    ),
+                )
             except OutputBindingError as e:
                 failing_node_id = getattr(e, "node_id", None)
                 logger.error(
@@ -1299,9 +1518,14 @@ class WorkflowExecutor:
                     failing_node_id=failing_node_id,
                     failure_detail=str(e),
                 )
-                # The run's final metadata (llm outcomes included) is
-                # still persisted on the output-binding-failure path so
-                # the artifact directory describes what the run produced.
+                # The run's final metadata (llm outcomes included) and
+                # the inference-node frames are still persisted on the
+                # output-binding-failure path so the artifact directory
+                # describes what the run produced (vlm-parity-run-results
+                # Requirement 2.2: success OR output-binding failure,
+                # before the finally-block removes the work dir).
+                self._persist_node_frames(session, execution, document,
+                                          work_dir)
                 self._persist_run_metadata(execution, tag_values)
                 return
 
@@ -1311,9 +1535,12 @@ class WorkflowExecutor:
             self._persist_node_status(
                 session, execution, collector, success=True
             )
-            # Persist the run metadata JSON into the per-run artifact
-            # directory (Defect B/C: the llm generated text — or error —
-            # previously lived only in in-memory tag values).
+            # Persist the inference-node captured frames and the run
+            # metadata JSON into the per-run artifact directory BEFORE
+            # the finally-block removes the work dir (Defect B/C; the
+            # frames sent to Bedrock/VLM previously died with the temp
+            # dir — vlm-parity-run-results Requirement 2.2).
+            self._persist_node_frames(session, execution, document, work_dir)
             self._persist_run_metadata(execution, tag_values)
             logger.info(
                 "Workflow execution %s completed; tags: %s",
@@ -1488,6 +1715,88 @@ class WorkflowExecutor:
             logger.exception(
                 "Could not mark llm binding outcomes in the node-status "
                 "map; the run's terminal status is unaffected"
+            )
+
+    #: Filename-unsafe characters in a node id — the same discipline the
+    #: portal compiler applies to its capture filenames
+    #: (``_UNSAFE_PATH_CHARS`` in workflow_core.compiler.compiler).
+    _UNSAFE_NODE_ID_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+
+    def _persist_node_frames(
+        self,
+        session,
+        execution: WorkflowExecution,
+        document: dict,
+        work_dir: Optional[str],
+    ) -> None:
+        """Copy each inference node's captured frames from the per-run
+        work dir into the run's artifact directory, contained
+        (vlm-parity-run-results Requirements 2.2, 2.4, 4.4).
+
+        For every ``bedrock_inference``/``llm_inference`` executor
+        binding carrying ``capturePaths``, each existing resolved frame
+        file is copied to ``{output_dir}/{capture_id}.node.
+        {sanitized_nodeId}.{port}.jpg`` BEFORE the ``finally`` block
+        removes the work dir — so the results view can show what the
+        model actually saw. Absent paths/files are skipped silently
+        (old packages have no llm capturePaths — Requirement 4.4; the
+        compiler emits ``reference: None`` for unfed ports). When at
+        least one frame was persisted the run is marked as having
+        viewable image results (Requirement 2.4). Entirely best-effort
+        in the R8.5 containment style (mirroring
+        :meth:`_persist_run_metadata`): any failure is logged and
+        swallowed and never changes the run status."""
+        try:
+            output_dir = getattr(execution, "output_dir", None)
+            capture_id = getattr(execution, "capture_id", None)
+            if not output_dir or not capture_id or not work_dir:
+                return
+            copied = 0
+            for binding in document.get("executorBindings") or []:
+                if binding.get("binding") not in (
+                    BINDING_BEDROCK_INFERENCE,
+                    BINDING_LLM_INFERENCE,
+                ):
+                    continue
+                node_id = str(binding.get("nodeId") or "")
+                safe_node = (
+                    self._UNSAFE_NODE_ID_CHARS.sub("_", node_id) or "node"
+                )
+                for port, path in (binding.get("capturePaths") or {}).items():
+                    if not isinstance(path, str) or not path:
+                        continue
+                    source = path.replace(self._WORK_DIR_TOKEN, work_dir)
+                    if not os.path.isfile(source):
+                        continue
+                    target = os.path.join(
+                        output_dir,
+                        "{0}.node.{1}.{2}.jpg".format(
+                            capture_id, safe_node, port
+                        ),
+                    )
+                    try:
+                        shutil.copyfile(source, target)
+                        copied += 1
+                    except OSError:
+                        logger.exception(
+                            "Could not persist node frame %s -> %s; "
+                            "continuing",
+                            source,
+                            target,
+                        )
+            if copied:
+                execution.has_image_results = True
+                session.commit()
+                logger.info(
+                    "Persisted %d inference-node frame(s) into %s",
+                    copied,
+                    output_dir,
+                )
+        except Exception:  # noqa: BLE001 - contained per 13.7 / R8.5
+            logger.exception(
+                "Could not persist inference-node frames for workflow "
+                "execution %s; the run's terminal status is unaffected",
+                execution.id,
             )
 
     def _persist_run_metadata(
@@ -1833,7 +2142,11 @@ class WorkflowExecutor:
             )
 
     def _run_post_run_handler(
-        self, registration: WorkflowRegistration, document: dict, tag_values: dict
+        self,
+        registration: WorkflowRegistration,
+        document: dict,
+        tag_values: dict,
+        detail_sink: Optional[Callable] = None,
     ) -> None:
         """Invoke the output-binding hook (task 12.4).
 
@@ -1841,11 +2154,21 @@ class WorkflowExecutor:
         failed) PROPAGATES to the caller so the run's terminal status
         reflects the failed binding(s). Any OTHER unexpected handler
         exception stays contained (Requirement 13.7) so an unrelated
-        handler bug cannot crash the run."""
+        handler bug cannot crash the run.
+
+        ``detail_sink`` (the per-run collector's ``set_detail``, when a
+        collector exists) is threaded to handlers that accept it so output
+        bindings can record their sent-message / skipped-outcome details into
+        node_status_json (output-node-sent-message feature). The generic
+        ``PostRunHandler`` signature is ``(registration, document,
+        tag_values) -> None``; a handler that does not accept ``detail_sink``
+        keeps working unchanged (backward compatibility)."""
         if self._post_run_handler is None:
             return
         try:
-            self._post_run_handler(registration, document, tag_values)
+            self._invoke_post_run_handler(
+                registration, document, tag_values, detail_sink
+            )
         except OutputBindingError:
             raise
         except Exception:  # noqa: BLE001 - contained per 13.7
@@ -1854,6 +2177,53 @@ class WorkflowExecutor:
                 registration.workflow_id,
                 registration.version,
             )
+
+    def _invoke_post_run_handler(
+        self,
+        registration: WorkflowRegistration,
+        document: dict,
+        tag_values: dict,
+        detail_sink: Optional[Callable],
+    ) -> None:
+        """Call the post-run handler, passing ``detail_sink`` only when the
+        handler accepts it (backward compatibility).
+
+        The generic ``PostRunHandler`` signature is ``(registration,
+        document, tag_values) -> None``; :class:`OutputBindingProcessor`
+        additionally accepts a ``detail_sink`` keyword. Handlers that do not
+        (plain lambdas, other implementations) are invoked with the original
+        three positional arguments and keep working unchanged."""
+        handler = self._post_run_handler
+        if detail_sink is not None and self._handler_accepts_detail_sink(handler):
+            handler(registration, document, tag_values, detail_sink=detail_sink)
+        else:
+            handler(registration, document, tag_values)
+
+    @staticmethod
+    def _handler_accepts_detail_sink(handler: Callable) -> bool:
+        """True when ``handler`` accepts a ``detail_sink`` keyword argument.
+
+        Inspects the callable's signature (``__call__`` for instances);
+        tolerates un-inspectable callables (e.g. some builtins) by returning
+        False so the original three-argument call is used."""
+        try:
+            target = handler
+            if not (inspect.isfunction(handler) or inspect.ismethod(handler)):
+                # Callable instance: inspect its __call__.
+                call = getattr(handler, "__call__", None)
+                if call is not None:
+                    target = call
+            signature = inspect.signature(target)
+        except (TypeError, ValueError):
+            return False
+        parameters = signature.parameters
+        if "detail_sink" in parameters:
+            return True
+        # A **kwargs-accepting handler can take the keyword too.
+        return any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in parameters.values()
+        )
 
 
 def register_workflow_executor(

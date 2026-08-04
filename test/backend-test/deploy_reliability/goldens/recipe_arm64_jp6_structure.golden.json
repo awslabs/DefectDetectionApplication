@@ -106,7 +106,8 @@
         },
         "Shutdown": {
           "RequiresPrivilege": true,
-          "Script": "systemctl stop nvidia-csi-capture || true\nexport $(grep -v '^#' /tmp/.dda.env | xargs) || true\ndocker compose --profile ${DOCKER_PROFILE:-tegra} -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP6-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP6/docker-compose.yaml down\n"
+          "Script": "systemctl stop nvidia-csi-capture || true\nexport $(grep -v '^#' /tmp/.dda.env | xargs) || true\ndocker compose --profile ${DOCKER_PROFILE:-tegra} -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP6-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP6/docker-compose.yaml down\nbash {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP6-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP6/host_scripts/compose_lifecycle.sh wait-empty 240 -- --profile ${DOCKER_PROFILE:-tegra} -f {artifacts:decompressedPath}/aws.edgeml.dda.LocalServer.arm64JP6-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64JP6/docker-compose.yaml || true\n",
+          "Timeout": 300
         }
       },
       "Platform": {

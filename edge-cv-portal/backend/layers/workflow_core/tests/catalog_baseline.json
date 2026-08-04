@@ -316,15 +316,28 @@
         "constraints": {
           "min_length": 1
         },
-        "default": "Compare the input image to the reference image. Respond with JSON: {\"is_anomalous\": true|false, \"confidence\": 0..1} where is_anomalous is true when the input meaningfully differs from the reference.",
+        "default": "Compare the input image to the reference image; is_anomalous is true when the input meaningfully differs from the reference.",
         "depends_on": null,
-        "description": "Instruction sent to the model with both images. The model must answer with JSON of the shape {\"is_anomalous\": true|false, \"confidence\": 0..1}; those fields become the inference metadata (is_anomalous, confidence) driving downstream filters, conditionals, and outputs.",
+        "description": "Instruction sent to the model with both images. In anomaly mode the executor automatically appends the JSON-format instruction ({\"is_anomalous\": true|false, \"confidence\": 0..1}) and those fields become the inference metadata (is_anomalous, confidence) driving downstream filters, conditionals, and outputs; in freeform mode the prompt is sent as-is.",
         "examples": [
-          "Compare the input image to the reference image. Respond with JSON: {\"is_anomalous\": true|false, \"confidence\": 0..1} where is_anomalous is true when the input meaningfully differs from the reference."
+          "Compare the input image to the reference image; is_anomalous is true when the input meaningfully differs from the reference."
         ],
         "name": "prompt",
         "param_type": "string",
         "required": true
+      },
+      {
+        "constraints": {},
+        "default": true,
+        "depends_on": null,
+        "description": "Checked: anomaly mode — the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs. Unchecked: freeform mode — the prompt is sent as-is and the raw model text is recorded in the run metadata as bedrock_text (and bedrock.{nodeId}.text), with no JSON parsing.",
+        "examples": [
+          true,
+          false
+        ],
+        "name": "anomaly_mode",
+        "param_type": "bool",
+        "required": false
       },
       {
         "constraints": {

@@ -36,6 +36,69 @@ add_warning() {
     echo "⚠️  $1" | tee -a "$LOG_FILE"
 }
 
+# --- apt/dpkg lock resilience -------------------------------------------------
+# On a freshly imaged device (JetPack first boot), unattended-upgrades typically
+# holds the apt/dpkg locks for several minutes. A plain `apt-get install` then
+# fails with "Could not get lock /var/lib/dpkg/lock-frontend", which previously
+# marked an otherwise-healthy setup as failed (an immediate second run
+# succeeded). Rationale: requirements.md has no criterion covering transient
+# apt-lock resilience; this hardening addresses that observed first-boot
+# failure directly.
+
+APT_LOCK_FILES="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock"
+APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-300}"   # max seconds to wait for the locks
+APT_LOCK_POLL_INTERVAL=5                       # seconds between lock probes
+
+# Returns 0 if any apt/dpkg lock is currently held by another process.
+apt_lock_held() {
+    # Without fuser we cannot probe the locks; assume free and let apt decide.
+    if ! command -v fuser >/dev/null 2>&1; then
+        return 1
+    fi
+    local lock
+    for lock in $APT_LOCK_FILES; do
+        if [ -e "$lock" ] && fuser "$lock" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Waits up to APT_LOCK_TIMEOUT (~5 minutes) for the apt/dpkg locks to be
+# released, printing periodic progress so the operator knows the script is
+# waiting on unattended-upgrades rather than hung. Returns 0 once free, 1 on
+# timeout (callers proceed anyway and let the apt operation itself fail).
+apt_wait_for_lock() {
+    local waited=0
+    while apt_lock_held; do
+        if [ "$waited" -ge "$APT_LOCK_TIMEOUT" ]; then
+            echo "⚠️  apt/dpkg lock still held after ${APT_LOCK_TIMEOUT}s — proceeding anyway" | tee -a "$LOG_FILE"
+            return 1
+        fi
+        if [ $((waited % 30)) -eq 0 ]; then
+            echo "⏳ Waiting for apt/dpkg lock (likely first-boot unattended-upgrades)... ${waited}s elapsed" | tee -a "$LOG_FILE"
+        fi
+        sleep "$APT_LOCK_POLL_INTERVAL"
+        waited=$((waited + APT_LOCK_POLL_INTERVAL))
+    done
+    return 0
+}
+
+# Wrapper for apt operations: wait for the locks, run the command, and on
+# failure re-wait and retry once before reporting failure. Usage mirrors
+# run_cmd: apt_run "apt-get install -y <pkgs>"
+apt_run() {
+    local cmd="$*"
+    apt_wait_for_lock
+    if run_cmd "$cmd"; then
+        return 0
+    fi
+    echo "⚠️  apt operation failed — waiting for apt/dpkg lock and retrying once: $cmd" | tee -a "$LOG_FILE"
+    apt_wait_for_lock
+    run_cmd "$cmd"
+}
+# ------------------------------------------------------------------------------
+
 # Resolve AWS credentials into this shell's environment for tools that use the
 # AWS SDK default provider chain (the Greengrass Java provisioner, and every
 # `aws` CLI call below). Handles the two failure modes seen with AWS CLI v2:
@@ -184,14 +247,14 @@ check_mandatory_deps() {
     echo "▶ Checking mandatory dependencies..."
     
     # Update package manager first
-    if ! run_cmd "apt-get update"; then
+    if ! apt_run "apt-get update"; then
         add_warning "Failed to update package manager"
     fi
     
     # Java
     if ! check_command java; then
         echo "Installing Java..."
-        if ! run_cmd "apt-get install -y default-jdk"; then
+        if ! apt_run "apt-get install -y default-jdk"; then
             add_error "Failed to install Java"
             return 1
         else
@@ -204,7 +267,7 @@ check_mandatory_deps() {
     # curl
     if ! check_command curl; then
         echo "Installing curl..."
-        if ! run_cmd "apt-get install -y curl"; then
+        if ! apt_run "apt-get install -y curl"; then
             add_error "Failed to install curl"
             return 1
         else
@@ -217,7 +280,7 @@ check_mandatory_deps() {
     # unzip
     if ! check_command unzip; then
         echo "Installing unzip..."
-        if ! run_cmd "apt-get install -y unzip"; then
+        if ! apt_run "apt-get install -y unzip"; then
             add_error "Failed to install unzip"
             return 1
         else
@@ -275,12 +338,12 @@ install_from_source() {
 
   # Install build dependencies
   echo "Installing build dependencies..."
-  if ! run_cmd "apt update"; then
+  if ! apt_run "apt update"; then
     add_error "Failed to update package manager"
     return 1
   fi
   
-  if ! run_cmd "apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget"; then
+  if ! apt_run "apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget"; then
     add_error "Failed to install build dependencies"
     return 1
   fi
@@ -355,12 +418,12 @@ install_from_ppa() {
   echo "Ubuntu version is not 18.04. Installing Python 3.11 from the deadsnakes PPA."
 
   # Add the deadsnakes PPA
-  if ! run_cmd "apt update"; then
+  if ! apt_run "apt update"; then
     add_error "Failed to update package manager"
     return 1
   fi
   
-  if ! run_cmd "apt install -y software-properties-common"; then
+  if ! apt_run "apt install -y software-properties-common"; then
     add_error "Failed to install software-properties-common"
     return 1
   fi
@@ -371,17 +434,17 @@ install_from_ppa() {
   fi
 
   # Install Python 3.11
-  if ! run_cmd "apt update"; then
+  if ! apt_run "apt update"; then
     add_error "Failed to update package manager after adding PPA"
     return 1
   fi
   
-  if ! run_cmd "apt install -y python3.11"; then
+  if ! apt_run "apt install -y python3.11"; then
     add_error "Failed to install Python 3.11 from PPA"
     return 1
   fi
   
-  run_cmd "apt install python3.11-venv -y" || add_warning "Failed to install python3.11-venv"
+  apt_run "apt install python3.11-venv -y" || add_warning "Failed to install python3.11-venv"
 
   echo "✓ Python 3.11 installed successfully from the deadsnakes PPA."
 }
@@ -506,11 +569,11 @@ echo ""
 
 echo "▶ Installing additional system packages..."
 
-if ! run_cmd "apt-get update"; then
+if ! apt_run "apt-get update"; then
     add_warning "Failed to update package manager"
 fi
 
-if ! run_cmd "apt-get install ca-certificates gnupg lsb-release zip -y"; then
+if ! apt_run "apt-get install ca-certificates gnupg lsb-release zip -y"; then
     add_warning "Failed to install additional system packages"
 fi
 
@@ -568,7 +631,7 @@ if [ -x /usr/local/bin/python3.11 ] && [ ! -e /usr/bin/python3.11 ]; then
 fi
 echo "✓ Python 3.11 available as python3.11 (system python3 left unchanged)"
 
-if ! run_cmd "apt-get install python3-pip -y"; then
+if ! apt_run "apt-get install python3-pip -y"; then
     add_error "Failed to install pip"
 else
     echo "✓ pip installed"
@@ -622,11 +685,28 @@ fi
 echo ""
 
 echo "▶ Installing GStreamer..."
-if ! run_cmd "apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-alsa gstreamer1.0-gl gstreamer1.0-gtk3 gstreamer1.0-qt5 gstreamer1.0-pulseaudio"; then
-    add_error "Failed to install GStreamer"
+# Split into a required core set (ERROR on failure) and optional desktop
+# extras (WARNING on failure). Rationale: requirements.md has no criterion
+# covering transient apt-lock resilience; on a fresh JP6 Orin Nano a first-boot
+# apt lock made this single 12-package install fail and marked an
+# otherwise-healthy setup as failed. The gtk3/qt5/pulseaudio extras are
+# desktop-only and must not fail the whole setup.
+GST_CORE_PACKAGES="libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-alsa gstreamer1.0-gl"
+GST_EXTRA_PACKAGES="gstreamer1.0-gtk3 gstreamer1.0-qt5 gstreamer1.0-pulseaudio"
+
+if ! apt_run "apt-get install -y ${GST_CORE_PACKAGES}"; then
+    add_error "Failed to install GStreamer core packages"
 else
-    echo "✓ GStreamer installed"
+    echo "✓ GStreamer core packages installed"
 fi
+
+for gst_pkg in ${GST_EXTRA_PACKAGES}; do
+    if apt_run "apt-get install -y ${gst_pkg}"; then
+        echo "✓ ${gst_pkg} installed"
+    else
+        add_warning "Failed to install optional GStreamer package ${gst_pkg} (desktop extras; not required for station operation)"
+    fi
+done
 echo ""
 
 echo "▶ Setting up Edge Manager Agent..."
@@ -710,10 +790,10 @@ else
         fi
         
         # Install NVIDIA's Docker packages
-        if ! run_cmd "apt-get update"; then
+        if ! apt_run "apt-get update"; then
             add_warning "Failed to update package manager"
         fi
-        if ! run_cmd "apt-get install -y docker.io containerd"; then
+        if ! apt_run "apt-get install -y docker.io containerd"; then
             add_error "Failed to install docker.io"
         else
             echo "✓ docker.io installed"
@@ -721,7 +801,7 @@ else
         
         # Install nvidia-container-runtime if not present (needed for GPU containers)
         if ! dpkg -l nvidia-container-runtime >/dev/null 2>&1; then
-            run_cmd "apt-get install -y nvidia-container-runtime" || add_warning "nvidia-container-runtime not available — GPU containers may not work"
+            apt_run "apt-get install -y nvidia-container-runtime" || add_warning "nvidia-container-runtime not available — GPU containers may not work"
         fi
         
         # Install Compose V2 plugin manually (required for --profile flag)
@@ -747,9 +827,9 @@ else
             add_error "Failed to download Docker GPG key"
         elif ! run_cmd "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable' | tee /etc/apt/sources.list.d/docker.list > /dev/null"; then
             add_error "Failed to add Docker repository"
-        elif ! run_cmd "apt-get update"; then
+        elif ! apt_run "apt-get update"; then
             add_error "Failed to update package manager after adding Docker repo"
-        elif ! run_cmd "apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y"; then
+        elif ! apt_run "apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y"; then
             add_error "Failed to install Docker packages"
         elif ! run_cmd "docker run hello-world"; then
             add_warning "Docker installed but hello-world test failed"
@@ -821,7 +901,7 @@ else
     DOCKER_MAJOR=$(echo "$DOCKER_VER" | cut -d. -f1)
     if echo "$DOCKER_MAJOR" | grep -qE '^[0-9]+$' && [ "$DOCKER_MAJOR" -ge 28 ]; then
         echo "▶ iptables 'raw' table unavailable and Docker $DOCKER_VER >= 28 — pinning Docker to 27.5.1 (JetPack 6 fix)..."
-        if run_cmd "apt-get install -y --allow-downgrades docker-ce=5:27.5.1* docker-ce-cli=5:27.5.1*"; then
+        if apt_run "apt-get install -y --allow-downgrades docker-ce=5:27.5.1* docker-ce-cli=5:27.5.1*"; then
             echo "   ✓ Docker downgraded to 27.5.1"
             run_cmd "apt-mark hold docker-ce docker-ce-cli" || \
                 add_warning "Could not 'apt-mark hold' Docker; a future apt upgrade may bump it back to 28+ and break bridge networking."
@@ -1029,8 +1109,39 @@ echo "▶ Ensuring IoT thing policy allows shadow data-plane sync..."
 # when the default policy version already grants UpdateThingShadow; prunes the
 # oldest non-default version first when the 5-version limit is reached.
 gg_thing_policy="GreengrassV2IoTThingPolicy"
-policy_doc=$(aws iot get-policy --policy-name "$gg_thing_policy" --query policyDocument --output text 2>/dev/null || echo "")
-if [ -z "$policy_doc" ]; then
+# Distinguish "check inconclusive" (CLI missing, auth failure, access denied)
+# from "policy absent" (API positively returns ResourceNotFoundException).
+# Previously CLI/auth errors were swallowed (2>/dev/null || echo "") and
+# reported as a missing policy, producing false alarms on devices where the
+# policy existed with correct permissions. Rationale: requirements.md has no
+# criterion covering these warnings; the false alarms pointed operators at the
+# wrong fix.
+gg_policy_check="ok"       # ok | inconclusive | absent
+gg_policy_check_detail=""
+policy_doc=""
+if ! command -v aws >/dev/null 2>&1; then
+    gg_policy_check="inconclusive"
+    gg_policy_check_detail="AWS CLI unavailable"
+elif ! aws sts get-caller-identity >/dev/null 2>&1; then
+    gg_policy_check="inconclusive"
+    gg_policy_check_detail="credentials not resolvable (aws sts get-caller-identity failed)"
+else
+    gg_policy_err_file=$(mktemp)
+    if ! policy_doc=$(aws iot get-policy --policy-name "$gg_thing_policy" --query policyDocument --output text 2>"$gg_policy_err_file"); then
+        gg_policy_err=$(tr '\n' ' ' < "$gg_policy_err_file")
+        if echo "$gg_policy_err" | grep -qE "ResourceNotFoundException|NoSuchEntity"; then
+            gg_policy_check="absent"
+        else
+            gg_policy_check="inconclusive"
+            gg_policy_check_detail="CLI error: ${gg_policy_err:-unknown error}"
+        fi
+        policy_doc=""
+    fi
+    rm -f "$gg_policy_err_file"
+fi
+if [ "$gg_policy_check" = "inconclusive" ]; then
+    add_warning "Could not verify $gg_thing_policy — the check itself failed (${gg_policy_check_detail}); verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow)"
+elif [ "$gg_policy_check" = "absent" ]; then
     add_warning "Could not read $gg_thing_policy - verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow)"
 elif echo "$policy_doc" | grep -q "iot:UpdateThingShadow"; then
     echo "✓ $gg_thing_policy already grants shadow data-plane actions"
@@ -1314,14 +1425,27 @@ else
     # 1. Attach DDA Portal Component Access Policy (managed policy)
     echo "1. Attaching DDA Portal Component Access Policy..."
     DDA_POLICY_ARN="arn:aws:iam::${aws_account_id}:policy/DDAPortalComponentAccessPolicy"
-    if aws iam get-policy --policy-arn "$DDA_POLICY_ARN" 2>/dev/null; then
+    # Distinguish "check inconclusive" (auth failure, access denied, network)
+    # from "policy absent" (API positively returns NoSuchEntity). Previously
+    # CLI/auth errors were swallowed (2>/dev/null) and reported as a missing
+    # policy, producing false "Deploy UseCaseAccountStack first" alarms on
+    # accounts where the policy existed.
+    dda_policy_err_file=$(mktemp)
+    if aws iam get-policy --policy-arn "$DDA_POLICY_ARN" >> "$LOG_FILE" 2>"$dda_policy_err_file"; then
+        rm -f "$dda_policy_err_file"
         if run_cmd "aws iam attach-role-policy --role-name GreengrassV2TokenExchangeRole --policy-arn $DDA_POLICY_ARN"; then
             echo "   ✓ DDAPortalComponentAccessPolicy attached"
         else
             add_warning "Could not attach DDAPortalComponentAccessPolicy. Attach manually if needed."
         fi
     else
-        add_warning "DDAPortalComponentAccessPolicy not found. Deploy UseCaseAccountStack first."
+        dda_policy_err=$(tr '\n' ' ' < "$dda_policy_err_file")
+        rm -f "$dda_policy_err_file"
+        if echo "$dda_policy_err" | grep -qE "NoSuchEntity|ResourceNotFoundException"; then
+            add_warning "DDAPortalComponentAccessPolicy not found. Deploy UseCaseAccountStack first."
+        else
+            add_warning "Could not verify DDAPortalComponentAccessPolicy — the check itself failed (CLI error: ${dda_policy_err:-unknown error}); verify the policy and attach it to GreengrassV2TokenExchangeRole manually if needed"
+        fi
     fi
     echo ""
     
