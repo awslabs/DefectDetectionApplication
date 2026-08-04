@@ -97,6 +97,7 @@ export default function Layout() {
     { type: 'link' as const, text: 'Workflows', href: '/workflows/builder' },
     { type: 'link' as const, text: 'Node Designer', href: '/node-designer' },
     { type: 'link' as const, text: 'Components', href: '/components' },
+    { type: 'link' as const, text: 'Builds', href: '/builds' },
     { type: 'link' as const, text: 'Deployments', href: '/deployments' },
     { type: 'link' as const, text: 'Devices', href: '/devices' },
   ];
@@ -105,6 +106,9 @@ export default function Layout() {
   const portalAdminItems: SideNavigationProps.Item[] = [
     { type: 'divider' as const },
     { type: 'link' as const, text: 'Plugin Review', href: '/node-designer/review' },
+    // Build server fleet management is PortalAdmin-only, like the
+    // UserManager entry (portal-build-fleet-and-workflow-gates Req 6.1, 6.7).
+    { type: 'link' as const, text: 'Build Fleet', href: '/admin/fleet' },
     { type: 'link' as const, text: 'Settings', href: '/settings' },
   ];
 

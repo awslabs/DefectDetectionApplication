@@ -304,6 +304,13 @@ def effective_build_config() -> Dict[str, Any]:
     return config
 
 
+def to_dynamo_safe(value: Any) -> Any:
+    """JSON-shaped value with floats as Decimal: DynamoDB rejects Python
+    floats, and the job's config_snapshot may carry non-integral numbers
+    (e.g. a fractional max_runtime_hours)."""
+    return json.loads(json.dumps(value), parse_float=Decimal)
+
+
 def put_new_job(job: Dict[str, Any]) -> Dict[str, Any]:
     """Persist a freshly created Build_Job record, adding the log
     location (design data model) and the 180-day TTL (seconds epoch, as
@@ -311,7 +318,7 @@ def put_new_job(job: Dict[str, Any]) -> Dict[str, Any]:
     item = dict(job)
     item['log'] = {'group': BUILD_LOG_GROUP, 'stream': job['build_job_id']}
     item['ttl'] = int(job['created_at'] / 1000) + JOB_TTL_DAYS * 24 * 60 * 60
-    jobs_table().put_item(Item=item)
+    jobs_table().put_item(Item=to_dynamo_safe(item))
     return item
 
 

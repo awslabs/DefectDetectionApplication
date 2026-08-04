@@ -6,7 +6,7 @@ Implementation proceeds pure-logic-first: the build fleet decision functions (re
 
 ## Tasks
 
-- [ ] 1. Build fleet pure decision logic
+- [x] 1. Build fleet pure decision logic
   - [x] 1.1 Create build domain module with target definitions and job state machine
     - Create `edge-cv-portal/backend/functions/build_domain.py` (pure, no AWS clients)
     - Build_Target definitions: target → component name / recipe / required arch map (JP5, JP6, AMD64, AMD64_NVIDIA; arm64 vs x86_64)
@@ -56,11 +56,11 @@ Implementation proceeds pure-logic-first: the build fleet decision functions (re
     - In `build_domain.py`: effective-config read applying documented defaults for absent fields (m6g.4xlarge, m6i.4xlarge, 100 GB, us-east-1, 4 h); `validate_build_config(update) -> ValidationResult` with the instance-family → architecture lookup table, positive volume size, positive max runtime; rejected updates leave stored config unchanged (atomic reject)
     - _Requirements: 9.2, 9.5_
 
-  - [ ] 1.12 Write property test for configuration defaults and validation
+  - [x] 1.12 Write property test for configuration defaults and validation
     - **Property 14: Configuration defaults and validation**
     - **Validates: Requirements 9.2, 9.5**
 
-- [ ] 2. Dispatcher planning logic (pure)
+- [x] 2. Dispatcher planning logic (pure)
   - [x] 2.1 Implement dispatch eligibility, server allocation, and queue promotion
     - Create `edge-cv-portal/backend/functions/build_planner.py` (pure planner consumed by the dispatcher handler)
     - Eligibility: a queued job is dispatchable iff its `predecessor_job_id` is null or terminal (any terminal status)
@@ -103,15 +103,15 @@ Implementation proceeds pure-logic-first: the build fleet decision functions (re
     - Dead-server sweep: queued jobs for a server failed with a server-state error iff the server state is stopped or terminated
     - _Requirements: 3.8, 3.9, 6.11, 7.7, 7.8, 7.9_
 
-  - [ ] 2.10 Write property test for watchdog deadline arithmetic
+  - [x] 2.10 Write property test for watchdog deadline arithmetic
     - **Property 8: Watchdog deadline arithmetic**
     - **Validates: Requirements 3.8, 3.9, 6.11, 7.7**
 
-  - [ ] 2.11 Write property test for serialization violation and dead-server sweeps
+  - [x] 2.11 Write property test for serialization violation and dead-server sweeps
     - **Property 12: Serialization violation and dead-server sweeps**
     - **Validates: Requirements 7.8, 7.9**
 
-- [ ] 3. Checkpoint - Ensure all tests pass
+- [x] 3. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [x] 4. Generation gate pure module
@@ -166,64 +166,64 @@ Implementation proceeds pure-logic-first: the build fleet decision functions (re
     - **Property 21: Session persistence if and only if the gate accepts**
     - **Validates: Requirements 8.1, 8.5, 8.7, 8.9, 8.10, 8.11**
 
-- [ ] 6. Checkpoint - Ensure all tests pass
+- [x] 6. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 7. Build fleet API handlers
+- [x] 7. Build fleet API handlers
   - [x] 7.1 Register build permissions in RBAC
     - Add `builds:submit`, `builds:cancel`, `builds:read` to the shared_utils RBACManager with the global (`allow_global`) scope pattern; grant Build_Operator (submit/cancel/read) to DataScientist, UseCaseAdmin, PortalAdmin; denials return the standard authorization error and record a denied-access Audit_Log entry
     - _Requirements: 1.6, 4.10, 6.7, 9.6_
 
-  - [-] 7.2 Implement build_jobs.py handler
+  - [x] 7.2 Implement build_jobs.py handler
     - Create `edge-cv-portal/backend/functions/build_jobs.py` following portal handler conventions (error envelope, `get_user_from_event`, `log_audit_event`), delegating decisions to `build_domain.py`
     - `POST /builds`: validate, create one job per target (BuildJobs table), audit `build_requested`, async-invoke the dispatcher; `GET /builds`: 90-day history most recent first, paginated, with published artifact identifiers on succeeded jobs; `GET /builds/{id}`; `GET /builds/{id}/logs`: CloudWatch Logs page with `nextToken` pagination; `POST /builds/{id}/cancel`: queued → immediate, running → SSM stop + pgrep confirmation within 5 minutes, terminal → 409; `POST /builds/{id}/retry`: retry-clone of an interrupted job with `retry_of`
     - _Requirements: 1.1, 1.2, 1.5, 1.6, 1.7, 1.9, 3.6, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 4.10_
 
-  - [ ] 7.3 Write property test for build history ordering
+  - [x] 7.3 Write property test for build history ordering
     - **Property 16: Build history ordering and content**
     - **Validates: Requirements 4.7**
 
-  - [ ] 7.4 Write unit tests for build_jobs RBAC and audit
+  - [x] 7.4 Write unit tests for build_jobs RBAC and audit
     - Unauthorized submit and cancel: rejected, authorization error, denied-access audit entry (1.6, 4.10); `build_requested` audit content on create (1.7); cancellation audit entries including the failed-cancellation path (4.5, 4.6, 4.9)
     - _Requirements: 1.6, 1.7, 4.5, 4.6, 4.9, 4.10_
 
-  - [ ] 7.5 Implement build_fleet.py handler
+  - [x] 7.5 Implement build_fleet.py handler
     - Create `edge-cv-portal/backend/functions/build_fleet.py`; PortalAdmin-gated actions, `builds:read` list
     - `GET /build-servers`: fleet list with live `DescribeInstances` reconciliation; `POST /build-servers`: RunInstances with arch-selected Ubuntu 22.04 AMI, configured type/volume, hardened profile (extended `dda-build-role`, no key pair, no inbound rules, IMDSv2), user-data bootstrap (`setup-build-server.sh` equivalent + repo clone), register in BuildServers; start/stop with `validate_fleet_action`; `DELETE /build-servers/{id}` with `confirm: "<server name>"` echo; `pending_action` markers with 10-minute deadlines; audit every action outcome
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8, 6.10, 6.12_
 
-  - [ ] 7.6 Write unit and integration tests for build_fleet
+  - [x] 7.6 Write unit and integration tests for build_fleet
     - Terminate confirmation flow and its cancellation leave the server unchanged (6.6, 6.12); non-PortalAdmin denial with audit (6.7); action-outcome audit entries (6.8); moto-based lifecycle integration for start, stop, and launch (6.2, 6.3, 6.5)
     - _Requirements: 6.2, 6.3, 6.5, 6.6, 6.7, 6.8, 6.12_
 
-  - [ ] 7.7 Implement build_config.py handler
+  - [x] 7.7 Implement build_config.py handler
     - Create `edge-cv-portal/backend/functions/build_config.py`; `GET /build-config` (`builds:read`) applying defaults on read; `PUT /build-config` (PortalAdmin only) using `validate_build_config`, atomic reject retaining prior values, Audit_Log entry per applied change (parameter, prior value, new value, user, time); store under PortalSettings key `build_infrastructure_config`
     - _Requirements: 9.1, 9.2, 9.4, 9.5, 9.6_
 
-  - [ ] 7.8 Write unit tests for build_config
+  - [x] 7.8 Write unit tests for build_config
     - Config read wiring for dispatch/launch parameters (9.1); audit entry content on change (9.4); non-PortalAdmin denial with audit (9.6)
     - _Requirements: 9.1, 9.4, 9.6_
 
-- [ ] 8. Dispatcher and event consumer handlers
-  - [ ] 8.1 Implement build_dispatcher.py handler
+- [x] 8. Dispatcher and event consumer handlers
+  - [x] 8.1 Implement build_dispatcher.py handler
     - Create `edge-cv-portal/backend/functions/build_dispatcher.py` (async on-submit invoke + 1-minute schedule), executing `build_planner.py` decisions with DynamoDB conditional updates (ConditionExpression on expected status; server allocation via `attribute_not_exists(running_build_job_id)`)
     - Tick order: dispatch eligible queued jobs (dedicated: allocate → pre-dispatch pgrep SSM verification → SendCommand agent); provision ephemeral runners (RunInstances per job arch/`config_snapshot`, SSM ping then SendCommand; RunInstances failure → failed with cause, partial compute terminated, audited); runtime timeout watchdog (SSM stop, failed, logs retained); serialization watchdog (pgrep count, count ≥ 2 → pkill within 60 s, jobs failed `SERIALIZATION_VIOLATION`, audited); termination watchdog (terminate terminal-job runners, retries ≤ every 10 min for 1 h, then SNS notify + `orphaned_runner` audit); queue-orphan and pending-action-deadline sweeps
     - _Requirements: 3.1, 3.2, 3.3, 3.7, 3.8, 3.9, 6.11, 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8, 7.9_
 
-  - [ ] 8.2 Write moto integration tests for dispatcher ticks
+  - [x] 8.2 Write moto integration tests for dispatcher ticks
     - End-to-end tick over mocked DynamoDB/EC2/SSM: dedicated dispatch with allocation lock, ephemeral provision + terminate, provisioning-failure path (3.7), timeout and serialization watchdog actions
     - _Requirements: 3.1, 3.7, 3.8, 7.2, 7.5, 7.8_
 
-  - [ ] 8.3 Implement build_events.py handler
+  - [x] 8.3 Implement build_events.py handler
     - Create `edge-cv-portal/backend/functions/build_events.py` consuming EventBridge: custom `dda.portal.builds` phase events (conditional transitions, start/end times, result metadata verbatim, `publish_partial` lists, `build_published` audit on success); EC2 spot interruption / state-change with a non-terminal job → `interrupted`; fleet instance state-change → BuildServers state + `last_state_change_at`, clear `pending_action` on expected state; SSM command Failed/TimedOut/Cancelled → failed/interrupted fallback; all transitions idempotent via conditional updates (duplicate delivery is a no-op)
     - Include the pure event-application function (event payload → job field updates) so Property 10 tests it directly
     - _Requirements: 3.5, 5.1, 5.3, 5.4, 5.5, 6.2, 6.3, 6.9, 6.11_
 
-  - [ ] 8.4 Write property test for completion event recording
+  - [x] 8.4 Write property test for completion event recording
     - **Property 10: Result and failure recording on completion events**
     - **Validates: Requirements 5.3, 5.4**
 
-  - [ ] 8.5 Write unit tests for build_events
+  - [x] 8.5 Write unit tests for build_events
     - Duplicate EventBridge delivery is a no-op (4.1 idempotence); `build_published` audit content (5.5); publishing failure recorded with published/unpublished lists and distinct error kind (5.4)
     - _Requirements: 4.1, 5.4, 5.5_
 
@@ -242,52 +242,52 @@ Implementation proceeds pure-logic-first: the build fleet decision functions (re
     - Update the security preservation golden baselines under `test/backend-test/security/baselines/` for every touched tracked file in this same change (recompute sha256 per `.kiro/steering/builds.md`) and run the preservation suite to confirm
     - _Requirements: 1.1, 1.4_
 
-- [ ] 10. CDK infrastructure
-  - [ ] 10.1 Create infrastructure/lib/build-fleet-stack.ts
+- [x] 10. CDK infrastructure
+  - [x] 10.1 Create infrastructure/lib/build-fleet-stack.ts
     - Follow `node-designer-stack.ts` patterns: DynamoDB `BuildJobs` (GSIs status/server/request, TTL 180 days) and `BuildServers` (PAY_PER_REQUEST, PITR); the five Lambdas with shared-utils layer and environment (table names, log group, event bus, SNS topic); EventBridge 1-minute schedule → dispatcher plus rules for EC2 state-change, spot interruption, SSM command status, and custom `dda.portal.builds` source → build_events; CloudWatch Logs group `/dda/portal-builds` retention ≥ 90 days; SNS topic `dda-portal-build-alerts`; scoped IAM (EC2 actions condition-keyed to `dda-build:*` tags, SSM send/describe; instance profile = CDK-created extended `dda-build-role` with `events:PutEvents`, logs, publish permissions); API Gateway routes on the existing REST API and authorizer
     - _Requirements: 3.1, 3.4, 3.9, 4.4, 6.5, 9.1_
 
-  - [ ] 10.2 Write CDK snapshot tests for the build fleet stack
+  - [x] 10.2 Write CDK snapshot tests for the build fleet stack
     - Assert log-group retention ≥ 90 days and job TTL ≥ 90 days (3.4, 4.4), EventBridge rules present, IAM scoping condition keys
     - _Requirements: 3.4, 4.4_
 
-- [ ] 11. Checkpoint - Ensure all tests pass
+- [x] 11. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 12. Frontend
-  - [ ] 12.1 Implement the Builds page and job detail
+- [x] 12. Frontend
+  - [x] 12.1 Implement the Builds page and job detail
     - Create `frontend/src/pages/builds/BuildsPage.tsx` + detail: Cloudscape Table of 90-day history most recent first (status Badge, target, mode, requester, times, published version for succeeded); submit Form with ordered target multi-select and execution-mode RadioGroup (dedicated option lists running servers; ephemeral is the only selectable mode when the fleet has no non-terminated server); job detail with log viewer polling `/builds/{id}/logs` every 30 s while running and status polling every 15 s; cancel and retry actions per status
     - _Requirements: 1.1, 2.1, 2.5, 4.2, 4.3, 4.4, 4.7_
 
-  - [ ] 12.2 Write vitest render tests for the Builds page
+  - [x] 12.2 Write vitest render tests for the Builds page
     - Target selection and submit controls (1.1), execution-mode selection (2.1), ephemeral-only when no servers (2.5), job detail fields (4.3)
     - _Requirements: 1.1, 2.1, 2.5, 4.3_
 
-  - [ ] 12.3 Implement the Fleet page
+  - [x] 12.3 Implement the Fleet page
     - Create `frontend/src/pages/admin/FleetPage.tsx`, PortalAdmin-gated like UserManager: server table (name, instance id, type, architecture, lifecycle state with 15 s polling, running Build_Job link, last state change); launch modal (name + architecture radio); start/stop buttons enabled by state; terminate flow with type-the-name confirmation Modal
     - _Requirements: 6.1, 6.2, 6.3, 6.6, 6.9, 6.12_
 
-  - [ ] 12.4 Write vitest render tests for the Fleet page
+  - [x] 12.4 Write vitest render tests for the Fleet page
     - Fleet list columns (6.1), terminate confirmation requires the typed name and cancel leaves the server unchanged (6.6, 6.12)
     - _Requirements: 6.1, 6.6, 6.12_
 
-  - [ ] 12.5 Implement the Build settings section
+  - [x] 12.5 Implement the Build settings section
     - Add the build infrastructure configuration form to the existing settings page with per-field validation errors surfaced from `PUT /build-config`
     - _Requirements: 9.1, 9.5_
 
-  - [ ] 12.6 Implement chat generation rejection and repaired-notice UI
+  - [x] 12.6 Implement chat generation rejection and repaired-notice UI
     - In the workflows chat panel: on `GENERATION_REJECTED` / `GENERATION_VALIDATION_INCOMPLETE`, render an Alert type="error" listing each structural error with affected node/connection display names (fallback to ids) and the plain-language explanation; keep the submitted prompt in the input (clear only on 200); on a repaired acceptance render an Alert type="info" listing the corrected errors
     - _Requirements: 8.6, 8.8_
 
-  - [ ] 12.7 Write vitest tests for rejection and repaired-notice rendering
+  - [x] 12.7 Write vitest tests for rejection and repaired-notice rendering
     - Rejection alert content with display-name fallback and prompt retention (8.8); repaired-notice with corrected errors (8.6)
     - _Requirements: 8.6, 8.8_
 
-  - [ ] 12.8 Wire routes and navigation
+  - [x] 12.8 Wire routes and navigation
     - Register the Builds page and Fleet page routes and side-navigation entries (Fleet gated to PortalAdmin), connect the settings section, and verify the frontend builds
     - _Requirements: 1.1, 6.1_
 
-- [ ] 13. Final checkpoint - Ensure all tests pass
+- [x] 13. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

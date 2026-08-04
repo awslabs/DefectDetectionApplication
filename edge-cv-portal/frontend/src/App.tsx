@@ -36,9 +36,12 @@ import RegistrationWizard from './pages/node-designer/RegistrationWizard';
 import ReviewQueue from './pages/node-designer/ReviewQueue';
 import SimulatorView from './pages/node-designer/SimulatorView';
 import ImportView from './pages/node-designer/ImportView';
+import BuildsPage from './pages/builds/BuildsPage';
+import BuildDetail from './pages/builds/BuildDetail';
 import Settings from './pages/Settings';
 import AuditLogs from './pages/AuditLogs';
 import UserManager from './pages/admin/UserManager';
+import FleetPage from './pages/admin/FleetPage';
 import Login from './pages/Login';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -109,8 +112,11 @@ function App() {
                   path="node-designer/plugins/:pluginId/versions/:version/simulate"
                   element={<SimulatorView />}
                 />
+                <Route path="builds" element={<BuildsPage />} />
+                <Route path="builds/:buildJobId" element={<BuildDetail />} />
                 <Route path="settings" element={<Settings />} />
                 <Route path="admin/user-manager" element={<UserManager />} />
+                <Route path="admin/fleet" element={<FleetPage />} />
                 <Route path="audit" element={<AuditLogs />} />
               </Route>
             </Routes>

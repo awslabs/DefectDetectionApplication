@@ -47,6 +47,7 @@ preserve PRIOR state, not merely emptiness.
 import json
 import os
 import sys
+import types
 
 from botocore.exceptions import ClientError
 from hypothesis import given, settings
@@ -92,6 +93,26 @@ for _module in ("workflow_generator", "workflow_validation", "shared_utils",
                 "bedrock_common", "code_assist", "node_catalog_resolution",
                 "generation_gate"):
     sys.modules.pop(_module, None)
+
+# The flask-app verification container's python3.9 is built without the
+# _bz2 C extension, and moto's request path imports moto.s3 -> bz2 on
+# every call (moto.core.authorization -> moto.iam.access_control ->
+# moto.s3.models). bz2 is only used for S3-Select payload decompression,
+# which this suite's plain put/get/list S3 traffic never exercises, so a
+# minimal stdlib-shaped stub keeps the import chain intact where _bz2 is
+# absent (same shim as the sibling test_build_history_ordering.py).
+try:
+    import bz2  # noqa: F401
+except ImportError:  # pragma: no cover - depends on the runner's build
+    _bz2_stub = types.ModuleType("_bz2")
+
+    class _Bz2Unavailable:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("bz2 is unavailable in this environment")
+
+    _bz2_stub.BZ2Compressor = _Bz2Unavailable
+    _bz2_stub.BZ2Decompressor = _Bz2Unavailable
+    sys.modules["_bz2"] = _bz2_stub
 
 from moto import mock_aws  # noqa: E402
 

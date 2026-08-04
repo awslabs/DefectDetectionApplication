@@ -295,10 +295,47 @@ export interface WorkflowValidationRun {
 }
 
 /**
+ * One affected node or connection of a user-readable Structural_Error
+ * (generation_gate.user_readable_errors, portal-build-fleet-and-workflow-gates
+ * Requirement 8.8). `displayName` is present only when the definition
+ * element carries one; the element is otherwise identified by id alone.
+ */
+export interface GenerationAffectedElement {
+  id: string;
+  kind: 'node' | 'connection';
+  displayName?: string;
+}
+
+/**
+ * One user-readable Structural_Error from a `GENERATION_REJECTED` error
+ * envelope (`error.details.structural_errors`, Requirement 8.8).
+ */
+export interface GenerationStructuralError {
+  code: string;
+  message: string;
+  affected: GenerationAffectedElement[];
+  explanation: string;
+}
+
+/**
+ * Generation_Gate metadata attached to accept-path generation responses
+ * (workflow_generator.gate_metadata, Requirements 8.3, 8.6). When
+ * `repaired` is true, `corrected_errors` lists the original
+ * Structural_Errors that the automatic Repair_Pass corrected.
+ */
+export interface GenerationGate {
+  passed: boolean;
+  repaired: boolean;
+  corrected_errors: ValidationFinding[];
+  structural_error_codes: string[];
+}
+
+/**
  * Successful prompt-based generation result
  * (POST /workflows/generate, workflow_generator.py, Requirements 10.2,
  * 10.3, 10.5). The backend always runs the Workflow_Validator on the
- * generated definition and returns the findings alongside it.
+ * generated definition and returns the findings alongside it, plus the
+ * Generation_Gate metadata (Requirement 8.3).
  */
 export interface WorkflowGenerationResult {
   session_id: string;
@@ -310,6 +347,7 @@ export interface WorkflowGenerationResult {
   validation_passed: boolean;
   assistant_text: string | null;
   model_id?: string;
+  gate?: GenerationGate;
 }
 
 // --------------------------------------------------------------------------
