@@ -32,6 +32,7 @@ import {
   checkV7,
   CODE_V7_STAGE_ORDER,
   runInlineChecks,
+  type GraphLike,
 } from './inlineChecks';
 import {
   SOURCE_KIND_PARAMETER,
@@ -485,7 +486,7 @@ describe('activation-port wiring (Requirements 5.5, 5.6)', () => {
 
 describe('inline validation mirrors (Requirements 5.7, 5.8)', () => {
   it('checkV7 emits a V7_STAGE_ORDER error for a connection targeting a trigger node', () => {
-    const graph = {
+    const graph: GraphLike = {
       nodes: [
         { id: 'f1', type: 'folder_source', position: { x: 0, y: 0 }, parameters: {} },
         { id: 'd1', type: 'digital_input', position: { x: 0, y: 0 }, parameters: { pin: 1 } },
@@ -502,7 +503,7 @@ describe('inline validation mirrors (Requirements 5.7, 5.8)', () => {
   });
 
   it('checkV7 emits no finding for a legal trigger -> unified activation edge', () => {
-    const graph = {
+    const graph: GraphLike = {
       nodes: [
         { id: 'd1', type: 'digital_input', position: { x: 0, y: 0 }, parameters: { pin: 1 } },
         { id: 'u1', type: 'unified_input', position: { x: 0, y: 0 }, parameters: { source_kind: 'folder' } },
@@ -515,7 +516,7 @@ describe('inline validation mirrors (Requirements 5.7, 5.8)', () => {
   });
 
   it('checkV5 treats a digital_input trigger as a reachability root', () => {
-    const graph = {
+    const graph: GraphLike = {
       nodes: [
         { id: 'd1', type: 'digital_input', position: { x: 0, y: 0 }, parameters: { pin: 1 } },
         { id: 'cap', type: 'capture', position: { x: 0, y: 0 }, parameters: {} },
@@ -528,7 +529,7 @@ describe('inline validation mirrors (Requirements 5.7, 5.8)', () => {
   });
 
   it('an unconnected activation port yields no inline finding (Requirement 5.8)', () => {
-    const graph = {
+    const graph: GraphLike = {
       nodes: [
         { id: 'u1', type: 'unified_input', position: { x: 0, y: 0 }, parameters: { source_kind: 'folder' } },
         { id: 'cap', type: 'capture', position: { x: 0, y: 0 }, parameters: {} },
@@ -541,7 +542,7 @@ describe('inline validation mirrors (Requirements 5.7, 5.8)', () => {
   });
 
   it('runInlineChecks includes V7 stage-order findings (Requirement 5.7)', () => {
-    const graph = {
+    const graph: GraphLike = {
       nodes: [
         { id: 'f1', type: 'folder_source', position: { x: 0, y: 0 }, parameters: {} },
         { id: 'd1', type: 'digital_input', position: { x: 0, y: 0 }, parameters: { pin: 1 } },
