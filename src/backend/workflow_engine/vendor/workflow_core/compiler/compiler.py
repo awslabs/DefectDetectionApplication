@@ -69,6 +69,15 @@ INERT_ACTIVATION_TYPE_IDS = frozenset(
     {UNIFIED_INPUT_TYPE} | set(SOURCE_KIND_TO_SOURCE_TYPE.values())
 )
 
+#: The subscribe-side trigger node types (trigger-activation-runtime,
+#: design C3/D3). Activation edges whose SOURCE node is one of these
+#: types are real activation-target declarations: ``expand_unified_inputs``
+#: keeps them (all other activation edges — notably ``digital_input`` —
+#: keep today's inert drop, Requirement 5.3), and ``compile()`` extracts
+#: them into the activation plan attached to the trigger's executor
+#: binding as ``"activates"`` (Requirements 5.1, 5.2).
+TRIGGER_EXECUTOR_TYPES = frozenset({"mqtt_subscribe", "opcua_subscribe"})
+
 #: The two-path routing executor binding (the conditional node): the
 #: compiler emits per-port gate conditions for it ("true" = the
 #: configured condition, "false" = its negation), so downstream executor
@@ -162,15 +171,52 @@ def expand_unified_inputs(
         if (
             connection.target.port == UNIFIED_ACTIVATION_PORT
             and node_types.get(connection.target.node) in INERT_ACTIVATION_TYPE_IDS
+            and node_types.get(connection.source.node) not in TRIGGER_EXECUTOR_TYPES
         ):
             # Drop edges into an inert activation port — on a unified node
             # (the expanded source has no activation realization,
             # Requirement 3.9, P4) or on a legacy source node
             # (Requirement 7.2); no activation binding is ever emitted.
+            # Edges sourced from a subscribe-side trigger node
+            # (``TRIGGER_EXECUTOR_TYPES``) are real Activation_Edges and
+            # survive expansion for ``compile()``'s activation-plan
+            # extraction (trigger-activation-runtime Requirements 5.2,
+            # 5.3 — ``digital_input`` edges keep today's drop).
             continue
         new_connections.append(copy.deepcopy(connection))
 
     return WorkflowGraph(nodes=new_nodes, connections=new_connections)
+
+
+def _extract_activation_plan(graph: WorkflowGraph) -> Dict[str, List[str]]:
+    """Pull the subscribe-side triggers' Activation_Edges out of the graph.
+
+    Removes (in place, on the compile-local graph copy) every connection
+    targeting an ``activation`` port whose SOURCE node type is in
+    :data:`TRIGGER_EXECUTOR_TYPES`, and returns the activation plan
+    ``{trigger_node_id: [target_node_id, ...]}`` with targets in
+    connection order (deduplicated). Stream topology, segments, and
+    predecessors/successors are computed on the reduced connection set,
+    so Activation_Edges never reach GStreamer stream-topology resolution
+    (trigger-activation-runtime Requirement 5.2, design D3). For graphs
+    without the new trigger types nothing is removed and the plan is
+    empty, keeping compiled output identical (Requirement 5.4).
+    """
+    node_types: Dict[str, str] = {node.id: node.type for node in graph.nodes}
+    plan: Dict[str, List[str]] = {}
+    kept: List[Connection] = []
+    for connection in graph.connections:
+        if (
+            connection.target.port == UNIFIED_ACTIVATION_PORT
+            and node_types.get(connection.source.node) in TRIGGER_EXECUTOR_TYPES
+        ):
+            targets = plan.setdefault(connection.source.node, [])
+            if connection.target.node not in targets:
+                targets.append(connection.target.node)
+            continue
+        kept.append(connection)
+    graph.connections = kept
+    return plan
 
 
 def compile(
@@ -228,6 +274,16 @@ def compile(
             )
             for finding in validation_errors
         ]
+
+    # 1b. Extract the subscribe-side triggers' Activation_Edges into the
+    #     activation plan (post-expansion, post-validation): the working
+    #     connection set is reduced so stream topology, segments, and
+    #     predecessors/successors are computed as if the Activation_Edges
+    #     were absent; the plan is attached to the trigger executor
+    #     bindings below (trigger-activation-runtime Requirements 5.1,
+    #     5.2, 5.4 — design C3/D3). Graphs without the new trigger types
+    #     are untouched (empty plan, identical connection set).
+    activation_plan = _extract_activation_plan(graph)
 
     # 2. Resolve mappings; collect every unmapped node (Requirement 6.5).
     #    In simulation mode, hardware-dependent node types resolve their
@@ -345,6 +401,12 @@ def compile(
         # resolved by the LocalServer executor per run).
         if mappings[node_id].executor_binding == BINDING_BEDROCK_INFERENCE:
             entry["capturePaths"] = bedrock_capture_paths.get(node_id, {})
+        # Subscribe-side trigger bindings carry the ordered activation
+        # targets extracted into the activation plan; no other binding
+        # gains any key (trigger-activation-runtime Requirement 5.1,
+        # design D2).
+        if mappings[node_id].executor_binding in TRIGGER_EXECUTOR_TYPES:
+            entry["activates"] = activation_plan.get(node_id, [])
         executor_bindings.append(entry)
 
     # 6. Plugin dependencies beyond the LocalServer-bundled set

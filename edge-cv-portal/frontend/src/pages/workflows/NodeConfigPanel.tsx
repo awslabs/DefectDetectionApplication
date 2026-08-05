@@ -123,11 +123,18 @@ export function effectiveParameterValue(
 
 /**
  * Whether a parameter's control is currently visible (catalog
- * `dependsOn` field): a parameter that depends on a bool parameter is
- * shown only while that parameter's effective value is true. Parameters
- * without `dependsOn` (or referencing an unknown parameter) are always
- * visible. Hidden parameters are optional by catalog convention, so
- * hiding them never suppresses a validation error.
+ * `dependsOn` field). Two gating forms (trigger-activation-runtime
+ * Requirements 3.1, 3.6):
+ *   - bare name (`"aws_iot"`): shown only while the named bool
+ *     parameter's effective value is true (existing semantics,
+ *     unchanged for all pre-existing descriptors);
+ *   - `"name=value"` (`"concurrency_policy=queue"`, `"mode=poll"`):
+ *     shown only while the named parameter's effective value (explicit
+ *     value when set, else the declared default), rendered as a
+ *     string, equals the literal — enum-selection gating.
+ * Parameters without `dependsOn` (or referencing an unknown parameter)
+ * are always visible. Hidden parameters are optional by catalog
+ * convention, so hiding them never suppresses a validation error.
  */
 export function isParameterVisible(
   descriptor: ParameterDescriptor,
@@ -138,11 +145,19 @@ export function isParameterVisible(
   if (dependsOn === undefined || dependsOn === null || dependsOn === '') {
     return true;
   }
-  const controlling = allParameters.find((parameter) => parameter.name === dependsOn);
+  const separator = dependsOn.indexOf('=');
+  const controllingName = separator === -1 ? dependsOn : dependsOn.slice(0, separator);
+  const controlling = allParameters.find((parameter) => parameter.name === controllingName);
   if (controlling === undefined) {
     return true;
   }
-  return effectiveParameterValue(parameters, controlling) === true;
+  const effective = effectiveParameterValue(parameters, controlling);
+  if (separator === -1) {
+    // Bare name: bool-truthy gating, byte-for-byte the pre-feature check.
+    return effective === true;
+  }
+  // "name=value": equality against the effective value's string form.
+  return textValue(effective) === dependsOn.slice(separator + 1);
 }
 
 // --------------------------------------------------------------------------

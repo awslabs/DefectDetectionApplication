@@ -1211,7 +1211,16 @@ def create_deployment(body, user):
             if 'configurationUpdate' not in nucleus_entry:
                 nucleus_entry['configurationUpdate'] = (
                     _nucleus_store_configuration_update())
-        
+
+        # Subscribe accessControl (trigger-activation-runtime 10.2, 10.3):
+        # when the set carries a workflow component whose version item
+        # records subscribed_topics AND the LocalServer component, merge the
+        # per-workflow aws.greengrass#SubscribeToIoTCore policy into the
+        # LocalServer entry's configurationUpdate; when LocalServer is
+        # absent, the returned warnings surface in the response. No-op —
+        # zero new keys anywhere — when no workflow records topics.
+        deployment_warnings = apply_subscribe_access_control(components_map)
+
         # Determine whether this target already has a deployment. Greengrass
         # deployments are immutable; creating a new deployment to the same target
         # ARN supersedes the previous one (a revision). To keep the deployment
@@ -1290,7 +1299,7 @@ def create_deployment(body, user):
             for name, config in components_map.items()
         ]
         
-        return create_response(201, {
+        response_body = {
             'deployment_id': deployment_id,
             'iot_job_id': response.get('iotJobId', ''),
             'iot_job_arn': response.get('iotJobArn', ''),
@@ -1299,7 +1308,13 @@ def create_deployment(body, user):
             'is_revision': is_revision,
             'superseded_deployment_id': existing_deployment.get('deploymentId') if is_revision else None,
             'message': 'Deployment updated successfully' if is_revision else 'Deployment created successfully'
-        })
+        }
+        # Additive: only present when the subscribe accessControl merge had
+        # something to say (trigger-activation-runtime 10.3) — pre-feature
+        # responses stay byte-identical.
+        if deployment_warnings:
+            response_body['warnings'] = deployment_warnings
+        return create_response(201, response_body)
         
     except ClientError as e:
         logger.error(f"AWS error creating deployment: {str(e)}")
@@ -2110,6 +2125,118 @@ def workflow_component_name(workflow_id):
 def workflow_component_version(workflow_version):
     """Component version derived from the workflow version"""
     return f"{int(workflow_version)}.0.0"
+
+
+def collect_workflow_subscribed_topics(components_map):
+    """``{workflow_id: [topic filters]}`` for the workflow components
+    (dda.workflow.*) in a deployment component set whose version item
+    records non-empty ``subscribed_topics`` (trigger-activation-runtime
+    10.2). The Component_Packager records the sorted, de-duplicated
+    greengrass-path ``mqtt_subscribe`` topic filters on the version item
+    at packaging time; versions without the field (all pre-feature
+    packages and every non-subscribing workflow) contribute nothing, so
+    deployments without a subscribing workflow are untouched."""
+    topics_by_workflow = {}
+    for name in sorted(components_map or {}):
+        if not name.startswith(WORKFLOW_COMPONENT_PREFIX):
+            continue
+        workflow_id = name[len(WORKFLOW_COMPONENT_PREFIX):]
+        version = (components_map[name] or {}).get('componentVersion')
+        major = str(version or '').split('.')[0]
+        if not workflow_id or not major.isdigit():
+            continue
+        try:
+            version_item = workflow_guards.get_version_item(
+                workflow_id, int(major))
+        except Exception as e:  # noqa: BLE001 — additive feature only
+            logger.warning(
+                f"Could not read workflow version item for {name}: {e}")
+            version_item = None
+        topics = [str(topic) for topic in
+                  (version_item or {}).get('subscribed_topics') or []
+                  if str(topic)]
+        if topics:
+            topics_by_workflow[workflow_id] = topics
+    return topics_by_workflow
+
+
+def apply_subscribe_access_control(components_map):
+    """Deep-merge the ``aws.greengrass#SubscribeToIoTCore`` accessControl
+    policies for subscribing workflow components into the LocalServer
+    entry's ``configurationUpdate.merge`` (trigger-activation-runtime
+    10.2, 10.3, design D5).
+
+    The IPC subscribe caller is the LocalServer process, so the
+    authorization lands on the LocalServer component: one uniquely-keyed
+    ``dda:workflow-subscribe:<workflowId>`` policy per subscribing
+    workflow, scoped to exactly that workflow's recorded topic filters.
+    Greengrass deep-merges configuration maps by key, so the recipe's
+    default accessControl policies stay untouched and multiple
+    subscribing workflows coexist under their own keys. Any existing
+    ``configurationUpdate.merge`` on the LocalServer entry is merged
+    into non-destructively.
+
+    Returns the list of actionable warnings: one per subscribing
+    workflow when the LocalServer component is absent from the set (the
+    merge has nowhere to attach; Requirement 10.3). Empty — and
+    ``components_map`` untouched — when no workflow in the set records
+    subscribed topics (Requirement 10.4 byte-identity)."""
+    topics_by_workflow = collect_workflow_subscribed_topics(components_map)
+    if not topics_by_workflow:
+        return []
+
+    local_server_name = next(
+        (name for name in sorted(components_map)
+         if name.startswith(LOCAL_SERVER_COMPONENT_PREFIX)), None)
+    if not local_server_name:
+        return [
+            (f"Workflow {workflow_id} subscribes to MQTT topics "
+             f"[{', '.join(topics)}] via Greengrass, but this deployment "
+             "does not include the LocalServer component, so the "
+             "aws.greengrass#SubscribeToIoTCore authorization could not be "
+             "attached. Deploy the LocalServer component together with this "
+             "workflow so the subscribe authorization can attach; until "
+             "then the trigger's subscription will be denied on the device.")
+            for workflow_id, topics in sorted(topics_by_workflow.items())
+        ]
+
+    entry = components_map[local_server_name]
+    config_update = entry.setdefault('configurationUpdate', {})
+    existing_merge = config_update.get('merge')
+    merge_doc = {}
+    if existing_merge:
+        try:
+            merge_doc = json.loads(existing_merge)
+        except (TypeError, ValueError) as e:
+            # Never clobber a caller-supplied merge we cannot parse.
+            logger.warning(
+                f"Could not parse existing configurationUpdate.merge on "
+                f"{local_server_name}; skipping subscribe accessControl "
+                f"merge: {e}")
+            return [
+                (f"Workflow {workflow_id} subscribes to MQTT topics "
+                 f"[{', '.join(topics)}] via Greengrass, but the LocalServer "
+                 "component's existing configurationUpdate could not be "
+                 "parsed, so the aws.greengrass#SubscribeToIoTCore "
+                 "authorization was not attached.")
+                for workflow_id, topics in sorted(topics_by_workflow.items())
+            ]
+    if not isinstance(merge_doc, dict):
+        merge_doc = {}
+    policies = merge_doc.setdefault('accessControl', {}).setdefault(
+        'aws.greengrass.ipc.mqttproxy', {})
+    for workflow_id, topics in sorted(topics_by_workflow.items()):
+        policies[f'dda:workflow-subscribe:{workflow_id}'] = {
+            'policyDescription': 'Workflow mqtt_subscribe trigger topics',
+            'operations': ['aws.greengrass#SubscribeToIoTCore'],
+            'resources': list(topics),
+        }
+        logger.info(
+            f"Merged SubscribeToIoTCore accessControl for workflow "
+            f"{workflow_id} ({len(topics)} topic filter(s)) into "
+            f"{local_server_name}")
+    config_update['merge'] = json.dumps(merge_doc)
+    return []
 
 
 def resolve_target_thing_names(iot_client, target_devices, target_thing_group):

@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 _watcher: Optional[WorkflowWatcher] = None
 _executor_instance = None
+_trigger_manager = None
 _lock = threading.Lock()
 
 
@@ -43,7 +44,7 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
     LocalServer starts normally and devices without Workflow_Components
     behave exactly as before.
     """
-    global _watcher, _executor_instance
+    global _watcher, _executor_instance, _trigger_manager
     with _lock:
         if _watcher is not None:
             return _watcher
@@ -103,6 +104,41 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
             logger.exception(
                 "WorkflowExecutor failed to register; triggered runs will "
                 "stay pending"
+            )
+        # Trigger subscription lifecycle (trigger-activation-runtime task
+        # 6.2). Contained in its OWN block (Requirement 12.4): a failure
+        # here logs and LocalServer continues — discovery, registration,
+        # manual triggering, and status reporting stay functional. With
+        # zero trigger-driven workflows registered the manager starts no
+        # threads and opens no connections.
+        try:
+            from workflow_engine.trigger_runtime import (
+                TriggerSubscriptionManager,
+                default_mqtt_transport_factory,
+                default_opcua_transport_factory,
+            )
+
+            # Production transports: the three MQTT paths (tasks 7.1/7.2:
+            # greengrass IPC, aws_iot mutual TLS, plain broker) and the
+            # OPC UA subscribe worker (task 8.1; the Liveness_Watchdog,
+            # auto-fallback, and poll mode land with task 8.2).
+            manager = TriggerSubscriptionManager(
+                mqtt_transport_factory=default_mqtt_transport_factory,
+                opcua_transport_factory=default_opcua_transport_factory,
+            )
+            # Watcher notifications after every sync_once drive the
+            # start-within-10s guarantee (Requirement 6.1); the immediate
+            # call below covers registrations the startup scan already
+            # reconciled before the manager existed.
+            watcher.registrations_listeners.append(
+                manager.on_registrations_changed
+            )
+            manager.on_registrations_changed()
+            _trigger_manager = manager
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "TriggerSubscriptionManager failed to start; trigger-driven "
+                "workflows will not activate"
             )
     return _watcher
 
@@ -186,6 +222,23 @@ def _wire_camera_binding_hooks(watcher: WorkflowWatcher) -> None:
 
 def get_watcher() -> Optional[WorkflowWatcher]:
     return _watcher
+
+
+def get_trigger_manager():
+    """The process-wide TriggerSubscriptionManager, or None when the
+    trigger subsystem could not start (mirrors :func:`get_watcher`)."""
+    return _trigger_manager
+
+
+def trigger_health(registration_id: str) -> list:
+    """A registration's Trigger_Health records in wire form (empty for
+    unknown/trigger-less registrations or when the manager is not
+    running) — the api.py source for the additive ``triggerHealth``
+    field (task 9.1)."""
+    manager = get_trigger_manager()
+    if manager is None:
+        return []
+    return manager.health(registration_id)
 
 
 def invalid_reason(registration_id: str) -> Optional[str]:

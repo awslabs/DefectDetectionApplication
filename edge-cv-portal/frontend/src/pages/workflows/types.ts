@@ -199,10 +199,22 @@ export interface ParameterDescriptor {
   default?: JsonValue | null;
   constraints?: ParameterConstraints;
   /**
-   * Conditional visibility: the name of a bool parameter on the same
-   * node type. While that parameter's effective value is not true, the
-   * configuration panel hides this parameter's control. Absent/null
-   * means always visible.
+   * Conditional visibility, declared in one of two forms (mirroring
+   * `ParameterDescriptor.depends_on` in the Python catalog):
+   *
+   *  - a bare parameter name: the name of a bool parameter on the same
+   *    node type. While that parameter's effective value is not true,
+   *    the configuration panel hides this parameter's control — the
+   *    original bool-truthy semantics, unchanged for every existing
+   *    descriptor.
+   *  - `"name=value"`: the name of a parameter on the same node type
+   *    plus a literal, e.g. `"mode=poll"`. This parameter's control is
+   *    visible only while the named parameter's effective value (its
+   *    explicit value, else its declared default) equals the literal
+   *    when both are rendered as strings — used for enum-selection
+   *    gating.
+   *
+   * Absent/null means always visible.
    */
   dependsOn?: string | null;
   /**
@@ -246,6 +258,445 @@ export interface NodeTypeDescriptor {
    */
   lifecycleState?: string | null;
 }
+
+// --------------------------------------------------------------------------
+// Subscribe-trigger descriptor mirrors (trigger-activation-runtime
+// Requirement 3.5)
+//
+// Hand-mirrored camelCase wire forms of the `mqtt_subscribe` and
+// `opcua_subscribe` descriptors in the Python catalog
+// (`workflow_core/catalog/nodes.py`) — identical type ids, category,
+// ports, and parameter names, types, defaults, constraints, and
+// `dependsOn` gating strings (including the `"name=value"` form). Keep
+// byte-for-byte in sync with the backend source of truth; the palette
+// lists both under Triggers automatically (category-driven).
+// --------------------------------------------------------------------------
+
+/**
+ * Architectures that correspond to physical edge devices, mirroring the
+ * Python catalog's `DEVICE_ARCHITECTURES`. Used by hardware-dependent
+ * node types whose `sim` mapping is a simulation stub rather than the
+ * device realization.
+ */
+const DEVICE_ARCHITECTURES = [
+  'x86_64',
+  'x86_64_nvidia',
+  'arm64_jp4',
+  'arm64_jp5',
+  'arm64_jp6',
+] as const;
+
+/**
+ * One identical executor-binding mapping per physical device
+ * architecture, mirroring the Python catalog's `_same_on_device_archs`.
+ */
+function sameOnDeviceArchs(
+  executorBinding: string,
+  pluginDependencies: string[]
+): GstMapping[] {
+  return DEVICE_ARCHITECTURES.map((arch) => ({
+    arch,
+    elementChain: [],
+    executorBinding,
+    pluginDependencies: [...pluginDependencies],
+  }));
+}
+
+/**
+ * The `ARCH_SIM` appsrc simulation stub shared by the trigger
+ * descriptors, mirroring the `digital_input` simulation stub form.
+ */
+function simAppsrcStub(): GstMapping {
+  return {
+    arch: 'sim',
+    elementChain: [{ factory: 'appsrc', argsTemplate: { name: '{sim_source_name}' } }],
+    executorBinding: null,
+    pluginDependencies: ['app'],
+  };
+}
+
+/**
+ * The shared per-trigger-node activation policy parameter family,
+ * mirroring the Python catalog's `_trigger_policy_parameters()` helper
+ * so the two trigger descriptors cannot drift: `concurrency_policy`
+ * with its gated `queue_depth` / `debounce_ms` companions (`dependsOn`
+ * `"name=value"` form), `retry_limit` (0 = retry forever), and
+ * `priority` (lower value = higher priority; ties served FIFO by firing
+ * time).
+ */
+function triggerPolicyParameters(): ParameterDescriptor[] {
+  return [
+    {
+      name: 'concurrency_policy',
+      paramType: 'enum',
+      required: false,
+      default: 'queue',
+      constraints: { values: ['queue', 'drop', 'debounce'] },
+      dependsOn: null,
+      description:
+        'What happens when this trigger fires while a run it activated is ' +
+        'still in flight or pending: queue the firing (bounded by queue ' +
+        'depth), drop it, or debounce — coalesce firings within the ' +
+        'debounce interval into one run carrying the most recent trigger ' +
+        'context.',
+      examples: ['queue', 'drop'],
+    },
+    {
+      name: 'queue_depth',
+      paramType: 'int',
+      required: false,
+      default: 10,
+      constraints: { min: 1, max: 1000 },
+      dependsOn: 'concurrency_policy=queue',
+      description:
+        'Maximum pending activations queued for this trigger (1-1000); ' +
+        'further firings are discarded and logged, e.g. 10.',
+      examples: [10, 100],
+    },
+    {
+      name: 'debounce_ms',
+      paramType: 'int',
+      required: false,
+      default: 500,
+      constraints: { min: 1, max: 60000 },
+      dependsOn: 'concurrency_policy=debounce',
+      description:
+        'Trailing debounce interval in milliseconds (1-60000): firings ' +
+        'within it coalesce into one activation carrying the most recent ' +
+        'trigger context, e.g. 500.',
+      examples: [500, 2000],
+    },
+    {
+      name: 'retry_limit',
+      paramType: 'int',
+      required: false,
+      default: 0,
+      constraints: { min: 0, max: 1000 },
+      dependsOn: null,
+      description:
+        "Maximum automatic reconnect attempts after the trigger's " +
+        'connection drops (0-1000); 0 = retry forever, e.g. 0.',
+      examples: [0, 5],
+    },
+    {
+      name: 'priority',
+      paramType: 'int',
+      required: false,
+      default: 100,
+      constraints: { min: 0, max: 1000 },
+      dependsOn: null,
+      description:
+        "Activation priority relative to the workflow's other triggers " +
+        '(0-1000); lower value = higher priority, ties served in firing ' +
+        'order, e.g. 100.',
+      examples: [100, 10],
+    },
+  ];
+}
+
+/**
+ * Mirror of the `mqtt_subscribe` trigger descriptor: fires a run
+ * activation when a message arrives on the subscribed topic filter over
+ * one of three transports (greengrass, aws_iot, plain broker). The
+ * connection parameters mirror `mqtt_publish` field-for-field.
+ */
+export const MQTT_SUBSCRIBE_DESCRIPTOR: NodeTypeDescriptor = {
+  typeId: 'mqtt_subscribe',
+  category: CATEGORY_TRIGGER,
+  displayName: 'MQTT Subscribe',
+  inputs: [],
+  outputs: [{ name: 'out', portType: PORT_TYPE_EVENT_SIGNAL }],
+  parameters: [
+    {
+      name: 'broker_host',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: null,
+      description: 'MQTT broker hostname or IP, e.g. 10.0.0.12 or broker.local.',
+      examples: ['10.0.0.12', 'broker.local'],
+    },
+    {
+      name: 'broker_port',
+      paramType: 'int',
+      required: false,
+      default: 1883,
+      constraints: { min: 1, max: 65535 },
+      dependsOn: null,
+      description: 'MQTT broker TCP port, e.g. 1883 (plain MQTT) or 8883 (TLS).',
+      examples: [1883, 8883],
+    },
+    {
+      name: 'topic',
+      paramType: 'string',
+      required: true,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: null,
+      description:
+        'Topic filter the trigger subscribes to; a message arriving on a ' +
+        'matching topic starts a workflow run, e.g. factory/line1/trigger ' +
+        'or factory/+/trigger.',
+      examples: ['factory/line1/trigger', 'factory/+/trigger'],
+    },
+    {
+      name: 'qos',
+      paramType: 'enum',
+      required: false,
+      default: 0,
+      constraints: { values: [0, 1, 2] },
+      dependsOn: null,
+      description:
+        'MQTT quality of service: 0 (at most once), 1 (at least once), or ' +
+        '2 (exactly once; AWS IoT Core supports up to 1).',
+      examples: [0, 1],
+    },
+    {
+      name: 'greengrass',
+      paramType: 'bool',
+      required: false,
+      default: false,
+      constraints: {},
+      dependsOn: null,
+      description:
+        "Publish through the device's Greengrass-managed MQTT (the " +
+        "Greengrass nucleus's AWS IoT Core connection) instead of a plain " +
+        'broker or your own AWS IoT credentials. Zero configuration: only ' +
+        'the topic is required — no broker host or port and no certificate ' +
+        'paths.',
+      examples: [true],
+    },
+    {
+      name: 'aws_iot',
+      paramType: 'bool',
+      required: false,
+      default: false,
+      constraints: {},
+      dependsOn: null,
+      description:
+        'Publish to AWS IoT Core over mutual TLS instead of a plain MQTT ' +
+        'broker; enables the IoT thing name and certificate path fields.',
+      examples: [true],
+    },
+    {
+      name: 'iot_thing_name',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+      description:
+        'AWS IoT thing name used as the MQTT client id, e.g. dda-edge-device-01.',
+      examples: ['dda-edge-device-01'],
+    },
+    {
+      name: 'iot_ca_cert_path',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+      description:
+        'Path of the Amazon root CA certificate on the device, e.g. ' +
+        '/greengrass/v2/rootCA.pem.',
+      examples: ['/greengrass/v2/rootCA.pem'],
+    },
+    {
+      name: 'iot_client_cert_path',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+      description:
+        'Path of the device client certificate on the device, e.g. ' +
+        '/greengrass/v2/thingCert.crt.',
+      examples: ['/greengrass/v2/thingCert.crt'],
+    },
+    {
+      name: 'iot_private_key_path',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+      description:
+        'Path of the device private key on the device, e.g. ' +
+        '/greengrass/v2/privKey.key.',
+      examples: ['/greengrass/v2/privKey.key'],
+    },
+    ...triggerPolicyParameters(),
+  ],
+  mappings: [
+    ...sameOnDeviceArchs('mqtt_subscribe', ['python:paho-mqtt', 'python:awsiotsdk']),
+    simAppsrcStub(),
+  ],
+  hardwareDependent: true,
+};
+
+/**
+ * Mirror of the `opcua_subscribe` trigger descriptor: fires a run
+ * activation when the monitored OPC UA node's value changes, via a true
+ * subscription or the poll fallback. The endpoint/security parameters
+ * mirror `opcua_write` field-for-field.
+ */
+export const OPCUA_SUBSCRIBE_DESCRIPTOR: NodeTypeDescriptor = {
+  typeId: 'opcua_subscribe',
+  category: CATEGORY_TRIGGER,
+  displayName: 'OPC UA Subscribe',
+  inputs: [],
+  outputs: [{ name: 'out', portType: PORT_TYPE_EVENT_SIGNAL }],
+  parameters: [
+    {
+      name: 'endpoint',
+      paramType: 'string',
+      required: true,
+      default: null,
+      constraints: { minLength: 1, regex: '^opc\\.tcp://.+' },
+      dependsOn: null,
+      description: 'OPC UA server endpoint URL, e.g. opc.tcp://192.168.1.20:4840.',
+      examples: ['opc.tcp://192.168.1.20:4840'],
+    },
+    {
+      name: 'node_id',
+      paramType: 'string',
+      required: true,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: null,
+      description:
+        'OPC UA node id the value is written to, e.g. ns=2;s=Machine1.Reject.',
+      examples: ['ns=2;s=Machine1.Reject'],
+    },
+    {
+      name: 'sampling_interval_ms',
+      paramType: 'int',
+      required: false,
+      default: 100,
+      constraints: { min: 10, max: 60000 },
+      dependsOn: null,
+      description:
+        'Sampling/publishing interval of the OPC UA subscription in ' +
+        'milliseconds (10-60000), e.g. 100.',
+      examples: [100, 1000],
+    },
+    {
+      name: 'mode',
+      paramType: 'enum',
+      required: false,
+      default: 'subscribe',
+      constraints: { values: ['subscribe', 'poll'] },
+      dependsOn: null,
+      description:
+        'How value changes are detected: subscribe registers a true OPC UA ' +
+        'data-change subscription (the default); poll reads the node ' +
+        'periodically and fires when the value changes.',
+      examples: ['subscribe', 'poll'],
+    },
+    {
+      name: 'poll_interval_ms',
+      paramType: 'int',
+      required: false,
+      default: 500,
+      constraints: { min: 10, max: 60000 },
+      dependsOn: 'mode=poll',
+      description:
+        'How often the node is read in poll mode, in milliseconds ' +
+        '(10-60000), e.g. 500.',
+      examples: [500, 2000],
+    },
+    {
+      name: 'username',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: {},
+      dependsOn: null,
+      description:
+        'Optional OPC UA user name for user-token authentication. Leave ' +
+        'empty for anonymous access.',
+      examples: ['operator'],
+    },
+    {
+      name: 'password',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: {},
+      dependsOn: null,
+      description:
+        'Optional password for the OPC UA user. Stored with the workflow ' +
+        'definition; treat as a secret.',
+      examples: ['changeit'],
+    },
+    {
+      name: 'security_policy',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: {},
+      dependsOn: null,
+      description:
+        'Optional OPC UA security policy for an encrypted/signed session, ' +
+        'e.g. Basic256Sha256. Requires client_cert_path and client_key_path.',
+      examples: ['Basic256Sha256'],
+    },
+    {
+      name: 'security_mode',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: {},
+      dependsOn: null,
+      description:
+        'Optional message security mode used with security_policy: Sign or ' +
+        'SignAndEncrypt (defaults to SignAndEncrypt when a policy is set).',
+      examples: ['SignAndEncrypt', 'Sign'],
+    },
+    {
+      name: 'client_cert_path',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: {},
+      dependsOn: null,
+      description:
+        'Optional path (on the device) to the client application ' +
+        'certificate used for certificate-based security.',
+      examples: ['/aws_dda/opcua/client-cert.der'],
+    },
+    {
+      name: 'client_key_path',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: {},
+      dependsOn: null,
+      description:
+        'Optional path (on the device) to the client certificate private key.',
+      examples: ['/aws_dda/opcua/client-key.pem'],
+    },
+    {
+      name: 'server_cert_path',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: {},
+      dependsOn: null,
+      description:
+        "Optional path (on the device) to the server's certificate to " +
+        'pin/trust.',
+      examples: ['/aws_dda/opcua/server-cert.der'],
+    },
+    ...triggerPolicyParameters(),
+  ],
+  mappings: [
+    ...sameOnDeviceArchs('opcua_subscribe', ['python:opcua']),
+    simAppsrcStub(),
+  ],
+  hardwareDependent: true,
+};
 
 // --------------------------------------------------------------------------
 // Validation findings (wire form of workflow_core.validator ValidationFinding)

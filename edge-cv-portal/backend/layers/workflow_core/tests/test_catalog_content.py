@@ -821,6 +821,9 @@ class TestCatalogCoverage:
         "custom_python", "inference_filter", "conditional",
         "digital_output", "mqtt_publish", "opcua_write", "capture",
         "unified_input",
+        # trigger-activation-runtime: the two subscribe-side triggers
+        # appended after unified_input (Requirements 3.2, 3.4).
+        "mqtt_subscribe", "opcua_subscribe",
     }
 
     def test_catalog_contains_exactly_the_expected_types(self):

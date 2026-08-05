@@ -82,3 +82,10 @@ class WorkflowExecution(Base):
     has_image_results = Column(Boolean, nullable=True, default=False)
     node_status_json = Column(Text)
     log_path = Column(String)
+    # Trigger activation runtime (additive, nullable): the JSON-serialized
+    # Trigger_Context of the trigger firing that activated this run
+    # (trigger-activation-runtime design D6, Requirement 6.8). NULL for
+    # manual and pre-existing runs. Added in place on existing devices by
+    # the additive alembic migration
+    # ``e9f2a6c31b84_add_workflow_execution_trigger_context``.
+    trigger_context_json = Column(Text)

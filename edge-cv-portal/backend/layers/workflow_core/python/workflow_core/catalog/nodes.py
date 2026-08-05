@@ -1289,6 +1289,308 @@ UNIFIED_INPUT = NodeTypeDescriptor(
 )
 
 # --------------------------------------------------------------------------
+# Subscribe trigger node types (trigger-activation-runtime Requirements
+# 1, 2) — executor-level triggers that fire a run activation when an
+# external event arrives: an MQTT message on a subscribed topic filter
+# or an OPC UA monitored-value change.
+# --------------------------------------------------------------------------
+
+
+def _trigger_policy_parameters():
+    """The shared per-trigger-node activation policy parameter family
+    (trigger-activation-runtime Requirements 1.3, 1.4, 2.5), built by one
+    helper so the ``mqtt_subscribe`` and ``opcua_subscribe`` descriptors
+    cannot drift: ``concurrency_policy`` with its gated ``queue_depth`` /
+    ``debounce_ms`` companions (``depends_on`` ``"name=value"`` form),
+    ``retry_limit`` (0 = retry forever), and ``priority`` (lower value =
+    higher priority; ties served FIFO by firing time)."""
+    return [
+        ParameterDescriptor("concurrency_policy", "enum", required=False,
+                            default="queue",
+                            constraints={"values": ["queue", "drop", "debounce"]},
+                            description="What happens when this trigger "
+                                        "fires while a run it activated is "
+                                        "still in flight or pending: queue "
+                                        "the firing (bounded by queue "
+                                        "depth), drop it, or debounce — "
+                                        "coalesce firings within the "
+                                        "debounce interval into one run "
+                                        "carrying the most recent trigger "
+                                        "context.",
+                            examples=["queue", "drop"]),
+        ParameterDescriptor("queue_depth", "int", required=False, default=10,
+                            constraints={"min": 1, "max": 1000},
+                            depends_on="concurrency_policy=queue",
+                            description="Maximum pending activations queued "
+                                        "for this trigger (1-1000); further "
+                                        "firings are discarded and logged, "
+                                        "e.g. 10.",
+                            examples=[10, 100]),
+        ParameterDescriptor("debounce_ms", "int", required=False, default=500,
+                            constraints={"min": 1, "max": 60000},
+                            depends_on="concurrency_policy=debounce",
+                            description="Trailing debounce interval in "
+                                        "milliseconds (1-60000): firings "
+                                        "within it coalesce into one "
+                                        "activation carrying the most "
+                                        "recent trigger context, e.g. 500.",
+                            examples=[500, 2000]),
+        ParameterDescriptor("retry_limit", "int", required=False, default=0,
+                            constraints={"min": 0, "max": 1000},
+                            description="Maximum automatic reconnect "
+                                        "attempts after the trigger's "
+                                        "connection drops (0-1000); 0 = "
+                                        "retry forever, e.g. 0.",
+                            examples=[0, 5]),
+        ParameterDescriptor("priority", "int", required=False, default=100,
+                            constraints={"min": 0, "max": 1000},
+                            description="Activation priority relative to "
+                                        "the workflow's other triggers "
+                                        "(0-1000); lower value = higher "
+                                        "priority, ties served in firing "
+                                        "order, e.g. 100.",
+                            examples=[100, 10]),
+    ]
+
+
+MQTT_SUBSCRIBE = NodeTypeDescriptor(
+    type_id="mqtt_subscribe",
+    category=CATEGORY_TRIGGER,
+    display_name="MQTT Subscribe",
+    inputs=[],
+    outputs=[PortDescriptor("out", PORT_TYPE_EVENT_SIGNAL)],
+    parameters=[
+        # Connection parameters mirror mqtt_publish field-for-field
+        # (trigger-activation-runtime Requirement 1.2): same names, types,
+        # defaults, and constraints, so the three transports (greengrass,
+        # aws_iot, plain broker) are configured exactly like publishing.
+        # broker_host is not statically required so a topic-only
+        # Greengrass config (greengrass=True) is not force-failed by the
+        # V4 required check; a mqtt_subscribe-specific validator check
+        # (V8) still rejects a config that supplies no target (no
+        # greengrass, no aws_iot, no host).
+        ParameterDescriptor("broker_host", "string", required=False, default=None,
+                            constraints={"min_length": 1},
+                            description="MQTT broker hostname or IP, e.g. "
+                                        "10.0.0.12 or broker.local.",
+                            examples=["10.0.0.12", "broker.local"]),
+        ParameterDescriptor("broker_port", "int", required=False, default=1883,
+                            constraints={"min": 1, "max": 65535},
+                            description="MQTT broker TCP port, e.g. 1883 "
+                                        "(plain MQTT) or 8883 (TLS).",
+                            examples=[1883, 8883]),
+        ParameterDescriptor("topic", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="Topic filter the trigger "
+                                        "subscribes to; a message arriving "
+                                        "on a matching topic starts a "
+                                        "workflow run, e.g. "
+                                        "factory/line1/trigger or "
+                                        "factory/+/trigger.",
+                            examples=["factory/line1/trigger",
+                                      "factory/+/trigger"]),
+        ParameterDescriptor("qos", "enum", required=False, default=0,
+                            constraints={"values": [0, 1, 2]},
+                            description="MQTT quality of service: 0 (at "
+                                        "most once), 1 (at least once), or "
+                                        "2 (exactly once; AWS IoT Core "
+                                        "supports up to 1).",
+                            examples=[0, 1]),
+        # Zero-config publishing through the device's Greengrass-managed
+        # MQTT: the Greengrass nucleus already holds the AWS IoT Core
+        # connection, so only the topic is needed — no broker host/port
+        # and no certificate file paths. Additive and off by default; the
+        # broker and aws_iot paths are unchanged when greengrass is off.
+        ParameterDescriptor("greengrass", "bool", required=False, default=False,
+                            constraints={},
+                            description="Publish through the device's "
+                                        "Greengrass-managed MQTT (the "
+                                        "Greengrass nucleus's AWS IoT Core "
+                                        "connection) instead of a plain "
+                                        "broker or your own AWS IoT "
+                                        "credentials. Zero configuration: "
+                                        "only the topic is required — no "
+                                        "broker host or port and no "
+                                        "certificate paths.",
+                            examples=[True]),
+        # AWS IoT Core publishing over mutual TLS. Certificates are
+        # referenced by file paths on the device (e.g. /greengrass/v2/...),
+        # never uploaded to the portal. The iot_* fields are shown in the
+        # config panel only while aws_iot is enabled (depends_on).
+        ParameterDescriptor("aws_iot", "bool", required=False, default=False,
+                            constraints={},
+                            description="Publish to AWS IoT Core over "
+                                        "mutual TLS instead of a plain MQTT "
+                                        "broker; enables the IoT thing name "
+                                        "and certificate path fields.",
+                            examples=[True]),
+        ParameterDescriptor("iot_thing_name", "string", required=False,
+                            default=None, constraints={"min_length": 1},
+                            depends_on="aws_iot",
+                            description="AWS IoT thing name used as the "
+                                        "MQTT client id, e.g. "
+                                        "dda-edge-device-01.",
+                            examples=["dda-edge-device-01"]),
+        # Amazon root CA path on the device.
+        ParameterDescriptor("iot_ca_cert_path", "string", required=False,
+                            default=None, constraints={"min_length": 1},
+                            depends_on="aws_iot",
+                            description="Path of the Amazon root CA "
+                                        "certificate on the device, e.g. "
+                                        "/greengrass/v2/rootCA.pem.",
+                            examples=["/greengrass/v2/rootCA.pem"]),
+        ParameterDescriptor("iot_client_cert_path", "string", required=False,
+                            default=None, constraints={"min_length": 1},
+                            depends_on="aws_iot",
+                            description="Path of the device client "
+                                        "certificate on the device, e.g. "
+                                        "/greengrass/v2/thingCert.crt.",
+                            examples=["/greengrass/v2/thingCert.crt"]),
+        ParameterDescriptor("iot_private_key_path", "string", required=False,
+                            default=None, constraints={"min_length": 1},
+                            depends_on="aws_iot",
+                            description="Path of the device private key on "
+                                        "the device, e.g. "
+                                        "/greengrass/v2/privKey.key.",
+                            examples=["/greengrass/v2/privKey.key"]),
+        *_trigger_policy_parameters(),
+    ],
+    # Executor-level MQTT subscription held by the device's trigger
+    # subscription manager. paho-mqtt serves the plain-broker and aws_iot
+    # paths; awsiotsdk provides the Greengrass IPC client used by the
+    # zero-config Greengrass SubscribeToIoTCore path. Simulation: an
+    # appsrc event source the test harness feeds from the Test_Dataset
+    # instead of any subscription, mirroring digital_input
+    # (Requirement 12.6).
+    mappings=_same_on_device_archs(
+        executor_binding="mqtt_subscribe",
+        plugin_dependencies=["python:paho-mqtt", "python:awsiotsdk"],
+    ) + [
+        GstMapping(
+            arch=ARCH_SIM,
+            element_chain=[_element("appsrc", name="{sim_source_name}")],
+            plugin_dependencies=["app"],
+        ),
+    ],
+    hardware_dependent=True,
+)
+
+OPCUA_SUBSCRIBE = NodeTypeDescriptor(
+    type_id="opcua_subscribe",
+    category=CATEGORY_TRIGGER,
+    display_name="OPC UA Subscribe",
+    inputs=[],
+    outputs=[PortDescriptor("out", PORT_TYPE_EVENT_SIGNAL)],
+    parameters=[
+        # endpoint/node_id and the security parameters mirror opcua_write
+        # field-for-field (trigger-activation-runtime Requirements 2.2,
+        # 2.3): same names, types, defaults, and constraints, so the
+        # session is configured exactly like writing.
+        ParameterDescriptor("endpoint", "string", required=True, default=None,
+                            constraints={"min_length": 1,
+                                         "regex": r"^opc\.tcp://.+"},
+                            description="OPC UA server endpoint URL, e.g. "
+                                        "opc.tcp://192.168.1.20:4840.",
+                            examples=["opc.tcp://192.168.1.20:4840"]),
+        ParameterDescriptor("node_id", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="OPC UA node id the value is "
+                                        "written to, e.g. "
+                                        "ns=2;s=Machine1.Reject.",
+                            examples=["ns=2;s=Machine1.Reject"]),
+        ParameterDescriptor("sampling_interval_ms", "int", required=False,
+                            default=100,
+                            constraints={"min": 10, "max": 60000},
+                            description="Sampling/publishing interval of "
+                                        "the OPC UA subscription in "
+                                        "milliseconds (10-60000), e.g. 100.",
+                            examples=[100, 1000]),
+        ParameterDescriptor("mode", "enum", required=False, default="subscribe",
+                            constraints={"values": ["subscribe", "poll"]},
+                            description="How value changes are detected: "
+                                        "subscribe registers a true OPC UA "
+                                        "data-change subscription (the "
+                                        "default); poll reads the node "
+                                        "periodically and fires when the "
+                                        "value changes.",
+                            examples=["subscribe", "poll"]),
+        ParameterDescriptor("poll_interval_ms", "int", required=False,
+                            default=500,
+                            constraints={"min": 10, "max": 60000},
+                            depends_on="mode=poll",
+                            description="How often the node is read in poll "
+                                        "mode, in milliseconds (10-60000), "
+                                        "e.g. 500.",
+                            examples=[500, 2000]),
+        # --- Authentication / security (all optional; anonymous + no
+        # security when unset). username/password enable user-token auth;
+        # security_policy + client_cert_path + client_key_path enable
+        # certificate-based signing/encryption. NOTE: password and cert
+        # paths are stored with the workflow definition — treat the
+        # password as a secret and prefer per-device certificate files.
+        ParameterDescriptor("username", "string", required=False, default=None,
+                            constraints={},
+                            description="Optional OPC UA user name for "
+                                        "user-token authentication. Leave "
+                                        "empty for anonymous access.",
+                            examples=["operator"]),
+        ParameterDescriptor("password", "string", required=False, default=None,
+                            constraints={},
+                            description="Optional password for the OPC UA "
+                                        "user. Stored with the workflow "
+                                        "definition; treat as a secret.",
+                            examples=["changeit"]),
+        ParameterDescriptor("security_policy", "string", required=False,
+                            default=None, constraints={},
+                            description="Optional OPC UA security policy for "
+                                        "an encrypted/signed session, e.g. "
+                                        "Basic256Sha256. Requires "
+                                        "client_cert_path and client_key_path.",
+                            examples=["Basic256Sha256"]),
+        ParameterDescriptor("security_mode", "string", required=False,
+                            default=None, constraints={},
+                            description="Optional message security mode used "
+                                        "with security_policy: Sign or "
+                                        "SignAndEncrypt (defaults to "
+                                        "SignAndEncrypt when a policy is set).",
+                            examples=["SignAndEncrypt", "Sign"]),
+        ParameterDescriptor("client_cert_path", "string", required=False,
+                            default=None, constraints={},
+                            description="Optional path (on the device) to the "
+                                        "client application certificate used "
+                                        "for certificate-based security.",
+                            examples=["/aws_dda/opcua/client-cert.der"]),
+        ParameterDescriptor("client_key_path", "string", required=False,
+                            default=None, constraints={},
+                            description="Optional path (on the device) to the "
+                                        "client certificate private key.",
+                            examples=["/aws_dda/opcua/client-key.pem"]),
+        ParameterDescriptor("server_cert_path", "string", required=False,
+                            default=None, constraints={},
+                            description="Optional path (on the device) to the "
+                                        "server's certificate to pin/trust.",
+                            examples=["/aws_dda/opcua/server-cert.der"]),
+        *_trigger_policy_parameters(),
+    ],
+    # Executor-level OPC UA subscription (or poll loop) held by the
+    # device's trigger subscription manager; the opcua Python lib is the
+    # same packaged dependency the opcua_write node uses. Simulation: an
+    # appsrc event source the test harness feeds from the Test_Dataset
+    # instead of any session, mirroring digital_input (Requirement 12.6).
+    mappings=_same_on_device_archs(
+        executor_binding="opcua_subscribe",
+        plugin_dependencies=["python:opcua"],
+    ) + [
+        GstMapping(
+            arch=ARCH_SIM,
+            element_chain=[_element("appsrc", name="{sim_source_name}")],
+            plugin_dependencies=["app"],
+        ),
+    ],
+    hardware_dependent=True,
+)
+
+# --------------------------------------------------------------------------
 # Catalog access
 # --------------------------------------------------------------------------
 
@@ -1318,6 +1620,10 @@ NODE_CATALOG = (
     # Appended (additive — triggers-stage-and-unified-input Requirement 3.1):
     # every pre-existing descriptor keeps its position and content.
     UNIFIED_INPUT,
+    # Appended (additive — trigger-activation-runtime Requirement 3.2):
+    # every pre-existing descriptor keeps its position and content.
+    MQTT_SUBSCRIBE,
+    OPCUA_SUBSCRIBE,
 )
 
 _CATALOG_BY_ID = {descriptor.type_id: descriptor for descriptor in NODE_CATALOG}

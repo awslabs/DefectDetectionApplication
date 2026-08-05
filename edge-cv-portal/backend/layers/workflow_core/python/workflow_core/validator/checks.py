@@ -97,6 +97,22 @@ CODE_V6_MQTT_NO_TARGET = "V6_MQTT_NO_TARGET"
 # illegal stage ordering (a trigger placed downstream of another node).
 CODE_V7_STAGE_ORDER = "V7_STAGE_ORDER"
 
+# V8 (trigger-activation-runtime Requirement 1.6): an ``mqtt_subscribe``
+# trigger node must declare a connection target, mirroring V6's
+# ``mqtt_publish`` rule — an error when the node enables neither
+# ``greengrass`` nor ``aws_iot`` and supplies no non-empty
+# ``broker_host``. Kept as a code separate from V6 so V6's
+# publish-specific message and existing finding sets are untouched.
+CODE_V8_MQTT_SUB_NO_TARGET = "V8_MQTT_SUB_NO_TARGET"
+
+# V9 (trigger-activation-runtime Requirements 4.1, 4.2): a workflow has
+# exactly one activation model — when the graph contains at least one
+# subscription trigger (``mqtt_subscribe`` / ``opcua_subscribe``), every
+# CATEGORY_INPUT node must have its ``activation`` input port connected.
+# Graphs without the new trigger types produce zero V9 findings
+# (``digital_input`` alone does not engage V9).
+CODE_V9_MIXED_ACTIVATION_MODEL = "V9_MIXED_ACTIVATION_MODEL"
+
 # W1 warnings (Requirement 4.6)
 CODE_W1_OUTPUT_NODE_NO_INPUT = "W1_OUTPUT_NODE_NO_INPUT"
 CODE_W1_UNUSED_OUTPUT_PORT = "W1_UNUSED_OUTPUT_PORT"
@@ -118,6 +134,22 @@ TYPE_LLM_INFERENCE = "llm_inference"
 #: Output node type that publishes over MQTT; V6 requires it to declare a
 #: publish target (Greengrass, AWS IoT Core, or a plain broker host).
 TYPE_MQTT_PUBLISH = "mqtt_publish"
+
+#: Trigger node type that subscribes over MQTT; V8 requires it to declare
+#: a connection target (Greengrass, AWS IoT Core, or a plain broker host).
+TYPE_MQTT_SUBSCRIBE = "mqtt_subscribe"
+
+#: Trigger node type that subscribes to an OPC UA monitored node.
+TYPE_OPCUA_SUBSCRIBE = "opcua_subscribe"
+
+#: The subscription trigger node types whose presence engages the V9
+#: mixed-activation-model rule (``digital_input`` is deliberately absent:
+#: its activation behavior is unchanged by trigger-activation-runtime).
+SUBSCRIPTION_TRIGGER_TYPES = frozenset({TYPE_MQTT_SUBSCRIBE, TYPE_OPCUA_SUBSCRIBE})
+
+#: The activation input port name on CATEGORY_INPUT nodes (the unified
+#: input node and the four legacy sources all declare it).
+ACTIVATION_PORT = "activation"
 
 
 @dataclass(frozen=True)
@@ -191,6 +223,8 @@ def validate(
     findings.extend(_check_v6(graph, typed_nodes))
     findings.extend(_check_w1(graph, typed_nodes))
     findings.extend(_check_v7(graph, typed_nodes))
+    findings.extend(_check_v8(graph, typed_nodes))
+    findings.extend(_check_v9(graph, typed_nodes))
     if model_registry is not None:
         findings.extend(_check_model_references(graph, typed_nodes, model_registry))
 
@@ -663,6 +697,90 @@ def _check_v7(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) 
                     connection.id, connection.target.node
                 ),
                 connection_id=connection.id,
+            ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# V8: mqtt_subscribe must declare a connection target
+# (trigger-activation-runtime Requirement 1.6)
+# --------------------------------------------------------------------------
+
+def _check_v8(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """Every ``mqtt_subscribe`` node must name a connection target.
+
+    V6's target logic applied to the subscribe trigger: ``broker_host``
+    is not statically required (so a topic-only Greengrass config is not
+    force-failed by V4), so this check rejects a target-less config under
+    a dedicated code — an error when the node enables neither the
+    Greengrass path (``greengrass``) nor the AWS IoT Core path
+    (``aws_iot``) and supplies no non-empty ``broker_host``. Kept
+    separate from V6 so V6's publish-specific behavior is untouched."""
+    findings = []
+    for node in graph.nodes:
+        if node.type != TYPE_MQTT_SUBSCRIBE:
+            continue
+        descriptor = typed_nodes.get(node.id)
+        if descriptor is None:
+            continue
+        values = {
+            parameter.name: _effective_value(node, parameter)
+            for parameter in descriptor.parameters
+        }
+        greengrass = bool(values.get("greengrass"))
+        aws_iot = bool(values.get("aws_iot"))
+        broker_host = values.get("broker_host")
+        has_broker_host = isinstance(broker_host, str) and broker_host.strip() != ""
+        if not (greengrass or aws_iot or has_broker_host):
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V8_MQTT_SUB_NO_TARGET,
+                "Node '{0}': mqtt_subscribe requires a connection target — enable "
+                "'greengrass', enable 'aws_iot', or set 'broker_host'".format(node.id),
+                node_id=node.id,
+            ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# V9: one activation model per workflow
+# (trigger-activation-runtime Requirements 4.1, 4.2)
+# --------------------------------------------------------------------------
+
+def _check_v9(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """A workflow has exactly one activation model: when the graph
+    contains at least one subscription trigger node (``mqtt_subscribe``
+    or ``opcua_subscribe``), every ``CATEGORY_INPUT`` node must have at
+    least one connection targeting its ``activation`` input port — one
+    error finding per unconnected input node. Graphs with zero
+    subscription trigger nodes produce zero V9 findings, preserving the
+    pre-feature finding set (``digital_input`` presence alone does not
+    engage V9: its activation behavior is unchanged)."""
+    has_subscription_trigger = any(
+        node.type in SUBSCRIPTION_TRIGGER_TYPES for node in graph.nodes
+    )
+    if not has_subscription_trigger:
+        return []
+
+    activation_connected = {
+        connection.target.node
+        for connection in graph.connections
+        if connection.target.port == ACTIVATION_PORT
+    }
+
+    findings = []
+    for node in graph.nodes:
+        descriptor = typed_nodes.get(node.id)
+        if descriptor is None or descriptor.category != CATEGORY_INPUT:
+            continue
+        if node.id not in activation_connected:
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V9_MIXED_ACTIVATION_MODEL,
+                "Input node '{0}' has no trigger connected to its 'activation' "
+                "port: a workflow with subscription triggers must drive every "
+                "input from a trigger".format(node.id),
+                node_id=node.id,
             ))
     return findings
 

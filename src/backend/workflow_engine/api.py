@@ -157,6 +157,12 @@ def get_workflow_registration(
     )
     payload = registration_to_dict(registration)
     payload["executions"] = [execution_to_dict(execution) for execution in executions]
+    # Trigger_Health surfacing (Requirements 9.1, 9.2): additive field,
+    # omitted entirely for trigger-less registrations (or when the trigger
+    # subsystem is not running) so their responses stay byte-identical.
+    health = runtime.trigger_health(registration_id)
+    if health:
+        payload["triggerHealth"] = health
     return payload
 
 

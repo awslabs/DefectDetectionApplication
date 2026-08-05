@@ -135,11 +135,22 @@ class ParameterDescriptor:
       - enum: ``values`` (list of allowed values)
       - int with a discrete value set: ``values``
 
-    ``depends_on`` declares conditional visibility: the name of a bool
-    parameter on the same node type. While that parameter's effective
-    value is false (or absent), the configuration UI hides this
-    parameter's control. None (the default) means always visible, so
-    existing node types are unaffected.
+    ``depends_on`` declares conditional visibility in one of two forms:
+
+      - a bare parameter name: the name of a bool parameter on the same
+        node type. While that parameter's effective value is false (or
+        absent), the configuration UI hides this parameter's control —
+        the original bool-truthy semantics, unchanged for every
+        existing descriptor.
+      - ``"name=value"``: the name of a parameter on the same node type
+        plus a literal, e.g. ``"mode=poll"``. This parameter's control
+        is visible only while the named parameter's effective value
+        (its explicit value, else its declared default) equals the
+        literal when both are rendered as strings — used for
+        enum-selection gating.
+
+    None (the default) means always visible, so existing node types are
+    unaffected.
 
     ``description`` is a concise human-readable explanation of the
     parameter — what it is, the expected format, and a short example

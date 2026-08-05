@@ -10,6 +10,8 @@
  * | V4    | required parameters have values satisfying constraints |
  * | V5    | every node reachable from some input node (forward BFS)|
  * | V7    | no connection targets a trigger node (stage ordering)  |
+ * | V8    | mqtt_subscribe declares a connection target            |
+ * | V9    | one activation model per workflow (mixed-model rule)   |
  */
 
 import { checkParameterValue, VIOLATION_REQUIRED } from './parameters';
@@ -34,6 +36,8 @@ export const CODE_V4_MISSING_REQUIRED_PARAMETER = 'V4_MISSING_REQUIRED_PARAMETER
 export const CODE_V4_INVALID_PARAMETER_VALUE = 'V4_INVALID_PARAMETER_VALUE';
 export const CODE_V5_UNREACHABLE_NODE = 'V5_UNREACHABLE_NODE';
 export const CODE_V7_STAGE_ORDER = 'V7_STAGE_ORDER';
+export const CODE_V8_MQTT_SUB_NO_TARGET = 'V8_MQTT_SUB_NO_TARGET';
+export const CODE_V9_MIXED_ACTIVATION_MODEL = 'V9_MIXED_ACTIVATION_MODEL';
 
 /** The graph slice the inline checks operate on. */
 export interface GraphLike {
@@ -247,15 +251,142 @@ export function checkV7(graph: GraphLike, catalog: NodeTypeDescriptor[]): Valida
   return findings;
 }
 
+// --------------------------------------------------------------------------
+// V8: mqtt_subscribe must declare a connection target
+// (trigger-activation-runtime Requirement 4.5, mirrors backend V8)
+// --------------------------------------------------------------------------
+
 /**
- * Run the inline mirror checks (V4 + V5 + V7) and return every finding,
- * each with the associated node or connection identifier. The canvas
- * turns these into inline validation markers (Requirements 1.9, 1.10,
- * 5.5).
+ * Trigger node type that subscribes over MQTT; V8 requires it to declare
+ * a connection target (Greengrass, AWS IoT Core, or a plain broker host).
+ */
+const TYPE_MQTT_SUBSCRIBE = 'mqtt_subscribe';
+
+/** Trigger node type that subscribes to an OPC UA monitored node. */
+const TYPE_OPCUA_SUBSCRIBE = 'opcua_subscribe';
+
+/**
+ * The subscription trigger node types whose presence engages the V9
+ * mixed-activation-model rule (`digital_input` is deliberately absent:
+ * its activation behavior is unchanged by trigger-activation-runtime).
+ */
+const SUBSCRIPTION_TRIGGER_TYPES = new Set([TYPE_MQTT_SUBSCRIBE, TYPE_OPCUA_SUBSCRIBE]);
+
+/**
+ * The activation input port name on CATEGORY_INPUT nodes (the unified
+ * input node and the four legacy sources all declare it).
+ */
+const ACTIVATION_PORT = 'activation';
+
+/**
+ * Mirror of validator check V8: every `mqtt_subscribe` node must name a
+ * connection target — an error when the node enables neither the
+ * Greengrass path (`greengrass`) nor the AWS IoT Core path (`aws_iot`)
+ * and supplies no non-empty `broker_host` (effective values: explicit,
+ * else declared default). Kept as a code separate from V6 so V6's
+ * publish-specific behavior is untouched.
+ */
+export function checkV8(graph: GraphLike, catalog: NodeTypeDescriptor[]): ValidationFinding[] {
+  const typed = typedNodes(graph, catalog);
+  const findings: ValidationFinding[] = [];
+
+  for (const node of graph.nodes) {
+    if (node.type !== TYPE_MQTT_SUBSCRIBE) {
+      continue;
+    }
+    const descriptor = typed.get(node.id);
+    if (descriptor === undefined) {
+      continue;
+    }
+    const values = new Map<string, JsonValue | null | undefined>(
+      descriptor.parameters.map((parameter) => [parameter.name, effectiveValue(node, parameter)])
+    );
+    const greengrass = Boolean(values.get('greengrass'));
+    const awsIot = Boolean(values.get('aws_iot'));
+    const brokerHost = values.get('broker_host');
+    const hasBrokerHost = typeof brokerHost === 'string' && brokerHost.trim() !== '';
+    if (!(greengrass || awsIot || hasBrokerHost)) {
+      findings.push({
+        severity: SEVERITY_ERROR,
+        code: CODE_V8_MQTT_SUB_NO_TARGET,
+        message:
+          `Node '${node.id}': mqtt_subscribe requires a connection target — ` +
+          `enable 'greengrass', enable 'aws_iot', or set 'broker_host'`,
+        nodeId: node.id,
+        connectionId: null,
+      });
+    }
+  }
+  return findings;
+}
+
+// --------------------------------------------------------------------------
+// V9: one activation model per workflow
+// (trigger-activation-runtime Requirement 4.5, mirrors backend V9)
+// --------------------------------------------------------------------------
+
+/**
+ * Mirror of validator check V9: a workflow has exactly one activation
+ * model — when the graph contains at least one subscription trigger node
+ * (`mqtt_subscribe` or `opcua_subscribe`), every `CATEGORY_INPUT` node
+ * must have at least one connection targeting its `activation` input
+ * port; one error finding per unconnected input node. Graphs with zero
+ * subscription trigger nodes produce zero V9 findings (`digital_input`
+ * presence alone does not engage V9: its activation behavior is
+ * unchanged).
+ */
+export function checkV9(graph: GraphLike, catalog: NodeTypeDescriptor[]): ValidationFinding[] {
+  const hasSubscriptionTrigger = graph.nodes.some((node) =>
+    SUBSCRIPTION_TRIGGER_TYPES.has(node.type)
+  );
+  if (!hasSubscriptionTrigger) {
+    return [];
+  }
+
+  const activationConnected = new Set(
+    graph.connections
+      .filter((connection) => connection.to.port === ACTIVATION_PORT)
+      .map((connection) => connection.to.node)
+  );
+
+  const typed = typedNodes(graph, catalog);
+  const findings: ValidationFinding[] = [];
+  for (const node of graph.nodes) {
+    const descriptor = typed.get(node.id);
+    if (descriptor === undefined || descriptor.category !== CATEGORY_INPUT) {
+      continue;
+    }
+    if (!activationConnected.has(node.id)) {
+      findings.push({
+        severity: SEVERITY_ERROR,
+        code: CODE_V9_MIXED_ACTIVATION_MODEL,
+        message:
+          `Input node '${node.id}' has no trigger connected to its ` +
+          `'activation' port: a workflow with subscription triggers must ` +
+          `drive every input from a trigger`,
+        nodeId: node.id,
+        connectionId: null,
+      });
+    }
+  }
+  return findings;
+}
+
+/**
+ * Run the inline mirror checks (V4 + V5 + V7 + V8 + V9) and return every
+ * finding, each with the associated node or connection identifier. The
+ * canvas turns these into inline validation markers (Requirements 1.9,
+ * 1.10, 5.5; trigger-activation-runtime Requirement 4.5).
  */
 export function runInlineChecks(
   graph: GraphLike,
   catalog: NodeTypeDescriptor[]
 ): ValidationFinding[] {
-  return [...checkV4(graph, catalog), ...checkV5(graph, catalog), ...checkV7(graph, catalog)];
+  return [
+    ...checkV4(graph, catalog),
+    ...checkV5(graph, catalog),
+    ...checkV7(graph, catalog),
+    ...checkV8(graph, catalog),
+    ...checkV9(graph, catalog),
+  ];
 }

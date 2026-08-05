@@ -111,6 +111,13 @@ class WorkflowWatcher:
         # registration id -> ResolutionResult for registrations whose
         # bindings resolved (substituted document + adapter assignments).
         self._binding_resolutions: Dict[str, ResolutionResult] = {}
+        # Additive registration-change listeners (trigger-activation-
+        # runtime Requirement 6.1): zero-argument callables invoked after
+        # every ``sync_once`` reconciliation — which includes removal
+        # invalidation — so the TriggerSubscriptionManager can diff the
+        # registered trigger-driven artifact sets. Each listener is
+        # contained: a failure never disturbs the scan or LocalServer.
+        self.registrations_listeners: List[Callable[[], None]] = []
 
     # ------------------------------------------------------------------
     # Public interface
@@ -196,7 +203,20 @@ class WorkflowWatcher:
             raise
         finally:
             session.close()
+        self._notify_registrations_listeners()
         return touched
+
+    def _notify_registrations_listeners(self) -> None:
+        """Invoke the additive registration-change listeners, each
+        contained so one failing listener never affects the others, the
+        scan cycle, or LocalServer."""
+        for listener in list(self.registrations_listeners):
+            try:
+                listener()
+            except Exception:  # noqa: BLE001 - listener isolation
+                logger.exception(
+                    "Workflow registrations listener failed; continuing"
+                )
 
     # ------------------------------------------------------------------
     # Registration

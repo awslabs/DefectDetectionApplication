@@ -42,6 +42,34 @@ Self-contained Hypothesis strategies; no shared generator module is
 used. >=100 examples per property.
 
 **Validates: Requirements 2.7, 4.5, 4.6, 6.6**
+
+---
+
+**Property D (trigger-activation-runtime, Property 4: Validator
+equivalence without the new triggers, task 2.5):** for any generated
+graph containing no ``mqtt_subscribe`` and no ``opcua_subscribe`` node
+(including ``digital_input`` graphs), the extended validator's finding
+set equals the pre-feature finding set (same codes, severities,
+node/connection ids), with zero ``V8``/``V9`` findings.
+
+Oracle choice (documented per task 2.5): the trigger-activation-runtime
+feature's only validator change was *appending* ``_check_v8`` and
+``_check_v9`` to ``validate()``'s check pipeline, so the pre-feature
+validator is reconstructed exactly and cheaply by re-running the same
+pipeline minus those two checks — the unknown-node-type pass plus the
+untouched ``_check_v1`` … ``_check_v6``, ``_check_w1``, ``_check_v7``
+functions (see ``_prefeature_validate`` below). This is a true
+pre-feature oracle, not a filtered view of the extended result. The
+zero-``V8``/``V9`` assertion is made independently as well.
+
+Property D additionally reuses the shared ``generators.py`` strategies
+(``graph_strategy`` for valid graphs, ``seeded_graph_strategy`` for
+deliberately-invalid ones) — the module predates the new trigger types
+and never emits them — alongside this file's self-contained
+zero-trigger / digital_input strategies and a unified_input activation
+wiring variant, for diverse valid *and* invalid no-new-trigger graphs.
+
+**Validates: Requirements 4.2 (trigger-activation-runtime)**
 """
 
 from __future__ import annotations
@@ -76,13 +104,21 @@ from workflow_core.validator.checks import (
     CODE_V1_NO_OUTPUT_NODE,
     CODE_V5_UNREACHABLE_NODE,
     CODE_V7_STAGE_ORDER,
+    CODE_V8_MQTT_SUB_NO_TARGET,
+    CODE_V9_MIXED_ACTIVATION_MODEL,
+    SUBSCRIPTION_TRIGGER_TYPES,
     ValidationFinding,
+    _check_v1,
     _check_v2,
     _check_v3,
     _check_v4,
+    _check_v5,
     _check_v6,
+    _check_v7,
     _check_w1,
 )
+
+from .generators import graph_strategy, seeded_graph_strategy
 
 _POS = Position(0.0, 0.0)
 
@@ -495,3 +531,142 @@ def test_non_v7_findings_never_drop_below_the_baseline(graph):
         "V1-V6/W1 findings dropped relative to the pre-feature baseline: "
         "{0}".format(dict(dropped))
     )
+
+
+# ===========================================================================
+# Property D — trigger-activation-runtime, Property 4: Validator equivalence
+# without the new triggers (task 2.5)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Pre-feature validator reconstruction (the Property-4 oracle)
+#
+# The trigger-activation-runtime feature's only change to the validator was
+# appending `_check_v8` and `_check_v9` to the end of `validate()`'s check
+# pipeline (every pre-existing check function is untouched). The pre-feature
+# validator is therefore reconstructed exactly by re-running that pipeline
+# without the two new checks.
+# ---------------------------------------------------------------------------
+
+def _prefeature_validate(graph: WorkflowGraph) -> List[ValidationFinding]:
+    """The pre-trigger-activation-runtime ``validate()``: the identical
+    unknown-node-type pass followed by the identical, feature-untouched
+    check functions V1–V7 and W1 — everything except the appended
+    ``_check_v8``/``_check_v9``."""
+    typed_nodes, findings = _typed_nodes(graph)
+    findings.extend(_check_v1(graph, typed_nodes))
+    findings.extend(_check_v2(graph, typed_nodes))
+    findings.extend(_check_v3(graph))
+    findings.extend(_check_v4(graph, typed_nodes))
+    findings.extend(_check_v5(graph, typed_nodes))
+    findings.extend(_check_v6(graph, typed_nodes))
+    findings.extend(_check_w1(graph, typed_nodes))
+    findings.extend(_check_v7(graph, typed_nodes))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# No-new-trigger graph strategies
+# ---------------------------------------------------------------------------
+
+#: unified_input source kinds with their required underlying parameters.
+_UNIFIED_SOURCE_KIND_PARAMS = {
+    "csi_camera": {},
+    "icam": {},
+    "aravis_camera": {"camera_id": "Aravis-Fake-GV01"},
+    "folder": {"location": "/data/images"},
+}
+
+
+@st.composite
+def unified_activation_graphs(draw) -> WorkflowGraph:
+    """Graphs exercising the ``activation`` port *without* the new trigger
+    types: ``digital_input.out -> unified_input.activation`` plus
+    ``unified_input.out -> capture.in`` (legal since sub-feature A), with
+    optional invalid variants (missing required source parameter,
+    unreachable island, dangling connection)."""
+    source_kind = draw(st.sampled_from(sorted(_UNIFIED_SOURCE_KIND_PARAMS)))
+    params = dict(_UNIFIED_SOURCE_KIND_PARAMS[source_kind])
+    params["source_kind"] = source_kind
+    if source_kind in ("aravis_camera", "folder") and draw(st.booleans()):
+        # Drop the underlying source's required parameter (V4 variant).
+        params.pop("camera_id", None)
+        params.pop("location", None)
+
+    nodes = [
+        _node("din", _DIGITAL_INPUT, **draw(digital_input_params())),
+        _node("uni", "unified_input", **params),
+        _node("cap", "capture", output_path="/out"),
+    ]
+    connections = [
+        _conn("c-act", "din", "uni", target_port="activation"),
+        _conn("c-cap", "uni", "cap"),
+    ]
+
+    # The digital_input may also be left unwired (no activation edge) —
+    # legal legacy shape; the input is then simply not activation-driven.
+    if draw(st.booleans()):
+        connections = connections[1:]
+
+    if draw(st.booleans()):
+        nodes.append(_node("island", draw(st.sampled_from(_PREPROCESSING_TYPES))))
+    if draw(st.booleans()):
+        connections.append(_conn("c-ghost", "uni", "ghost"))
+
+    return WorkflowGraph(nodes=nodes, connections=connections)
+
+
+def no_new_trigger_graphs() -> st.SearchStrategy:
+    """Diverse graphs guaranteed to contain no ``mqtt_subscribe`` /
+    ``opcua_subscribe`` node: catalog-wide valid graphs, defect-seeded
+    invalid graphs (missing inputs/outputs, bad connections, cycles,
+    cleared required parameters, unreachable nodes), the zero-trigger and
+    digital_input families above (V7-offender variants included), and the
+    unified_input activation wiring."""
+    return st.one_of(
+        graph_strategy(),
+        seeded_graph_strategy().map(lambda seeded: seeded.graph),
+        zero_trigger_graphs(),
+        digital_input_graphs(),
+        digital_input_graphs_with_offenders(),
+        unified_activation_graphs(),
+    )
+
+
+# Feature: trigger-activation-runtime, Property 4: Validator equivalence without the new triggers
+@settings(max_examples=100)
+@given(graph=no_new_trigger_graphs())
+def test_no_new_trigger_finding_set_equals_prefeature_validator(graph):
+    """**Feature: trigger-activation-runtime, Property 4: Validator
+    equivalence without the new triggers** — Property D.
+
+    For any generated graph containing no ``mqtt_subscribe`` and no
+    ``opcua_subscribe`` node (including ``digital_input`` graphs), the
+    extended validator's finding multiset (code/severity/node_id/
+    connection_id) equals the pre-feature validator's — reconstructed by
+    re-running ``validate()``'s pipeline minus the appended
+    ``_check_v8``/``_check_v9`` (see the module docstring's oracle note) —
+    with zero ``V8``/``V9`` findings and a deterministic result across
+    repeated runs.
+
+    **Validates: Requirements 4.2**
+    """
+    # Strategy guard: the generated graph really contains no new trigger.
+    assert not any(
+        node.type in SUBSCRIPTION_TRIGGER_TYPES for node in graph.nodes
+    )
+
+    current = validate(graph)
+
+    # Zero V8/V9 findings for no-new-trigger graphs.
+    assert [f for f in current if f.code == CODE_V8_MQTT_SUB_NO_TARGET] == []
+    assert [f for f in current if f.code == CODE_V9_MIXED_ACTIVATION_MODEL] == []
+
+    # Finding-multiset equality against the reconstructed pre-feature
+    # validator: same codes, severities, node ids, and connection ids.
+    baseline = _prefeature_validate(graph)
+    assert Counter(_key(f) for f in current) == Counter(_key(f) for f in baseline)
+
+    # The finding set is unchanged when validate is re-run (pure function).
+    rerun = validate(graph)
+    assert Counter(_key(f) for f in rerun) == Counter(_key(f) for f in current)

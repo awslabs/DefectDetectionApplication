@@ -1016,6 +1016,57 @@ def llm_arch_gate_findings(definition: Dict, requested_archs: List[str]) -> List
 
 
 # --------------------------------------------------------------------------
+# Subscribed-topic recording for greengrass mqtt_subscribe triggers
+# (trigger-activation-runtime Requirements 10.1, 10.4)
+#
+# A workflow whose ``mqtt_subscribe`` trigger nodes use the Greengrass IPC
+# transport needs a ``SubscribeToIoTCore`` accessControl authorization at
+# deployment time. The packager records the set of subscribed topic
+# filters as ``subscribed_topics`` on the workflow version item and in the
+# packaged manifest.json — ONLY when the set is non-empty, so every
+# workflow without a greengrass-enabled ``mqtt_subscribe`` node packages
+# byte-identically to pre-feature output (10.4). The deployment merge
+# (deployments.py) reads the version-item copy.
+# --------------------------------------------------------------------------
+
+#: The MQTT subscribe trigger catalog type (workflow_core.catalog
+#: MQTT_SUBSCRIBE, trigger-activation-runtime C1).
+MQTT_SUBSCRIBE_TYPE_ID = 'mqtt_subscribe'
+
+
+def gather_subscribed_topics(definition: Dict) -> List[str]:
+    """The sorted, de-duplicated ``topic`` values of the definition's
+    ``mqtt_subscribe`` nodes whose effective ``greengrass`` is true
+    (Requirement 10.1).
+
+    The effective value follows the validator's rule (``_effective_value``
+    / gather_model_references): the explicitly set value when the key is
+    present — an explicit null counts as cleared — else the declared
+    default, which is false for ``greengrass``. Only the greengrass
+    transport needs recipe accessControl, so aws_iot/broker subscribe
+    nodes contribute nothing. Non-string/blank topics are excluded
+    (validation's problem, not packaging's). Empty for every pre-feature
+    workflow (10.4)."""
+    topics: List[str] = []
+    for node in definition.get('nodes') or []:
+        if not isinstance(node, dict) or node.get('type') != MQTT_SUBSCRIBE_TYPE_ID:
+            continue
+        parameters = node.get('parameters')
+        if not isinstance(parameters, dict):
+            parameters = {}
+        # Effective greengrass: explicit value if present, else the
+        # declared default (False). Truthiness mirrors the V6/V8 target
+        # checks.
+        greengrass = parameters['greengrass'] if 'greengrass' in parameters else False
+        if not greengrass:
+            continue
+        topic = parameters.get('topic')
+        if isinstance(topic, str) and topic.strip() and topic not in topics:
+            topics.append(topic)
+    return sorted(topics)
+
+
+# --------------------------------------------------------------------------
 # Packaged/served vLLM model name alignment
 # (vllm-model-name-mismatch Requirements 2.1, 2.2, 3.1, 3.2, 3.3)
 #
@@ -1509,7 +1560,8 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
                    plugin_checksums: Optional[Dict[str, str]] = None,
                    plugin_components: Optional[Dict[str, str]] = None,
                    component_version: Optional[str] = None,
-                   workflow_name: Optional[str] = None) -> Dict:
+                   workflow_name: Optional[str] = None,
+                   subscribed_topics: Optional[List[str]] = None) -> Dict:
     """manifest.json content: what WorkflowWatcher needs to register the
     workflow and what the deployment compatibility check reads (8.4).
 
@@ -1517,8 +1569,12 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
     ``plugin_components`` ({<pluginComponentName>: <componentVersion>})
     let the LocalServer plugin loader verify each Plugin_Component-
     delivered custom plugin file and derive its install root
-    (custom-node-designer Requirements 10.4, 10.6, 11.1)."""
-    return {
+    (custom-node-designer Requirements 10.4, 10.6, 11.1).
+
+    ``subscribed_topics`` (trigger-activation-runtime 10.1, 10.4): the
+    greengrass mqtt_subscribe topic filters, recorded ONLY when non-empty
+    so trigger-less manifests stay byte-identical to pre-feature output."""
+    manifest = {
         'componentName': component_name_for(workflow_id),
         # The resolved (possibly patch-bumped) version when provided, else the
         # base version for the workflow version.
@@ -1545,6 +1601,9 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
         'packagedAt': now_ms(),
         'packagedBy': user['user_id']
     }
+    if subscribed_topics:
+        manifest['subscribed_topics'] = list(subscribed_topics)
+    return manifest
 
 
 def build_arch_zip(zip_path: str, arch: str, manifest: Dict, definition_json: str,
@@ -1911,6 +1970,12 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # without an llm_inference node contribute zero findings.
     llm_node_ids = gather_llm_inference_node_ids(definition_dict)
     llm_findings = llm_arch_gate_findings(definition_dict, architectures)
+
+    # Greengrass mqtt_subscribe topic filters (trigger-activation-runtime
+    # 10.1, 10.4): recorded on the manifests and the version item only
+    # when non-empty, so trigger-less packaging output is byte-identical
+    # to pre-feature output.
+    subscribed_topics = gather_subscribed_topics(definition_dict)
     if llm_findings:
         return error_response(
             409, GATE_LLM_ARCH_UNSUPPORTED, llm_findings[0]['message'],
@@ -2082,7 +2147,8 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                 plugin_checksums=arch_plugin_checksums[arch],
                 plugin_components=arch_plugin_components[arch],
                 component_version=resolved_component_version,
-                workflow_name=item.get('name'))
+                workflow_name=item.get('name'),
+                subscribed_topics=subscribed_topics)
             zip_path = os.path.join(work_dir, zip_artifact_name(arch))
             build_arch_zip(zip_path, arch, manifest, packaged_definition_json,
                            arch_compiled_json[arch], gst_plugins,
@@ -2163,26 +2229,35 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # architecture gate for this workflow component, and
     # packaged_architectures is the arch set the gate compares device
     # architectures against (3.3) without re-reading compiled documents.
+    # Greengrass mqtt_subscribe topic filters (trigger-activation-runtime
+    # 10.1, 10.4): the attribute is written ONLY when the set is non-empty,
+    # keeping the version item byte-identical to pre-feature output for
+    # every workflow without a greengrass-enabled mqtt_subscribe node.
+    update_expression = ('SET component_arn = :arn, compiled_arch_keys = :keys, '
+                         'plugin_components = :pc, '
+                         'has_binding_points = :hbp, '
+                         'camera_input_nodes = :cin, '
+                         'has_llm_inference = :hli, '
+                         'packaged_architectures = :pa, '
+                         'packaged_at = :at, packaged_by = :by')
+    update_values = {
+        ':arn': component_arn,
+        ':keys': compiled_arch_keys,
+        ':pc': workflow_plugin_components,
+        ':hbp': bool(camera_nodes),
+        ':cin': _dynamo_safe(camera_input_nodes),
+        ':hli': bool(llm_node_ids),
+        ':pa': architectures,
+        ':at': now_ms(),
+        ':by': user['user_id']
+    }
+    if subscribed_topics:
+        update_expression += ', subscribed_topics = :st'
+        update_values[':st'] = subscribed_topics
     dynamodb.Table(WORKFLOW_VERSIONS_TABLE).update_item(
         Key={'workflow_id': workflow_id, 'version': version},
-        UpdateExpression=('SET component_arn = :arn, compiled_arch_keys = :keys, '
-                          'plugin_components = :pc, '
-                          'has_binding_points = :hbp, '
-                          'camera_input_nodes = :cin, '
-                          'has_llm_inference = :hli, '
-                          'packaged_architectures = :pa, '
-                          'packaged_at = :at, packaged_by = :by'),
-        ExpressionAttributeValues={
-            ':arn': component_arn,
-            ':keys': compiled_arch_keys,
-            ':pc': workflow_plugin_components,
-            ':hbp': bool(camera_nodes),
-            ':cin': _dynamo_safe(camera_input_nodes),
-            ':hli': bool(llm_node_ids),
-            ':pa': architectures,
-            ':at': now_ms(),
-            ':by': user['user_id']
-        }
+        UpdateExpression=update_expression,
+        ExpressionAttributeValues=update_values
     )
 
     # Audit log entry for packaging (Requirement 11.5)
