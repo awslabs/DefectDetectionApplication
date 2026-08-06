@@ -175,15 +175,41 @@ _TRIGGER_PARAM_STRATEGIES = {
 }
 
 
+def _is_aravis_input(node):
+    """Whether this input resolves to an ``aravis_camera_source`` node —
+    directly, or through ``unified_input`` expansion (``compile()``
+    expands unified inputs *before* re-running validation)."""
+    return (
+        node.type == "aravis_camera_source"
+        or (node.type == "unified_input"
+            and node.parameters.get("source_kind") == "aravis_camera")
+    )
+
+
 @st.composite
-def _input_node(draw, node_id):
-    """One CATEGORY_INPUT node: unified_input or a legacy source."""
+def _input_node(draw, node_id, allow_aravis=True):
+    """One CATEGORY_INPUT node: unified_input or a legacy source.
+
+    ``allow_aravis=False`` excludes the Aravis-flavored choices so a
+    graph never carries two ``aravis_camera_source`` nodes after
+    unified_input expansion: the device runtime's single-frame appsrc
+    feed supports exactly one Aravis camera source per workflow
+    (workflow_engine.aravis_feed.plan_aravis_feeds), enforced at
+    validation/compile time by V7_COEXISTENCE_CONFLICT
+    (portal-build-fleet-and-workflow-gates Requirement 8.2).
+    """
     if draw(st.booleans()):
-        source_kind = draw(st.sampled_from(sorted(_SOURCE_KIND_PARAMS)))
+        kinds = sorted(_SOURCE_KIND_PARAMS)
+        if not allow_aravis:
+            kinds = [k for k in kinds if k != "aravis_camera"]
+        source_kind = draw(st.sampled_from(kinds))
         params = dict(_SOURCE_KIND_PARAMS[source_kind])
         params["source_kind"] = source_kind
         return _node(node_id, "unified_input", params)
-    node_type = draw(st.sampled_from(sorted(_LEGACY_INPUT_PARAMS)))
+    types = sorted(_LEGACY_INPUT_PARAMS)
+    if not allow_aravis:
+        types = [t for t in types if t != "aravis_camera_source"]
+    node_type = draw(st.sampled_from(types))
     return _node(node_id, node_type, _LEGACY_INPUT_PARAMS[node_type])
 
 
@@ -216,8 +242,14 @@ def trigger_binding_cases(draw):
 
     input_count = draw(st.integers(min_value=1, max_value=3))
     input_nodes = []
+    aravis_used = False
     for index in range(input_count):
-        input_nodes.append(draw(_input_node("input-{0}".format(index))))
+        # At most one Aravis-flavored input per graph (V7-coexistence
+        # singleton rule; see _input_node).
+        node = draw(_input_node("input-{0}".format(index),
+                                allow_aravis=not aravis_used))
+        aravis_used = aravis_used or _is_aravis_input(node)
+        input_nodes.append(node)
 
     capture = _node("cap", "capture", {"output_path": "/out"})
     stream_connections = [_conn("c-cap", input_nodes[0].id, "cap")]

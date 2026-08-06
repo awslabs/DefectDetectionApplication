@@ -22,10 +22,17 @@ boto3 clients bind to the mock (same re-import pattern as
 test_property_packaging_gates.py). ``has_binding_points`` is asserted
 through the value the handler stores: ``bool(camera_nodes)``.
 
-Generators: definitions with 1..3 source->capture chains, each headed
-by an aravis_camera_source or (mixed) a camera_source, with generated
-camera_id/device values, optional gain/exposure overrides, and optional
-cameraBindingHint node data.
+Generators: definitions with 1..3 source->capture chains, exactly one
+headed by an aravis_camera_source and the rest (mixed) by a
+camera_source, with generated camera_id/device values, optional
+gain/exposure overrides, and optional cameraBindingHint node data.
+The single-Aravis bound encodes the device runtime's Frame_Feed
+contract — the single-frame appsrc feed supports exactly one Aravis
+camera source per workflow (workflow_engine.aravis_feed.
+plan_aravis_feeds raises on >1 Aravis binding point), enforced at
+compile time by the V7_COEXISTENCE_CONFLICT validation rule
+(portal-build-fleet-and-workflow-gates Requirement 8.2), so multi-
+Aravis definitions never reach packaging.
 """
 import json
 import sys
@@ -94,14 +101,21 @@ _hints = st.fixed_dictionaries(
 
 @st.composite
 def _aravis_definitions(draw):
-    """A valid definition of 1..3 source->capture chains, at least one
-    headed by an aravis_camera_source, the rest optionally mixed with
-    camera_source chains. Returns (definition, aravis_specs, camera_ids)
-    where aravis_specs maps node id -> (parameters, hint-or-None) and
-    camera_ids is the full ordered list of Camera_Input_Node ids."""
+    """A valid definition of 1..3 source->capture chains, exactly one
+    headed by an aravis_camera_source, the rest mixed with camera_source
+    chains. Returns (definition, aravis_specs, camera_ids) where
+    aravis_specs maps node id -> (parameters, hint-or-None) and
+    camera_ids is the full ordered list of Camera_Input_Node ids.
+
+    Exactly one Aravis chain per definition: the workflow validator's
+    V7_COEXISTENCE_CONFLICT rule (portal-build-fleet-and-workflow-gates
+    Requirement 8.2) makes compile() refuse >1 aravis_camera_source per
+    workflow, mirroring the device runtime contract
+    (workflow_engine.aravis_feed.plan_aravis_feeds supports exactly one
+    Aravis camera source per single-frame appsrc feed)."""
     chain_count = draw(st.integers(min_value=1, max_value=3))
-    aravis_indices = draw(st.sets(
-        st.integers(min_value=0, max_value=chain_count - 1), min_size=1))
+    aravis_indices = {draw(st.integers(
+        min_value=0, max_value=chain_count - 1))}
 
     nodes, connections = [], []
     aravis_specs, camera_node_ids = {}, []

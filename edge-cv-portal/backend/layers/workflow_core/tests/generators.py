@@ -70,6 +70,7 @@ from workflow_core.validator import (
     CODE_V3_CYCLE,
     CODE_V4_MISSING_REQUIRED_PARAMETER,
     CODE_V5_UNREACHABLE_NODE,
+    COEXISTENCE_SINGLETON_TYPES,
     check_parameter_value,
     is_parameter_value_valid,
 )
@@ -295,11 +296,37 @@ class _GraphBuilder:
         self.connections: List[Connection] = []
         #: (node_id, port_name, effective_port_type) for every output port.
         self.sources: List[Tuple[str, str, str]] = []
+        #: Coexistence-singleton node types already present in the graph
+        #: (see :meth:`coexistence_safe`).
+        self._singleton_types_present: set = set()
+
+    def coexistence_safe(self, type_ids: Sequence[str]) -> Tuple[str, ...]:
+        """``type_ids`` minus any coexistence-singleton type the graph
+        already contains.
+
+        The device runtime allows at most one node of each type in
+        :data:`COEXISTENCE_SINGLETON_TYPES` per workflow — today
+        ``aravis_camera_source``, whose single-frame appsrc Frame_Feed
+        supports exactly one Aravis camera source per workflow
+        (``workflow_engine.aravis_feed.plan_aravis_feeds`` raises on
+        documents carrying more than one Aravis binding point). The
+        validator's V7_COEXISTENCE_CONFLICT check
+        (portal-build-fleet-and-workflow-gates Requirement 8.2) enforces
+        the same contract, so *valid*-graph generation must never emit a
+        second instance of such a type.
+        """
+        return tuple(
+            type_id for type_id in type_ids
+            if not (type_id in COEXISTENCE_SINGLETON_TYPES
+                    and type_id in self._singleton_types_present)
+        )
 
     def add_node(self, type_id: str, forced_params: Optional[Dict[str, Any]] = None,
                  register_outputs: bool = True) -> Node:
         descriptor = get_node_type(type_id)
         assert descriptor is not None, type_id
+        if type_id in COEXISTENCE_SINGLETON_TYPES:
+            self._singleton_types_present.add(type_id)
         self._node_counter += 1
         node = Node(
             id="{}{}".format(self._node_prefix, self._node_counter),
@@ -342,14 +369,18 @@ class _GraphBuilder:
         port its own feeder.
         """
         shared_feeder = self._draw(st.booleans())
+        # coexistence_safe: at most one aravis_camera_source per graph
+        # (see the method docstring for the runtime-contract grounding).
         first = self.add_node(
-            self._draw(st.sampled_from(_VIDEO_INPUT_TYPES)),
+            self._draw(st.sampled_from(self.coexistence_safe(_VIDEO_INPUT_TYPES))),
             register_outputs=False,
         )
         second = (
             first if shared_feeder
             else self.add_node(
-                self._draw(st.sampled_from(_VIDEO_INPUT_TYPES)),
+                self._draw(
+                    st.sampled_from(self.coexistence_safe(_VIDEO_INPUT_TYPES))
+                ),
                 register_outputs=False,
             )
         )
@@ -444,9 +475,14 @@ def graph_strategy(
     hub = draw(st.booleans())
 
     # V1 + wiring feasibility: at least one VideoFrames-producing input.
+    # coexistence_safe keeps the graph valid under the V7-coexistence rule
+    # (portal-build-fleet-and-workflow-gates Requirement 8.2): at most one
+    # aravis_camera_source per workflow, matching the device runtime's
+    # single Frame_Feed contract (workflow_engine.aravis_feed.
+    # plan_aravis_feeds rejects >1 Aravis binding point per workflow).
     builder.add_node(draw(st.sampled_from(_VIDEO_INPUT_TYPES)))
     for _ in range(draw(st.integers(min_value=0, max_value=max_extra_inputs))):
-        builder.add_node(draw(st.sampled_from(_INPUT_TYPES)))
+        builder.add_node(draw(st.sampled_from(builder.coexistence_safe(_INPUT_TYPES))))
 
     for _ in range(draw(st.integers(min_value=0, max_value=max_intermediates))):
         feasible = builder.feasible_consumer_types(_INTERMEDIATE_TYPES)
@@ -585,9 +621,14 @@ def seeded_graph_strategy(draw, defect_classes: Optional[Sequence[str]] = None):
 
     # --- valid base structure (minus the classes seeded by omission) ------
     if include_inputs:
+        # coexistence_safe: at most one aravis_camera_source (singleton
+        # runtime contract, see graph_strategy) so seeded graphs never
+        # carry V7_COEXISTENCE_CONFLICT findings beyond `expected`.
         builder.add_node(draw(st.sampled_from(_VIDEO_INPUT_TYPES)))
         for _ in range(draw(st.integers(min_value=0, max_value=1))):
-            builder.add_node(draw(st.sampled_from(_INPUT_TYPES)))
+            builder.add_node(
+                draw(st.sampled_from(builder.coexistence_safe(_INPUT_TYPES)))
+            )
         for _ in range(draw(st.integers(min_value=0, max_value=2))):
             feasible = builder.feasible_consumer_types(_INTERMEDIATE_TYPES)
             builder.add_wired_consumer(draw(st.sampled_from(feasible)), hub)

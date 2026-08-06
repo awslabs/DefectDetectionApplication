@@ -115,6 +115,7 @@ from workflow_core.validator.checks import (
     _check_v5,
     _check_v6,
     _check_v7,
+    _check_v7_coexistence,
     _check_w1,
 )
 
@@ -552,7 +553,15 @@ def _prefeature_validate(graph: WorkflowGraph) -> List[ValidationFinding]:
     """The pre-trigger-activation-runtime ``validate()``: the identical
     unknown-node-type pass followed by the identical, feature-untouched
     check functions V1–V7 and W1 — everything except the appended
-    ``_check_v8``/``_check_v9``."""
+    ``_check_v8``/``_check_v9``.
+
+    ``_check_v7_coexistence`` (portal-build-fleet-and-workflow-gates
+    Requirement 8.2, grounded in the device runtime's single-Aravis
+    Frame_Feed contract — workflow_engine.aravis_feed.plan_aravis_feeds)
+    was appended to ``validate()`` by a *different* feature and is not a
+    V8/V9 trigger check, so the reconstructed oracle includes it: the
+    pipeline "minus the two new trigger checks" carries every other
+    current check."""
     typed_nodes, findings = _typed_nodes(graph)
     findings.extend(_check_v1(graph, typed_nodes))
     findings.extend(_check_v2(graph, typed_nodes))
@@ -560,6 +569,7 @@ def _prefeature_validate(graph: WorkflowGraph) -> List[ValidationFinding]:
     findings.extend(_check_v4(graph, typed_nodes))
     findings.extend(_check_v5(graph, typed_nodes))
     findings.extend(_check_v6(graph, typed_nodes))
+    findings.extend(_check_v7_coexistence(graph))
     findings.extend(_check_w1(graph, typed_nodes))
     findings.extend(_check_v7(graph, typed_nodes))
     return findings
