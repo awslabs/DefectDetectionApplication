@@ -113,6 +113,29 @@ CODE_V8_MQTT_SUB_NO_TARGET = "V8_MQTT_SUB_NO_TARGET"
 # (``digital_input`` alone does not engage V9).
 CODE_V9_MIXED_ACTIVATION_MODEL = "V9_MIXED_ACTIVATION_MODEL"
 
+# V7-coexistence (portal-build-fleet-and-workflow-gates Requirement 8.2):
+# note the "V7" prefix was independently assigned by two features; the
+# finding-code strings remain distinct (V7_STAGE_ORDER vs
+# V7_COEXISTENCE_CONFLICT) so no consumer is ambiguous. Node types
+# that cannot coexist in one workflow. The rule table below is grounded
+# in real runtime contracts of the workflow engine; today the single
+# entry is ``aravis_camera_source``, whose single-frame appsrc Frame_Feed
+# supports exactly one Aravis camera source per workflow (a document
+# with more than one Aravis binding point fails feed planning on the
+# device — see workflow_engine.aravis_feed.plan_aravis_feeds). V7
+# surfaces that conflict at validation time, one error finding per
+# offending node, each naming the full conflicting membership.
+CODE_V7_COEXISTENCE_CONFLICT = "V7_COEXISTENCE_CONFLICT"
+
+#: Node types allowed at most once per workflow: two or more instances
+#: cannot coexist. Maps type id -> the plain-language reason.
+COEXISTENCE_SINGLETON_TYPES: Dict[str, str] = {
+    "aravis_camera_source": (
+        "the single-frame appsrc feed supports exactly one Aravis "
+        "camera source per workflow"
+    ),
+}
+
 # W1 warnings (Requirement 4.6)
 CODE_W1_OUTPUT_NODE_NO_INPUT = "W1_OUTPUT_NODE_NO_INPUT"
 CODE_W1_UNUSED_OUTPUT_PORT = "W1_UNUSED_OUTPUT_PORT"
@@ -221,6 +244,7 @@ def validate(
     findings.extend(_check_v4(graph, typed_nodes))
     findings.extend(_check_v5(graph, typed_nodes))
     findings.extend(_check_v6(graph, typed_nodes))
+    findings.extend(_check_v7_coexistence(graph))
     findings.extend(_check_w1(graph, typed_nodes))
     findings.extend(_check_v7(graph, typed_nodes))
     findings.extend(_check_v8(graph, typed_nodes))
@@ -781,6 +805,49 @@ def _check_v9(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) 
                 "port: a workflow with subscription triggers must drive every "
                 "input from a trigger".format(node.id),
                 node_id=node.id,
+            ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# V7-coexistence: node-type coexistence conflicts
+# (portal-build-fleet-and-workflow-gates Requirement 8.2)
+# --------------------------------------------------------------------------
+
+def _check_v7_coexistence(graph: WorkflowGraph) -> List[ValidationFinding]:
+    """Report node types that cannot coexist in one workflow.
+
+    Driven by :data:`COEXISTENCE_SINGLETON_TYPES` — node types whose
+    runtime contract allows at most one instance per workflow. When two
+    or more nodes of such a type are present, every one of them gets an
+    error finding naming the full conflicting membership (mirroring the
+    V3 cycle-reporting shape), so each offending node is individually
+    addressable by the caller.
+
+    The check keys on ``node.type`` directly (not the catalog) so a
+    conflict is reported even when the type is also unknown to the
+    catalog in use.
+    """
+    findings = []
+    by_type: Dict[str, List[str]] = {}
+    for node in graph.nodes:
+        if node.type in COEXISTENCE_SINGLETON_TYPES:
+            by_type.setdefault(node.type, []).append(node.id)
+
+    for node_type, node_ids in sorted(by_type.items()):
+        if len(node_ids) < 2:
+            continue
+        reason = COEXISTENCE_SINGLETON_TYPES[node_type]
+        members = ", ".join("'{0}'".format(i) for i in sorted(node_ids))
+        for node_id in sorted(node_ids):
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V7_COEXISTENCE_CONFLICT,
+                "Node '{0}': {1} nodes of type '{2}' cannot coexist in "
+                "one workflow ({3}): {4}".format(
+                    node_id, len(node_ids), node_type, members, reason
+                ),
+                node_id=node_id,
             ))
     return findings
 

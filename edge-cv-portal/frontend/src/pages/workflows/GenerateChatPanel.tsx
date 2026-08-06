@@ -20,6 +20,15 @@
  *     the error, leaves the canvas unchanged, and preserves the typed
  *     prompt in the input for retry (10.4, 10.7).
  *
+ * Generation_Gate handling (portal-build-fleet-and-workflow-gates
+ * Requirements 8.6, 8.8): a 422 `GENERATION_REJECTED` /
+ * `GENERATION_VALIDATION_INCOMPLETE` rejection renders an error Alert
+ * listing each structural error with the affected nodes/connections
+ * (display name, falling back to id) and a plain-language explanation,
+ * with the prompt kept in the input for retry (cleared only on 200); a
+ * repaired acceptance (`gate.repaired`) renders an info Alert listing
+ * the corrected original structural errors.
+ *
  * Task 11.6's test panel is the sibling drawer tab; this component is
  * self-contained and exposes no canvas state beyond the
  * `onApplyGenerated` callback. It stays mounted while the drawer is
@@ -36,11 +45,12 @@ import Input from '@cloudscape-design/components/input';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import Textarea from '@cloudscape-design/components/textarea';
-import { apiService } from '../../services/api';
+import { ApiError, apiService } from '../../services/api';
 import type { UserRole } from '../../types';
 import { fromWorkflowDefinition, type BuilderNode } from './builderGraph';
 import { canEditWorkflows } from './WorkflowToolbar';
 import type {
+  GenerationStructuralError,
   NodeTypeDescriptor,
   ValidationFinding,
   WorkflowDefinition,
@@ -71,6 +81,41 @@ export interface GenerateChatPanelProps {
    * parse; the parent replaces the canvas contents (10.3).
    */
   onApplyGenerated: (generated: { nodes: BuilderNode[]; edges: Edge[] }) => void;
+}
+
+/**
+ * Error codes of a Generation_Gate rejection
+ * (portal-build-fleet-and-workflow-gates Req 8.5, 8.8, 8.11): structural
+ * rejection and the fail-closed validator-incomplete path. Both leave the
+ * canvas unchanged and preserve the prompt for retry.
+ */
+const GATE_REJECTION_CODES = new Set([
+  'GENERATION_REJECTED',
+  'GENERATION_VALIDATION_INCOMPLETE',
+]);
+
+/** One gate rejection held for display (Req 8.8). */
+interface GateRejection {
+  message: string;
+  structuralErrors: GenerationStructuralError[];
+}
+
+/**
+ * The affected nodes/connections of one structural error, identified by
+ * display name with the id as fallback (Req 8.8); null when the error is
+ * graph-level (no affected elements).
+ */
+function affectedLabel(error: GenerationStructuralError): string | null {
+  if (error.affected.length === 0) {
+    return null;
+  }
+  return error.affected
+    .map((element) =>
+      element.displayName && element.displayName.trim() !== ''
+        ? element.displayName
+        : element.id
+    )
+    .join(', ');
 }
 
 /** Summary line for the backend validation findings of a generation. */
@@ -121,6 +166,13 @@ export default function GenerateChatPanel({
   const [error, setError] = useState<string | null>(null);
   const [findings, setFindings] = useState<ValidationFinding[] | null>(null);
   const [resultSummary, setResultSummary] = useState<string | null>(null);
+  // Generation_Gate rejection (422 GENERATION_REJECTED /
+  // GENERATION_VALIDATION_INCOMPLETE): the structural errors are listed
+  // in an error Alert and the prompt stays in the input for retry (8.8).
+  const [rejection, setRejection] = useState<GateRejection | null>(null);
+  // Repaired acceptance (gate.repaired): the corrected original
+  // Structural_Errors are listed in an info Alert (8.6).
+  const [correctedErrors, setCorrectedErrors] = useState<ValidationFinding[] | null>(null);
 
   const handleSend = useCallback(async () => {
     const trimmed = prompt.trim();
@@ -131,6 +183,8 @@ export default function GenerateChatPanel({
     setError(null);
     setFindings(null);
     setResultSummary(null);
+    setRejection(null);
+    setCorrectedErrors(null);
     try {
       const definition = getDefinition();
       const result = await apiService.generateWorkflow({
@@ -166,8 +220,27 @@ export default function GenerateChatPanel({
       ]);
       setFindings(result.findings);
       setResultSummary(validationSummary(result));
+      // Repaired acceptance: surface the automatic-correction notice
+      // with the corrected original Structural_Errors (8.6).
+      if (result.gate?.repaired) {
+        setCorrectedErrors(result.gate.corrected_errors);
+      }
       setPrompt('');
     } catch (err) {
+      // Generation_Gate rejection (8.5, 8.7, 8.11): list each structural
+      // error with its affected elements and plain-language explanation;
+      // the canvas stays unchanged and the prompt stays in the input for
+      // retry (8.8; the prompt is cleared only on a 200 above).
+      if (err instanceof ApiError && err.code !== undefined && GATE_REJECTION_CODES.has(err.code)) {
+        const structuralErrors = err.details?.structural_errors;
+        setRejection({
+          message: err.message,
+          structuralErrors: Array.isArray(structuralErrors)
+            ? (structuralErrors as GenerationStructuralError[])
+            : [],
+        });
+        return;
+      }
       // API error (backend parse failure, Bedrock failure, timeout) or
       // client-side parse failure: display the error, leave the canvas
       // unchanged, and preserve the prompt for retry (10.4, 10.7).
@@ -231,6 +304,57 @@ export default function GenerateChatPanel({
             onDismiss={() => setError(null)}
           >
             {error} Your prompt is preserved below - you can retry.
+          </Alert>
+        )}
+
+        {rejection !== null && (
+          <Alert
+            type="error"
+            header="Generation rejected"
+            dismissible
+            onDismiss={() => setRejection(null)}
+          >
+            <SpaceBetween size="xs">
+              <span>{rejection.message} Your prompt is preserved below - you can retry.</span>
+              {rejection.structuralErrors.length > 0 && (
+                <ul aria-label="Structural errors" style={{ margin: 0, paddingLeft: 18 }}>
+                  {rejection.structuralErrors.map((structuralError, index) => {
+                    const affected = affectedLabel(structuralError);
+                    return (
+                      <li key={`${structuralError.code}-${index}`}>
+                        {affected !== null && <Box variant="strong">{affected}: </Box>}
+                        {structuralError.explanation}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </SpaceBetween>
+          </Alert>
+        )}
+
+        {correctedErrors !== null && (
+          <Alert
+            type="info"
+            header="Automatic correction applied"
+            dismissible
+            onDismiss={() => setCorrectedErrors(null)}
+          >
+            <SpaceBetween size="xs">
+              <span>
+                The generated workflow had structural errors that were corrected automatically
+                before it was rendered on the canvas:
+              </span>
+              <ul aria-label="Corrected structural errors" style={{ margin: 0, paddingLeft: 18 }}>
+                {correctedErrors.map((corrected, index) => (
+                  <li key={`${corrected.code}-${index}`}>
+                    {corrected.code}: {corrected.message}
+                    {corrected.nodeId !== null && ` (node: ${corrected.nodeId})`}
+                    {corrected.connectionId !== null && ` (connection: ${corrected.connectionId})`}
+                  </li>
+                ))}
+              </ul>
+            </SpaceBetween>
           </Alert>
         )}
 

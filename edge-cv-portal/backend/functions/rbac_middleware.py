@@ -327,6 +327,18 @@ class CommonPermissions:
     ]
     REVIEW_NODE_DESIGNER = [Permission.NODE_DESIGNER_SECURITY_REVIEW]
 
+    # Build Fleet Operations (portal-build-fleet-and-workflow-gates)
+    # Role mapping (see shared_utils.RBACManager):
+    #   builds:submit/cancel/read -> DataScientist, UseCaseAdmin, PortalAdmin
+    #                                (the Build_Operator capability)
+    # Builds are not Use_Case-scoped: check these permissions with
+    # rbac_check(..., allow_global=True) so the scope resolves to
+    # 'global'. Denials return the standard authorization error and
+    # record a denied-access Audit_Log entry (Req 1.6, 4.10, 9.6).
+    SUBMIT_BUILDS = [Permission.BUILDS_SUBMIT]
+    CANCEL_BUILDS = [Permission.BUILDS_CANCEL]
+    VIEW_BUILDS = [Permission.BUILDS_READ]
+
 
 # Convenience decorators for common permission patterns
 def require_data_scientist_or_admin(usecase_param: str = 'usecase_id'):
@@ -383,3 +395,25 @@ def require_node_designer_manage(usecase_param: str = 'usecase_id'):
 def require_node_designer_security_review(usecase_param: str = 'usecase_id'):
     """Require node-designer:security-review (PortalAdmin only, 13.2)"""
     return rbac_check(CommonPermissions.REVIEW_NODE_DESIGNER, usecase_param)
+
+
+def require_builds_submit():
+    """Require builds:submit (DataScientist, UseCaseAdmin, PortalAdmin).
+
+    Global scope: builds are not Use_Case-scoped (Req 1.6)."""
+    return rbac_check(CommonPermissions.SUBMIT_BUILDS, allow_global=True)
+
+
+def require_builds_cancel():
+    """Require builds:cancel (DataScientist, UseCaseAdmin, PortalAdmin).
+
+    Global scope: builds are not Use_Case-scoped (Req 4.10)."""
+    return rbac_check(CommonPermissions.CANCEL_BUILDS, allow_global=True)
+
+
+def require_builds_read():
+    """Require builds:read (DataScientist, UseCaseAdmin, PortalAdmin).
+
+    Global scope: builds are not Use_Case-scoped. Read is restricted to
+    Build_Operators too (build logs may contain account identifiers)."""
+    return rbac_check(CommonPermissions.VIEW_BUILDS, allow_global=True)

@@ -24,6 +24,13 @@ import type {
   DeviceCamerasResponse,
 } from '../pages/workflows/cameraReference';
 import type { CameraBindingContext } from '../pages/deployments/cameraBindings';
+import type {
+  BuildJob,
+  BuildJobsPage,
+  BuildLogsPage,
+  SubmitBuildRequest,
+  SubmitBuildResponse,
+} from '../pages/builds/types';
 import { beginRequest, endRequest } from './loadingBus';
 
 /**
@@ -118,10 +125,119 @@ export interface EdgeSyncDevice {
   failureReason?: string | null;
 }
 
+// Build infrastructure configuration types
+// (portal-build-fleet-and-workflow-gates Requirement 9).
+
+/**
+ * Effective build infrastructure configuration as returned by
+ * `GET /build-config`: stored values merged over the documented defaults
+ * (arm64 m6g.4xlarge, x86_64 m6i.4xlarge, 100 GB, us-east-1, 4 h,
+ * spot off, source_ref null = repository default branch).
+ */
+export interface BuildInfrastructureConfig {
+  arm64_instance_type: string;
+  x86_64_instance_type: string;
+  volume_size_gb: number;
+  region: string;
+  max_runtime_hours: number;
+  use_spot_for_ephemeral: boolean;
+  /** null means "the repository's default branch". */
+  source_ref: string | null;
+}
+
+/**
+ * One per-parameter rejection from `PUT /build-config`
+ * (CONFIG_INVALID `details.errors`, Requirement 9.5): the failed
+ * validation rule, the invalid parameter, and a user-readable message.
+ */
+export interface BuildConfigValidationError {
+  rule: string;
+  parameter?: string;
+  message: string;
+}
+
+/** One applied change recorded by `PUT /build-config` (Requirement 9.4). */
+export interface BuildConfigChange {
+  parameter: string;
+  prior_value: unknown;
+  new_value: unknown;
+}
+
+/**
+ * Partial configuration update for `PUT /build-config`. Values are sent
+ * as entered (the backend validates and rejects atomically with
+ * per-parameter errors); null reverts a field to its documented default.
+ */
+export type BuildInfrastructureConfigUpdate = Partial<
+  Record<keyof BuildInfrastructureConfig, string | number | boolean | null>
+>;
+
 /** Response of `GET /api/v1/admin/edge-sync/devices` (user_admin.py). */
 export interface EdgeSyncDevicesResponse {
   devices: EdgeSyncDevice[];
   count: number;
+}
+
+// Build fleet types (portal-build-fleet-and-workflow-gates).
+
+/**
+ * EC2 lifecycle state of a Dedicated_Build_Server — exactly the six
+ * states of Requirement 6.1.
+ */
+export type BuildServerLifecycleState =
+  | 'pending'
+  | 'running'
+  | 'stopping'
+  | 'stopped'
+  | 'shutting-down'
+  | 'terminated';
+
+/** CPU architecture of a Dedicated_Build_Server (Requirement 6.5). */
+export type BuildServerArchitecture = 'arm64' | 'x86_64';
+
+/**
+ * Marker of an accepted fleet action that has not yet reached its
+ * expected lifecycle state (build_fleet.py, Requirement 6.11). The
+ * dispatcher reports the action failed when `deadline` (epoch ms)
+ * passes before `expected_state` is observed.
+ */
+export interface BuildServerPendingAction {
+  action: 'launch' | 'start' | 'stop' | 'terminate';
+  requested_by: string;
+  /** Epoch milliseconds. */
+  requested_at: number;
+  /** Epoch milliseconds; 10 minutes after the action was accepted. */
+  deadline: number;
+  expected_state: BuildServerLifecycleState;
+}
+
+/**
+ * One Dedicated_Build_Server as returned by `GET /build-servers`
+ * (build_fleet.py, Requirement 6.1): name, instance identifier,
+ * instance type, CPU architecture, lifecycle state (reconciled live
+ * against EC2), the running Build_Job when one exists, and the time of
+ * the last state change.
+ */
+export interface BuildServer {
+  server_id: string;
+  name: string;
+  instance_id: string;
+  instance_type: string;
+  cpu_architecture: BuildServerArchitecture;
+  lifecycle_state: BuildServerLifecycleState;
+  /** Present iff a Build_Job is currently running on the server. */
+  running_build_job_id?: string | null;
+  /** Epoch milliseconds of the last lifecycle state change. */
+  last_state_change_at?: number | null;
+  pending_action?: BuildServerPendingAction | null;
+  created_by?: string;
+  created_at?: number;
+  terminated_at?: number | null;
+}
+
+/** Response of `GET /build-servers` (build_fleet.py). */
+export interface BuildServersResponse {
+  servers: BuildServer[];
 }
 
 // vLLM model registration types (vllm-triton-inference).
@@ -519,6 +635,73 @@ class ApiService {
     return this.request<{ message: string }>(
       `/admin/edge-sync/devices/${encodeURIComponent(deviceId)}`,
       { method: 'POST', body: JSON.stringify({ usernames }) }
+    );
+  }
+
+  // Build fleet endpoints (portal-build-fleet-and-workflow-gates).
+
+  /**
+   * The Dedicated_Build_Server fleet list with live EC2 lifecycle state
+   * reconciliation (`build_fleet.py`, Requirement 6.1).
+   */
+  async listBuildServers(): Promise<BuildServersResponse> {
+    return this.request<BuildServersResponse>('/build-servers');
+  }
+
+  /**
+   * Launch a new Dedicated_Build_Server of the selected CPU architecture
+   * (`build_fleet.py`, Requirement 6.5). PortalAdmin only (6.7); a 400
+   * identifies the missing name or invalid architecture.
+   */
+  async launchBuildServer(body: {
+    name: string;
+    architecture: BuildServerArchitecture;
+  }): Promise<{ server: BuildServer }> {
+    return this.request<{ server: BuildServer }>('/build-servers', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Start a stopped Dedicated_Build_Server (`build_fleet.py`,
+   * Requirements 6.2, 6.10). PortalAdmin only (6.7); a 409 identifies
+   * the server's current lifecycle state when start is not permitted.
+   */
+  async startBuildServer(serverId: string): Promise<{ server: BuildServer }> {
+    return this.request<{ server: BuildServer }>(
+      `/build-servers/${encodeURIComponent(serverId)}/start`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Stop a running Dedicated_Build_Server with no running Build_Job
+   * (`build_fleet.py`, Requirements 6.3, 6.4, 6.10). PortalAdmin only
+   * (6.7); a 409 identifies the current lifecycle state or the running
+   * Build_Job when stop is not permitted.
+   */
+  async stopBuildServer(serverId: string): Promise<{ server: BuildServer }> {
+    return this.request<{ server: BuildServer }>(
+      `/build-servers/${encodeURIComponent(serverId)}/stop`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Terminate a Dedicated_Build_Server. The request body must echo the
+   * server's exact name as `confirm` — anything else performs no
+   * termination and leaves the server unchanged (`build_fleet.py`,
+   * Requirements 6.6, 6.12). PortalAdmin only (6.7); a 409 identifies a
+   * running Build_Job or a lifecycle state that forbids termination.
+   */
+  async terminateBuildServer(
+    serverId: string,
+    confirm: string
+  ): Promise<{ server: BuildServer }> {
+    return this.request<{ server: BuildServer }>(
+      `/build-servers/${encodeURIComponent(serverId)}`,
+      { method: 'DELETE', body: JSON.stringify({ confirm }) }
     );
   }
 
@@ -2592,6 +2775,27 @@ class ApiService {
     });
   }
 
+  // Build infrastructure configuration endpoints (build_config.py,
+  // portal-build-fleet-and-workflow-gates Requirement 9). GET returns the
+  // effective configuration with documented defaults applied per field
+  // (builds:read); PUT is PortalAdmin-only and applies a partial update
+  // atomically — an invalid update is rejected in full with code
+  // CONFIG_INVALID and per-parameter errors in details.errors
+  // (Requirements 9.1, 9.5).
+  async getBuildConfig(): Promise<{ config: BuildInfrastructureConfig }> {
+    return this.request('/build-config');
+  }
+
+  async updateBuildConfig(config: BuildInfrastructureConfigUpdate): Promise<{
+    config: BuildInfrastructureConfig;
+    changes: BuildConfigChange[];
+  }> {
+    return this.request('/build-config', {
+      method: 'PUT',
+      body: JSON.stringify({ config }),
+    });
+  }
+
   // Component Configuration endpoints
   async getComponentConfigurationSchema(componentName: string): Promise<{
     component_name: string;
@@ -2866,6 +3070,78 @@ class ApiService {
   // stubActivity, error} produced so far (Requirements 12.7, 12.10).
   async getTestRun(testRunId: string): Promise<WorkflowTestRunDetail> {
     return this.request(`/test-runs/${encodeURIComponent(testRunId)}`);
+  }
+
+  // Build fleet endpoints (portal-build-fleet-and-workflow-gates).
+
+  /**
+   * Submit a build request: one Build_Job is created per selected
+   * Build_Target in request order (Req 1.1, 1.2, 1.3, 2.1).
+   */
+  async submitBuild(data: SubmitBuildRequest): Promise<SubmitBuildResponse> {
+    return this.request('/builds', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * One page of the 90-day Build_Job history, most recent first
+   * (Req 4.7). Pass the returned nextToken to fetch the next page.
+   */
+  async listBuilds(params?: {
+    limit?: number;
+    nextToken?: string;
+  }): Promise<BuildJobsPage> {
+    const query = new URLSearchParams();
+    if (params?.limit) query.set('limit', String(params.limit));
+    if (params?.nextToken) query.set('nextToken', params.nextToken);
+    const qs = query.toString();
+    return this.request(`/builds${qs ? `?${qs}` : ''}`);
+  }
+
+  /** Build_Job detail (Req 4.3). */
+  async getBuild(buildJobId: string): Promise<{ job: BuildJob }> {
+    return this.request(`/builds/${encodeURIComponent(buildJobId)}`);
+  }
+
+  /**
+   * One CloudWatch Logs page of the job's build log (Req 4.4).
+   * CloudWatch returns the same nextToken when the page is exhausted;
+   * keep polling that token for new output of a running build.
+   */
+  async getBuildLogs(
+    buildJobId: string,
+    params?: { limit?: number; nextToken?: string }
+  ): Promise<BuildLogsPage> {
+    const query = new URLSearchParams();
+    if (params?.limit) query.set('limit', String(params.limit));
+    if (params?.nextToken) query.set('nextToken', params.nextToken);
+    const qs = query.toString();
+    return this.request(
+      `/builds/${encodeURIComponent(buildJobId)}/logs${qs ? `?${qs}` : ''}`
+    );
+  }
+
+  /**
+   * Cancel a queued or running Build_Job (Req 4.5, 4.6); terminal jobs
+   * are rejected with 409 (Req 4.8).
+   */
+  async cancelBuild(buildJobId: string): Promise<{ job: BuildJob }> {
+    return this.request(`/builds/${encodeURIComponent(buildJobId)}/cancel`, {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * Retry an interrupted Build_Job: creates a new Build_Job with the
+   * same Build_Target and execution mode plus a retry_of reference
+   * (Req 3.6).
+   */
+  async retryBuild(buildJobId: string): Promise<{ job: BuildJob }> {
+    return this.request(`/builds/${encodeURIComponent(buildJobId)}/retry`, {
+      method: 'POST',
+    });
   }
 
   // Manifest Validator endpoints
