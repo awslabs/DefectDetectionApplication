@@ -131,9 +131,14 @@ def wait_for_execution(client, execution_id, timeout=POLL_TIMEOUT_SEC):
     )
 
 
-def wait_for_registration_status(client, registration_id, status):
+def wait_for_registration_status(
+    client, registration_id, status, include_inactive=False
+):
     def matches():
-        response = client.get("/workflows/registrations")
+        url = "/workflows/registrations"
+        if include_inactive:
+            url += "?includeInactive=true"
+        response = client.get(url)
         assert response.status_code == 200
         for registration in response.json():
             if (registration["registrationId"] == registration_id
@@ -402,10 +407,13 @@ class TestDeployAndRemoveWhilePipelineRuns:
         )
         assert registration["arch"] == DEVICE_ARCH
 
-        # ... and later removes it, still mid-run.
+        # ... and later removes it, still mid-run. Stale-workflow-
+        # registrations bugfix (expected behavior 2.2/2.4): the vanished
+        # directory retires the registration as 'removed' (row preserved)
+        # and the default listing filters it, so poll includeInactive.
         shutil.rmtree(os.path.join(workflow_root, "wf-iso"))
         invalidated = wait_for_registration_status(
-            client, "wf-iso:1", "invalid"
+            client, "wf-iso:1", "removed", include_inactive=True
         )
         assert "removed" in invalidated["invalidReason"]
 

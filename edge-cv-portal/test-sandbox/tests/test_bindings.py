@@ -195,6 +195,64 @@ class TestExecuteBindings:
         assert store.record("dout")["stubActivity"][0]["triggered"] is False
         assert store.has_failure()
 
+    # Feature: modbus-tcp-output — recording_modbus_write resolves through
+    # the same prefix-generic recorder path as the existing hardware
+    # outputs (Requirements 7.1, 7.2); zero harness changes.
+    MODBUS_PARAMETERS = {
+        "host": "192.168.1.30", "port": 502, "unit_id": 1,
+        "register_type": "coil", "address": 12,
+        "value_template": "{is_anomalous}", "pulse_ms": 0,
+    }
+
+    def _modbus_conditional_bindings(self, condition="is_anomalous == true"):
+        """conditional 'br' routing to 'mb_true' (true path) and 'mb_false'
+        (false path), each a recording_modbus_write stub."""
+        return [
+            {"nodeId": "br", "binding": "conditional",
+             "parameters": {"condition": condition},
+             "upstreamNodeIds": ["inf"],
+             "downstreamNodeIds": ["mb_true", "mb_false"],
+             "downstreamNodeIdsByPort": {"true": ["mb_true"],
+                                         "false": ["mb_false"]},
+             "portConditions": {"true": condition,
+                                "false": "!({0})".format(condition)}},
+            {"nodeId": "mb_true", "binding": "recording_modbus_write",
+             "parameters": dict(self.MODBUS_PARAMETERS),
+             "upstreamNodeIds": ["br"], "downstreamNodeIds": []},
+            {"nodeId": "mb_false", "binding": "recording_modbus_write",
+             "parameters": dict(self.MODBUS_PARAMETERS,
+                                register_type="holding_register",
+                                address=40001),
+             "upstreamNodeIds": ["br"], "downstreamNodeIds": []},
+        ]
+
+    def test_modbus_recording_records_parameters_and_metadata_when_gate_passes(self):
+        # Requirement 7.1: a recording_modbus_write whose gates passed is
+        # recorded with its parameters and the triggering metadata.
+        store, snapshots = _store(["br", "mb_true", "mb_false"])
+        execute_bindings(self._modbus_conditional_bindings(), METADATA, store)
+
+        record = store.record("mb_true")
+        assert record["status"] == "completed"
+        activity = record["stubActivity"][0]
+        assert activity["type"] == "recorded_actuation"
+        assert activity["binding"] == "recording_modbus_write"
+        assert activity["parameters"] == self.MODBUS_PARAMETERS
+        assert activity["triggered"] is True
+        assert activity["triggeringMetadata"] == METADATA
+        assert snapshots  # flushed incrementally
+
+    def test_modbus_recording_not_triggered_behind_false_conditional(self):
+        # Requirement 7.2: a recording_modbus_write gated out by the
+        # conditional's non-passing port records as not triggered.
+        store, _ = _store(["br", "mb_true", "mb_false"])
+        execute_bindings(self._modbus_conditional_bindings(), METADATA, store)
+
+        activity = store.record("mb_false")["stubActivity"][0]
+        assert activity["triggered"] is False
+        assert activity["binding"] == "recording_modbus_write"
+        assert store.record("mb_false")["status"] == "completed"
+
     def test_non_recording_non_filter_bindings_untouched(self):
         # A non-simulation binding (device digital_input) is not executed
         # by the recorder path; nothing is recorded against it here.

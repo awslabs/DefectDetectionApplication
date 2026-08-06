@@ -63,6 +63,20 @@ REQUIRED_FILES = (MANIFEST_FILE, WORKFLOW_FILE, COMPILED_PIPELINE_FILE)
 STATUS_REGISTERED = "registered"
 STATUS_INVALID = "invalid"
 
+# Non-active registration statuses (stale-workflow-registrations bugfix).
+# ``removed``: the artifact directory no longer exists on disk (what the
+# recipe's Shutdown cleanup produces on component replace/remove).
+# ``superseded``: the directory is present but a higher numeric version of
+# the same workflow is also on disk, so this version is not the deployed
+# one. Rows with these statuses are preserved (execution history is never
+# deleted) but are filtered from the default registrations listing and can
+# never be triggered.
+STATUS_REMOVED = "removed"
+STATUS_SUPERSEDED = "superseded"
+
+#: Statuses the default ``GET /workflows/registrations`` listing returns.
+ACTIVE_STATUSES = (STATUS_REGISTERED, STATUS_INVALID)
+
 
 @dataclass(frozen=True)
 class DiscoveredArtifactSet:

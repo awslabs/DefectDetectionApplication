@@ -40,7 +40,11 @@ processor receives the parsed inference tag values (``is_anomalous``,
   certificate paths;
 - writes ``opcua_write`` bindings' rendered value to the configured
   server node through the ``opcua`` client the Workflow_Component
-  packages as a Python dependency (Requirement 9.6).
+  packages as a Python dependency (Requirement 9.6);
+- writes ``modbus_write`` bindings' rendered value to the configured
+  coil or holding register on a Modbus TCP server through the stdlib
+  ``modbus_tcp`` client (modbus-tcp-output feature, Requirements
+  4.1-4.9).
 
 Input-side bindings (``digital_input``) and unknown binding kinds are
 skipped. Every binding is processed independently: a failure is logged
@@ -68,6 +72,7 @@ BINDING_CONDITIONAL = "conditional"
 BINDING_DIGITAL_OUTPUT = "digital_output"
 BINDING_MQTT_PUBLISH = "mqtt_publish"
 BINDING_OPCUA_WRITE = "opcua_write"
+BINDING_MODBUS_WRITE = "modbus_write"
 BINDING_DIGITAL_INPUT = "digital_input"
 #: Handled by BedrockInferenceProcessor BEFORE the output bindings run
 #: (the pipeline executor merges its result into the tag values this
@@ -577,6 +582,106 @@ def _default_opcua_writer(
         client.disconnect()
 
 
+#: Catalog register types for modbus_write bindings.
+REGISTER_TYPE_COIL = "coil"
+REGISTER_TYPE_HOLDING_REGISTER = "holding_register"
+
+#: The catalog default Modbus TCP port.
+DEFAULT_MODBUS_PORT = 502
+
+#: Permitted holding-register value range (16-bit, Requirement 4.4).
+MODBUS_REGISTER_MIN = 0
+MODBUS_REGISTER_MAX = 65535
+
+
+def _default_modbus_writer(
+    host: str,
+    port: int,
+    unit_id: int,
+    register_type: str,
+    address: int,
+    value: Any,
+    pulse_ms: int,
+) -> None:
+    """Write one coil or holding register on a Modbus TCP server through
+    the stdlib ``modbus_tcp`` client (modbus-tcp-output feature,
+    Requirements 4.1, 4.5, 4.8).
+
+    Production default for the :class:`OutputBindingProcessor`
+    ``modbus_writer`` seam (Requirement 4.6). ``modbus_tcp`` is imported
+    lazily, matching the paho/opcua convention, so this module stays
+    importable everywhere.
+
+    - ``coil`` with ``pulse_ms == 0``: one Write Single Coil latching the
+      boolean state (Requirement 4.1).
+    - ``coil`` with ``pulse_ms > 0``: write the state, wait ``pulse_ms``,
+      write the inverse — the same in-process ``time.sleep`` pattern
+      ``_default_dio_actuator`` uses (Requirement 4.5). If the inverse
+      write fails, the error says the coil may be left latched so the
+      operator knows the physical state is indeterminate.
+    - ``holding_register``: one Write Single Register with the validated
+      integer (Requirement 4.1).
+
+    Connection failures are wrapped with the ``host:port`` target so the
+    run error is actionable (Requirement 4.8; ``modbus_tcp``'s own
+    timeout errors already name the host and port).
+    """
+    from workflow_engine import modbus_tcp
+
+    host = str(host)
+    port = int(port)
+    unit_id = int(unit_id)
+    address = int(address)
+    pulse_ms = int(pulse_ms or 0)
+
+    def _write(function_code: int, wire_value: int, action: str) -> None:
+        try:
+            modbus_tcp.write_single(
+                host, port, unit_id, function_code, address, wire_value
+            )
+        except modbus_tcp.ModbusError:
+            # Already actionable (exception meaning / timeout with
+            # host:port); the pulse inverse write adds its own context
+            # below.
+            raise
+        except (ConnectionError, OSError) as exc:
+            raise RuntimeError(
+                "Modbus TCP {0} to {1}:{2} failed: {3}".format(
+                    action, host, port, exc)
+            ) from exc
+
+    if register_type == REGISTER_TYPE_COIL:
+        state = bool(value)
+        wire_on = modbus_tcp.COIL_ON if state else modbus_tcp.COIL_OFF
+        wire_off = modbus_tcp.COIL_OFF if state else modbus_tcp.COIL_ON
+        _write(
+            modbus_tcp.FUNCTION_WRITE_SINGLE_COIL, wire_on, "coil write"
+        )
+        if pulse_ms > 0:
+            time.sleep(pulse_ms / 1000.0)
+            try:
+                _write(
+                    modbus_tcp.FUNCTION_WRITE_SINGLE_COIL,
+                    wire_off,
+                    "coil pulse inverse write",
+                )
+            except (modbus_tcp.ModbusError, RuntimeError) as exc:
+                raise RuntimeError(
+                    "Modbus TCP coil pulse inverse write to {0}:{1} "
+                    "failed (the coil at address {2} may be left "
+                    "latched): {3}".format(host, port, address, exc)
+                ) from exc
+    elif register_type == REGISTER_TYPE_HOLDING_REGISTER:
+        _write(
+            modbus_tcp.FUNCTION_WRITE_SINGLE_REGISTER,
+            int(value),
+            "holding-register write",
+        )
+    else:
+        raise ValueError(
+            "Unknown Modbus register type {0!r}".format(register_type))
+
+
 # ---------------------------------------------------------------------------
 # Bedrock comparison inference (bedrock_inference bindings)
 #
@@ -1078,6 +1183,7 @@ class OutputBindingProcessor:
         mqtt_publisher: Optional[Callable] = None,
         opcua_writer: Optional[Callable] = None,
         greengrass_publisher: Optional[Callable] = None,
+        modbus_writer: Optional[Callable] = None,
     ) -> None:
         self._dio_actuator = dio_actuator or _default_dio_actuator
         self._mqtt_publisher = mqtt_publisher or _default_mqtt_publisher
@@ -1085,6 +1191,7 @@ class OutputBindingProcessor:
         self._greengrass_publisher = (
             greengrass_publisher or _default_greengrass_publisher
         )
+        self._modbus_writer = modbus_writer or _default_modbus_writer
 
     def __call__(
         self,
@@ -1165,6 +1272,8 @@ class OutputBindingProcessor:
                     runner = self._run_mqtt_publish
                 elif kind == BINDING_OPCUA_WRITE:
                     runner = self._run_opcua_write
+                elif kind == BINDING_MODBUS_WRITE:
+                    runner = self._run_modbus_write
                 else:
                     logger.debug(
                         "Skipping unknown executor binding %r (node %s)",
@@ -1447,3 +1556,67 @@ class OutputBindingProcessor:
             self._opcua_writer(endpoint, node_id, value)
         return "wrote {0} to {1} at {2}".format(
             _preview(repr(value)), node_id, endpoint)
+
+    def _run_modbus_write(
+        self, parameters: Dict[str, Any], metadata: Dict[str, Any]
+    ) -> Optional[str]:
+        """Write the rendered value to the configured coil or holding
+        register on a Modbus TCP server (modbus-tcp-output feature,
+        Requirements 4.1-4.4, 4.9).
+
+        The ``value_template`` (default ``{is_anomalous}``) is rendered
+        over the run's inference metadata; a coil write coerces the
+        rendered value to a boolean via the shared ``_coerce``
+        normalization (Requirement 4.2), a holding-register write to an
+        integer in 0-65535, raising ``ValueError`` — before any write —
+        when the value cannot be coerced or is out of range (Requirements
+        4.3, 4.4). The injected ``modbus_writer`` performs the exchange
+        (Requirement 4.6; pulse semantics live in the writer).
+
+        Returns the sent-message detail naming the written value, the
+        register type and address, the host:port, the unit id, and the
+        pulse duration when pulsed (Requirement 4.9).
+        """
+        rendered = render_template(
+            parameters.get("value_template") or "{is_anomalous}", metadata
+        )
+        host = str(parameters["host"])
+        port = int(parameters.get("port", DEFAULT_MODBUS_PORT))
+        unit_id = int(parameters.get("unit_id", 1))
+        register_type = str(
+            parameters.get("register_type") or REGISTER_TYPE_COIL)
+        address = int(parameters["address"])
+        pulse_ms = int(parameters.get("pulse_ms") or 0)
+
+        if register_type == REGISTER_TYPE_COIL:
+            value: Any = bool(_coerce(rendered))
+        elif register_type == REGISTER_TYPE_HOLDING_REGISTER:
+            coerced = _coerce(rendered)
+            try:
+                value = int(coerced)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "Modbus holding-register value {0!r} cannot be coerced "
+                    "to an integer in {1}-{2}".format(
+                        rendered, MODBUS_REGISTER_MIN, MODBUS_REGISTER_MAX)
+                ) from None
+            if not MODBUS_REGISTER_MIN <= value <= MODBUS_REGISTER_MAX:
+                raise ValueError(
+                    "Modbus holding-register value {0!r} is outside the "
+                    "permitted range {1}-{2}".format(
+                        rendered, MODBUS_REGISTER_MIN, MODBUS_REGISTER_MAX))
+        else:
+            raise ValueError(
+                "Unknown Modbus register type {0!r}".format(register_type))
+
+        self._modbus_writer(
+            host, port, unit_id, register_type, address, value, pulse_ms
+        )
+        pulsed = (
+            ", pulse {0}ms".format(pulse_ms)
+            if register_type == REGISTER_TYPE_COIL and pulse_ms > 0
+            else ""
+        )
+        return "wrote {0} to {1} {2} at {3}:{4} (unit {5}{6})".format(
+            _preview(repr(value)), register_type, address, host, port,
+            unit_id, pulsed)

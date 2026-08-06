@@ -1072,6 +1072,15 @@ class ReconnectEngine:
                     # health with the actionable diagnostic; the engine
                     # parks without restoring or overwriting it, and the
                     # denial is not retried (it does not self-heal).
+                    #
+                    # Contract: the worker owns the FINAL health write on
+                    # park — the engine never writes health after
+                    # receiving RECONNECT_PARK. Because this loop's
+                    # pre-attempt ``reconnecting`` write may have landed
+                    # after the worker's ``failed`` record, workers MUST
+                    # (re-)assert their permanent-failure health inside
+                    # the attempt that returns RECONNECT_PARK
+                    # (greengrass-denial-health-race).
                     with self._lock:
                         self._parked = True
                     logger.error(
@@ -1696,8 +1705,21 @@ class GreengrassIpcSubscriber:
         denied the subscription — the engine parks and the denial
         health set here stands (Requirement 8.7)."""
         with self._lock:
-            if self._denied:
-                return RECONNECT_PARK
+            denied = self._denied
+        if denied:
+            # A reconnect loop that slipped in before the denial was
+            # marked writes ``reconnecting`` pre-attempt, and the engine
+            # parks on RECONNECT_PARK without touching health — so the
+            # ``failed`` denial record must be re-established here to be
+            # the settled state under every interleaving
+            # (greengrass-denial-health-race). Health is written outside
+            # the worker lock (matching _mark_denied's discipline —
+            # TriggerHealth has its own lock).
+            self._health.set_state(
+                HEALTH_FAILED,
+                error=greengrass_subscribe_denial_message(self.topic),
+            )
+            return RECONNECT_PARK
         self._teardown_transport()
         if not self._subscribe():
             # _subscribe returns False only on a denial (anything else
@@ -1745,8 +1767,18 @@ class GreengrassIpcSubscriber:
                 timeout=GREENGRASS_SUBSCRIBE_TIMEOUT_SECONDS
             )
         except model.UnauthorizedError:
-            self._close_quietly(operation, ipc_client)
+            # Mark the denial (and retire this subscribe generation)
+            # BEFORE closing the denied operation: the close can fire
+            # on_stream_closed/on_stream_error on the CURRENT-generation
+            # handler, and _handle_stream_lost must already be armed to
+            # suppress it — via ``_denied`` and the now-stale generation —
+            # so a permanent authorization denial can never route a
+            # stream-lost signal into the reconnect engine
+            # (greengrass-denial-health-race).
+            with self._lock:
+                self._generation += 1
             self._mark_denied()
+            self._close_quietly(operation, ipc_client)
             return False
         except Exception:
             self._close_quietly(operation, ipc_client)

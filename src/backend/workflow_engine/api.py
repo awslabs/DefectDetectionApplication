@@ -47,7 +47,11 @@ from sqlalchemy.orm import Session
 from dao.sqlite_db.sqlite_db_operations import SessionLocal
 from endpoints.route.access_log_router import get_api_router
 from workflow_engine import executor, run_artifacts, runtime
-from workflow_engine.discovery import STATUS_REGISTERED, WORKFLOW_FILE
+from workflow_engine.discovery import (
+    ACTIVE_STATUSES,
+    STATUS_REGISTERED,
+    WORKFLOW_FILE,
+)
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
 from workflow_engine.watcher import new_execution_id
 
@@ -122,13 +126,24 @@ def execution_to_dict(execution: WorkflowExecution) -> dict:
 
 
 @router.get("/workflows/registrations")
-def list_workflow_registrations(db: Session = Depends(get_db)) -> List[dict]:
-    """Every Workflow_Component registration discovered on this device."""
-    registrations = (
-        db.query(WorkflowRegistration)
-        .order_by(WorkflowRegistration.workflow_id, WorkflowRegistration.version)
-        .all()
-    )
+def list_workflow_registrations(
+    includeInactive: bool = False, db: Session = Depends(get_db)
+) -> List[dict]:
+    """The Workflow_Component registrations discovered on this device.
+
+    By default only active registrations (statuses ``registered`` and
+    ``invalid``) are returned — retired rows (``removed``/``superseded``,
+    stale-workflow-registrations bugfix) are filtered out so the
+    deployed-workflows view reflects what is actually deployed. Pass
+    ``includeInactive=true`` to also return retired registrations, whose
+    execution history stays reachable here and via the detail route.
+    """
+    query = db.query(WorkflowRegistration)
+    if not includeInactive:
+        query = query.filter(WorkflowRegistration.status.in_(ACTIVE_STATUSES))
+    registrations = query.order_by(
+        WorkflowRegistration.workflow_id, WorkflowRegistration.version
+    ).all()
     return [registration_to_dict(registration) for registration in registrations]
 
 

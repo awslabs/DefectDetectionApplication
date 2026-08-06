@@ -108,7 +108,11 @@ class TestWorkflowWatcherSync:
         assert get_rows(session_factory)["wf-1:3"].status == "registered"
         assert watcher.invalid_reason("wf-1:3") is None
 
-    def test_removed_artifacts_marked_invalid(self, tmp_path, session_factory):
+    def test_removed_artifacts_marked_removed(self, tmp_path, session_factory):
+        # Stale-workflow-registrations bugfix (expected behavior 2.2): a
+        # vanished artifact directory retires the registration with the
+        # distinct non-active status 'removed' (row preserved), instead
+        # of the old 'invalid' marking.
         write_artifact_set(tmp_path, "wf-1", "3")
         watcher = make_watcher(tmp_path, session_factory)
         watcher.sync_once()
@@ -117,7 +121,7 @@ class TestWorkflowWatcherSync:
         touched = watcher.sync_once()
 
         assert touched == ["wf-1:3"]
-        assert get_rows(session_factory)["wf-1:3"].status == "invalid"
+        assert get_rows(session_factory)["wf-1:3"].status == "removed"
         assert "removed" in watcher.invalid_reason("wf-1:3")
 
     def test_empty_root_registers_nothing(self, tmp_path, session_factory):
@@ -128,6 +132,10 @@ class TestWorkflowWatcherSync:
         assert get_rows(session_factory) == {}
 
     def test_multiple_versions_and_workflows(self, tmp_path, session_factory):
+        # Stale-workflow-registrations bugfix (expected behavior 2.3):
+        # among numeric versions of one workflow only the highest is the
+        # deployed one; lower versions are retired as 'superseded' (rows
+        # preserved). Other workflows validate independently as before.
         write_artifact_set(tmp_path, "wf-a", "1")
         write_artifact_set(tmp_path, "wf-a", "2")
         write_artifact_set(tmp_path, "wf-b", "1", omit=("workflow.json",))
@@ -137,7 +145,8 @@ class TestWorkflowWatcherSync:
 
         rows = get_rows(session_factory)
         assert set(rows) == {"wf-a:1", "wf-a:2", "wf-b:1"}
-        assert rows["wf-a:1"].status == "registered"
+        assert rows["wf-a:1"].status == "superseded"
+        assert "superseded by version 2" in watcher.invalid_reason("wf-a:1")
         assert rows["wf-a:2"].status == "registered"
         assert rows["wf-b:1"].status == "invalid"
 
