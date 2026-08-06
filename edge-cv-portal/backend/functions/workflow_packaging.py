@@ -1758,6 +1758,25 @@ def build_recipe(workflow_id: str, workflow_version: int, bucket: str,
     on-disk manifest (observed on JP6: the device kept the original
     ``minLocalServerVersion`` after re-packaging and never became runnable).
 
+    Stale-version cleanup (stale-workflow-registrations 2.1) rides INSIDE
+    the Run script, not a ``Shutdown`` lifecycle step: before staging, the
+    script best-effort removes the workflow's whole directory tree
+    (``rm -rf /aws_dda/workflows/{id}`` — every previously staged version,
+    including a prior copy of the incoming one), then re-creates and
+    re-copies the incoming version. A Shutdown step CANNOT be used for
+    replace-time cleanup on these one-shot components: verified on-device,
+    Greengrass transitions a FINISHED generic component RUNNING → STOPPING
+    as soon as its Run script exits 0 and executes Shutdown ~10ms later, so
+    a Shutdown ``rm -rf {install_dir}`` deleted the freshly staged
+    artifacts on EVERY deploy (the workflow never registered), not just on
+    replace/remove. With cleanup in Run, sibling version directories are
+    removed exactly when a new version lands (Run re-executes on every
+    component version change) and the re-copy-on-every-(re)start behavior
+    is unchanged. The cleanup is best-effort (joined with ``;`` so a
+    cleanup failure never blocks staging) while the ``mkdir && cp`` staging
+    chain remains mandatory; ``rm -rf`` is a safe no-op when the workflow
+    directory does not exist yet (first install).
+
     ``component_dependencies`` is the ComponentDependencies block
     declaring the Plugin_Components of the workflow's Custom_Node_Types
     (custom-node-designer Requirement 16.4); omitted when the workflow
@@ -1784,7 +1803,18 @@ def build_recipe(workflow_id: str, workflow_version: int, bucket: str,
         elif arch == ARCH_X86_64_NVIDIA:
             platform['runtime'] = 'nvidia'
         unarchived_dir = zip_artifact_name(arch)[:-len('.zip')]
+        # Stale-version cleanup rides the Run script: best-effort remove
+        # every previously staged version of THIS workflow (rm -rf is a
+        # no-op when the dir doesn't exist yet), then re-create and re-copy
+        # the incoming version. Deliberately NOT a Shutdown lifecycle step:
+        # Greengrass runs Shutdown ~10ms after a one-shot Run exits 0
+        # (RUNNING → STOPPING on FINISHED, verified on device), which would
+        # delete the freshly staged artifacts on every deploy
+        # (stale-workflow-registrations 2.1). The ';' keeps the cleanup
+        # best-effort — a cleanup failure never blocks the mandatory
+        # 'mkdir && cp' staging chain.
         run_script = (
+            f"rm -rf {DEVICE_WORKFLOWS_ROOT}/{workflow_id} 2>/dev/null; "
             f"mkdir -p {install_dir} && "
             f"cp -r {{artifacts:decompressedPath}}/{unarchived_dir}/. {install_dir}/"
         )
@@ -2233,7 +2263,8 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # 10.1, 10.4): the attribute is written ONLY when the set is non-empty,
     # keeping the version item byte-identical to pre-feature output for
     # every workflow without a greengrass-enabled mqtt_subscribe node.
-    update_expression = ('SET component_arn = :arn, compiled_arch_keys = :keys, '
+    update_expression = ('SET component_arn = :arn, component_version = :cv, '
+                         'compiled_arch_keys = :keys, '
                          'plugin_components = :pc, '
                          'has_binding_points = :hbp, '
                          'camera_input_nodes = :cin, '
@@ -2242,6 +2273,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                          'packaged_at = :at, packaged_by = :by')
     update_values = {
         ':arn': component_arn,
+        ':cv': resolved_component_version,
         ':keys': compiled_arch_keys,
         ':pc': workflow_plugin_components,
         ':hbp': bool(camera_nodes),

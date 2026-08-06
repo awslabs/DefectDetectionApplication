@@ -824,6 +824,9 @@ class TestCatalogCoverage:
         # trigger-activation-runtime: the two subscribe-side triggers
         # appended after unified_input (Requirements 3.2, 3.4).
         "mqtt_subscribe", "opcua_subscribe",
+        # modbus-tcp-output: the Modbus TCP write output appended last
+        # (Requirement 2.1).
+        "modbus_write",
     }
 
     def test_catalog_contains_exactly_the_expected_types(self):

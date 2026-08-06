@@ -76,6 +76,7 @@ from workflow_core.validator import (
 
 __all__ = [
     "graph_strategy",
+    "modbus_write_graph_strategy",
     "single_node_graph_strategy",
     "valid_parameter_value_strategy",
     "node_parameters_strategy",
@@ -459,6 +460,36 @@ def graph_strategy(
     for _ in range(1 + draw(st.integers(min_value=0, max_value=max_extra_outputs))):
         feasible = builder.feasible_consumer_types(_OUTPUT_TYPES)
         builder.add_wired_consumer(draw(st.sampled_from(feasible)), hub)
+
+    return builder.build()
+
+
+@st.composite
+def modbus_write_graph_strategy(draw, max_modbus_nodes=3, max_intermediates=2):
+    """Random *valid* graphs guaranteed to contain 1..max_modbus_nodes
+    ``modbus_write`` output nodes (modbus-tcp-output Properties 10-12).
+
+    Structure: one VideoFrames input feeding a ``model_inference`` node
+    (guaranteeing an InferenceMeta source for the Modbus nodes' ``in``
+    port), 0..max_intermediates wired intermediate nodes, a guaranteed
+    ``capture`` output keeping the graph valid regardless of wiring, and
+    1..max_modbus_nodes wired ``modbus_write`` nodes with drawn valid
+    parameter values (optionals randomly omitted so effective-parameter
+    resolution covers both explicit values and applied defaults).
+    """
+    builder = _GraphBuilder(draw)
+    hub = draw(st.booleans())
+
+    builder.add_node(draw(st.sampled_from(_VIDEO_INPUT_TYPES)))
+    builder.add_wired_consumer("model_inference", hub)
+
+    for _ in range(draw(st.integers(min_value=0, max_value=max_intermediates))):
+        feasible = builder.feasible_consumer_types(_INTERMEDIATE_TYPES)
+        builder.add_wired_consumer(draw(st.sampled_from(feasible)), hub)
+
+    builder.add_wired_consumer("capture", hub)
+    for _ in range(draw(st.integers(min_value=1, max_value=max_modbus_nodes))):
+        builder.add_wired_consumer("modbus_write", hub)
 
     return builder.build()
 

@@ -1591,6 +1591,86 @@ OPCUA_SUBSCRIBE = NodeTypeDescriptor(
 )
 
 # --------------------------------------------------------------------------
+# Modbus TCP output node (modbus-tcp-output Requirements 1.1-1.6) — an
+# OUTPUT-category node that, after a workflow run completes, writes one
+# value to one coil or holding register on a Modbus TCP server (typically
+# a PLC), gated by upstream conditional / inference_filter nodes exactly
+# like digital_output / mqtt_publish / opcua_write.
+# --------------------------------------------------------------------------
+
+MODBUS_WRITE = NodeTypeDescriptor(
+    type_id="modbus_write",
+    category=CATEGORY_OUTPUT,
+    display_name="Modbus TCP Write",
+    inputs=[PortDescriptor("in", PORT_TYPE_INFERENCE_META)],
+    outputs=[],
+    parameters=[
+        ParameterDescriptor("host", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="Modbus TCP server (PLC) hostname "
+                                        "or IP, e.g. 192.168.1.30.",
+                            examples=["192.168.1.30", "plc.local"]),
+        ParameterDescriptor("port", "int", required=False, default=502,
+                            constraints={"min": 1, "max": 65535},
+                            description="Modbus TCP port, e.g. 502 (the "
+                                        "standard Modbus port).",
+                            examples=[502]),
+        ParameterDescriptor("unit_id", "int", required=False, default=1,
+                            constraints={"min": 0, "max": 255},
+                            description="Modbus unit (slave) id addressed "
+                                        "by the write (0-255), e.g. 1.",
+                            examples=[1, 0]),
+        ParameterDescriptor("register_type", "enum", required=True,
+                            default="coil",
+                            constraints={"values": ["coil",
+                                                    "holding_register"]},
+                            description="Write target kind: coil (a single "
+                                        "on/off bit, Write Single Coil "
+                                        "function code 0x05) or "
+                                        "holding_register (a 16-bit "
+                                        "register, Write Single Register "
+                                        "function code 0x06).",
+                            examples=["coil", "holding_register"]),
+        ParameterDescriptor("address", "int", required=True, default=None,
+                            constraints={"min": 0, "max": 65535},
+                            description="Address of the coil or holding "
+                                        "register written (0-65535), "
+                                        "e.g. 12.",
+                            examples=[12, 40]),
+        ParameterDescriptor("value_template", "string", required=False,
+                            default="{is_anomalous}", constraints={},
+                            description="Value written to the target. "
+                                        "Placeholders in curly braces are "
+                                        "replaced from the inference "
+                                        "metadata: {is_anomalous}, "
+                                        "{confidence}, or {inference_json}; "
+                                        "a single placeholder keeps its "
+                                        "native type. Coil writes coerce "
+                                        "the rendered value to a boolean; "
+                                        "holding-register writes coerce it "
+                                        "to an integer 0-65535.",
+                            examples=["{is_anomalous}", "{confidence}"]),
+        ParameterDescriptor("pulse_ms", "int", required=False, default=0,
+                            constraints={"min": 0, "max": 60000},
+                            depends_on="register_type=coil",
+                            description="Coil pulse duration in "
+                                        "milliseconds (0-60000): 0 latches "
+                                        "the written value (single write); "
+                                        "a positive value writes the "
+                                        "rendered value, waits pulse_ms "
+                                        "milliseconds, then writes the "
+                                        "inverse coil value, e.g. 250.",
+                            examples=[0, 250]),
+    ],
+    # Executor-level Modbus TCP client write (stdlib socket exchange; no
+    # packaged plugin dependency). Simulation: recording binding, no PLC
+    # contact (Requirement 12.6).
+    mappings=_same_on_device_archs(executor_binding="modbus_write")
+             + [_recording_binding("modbus_write")],
+    hardware_dependent=True,
+)
+
+# --------------------------------------------------------------------------
 # Catalog access
 # --------------------------------------------------------------------------
 
@@ -1624,6 +1704,9 @@ NODE_CATALOG = (
     # every pre-existing descriptor keeps its position and content.
     MQTT_SUBSCRIBE,
     OPCUA_SUBSCRIBE,
+    # Appended (additive — modbus-tcp-output Requirement 2.1): every
+    # pre-existing descriptor keeps its position and content.
+    MODBUS_WRITE,
 )
 
 _CATALOG_BY_ID = {descriptor.type_id: descriptor for descriptor in NODE_CATALOG}

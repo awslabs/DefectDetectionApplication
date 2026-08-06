@@ -699,6 +699,140 @@ export const OPCUA_SUBSCRIBE_DESCRIPTOR: NodeTypeDescriptor = {
 };
 
 // --------------------------------------------------------------------------
+// Modbus TCP output descriptor mirror (modbus-tcp-output Requirements
+// 3.1, 3.2)
+//
+// Hand-mirrored camelCase wire form of the `modbus_write` descriptor in
+// the Python catalog (`workflow_core/catalog/nodes.py`) — identical type
+// id, category, display name, ports, and parameter names, types,
+// defaults, constraints, and `dependsOn` gating (the `"name=value"` form
+// on `pulse_ms`). Keep byte-for-byte in sync with the backend source of
+// truth; the palette lists it under Outputs automatically
+// (category-driven).
+// --------------------------------------------------------------------------
+
+/**
+ * The `ARCH_SIM` recording stub for a hardware output node, mirroring
+ * the Python catalog's `_recording_binding`: an executor binding that
+ * records would-be actuations to the test run's recording log instead
+ * of contacting any endpoint.
+ */
+function recordingBinding(nodeTypeId: string): GstMapping {
+  return {
+    arch: 'sim',
+    elementChain: [],
+    executorBinding: `recording_${nodeTypeId}`,
+    pluginDependencies: [],
+  };
+}
+
+/**
+ * Mirror of the `modbus_write` output descriptor: after a workflow run
+ * completes, writes one value to one coil or holding register on a
+ * Modbus TCP server (typically a PLC), gated by upstream conditional /
+ * inference_filter nodes exactly like digital_output / mqtt_publish /
+ * opcua_write.
+ */
+export const MODBUS_WRITE_DESCRIPTOR: NodeTypeDescriptor = {
+  typeId: 'modbus_write',
+  category: CATEGORY_OUTPUT,
+  displayName: 'Modbus TCP Write',
+  inputs: [{ name: 'in', portType: PORT_TYPE_INFERENCE_META }],
+  outputs: [],
+  parameters: [
+    {
+      name: 'host',
+      paramType: 'string',
+      required: true,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: null,
+      description: 'Modbus TCP server (PLC) hostname or IP, e.g. 192.168.1.30.',
+      examples: ['192.168.1.30', 'plc.local'],
+    },
+    {
+      name: 'port',
+      paramType: 'int',
+      required: false,
+      default: 502,
+      constraints: { min: 1, max: 65535 },
+      dependsOn: null,
+      description: 'Modbus TCP port, e.g. 502 (the standard Modbus port).',
+      examples: [502],
+    },
+    {
+      name: 'unit_id',
+      paramType: 'int',
+      required: false,
+      default: 1,
+      constraints: { min: 0, max: 255 },
+      dependsOn: null,
+      description:
+        'Modbus unit (slave) id addressed by the write (0-255), e.g. 1.',
+      examples: [1, 0],
+    },
+    {
+      name: 'register_type',
+      paramType: 'enum',
+      required: true,
+      default: 'coil',
+      constraints: { values: ['coil', 'holding_register'] },
+      dependsOn: null,
+      description:
+        'Write target kind: coil (a single on/off bit, Write Single Coil ' +
+        'function code 0x05) or holding_register (a 16-bit register, Write ' +
+        'Single Register function code 0x06).',
+      examples: ['coil', 'holding_register'],
+    },
+    {
+      name: 'address',
+      paramType: 'int',
+      required: true,
+      default: null,
+      constraints: { min: 0, max: 65535 },
+      dependsOn: null,
+      description:
+        'Address of the coil or holding register written (0-65535), e.g. 12.',
+      examples: [12, 40],
+    },
+    {
+      name: 'value_template',
+      paramType: 'string',
+      required: false,
+      default: '{is_anomalous}',
+      constraints: {},
+      dependsOn: null,
+      description:
+        'Value written to the target. Placeholders in curly braces are ' +
+        'replaced from the inference metadata: {is_anomalous}, ' +
+        '{confidence}, or {inference_json}; a single placeholder keeps its ' +
+        'native type. Coil writes coerce the rendered value to a boolean; ' +
+        'holding-register writes coerce it to an integer 0-65535.',
+      examples: ['{is_anomalous}', '{confidence}'],
+    },
+    {
+      name: 'pulse_ms',
+      paramType: 'int',
+      required: false,
+      default: 0,
+      constraints: { min: 0, max: 60000 },
+      dependsOn: 'register_type=coil',
+      description:
+        'Coil pulse duration in milliseconds (0-60000): 0 latches the ' +
+        'written value (single write); a positive value writes the ' +
+        'rendered value, waits pulse_ms milliseconds, then writes the ' +
+        'inverse coil value, e.g. 250.',
+      examples: [0, 250],
+    },
+  ],
+  mappings: [
+    ...sameOnDeviceArchs('modbus_write', []),
+    recordingBinding('modbus_write'),
+  ],
+  hardwareDependent: true,
+};
+
+// --------------------------------------------------------------------------
 // Validation findings (wire form of workflow_core.validator ValidationFinding)
 // --------------------------------------------------------------------------
 

@@ -2695,6 +2695,168 @@
     ],
     "type_id": "llm_inference"
   },
+  "modbus_write": {
+    "category": "output",
+    "display_name": "Modbus TCP Write",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp4",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "recording_modbus_write",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Modbus TCP server (PLC) hostname or IP, e.g. 192.168.1.30.",
+        "examples": [
+          "192.168.1.30",
+          "plc.local"
+        ],
+        "name": "host",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 65535,
+          "min": 1
+        },
+        "default": 502,
+        "depends_on": null,
+        "description": "Modbus TCP port, e.g. 502 (the standard Modbus port).",
+        "examples": [
+          502
+        ],
+        "name": "port",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 255,
+          "min": 0
+        },
+        "default": 1,
+        "depends_on": null,
+        "description": "Modbus unit (slave) id addressed by the write (0-255), e.g. 1.",
+        "examples": [
+          1,
+          0
+        ],
+        "name": "unit_id",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "coil",
+            "holding_register"
+          ]
+        },
+        "default": "coil",
+        "depends_on": null,
+        "description": "Write target kind: coil (a single on/off bit, Write Single Coil function code 0x05) or holding_register (a 16-bit register, Write Single Register function code 0x06).",
+        "examples": [
+          "coil",
+          "holding_register"
+        ],
+        "name": "register_type",
+        "param_type": "enum",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 65535,
+          "min": 0
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Address of the coil or holding register written (0-65535), e.g. 12.",
+        "examples": [
+          12,
+          40
+        ],
+        "name": "address",
+        "param_type": "int",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": "{is_anomalous}",
+        "depends_on": null,
+        "description": "Value written to the target. Placeholders in curly braces are replaced from the inference metadata: {is_anomalous}, {confidence}, or {inference_json}; a single placeholder keeps its native type. Coil writes coerce the rendered value to a boolean; holding-register writes coerce it to an integer 0-65535.",
+        "examples": [
+          "{is_anomalous}",
+          "{confidence}"
+        ],
+        "name": "value_template",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": "register_type=coil",
+        "description": "Coil pulse duration in milliseconds (0-60000): 0 latches the written value (single write); a positive value writes the rendered value, waits pulse_ms milliseconds, then writes the inverse coil value, e.g. 250.",
+        "examples": [
+          0,
+          250
+        ],
+        "name": "pulse_ms",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "modbus_write"
+  },
   "model_inference": {
     "category": "inference",
     "display_name": "Model Inference",

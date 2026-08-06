@@ -607,10 +607,23 @@ class TestPackagingArtifactSets:
                 "variant": "arm64_jp6"} in platforms
 
         for manifest in recipe["Manifests"]:
-            # One-shot Run lifecycle: copies artifacts and exits 0, starting
-            # no long-lived process, and re-executes on every version change
-            # so re-packaged workflows overwrite the on-disk copy (7.2, 13.3).
+            # One-shot Run lifecycle ONLY: copies artifacts and exits 0,
+            # starting no long-lived process, and re-executes on every
+            # version change so re-packaged workflows overwrite the on-disk
+            # copy (7.2, 13.3). The stale-workflow-registrations (2.1)
+            # cleanup rides INSIDE the Run script as a best-effort rm -rf
+            # prefix — NOT a Shutdown step, which Greengrass fires ~10ms
+            # after a one-shot Run exits 0 (verified on device) and which
+            # deleted the freshly staged artifacts on every deploy.
             assert set(manifest["Lifecycle"]) == {"Run"}
+            script = manifest["Lifecycle"]["Run"]["Script"]
+            assert script.startswith(
+                f"rm -rf /aws_dda/workflows/{fleet.workflow_id} "
+                "2>/dev/null; ")
+            assert (f"mkdir -p /aws_dda/workflows/{fleet.workflow_id}/1 "
+                    "&& cp -r ") in script
+            assert script.endswith(
+                f" /aws_dda/workflows/{fleet.workflow_id}/1/")
             [artifact] = manifest["Artifacts"]
             assert artifact["Unarchive"] == "ZIP"
             assert artifact["Uri"].startswith(

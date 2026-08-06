@@ -20,14 +20,18 @@ dependencies are supplied).
 
 The assertions use the modulo-comparison technique from
 test_workflow_packaging_recipe_preservation.py, applied to the field this
-fix changes: the recipe with each manifest's ``Shutdown`` Lifecycle key
-deleted must equal the independently-computed unfixed golden. On the
-UNFIXED tree no manifest carries a Shutdown key, so the stripping is the
-identity and the comparison pins today's exact output; after the fix (task
-3.1 adds only the Shutdown entry per manifest) the stripped recipe must
-still equal the same golden — any other change to any field fails the
-property. The Shutdown entry's own content is asserted by the task-1
-exploration test, not here.
+fix changes. REWORKED after the on-device counterexample that reverted the
+first fix (a ``Shutdown: rm -rf {install_dir}`` step — Greengrass runs
+Shutdown ~10ms after a one-shot Run exits 0, deleting the freshly staged
+artifacts on every deploy; JP6 greengrass.log 00:28:58, workflow
+modbus_test v1 never registered). The reworked fix moves the stale-version
+cleanup INTO the Run script as a best-effort ``rm -rf`` prefix, so the
+allowed delta is now: the recipe with the cleanup prefix stripped from
+each manifest's Run script must equal the independently-computed
+pre-stale-registrations golden, and NO manifest may carry a Shutdown key
+anywhere. Any other change to any field fails the property. The cleanup
+prefix's own content is asserted by the task-1 exploration test, not
+here.
 
 NOT duplicated here: the packaged llm_inference ``modelName`` rewrite is a
 different code path (compiled-document assembly, not build_recipe) and is
@@ -151,15 +155,29 @@ def expected_unfixed_recipe(workflow_id, workflow_version, component_version,
     return recipe
 
 
-def recipe_without_shutdown(recipe):
-    """The recipe with each manifest's ``Shutdown`` Lifecycle key deleted —
-    the ONLY delta the fix is allowed to introduce. On the unfixed tree no
-    Shutdown key exists, so this is the identity."""
+def _strip_run_cleanup_prefix(script):
+    """The Run script with its best-effort stale-version cleanup prefix
+    (everything up to and including the first ``'; '``) removed — the ONLY
+    delta the reworked fix is allowed to introduce to the Run script. On
+    the pre-stale-registrations tree no prefix existed, so the golden
+    carries the bare staging chain."""
+    _cleanup, sep, staging = script.partition("; ")
+    return staging if sep else script
+
+
+def recipe_without_run_cleanup_prefix(recipe):
+    """The recipe with the cleanup prefix stripped from each manifest's
+    Run script — must equal the pre-stale-registrations golden in every
+    field. Note this does NOT strip a Shutdown key: no manifest may carry
+    one (asserted separately), since Greengrass fires Shutdown on one-shot
+    Run completion and would destroy the staged artifacts."""
     stripped = dict(recipe)
     stripped["Manifests"] = [
         {**manifest,
-         "Lifecycle": {k: v for k, v in manifest["Lifecycle"].items()
-                       if k != "Shutdown"}}
+         "Lifecycle": {
+             k: ({**v, "Script": _strip_run_cleanup_prefix(v["Script"])}
+                 if k == "Run" else v)
+             for k, v in manifest["Lifecycle"].items()}}
         for manifest in recipe["Manifests"]
     ]
     return stripped
@@ -228,12 +246,12 @@ _dependency_dicts = st.tuples(
 # Property
 # --------------------------------------------------------------------------
 
-class TestRecipePreservationModuloShutdown:
+class TestRecipePreservationModuloRunCleanup:
 
     @settings(max_examples=25, deadline=None)
     @given(workflow_id=_workflow_ids, workflow_version=_versions,
            archs=_arch_sets, dependencies=_dependency_dicts)
-    def test_recipe_equals_unfixed_golden_modulo_shutdown(
+    def test_recipe_equals_unfixed_golden_modulo_run_cleanup_prefix(
             self, packaging_env, workflow_id, workflow_version, archs,
             dependencies):
         """**Property 2: Preservation — Deployed Version and Recipe
@@ -241,15 +259,16 @@ class TestRecipePreservationModuloShutdown:
 
         For ANY workflow id, version, arch subset, and ComponentDependencies
         dict (dda.plugin.* pinned HARD entries, model component entries,
-        per-arch LocalServer floors), the recipe with each manifest's
-        ``Shutdown`` key deleted equals the independently-computed unfixed
-        golden in EVERY field: Run script, artifact URIs, manifest
-        ordering/platform attributes, configuration, empty top-level
-        Lifecycle, and the byte-identical ComponentDependencies passthrough.
-
-        Holds pre-fix (no Shutdown key exists, stripping is the identity)
-        and must keep holding post-fix (task 3.1 may add ONLY the Shutdown
-        entry per manifest).
+        per-arch LocalServer floors), the recipe with the stale-version
+        cleanup prefix stripped from each manifest's Run script equals the
+        independently-computed pre-stale-registrations golden in EVERY
+        field: staging chain, Run Timeout/requiresPrivilege, artifact URIs,
+        manifest ordering/platform attributes, configuration, empty
+        top-level Lifecycle, and the byte-identical ComponentDependencies
+        passthrough. Additionally, NO manifest carries a Shutdown key —
+        Greengrass fires Shutdown ~10ms after a one-shot Run exits 0
+        (verified on device), so a Shutdown step would destroy the freshly
+        staged artifacts on every deploy.
 
         **Validates: Requirements 3.2**
         """
@@ -271,11 +290,20 @@ class TestRecipePreservationModuloShutdown:
             workflow_id, workflow_version, component_version, bucket,
             archs, dependencies)
 
-        assert recipe_without_shutdown(recipe) == golden, (
+        assert recipe_without_run_cleanup_prefix(recipe) == golden, (
             "PRESERVATION REGRESSION (Property 2 / Requirement 3.2): the "
             "recipe differs from the unfixed golden in a field other than "
-            "the added manifest Lifecycle Shutdown (archs={})".format(
+            "the Run script's stale-version cleanup prefix (archs={})".format(
                 sorted(archs)))
+
+        # No Shutdown key anywhere: the reverted first fix's Shutdown fired
+        # on one-shot Run completion and deleted the staged artifacts.
+        for manifest in recipe["Manifests"]:
+            assert "Shutdown" not in manifest["Lifecycle"], (
+                "REGRESSION (Requirement 3.2): manifest for platform "
+                "{platform!r} carries a Shutdown step, which Greengrass "
+                "runs right after the one-shot Run exits 0".format(
+                    platform=manifest.get("Platform")))
 
         # The passthrough restriction, stated explicitly: supplied
         # dependencies appear byte-identical; none supplied -> key absent.
