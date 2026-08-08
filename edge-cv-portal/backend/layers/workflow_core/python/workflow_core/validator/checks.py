@@ -118,10 +118,11 @@ CODE_V9_MIXED_ACTIVATION_MODEL = "V9_MIXED_ACTIVATION_MODEL"
 # finding-code strings remain distinct (V7_STAGE_ORDER vs
 # V7_COEXISTENCE_CONFLICT) so no consumer is ambiguous. Node types
 # that cannot coexist in one workflow. The rule table below is grounded
-# in real runtime contracts of the workflow engine; today the single
-# entry is ``aravis_camera_source``, whose single-frame appsrc Frame_Feed
-# supports exactly one Aravis camera source per workflow (a document
-# with more than one Aravis binding point fails feed planning on the
+# in real runtime contracts of the workflow engine: the entries are the
+# frame-feed source types (``aravis_camera_source`` and
+# ``custom_python_source``), whose single-frame appsrc Frame_Feed
+# supports exactly one frame-feed source per workflow (a document
+# with more than one frame-feed binding point fails feed planning on the
 # device — see workflow_engine.aravis_feed.plan_aravis_feeds). V7
 # surfaces that conflict at validation time, one error finding per
 # offending node, each naming the full conflicting membership.
@@ -134,7 +135,21 @@ COEXISTENCE_SINGLETON_TYPES: Dict[str, str] = {
         "the single-frame appsrc feed supports exactly one Aravis "
         "camera source per workflow"
     ),
+    # custom-python-source Requirement 8.1: the source node rides the same
+    # single-frame appsrc Frame_Feed machinery as the Aravis source.
+    "custom_python_source": (
+        "the single-frame appsrc feed serves exactly one frame-feed "
+        "source per workflow"
+    ),
 }
+
+#: Node types that all bind the runtime's single frame feed; at most one
+#: node across the whole group may exist per workflow (custom-python-source
+#: Requirements 8.1, 8.2). When BOTH types appear in one workflow, the
+#: mixed frame-feed group rule below reports every member of the union;
+#: same-type-only multiples stay covered by the singleton rule, so no
+#: graph is double-reported.
+FRAME_FEED_SOURCE_TYPES = frozenset({"aravis_camera_source", "custom_python_source"})
 
 # W1 warnings (Requirement 4.6)
 CODE_W1_OUTPUT_NODE_NO_INPUT = "W1_OUTPUT_NODE_NO_INPUT"
@@ -827,6 +842,18 @@ def _check_v7_coexistence(graph: WorkflowGraph) -> List[ValidationFinding]:
     The check keys on ``node.type`` directly (not the catalog) so a
     conflict is reported even when the type is also unknown to the
     catalog in use.
+
+    Mixed frame-feed group rule (custom-python-source Requirement 8.2):
+    the :data:`FRAME_FEED_SOURCE_TYPES` all bind the runtime's single
+    frame feed, so when the workflow contains BOTH types, every
+    frame-feed node gets one error finding (same finding code) naming
+    the full conflicting membership across both types and stating that
+    the runtime serves one frame-feed source per workflow. The mixed
+    rule is restricted to "both types present", and the singleton loop
+    skips the frame-feed types in that case, so each offending node is
+    reported exactly once; graphs with only one of the types present
+    (including Aravis-only graphs, Requirement 8.3) take the singleton
+    path unchanged.
     """
     findings = []
     by_type: Dict[str, List[str]] = {}
@@ -834,7 +861,29 @@ def _check_v7_coexistence(graph: WorkflowGraph) -> List[ValidationFinding]:
         if node.type in COEXISTENCE_SINGLETON_TYPES:
             by_type.setdefault(node.type, []).append(node.id)
 
+    mixed_frame_feed = FRAME_FEED_SOURCE_TYPES <= set(by_type)
+    if mixed_frame_feed:
+        member_ids = sorted(
+            node_id
+            for node_type in FRAME_FEED_SOURCE_TYPES
+            for node_id in by_type[node_type]
+        )
+        members = ", ".join("'{0}'".format(i) for i in member_ids)
+        for node_id in member_ids:
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V7_COEXISTENCE_CONFLICT,
+                "Node '{0}': frame-feed source nodes ({1}) cannot coexist "
+                "in one workflow: the runtime serves one frame-feed source "
+                "per workflow".format(node_id, members),
+                node_id=node_id,
+            ))
+
     for node_type, node_ids in sorted(by_type.items()):
+        if mixed_frame_feed and node_type in FRAME_FEED_SOURCE_TYPES:
+            # Already reported by the mixed frame-feed rule above; a
+            # singleton finding here would double-report these nodes.
+            continue
         if len(node_ids) < 2:
             continue
         reason = COEXISTENCE_SINGLETON_TYPES[node_type]

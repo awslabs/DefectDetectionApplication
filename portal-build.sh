@@ -31,6 +31,9 @@ set -o pipefail
 # Environment:
 #   EVENT_BUS                 EventBridge bus name/ARN for phase events (optional)
 #   BUILD_JOB_ID              Portal Build_Job id included in phase events (optional)
+#   ATTEMPT_ID                Execution-attempt identity included in phase
+#                             events when set (optional, additive; exported
+#                             by portal-build-agent.sh — task 7.2)
 #   SKIP_BUILD=1              Re-use existing greengrass-build/ artifacts, publish only
 #   BUILD_INFERENCE_UPLOADER=1  Also build the InferenceUploader component (optional)
 #
@@ -56,14 +59,18 @@ emit_phase_event() {
     local entries
     entries=$(python3 -c '
 import json, sys
-bus, job_id, phase, component = sys.argv[1:5]
+bus, job_id, phase, component, attempt_id = sys.argv[1:6]
 detail = {"build_job_id": job_id, "phase": phase, "component_name": component}
+if attempt_id:
+    # Correlated execution-attempt identity (build-fleet-execution-
+    # failures task 7.2): additive only — absent for legacy invocations.
+    detail["attempt_id"] = attempt_id
 print(json.dumps([{
     "Source": "dda.portal.builds",
     "DetailType": "BuildPhaseChange",
     "EventBusName": bus,
     "Detail": json.dumps(detail),
-}]))' "$EVENT_BUS" "${BUILD_JOB_ID:-}" "$phase" "${COMPONENT_NAME:-}") || {
+}]))' "$EVENT_BUS" "${BUILD_JOB_ID:-}" "$phase" "${COMPONENT_NAME:-}" "${ATTEMPT_ID:-}") || {
         echo "⚠ Warning: failed to serialize phase=${phase} event"
         return 0
     }

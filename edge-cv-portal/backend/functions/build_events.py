@@ -25,11 +25,25 @@ four EventBridge rules:
     updated, ``terminated_at`` recorded on termination, and the
     ``pending_action`` marker cleared when the accepted fleet action's
     expected state is reached (Req 6.2, 6.3, 6.9, 6.11).
-  - SSM command status change to Failed/TimedOut/Cancelled for a job's
-    agent command, while the job is still building/publishing and no
-    agent terminal phase event arrived: fallback to ``failed``
-    (Failed/TimedOut) or ``interrupted`` (Cancelled — the command was
-    torn down under the agent, e.g. by instance loss).
+  - SSM command status change to Success/Failed/TimedOut/Cancelled for a
+    job's agent command (build-fleet-execution-failures task 5.1): the
+    consumer resolves the correlated attempt/command/instance identity,
+    retrieves the final invocation READ-ONLY via ``GetCommandInvocation``,
+    sanitizes it immediately through build_reconciliation (raw provider
+    payloads never reach any log/persistence/API sink), and delegates
+    classification to ``build_reconciliation.classify_attempt`` instead of
+    the generic fallback. ``InvocationDoesNotExist`` is eventual
+    consistency: a bounded retry/settlement state is persisted on the job
+    and the scheduled dispatcher tick re-drives it. Late diagnostics are
+    persisted/merged INDEPENDENTLY of the terminal transition
+    (``apply_evidence`` terminal absorption), so callback-first,
+    command-first, duplicate, and reordered deliveries converge without
+    duplicate side effects. Evidence gate (historical-evidence.md task
+    3.3): this path is authorized by hypothesis rows 2 (invocation
+    evidence discarded — CONFIRMED), 3 (Build Log source incomplete —
+    CONFIRMED), and 4 (terminal fallback premature/generic — CONFIRMED).
+    Legacy jobs whose instance identity cannot be resolved keep the
+    original generic fallback (``decide_ssm_fallback``) byte-compatibly.
 
 Idempotence (Req 4.1): every job status transition is a DynamoDB
 conditional update (ConditionExpression on the expected current status)
@@ -47,6 +61,7 @@ recording on completion events) tests ``apply_phase_event`` directly.
 Spec: .kiro/specs/portal-build-fleet-and-workflow-gates
 Requirements: 3.5, 5.1, 5.3, 5.4, 5.5, 6.2, 6.3, 6.9, 6.11
 """
+import hashlib
 import json
 import logging
 import os
@@ -66,6 +81,10 @@ from shared_utils import log_audit_event
 # computed by the build_domain state machine (terminal absorption,
 # Req 4.1).
 import build_domain
+# Pure shared reconciliation contract (build-fleet-execution-failures
+# tasks 4.1-4.3): sanitization/bounding, deterministic classification,
+# diagnostic merge, terminal absorption, settlement planning.
+import build_reconciliation
 
 # Configure logging
 logger = logging.getLogger()
@@ -73,10 +92,22 @@ logger.setLevel(logging.INFO)
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
+# READ-ONLY invocation retrieval (GetCommandInvocation) for terminal
+# command reconciliation (Req 2.1); this consumer sends no commands.
+ssm = boto3.client('ssm')
+# Best-effort dispatcher wake after an allocation release (task 6.3):
+# the 1-minute schedule remains the authoritative promotion fallback,
+# so a missing function name or a refused invoke costs latency only.
+lambda_client = boto3.client('lambda')
 
 # Environment variables (build-fleet-stack.ts lambdaEnvironment)
 BUILD_JOBS_TABLE = os.environ.get('BUILD_JOBS_TABLE')
 BUILD_SERVERS_TABLE = os.environ.get('BUILD_SERVERS_TABLE')
+#: Optional dispatcher function name for the promotion wakeup (task 6.3).
+#: Unset means the wakeup effect stays pending and the scheduled tick —
+#: the retained fallback — completes the promotion within a minute.
+BUILD_DISPATCHER_FUNCTION_NAME = os.environ.get(
+    'BUILD_DISPATCHER_FUNCTION_NAME', '')
 
 #: Audit_Log actor for event-driven transitions (no requesting user).
 SYSTEM_USER = 'system'
@@ -107,9 +138,28 @@ KNOWN_PHASES = frozenset({
     PHASE_BUILDING, PHASE_PUBLISHING, PHASE_SUCCEEDED, PHASE_FAILED,
 })
 
+#: Correlated agent liveness/progress events (build-fleet-execution-
+#: failures task 7.2, Req 2.6/2.16/2.18): emitted by the agent when it
+#: was dispatched with an ATTEMPT_ID. They update ONLY the job's timing
+#: evidence (execution-start anchor, heartbeat/progress leases) and the
+#: preflight/disk evidence record — never a status.
+PHASE_EXECUTION_START = 'execution_start'
+PHASE_HEARTBEAT = 'heartbeat'
+PHASE_PROGRESS = 'progress'
+AGENT_ACTIVITY_PHASES = frozenset({
+    PHASE_EXECUTION_START, PHASE_HEARTBEAT, PHASE_PROGRESS,
+})
+
 #: error_kind reported on a phase=failed event for a publish-stage
 #: failure (portal-build-agent.sh, Req 5.4).
 ERROR_KIND_PUBLISHING = 'publishing'
+#: error_kind the agent reports when its LOCAL detector found ENOSPC
+#: evidence in the failure output (task 7.4); classification honors it
+#: without pattern matching (task 4.4 seam, Req 2.21).
+ERROR_KIND_DISK = build_reconciliation.AGENT_ERROR_KIND_DISK
+#: error_kind the agent reports when its own preflight failed before
+#: any build/publish work (task 7.1, Req 2.8).
+ERROR_KIND_PREFLIGHT = build_reconciliation.AGENT_ERROR_KIND_PREFLIGHT
 
 #: Error codes recorded on failed Build_Jobs (design Error Handling):
 #: a publishing failure is DISTINCT from a build failure (Req 5.4).
@@ -117,6 +167,15 @@ ERROR_BUILD_FAILED = 'BUILD_FAILED'
 ERROR_PUBLISHING_FAILED = 'PUBLISHING_FAILED'
 ERROR_AGENT_COMMAND_FAILED = 'AGENT_COMMAND_FAILED'
 ERROR_AGENT_COMMAND_TIMED_OUT = 'AGENT_COMMAND_TIMED_OUT'
+#: Stable disk-exhaustion code (task 4.4 / 7.5 wiring, evidence-gate
+#: row 9 — CONFIRMED: JP6 job bd91c5d8 collapsed ENOSPC into a generic
+#: BUILD_FAILED); a failed callback bearing ENOSPC evidence classifies
+#: RUNNER_DISK_FULL while disk-free failures keep BUILD_FAILED (Req
+#: 2.21, 3.15).
+ERROR_RUNNER_DISK_FULL = build_reconciliation.CODE_RUNNER_DISK_FULL
+#: Stable preflight-failure code (task 7.1, evidence-gate rows 1/8).
+ERROR_COMMAND_PREFLIGHT_FAILED = \
+    build_reconciliation.CODE_COMMAND_PREFLIGHT_FAILED
 
 #: Audit_Log actions recorded by this consumer.
 AUDIT_BUILD_PUBLISHED = 'build_published'            # Req 5.5
@@ -131,6 +190,27 @@ SSM_STATUS_CANCELLED = 'Cancelled'
 SSM_FAILURE_STATUSES = frozenset({
     SSM_STATUS_FAILED, SSM_STATUS_TIMED_OUT, SSM_STATUS_CANCELLED,
 })
+#: All terminal command statuses routed through reconciliation (Req 2.1):
+#: Success is routed too, so a missing agent result after a successful
+#: command can be settled to AGENT_RESULT_MISSING (Req 2.4).
+SSM_STATUS_SUCCESS = 'Success'
+SSM_TERMINAL_EVENT_STATUSES = frozenset({
+    SSM_STATUS_SUCCESS, SSM_STATUS_FAILED, SSM_STATUS_TIMED_OUT,
+    SSM_STATUS_CANCELLED,
+})
+
+#: Bounded window for GetCommandInvocation eventual consistency
+#: (InvocationDoesNotExist is retried, never fabricated as failure,
+#: Req 2.5); after the window the evidence is identified as unavailable.
+INVOCATION_LOOKUP_WINDOW_MS = int(os.environ.get(
+    'BUILD_INVOCATION_LOOKUP_WINDOW_MS', str(10 * 60 * 1000)))
+#: Settlement window after a terminal command observation in which a
+#: valid already-in-flight terminal agent result may still arrive.
+SETTLEMENT_WINDOW_MS = int(os.environ.get(
+    'BUILD_SETTLEMENT_WINDOW_MS',
+    str(build_reconciliation.DEFAULT_SETTLEMENT_WINDOW_MS)))
+#: Diagnostic source tag for this consumer (design data model).
+EVIDENCE_SOURCE_EVENTBRIDGE = 'eventbridge'
 
 #: EC2 instance states that mean the compute is gone: a non-terminal
 #: Build_Job on that instance is interrupted (Req 3.5).
@@ -313,6 +393,11 @@ def apply_phase_event(current_status: str, detail: Dict[str, Any],
     # End time from the moment the job reaches a terminal status (Req 4.3).
     if build_domain.is_terminal(final_status):
         updates['ended_at'] = now
+    # Resolved commit SHA (build-source-selection Req 4.5): a present
+    # source_commit on the event detail is persisted with the applied
+    # transition; its absence (legacy agents) changes nothing.
+    if detail.get('source_commit'):
+        updates['source_commit'] = detail['source_commit']
 
     if final_status == build_domain.STATUS_SUCCEEDED:
         # Result metadata recorded VERBATIM as the agent reported it:
@@ -352,14 +437,32 @@ def apply_phase_event(current_status: str, detail: Dict[str, Any],
                 'unpublished': updates['publish_partial']['unpublished'],
             }
         else:
+            # Build-stage failure classification (tasks 7.1/7.5 wiring;
+            # evidence-gate rows 1, 8, 9 — all CONFIRMED):
+            #   - the agent's own failed preflight is the stable
+            #     COMMAND_PREFLIGHT_FAILED (no costly work ran);
+            #   - ENOSPC evidence in the agent's message, or the agent's
+            #     local error_kind=disk shortcut, is the stable
+            #     RUNNER_DISK_FULL (Req 2.21) instead of collapsing into
+            #     a generic build failure;
+            #   - disk-free failures keep BUILD_FAILED byte-compatibly
+            #     (preservation Req 3.15).
+            if build_reconciliation.is_preflight_failure_evidence(
+                    message, agent_error_kind=error_kind):
+                error_code = ERROR_COMMAND_PREFLIGHT_FAILED
+            elif build_reconciliation.is_disk_exhaustion_evidence(
+                    message, agent_error_kind=error_kind):
+                error_code = ERROR_RUNNER_DISK_FULL
+            else:
+                error_code = ERROR_BUILD_FAILED
             updates['error'] = {
-                'code': ERROR_BUILD_FAILED,
+                'code': error_code,
                 'message': message,
             }
             audit_action = AUDIT_BUILD_FAILED
             audit_details = {
                 'error_kind': error_kind or 'building',
-                'error_code': ERROR_BUILD_FAILED,
+                'error_code': error_code,
                 'message': message,
             }
 
@@ -484,6 +587,18 @@ def to_native(value: Any) -> Any:
     return value
 
 
+def to_dynamo(value: Any) -> Any:
+    """Convert native floats to Decimals for DynamoDB persistence (deep);
+    sanitized diagnostics may carry numeric fields."""
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: to_dynamo(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_dynamo(v) for v in value]
+    return value
+
+
 def jobs_table():
     """BuildJobs DynamoDB table accessor"""
     return dynamodb.Table(BUILD_JOBS_TABLE)
@@ -543,6 +658,26 @@ def transition_job(build_job_id: str, expected_status: str,
                 'ConditionalCheckFailedException':
             return False
         raise
+
+
+def set_job_fields(build_job_id: str, fields: Dict[str, Any]) -> None:
+    """Unconditional SET of non-status Build_Job bookkeeping attributes
+    (sanitized diagnostics, reconciliation state). Never touches
+    ``status``/``ended_at``/``error`` — terminal absorption is enforced
+    by the conditional transition path."""
+    names = {}
+    values = {}
+    sets = []
+    for index, (key, value) in enumerate(sorted(fields.items())):
+        names[f'#f{index}'] = key
+        values[f':f{index}'] = value
+        sets.append(f'#f{index} = :f{index}')
+    jobs_table().update_item(
+        Key={'build_job_id': build_job_id},
+        UpdateExpression='SET ' + ', '.join(sets),
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
+    )
 
 
 def release_server(server_id: str, build_job_id: str) -> bool:
@@ -621,6 +756,155 @@ def audit(action: str, resource_id: str, result: str,
 
 
 # =========================================================================
+# Terminal-effects ledger adapters (build-fleet-execution-failures
+# task 6.1, Req 2.6/2.7/3.11): ONE conditional terminal write carries the
+# status, error-or-result, ended_at, evidence digest, and the stable
+# effect ID; every remaining side effect (audit, verified cleanup,
+# allocation release, promotion wakeup) is a retryable ledger effect
+# completed by a conditional pending -> done write, so retries and races
+# converge on exactly one logical effect each.
+# =========================================================================
+
+#: Stable attempt component of the effect identity for jobs that never
+#: recorded an execution attempt (queued cancellations, legacy jobs).
+NO_ATTEMPT_ID = 'no-attempt'
+
+#: Ledger effects whose completion is gated on a predecessor effect
+#: (advance_effect ordering, enforced here as a DynamoDB condition):
+#: allocation release requires VERIFIED compute cleanup first
+#: (stop-before-release, Req 3.11); promotion requires the release.
+_EFFECT_ORDER_GUARDS = {
+    build_reconciliation.EFFECT_ALLOCATION_RELEASE:
+        build_reconciliation.EFFECT_COMPUTE_CLEANUP,
+    build_reconciliation.EFFECT_PROMOTION_WAKEUP:
+        build_reconciliation.EFFECT_ALLOCATION_RELEASE,
+}
+
+
+def evidence_digest(evidence: Any) -> Optional[str]:
+    """Stable content digest of one terminal outcome's sanitized
+    evidence (the 'evidence digest' of the design's terminal
+    finalization write). Digests only already-sanitized structures."""
+    if not evidence:
+        return None
+    return hashlib.sha256(
+        json.dumps(to_native(evidence), sort_keys=True,
+                   default=str).encode('utf-8')).hexdigest()
+
+
+def plan_job_ledger(job: Dict[str, Any],
+                    cleanup_required: bool) -> Dict[str, Any]:
+    """The terminal-effects ledger for one job's terminal outcome
+    (build_reconciliation.plan_terminal_effects) keyed by the job's
+    current attempt identity; jobs without an attempt use a stable
+    placeholder so the effect ID stays deterministic."""
+    attempt_id = ((job.get('execution_attempt') or {}).get('attempt_id')
+                  or NO_ATTEMPT_ID)
+    return build_reconciliation.plan_terminal_effects(
+        job['build_job_id'], attempt_id,
+        job.get('execution_mode') or '', cleanup_required)
+
+
+def complete_effect(build_job_id: str, effect_id: Optional[str],
+                    effect: str) -> bool:
+    """Conditionally advance ONE ledger effect pending -> done.
+
+    The DynamoDB condition is the concurrency arbiter (the persistence
+    adapter of build_reconciliation.advance_effect): the effect must
+    still be pending under the SAME stable effect_id, and ordered
+    effects require their predecessor to be done or not_applicable.
+    Returns False on a duplicate/out-of-order completion — the retry
+    must not repeat the side effect (Req 2.7)."""
+    if not effect_id:
+        return False
+    names = {'#fx': 'terminal_effects', '#e': effect}
+    values: Dict[str, Any] = {
+        ':eid': effect_id,
+        ':pending': build_reconciliation.EFFECT_PENDING,
+        ':done': build_reconciliation.EFFECT_DONE,
+    }
+    condition = '#fx.effect_id = :eid AND #fx.#e = :pending'
+    guard = _EFFECT_ORDER_GUARDS.get(effect)
+    if guard:
+        names['#g'] = guard
+        values[':na'] = build_reconciliation.EFFECT_NOT_APPLICABLE
+        condition += ' AND (#fx.#g = :done OR #fx.#g = :na)'
+    try:
+        jobs_table().update_item(
+            Key={'build_job_id': build_job_id},
+            UpdateExpression='SET #fx.#e = :done',
+            ConditionExpression=condition,
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+        return True
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == \
+                'ConditionalCheckFailedException':
+            return False
+        raise
+
+
+def audit_terminal_effect(build_job_id: str, ledger: Dict[str, Any],
+                          action: str, result: str,
+                          details: Optional[Dict[str, Any]] = None) -> None:
+    """ONE logical Audit_Log entry per terminal outcome, deduplicated by
+    the stable effect identity (Req 2.7): only the writer that completes
+    the pending audit effect writes the entry, so a retry may complete a
+    pending audit but can never create a second logical audit."""
+    effect_id = ledger.get('effect_id')
+    if complete_effect(build_job_id, effect_id,
+                       build_reconciliation.EFFECT_AUDIT):
+        audit(action, build_job_id, result,
+              {**(details or {}), 'terminal_effect_id': effect_id})
+
+
+def wake_dispatcher(build_job_id: str) -> bool:
+    """Best-effort async dispatcher wake after an allocation release
+    (task 6.3): the 1-minute schedule remains the promotion fallback, so
+    any failure here costs latency, never correctness."""
+    if not BUILD_DISPATCHER_FUNCTION_NAME:
+        return False
+    try:
+        lambda_client.invoke(
+            FunctionName=BUILD_DISPATCHER_FUNCTION_NAME,
+            InvocationType='Event',
+            Payload=json.dumps({'action': 'promote',
+                                'build_job_ids': [build_job_id]}),
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"Dispatcher wake after release of Build_Job "
+                       f"{build_job_id} failed (schedule fallback "
+                       f"promotes): {e}")
+        return False
+
+
+def release_and_promote(job: Dict[str, Any],
+                        ledger: Dict[str, Any]) -> None:
+    """Drive the allocation_release and promotion_wakeup effects for one
+    finalized terminal outcome (Req 2.7/3.11).
+
+    The release completes ONLY when the ledger's compute cleanup is done
+    or not applicable (the conditional guard), so a follower can never
+    be promoted onto a server whose process state is unknown; the actual
+    slot release stays conditional on this job still owning it
+    (stale-release protection preserved). The wakeup is best-effort —
+    the scheduled tick remains the fallback and completes the pending
+    effect itself."""
+    build_job_id = job['build_job_id']
+    effect_id = ledger.get('effect_id')
+    if job.get('execution_mode') == build_domain.EXECUTION_MODE_DEDICATED \
+            and job.get('server_id'):
+        if complete_effect(build_job_id, effect_id,
+                           build_reconciliation.EFFECT_ALLOCATION_RELEASE):
+            release_server(job['server_id'], build_job_id)
+    if wake_dispatcher(build_job_id):
+        complete_effect(build_job_id, effect_id,
+                        build_reconciliation.EFFECT_PROMOTION_WAKEUP)
+
+
+# =========================================================================
 # Job lookup helpers
 # =========================================================================
 
@@ -661,17 +945,86 @@ def find_server_by_instance(instance_id: str) -> Optional[Dict]:
     return None
 
 
-def release_if_dedicated(job: Dict[str, Any]) -> None:
-    """Free a terminal dedicated Build_Job's server allocation so queue
-    promotion is not delayed to the dispatcher tick (Req 7.3)."""
-    if job.get('execution_mode') == build_domain.EXECUTION_MODE_DEDICATED \
-            and job.get('server_id'):
-        release_server(job['server_id'], job['build_job_id'])
-
-
 # =========================================================================
 # Event handlers
 # =========================================================================
+
+def apply_agent_activity(job: Dict[str, Any],
+                         detail: Dict[str, Any]) -> None:
+    """Apply one correlated agent activity event (task 7.2, Req 2.6,
+    2.16, 2.18) to the Build_Job's timing evidence through the pure
+    build_reconciliation observers:
+
+      - ``execution_start`` anchors active runtime exactly once (first
+        writer wins) and carries the agent's machine-side preflight
+        summary and disk-capacity recording (task 7.5, Req 2.23),
+        persisted sanitized on the job's ``preflight`` record;
+      - ``heartbeat`` renews liveness only; ``progress`` renews both
+        liveness and the progress lease. Monotonic sequences make
+        duplicates and reordered deliveries no-ops.
+
+    Stale-attempt evidence is rejected by attempt correlation; terminal
+    jobs are absorbing (nothing here touches status/result/ended_at).
+    Heartbeats carry no raw build output or environment; only the known
+    fields below are ever read or persisted.
+    """
+    if build_domain.is_terminal(job.get('status', '')):
+        return  # absorbing terminal state (Req 2.6)
+    build_job_id = job['build_job_id']
+    phase = detail.get('phase')
+    observed_at = detail.get('observed_at')
+    observed_at = int(observed_at) \
+        if isinstance(observed_at, (int, float)) and observed_at > 0 \
+        else now_ms()
+    evidence = {'attempt_id': detail.get('attempt_id')}
+    fields: Dict[str, Any] = {}
+    update = None
+
+    if phase == PHASE_EXECUTION_START:
+        update = build_reconciliation.observe_execution_start(
+            job, evidence, observed_at)
+        # Machine-side preflight evidence + disk-capacity recording
+        # travel on the execution-start event (tasks 7.1/7.5): recorded
+        # sanitized, with an unusable measurement identified as
+        # unavailable rather than fabricated.
+        existing = job.get('preflight') or {}
+        preflight_updates: Dict[str, Any] = {}
+        if 'disk' in detail:
+            preflight_updates['disk'] = \
+                build_reconciliation.sanitize_disk_evidence(
+                    detail.get('disk'))
+        if isinstance(detail.get('preflight'), dict):
+            preflight_updates['agent_checks'] = \
+                build_reconciliation.sanitize_evidence_tree(
+                    detail['preflight'])
+        if preflight_updates:
+            fields['preflight'] = to_dynamo(
+                {**existing, **preflight_updates})
+    elif phase in (PHASE_HEARTBEAT, PHASE_PROGRESS):
+        sequence = detail.get('sequence')
+        if not isinstance(sequence, (int, float)):
+            return  # unusable evidence: never fabricate a sequence
+        sequence = int(sequence)
+        if phase == PHASE_HEARTBEAT:
+            update = build_reconciliation.observe_heartbeat(
+                job, evidence, sequence, observed_at)
+        else:
+            kind = detail.get('progress_kind')
+            if kind not in (build_reconciliation.PROGRESS_KIND_PHASE,
+                            build_reconciliation.PROGRESS_KIND_CHECKPOINT,
+                            build_reconciliation
+                            .PROGRESS_KIND_OUTPUT_GROWTH):
+                kind = build_reconciliation.PROGRESS_KIND_OUTPUT_GROWTH
+            update = build_reconciliation.observe_progress(
+                job, evidence, sequence, observed_at, kind)
+
+    if update is not None and update.accepted:
+        fields['timing'] = to_dynamo(update.timing)
+    if fields:
+        set_job_fields(build_job_id, fields)
+        logger.info(f"Build_Job {build_job_id}: agent activity "
+                    f"'{phase}' recorded")
+
 
 def handle_phase_event(detail: Dict[str, Any]) -> None:
     """Custom dda.portal.builds phase event from the build agent:
@@ -688,12 +1041,37 @@ def handle_phase_event(detail: Dict[str, Any]) -> None:
                        f"{build_job_id} ignored")
         return
 
+    # Correlated liveness/progress evidence (task 7.2): timing and
+    # preflight/disk bookkeeping only; the phase state machine below is
+    # untouched by these events.
+    if detail.get('phase') in AGENT_ACTIVITY_PHASES:
+        apply_agent_activity(job, detail)
+        return
+
     application = apply_phase_event(job['status'], detail, now_ms())
     if application.is_noop:
         logger.info(f"Phase event '{detail.get('phase')}' for Build_Job "
                     f"{build_job_id} (status '{job['status']}') is a "
                     f"no-op (duplicate/stale delivery)")
         return
+
+    # Surface disk evidence in failure diagnostics (task 7.5, Req 2.23,
+    # evidence-gate row 9): a disk-classified failure always carries a
+    # disk block — the measured preflight/agent evidence when available,
+    # else the truthful {"available": False} marker — and any other
+    # failure carries it when a measurement exists. Disk-free failures
+    # without a measurement keep their records unchanged (Req 3.14).
+    failure_code = (application.updates.get('error') or {}).get('code')
+    measured_disk = detail.get('disk') \
+        if isinstance(detail.get('disk'), dict) \
+        else (job.get('preflight') or {}).get('disk')
+    if failure_code in (ERROR_RUNNER_DISK_FULL,
+                        ERROR_COMMAND_PREFLIGHT_FAILED) \
+            or (failure_code and isinstance(measured_disk, dict)):
+        diagnostic = dict(job.get('execution_diagnostic') or {})
+        diagnostic['disk'] = build_reconciliation.sanitize_disk_evidence(
+            measured_disk)
+        application.updates['execution_diagnostic'] = to_dynamo(diagnostic)
 
     # Execute the conditional chain; any lost race means another writer
     # (duplicate delivery, cancellation, watchdog) already moved the job:
@@ -705,8 +1083,28 @@ def handle_phase_event(detail: Dict[str, Any]) -> None:
                         f"treating delivery as stale")
             return
     expected, final = application.steps[-1]
-    if not transition_job(build_job_id, expected, final,
-                          extra=application.updates):
+    updates: Dict[str, Any] = dict(application.updates)
+    ledger: Optional[Dict[str, Any]] = None
+    if build_domain.is_terminal(final):
+        # Terminal finalization (task 6.1): ONE conditional write carries
+        # the status, result-or-error, ended_at, evidence digest, and the
+        # stable effect ID. An agent-reported terminal outcome means the
+        # agent process exited on its own, so a dedicated server needs no
+        # stop verification (cleanup not applicable); an ephemeral runner
+        # still needs its idempotent termination, completed by the
+        # termination watchdog (Req 2.7, preservation Req 3.9).
+        ledger = plan_job_ledger(
+            job,
+            cleanup_required=(job.get('execution_mode') ==
+                              build_domain.EXECUTION_MODE_EPHEMERAL))
+        if not application.audit_action:
+            # No audit belongs to this outcome: never leave a pending
+            # audit for a reconciler to invent one (preservation 3.1).
+            ledger[build_reconciliation.EFFECT_AUDIT] = \
+                build_reconciliation.EFFECT_DONE
+        updates['terminal_effects'] = ledger
+        updates['evidence_digest'] = evidence_digest(application.updates)
+    if not transition_job(build_job_id, expected, final, extra=updates):
         logger.info(f"Build_Job {build_job_id} moved during phase "
                     f"application ({expected} -> {final} raced); "
                     f"treating delivery as stale")
@@ -714,31 +1112,51 @@ def handle_phase_event(detail: Dict[str, Any]) -> None:
     logger.info(f"Build_Job {build_job_id}: phase '{detail.get('phase')}' "
                 f"applied, status '{job['status']}' -> '{final}'")
 
-    if build_domain.is_terminal(final):
-        release_if_dedicated(job)
-    if application.audit_action:
-        audit(application.audit_action, build_job_id,
-              'success' if final == build_domain.STATUS_SUCCEEDED
-              else 'failure',
-              application.audit_details)
+    if ledger is not None:
+        if application.audit_action:
+            audit_terminal_effect(
+                build_job_id, ledger, application.audit_action,
+                'success' if final == build_domain.STATUS_SUCCEEDED
+                else 'failure',
+                application.audit_details)
+        release_and_promote(job, ledger)
 
 
-def interrupt_jobs_on_instance(instance_id: str, cause: str) -> None:
+def interrupt_jobs_on_instance(instance_id: str, cause: str,
+                               compute_gone: bool = False) -> None:
     """Mark every non-terminal Build_Job occupying an instance as
     interrupted (Req 3.5): conditional transition per job (terminal jobs
     unchanged — Req 4.1), end time recorded, logs already durable in
-    CloudWatch, retry served by build_jobs.py."""
+    CloudWatch, retry served by build_jobs.py.
+
+    ``compute_gone`` True means the interruption evidence IS an observed
+    terminal instance state (stopped/terminated): the design lets that
+    observation complete the cleanup effect directly, so the allocation
+    release is not blocked on a process check that can never run. A spot
+    interruption WARNING leaves cleanup pending — the instance is still
+    up, so the termination watchdog / effects reconciliation verifies it
+    (Req 2.7/3.11)."""
     for job in find_jobs_on_instance(instance_id):
         current = job['status']
         interrupted = build_domain.apply_interruption(current)
         if interrupted == current:
             continue  # terminal: unchanged
+        evidence = {'instance_id': instance_id, 'cause': cause,
+                    'status_at_interruption': current}
+        ledger = plan_job_ledger(job, cleanup_required=True)
         if transition_job(job['build_job_id'], current, interrupted,
-                          extra={'ended_at': now_ms()}):
-            release_if_dedicated(job)
-            audit(AUDIT_BUILD_INTERRUPTED, job['build_job_id'], 'failure',
-                  {'instance_id': instance_id, 'cause': cause,
-                   'status_at_interruption': current})
+                          extra={'ended_at': now_ms(),
+                                 'terminal_effects': ledger,
+                                 'evidence_digest':
+                                     evidence_digest(evidence)}):
+            if compute_gone:
+                complete_effect(job['build_job_id'],
+                                ledger.get('effect_id'),
+                                build_reconciliation.EFFECT_COMPUTE_CLEANUP)
+            audit_terminal_effect(job['build_job_id'], ledger,
+                                  AUDIT_BUILD_INTERRUPTED, 'failure',
+                                  evidence)
+            release_and_promote(job, ledger)
             logger.info(f"Build_Job {job['build_job_id']} interrupted "
                         f"({cause}, instance {instance_id})")
 
@@ -746,7 +1164,8 @@ def interrupt_jobs_on_instance(instance_id: str, cause: str) -> None:
 def handle_spot_interruption(detail: Dict[str, Any]) -> None:
     """EC2 Spot Instance Interruption Warning: the compute provider is
     reclaiming the runner — every non-terminal Build_Job on it becomes
-    interrupted (Req 3.5)."""
+    interrupted (Req 3.5). The instance is still running at warning
+    time, so cleanup stays pending until verified (Req 3.11)."""
     instance_id = detail.get('instance-id')
     if not instance_id:
         return
@@ -775,45 +1194,340 @@ def handle_instance_state_change(detail: Dict[str, Any]) -> None:
                        if application.clear_pending else ''))
 
     if state in INSTANCE_LOST_STATES:
-        interrupt_jobs_on_instance(instance_id, f'instance_{state}')
+        # Observed terminal instance state: the design lets this
+        # observation set cleanup done (the compute is gone, so no
+        # protected build process can remain).
+        interrupt_jobs_on_instance(instance_id, f'instance_{state}',
+                                   compute_gone=True)
 
 
-def handle_ssm_command_status(detail: Dict[str, Any]) -> None:
-    """SSM command status change to Failed/TimedOut/Cancelled for a
-    job's agent command: fallback transition when the job is still
-    building/publishing and no agent terminal phase event arrived
-    (design §4) — failed for Failed/TimedOut, interrupted for
-    Cancelled."""
-    command_id = detail.get('command-id')
-    status = detail.get('status')
-    if not command_id or status not in SSM_FAILURE_STATUSES:
+def resolve_command_identity(job: Dict[str, Any],
+                             event_instance_id: Optional[str] = None
+                             ) -> Tuple[Dict[str, Any], Optional[str]]:
+    """The correlated (attempt, instance_id) identity for the job's
+    agent command (Req 2.6): the execution attempt record first, then
+    the ssm marker, the ephemeral runner, the dedicated server record,
+    and finally the event's own instance id."""
+    attempt = job.get('execution_attempt') or {}
+    ssm_info = job.get('ssm') or {}
+    instance_id = (attempt.get('instance_id')
+                   or ssm_info.get('instance_id')
+                   or (job.get('runner') or {}).get('instance_id'))
+    if not instance_id and job.get('server_id'):
+        try:
+            response = servers_table().get_item(
+                Key={'server_id': job['server_id']})
+            instance_id = (response.get('Item') or {}).get('instance_id')
+        except ClientError as e:
+            logger.warning(f"Server lookup for Build_Job "
+                           f"{job.get('build_job_id')} failed: "
+                           f"{e.response.get('Error', {}).get('Code')}")
+    return attempt, instance_id or event_instance_id
+
+
+def retrieve_invocation(command_id: Optional[str],
+                        instance_id: Optional[str]
+                        ) -> Optional[Dict[str, Any]]:
+    """READ-ONLY GetCommandInvocation for the persisted command identity
+    (Req 2.1). Returns None on ``InvocationDoesNotExist`` (eventual
+    consistency, Req 2.5) or when identity is incomplete. The raw
+    response exists only in local memory long enough to be sanitized by
+    the caller — it is NEVER logged or persisted as-is (Req 2.10)."""
+    if not command_id or not instance_id:
+        return None
+    try:
+        return ssm.get_command_invocation(CommandId=command_id,
+                                          InstanceId=instance_id)
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        if code not in ('InvocationDoesNotExist', 'InvalidCommandId'):
+            # Service unavailability is represented (retried by the
+            # scheduled tick), never fabricated as command failure.
+            logger.warning(f"GetCommandInvocation({command_id}) "
+                           f"failed: {code}")
+        return None
+
+
+def classification_message(classification:
+                           'build_reconciliation.Classification',
+                           command_status: Optional[str]) -> str:
+    """Safe failed-job message built ONLY from stable vocabulary — no
+    raw provider text ever enters the error record (Req 2.10); the
+    bounded redacted evidence lives in ``execution_diagnostic``."""
+    return (f"The build agent SSM command ended with status "
+            f"'{command_status}' before reporting a build result: "
+            f"{classification.reason}. Retained command evidence was "
+            f"recorded in the execution diagnostic.")
+
+
+def reconcile_command_evidence(job: Dict[str, Any], command_id: str,
+                               event_status: Optional[str],
+                               instance_id: Optional[str],
+                               source: str,
+                               now: Optional[int] = None) -> None:
+    """Reconcile one terminal command observation for one Build_Job
+    (build-fleet-execution-failures task 5.1, design "Reconciliation
+    Flow"): retrieve the final invocation, sanitize immediately,
+    classify deterministically via ``classify_attempt``, and persist/
+    merge the bounded redacted diagnostic INDEPENDENTLY of the terminal
+    transition, so delivery order/duplication cannot change the outcome
+    or duplicate side effects (Req 2.1, 2.2, 2.4, 2.6, 2.10)."""
+    now = now if now is not None else now_ms()
+    build_job_id = job['build_job_id']
+    job_status = job['status']
+    attempt = job.get('execution_attempt') or {}
+
+    # Stale/mismatched evidence rejection (Req 2.6): evidence carrying a
+    # different attempt/command/instance identity can never affect this
+    # job's current attempt.
+    evidence_identity: Dict[str, Any] = {'command_id': command_id}
+    if instance_id:
+        evidence_identity['instance_id'] = instance_id
+    if not build_reconciliation.evidence_matches_attempt(
+            attempt, evidence_identity):
+        logger.info(f"Build_Job {build_job_id}: stale/mismatched command "
+                    f"evidence for {command_id} rejected")
         return
-    job = find_job_by_command(command_id)
-    if job is None:
+
+    recon = job.get('reconciliation') or {}
+    first_observed_at = recon.get('first_observed_at') or now
+    settlement_deadline_ms = recon.get('settlement_deadline')
+
+    raw_invocation = retrieve_invocation(command_id, instance_id)
+    lookup = build_reconciliation.decide_invocation_lookup(
+        raw_invocation, first_observed_at, now,
+        INVOCATION_LOOKUP_WINDOW_MS)
+
+    invocation_status = (raw_invocation or {}).get('Status')
+    if raw_invocation is not None and invocation_status not in \
+            build_reconciliation.SSM_TERMINAL_STATUSES:
+        # A genuinely nonterminal invocation keeps the job nonterminal
+        # (Req 2.5): record the observation, decide nothing.
+        set_job_fields(build_job_id, {'reconciliation': to_dynamo({
+            'command_id': command_id,
+            'command_status': invocation_status,
+            'first_observed_at': first_observed_at,
+            'lookup_state': lookup.state,
+            'updated_at': now,
+        })})
         return
 
+    if lookup.state == build_reconciliation.LOOKUP_PENDING:
+        # InvocationDoesNotExist inside the bounded window is eventual
+        # consistency (Req 2.5): persist the retry/settlement state on
+        # the job; the scheduled dispatcher tick re-drives it.
+        state = {
+            'command_id': command_id,
+            'command_status': event_status,
+            'first_observed_at': first_observed_at,
+            'lookup_state': build_reconciliation.LOOKUP_PENDING,
+            'updated_at': now,
+        }
+        if settlement_deadline_ms is not None:
+            state['settlement_deadline'] = settlement_deadline_ms
+        set_job_fields(build_job_id,
+                       {'reconciliation': to_dynamo(state)})
+        return
+
+    # Settled evidence: the retrieved final invocation, or — only after
+    # the bounded window is exhausted — the event's own terminal status
+    # with every invocation field identified as unavailable (Req 2.2:
+    # unavailable is identified, never fabricated).
+    if lookup.state == build_reconciliation.LOOKUP_RETRIEVED:
+        evidence: Optional[Dict[str, Any]] = raw_invocation
+    else:
+        evidence = {'Status': event_status} if event_status else None
+
+    terminal_status = (evidence or {}).get('Status')
+    if terminal_status == SSM_STATUS_SUCCESS \
+            and settlement_deadline_ms is None:
+        # Success without a terminal agent result waits out the
+        # settlement window; only after it may AGENT_RESULT_MISSING be
+        # classified (Req 2.4, 2.5 — the dispatcher settles it).
+        settlement_deadline_ms = build_reconciliation.settlement_deadline(
+            now, SETTLEMENT_WINDOW_MS)
+
+    classification = build_reconciliation.classify_attempt(
+        current_status=job_status,
+        invocation=evidence,
+        settlement_deadline_ms=settlement_deadline_ms,
+        now=now)
+
+    incoming = build_reconciliation.build_execution_diagnostic(
+        attempt={'attempt_id': attempt.get('attempt_id'),
+                 'command_id': command_id,
+                 'instance_id': instance_id},
+        invocation=raw_invocation,
+        classification=classification.error_code,
+        source=source,
+        observed_at=now,
+        disk=(job.get('preflight') or {}).get('disk'))
+
+    application = build_reconciliation.apply_evidence(
+        job_status, job.get('execution_diagnostic'), incoming,
+        classification, now)
+
+    recon_state = {
+        'command_id': command_id,
+        'command_status': terminal_status or event_status,
+        'first_observed_at': first_observed_at,
+        'lookup_state': lookup.state,
+        'updated_at': now,
+    }
+    if settlement_deadline_ms is not None:
+        recon_state['settlement_deadline'] = settlement_deadline_ms
+
+    # Terminal transitions apply exactly where the previous fallback
+    # applied them — jobs the agent was running (building/publishing);
+    # genuinely in-progress phases and terminal jobs only gain
+    # diagnostic completeness (preservation Req 3.1, terminal
+    # absorption Req 2.6).
+    if application.update_status is not None \
+            and job_status in AGENT_RUNNING_STATUSES:
+        # Terminal finalization (task 6.1): the ONE conditional write
+        # carries status, error, ended_at, the sanitized evidence
+        # digest, and the terminal-effects ledger under its stable
+        # effect ID. A terminal invocation means the command's shell
+        # exited on the server, so a dedicated slot needs no separate
+        # stop verification here (cleanup not applicable, preserving
+        # same-event release/promotion); an ephemeral runner's
+        # idempotent termination stays a pending retryable effect.
+        ledger = plan_job_ledger(
+            job,
+            cleanup_required=(job.get('execution_mode') ==
+                              build_domain.EXECUTION_MODE_EPHEMERAL))
+        extra: Dict[str, Any] = {
+            'ended_at': application.update_ended_at,
+            'reconciliation': to_dynamo(recon_state),
+            'terminal_effects': ledger,
+            'evidence_digest': evidence_digest(
+                application.update_diagnostic or incoming),
+        }
+        if application.update_diagnostic is not None:
+            extra['execution_diagnostic'] = to_dynamo(
+                application.update_diagnostic)
+        if application.update_status == build_domain.STATUS_FAILED:
+            extra['error'] = {
+                'code': (application.update_error_code
+                         or ERROR_AGENT_COMMAND_FAILED),
+                'message': classification_message(
+                    classification, terminal_status or event_status),
+            }
+        if not transition_job(build_job_id, job_status,
+                              application.update_status, extra=extra):
+            return  # raced: another writer recorded the outcome (Req 2.6)
+        if application.update_status == build_domain.STATUS_INTERRUPTED:
+            audit_terminal_effect(
+                build_job_id, ledger, AUDIT_BUILD_INTERRUPTED, 'failure',
+                {'command_id': command_id,
+                 'command_status': terminal_status or event_status,
+                 'error_code': application.update_error_code,
+                 'status_at_interruption': job_status})
+        else:
+            audit_terminal_effect(
+                build_job_id, ledger, AUDIT_BUILD_FAILED, 'failure',
+                {'command_id': command_id,
+                 'command_status': terminal_status or event_status,
+                 'error_code': application.update_error_code,
+                 'status_at_failure': job_status})
+        release_and_promote(job, ledger)
+        logger.info(f"Build_Job {build_job_id}: agent command "
+                    f"{command_id} reconciled "
+                    f"'{terminal_status or event_status}' -> job "
+                    f"'{application.update_status}' "
+                    f"({application.update_error_code or 'agent result'})")
+        return
+
+    # No terminal transition here: persist increased diagnostic
+    # completeness and the settlement/lookup state. Duplicate or
+    # non-increasing evidence is a no-op (Req 2.6 idempotence).
+    fields: Dict[str, Any] = {}
+    if application.update_diagnostic is not None:
+        fields['execution_diagnostic'] = to_dynamo(
+            application.update_diagnostic)
+    state_changed = (
+        recon.get('lookup_state') != recon_state['lookup_state']
+        or recon.get('command_status') != recon_state['command_status']
+        or recon.get('settlement_deadline')
+        != recon_state.get('settlement_deadline')
+        or recon.get('first_observed_at')
+        != recon_state['first_observed_at'])
+    if state_changed and not build_domain.is_terminal(job_status):
+        fields['reconciliation'] = to_dynamo(recon_state)
+    if fields:
+        set_job_fields(build_job_id, fields)
+
+
+def legacy_ssm_fallback(job: Dict[str, Any], command_id: str,
+                        status: str) -> None:
+    """The original generic fallback, retained BYTE-COMPATIBLY for jobs
+    whose instance identity cannot be resolved (no invocation retrieval
+    is possible): failed for Failed/TimedOut, interrupted for
+    Cancelled (preservation Req 3.1/3.8)."""
     fallback = decide_ssm_fallback(job['status'], status)
     if not fallback.apply:
         return  # agent outcome already recorded / job not running
-    extra: Dict[str, Any] = {'ended_at': now_ms()}
+    # Same task 6.1 terminal-effects contract as the reconciled path:
+    # the outcome/status/audit meanings stay byte-compatible; only the
+    # additive ledger/digest fields and the audit's effect-identity
+    # deduplication are new (preservation Req 3.1/3.8).
+    ledger = plan_job_ledger(
+        job, cleanup_required=(job.get('execution_mode') ==
+                               build_domain.EXECUTION_MODE_EPHEMERAL))
+    extra: Dict[str, Any] = {
+        'ended_at': now_ms(),
+        'terminal_effects': ledger,
+        'evidence_digest': evidence_digest(
+            {'command_id': command_id, 'command_status': status}),
+    }
     if fallback.error:
         extra['error'] = fallback.error
     if not transition_job(job['build_job_id'], job['status'],
                           fallback.next_status, extra=extra):
         return  # raced: another writer recorded the outcome (Req 4.1)
-    release_if_dedicated(job)
     if fallback.next_status == build_domain.STATUS_INTERRUPTED:
-        audit(AUDIT_BUILD_INTERRUPTED, job['build_job_id'], 'failure',
-              {'command_id': command_id, 'command_status': status,
-               'status_at_interruption': job['status']})
+        audit_terminal_effect(
+            job['build_job_id'], ledger, AUDIT_BUILD_INTERRUPTED,
+            'failure',
+            {'command_id': command_id, 'command_status': status,
+             'status_at_interruption': job['status']})
     else:
-        audit(AUDIT_BUILD_FAILED, job['build_job_id'], 'failure',
-              {'command_id': command_id, 'command_status': status,
-               'error_code': (fallback.error or {}).get('code'),
-               'status_at_failure': job['status']})
+        audit_terminal_effect(
+            job['build_job_id'], ledger, AUDIT_BUILD_FAILED, 'failure',
+            {'command_id': command_id, 'command_status': status,
+             'error_code': (fallback.error or {}).get('code'),
+             'status_at_failure': job['status']})
+    release_and_promote(job, ledger)
     logger.info(f"Build_Job {job['build_job_id']}: agent command "
                 f"{command_id} ended '{status}' -> job "
                 f"'{fallback.next_status}' (fallback)")
+
+
+def handle_ssm_command_status(detail: Dict[str, Any]) -> None:
+    """SSM command status change to a terminal status for a job's agent
+    command (task 5.1): every terminal status — Success included — is
+    reconciled through final invocation evidence via
+    ``reconcile_command_evidence`` (Req 2.1, 2.4). Jobs without a
+    resolvable instance identity keep the original generic fallback."""
+    command_id = detail.get('command-id')
+    status = detail.get('status')
+    if not command_id or status not in SSM_TERMINAL_EVENT_STATUSES:
+        return
+    job = find_job_by_command(command_id)
+    if job is None:
+        return
+
+    attempt, instance_id = resolve_command_identity(
+        job, detail.get('instance-id'))
+    if not instance_id:
+        # Legacy record: no invocation retrieval is possible. Success
+        # cannot be acted on without evidence; failure statuses keep the
+        # original byte-compatible fallback.
+        if status in SSM_FAILURE_STATUSES:
+            legacy_ssm_fallback(job, command_id, status)
+        return
+    reconcile_command_evidence(job, command_id, status, instance_id,
+                               EVIDENCE_SOURCE_EVENTBRIDGE)
 
 
 # =========================================================================

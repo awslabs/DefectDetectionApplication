@@ -523,14 +523,17 @@ def zip_artifact_name(arch: str) -> str:
 #: Node types whose per-node code and declared pip dependencies ship as
 #: python/{nodeId}/handler.py + requirements.txt in every architecture
 #: artifact zip and are listed together in the manifest's
-#: customPythonNodeIds (custom-python-frames Requirements 2.4, 2.5).
-CUSTOM_PYTHON_NODE_TYPES = ('custom_python', 'custom_python_preprocess')
+#: customPythonNodeIds (custom-python-frames Requirements 2.4, 2.5;
+#: custom-python-source Requirements 9.1, 9.2).
+CUSTOM_PYTHON_NODE_TYPES = ('custom_python', 'custom_python_preprocess',
+                            'custom_python_source')
 
 
 def gather_custom_python_nodes(graph) -> List[Dict]:
     """Custom_Python_Nodes whose code + declared dependencies ship in the
-    Workflow_Component artifacts (Requirement 7.3; both Custom Python node
-    types — custom-python-frames Requirements 2.4, 2.5)"""
+    Workflow_Component artifacts (Requirement 7.3; all three Custom Python
+    node types — custom-python-frames Requirements 2.4, 2.5;
+    custom-python-source Requirements 9.1, 9.2)"""
     nodes = []
     for node in graph.nodes:
         if node.type in CUSTOM_PYTHON_NODE_TYPES:
@@ -594,6 +597,25 @@ ICAM_SOURCE_TYPE_ID = 'icam_source'
 #: element argument: the binding point carries ``aravisBinding: true``
 #: with empty slots on every physical device architecture.
 ARAVIS_CAMERA_SOURCE_TYPE_ID = 'aravis_camera_source'
+
+#: The Custom Python source node type (custom-python-source Requirements
+#: 9.1, 9.2). The Frame_Producer runs in the LocalServer's Python_Bridge
+#: and feeds the compiled ``appsrc_{nodeId}`` through the executor's
+#: single-frame Frame_Feed, so the binding never lands in an element
+#: argument: the binding point carries ``pythonSourceBinding: true`` with
+#: empty slots and ONLY the rendered ``allowed_uri_prefixes`` parameter —
+#: ``code``/``requirements`` ship as artifact files, never duplicated
+#: into the binding point.
+CUSTOM_PYTHON_SOURCE_TYPE_ID = 'custom_python_source'
+
+
+def gather_python_source_nodes(graph) -> List:
+    """The graph's Custom Python source nodes, in graph node order: each
+    gains a ``pythonSourceBinding`` bindingPoints entry so the device
+    planner can locate the node's compiled appsrc
+    (custom-python-source Requirement 9.2)."""
+    return [node for node in graph.nodes
+            if node.type == CUSTOM_PYTHON_SOURCE_TYPE_ID]
 
 #: Optional Custom_Node_Type descriptor flag declaring the type
 #: camera-backed. Both the snake_case spelling from the design and the
@@ -707,7 +729,12 @@ def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
     device value. aravis_camera_source is executor-feed-bound on every
     physical device architecture (``aravisBinding: true``, empty slots)
     with the rendered camera_id/gain/exposure values in ``parameters``
-    (aravis-camera-input Requirement 4.2)."""
+    (aravis-camera-input Requirement 4.2). custom_python_source is
+    executor-feed-bound the same way (``pythonSourceBinding: true``,
+    empty slots) with ONLY the rendered ``allowed_uri_prefixes`` value in
+    ``parameters`` — ``code``/``requirements`` ship as artifact files and
+    are never duplicated into the binding point (custom-python-source
+    Requirements 9.1, 9.2)."""
     binding_points: List[Dict] = []
     for node in camera_nodes:
         descriptor = descriptors_by_id[node.type]
@@ -720,7 +747,12 @@ def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
         hint = hints.get(node.id)
         if hint:
             entry['bindingHint'] = hint
-        if node.type == ARAVIS_CAMERA_SOURCE_TYPE_ID:
+        if node.type == CUSTOM_PYTHON_SOURCE_TYPE_ID:
+            entry['pythonSourceBinding'] = True
+            entry['parameters'] = {
+                'allowed_uri_prefixes':
+                    entry['parameters'].get('allowed_uri_prefixes') or ''}
+        elif node.type == ARAVIS_CAMERA_SOURCE_TYPE_ID:
             entry['aravisBinding'] = True
         elif node.type == CSI_CAMERA_SOURCE_TYPE_ID:
             entry['csiSensorBinding'] = True
@@ -2038,10 +2070,15 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # Camera_Input_Node binding points (camera-registry-sync 8.6, 11.5):
     # one bindingPoints entry per camera node in each arch's compiled
     # document, plus the version-item discriminator recorded on success.
-    # Workflows without camera nodes serialize byte-identically to the
-    # plain compiler output.
+    # Custom Python source nodes additionally get a pythonSourceBinding
+    # point so the device planner can locate the node's compiled appsrc
+    # (custom-python-source 9.2); they never join camera_nodes, so the
+    # camera-binding discriminator and camera_input_nodes record are
+    # untouched. Workflows without camera or source nodes serialize
+    # byte-identically to the plain compiler output.
     camera_nodes = gather_camera_input_nodes(
         graph, camera_backed_type_ids(resolved_items))
+    python_source_nodes = gather_python_source_nodes(graph)
     binding_hints = binding_hints_from_definition(definition_dict)
     descriptors_by_id = {descriptor.type_id: descriptor for descriptor in catalog}
 
@@ -2061,7 +2098,8 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     for arch, compiled in compiled_docs.items():
         compiled_dict = compiled.to_dict()
         binding_points = build_binding_points(
-            camera_nodes, compiled_dict, arch, binding_hints, descriptors_by_id)
+            camera_nodes + python_source_nodes, compiled_dict, arch,
+            binding_hints, descriptors_by_id)
         arch_compiled_dicts[arch] = compiled_dict
         arch_binding_points[arch] = binding_points
         arch_compiled_json[arch] = compiled_document_json(compiled, binding_points)

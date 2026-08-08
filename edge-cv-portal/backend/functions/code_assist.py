@@ -15,7 +15,8 @@ Request body:
         "usecase_id": "...",          required
         "surface": "...",             required; workflow-builder | node-designer
         "contract": "...",            required; process_frame |
-                                      process_frame_or_handle | frame_hook
+                                      process_frame_or_handle | frame_hook |
+                                      produce_frame
         "prompt": "...",              required; 1..4000 chars, at least one
                                       non-whitespace character
         "current_code": "...",        optional string; embedded in the
@@ -118,6 +119,36 @@ FRAME_HOOK_ENVIRONMENT = (
     'module on this surface.'
 )
 
+# The Python_Bridge frame producer (custom-python-source, Requirements
+# 9.4, 9.5): produce_frame(context) runs exactly once per workflow run in
+# the same handler subprocess isolation as the per-frame contracts. The
+# environment description mirrors the runner's produce operation and the
+# dda_frames Frame_Helpers (load_image/load_bytes with the bounded HTTP
+# timeout and the allowed-URI-prefix restriction).
+PRODUCE_FRAME_ENVIRONMENT = (
+    'RUNTIME ENVIRONMENT (Python_Bridge frame producer):\n'
+    '- produce_frame(context): called EXACTLY ONCE per workflow run. '
+    '`context` is the Trigger_Context that started the run: for MQTT '
+    'triggers {topic, payload, payload_json, qos, timestamp} (payload_json '
+    'is the payload parsed as JSON, or None); for OPC UA triggers '
+    '{endpoint, node_id, value, source_timestamp}; {} for manual runs.\n'
+    '- Return the frame: a NumPy uint8 array (H x W grayscale, H x W x 3 '
+    'BGR, or H x W x 4 BGRA — OpenCV channel order), or '
+    '{"array": arr, "format": "RGB"|"RGBA"|"GRAY8"} to skip channel '
+    'conversion, or {"data": bytes, "width": W, "height": H, "format": ...}. '
+    'Returning None fails the run.\n'
+    '- cv2, np, and numpy are pre-bound; `import dda_frames` provides '
+    'load_image(source) -> BGR uint8 array and load_bytes(source) -> raw '
+    'bytes for local paths, s3://bucket/key URIs, and http(s):// URLs '
+    '(bounded network timeout; fetches may be restricted to the node\'s '
+    'allowed URI prefixes).\n'
+    '- Never write to stdout - it belongs to the framed frame protocol; '
+    'use sys.stderr for diagnostics.\n'
+    '- Extra pip packages may be imported freely; the portal derives the '
+    "node's pip requirements from the module's import statements, so emit "
+    'a normal import statement for any library the user asks for.'
+)
+
 # Node_Contract table (design "Prompt assembly"): entry-point rule,
 # human-readable signature, and per-contract environment description.
 # `entry_points`/`require_exactly_one` drive validate_entry_point (task 2.2).
@@ -140,6 +171,12 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
         'require_exactly_one': False,
         'signature': 'process_frame(frame, params)',
         'environment': FRAME_HOOK_ENVIRONMENT,
+    },
+    'produce_frame': {
+        'entry_points': frozenset({'produce_frame'}),
+        'require_exactly_one': False,
+        'signature': 'produce_frame(context)',
+        'environment': PRODUCE_FRAME_ENVIRONMENT,
     },
 }
 

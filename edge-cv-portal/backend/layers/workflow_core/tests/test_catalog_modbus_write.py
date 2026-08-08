@@ -161,10 +161,16 @@ class TestModbusWriteMappings:
 class TestModbusWriteCatalogPositionAndBaseline:
     """Requirements 2.1, 2.3: appended last; baseline delta scope."""
 
-    def test_appended_as_the_last_catalog_entry(self):
-        assert NODE_CATALOG[-1].type_id == "modbus_write"
+    def test_appended_after_every_pre_modbus_descriptor(self):
+        # modbus_write was appended after every descriptor that predates
+        # it (Requirement 2.1); later additive features (e.g.
+        # custom_python_source) may only append *after* it, so the
+        # durable assertion is positional: modbus_write keeps its place
+        # right after the 23 pre-modbus descriptors.
+        order = [d.type_id for d in NODE_CATALOG]
+        assert order.index("modbus_write") == 23
         # Exactly one catalog entry carries the type id.
-        assert [d.type_id for d in NODE_CATALOG].count("modbus_write") == 1
+        assert order.count("modbus_write") == 1
 
     def test_baseline_delta_scoped_to_the_new_descriptor(self):
         # The recorded baseline covers exactly the live catalog (nothing

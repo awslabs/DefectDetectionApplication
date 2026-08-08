@@ -10,6 +10,7 @@
  * | V4    | required parameters have values satisfying constraints |
  * | V5    | every node reachable from some input node (forward BFS)|
  * | V7    | no connection targets a trigger node (stage ordering)  |
+ * | V7-co | frame-feed source coexistence (one fed source per run) |
  * | V8    | mqtt_subscribe declares a connection target            |
  * | V9    | one activation model per workflow (mixed-model rule)   |
  */
@@ -36,6 +37,7 @@ export const CODE_V4_MISSING_REQUIRED_PARAMETER = 'V4_MISSING_REQUIRED_PARAMETER
 export const CODE_V4_INVALID_PARAMETER_VALUE = 'V4_INVALID_PARAMETER_VALUE';
 export const CODE_V5_UNREACHABLE_NODE = 'V5_UNREACHABLE_NODE';
 export const CODE_V7_STAGE_ORDER = 'V7_STAGE_ORDER';
+export const CODE_V7_COEXISTENCE_CONFLICT = 'V7_COEXISTENCE_CONFLICT';
 export const CODE_V8_MQTT_SUB_NO_TARGET = 'V8_MQTT_SUB_NO_TARGET';
 export const CODE_V9_MIXED_ACTIVATION_MODEL = 'V9_MIXED_ACTIVATION_MODEL';
 
@@ -252,6 +254,105 @@ export function checkV7(graph: GraphLike, catalog: NodeTypeDescriptor[]): Valida
 }
 
 // --------------------------------------------------------------------------
+// V7-coexistence: frame-feed source coexistence
+// (custom-python-source Requirement 8.4, mirrors backend V7-coexistence)
+// --------------------------------------------------------------------------
+
+/**
+ * Node types allowed at most once per workflow, mapped to the
+ * plain-language reason — the TypeScript mirror of the backend's
+ * `COEXISTENCE_SINGLETON_TYPES` table in
+ * `workflow_core.validator.checks` (the source of truth; keep the
+ * entries and reason strings in sync).
+ */
+const COEXISTENCE_SINGLETON_TYPES: Record<string, string> = {
+  aravis_camera_source:
+    'the single-frame appsrc feed supports exactly one Aravis camera source per workflow',
+  custom_python_source:
+    'the single-frame appsrc feed serves exactly one frame-feed source per workflow',
+};
+
+/**
+ * Node types that all bind the runtime's single frame feed; at most one
+ * node across the whole group may exist per workflow (custom-python-source
+ * Requirements 8.1, 8.2). Mirror of the backend's `FRAME_FEED_SOURCE_TYPES`.
+ */
+const FRAME_FEED_SOURCE_TYPES = new Set(['aravis_camera_source', 'custom_python_source']);
+
+/**
+ * Mirror of the backend `_check_v7_coexistence` frame-feed rule
+ * (custom-python-source Requirement 8.4): when a workflow contains BOTH
+ * frame-feed source types (`custom_python_source` and
+ * `aravis_camera_source`), every frame-feed node gets one error finding
+ * naming the full conflicting membership across both types and stating
+ * that the runtime serves one frame-feed source per workflow; when two
+ * or more nodes of one singleton type are present (and the mixed rule
+ * did not already report them), every one of them gets an error finding
+ * naming the full same-type membership. Like the backend, the check
+ * keys on `node.type` directly (not the catalog), and each offending
+ * node is reported exactly once.
+ */
+export function checkV7Coexistence(graph: GraphLike): ValidationFinding[] {
+  const findings: ValidationFinding[] = [];
+  const byType = new Map<string, string[]>();
+  for (const node of graph.nodes) {
+    if (node.type in COEXISTENCE_SINGLETON_TYPES) {
+      const ids = byType.get(node.type) ?? [];
+      ids.push(node.id);
+      byType.set(node.type, ids);
+    }
+  }
+
+  const mixedFrameFeed = [...FRAME_FEED_SOURCE_TYPES].every((type) => byType.has(type));
+  if (mixedFrameFeed) {
+    const memberIds = [...FRAME_FEED_SOURCE_TYPES]
+      .flatMap((type) => byType.get(type) ?? [])
+      .sort();
+    const members = memberIds.map((id) => `'${id}'`).join(', ');
+    for (const nodeId of memberIds) {
+      findings.push({
+        severity: SEVERITY_ERROR,
+        code: CODE_V7_COEXISTENCE_CONFLICT,
+        message:
+          `Node '${nodeId}': frame-feed source nodes (${members}) cannot ` +
+          `coexist in one workflow: the runtime serves one frame-feed ` +
+          `source per workflow`,
+        nodeId,
+        connectionId: null,
+      });
+    }
+  }
+
+  for (const [nodeType, nodeIds] of [...byType.entries()].sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0
+  )) {
+    if (mixedFrameFeed && FRAME_FEED_SOURCE_TYPES.has(nodeType)) {
+      // Already reported by the mixed frame-feed rule above; a
+      // singleton finding here would double-report these nodes.
+      continue;
+    }
+    if (nodeIds.length < 2) {
+      continue;
+    }
+    const reason = COEXISTENCE_SINGLETON_TYPES[nodeType];
+    const sortedIds = [...nodeIds].sort();
+    const members = sortedIds.map((id) => `'${id}'`).join(', ');
+    for (const nodeId of sortedIds) {
+      findings.push({
+        severity: SEVERITY_ERROR,
+        code: CODE_V7_COEXISTENCE_CONFLICT,
+        message:
+          `Node '${nodeId}': ${nodeIds.length} nodes of type '${nodeType}' ` +
+          `cannot coexist in one workflow (${members}): ${reason}`,
+        nodeId,
+        connectionId: null,
+      });
+    }
+  }
+  return findings;
+}
+
+// --------------------------------------------------------------------------
 // V8: mqtt_subscribe must declare a connection target
 // (trigger-activation-runtime Requirement 4.5, mirrors backend V8)
 // --------------------------------------------------------------------------
@@ -373,7 +474,8 @@ export function checkV9(graph: GraphLike, catalog: NodeTypeDescriptor[]): Valida
 }
 
 /**
- * Run the inline mirror checks (V4 + V5 + V7 + V8 + V9) and return every
+ * Run the inline mirror checks (V4 + V5 + V7 + V7-coexistence + V8 + V9)
+ * and return every
  * finding, each with the associated node or connection identifier. The
  * canvas turns these into inline validation markers (Requirements 1.9,
  * 1.10, 5.5; trigger-activation-runtime Requirement 4.5).
@@ -386,6 +488,7 @@ export function runInlineChecks(
     ...checkV4(graph, catalog),
     ...checkV5(graph, catalog),
     ...checkV7(graph, catalog),
+    ...checkV7Coexistence(graph),
     ...checkV8(graph, catalog),
     ...checkV9(graph, catalog),
   ];

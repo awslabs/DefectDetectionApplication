@@ -541,6 +541,21 @@ export class BuildFleetStack extends cdk.Stack {
       }));
     };
 
+    /** Read-only invocation/command recovery for terminal reconciliation
+     * (build-fleet-execution-failures Req 2.1, 2.5, 2.12): the event
+     * consumer retrieves the final invocation, and the dispatcher's
+     * scheduled tick additionally recovers ambiguous sends through a
+     * recent-command lookup. GetCommandInvocation and ListCommands
+     * support no resource-level scoping; no mutating action is granted
+     * here. This is service execution wiring, not user RBAC. */
+    const grantSsmReconciliationReads = (role: iam.Role) => {
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetCommandInvocation', 'ssm:ListCommands'],
+        resources: ['*'],
+      }));
+    };
+
     /** Public canonical Ubuntu 22.04 AMI SSM parameters (AMI resolution
      * in build_fleet.py / build_dispatcher.py). */
     const grantAmiParameterRead = (role: iam.Role) => {
@@ -569,6 +584,9 @@ export class BuildFleetStack extends cdk.Stack {
     grantInstanceLifecycle(dispatcherRole, ['ec2:TerminateInstances', 'ec2:StopInstances'], TAG_EPHEMERAL);
     grantEc2Describe(dispatcherRole);
     grantSsmCommands(dispatcherRole);
+    // Scheduled command reconciliation + ambiguous-send recovery
+    // (build-fleet-execution-failures Req 2.5, 2.7).
+    grantSsmReconciliationReads(dispatcherRole);
     grantAmiParameterRead(dispatcherRole);
     this.buildDispatcherHandler = new lambda.Function(this, 'BuildDispatcherHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
@@ -662,13 +680,18 @@ export class BuildFleetStack extends cdk.Stack {
     });
 
     // build_events.py — EventBridge consumer (agent phase events, EC2
-    // state changes, spot interruptions, SSM command status). Pure
-    // DynamoDB conditional updates; no EC2/SSM permissions needed.
+    // state changes, spot interruptions, SSM command status). DynamoDB
+    // conditional updates plus the READ-ONLY GetCommandInvocation
+    // retrieval for terminal command reconciliation
+    // (build-fleet-execution-failures Req 2.1, 2.12): no mutating
+    // EC2/SSM action is granted to this consumer.
+    const eventsRole = createHandlerRole('BuildEvents');
+    grantSsmReconciliationReads(eventsRole);
     this.buildEventsHandler = new lambda.Function(this, 'BuildEventsHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'build_events.handler',
       code: functionsAsset,
-      role: createHandlerRole('BuildEvents'),
+      role: eventsRole,
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2026-02-21-build-events',
@@ -724,8 +747,11 @@ export class BuildFleetStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(this.buildEventsHandler)],
     });
 
-    // SSM command status: agent command Failed/TimedOut/Cancelled with no
-    // terminal phase event → failed/interrupted fallback.
+    // SSM command status: every TERMINAL agent command status is routed
+    // to the reconciliation path (build-fleet-execution-failures
+    // Req 2.1) — `Success` is included so a successful command whose
+    // agent result never arrives can be settled to AGENT_RESULT_MISSING;
+    // all pre-existing failure statuses are preserved.
     new events.Rule(this, 'BuildSsmCommandStatusRule', {
       ruleName: 'dda-portal-build-ssm-command-status',
       description: 'Delivers SSM command status changes to build_events.py',
@@ -736,7 +762,7 @@ export class BuildFleetStack extends cdk.Stack {
           'EC2 Command Invocation Status-change Notification',
         ],
         detail: {
-          status: ['Failed', 'TimedOut', 'Cancelled'],
+          status: ['Success', 'Failed', 'TimedOut', 'Cancelled'],
         },
       },
       targets: [new targets.LambdaFunction(this.buildEventsHandler)],
@@ -827,6 +853,14 @@ export class BuildFleetStack extends cdk.Stack {
     addMethod(configResource, 'GET', configIntegration);
     addMethod(configResource, 'PUT', configIntegration);
 
+    // /build-branches — branch discovery for the submission form's
+    // repository field (build_jobs.list_build_branches, guarded by the
+    // builds read boundary; build-source-selection Req 3.1, 3.4).
+    const branchesResource = api.root.addResource('build-branches', {
+      defaultCorsPreflightOptions: corsOptions,
+    });
+    addMethod(branchesResource, 'GET', jobsIntegration);
+
     // Deployment re-pointing the existing stage so the routes above go
     // live; logical id salted with the route table so any route change
     // rolls a new deployment (same pattern as NodeDesignerApiStack).
@@ -853,6 +887,7 @@ export class BuildFleetStack extends cdk.Stack {
     deployment.node.addDependency(buildsResource);
     deployment.node.addDependency(serversResource);
     deployment.node.addDependency(configResource);
+    deployment.node.addDependency(branchesResource);
 
     // ------------------------------------------------------------------
     // Outputs

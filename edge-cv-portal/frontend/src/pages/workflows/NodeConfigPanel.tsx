@@ -472,6 +472,10 @@ function ExampleChips({
 export const CODE_ASSIST_CONTRACTS: Record<string, CodeAssistContract> = {
   custom_python: 'process_frame_or_handle',
   custom_python_preprocess: 'process_frame',
+  // custom-python-source Requirement 9.6: the source node's code editor
+  // gets the assistant panel, the derived-requirements pipeline, and
+  // role gating on the same terms as the other Custom Python node types.
+  custom_python_source: 'produce_frame',
 };
 
 // --------------------------------------------------------------------------

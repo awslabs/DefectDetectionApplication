@@ -96,7 +96,22 @@ const CUSTOM_PYTHON_PREPROCESS: NodeTypeDescriptor = {
   hardwareDependent: false,
 };
 
-const CATALOG = [CAMERA, CAPTURE, CUSTOM_PYTHON, CUSTOM_PYTHON_PREPROCESS];
+const CUSTOM_PYTHON_SOURCE: NodeTypeDescriptor = {
+  typeId: 'custom_python_source',
+  category: CATEGORY_INPUT,
+  displayName: 'Custom Python (Source)',
+  inputs: [{ name: 'activation', portType: PORT_TYPE_EVENT_SIGNAL }],
+  outputs: [{ name: 'out', portType: PORT_TYPE_VIDEO_FRAMES }],
+  parameters: [
+    { name: 'code', paramType: 'code', required: true, default: null, constraints: { minLength: 1 } },
+    { name: 'requirements', paramType: 'string', required: false, default: '', constraints: {} },
+    { name: 'allowed_uri_prefixes', paramType: 'string', required: false, default: '', constraints: {} },
+  ],
+  mappings: [],
+  hardwareDependent: true,
+};
+
+const CATALOG = [CAMERA, CAPTURE, CUSTOM_PYTHON, CUSTOM_PYTHON_PREPROCESS, CUSTOM_PYTHON_SOURCE];
 
 function node(id: string, type: string, parameters: WorkflowNode['parameters'] = {}): WorkflowNode {
   return { id, type, position: { x: 0, y: 0 }, parameters };
@@ -164,6 +179,24 @@ describe('checkV4', () => {
   it('reports no marker once the custom_python_preprocess code parameter has a value', () => {
     const graph = {
       nodes: [node('n1', 'custom_python_preprocess', { code: 'def process_frame(frame, metadata):\n    return None' })],
+      connections: [],
+    };
+    expect(checkV4(graph, CATALOG)).toEqual([]);
+  });
+
+  it('reports a required-parameter marker for a custom_python_source node without code (custom-python-source Requirement 10.5)', () => {
+    const graph = { nodes: [node('n1', 'custom_python_source')], connections: [] };
+    const findings = checkV4(graph, CATALOG);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].code).toBe(CODE_V4_MISSING_REQUIRED_PARAMETER);
+    expect(findings[0].severity).toBe('error');
+    expect(findings[0].nodeId).toBe('n1');
+    expect(findings[0].message).toContain('code');
+  });
+
+  it('reports no marker once the custom_python_source code parameter has a value', () => {
+    const graph = {
+      nodes: [node('n1', 'custom_python_source', { code: 'def produce_frame(context):\n    return None' })],
       connections: [],
     };
     expect(checkV4(graph, CATALOG)).toEqual([]);

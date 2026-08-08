@@ -15,6 +15,23 @@
  * (Requirement 9.2): the field is sent as null and the backend applies
  * the default on read. Users without the PortalAdmin role see an access
  * notice instead of the form (changes are PortalAdmin-only, Req 9.6).
+ *
+ * build-fleet-execution-failures tasks 8.4/8.5 add two OPTIONAL
+ * sections while retaining every existing field and the legacy payload
+ * shape (Req 2.17, 2.19, 2.20, 3.6, 3.12, 3.13):
+ *
+ * - Per-target/mode runtime budgets (`runtime_budgets`): hard runtime
+ *   ceiling (non-extendable), heartbeat lease, progress-stall lease,
+ *   and the independent OPTIONAL queue-wait and provisioning limits.
+ * - Per-target ephemeral volume sizes (`volume_size_gb_by_target`);
+ *   the global volume size stays (documented default now 200 GB) and
+ *   any JP6 entry must be at least 200 GB.
+ *
+ * Both maps are omitted from the payload while unconfigured (legacy
+ * payloads preserved) and sent as null to revert when the stored maps
+ * are cleared. Changing any of these settings never mutates existing
+ * Build_Jobs: every job keeps the budgets and volume size snapshotted
+ * at its submission.
  */
 import { useEffect, useState } from 'react';
 import {
@@ -49,6 +66,55 @@ interface BuildConfigFormState {
   source_ref: string;
 }
 
+/**
+ * One editable runtime-budget row (`runtime_budgets` map entry): a
+ * build target, an execution mode (or `default` for both modes), and
+ * the five optional budget values, all as entered.
+ */
+interface RuntimeBudgetRow {
+  target: string;
+  mode: string;
+  hard_runtime_hours: string;
+  heartbeat_lease_minutes: string;
+  progress_stall_minutes: string;
+  queue_wait_hours: string;
+  provisioning_minutes: string;
+}
+
+/** One editable per-target volume-size row. */
+interface VolumeByTargetRow {
+  target: string;
+  volume_size_gb: string;
+}
+
+const EMPTY_BUDGET_ROW: RuntimeBudgetRow = {
+  target: '',
+  mode: '',
+  hard_runtime_hours: '',
+  heartbeat_lease_minutes: '',
+  progress_stall_minutes: '',
+  queue_wait_hours: '',
+  provisioning_minutes: '',
+};
+
+const BUDGET_VALUE_KEYS = [
+  'hard_runtime_hours',
+  'heartbeat_lease_minutes',
+  'progress_stall_minutes',
+  'queue_wait_hours',
+  'provisioning_minutes',
+] as const;
+
+/**
+ * The effective configuration may additionally carry the OPTIONAL
+ * runtime-budget and per-target volume maps (null while unconfigured).
+ * Declared locally so the shared api.ts types stay untouched.
+ */
+type ExtendedBuildConfig = BuildInfrastructureConfig & {
+  runtime_budgets?: Record<string, Record<string, Record<string, unknown>>> | null;
+  volume_size_gb_by_target?: Record<string, unknown> | null;
+};
+
 type FieldErrors = Partial<Record<keyof BuildConfigFormState, string>>;
 
 function toFormState(config: BuildInfrastructureConfig): BuildConfigFormState {
@@ -63,6 +129,83 @@ function toFormState(config: BuildInfrastructureConfig): BuildConfigFormState {
     // renders as a blank field (never the literal string "null").
     source_ref: config.source_ref == null ? '' : String(config.source_ref),
   };
+}
+
+/** Flatten the stored runtime_budgets map into editable rows. */
+export function toBudgetRows(
+  budgets: ExtendedBuildConfig['runtime_budgets'],
+): RuntimeBudgetRow[] {
+  if (!budgets || typeof budgets !== 'object') return [];
+  const rows: RuntimeBudgetRow[] = [];
+  for (const [target, perMode] of Object.entries(budgets)) {
+    if (!perMode || typeof perMode !== 'object') continue;
+    for (const [mode, entry] of Object.entries(perMode)) {
+      const row: RuntimeBudgetRow = { ...EMPTY_BUDGET_ROW, target, mode };
+      if (entry && typeof entry === 'object') {
+        for (const key of BUDGET_VALUE_KEYS) {
+          const value = (entry as Record<string, unknown>)[key];
+          if (value != null) row[key] = String(value);
+        }
+      }
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+/** Flatten the stored volume_size_gb_by_target map into editable rows. */
+export function toVolumeRows(
+  byTarget: ExtendedBuildConfig['volume_size_gb_by_target'],
+): VolumeByTargetRow[] {
+  if (!byTarget || typeof byTarget !== 'object') return [];
+  return Object.entries(byTarget).map(([target, size]) => ({
+    target,
+    volume_size_gb: size == null ? '' : String(size),
+  }));
+}
+
+/**
+ * Assemble the runtime_budgets wire map from the edited rows. Rows that
+ * are entirely blank are skipped; a blank mode means `default` (both
+ * modes). Values are sent as entered (numericValue) so the backend can
+ * name each rejection. Returns null when no row survives (the caller
+ * decides between omitting the key and reverting with null).
+ */
+export function budgetRowsToMap(
+  rows: RuntimeBudgetRow[],
+): Record<string, Record<string, Record<string, number | string>>> | null {
+  const budgets: Record<string, Record<string, Record<string, number | string>>> = {};
+  for (const row of rows) {
+    const target = row.target.trim();
+    const blank =
+      target === '' &&
+      row.mode.trim() === '' &&
+      BUDGET_VALUE_KEYS.every((key) => row[key].trim() === '');
+    if (blank) continue;
+    const mode = row.mode.trim() === '' ? 'default' : row.mode.trim();
+    const entry: Record<string, number | string> = {};
+    for (const key of BUDGET_VALUE_KEYS) {
+      const value = numericValue(row[key]);
+      if (value !== null) entry[key] = value;
+    }
+    if (!budgets[target]) budgets[target] = {};
+    budgets[target][mode] = entry;
+  }
+  return Object.keys(budgets).length > 0 ? budgets : null;
+}
+
+/** Assemble the volume_size_gb_by_target wire map from the edited rows. */
+export function volumeRowsToMap(
+  rows: VolumeByTargetRow[],
+): Record<string, number | string> | null {
+  const byTarget: Record<string, number | string> = {};
+  for (const row of rows) {
+    const target = row.target.trim();
+    if (target === '' && row.volume_size_gb.trim() === '') continue;
+    const value = numericValue(row.volume_size_gb);
+    byTarget[target] = value === null ? '' : value;
+  }
+  return Object.keys(byTarget).length > 0 ? byTarget : null;
 }
 
 /**
@@ -134,6 +277,22 @@ export default function BuildInfrastructureSettings() {
   const [success, setSuccess] = useState('');
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [form, setForm] = useState<BuildConfigFormState>(EMPTY_FORM);
+  const [budgetRows, setBudgetRows] = useState<RuntimeBudgetRow[]>([]);
+  const [volumeRows, setVolumeRows] = useState<VolumeByTargetRow[]>([]);
+  // Whether the stored configuration carried the optional maps: cleared
+  // rows then revert with null; otherwise the keys are omitted so an
+  // unconfigured save keeps the exact legacy payload shape.
+  const [storedHadBudgets, setStoredHadBudgets] = useState(false);
+  const [storedHadVolumeMap, setStoredHadVolumeMap] = useState(false);
+
+  const applyConfig = (config: BuildInfrastructureConfig) => {
+    const extended = config as ExtendedBuildConfig;
+    setForm(toFormState(config));
+    setBudgetRows(toBudgetRows(extended.runtime_budgets));
+    setVolumeRows(toVolumeRows(extended.volume_size_gb_by_target));
+    setStoredHadBudgets(extended.runtime_budgets != null);
+    setStoredHadVolumeMap(extended.volume_size_gb_by_target != null);
+  };
 
   useEffect(() => {
     if (!isPortalAdmin) return;
@@ -142,7 +301,7 @@ export default function BuildInfrastructureSettings() {
     apiService
       .getBuildConfig()
       .then((response) => {
-        if (!cancelled) setForm(toFormState(response.config));
+        if (!cancelled) applyConfig(response.config);
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(getErrorMessage(err, 'Failed to load the build configuration'));
@@ -167,12 +326,20 @@ export default function BuildInfrastructureSettings() {
     setForm((current) => ({ ...current, [field]: detail.value }));
   };
 
+  const setBudgetRow = (index: number, field: keyof RuntimeBudgetRow, value: string) => {
+    setBudgetRows((rows) => rows.map((row, i) => (i === index ? { ...row, [field]: value } : row)));
+  };
+
+  const setVolumeRow = (index: number, field: keyof VolumeByTargetRow, value: string) => {
+    setVolumeRows((rows) => rows.map((row, i) => (i === index ? { ...row, [field]: value } : row)));
+  };
+
   const handleSave = async () => {
     setError('');
     setSuccess('');
     setFieldErrors({});
 
-    const update: BuildInfrastructureConfigUpdate = {
+    const update: Record<string, unknown> = {
       arm64_instance_type: textValue(form.arm64_instance_type),
       x86_64_instance_type: textValue(form.x86_64_instance_type),
       volume_size_gb: numericValue(form.volume_size_gb),
@@ -181,11 +348,23 @@ export default function BuildInfrastructureSettings() {
       use_spot_for_ephemeral: form.use_spot_for_ephemeral,
       source_ref: textValue(form.source_ref),
     };
+    // OPTIONAL maps: omitted while unconfigured (legacy payload
+    // preserved); null reverts a previously stored map (Req 3.6).
+    const budgets = budgetRowsToMap(budgetRows);
+    if (budgets !== null || storedHadBudgets) {
+      update.runtime_budgets = budgets;
+    }
+    const volumesByTarget = volumeRowsToMap(volumeRows);
+    if (volumesByTarget !== null || storedHadVolumeMap) {
+      update.volume_size_gb_by_target = volumesByTarget;
+    }
 
     setSaving(true);
     try {
-      const response = await apiService.updateBuildConfig(update);
-      setForm(toFormState(response.config));
+      const response = await apiService.updateBuildConfig(
+        update as BuildInfrastructureConfigUpdate,
+      );
+      applyConfig(response.config);
       setSuccess(
         response.changes.length > 0
           ? `Build configuration saved (${response.changes.length} ` +
@@ -279,7 +458,7 @@ export default function BuildInfrastructureSettings() {
 
           <FormField
             label="Volume size (GB)"
-            constraintText="Root volume size for build instances, a positive number (default 100)"
+            constraintText="Root volume size for build instances, a positive number (default 200). Applies to Build_Jobs created after the change: existing jobs keep their snapshotted volume size."
             errorText={fieldErrors.volume_size_gb}
           >
             <Input
@@ -343,6 +522,130 @@ export default function BuildInfrastructureSettings() {
               ariaLabel="Source ref"
             />
           </FormField>
+
+          <Header
+            variant="h3"
+            description="Optional per-target volume sizes for ephemeral build runners. A target without an entry uses the global volume size above. JP6 requires at least 200 GB. Entries apply only to Build_Jobs created after the change: existing jobs keep their snapshotted volume sizes."
+          >
+            Per-target volume sizes
+          </Header>
+          {volumeRows.map((row, index) => (
+            <SpaceBetween key={`volume-row-${index}`} size="xs" direction="horizontal">
+              <FormField label="Build target" constraintText="JP5, JP6, AMD64, or AMD64_NVIDIA">
+                <Input
+                  value={row.target}
+                  onChange={({ detail }) => setVolumeRow(index, 'target', detail.value)}
+                  placeholder="JP6"
+                  ariaLabel={`Per-target volume ${index + 1} target`}
+                />
+              </FormField>
+              <FormField label="Volume size (GB)" constraintText="JP6 minimum 200">
+                <Input
+                  type="number"
+                  value={row.volume_size_gb}
+                  onChange={({ detail }) => setVolumeRow(index, 'volume_size_gb', detail.value)}
+                  ariaLabel={`Per-target volume ${index + 1} size GB`}
+                />
+              </FormField>
+              <Button
+                ariaLabel={`Remove per-target volume ${index + 1}`}
+                onClick={() => setVolumeRows((rows) => rows.filter((_, i) => i !== index))}
+              >
+                Remove
+              </Button>
+            </SpaceBetween>
+          ))}
+          <Button
+            ariaLabel="Add per-target volume size"
+            onClick={() => setVolumeRows((rows) => [...rows, { target: '', volume_size_gb: '' }])}
+          >
+            Add per-target volume size
+          </Button>
+
+          <Header
+            variant="h3"
+            description="Optional runtime budgets per build target and execution mode, snapshotted onto each Build_Job at submission. The hard runtime ceiling is a non-extendable safety limit: fresh heartbeats and progress renew the soft leases but can never extend it. Queue-wait and provisioning limits are independent and optional — they stay disabled unless set, and queue or provisioning time is never charged against execution runtime. Changing these settings does not mutate existing Build_Jobs: every job keeps the budgets snapshotted when it was submitted."
+          >
+            Runtime budgets (per target and mode)
+          </Header>
+          {budgetRows.map((row, index) => (
+            <SpaceBetween key={`budget-row-${index}`} size="xs" direction="horizontal">
+              <FormField label="Build target" constraintText="JP5, JP6, AMD64, or AMD64_NVIDIA">
+                <Input
+                  value={row.target}
+                  onChange={({ detail }) => setBudgetRow(index, 'target', detail.value)}
+                  placeholder="JP6"
+                  ariaLabel={`Runtime budget ${index + 1} target`}
+                />
+              </FormField>
+              <FormField label="Mode" constraintText="ephemeral, dedicated, or blank for both (default)">
+                <Input
+                  value={row.mode}
+                  onChange={({ detail }) => setBudgetRow(index, 'mode', detail.value)}
+                  placeholder="default"
+                  ariaLabel={`Runtime budget ${index + 1} mode`}
+                />
+              </FormField>
+              <FormField label="Hard runtime (hours)" constraintText="Non-extendable ceiling">
+                <Input
+                  type="number"
+                  value={row.hard_runtime_hours}
+                  onChange={({ detail }) => setBudgetRow(index, 'hard_runtime_hours', detail.value)}
+                  ariaLabel={`Runtime budget ${index + 1} hard runtime hours`}
+                />
+              </FormField>
+              <FormField label="Heartbeat lease (min)" constraintText="Optional liveness lease">
+                <Input
+                  type="number"
+                  value={row.heartbeat_lease_minutes}
+                  onChange={({ detail }) =>
+                    setBudgetRow(index, 'heartbeat_lease_minutes', detail.value)
+                  }
+                  ariaLabel={`Runtime budget ${index + 1} heartbeat lease minutes`}
+                />
+              </FormField>
+              <FormField label="Progress stall (min)" constraintText="Optional progress lease">
+                <Input
+                  type="number"
+                  value={row.progress_stall_minutes}
+                  onChange={({ detail }) =>
+                    setBudgetRow(index, 'progress_stall_minutes', detail.value)
+                  }
+                  ariaLabel={`Runtime budget ${index + 1} progress stall minutes`}
+                />
+              </FormField>
+              <FormField label="Queue wait (hours)" constraintText="Optional, independent of runtime">
+                <Input
+                  type="number"
+                  value={row.queue_wait_hours}
+                  onChange={({ detail }) => setBudgetRow(index, 'queue_wait_hours', detail.value)}
+                  ariaLabel={`Runtime budget ${index + 1} queue wait hours`}
+                />
+              </FormField>
+              <FormField label="Provisioning (min)" constraintText="Optional, independent of runtime">
+                <Input
+                  type="number"
+                  value={row.provisioning_minutes}
+                  onChange={({ detail }) =>
+                    setBudgetRow(index, 'provisioning_minutes', detail.value)
+                  }
+                  ariaLabel={`Runtime budget ${index + 1} provisioning minutes`}
+                />
+              </FormField>
+              <Button
+                ariaLabel={`Remove runtime budget ${index + 1}`}
+                onClick={() => setBudgetRows((rows) => rows.filter((_, i) => i !== index))}
+              >
+                Remove
+              </Button>
+            </SpaceBetween>
+          ))}
+          <Button
+            ariaLabel="Add runtime budget"
+            onClick={() => setBudgetRows((rows) => [...rows, { ...EMPTY_BUDGET_ROW }])}
+          >
+            Add runtime budget
+          </Button>
         </SpaceBetween>
       </Form>
     </SpaceBetween>

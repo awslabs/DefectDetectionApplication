@@ -45,7 +45,9 @@ import FleetPage from './pages/admin/FleetPage';
 import Login from './pages/Login';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
+import RequireRole from './components/RequireRole';
 import GlobalLoadingBar from './components/GlobalLoadingBar';
+import { BUILDS_ACCESS_ROLES } from './utils/buildsAccess';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -112,11 +114,37 @@ function App() {
                   path="node-designer/plugins/:pluginId/versions/:version/simulate"
                   element={<SimulatorView />}
                 />
-                <Route path="builds" element={<BuildsPage />} />
-                <Route path="builds/:buildJobId" element={<BuildDetail />} />
+                {/* Builds surface is role-gated (bugfix Req 2.5/2.6): roles without
+                    builds access are redirected instead of rendering a 403-banner page.
+                    Server-side RBAC remains the ultimate authority (Req 2.7). */}
+                <Route
+                  path="builds"
+                  element={
+                    <RequireRole roles={BUILDS_ACCESS_ROLES}>
+                      <BuildsPage />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="builds/:buildJobId"
+                  element={
+                    <RequireRole roles={BUILDS_ACCESS_ROLES}>
+                      <BuildDetail />
+                    </RequireRole>
+                  }
+                />
                 <Route path="settings" element={<Settings />} />
                 <Route path="admin/user-manager" element={<UserManager />} />
-                <Route path="admin/fleet" element={<FleetPage />} />
+                {/* Build Fleet stays PortalAdmin-only (Req 3.6). FleetPage's own
+                    PortalAdmin check remains as a second defensive layer. */}
+                <Route
+                  path="admin/fleet"
+                  element={
+                    <RequireRole roles={['PortalAdmin']}>
+                      <FleetPage />
+                    </RequireRole>
+                  }
+                />
                 <Route path="audit" element={<AuditLogs />} />
               </Route>
             </Routes>

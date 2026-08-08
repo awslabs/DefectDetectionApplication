@@ -335,7 +335,7 @@
         "constraints": {},
         "default": true,
         "depends_on": null,
-        "description": "Checked: anomaly mode — the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs. Unchecked: freeform mode — the prompt is sent as-is and the raw model text is recorded in the run metadata as bedrock_text (and bedrock.{nodeId}.text), with no JSON parsing.",
+        "description": "Checked: anomaly mode \u2014 the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs. Unchecked: freeform mode \u2014 the prompt is sent as-is and the raw model text is recorded in the run metadata as bedrock_text (and bedrock.{nodeId}.text), with no JSON parsing.",
         "examples": [
           true,
           false
@@ -1455,6 +1455,198 @@
       }
     ],
     "type_id": "custom_python_preprocess"
+  },
+  "custom_python_source": {
+    "category": "input",
+    "display_name": "Custom Python (Source)",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp4",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Python run once per workflow run to produce the run's frame. Define produce_frame(context) and return the frame; context is the trigger context that started the run: for MQTT triggers the keys topic, payload, payload_json, qos and timestamp (payload_json is the payload parsed as JSON, or None when it does not parse); for OPC UA triggers the keys endpoint, node_id, value and source_timestamp; an empty dict for manual runs. Return a NumPy uint8 array (rows x cols grayscale, rows x cols x 3 BGR, or rows x cols x 4 BGRA \u2014 OpenCV channel order), or {'array': arr, 'format': 'RGB'|'RGBA'|'GRAY8'} to use the array's bytes without channel conversion, or {'data': bytes, 'width': W, 'height': H, 'format': ...} for raw bytes; returning None fails the run. cv2/np are pre-imported. Helpers: import dda_frames for load_image(source) -> BGR uint8 array and load_bytes(source) -> raw bytes, for local paths, s3://bucket/key URIs, and http(s):// URLs.",
+        "examples": [
+          "def produce_frame(context):\n    import dda_frames\n    payload = context.get(\"payload_json\") or {}\n    return dda_frames.load_image(payload[\"image_url\"])",
+          "def produce_frame(context):\n    import dda_frames\n    return dda_frames.load_image(\"s3://plant-images/reference.jpg\")"
+        ],
+        "name": "code",
+        "param_type": "code",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Extra pip packages the code needs, one per line in requirements.txt form.",
+        "examples": [
+          "requests==2.32.3"
+        ],
+        "name": "requirements",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional newline-separated list of URI prefixes that dda_frames.load_image and load_bytes may fetch from, e.g. s3://plant-images/; empty permits any source. The restriction applies only to fetches made through the dda_frames helpers \u2014 it is not a sandbox boundary.",
+        "examples": [
+          "s3://plant-images/\nhttps://mes.local/"
+        ],
+        "name": "allowed_uri_prefixes",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "custom_python_source"
   },
   "dewarp": {
     "category": "preprocessing",
@@ -3385,7 +3577,7 @@
         "constraints": {},
         "default": false,
         "depends_on": null,
-        "description": "Publish through the device's Greengrass-managed MQTT (the Greengrass nucleus's AWS IoT Core connection) instead of a plain broker or your own AWS IoT credentials. Zero configuration: only the topic is required — no broker host or port and no certificate paths.",
+        "description": "Publish through the device's Greengrass-managed MQTT (the Greengrass nucleus's AWS IoT Core connection) instead of a plain broker or your own AWS IoT credentials. Zero configuration: only the topic is required \u2014 no broker host or port and no certificate paths.",
         "examples": [
           true
         ],
@@ -3471,7 +3663,7 @@
         },
         "default": "queue",
         "depends_on": null,
-        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce — coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
+        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce \u2014 coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
         "examples": [
           "queue",
           "drop"
@@ -3790,7 +3982,7 @@
         },
         "default": "queue",
         "depends_on": null,
-        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce — coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
+        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce \u2014 coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
         "examples": [
           "queue",
           "drop"

@@ -1671,6 +1671,94 @@ MODBUS_WRITE = NodeTypeDescriptor(
 )
 
 # --------------------------------------------------------------------------
+# Custom Python source node (custom-python-source Requirements 1.1-1.8)
+# --------------------------------------------------------------------------
+
+CUSTOM_PYTHON_SOURCE = NodeTypeDescriptor(
+    type_id="custom_python_source",
+    category=CATEGORY_INPUT,
+    display_name="Custom Python (Source)",
+    # The activation port is how a subscription trigger starts the run
+    # whose Trigger_Context the Frame_Producer receives.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
+    outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
+    parameters=[
+        ParameterDescriptor("code", "code", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="Python run once per workflow run "
+                                        "to produce the run's frame. Define "
+                                        "produce_frame(context) and return "
+                                        "the frame; context is the trigger "
+                                        "context that started the run: for "
+                                        "MQTT triggers the keys topic, "
+                                        "payload, payload_json, qos and "
+                                        "timestamp (payload_json is the "
+                                        "payload parsed as JSON, or None "
+                                        "when it does not parse); for "
+                                        "OPC UA triggers the keys endpoint, "
+                                        "node_id, value and "
+                                        "source_timestamp; an empty dict "
+                                        "for manual runs. Return a NumPy "
+                                        "uint8 array (rows x cols "
+                                        "grayscale, rows x cols x 3 BGR, "
+                                        "or rows x cols x 4 BGRA — OpenCV "
+                                        "channel order), or {'array': arr, "
+                                        "'format': 'RGB'|'RGBA'|'GRAY8'} "
+                                        "to use the array's bytes without "
+                                        "channel conversion, or {'data': "
+                                        "bytes, 'width': W, 'height': H, "
+                                        "'format': ...} for raw bytes; "
+                                        "returning None fails the run. "
+                                        "cv2/np are pre-imported. Helpers: "
+                                        "import dda_frames for "
+                                        "load_image(source) -> BGR uint8 "
+                                        "array and load_bytes(source) -> "
+                                        "raw bytes, for local paths, "
+                                        "s3://bucket/key URIs, and "
+                                        "http(s):// URLs.",
+                            examples=["def produce_frame(context):\n"
+                                      "    import dda_frames\n"
+                                      "    payload = context.get(\"payload_json\") or {}\n"
+                                      "    return dda_frames.load_image(payload[\"image_url\"])",
+                                      "def produce_frame(context):\n"
+                                      "    import dda_frames\n"
+                                      "    return dda_frames.load_image(\"s3://plant-images/reference.jpg\")"]),
+        ParameterDescriptor("requirements", "string", required=False, default="",
+                            constraints={},
+                            description="Extra pip packages the code needs, "
+                                        "one per line in requirements.txt "
+                                        "form.",
+                            examples=["requests==2.32.3"]),
+        ParameterDescriptor("allowed_uri_prefixes", "string", required=False, default="",
+                            constraints={},
+                            description="Optional newline-separated list of "
+                                        "URI prefixes that "
+                                        "dda_frames.load_image and "
+                                        "load_bytes may fetch from, e.g. "
+                                        "s3://plant-images/; empty permits "
+                                        "any source. The restriction "
+                                        "applies only to fetches made "
+                                        "through the dda_frames helpers — "
+                                        "it is not a sandbox boundary.",
+                            examples=["s3://plant-images/\nhttps://mes.local/"]),
+    ],
+    # The Frame_Producer runs in the LocalServer's Python_Bridge before
+    # the pipeline starts; the produced frame is pushed into the compiled
+    # appsrc through the existing single-frame Frame_Feed model — the
+    # byte-for-byte Aravis chain (appsrc name compile-time rendered per
+    # node via {nodeId}). Simulation: fed from the Test_Dataset like the
+    # other hardware frame sources (Requirement 12.6).
+    mappings=_same_on_device_archs(
+        element_chain=[
+            _element("appsrc", name="appsrc_{nodeId}"),
+            _element("videoconvert"),
+        ],
+        plugin_dependencies=["app", "videoconvertscale"],
+    ) + [_dataset_fed_sim_source()],
+    hardware_dependent=True,
+)
+
+# --------------------------------------------------------------------------
 # Catalog access
 # --------------------------------------------------------------------------
 
@@ -1707,6 +1795,9 @@ NODE_CATALOG = (
     # Appended (additive — modbus-tcp-output Requirement 2.1): every
     # pre-existing descriptor keeps its position and content.
     MODBUS_WRITE,
+    # Appended (additive — custom-python-source Requirement 11.4): every
+    # pre-existing descriptor keeps its position and content.
+    CUSTOM_PYTHON_SOURCE,
 )
 
 _CATALOG_BY_ID = {descriptor.type_id: descriptor for descriptor in NODE_CATALOG}

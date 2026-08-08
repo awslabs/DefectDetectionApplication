@@ -827,6 +827,9 @@ class TestCatalogCoverage:
         # modbus-tcp-output: the Modbus TCP write output appended last
         # (Requirement 2.1).
         "modbus_write",
+        # custom-python-source: the Custom Python frame source appended
+        # last (Requirements 1.1, 11.4).
+        "custom_python_source",
     }
 
     def test_catalog_contains_exactly_the_expected_types(self):

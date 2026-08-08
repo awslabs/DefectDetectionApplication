@@ -26,6 +26,13 @@ Requirements: 1.3, 2.2, 2.3, 3.1, 3.3, 3.8, 3.9, 6.11, 7.1, 7.2, 7.3, 7.4,
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import build_domain
+# Pure timing/reconciliation model (build-fleet-execution-failures task 8):
+# separate queue/provisioning/execution phase clocks, heartbeat/progress
+# leases, and the non-extendable snapshotted hard ceiling live in
+# build_reconciliation.decide_timing; this module delegates to it for jobs
+# carrying the new timing shape while preserving the legacy wall-clock
+# decision for legacy-shaped jobs (Req 2.13-2.16, 2.18, 3.4, 3.12).
+import build_reconciliation
 
 # ---------------------------------------------------------------------------
 # Dispatch eligibility (Requirement 1.3)
@@ -493,37 +500,138 @@ RUNNING_WATCHDOG_STATUSES = frozenset({
 class TimeoutDecision(NamedTuple):
     """Runtime-watchdog decision for one running Build_Job (Req 3.8).
 
-    - ``timed_out``: True iff the job's elapsed runtime exceeds its
-      ``config_snapshot`` maximum
+    - ``timed_out``: True iff the job's applicable deadline was strictly
+      crossed (``now > deadline``, Req 3.12)
     - ``build_job_id``: the job the decision is about
     - ``status``: the Build_Job status the decision implies — failed on a
       timeout, the unchanged current status otherwise
     - ``error``: the timeout error recorded on the job (None when not
       timed out); logs produced up to termination are retained
+    - ``classification``: the stable timeout code (e.g.
+      MAX_RUNTIME_EXCEEDED, AGENT_HEARTBEAT_EXPIRED,
+      BUILD_PROGRESS_STALLED, QUEUE_WAIT_TIMEOUT, PROVISIONING_TIMEOUT)
+      when timed out; CONTINUE / WAIT_FOR_EXECUTION_EVIDENCE while the
+      job may keep running under the phase-clock model; None on the
+      legacy non-timeout path (Req 2.4, 2.18)
+    - ``evidence``: the evidence-rich timing record (phase, observed
+      durations, applicable budget + value + source, target/mode, last
+      heartbeat/progress; unavailable fields present as None) produced
+      by the phase-clock model; None on the legacy path (Req 2.18)
     """
     timed_out: bool
     build_job_id: str
     status: str
     error: Optional[str]
+    classification: Optional[str] = None
+    evidence: Optional[Dict[str, Any]] = None
+
+
+def _timing_timeout_error(classification: str,
+                          evidence: Dict[str, Any]) -> str:
+    """The recorded timeout error message for one phase-clock timeout
+    classification (safe: built only from the pure evidence record,
+    never from raw provider text)."""
+    budget_ms = evidence.get('budget_ms')
+
+    def _hours() -> str:
+        return f"{(budget_ms or 0) / _MS_PER_HOUR:g}"
+
+    def _minutes() -> str:
+        return f"{(budget_ms or 0) / _MS_PER_MINUTE:g}"
+
+    if classification == build_reconciliation.CODE_MAX_RUNTIME_EXCEEDED:
+        # Keep the legacy wording for the hard-ceiling expiry so existing
+        # consumers of the timeout message see no change (Req 3.8).
+        return (f"Build_Job exceeded its maximum runtime of "
+                f"{_hours()} hours (timeout).")
+    if classification == build_reconciliation.CODE_AGENT_HEARTBEAT_EXPIRED:
+        return (f"Build_Job agent heartbeat expired: no heartbeat was "
+                f"observed for more than {_minutes()} minutes "
+                f"(AGENT_HEARTBEAT_EXPIRED).")
+    if classification == build_reconciliation.CODE_BUILD_PROGRESS_STALLED:
+        return (f"Build_Job progress stalled: heartbeats remained fresh "
+                f"but no meaningful progress was observed for more than "
+                f"{_minutes()} minutes (BUILD_PROGRESS_STALLED).")
+    if classification == build_reconciliation.CODE_QUEUE_WAIT_TIMEOUT:
+        return (f"Build_Job exceeded its explicitly configured queue-wait "
+                f"budget of {_hours()} hours (QUEUE_WAIT_TIMEOUT).")
+    if classification == build_reconciliation.CODE_PROVISIONING_TIMEOUT:
+        return (f"Build_Job exceeded its explicitly configured "
+                f"provisioning budget of {_minutes()} minutes "
+                f"(PROVISIONING_TIMEOUT).")
+    return f"Build_Job timed out ({classification})."
+
+
+def _timeout_from_timing(job: Dict[str, Any], now: int) -> TimeoutDecision:
+    """Delegate one job's runtime decision to the pure phase-clock model
+    (``build_reconciliation.decide_timing``): separate queue wait,
+    provisioning, and active execution clocks (active runtime begins
+    ONLY with positive execution-start evidence), heartbeat/progress
+    leases in the approved precedence, strict ``now > deadline``
+    boundaries, and a non-extendable hard ceiling (Req 2.13-2.16, 3.12).
+    """
+    status = job.get('status')
+    decision = build_reconciliation.decide_timing(job, now)
+    if not decision.timed_out:
+        return TimeoutDecision(
+            timed_out=False,
+            build_job_id=job['build_job_id'],
+            status=status,
+            error=None,
+            classification=decision.classification,
+            evidence=decision.evidence,
+        )
+    if status in RUNNING_WATCHDOG_STATUSES:
+        next_status = build_domain.next_status(
+            status, build_domain.EVENT_TIMEOUT)
+    else:
+        # Explicit queue-wait/provisioning budget expiry (design
+        # classification table): the outcome status is failed.
+        next_status = build_domain.STATUS_FAILED
+    return TimeoutDecision(
+        timed_out=True,
+        build_job_id=job['build_job_id'],
+        status=next_status,
+        error=_timing_timeout_error(decision.classification,
+                                    decision.evidence),
+        classification=decision.classification,
+        evidence=decision.evidence,
+    )
 
 
 def decide_runtime_timeout(job: Dict[str, Any], now: int) -> TimeoutDecision:
     """Runtime-watchdog decision for one Build_Job (pure, Req 3.8).
 
-    A job is timed out if and only if it is running (building or
-    publishing), its start time is known, and its elapsed runtime
-    strictly exceeds the ``max_runtime_hours`` of its OWN
-    ``config_snapshot`` (default 4 hours per Req 9.2; never the current
-    configuration, Req 9.3). On a timeout the job is marked failed with a
-    timeout error naming the limit; the dispatcher stops the build and
-    retains the logs produced up to termination.
+    Jobs carrying the new ``timing`` shape — and every queued or
+    provisioning job, whose queue/provisioning phase clocks exist under
+    the new model regardless of shape — are decided by the separate
+    phase-clock model (``_timeout_from_timing``): queue wait and
+    provisioning are measured independently and never charged to
+    execution runtime, active runtime is anchored only on positive
+    execution-start evidence, heartbeat/progress leases are evaluated in
+    the approved precedence, and the snapshotted target/mode hard
+    ceiling is non-extendable (Req 2.13-2.16, 2.18).
 
-    ``started_at`` (ms epoch, recorded when the job entered the building
-    status) missing/None means elapsed runtime cannot be established, so
-    the job is not timed out (fail-safe: the watchdog never kills a job on
-    unknown arithmetic).
+    LEGACY-shaped running jobs (no ``timing`` map: only ``started_at``
+    plus a snapshotted ``max_runtime_hours``) keep the frozen legacy
+    decision EXACTLY (preservation baseline, Req 3.12): timed out if and
+    only if the job is running (building or publishing), its start time
+    is known, and its elapsed runtime strictly exceeds the
+    ``max_runtime_hours`` of its OWN ``config_snapshot`` (default 4
+    hours per Req 9.2; never the current configuration, Req 9.3). On a
+    timeout the job is marked failed with a timeout error naming the
+    limit; the dispatcher stops the build and retains the logs produced
+    up to termination. A missing ``started_at`` means elapsed runtime
+    cannot be established, so the job is not timed out (fail-safe: the
+    watchdog never kills a job on unknown arithmetic).
     """
     status = job.get('status')
+    if status in (build_domain.STATUS_QUEUED,
+                  build_domain.STATUS_PROVISIONING) \
+            or isinstance(job.get('timing'), dict):
+        return _timeout_from_timing(job, now)
+
+    # ------- legacy path: frozen behavior for legacy-shaped jobs -------
     started_at = job.get('started_at')
     limit_ms = max_runtime_ms(job.get('config_snapshot'))
     timed_out = (
@@ -547,6 +655,7 @@ def decide_runtime_timeout(job: Dict[str, Any], now: int) -> TimeoutDecision:
             f"Build_Job exceeded its maximum runtime of "
             f"{limit_hours:g} hours (timeout)."
         ),
+        classification=build_reconciliation.CODE_MAX_RUNTIME_EXCEEDED,
     )
 
 
@@ -864,5 +973,212 @@ def sweep_dead_server(
             f"Dedicated_Build_Server '{server_id}' entered lifecycle state "
             f"'{state}' while Build_Jobs remained in its Build_Queue; the "
             f"queued Build_Jobs cannot run on this server."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ephemeral runner readiness — bootstrap completion gate
+# (Requirements 6.2, 6.3, 6.4; spec .kiro/specs/build-source-selection)
+# ---------------------------------------------------------------------------
+
+# The Bootstrap_Marker the bootstrap writes as its LAST statement, and the
+# log its output is redirected to (mirroring the dedicated
+# build_fleet.USER_DATA_TEMPLATE). The marker means "bootstrap ran to
+# completion"; inner-step failures do not suppress it, and Req 6.4 makes
+# that signal authoritative.
+BOOTSTRAP_MARKER_PATH = '/var/log/dda-build-server-bootstrap.done'
+BOOTSTRAP_LOG_PATH = '/var/log/dda-build-server-bootstrap.log'
+
+# Keys the marker probe emits, one per line
+# (``BOOTSTRAP_DONE=1``/``BOOTSTRAP_DONE=0`` and ``BOOTSTRAP_LOG=<path>``).
+BOOTSTRAP_DONE_PROBE_KEY = 'BOOTSTRAP_DONE'
+BOOTSTRAP_LOG_PROBE_KEY = 'BOOTSTRAP_LOG'
+
+# Probe values that report the marker as present / absent. Anything else is
+# unrecognized and reports nothing (see ``bootstrap_marker_observed``).
+_BOOTSTRAP_DONE_TRUE_VALUES = frozenset({'1', 'true', 'yes'})
+_BOOTSTRAP_DONE_FALSE_VALUES = frozenset({'0', 'false', 'no'})
+
+# Documented default bootstrap budget in minutes, applied when a job's
+# config_snapshot lacks ``bootstrap_timeout_minutes``. The observed live
+# bootstrap took ~140 s, so 20 minutes tolerates a cold package install
+# while still bounding Req 6.3. The snapshot is normally the effective
+# (default-applied) configuration at job creation, so this is a fail-safe
+# only — current configuration is NEVER consulted here (Req 9.3).
+DEFAULT_BOOTSTRAP_TIMEOUT_MINUTES = 20
+
+# Readiness decision outcomes
+READINESS_READY = 'ready'      # marker observed: the agent command may be sent
+READINESS_WAIT = 'wait'        # marker absent, at or below the budget (6.2)
+READINESS_TIMEOUT = 'timeout'  # marker absent, strictly past the budget (6.3)
+
+
+def bootstrap_timeout_ms(config_snapshot: Optional[Dict[str, Any]]) -> float:
+    """Bootstrap budget in ms from a job's own ``config_snapshot``
+    (``bootstrap_timeout_minutes``, default 20) — never the current
+    configuration (Req 9.3)."""
+    snapshot = config_snapshot or {}
+    minutes = snapshot.get('bootstrap_timeout_minutes')
+    if minutes is None:
+        minutes = DEFAULT_BOOTSTRAP_TIMEOUT_MINUTES
+    return minutes * _MS_PER_MINUTE
+
+
+def parse_bootstrap_probe(probe_output: Optional[str]) -> Dict[str, str]:
+    """Extract the ``KEY=value`` pairs from marker-probe output (pure).
+
+    ``probe_output`` is the combined stdout of ``BOOTSTRAP_PROBE_COMMANDS``
+    run on the runner (one ``KEY=value`` per line). Parsing is deliberately
+    defensive: None, empty output, blank lines, and lines carrying no ``=``
+    contribute nothing, so unexpected output can never raise — it simply
+    reports nothing. A repeated key keeps its LAST occurrence (the most
+    recent probe line wins).
+    """
+    if not probe_output:
+        return {}
+    values: Dict[str, str] = {}
+    for line in str(probe_output).splitlines():
+        line = line.strip()
+        if not line or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key = key.strip()
+        if key:
+            values[key] = value.strip()
+    return values
+
+
+def bootstrap_marker_observed(probe_output: Optional[str]) -> bool:
+    """True iff the probe output reports the Bootstrap_Marker as present
+    (Req 6.2).
+
+    The marker is observed if and only if the probe reported
+    ``BOOTSTRAP_DONE`` with a recognized true value AND reported no
+    recognized false value: readiness must be POSITIVELY established, so
+    absent, empty, unrecognized, or self-contradictory output leaves the
+    marker unobserved (fail-safe — the gate never opens on unknown
+    output). The marker's own path never appears as a value here, so a
+    ``BOOTSTRAP_LOG`` line can never be mistaken for the marker.
+    """
+    values = parse_bootstrap_probe(probe_output)
+    reported = values.get(BOOTSTRAP_DONE_PROBE_KEY)
+    if reported is None:
+        return False
+    reported = reported.lower()
+    if reported in _BOOTSTRAP_DONE_FALSE_VALUES:
+        return False
+    return reported in _BOOTSTRAP_DONE_TRUE_VALUES
+
+
+def bootstrap_log_path(probe_output: Optional[str]) -> str:
+    """Bootstrap log location surfaced by the probe, so the caller can
+    record it for diagnosis (Req 6.4).
+
+    The ``BOOTSTRAP_LOG`` value when the probe reported a non-empty one,
+    else the documented ``BOOTSTRAP_LOG_PATH`` the bootstrap redirects to:
+    a job whose probe output was unexpected still carries a log location.
+    """
+    reported = parse_bootstrap_probe(probe_output).get(BOOTSTRAP_LOG_PROBE_KEY)
+    return reported or BOOTSTRAP_LOG_PATH
+
+
+class ReadinessDecision(NamedTuple):
+    """Bootstrap completion gate decision for one Ephemeral_Build_Runner
+    (Req 6.2, 6.3, 6.4).
+
+    - ``readiness``: READINESS_READY (marker observed — the agent command
+      may be sent), READINESS_WAIT (marker absent, at or below the
+      budget), or READINESS_TIMEOUT (marker absent, strictly past it)
+    - ``build_job_id``: the job the decision is about
+    - ``marker_observed``: whether the probe reported the Bootstrap_Marker
+    - ``log_path``: the bootstrap log location to record on the job
+      (Req 6.4), from the probe when it reported one
+    - ``deadline``: the budget deadline (ms epoch); None when the job's
+      ``dispatched_at`` is unknown, so no deadline can be established
+    - ``timeout_minutes``: the budget from the job's own ``config_snapshot``
+    - ``error``: the bootstrap-stage error recorded on the job, naming the
+      budget and the bootstrap log (None unless timed out, Req 6.3)
+    """
+    readiness: str
+    build_job_id: str
+    marker_observed: bool
+    log_path: str
+    deadline: Optional[int]
+    timeout_minutes: Any
+    error: Optional[str]
+
+
+def decide_runner_readiness(
+    job: Dict[str, Any],
+    probe_output: Optional[str],
+    now: int,
+) -> ReadinessDecision:
+    """Decide whether a runner's bootstrap has completed (pure).
+
+    ``probe_output`` is the combined stdout of the marker probe run on the
+    runner; ``now`` is the probe time (ms epoch). The decision is a
+    function of the probe output plus time ALONE — there is no
+    sleep-based or fixed-interval branch (Req 6.2).
+
+    - Marker observed -> READY, REGARDLESS of recorded inner-step
+      failures: the live runner logged ``Failed: sudo chmod 666
+      /var/run/docker.sock`` and ``Failed to set Python 3.11 as default``
+      while cloud-init still finished successfully, and Req 6.4 makes the
+      readiness signal authoritative. The bootstrap log location is
+      surfaced on the decision so the caller can record it for diagnosis.
+    - Marker absent at or below the budget -> WAIT: no agent command is
+      sent while the marker has not been observed (Req 6.1, 6.2).
+    - Marker absent STRICTLY past the budget -> TIMEOUT with an error
+      naming bootstrap's budget and log, so the job fails instead of
+      waiting indefinitely (Req 6.3). The boundary is strict ``now >
+      deadline``, matching this module's other watchdog boundaries
+      (``is_pending_action_failed``, ``decide_runtime_timeout``), so at
+      ``now == deadline`` the decision is still WAIT.
+
+    The budget is ``bootstrap_timeout_minutes`` from the job's OWN
+    ``config_snapshot`` (default 20), measured from ``dispatched_at``.
+    A missing/None ``dispatched_at`` means elapsed bootstrap time cannot
+    be established, so the decision is WAIT (fail-safe: the gate never
+    fails a job on unknown arithmetic, mirroring
+    ``decide_runtime_timeout``'s missing ``started_at``).
+    """
+    observed = bootstrap_marker_observed(probe_output)
+    log_path = bootstrap_log_path(probe_output)
+    limit_ms = bootstrap_timeout_ms(job.get('config_snapshot'))
+    limit_minutes = limit_ms / _MS_PER_MINUTE
+    dispatched_at = job.get('dispatched_at')
+    deadline = None if dispatched_at is None else dispatched_at + limit_ms
+
+    if observed:
+        return ReadinessDecision(
+            readiness=READINESS_READY,
+            build_job_id=job['build_job_id'],
+            marker_observed=True,
+            log_path=log_path,
+            deadline=deadline,
+            timeout_minutes=limit_minutes,
+            error=None,
+        )
+    if deadline is None or not now > deadline:
+        return ReadinessDecision(
+            readiness=READINESS_WAIT,
+            build_job_id=job['build_job_id'],
+            marker_observed=False,
+            log_path=log_path,
+            deadline=deadline,
+            timeout_minutes=limit_minutes,
+            error=None,
+        )
+    return ReadinessDecision(
+        readiness=READINESS_TIMEOUT,
+        build_job_id=job['build_job_id'],
+        marker_observed=False,
+        log_path=log_path,
+        deadline=deadline,
+        timeout_minutes=limit_minutes,
+        error=(
+            f"Ephemeral_Build_Runner bootstrap did not complete within "
+            f"{limit_minutes:g} minutes; bootstrap log: {log_path}"
         ),
     )

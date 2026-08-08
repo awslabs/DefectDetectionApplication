@@ -87,6 +87,18 @@ DEFAULT_WALL_CLOCK_LIMIT_SEC = 10.0
 #: ``memory_limit_bytes`` constructor parameter.
 DEFAULT_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
 
+#: Frame_Producer wall-clock limit — one ``produce_frame`` invocation
+#: covers a remote object fetch plus a decode, so it is wider than the
+#: per-frame limit and configurable independently of it via the
+#: environment (Requirement 6.2).
+DEFAULT_PRODUCER_WALL_CLOCK_LIMIT_SEC = 30.0
+PRODUCER_WALL_CLOCK_ENV = "DDA_PYTHON_SOURCE_WALL_CLOCK_SEC"
+#: Frame_Producer subprocess memory limit (RLIMIT_AS), configurable
+#: independently of the per-frame limit via the environment
+#: (Requirement 6.3).
+DEFAULT_PRODUCER_MEMORY_LIMIT_BYTES = DEFAULT_MEMORY_LIMIT_BYTES
+PRODUCER_MEMORY_LIMIT_ENV = "DDA_PYTHON_SOURCE_MEMORY_LIMIT_BYTES"
+
 #: Thread-pool caps applied to the handler subprocess environment when a
 #: memory limit is in force (values already set by the operator win).
 #: Without these, OpenBLAS (numpy) and OpenCV size their pools to the
@@ -188,16 +200,30 @@ HELPERS_SOURCE = r'''
 """dda_frames — frame helpers for Custom Python handlers.
 
 Provides frame/array conversion (``to_array``/``to_bytes``), the
-current frame's caps (``frame_info``), and image loading from local
-disk or S3 (``load_image``). All functions raise ``ValueError`` with a
-descriptive message on bad input.
+current frame's caps (``frame_info``), image loading from local disk,
+S3, or HTTP(S) (``load_image``), and raw byte fetching (``load_bytes``).
+All functions raise ``ValueError`` with a descriptive message on bad
+input.
 """
 
 #: Supported Pixel_Formats and their channel counts.
 FORMAT_CHANNELS = {"RGB": 3, "BGR": 3, "RGBA": 4, "GRAY8": 1}
 
+#: Bounded network timeout applied to every HTTP(S) fetch, in seconds
+#: (Requirement 4.4). Kept below the Frame_Producer wall-clock limit so
+#: an unresponsive endpoint cannot hold the producer open past it.
+HTTP_TIMEOUT_SEC = 20.0
+
 _current_frame = None
 _s3_client = None
+
+#: Allowed URI prefixes for helper fetches; the empty tuple permits
+#: everything (Requirement 5.3). Set per invocation by the runner via
+#: ``_set_allowed_prefixes`` — never by handler code.
+_allowed_prefixes = ()
+#: Source strings fetched through the helpers since the last
+#: ``_set_allowed_prefixes`` call (Requirement 5.4).
+_fetched = []
 
 
 def _set_current(info):
@@ -311,17 +337,81 @@ def _decode_image(source, data):
     return image
 
 
-def load_image(source, s3_client=None):
-    """Local path or ``s3://bucket/key`` -> uint8 image array in OpenCV
-    BGR channel order (single-channel images decode to a 2-D array).
+def _set_allowed_prefixes(prefixes):
+    """Set the allowed URI prefixes and reset the fetched-sources record.
 
-    Raises ``ValueError`` naming the source on a missing file, malformed
-    URI, fetch failure, undecodable content, or missing boto3.
-    ``s3_client`` is injectable for tests; by default a lazily created
-    boto3 client using the device's ambient AWS credentials.
+    Runner-only hook, called before each Frame_Producer invocation with
+    the node's ``allowed_uri_prefixes`` (Requirements 5.1, 5.3); not part
+    of the public handler API.
     """
+    global _allowed_prefixes, _fetched
+    _allowed_prefixes = tuple(str(p) for p in (prefixes or ()))
+    _fetched = []
+
+
+def _fetched_sources():
+    """Source strings fetched since the last ``_set_allowed_prefixes``.
+
+    Runner-only hook so the executor can log every fetch a
+    Frame_Producer made (Requirement 5.4); not part of the public
+    handler API.
+    """
+    return list(_fetched)
+
+
+def _check_allowed(source):
+    """Raise ``ValueError`` when prefixes are declared and none matches
+    the source (Requirements 5.1, 5.2). An empty declaration permits
+    every source (Requirement 5.3)."""
+    if not _allowed_prefixes:
+        return
+    for prefix in _allowed_prefixes:
+        if source.startswith(prefix):
+            return
+    raise ValueError(
+        "fetch of '{0}' denied: the source is outside the node's "
+        "allowed URI prefixes".format(source)
+    )
+
+
+def _fetch_http(source):
+    """HTTP(S) fetch with the bounded timeout (Requirement 4.4);
+    non-success status, timeout, and connection failures raise
+    ``ValueError`` naming the source (Requirement 4.5)."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            source, timeout=HTTP_TIMEOUT_SEC
+        ) as response:
+            status = getattr(response, "status", None)
+            if status is None:  # pragma: no cover - pre-3.9 fallback
+                status = response.getcode()
+            data = response.read()
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(
+            "could not fetch '{0}': {1}".format(source, e)
+        )
+    if not 200 <= int(status) < 300:
+        raise ValueError(
+            "could not fetch '{0}': HTTP status {1} is not a "
+            "success".format(source, status)
+        )
+    return data
+
+
+def _fetch_bytes(source, s3_client=None):
+    """source -> raw bytes. Dispatches ``http(s)://`` (bounded-timeout
+    urllib fetch), ``s3://bucket/key`` (boto3), and local paths.
+    Applies the prefix gate and records the source first."""
     source = str(source)
-    if source.startswith("s3://"):
+    _check_allowed(source)
+    _fetched.append(source)
+    if source.startswith("http://") or source.startswith("https://"):
+        data = _fetch_http(source)
+    elif source.startswith("s3://"):
         remainder = source[len("s3://"):]
         bucket, _, key = remainder.partition("/")
         if not bucket or not key:
@@ -356,6 +446,32 @@ def load_image(source, s3_client=None):
             raise ValueError(
                 "load_image: could not read '{0}': {1}".format(source, e)
             )
+    return data
+
+
+def load_bytes(source):
+    """Raw bytes of a local path, ``s3://bucket/key`` URI, or
+    ``http(s)://`` URL, without decoding them as an image
+    (Requirement 4.3).
+
+    Raises ``ValueError`` naming the source on a missing file, malformed
+    URI, fetch failure, or a source outside the node's allowed prefixes.
+    """
+    return _fetch_bytes(source)
+
+
+def load_image(source, s3_client=None):
+    """Local path, ``s3://bucket/key``, or ``http(s)://`` URL -> uint8
+    image array in OpenCV BGR channel order (single-channel images
+    decode to a 2-D array).
+
+    Raises ``ValueError`` naming the source on a missing file, malformed
+    URI, fetch failure, undecodable content, or missing boto3.
+    ``s3_client`` is injectable for tests; by default a lazily created
+    boto3 client using the device's ambient AWS credentials.
+    """
+    source = str(source)
+    data = _fetch_bytes(source, s3_client=s3_client)
     return _decode_image(source, data)
 '''
 
@@ -496,6 +612,155 @@ def _invoke_handle(handle, frame, metadata):
     return out_frame, out_meta
 
 
+#: Pixel_Formats a Frame_Producer may declare, and their channel counts.
+_PRODUCE_FORMATS = {"RGB": 3, "RGBA": 4, "GRAY8": 1}
+
+_PRODUCE_ACCEPTED = (
+    "produce_frame must return a uint8 NumPy array (HxW grayscale, "
+    "HxWx3 BGR, or HxWx4 BGRA), a mapping with 'array' and 'format' "
+    "(RGB, RGBA, or GRAY8), or a mapping with 'data', 'width', "
+    "'height', and 'format'"
+)
+
+
+def _resolve_produced_array(np, array):
+    """A bare NumPy array return -> (bytes, width, height, format):
+    2-D is GRAY8, 3-channel is OpenCV BGR converted to RGB, 4-channel
+    is BGRA converted to RGBA (Requirements 3.3, 3.4, 3.5)."""
+    if array.dtype != np.uint8:
+        raise ValueError(
+            "produce_frame returned an array of unsupported dtype "
+            "{0}; {1}".format(array.dtype, _PRODUCE_ACCEPTED)
+        )
+    if array.ndim == 2:
+        height, width = array.shape
+        return (np.ascontiguousarray(array).tobytes(),
+                width, height, "GRAY8")
+    if array.ndim == 3 and array.shape[2] == 3:
+        height, width = array.shape[:2]
+        rgb = np.ascontiguousarray(array[:, :, ::-1])
+        return rgb.tobytes(), width, height, "RGB"
+    if array.ndim == 3 and array.shape[2] == 4:
+        height, width = array.shape[:2]
+        rgba = np.ascontiguousarray(array[:, :, [2, 1, 0, 3]])
+        return rgba.tobytes(), width, height, "RGBA"
+    raise ValueError(
+        "produce_frame returned an array of unsupported shape "
+        "{0}; {1}".format(array.shape, _PRODUCE_ACCEPTED)
+    )
+
+
+def _resolve_produced_mapping(np, mapping):
+    """A mapping return -> (bytes, width, height, format). The
+    ``{"array", "format"}`` shape carries the array's bytes under the
+    stated format with NO channel conversion (Requirement 3.6); the
+    ``{"data", "width", "height", "format"}`` shape passes raw bytes,
+    dims, and format through (Requirement 3.7). Unsupported formats
+    and byte lengths inconsistent with the declared dims are errors
+    describing the inconsistency (Requirement 3.10)."""
+    if "array" in mapping:
+        fmt = mapping.get("format")
+        if fmt not in _PRODUCE_FORMATS:
+            raise ValueError(
+                "produce_frame returned a mapping with unsupported "
+                "format {0!r}: the format must be one of {1}".format(
+                    fmt, ", ".join(sorted(_PRODUCE_FORMATS))
+                )
+            )
+        array = mapping["array"]
+        if np is None or not isinstance(array, np.ndarray) \
+                or array.dtype != np.uint8:
+            raise ValueError(
+                "produce_frame returned a mapping whose 'array' is not "
+                "a uint8 NumPy array; {0}".format(_PRODUCE_ACCEPTED)
+            )
+        channels = _PRODUCE_FORMATS[fmt]
+        if channels == 1:
+            if array.ndim != 2:
+                raise ValueError(
+                    "produce_frame returned an array of shape {0} "
+                    "under format {1}, which needs a 2-D array".format(
+                        array.shape, fmt
+                    )
+                )
+            height, width = array.shape
+        else:
+            if array.ndim != 3 or array.shape[2] != channels:
+                raise ValueError(
+                    "produce_frame returned an array of shape {0} "
+                    "under format {1}, which needs {2} channels".format(
+                        array.shape, fmt, channels
+                    )
+                )
+            height, width = array.shape[:2]
+        return (np.ascontiguousarray(array).tobytes(),
+                width, height, fmt)
+    missing = [key for key in ("data", "width", "height", "format")
+               if key not in mapping]
+    if missing:
+        raise ValueError(
+            "produce_frame returned a mapping missing {0}; {1}".format(
+                ", ".join(missing), _PRODUCE_ACCEPTED
+            )
+        )
+    fmt = mapping["format"]
+    if fmt not in _PRODUCE_FORMATS:
+        raise ValueError(
+            "produce_frame returned a mapping with unsupported format "
+            "{0!r}: the format must be one of {1}".format(
+                fmt, ", ".join(sorted(_PRODUCE_FORMATS))
+            )
+        )
+    data = mapping["data"]
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError(
+            "produce_frame returned a mapping whose 'data' is not "
+            "bytes; {0}".format(_PRODUCE_ACCEPTED)
+        )
+    width = mapping["width"]
+    height = mapping["height"]
+    if not isinstance(width, int) or not isinstance(height, int) \
+            or isinstance(width, bool) or isinstance(height, bool) \
+            or width <= 0 or height <= 0:
+        raise ValueError(
+            "produce_frame returned invalid frame dimensions "
+            "{0!r}x{1!r}".format(width, height)
+        )
+    expected = width * height * _PRODUCE_FORMATS[fmt]
+    if len(data) != expected:
+        raise ValueError(
+            "produce_frame returned {0} frame bytes for {1}x{2} {3}, "
+            "which needs exactly {4} bytes".format(
+                len(data), width, height, fmt, expected
+            )
+        )
+    return bytes(data), width, height, fmt
+
+
+def _resolve_produced_frame(result):
+    """produce_frame return value -> (frame_bytes, width, height,
+    format), implementing the Produced_Frame resolution table
+    (Requirements 3.3-3.10). Anything outside the accepted shapes
+    raises ValueError describing the defect."""
+    if result is None:
+        raise ValueError(
+            "produce_frame returned None: a source must produce a frame"
+        )
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    if np is not None and isinstance(result, np.ndarray):
+        return _resolve_produced_array(np, result)
+    if isinstance(result, dict):
+        return _resolve_produced_mapping(np, result)
+    raise ValueError(
+        "produce_frame returned {0}; {1}".format(
+            type(result).__name__, _PRODUCE_ACCEPTED
+        )
+    )
+
+
 def main():
     handler_path = sys.argv[1]
     stdin = sys.stdin.buffer
@@ -525,12 +790,15 @@ def main():
         spec.loader.exec_module(module)
         process_frame = getattr(module, "process_frame", None)
         handle = getattr(module, "handle", None)
+        produce_frame = getattr(module, "produce_frame", None)
         process_frame = process_frame if callable(process_frame) else None
         handle = handle if callable(handle) else None
-        if process_frame is None and handle is None:
+        produce_frame = produce_frame if callable(produce_frame) else None
+        if process_frame is None and handle is None and produce_frame is None:
             raise TypeError(
-                "handler.py defines neither "
-                "process_frame(frame, metadata) nor "
+                "handler.py defines none of "
+                "produce_frame(context), "
+                "process_frame(frame, metadata), or "
                 "handle(frame_bytes, metadata)"
             )
     except BaseException:
@@ -548,7 +816,53 @@ def main():
             return
         header = json.loads(raw_header.decode("utf-8"))
         frame = _read_exact(stdin, int(header.get("frameSize", 0))) or b""
+        if header.get("op") == "produce":
+            # One Frame_Producer invocation (Requirement 3.1). Requests
+            # without an ``op`` field fall through to the per-frame path
+            # below, bit-identical to the pre-produce protocol
+            # (Requirements 6.6, 11.3).
+            try:
+                if produce_frame is None:
+                    # process_frame/handle are never invoked for a
+                    # produce request (Requirements 3.2, 3.11).
+                    raise TypeError(
+                        "handler.py does not define produce_frame("
+                        "context), the entry point required to produce "
+                        "a frame"
+                    )
+                dda_frames._set_allowed_prefixes(
+                    header.get("allowedUriPrefixes") or ()
+                )
+                result = produce_frame(header.get("context") or {})
+                out_bytes, width, height, out_format = (
+                    _resolve_produced_frame(result)
+                )
+                metadata = {}
+                if isinstance(result, dict) and isinstance(
+                    result.get("metadata"), dict
+                ):
+                    metadata = result["metadata"]
+                _write(
+                    stdout,
+                    {"status": "ok", "width": width, "height": height,
+                     "format": out_format, "metadata": metadata,
+                     "fetchedSources": dda_frames._fetched_sources()},
+                    out_bytes,
+                )
+            except BaseException:
+                _write(stdout, {"status": "error",
+                                "error": traceback.format_exc(limit=20)},
+                       b"")
+                sys.exit(1)
+            continue
         try:
+            if process_frame is None and handle is None:
+                raise TypeError(
+                    "handler.py defines neither "
+                    "process_frame(frame, metadata) nor "
+                    "handle(frame_bytes, metadata), which are required "
+                    "to process frames"
+                )
             metadata = header.get("metadata") or {}
             info = {"width": header.get("width"),
                     "height": header.get("height"),
@@ -636,6 +950,9 @@ class CustomPythonBridge:
         self._python_executable = python_executable or sys.executable
         self._process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
+        #: Sources the last ``produce_frame`` fetched through
+        #: ``dda_frames``, for the executor's run log (Requirement 5.4).
+        self.fetched_sources: List[str] = []
 
     # -- lifecycle ------------------------------------------------------
 
@@ -762,6 +1079,92 @@ class CustomPythonBridge:
                     self.node_id, "handler failed: {0}".format(error)
                 )
             return out_frame, response.get("metadata") or {}
+
+    # -- frame production -------------------------------------------------
+
+    def produce_frame(
+        self,
+        context: Optional[Dict[str, Any]],
+        allowed_uri_prefixes: Tuple[str, ...] = (),
+    ) -> Tuple[bytes, int, int, str, Dict[str, Any]]:
+        """One Frame_Producer invocation: send a ``produce`` request
+        carrying the run's Trigger_Context and the node's allowed URI
+        prefixes, and return ``(frame_bytes, width, height, format,
+        metadata)`` within the bridge's wall-clock limit.
+
+        Timeout, subprocess death, protocol violations, and handler
+        errors raise :class:`CustomPythonNodeError` naming the node; the
+        timeout message states the limit (Requirement 6.4). The sources
+        the producer fetched through ``dda_frames`` are recorded on
+        ``self.fetched_sources`` for the executor to log
+        (Requirement 5.4).
+        """
+        with self._lock:
+            self._start_locked()
+            deadline = time.monotonic() + self._wall_clock_limit_sec
+            header = {
+                "op": "produce",
+                "nodeId": self.node_id,
+                "context": context or {},
+                "allowedUriPrefixes": list(allowed_uri_prefixes or ()),
+            }
+            try:
+                write_message(self._process.stdin, header, b"")
+            except (BrokenPipeError, OSError):
+                raise self._death_error(
+                    "exited while receiving a produce request"
+                )
+            try:
+                response, out_frame = self._read_response(deadline)
+            except _Timeout:
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id,
+                    "exceeded the {0:g}s wall-clock limit for producing "
+                    "the frame".format(self._wall_clock_limit_sec),
+                )
+            except _PeerClosed:
+                raise self._death_error(
+                    "exited without answering a produce request"
+                )
+            except ProtocolViolation as e:
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id, "protocol violation: {0}".format(e)
+                )
+            if response.get("status") != "ok":
+                error = str(
+                    response.get("error") or "producer reported an error"
+                ).strip()
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id, "producer failed: {0}".format(error)
+                )
+            width = response.get("width")
+            height = response.get("height")
+            frame_format = response.get("format")
+            if (
+                not isinstance(width, int)
+                or not isinstance(height, int)
+                or not isinstance(frame_format, str)
+            ):
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id,
+                    "protocol violation: produce response is missing "
+                    "the frame dimensions or format",
+                )
+            self.fetched_sources = [
+                str(source)
+                for source in (response.get("fetchedSources") or [])
+            ]
+            return (
+                out_frame,
+                width,
+                height,
+                frame_format,
+                response.get("metadata") or {},
+            )
 
     # -- internals ------------------------------------------------------
 
@@ -987,15 +1390,99 @@ def build_bridges(
     return bridges
 
 
+def producer_wall_clock_limit_sec() -> float:
+    """The Frame_Producer wall-clock limit: the environment override
+    when it parses as a positive number, the default otherwise
+    (Requirement 6.2)."""
+    raw = os.environ.get(PRODUCER_WALL_CLOCK_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = None
+        if value is not None and value > 0:
+            return value
+        logger.warning(
+            "Ignoring invalid %s=%r; using the default %.1fs",
+            PRODUCER_WALL_CLOCK_ENV, raw,
+            DEFAULT_PRODUCER_WALL_CLOCK_LIMIT_SEC,
+        )
+    return DEFAULT_PRODUCER_WALL_CLOCK_LIMIT_SEC
+
+
+def producer_memory_limit_bytes() -> Optional[int]:
+    """The Frame_Producer memory limit: the environment override when
+    it parses as a positive integer, the default otherwise
+    (Requirement 6.3)."""
+    raw = os.environ.get(PRODUCER_MEMORY_LIMIT_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = None
+        if value is not None and value > 0:
+            return value
+        logger.warning(
+            "Ignoring invalid %s=%r; using the default %d bytes",
+            PRODUCER_MEMORY_LIMIT_ENV, raw,
+            DEFAULT_PRODUCER_MEMORY_LIMIT_BYTES,
+        )
+    return DEFAULT_PRODUCER_MEMORY_LIMIT_BYTES
+
+
+def build_producer_bridge(feed, artifact_path: str) -> CustomPythonBridge:
+    """One producer bridge for a planned Python source feed, mirroring
+    :func:`build_bridges` for a single node.
+
+    ``feed`` is duck-typed: any object carrying ``node_id`` and
+    ``handler_path`` (the artifact-relative handler path) attributes —
+    the planner's ``PythonSourceFeed``. The subprocess spawn is the same
+    ``_start_locked`` path every per-frame bridge uses (interpreter, env
+    passthrough, thread caps, RLIMIT_AS preexec — Requirement 6.1),
+    under the producer limits (Requirements 6.2, 6.3).
+    """
+    handler_path = getattr(feed, "handler_path", None)
+    if not handler_path:
+        raise CustomPythonNodeError(
+            getattr(feed, "node_id", None),
+            "planned source feed does not specify a handler path",
+        )
+    return CustomPythonBridge(
+        node_id=feed.node_id,
+        handler_path=os.path.join(artifact_path, handler_path),
+        wall_clock_limit_sec=producer_wall_clock_limit_sec(),
+        memory_limit_bytes=producer_memory_limit_bytes(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # GStreamer wiring (lazy gi import; mirrors GstPipelineManager.run_pipeline)
 # ---------------------------------------------------------------------------
+
+
+def _fed_frame_caps(launch_string: str, frame_data: Dict[str, Any]) -> str:
+    """Caps string for the fed ``appsrc``: the frame's explicit format
+    when it declares one (a Produced_Frame always does — Requirement
+    7.2), otherwise the launch string's ``caps=`` clause; the frame's
+    width/height are appended either way — the same single-frame model
+    ``GstPipelineManager.create_buffer`` implements."""
+    width = frame_data.get("width")
+    height = frame_data.get("height")
+    frame_format = frame_data.get("format")
+    if frame_format:
+        return "video/x-raw,format={0},width={1},height={2}".format(
+            frame_format, width, height
+        )
+    match = re.search(r"caps=([^!]+)", launch_string)
+    base = match.group(1).strip() if match else "video/x-raw"
+    return "{0},width={1},height={2}".format(base, width, height)
 
 
 def run_bridged_pipeline(
     launch_string: str,
     bridges: List[CustomPythonBridge],
     latency_metrics=None,
+    frame_data: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """Run a rewritten launch string, pumping each appsink through its
     node's subprocess and into the paired appsrc.
@@ -1006,6 +1493,14 @@ def run_bridged_pipeline(
     same error capture and emltriton tag handling. Bridge failures quit
     the loop and re-raise as :class:`CustomPythonNodeError`, failing only
     this run with the node identified (Requirements 9.8, 13.7).
+
+    ``frame_data`` (optional) feeds a produced frame into the run: the
+    element named ``appsrc`` — the renamed fed source — gets its caps
+    from the frame's explicit format/dims, one wrapped buffer is pushed,
+    and EOS is emitted, exactly the single-frame model
+    ``GstPipelineManager.run_pipeline`` implements (Requirement 7.4).
+    ``frame_data=None`` (every pre-existing caller) changes nothing
+    (Requirement 11.1).
     """
     import gi
 
@@ -1122,6 +1617,27 @@ def run_bridged_pipeline(
             raise PipelineSyntaxException(str(e))
         loop = GLib.MainLoop()
 
+        fed_source = None
+        fed_buffer = None
+        if frame_data:
+            # The renamed fed source (the executor names the planned
+            # feed's element ``appsrc``): explicit caps from the frame's
+            # declared format/dims, one buffer, then EOS (Req 7.4).
+            fed_source = pipeline.get_by_name("appsrc")
+            if fed_source is None:
+                raise PipelineExecutionException(
+                    "fed appsrc element missing from the pipeline"
+                )
+            fed_source.set_property(
+                "caps",
+                Gst.Caps.from_string(
+                    _fed_frame_caps(launch_string, frame_data)
+                ),
+            )
+            fed_source.set_property("block", True)
+            fed_source.set_property("format", Gst.Format.TIME)
+            fed_buffer = Gst.Buffer.new_wrapped(frame_data["data"])
+
         for bridge in bridges:
             sink = pipeline.get_by_name(bridge.sink_name)
             src = pipeline.get_by_name(bridge.src_name)
@@ -1183,6 +1699,9 @@ def run_bridged_pipeline(
                 "Pipeline failed to change state to PLAYING, "
                 "check logs above this."
             )
+        if fed_source is not None:
+            fed_source.emit("push-buffer", fed_buffer)
+            fed_source.emit("end-of-stream")
         loop.run()
         try:
             GLib.source_remove(watchdog_id)

@@ -9,8 +9,11 @@ deploy-time Camera_Binding validation — validate_camera_bindings
 snapshot, and binding set, `validate_camera_bindings` SHALL produce a
 type-incompatibility error for a binding exactly when the bound
 Camera_Source's type is outside the node type's declared compatible set
-— `{Camera, AravisDiscovered}` for `aravis_camera_source`, the existing
-set plus `AravisDiscovered` for `camera_source`.
+— `{Camera, AravisDiscovered}` for `aravis_camera_source`,
+`{NvidiaCSI, Camera}` for `csi_camera_source` and
+`{ICam, V4L2Discovered, Camera}` for `icam_source`
+(csi-icam-input-nodes Requirements 6.1, 6.2 renamed/split the legacy
+`camera_source` type into those two).
 
 **Validates: Requirements 5.2, 5.3**
 
@@ -42,12 +45,14 @@ def deployments(aws_stack):
 # of the implementation's _CAMERA_COMPATIBLE_SOURCE_TYPES)
 # ---------------------------------------------------------------------------
 
-#: camera_source keeps its pre-feature camera-backed set plus
-#: AravisDiscovered (Requirement 5.3); aravis_camera_source must bind to
-#: an Aravis-backed source (Requirement 5.2).
+#: aravis_camera_source must bind to an Aravis-backed source
+#: (aravis-camera-input Requirement 5.2); the legacy camera_source type
+#: was split into csi_camera_source (NVIDIA CSI through the host capture
+#: service) and icam_source (direct V4L2 smart camera) by
+#: csi-icam-input-nodes Requirements 6.2 and 6.1 respectively.
 _COMPATIBLE = {
-    "camera_source": frozenset({"Camera", "ICam", "NvidiaCSI",
-                                "V4L2Discovered", "AravisDiscovered"}),
+    "csi_camera_source": frozenset({"NvidiaCSI", "Camera"}),
+    "icam_source": frozenset({"ICam", "V4L2Discovered", "Camera"}),
     "aravis_camera_source": frozenset({"Camera", "AravisDiscovered"}),
 }
 
@@ -133,9 +138,10 @@ def test_aravis_type_incompatibility_is_flagged_exactly(deployments, case):
     bindings whose Camera_Source type is outside the node type's
     compatible set per the compatibility-map oracle: an
     aravis_camera_source node accepts only {Camera, AravisDiscovered}
-    (5.2), a camera_source node accepts its pre-feature set plus
-    AravisDiscovered (5.3) — and no other error is produced for these
-    healthy, fully bound cases.
+    (5.2), a csi_camera_source node accepts {NvidiaCSI, Camera} and an
+    icam_source node {ICam, V4L2Discovered, Camera} (csi-icam-input-nodes
+    6.2/6.1) — and no other error is produced for these healthy, fully
+    bound cases.
     """
     (version, targets, registry_snapshot, bindings, node_types,
      source_refs) = case

@@ -138,12 +138,19 @@ def rbac_check(required_permissions: List[Permission],
                     'is_super_user': rbac_manager.is_portal_admin(user_id, user_info=user)
                 })
                 
-                # Call the original function
-                return func(event, context)
-                
             except Exception as e:
                 logger.error(f"Error in RBAC check: {str(e)}", exc_info=True)
                 return create_response(500, {'error': 'Authorization check failed'})
+            
+            # Call the original function OUTSIDE the authorization
+            # try/except: only failures of the authorization logic itself
+            # may answer 'Authorization check failed'. A handler error has
+            # to surface through the handler's own error handling (the
+            # portal handlers wrap their routing in try/except and return
+            # their own error envelope), otherwise a post-authorization
+            # bug is reported as an authorization failure and the real
+            # cause stays invisible (Req 2.7, 3.2).
+            return func(event, context)
         
         return wrapper
     return decorator
@@ -190,11 +197,13 @@ def super_user_only(func):
                 'user_role': Role.PORTAL_ADMIN
             })
             
-            return func(event, context)
-            
         except Exception as e:
             logger.error(f"Error in super user check: {str(e)}", exc_info=True)
             return create_response(500, {'error': 'Authorization check failed'})
+        
+        # Handler call outside the authorization try/except: same
+        # reasoning as rbac_check above (Req 2.7, 3.2).
+        return func(event, context)
     
     return wrapper
 

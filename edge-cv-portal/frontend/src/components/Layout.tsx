@@ -17,6 +17,7 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import { UserRole } from '../types';
 import { getConfig, getBuildInfo } from '../config';
+import { canAccessBuilds } from '../utils/buildsAccess';
 
 /**
  * Builds the items for the top-navigation settings dropdown based on the
@@ -59,6 +60,74 @@ export function buildSettingsDropdownItems(
   ];
 }
 
+/**
+ * Builds the side-navigation item list for a user's role
+ * (build-fleet-rbac-visibility Requirements 2.5, 2.6, 3.6).
+ *
+ * Exported as a pure function so the role gating is directly property-testable
+ * (mirroring the `buildSettingsDropdownItems` pattern above). The list is the
+ * historical navigation exactly, with one gating change: the
+ * `{ text: 'Builds', href: '/builds' }` entry is included only when
+ * `canAccessBuilds(role)`, so roles without builds access no longer see a link
+ * to a page that can only render a 403 banner. The PortalAdmin-only group
+ * (including "Build Fleet" → `/admin/fleet`) and the UseCaseAdmin audit-logs
+ * handling are unchanged.
+ */
+export function buildNavigationItems(
+  role: UserRole | undefined
+): SideNavigationProps.Item[] {
+  // Base navigation items for all users
+  const baseNavigationItems: SideNavigationProps.Item[] = [
+    { type: 'link' as const, text: 'Dashboard', href: '/dashboard' },
+    { type: 'link' as const, text: 'Use Cases', href: '/usecases' },
+    { type: 'divider' as const },
+    { type: 'link' as const, text: 'Data Management', href: '/data' },
+    { type: 'link' as const, text: 'Labeling', href: '/labeling' },
+    { type: 'link' as const, text: 'Training', href: '/training' },
+    { type: 'link' as const, text: 'Models', href: '/models' },
+    { type: 'divider' as const },
+    { type: 'link' as const, text: 'Workflows', href: '/workflows/builder' },
+    { type: 'link' as const, text: 'Node Designer', href: '/node-designer' },
+    { type: 'link' as const, text: 'Components', href: '/components' },
+    // The builds surface is limited to the roles holding `builds:*`
+    // (DataScientist, UseCaseAdmin, PortalAdmin) — Req 2.5, 2.6.
+    ...(canAccessBuilds(role)
+      ? [{ type: 'link' as const, text: 'Builds', href: '/builds' }]
+      : []),
+    { type: 'link' as const, text: 'Deployments', href: '/deployments' },
+    { type: 'link' as const, text: 'Devices', href: '/devices' },
+  ];
+
+  // Admin-only items (PortalAdmin only)
+  const portalAdminItems: SideNavigationProps.Item[] = [
+    { type: 'divider' as const },
+    { type: 'link' as const, text: 'Plugin Review', href: '/node-designer/review' },
+    // Build server fleet management is PortalAdmin-only, like the
+    // UserManager entry (portal-build-fleet-and-workflow-gates Req 6.1, 6.7).
+    { type: 'link' as const, text: 'Build Fleet', href: '/admin/fleet' },
+    { type: 'link' as const, text: 'Settings', href: '/settings' },
+  ];
+
+  // Audit logs - available to PortalAdmin and UseCaseAdmin
+  const auditLogsItem: SideNavigationProps.Item = {
+    type: 'link' as const,
+    text: 'Audit Logs',
+    href: '/audit'
+  };
+
+  // Combine navigation items based on user role
+  const isPortalAdmin = role === 'PortalAdmin';
+  const isUseCaseAdmin = role === 'UseCaseAdmin';
+
+  if (isPortalAdmin) {
+    return [...baseNavigationItems, ...portalAdminItems, auditLogsItem];
+  }
+  if (isUseCaseAdmin) {
+    return [...baseNavigationItems, { type: 'divider' as const }, auditLogsItem];
+  }
+  return [...baseNavigationItems];
+}
+
 export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -84,52 +153,7 @@ export default function Layout() {
   const [changePwError, setChangePwError] = useState('');
   const [changePwSuccess, setChangePwSuccess] = useState(false);
 
-  // Base navigation items for all users
-  const baseNavigationItems: SideNavigationProps.Item[] = [
-    { type: 'link' as const, text: 'Dashboard', href: '/dashboard' },
-    { type: 'link' as const, text: 'Use Cases', href: '/usecases' },
-    { type: 'divider' as const },
-    { type: 'link' as const, text: 'Data Management', href: '/data' },
-    { type: 'link' as const, text: 'Labeling', href: '/labeling' },
-    { type: 'link' as const, text: 'Training', href: '/training' },
-    { type: 'link' as const, text: 'Models', href: '/models' },
-    { type: 'divider' as const },
-    { type: 'link' as const, text: 'Workflows', href: '/workflows/builder' },
-    { type: 'link' as const, text: 'Node Designer', href: '/node-designer' },
-    { type: 'link' as const, text: 'Components', href: '/components' },
-    { type: 'link' as const, text: 'Builds', href: '/builds' },
-    { type: 'link' as const, text: 'Deployments', href: '/deployments' },
-    { type: 'link' as const, text: 'Devices', href: '/devices' },
-  ];
-
-  // Admin-only items (PortalAdmin only)
-  const portalAdminItems: SideNavigationProps.Item[] = [
-    { type: 'divider' as const },
-    { type: 'link' as const, text: 'Plugin Review', href: '/node-designer/review' },
-    // Build server fleet management is PortalAdmin-only, like the
-    // UserManager entry (portal-build-fleet-and-workflow-gates Req 6.1, 6.7).
-    { type: 'link' as const, text: 'Build Fleet', href: '/admin/fleet' },
-    { type: 'link' as const, text: 'Settings', href: '/settings' },
-  ];
-
-  // Audit logs - available to PortalAdmin and UseCaseAdmin
-  const auditLogsItem: SideNavigationProps.Item = { 
-    type: 'link' as const, 
-    text: 'Audit Logs', 
-    href: '/audit' 
-  };
-
-  // Combine navigation items based on user role
-  const isPortalAdmin = user?.role === 'PortalAdmin';
-  const isUseCaseAdmin = user?.role === 'UseCaseAdmin';
-  
-  let navigationItems = [...baseNavigationItems];
-  
-  if (isPortalAdmin) {
-    navigationItems = [...navigationItems, ...portalAdminItems, auditLogsItem];
-  } else if (isUseCaseAdmin) {
-    navigationItems = [...navigationItems, { type: 'divider' as const }, auditLogsItem];
-  }
+  const navigationItems = buildNavigationItems(user?.role);
 
   return (
     <>

@@ -16,6 +16,12 @@ Requirements: 1.2, 1.3, 1.4, 1.5, 1.8, 1.9, 2.4, 2.6, 2.7, 2.8, 3.5, 3.6,
 import copy
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
+# Pure sibling module (also NO AWS clients): repository URL validation and
+# normalization. Configuration validation of `default_repository` delegates
+# to it (build-source-selection Req 1.5) so the accepted repository shape
+# has exactly one definition.
+import build_source
+
 # ---------------------------------------------------------------------------
 # Build_Target definitions (Requirement 1.4)
 # ---------------------------------------------------------------------------
@@ -302,6 +308,11 @@ RULE_SERVER_ID_MISSING = 'server_id_missing'            # Req 2.6
 RULE_SERVER_NOT_FOUND = 'server_not_found'              # Req 2.4
 RULE_SERVER_NOT_RUNNING = 'server_not_running'          # Req 2.4
 RULE_SERVER_ARCH_MISMATCH = 'server_arch_mismatch'      # Req 2.8
+# Per-submission source selection (build-source-selection Req 1.4, 2.7).
+# Re-exported from build_source — the one definition of the accepted
+# repository/ref shapes — rather than spelled a second time here.
+RULE_REPOSITORY_INVALID = build_source.RULE_REPOSITORY_INVALID
+RULE_SOURCE_REF_INVALID = build_source.RULE_SOURCE_REF_INVALID
 
 
 class ValidationResult(NamedTuple):
@@ -350,6 +361,15 @@ def validate_build_request(
     is the effective build configuration (accepted for signature parity;
     no configuration value affects request validity).
 
+    The body may additionally carry an OPTIONAL per-submission source
+    selection (build-source-selection Req 1.3, 1.4, 2.7):
+    ``repository`` (an HTTPS GitHub remote) and ``source_ref`` (a branch,
+    tag, or 40-hex commit SHA). Both are validated through build_source —
+    the one definition of the accepted shapes — and each rejection carries
+    the offending ``field`` alongside its ``rule``, so the existing
+    BUILD_REQUEST_INVALID envelope names the form control that failed.
+    Omitted values are valid: they mean "the configured default".
+
     Rules enforced, each rejection naming the failing rule:
       - targets non-empty (Req 1.8)
       - every target supported, error lists the supported Build_Targets
@@ -361,6 +381,10 @@ def validate_build_request(
       - the server's CPU architecture matches the required architecture of
         every selected target; the error names the server architecture, the
         mismatched Build_Target, and the architecture it requires (Req 2.8)
+      - a supplied ``repository`` is a well-formed HTTPS GitHub remote
+        (RULE_REPOSITORY_INVALID, build-source-selection Req 1.4)
+      - a supplied ``source_ref`` is a valid branch/tag/SHA ref
+        (RULE_SOURCE_REF_INVALID, build-source-selection Req 2.7)
     """
     del config  # No configuration value affects request validity.
     body = body or {}
@@ -452,6 +476,24 @@ def validate_build_request(
                                 f"'{required}'."
                             ),
                         })
+
+    # --- Optional per-submission source selection
+    #     (build-source-selection Req 1.3, 1.4, 2.7) ---
+    # An omitted repository means "the configured default repository";
+    # a supplied one must be a well-formed HTTPS GitHub remote. The
+    # build_source rejection already carries rule, field and message, so
+    # it splices straight into the envelope with the offending field named.
+    if body.get('repository') is not None:
+        _, repository_error = build_source.normalize_repository_url(
+            body['repository'])
+        if repository_error is not None:
+            errors.append(dict(repository_error))
+    # None and a blank string both mean "no ref selected" (the configured
+    # value applies); anything else must be a valid branch/tag/SHA ref.
+    _, source_ref_error = build_source.normalize_source_ref(
+        body.get('source_ref'))
+    if source_ref_error is not None:
+        errors.append(dict(source_ref_error))
 
     if errors:
         return ValidationResult.rejected(errors)
@@ -591,6 +633,7 @@ def create_build_jobs(
     requested_by: str,
     created_at: int,
     config_snapshot: Optional[Dict[str, Any]] = None,
+    volume_size_gb: Any = None,
 ) -> List[Dict[str, Any]]:
     """Create the Build_Job records for a validated build request (pure).
 
@@ -607,6 +650,19 @@ def create_build_jobs(
 
     ``job_ids`` must supply exactly one pre-generated id per target so the
     function stays deterministic and side-effect free.
+
+    Ephemeral volume sizing is resolved ONCE here, per job, in design
+    order (Req 2.20): the OPTIONAL explicit ``volume_size_gb`` request
+    value, the snapshot's OPTIONAL ``volume_size_gb_by_target`` entry for
+    the job's own target, then the snapshot's global ``volume_size_gb``
+    (documented default 200). The resolved size is written into each
+    job's own ``config_snapshot.volume_size_gb``, which ``plan_runner``
+    continues to read unchanged; a snapshot supplying neither a map
+    entry nor a global value is left untouched. Previously created jobs
+    keep their snapshotted sizes without retroactive adoption (Req 3.13).
+    Snapshotted ``runtime_budgets`` are deep-copied per job like every
+    other snapshot field, making each job's runtime budget immutable at
+    submission (Req 2.17).
     """
     if not targets:
         raise ValueError('create_build_jobs requires at least one Build_Target')
@@ -623,6 +679,12 @@ def create_build_jobs(
     jobs: List[Dict[str, Any]] = []
     for order, target in enumerate(targets):
         definition = target_definition(target)
+        snapshot = copy.deepcopy(config_snapshot)
+        if isinstance(snapshot, dict):
+            resolved_volume = resolve_volume_size_gb(
+                volume_size_gb, target, snapshot)
+            if resolved_volume is not None:
+                snapshot['volume_size_gb'] = resolved_volume
         jobs.append({
             'build_job_id': job_ids[order],
             'request_id': request_id,
@@ -639,7 +701,7 @@ def create_build_jobs(
             'status': STATUS_QUEUED,
             'requested_by': requested_by,
             'created_at': created_at,
-            'config_snapshot': copy.deepcopy(config_snapshot),
+            'config_snapshot': snapshot,
         })
     return jobs
 
@@ -803,13 +865,61 @@ def decide_cancellation(
 DEFAULT_BUILD_CONFIG: Dict[str, Any] = {
     'arm64_instance_type': 'm6g.4xlarge',
     'x86_64_instance_type': 'm6i.4xlarge',
-    'volume_size_gb': 100,
+    # Raised from 100 to 200 (build-fleet-execution-failures storage
+    # amendment, Req 2.20): the JP6 target exports two large multi-stage
+    # docker images concurrently on a single root volume shared by snap
+    # docker layer storage, the repository clone, buildkit cache, and
+    # /tmp; 100 GB was evidence-confirmed as undersized (job bd91c5d8).
+    # Applies at submission time only: previously created jobs keep
+    # their snapshotted sizes (Req 3.13).
+    'volume_size_gb': 200,
     'region': 'us-east-1',
     'max_runtime_hours': 4,
     'use_spot_for_ephemeral': False,
+    # Operator-controlled default repository for build submissions
+    # (build-source-selection Req 1.5). Present in this table so
+    # build_config.KNOWN_PARAMETERS makes it an operator-settable,
+    # audited parameter with no build_config.py change.
+    'default_repository': 'https://github.com/awslabs/DefectDetectionApplication',
     # None means "the repository's default branch" (resolved at build time).
     'source_ref': None,
+    # OPTIONAL target/mode runtime budgets (build-fleet-execution-failures
+    # Req 2.17): {target: {mode-or-'default': {heartbeat_lease_minutes,
+    # progress_stall_minutes, hard_runtime_hours, queue_wait_hours,
+    # provisioning_minutes}}}. None means "not configured": jobs fall back
+    # to their snapshotted max_runtime_hours (Req 3.12). No default value
+    # is encoded here — an unevidenced production timeout change is
+    # prohibited (Req 2.19, historical-evidence.md gate row 6).
+    'runtime_budgets': None,
+    # OPTIONAL per-target ephemeral volume sizing (Req 2.20):
+    # {target: volume GB}. None means "not configured": every target uses
+    # the global volume_size_gb. Any configured JP6 entry must be at
+    # least MIN_JP6_VOLUME_SIZE_GB.
+    'volume_size_gb_by_target': None,
 }
+
+#: Minimum ephemeral volume size for the JP6 target (GB): JP6 exports two
+#: large multi-stage images concurrently and is evidence-confirmed to
+#: exhaust 100 GB (Req 2.20 — any configured JP6 value must be >= 200).
+MIN_JP6_VOLUME_SIZE_GB = 200
+
+#: The budget keys one runtime-budget entry may define, matching the
+#: expectations of ``build_reconciliation.effective_budget`` (Req 2.17):
+#: soft leases and hard ceiling, plus the independent OPTIONAL queue-wait
+#: and provisioning budgets (disabled unless explicitly configured,
+#: Req 2.14).
+RUNTIME_BUDGET_ENTRY_KEYS = frozenset({
+    'heartbeat_lease_minutes',
+    'progress_stall_minutes',
+    'hard_runtime_hours',
+    'queue_wait_hours',
+    'provisioning_minutes',
+})
+
+#: The per-target keys of the runtime_budgets map: one entry per
+#: execution mode plus the target-wide 'default'.
+RUNTIME_BUDGET_MODE_KEYS = frozenset(
+    {EXECUTION_MODE_EPHEMERAL, EXECUTION_MODE_DEDICATED, 'default'})
 
 # EC2 instance-family -> CPU architecture lookup table (design §7).
 # Graviton families are arm64; Intel/AMD families are x86_64. Families not
@@ -860,6 +970,10 @@ RULE_CONFIG_INSTANCE_TYPE_INVALID = 'config_instance_type_invalid'
 RULE_CONFIG_INSTANCE_TYPE_ARCH_MISMATCH = 'config_instance_type_arch_mismatch'
 RULE_CONFIG_VOLUME_SIZE_INVALID = 'config_volume_size_invalid'
 RULE_CONFIG_MAX_RUNTIME_INVALID = 'config_max_runtime_invalid'
+RULE_CONFIG_REPOSITORY_INVALID = 'config_repository_invalid'
+RULE_CONFIG_RUNTIME_BUDGETS_INVALID = 'config_runtime_budgets_invalid'
+RULE_CONFIG_VOLUME_BY_TARGET_INVALID = 'config_volume_by_target_invalid'
+RULE_CONFIG_JP6_VOLUME_MINIMUM = 'config_jp6_volume_minimum'
 
 
 def effective_build_config(stored: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -869,10 +983,11 @@ def effective_build_config(stored: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     PortalSettings (or None when never written). The result contains every
     documented parameter: the stored value when present, the documented
     default otherwise (ARM64 instance type m6g.4xlarge, x86_64 instance
-    type m6i.4xlarge, volume size 100 GB, region us-east-1, max runtime
-    4 hours, spot for ephemeral runners off, source ref = repository
-    default branch). A field stored as None counts as absent. Unknown
-    stored fields pass through unchanged.
+    type m6i.4xlarge, volume size 200 GB, region us-east-1, max runtime
+    4 hours, spot for ephemeral runners off, default repository
+    https://github.com/awslabs/DefectDetectionApplication, source ref =
+    repository default branch). A field stored as None counts as absent.
+    Unknown stored fields pass through unchanged.
     """
     config = dict(DEFAULT_BUILD_CONFIG)
     for key, value in (stored or {}).items():
@@ -916,6 +1031,140 @@ def _is_positive_number(value: Any) -> bool:
     return as_float > 0 and as_float != float('inf')
 
 
+def validate_runtime_budgets(value: Any) -> List[Dict[str, str]]:
+    """Validate an OPTIONAL target/mode runtime-budget map (pure,
+    Req 2.17): ``{target: {mode-or-'default': {budget key: positive
+    number}}}``, the shape ``build_reconciliation.effective_budget``
+    resolves at decision time. Fail-closed: unknown targets, unknown
+    mode keys, unknown budget keys, and non-positive values are all
+    rejected so a typo can never silently disable or misapply a budget.
+    Returns the (possibly empty) list of error dicts."""
+    errors: List[Dict[str, str]] = []
+
+    def _error(message: str) -> None:
+        errors.append({
+            'rule': RULE_CONFIG_RUNTIME_BUDGETS_INVALID,
+            'parameter': 'runtime_budgets',
+            'message': 'Invalid value for runtime_budgets: ' + message,
+        })
+
+    if not isinstance(value, dict):
+        _error(f"'{value}' is not a map of Build_Target to per-mode "
+               f"budget entries.")
+        return errors
+    supported = ', '.join(sorted(SUPPORTED_BUILD_TARGETS))
+    for target, per_mode in value.items():
+        if not is_supported_target(target):
+            _error(f"'{target}' is not a supported Build_Target "
+                   f"(supported: {supported}).")
+            continue
+        if not isinstance(per_mode, dict):
+            _error(f"the entry for target '{target}' is not a map of "
+                   f"execution mode (or 'default') to a budget entry.")
+            continue
+        for mode, entry in per_mode.items():
+            if mode not in RUNTIME_BUDGET_MODE_KEYS:
+                _error(f"'{target}.{mode}' is not an execution mode or "
+                       f"'default' (expected one of: "
+                       + ', '.join(sorted(RUNTIME_BUDGET_MODE_KEYS)) + ').')
+                continue
+            if not isinstance(entry, dict):
+                _error(f"the budget entry '{target}.{mode}' is not a map "
+                       f"of budget keys to positive numbers.")
+                continue
+            for key, budget in entry.items():
+                if key not in RUNTIME_BUDGET_ENTRY_KEYS:
+                    _error(f"'{target}.{mode}.{key}' is not a known "
+                           f"budget key (expected one of: "
+                           + ', '.join(sorted(RUNTIME_BUDGET_ENTRY_KEYS))
+                           + ').')
+                    continue
+                if budget is not None and not _is_positive_number(budget):
+                    _error(f"'{target}.{mode}.{key}' = '{budget}' is not "
+                           f"a positive number.")
+    return errors
+
+
+def validate_volume_size_by_target(value: Any) -> List[Dict[str, str]]:
+    """Validate an OPTIONAL per-target volume-size map (pure, Req 2.20):
+    ``{target: volume GB}``, each value a positive number, and any
+    configured JP6 entry at least ``MIN_JP6_VOLUME_SIZE_GB`` (the JP6
+    target is evidence-confirmed to exhaust smaller volumes). Returns
+    the (possibly empty) list of error dicts."""
+    errors: List[Dict[str, str]] = []
+    if not isinstance(value, dict):
+        errors.append({
+            'rule': RULE_CONFIG_VOLUME_BY_TARGET_INVALID,
+            'parameter': 'volume_size_gb_by_target',
+            'message': (
+                f"Invalid value for volume_size_gb_by_target: '{value}' "
+                f"is not a map of Build_Target to volume size (GB)."
+            ),
+        })
+        return errors
+    supported = ', '.join(sorted(SUPPORTED_BUILD_TARGETS))
+    for target, size in value.items():
+        if not is_supported_target(target):
+            errors.append({
+                'rule': RULE_CONFIG_VOLUME_BY_TARGET_INVALID,
+                'parameter': 'volume_size_gb_by_target',
+                'message': (
+                    f"Invalid value for volume_size_gb_by_target: "
+                    f"'{target}' is not a supported Build_Target "
+                    f"(supported: {supported})."
+                ),
+            })
+            continue
+        if size is None:
+            continue
+        if not _is_positive_number(size):
+            errors.append({
+                'rule': RULE_CONFIG_VOLUME_BY_TARGET_INVALID,
+                'parameter': 'volume_size_gb_by_target',
+                'message': (
+                    f"Invalid value for volume_size_gb_by_target."
+                    f"{target}: '{size}' is not a positive number."
+                ),
+            })
+            continue
+        if target == TARGET_JP6 and float(size) < MIN_JP6_VOLUME_SIZE_GB:
+            errors.append({
+                'rule': RULE_CONFIG_JP6_VOLUME_MINIMUM,
+                'parameter': 'volume_size_gb_by_target',
+                'message': (
+                    f"Invalid value for volume_size_gb_by_target.JP6: "
+                    f"'{size}' is below the required minimum of "
+                    f"{MIN_JP6_VOLUME_SIZE_GB} GB — the JP6 target "
+                    f"exports two large multi-stage images concurrently "
+                    f"and exhausts smaller volumes."
+                ),
+            })
+    return errors
+
+
+def resolve_volume_size_gb(
+    explicit_value: Any,
+    build_target: str,
+    config: Optional[Dict[str, Any]],
+) -> Any:
+    """Resolve one Build_Job's ephemeral volume size at submission
+    (pure, Req 2.20), in design order: the explicit request value when
+    supplied, the OPTIONAL per-target map entry, then the global
+    ``volume_size_gb`` (documented default 200). Returns None when no
+    level supplies a value (the caller leaves the snapshot untouched and
+    ``plan_runner``'s fail-safe applies). Resolution happens ONCE at
+    submission and is snapshotted immutably: previously created jobs
+    keep their snapshotted sizes without retroactive adoption
+    (Req 3.13)."""
+    if explicit_value is not None:
+        return explicit_value
+    config = config or {}
+    by_target = config.get('volume_size_gb_by_target')
+    if isinstance(by_target, dict) and by_target.get(build_target) is not None:
+        return by_target[build_target]
+    return config.get('volume_size_gb')
+
+
 def validate_build_config(update: Optional[Dict[str, Any]]) -> ValidationResult:
     """Validate a build infrastructure configuration update (pure, Req 9.5).
 
@@ -931,6 +1180,14 @@ def validate_build_config(update: Optional[Dict[str, Any]]) -> ValidationResult:
       - ``volume_size_gb``: a positive number.
       - ``max_runtime_hours``: a positive duration (positive number of
         hours).
+      - ``default_repository``: a well-formed HTTPS GitHub remote, per
+        ``build_source.normalize_repository_url`` (build-source-selection
+        Req 1.5).
+      - ``runtime_budgets``: an OPTIONAL target/mode runtime-budget map
+        (``validate_runtime_budgets``, Req 2.17).
+      - ``volume_size_gb_by_target``: an OPTIONAL per-target volume-size
+        map with any JP6 entry at least ``MIN_JP6_VOLUME_SIZE_GB``
+        (``validate_volume_size_by_target``, Req 2.20).
 
     A rejected update must be discarded in full (atomic reject): the caller
     keeps the stored configuration unchanged — see ``apply_config_update``.
@@ -992,6 +1249,21 @@ def validate_build_config(update: Optional[Dict[str, Any]]) -> ValidationResult:
                 ),
             })
 
+    # --- Default repository a well-formed HTTPS GitHub remote
+    #     (build-source-selection Req 1.5) ---
+    if 'default_repository' in update and update['default_repository'] is not None:
+        value = update['default_repository']
+        _, repository_error = build_source.normalize_repository_url(value)
+        if repository_error is not None:
+            errors.append({
+                'rule': RULE_CONFIG_REPOSITORY_INVALID,
+                'parameter': 'default_repository',
+                'message': (
+                    'Invalid value for default_repository: '
+                    + repository_error['message']
+                ),
+            })
+
     # --- Max runtime a positive duration (Req 9.5) ---
     if 'max_runtime_hours' in update and update['max_runtime_hours'] is not None:
         value = update['max_runtime_hours']
@@ -1004,6 +1276,16 @@ def validate_build_config(update: Optional[Dict[str, Any]]) -> ValidationResult:
                     f"a positive duration."
                 ),
             })
+
+    # --- OPTIONAL target/mode runtime budgets (Req 2.17) ---
+    if 'runtime_budgets' in update and update['runtime_budgets'] is not None:
+        errors.extend(validate_runtime_budgets(update['runtime_budgets']))
+
+    # --- OPTIONAL per-target volume sizes, JP6 >= 200 GB (Req 2.20) ---
+    if 'volume_size_gb_by_target' in update \
+            and update['volume_size_gb_by_target'] is not None:
+        errors.extend(validate_volume_size_by_target(
+            update['volume_size_gb_by_target']))
 
     if errors:
         return ValidationResult.rejected(errors)

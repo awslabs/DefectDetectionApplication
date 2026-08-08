@@ -89,6 +89,27 @@ const CUSTOM_PYTHON_PREPROCESS: NodeTypeDescriptor = {
   hardwareDependent: false,
 };
 
+const CUSTOM_PYTHON_SOURCE: NodeTypeDescriptor = {
+  typeId: 'custom_python_source',
+  category: 'input',
+  displayName: 'Custom Python (Source)',
+  inputs: [{ name: 'activation', portType: 'EventSignal' }],
+  outputs: [{ name: 'out', portType: 'VideoFrames' }],
+  parameters: [
+    { name: 'code', paramType: 'code', required: true, default: null, constraints: {} },
+    { name: 'requirements', paramType: 'string', required: false, default: '', constraints: {} },
+    {
+      name: 'allowed_uri_prefixes',
+      paramType: 'string',
+      required: false,
+      default: '',
+      constraints: {},
+    },
+  ],
+  mappings: [],
+  hardwareDependent: true,
+};
+
 /** A non-custom-Python node type: no assistant, no Import_Analyzer. */
 const CAMERA: NodeTypeDescriptor = {
   typeId: 'camera_source',
@@ -165,6 +186,21 @@ describe('Code_Assistant presence in NodeConfigPanel', () => {
         role="UseCaseAdmin"
       />
     );
+    expect(container.querySelector('textarea[aria-label="code"]')).not.toBeNull();
+    expect(assistantPrompt()).toBeInTheDocument();
+  });
+
+  it('renders the code editor and the assistant for a custom_python_source node (custom-python-source Requirements 9.6, 10.2)', () => {
+    const { container } = render(
+      <NodeConfigPanel
+        node={builderNode(CUSTOM_PYTHON_SOURCE, { code: '' })}
+        onParametersChange={vi.fn()}
+        role="DataScientist"
+      />
+    );
+    // Selecting the node renders a code editor for `code` and offers the
+    // Code_Assistant panel on the same terms as the other Custom Python
+    // node types.
     expect(container.querySelector('textarea[aria-label="code"]')).not.toBeNull();
     expect(assistantPrompt()).toBeInTheDocument();
   });
@@ -257,6 +293,32 @@ describe('debounced Import_Analyzer', () => {
     // One run per change: no further writes without another code change.
     vi.advanceTimersByTime(5000);
     expect(onParametersChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('derives requirements from a custom_python_source code change on the same terms (custom-python-source Requirement 9.6)', () => {
+    const onParametersChange = vi.fn();
+    const node = builderNode(CUSTOM_PYTHON_SOURCE, { code: '', requirements: '' });
+    const { rerender } = render(
+      <NodeConfigPanel node={node} onParametersChange={onParametersChange} role="DataScientist" />
+    );
+
+    const sourceCode =
+      'import cv2\n\ndef produce_frame(context):\n    return cv2.imread("/aws_dda/reference.png")\n';
+    rerender(
+      <NodeConfigPanel
+        node={builderNode(CUSTOM_PYTHON_SOURCE, { code: sourceCode, requirements: '' })}
+        onParametersChange={onParametersChange}
+        role="DataScientist"
+      />
+    );
+
+    vi.advanceTimersByTime(750);
+    const expected = expectedReconciled(sourceCode, '');
+    expect(expected).toContain('opencv-python-headless');
+    expect(onParametersChange).toHaveBeenCalledWith('custom_python_source_1', {
+      code: sourceCode,
+      requirements: expected,
+    });
   });
 
   it('writes nothing when the reconciled text equals the current requirements', () => {
