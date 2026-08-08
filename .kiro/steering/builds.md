@@ -65,7 +65,23 @@ whole build. Pre-build check:
    regenerate `cdk.out` mid-build and the security gate (which runs AFTER the
    ~1h compile) fails on the drift guard, wasting the whole build. Sequence
    them: portal deploy fully finishes → move cdk.out aside → start the build.
-5. Only then start the build.
+5. **ALWAYS run the guard suite and confirm it is green before starting the
+   build — never assume it.** This takes seconds and saves the whole build
+   when a baseline is stale (a portal deploy having regenerated `cdk.out` is
+   the classic cause):
+   ```
+   python3 -m pytest \
+     test/backend-test/security/preservation/test_preservation_out_of_scope_guard.py \
+     test/backend-test/security/preservation/test_preservation_secrets_out_of_scope_guard.py \
+     -p no:cacheprovider --noconftest -q
+   ```
+   If the cdk.out drift guards fail, either move `cdk.out` aside (step 3) or
+   add the new copies' sha256 entries to
+   `test/backend-test/security/preservation/cdk_out_baseline.json` and
+   `.../secrets_cdk_out_baseline.json`, re-run the guards, and only start the
+   build once they pass. When practical, run the full preservation suite in
+   the flask-app container too (see "Security preservation gate" below).
+6. Only then start the build.
 
 ## CRITICAL: test new on-device edge features on real hardware before committing
 
