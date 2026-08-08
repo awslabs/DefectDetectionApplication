@@ -37,6 +37,7 @@ same surface (``state``, ``list_models``, ``engine_args``, ``generate``,
 
 # System Modules
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -96,9 +97,16 @@ def normalize_generation_request(
         configured max_model_len)
       - supplied temperature outside [0.0, 2.0]
       - supplied top_p outside (0.0, 1.0] (exclusive lower bound)
+      - supplied image not a string, not valid base64, decoding to zero
+        bytes, or decoding to more than the configured maximum image
+        size (edge-vlm-image-inference Requirements 3.4, 3.5)
 
     Omitted generation parameters are never findings: their defaults are
-    applied and the request is processed (Requirement 5.8).
+    applied and the request is processed (Requirement 5.8). An omitted
+    ``image`` leaves the normalized result identical to pre-feature
+    behavior (Requirements 3.3, 6.2); a valid ``image`` is decoded once
+    here, at the validation boundary, and stored as
+    ``effective["image_bytes"]`` (Requirement 3.1).
 
     Callers distinguish the outcomes with isinstance(result, list).
     """
@@ -161,6 +169,39 @@ def normalize_generation_request(
                           "than 1.0",
             })
 
+    image_bytes: Optional[bytes] = None
+    if "image" in body:
+        image = body["image"]
+        if not isinstance(image, str):
+            findings.append({
+                "field": "image",
+                "reason": "image must be a base64-encoded string",
+            })
+        else:
+            try:
+                decoded = base64.b64decode(image, validate=True)
+            except (ValueError, TypeError):
+                findings.append({
+                    "field": "image",
+                    "reason": "image is not valid base64",
+                })
+            else:
+                max_image_bytes = get_max_image_bytes()
+                if len(decoded) == 0:
+                    findings.append({
+                        "field": "image",
+                        "reason": "image decodes to zero bytes",
+                    })
+                elif len(decoded) > max_image_bytes:
+                    findings.append({
+                        "field": "image",
+                        "reason": "image decodes to {} bytes, exceeding "
+                                  "the maximum of {} bytes".format(
+                                      len(decoded), max_image_bytes),
+                    })
+                else:
+                    image_bytes = decoded
+
     if findings:
         return findings
 
@@ -170,6 +211,8 @@ def normalize_generation_request(
             effective[key] = body[key]
     effective["model_name"] = model_name
     effective["prompt"] = prompt
+    if image_bytes is not None:
+        effective["image_bytes"] = image_bytes
     return effective
 
 
@@ -185,6 +228,10 @@ DEFAULT_TEXT_GEN_RETRY_LIMIT = 2
 #: Default wall-clock timeout over a whole non-streaming generate call,
 #: retries included (Requirement 5.11).
 DEFAULT_TEXT_GEN_TIMEOUT_SECONDS = 120.0
+
+#: Default maximum decoded size of an ``image`` payload
+#: (edge-vlm-image-inference Requirement 3.5): 16 MiB.
+DEFAULT_MAX_IMAGE_BYTES = 16 * 1024 * 1024
 
 #: max_tokens upper bound applied when the model's max_model_len is not
 #: known to the manager (e.g. the model is not loaded — such requests are
@@ -220,6 +267,22 @@ def get_timeout_seconds() -> float:
             pass
         logger.warning("Ignoring invalid TEXT_GEN_TIMEOUT_SECONDS=%r", raw)
     return DEFAULT_TEXT_GEN_TIMEOUT_SECONDS
+
+
+def get_max_image_bytes() -> int:
+    """The maximum decoded ``image`` payload size in bytes:
+    ``TEXT_GEN_MAX_IMAGE_BYTES`` when set to a parseable positive
+    integer, else the default of 16 MiB."""
+    raw = os.environ.get("TEXT_GEN_MAX_IMAGE_BYTES")
+    if raw is not None:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+        logger.warning("Ignoring invalid TEXT_GEN_MAX_IMAGE_BYTES=%r", raw)
+    return DEFAULT_MAX_IMAGE_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +427,33 @@ def _sse_event(payload: Dict[str, Any]) -> str:
     return "data: {}\n\n".format(json.dumps(payload))
 
 
+def _generate_kwargs(effective: Dict[str, Any]) -> Dict[str, Any]:
+    """Extra keyword arguments for the runtime generate invocation:
+    ``image=`` only when the normalized request carries decoded image
+    bytes (edge-vlm-image-inference Requirement 3.2). Imageless requests
+    produce an empty dict so the runtime invocation stays byte-identical
+    to pre-feature behavior — and fakes without an ``image`` parameter
+    keep working for text-only tests (Requirement 3.3)."""
+    image_bytes = effective.get("image_bytes")
+    if image_bytes is not None:
+        return {"image": image_bytes}
+    return {}
+
+
+def _image_used(runtime: Any, model_name: str) -> bool:
+    """Whether the serving model consumed the request's image, sourced
+    from the manager's multimodal capability (edge-vlm-image-inference
+    Requirement 3.6). Tolerant of fakes lacking ``image_supported`` —
+    a runtime that cannot report capability reports no consumption."""
+    supported = getattr(runtime, "image_supported", None)
+    if not callable(supported):
+        return False
+    try:
+        return bool(supported(model_name))
+    except Exception:  # noqa: BLE001 - reporting must never fail a response
+        return False
+
+
 # ---------------------------------------------------------------------------
 # FastAPI router (design section 11)
 # ---------------------------------------------------------------------------
@@ -408,6 +498,7 @@ async def generate_text(
 
     prompt = effective["prompt"]
     sampling_params = _sampling_params(effective)
+    generate_kwargs = _generate_kwargs(effective)
     retry_limit = get_retry_limit()
     timeout_seconds = get_timeout_seconds()
     loop = asyncio.get_running_loop()
@@ -420,10 +511,19 @@ async def generate_text(
             return _timeout_response(model_name, timeout_seconds)
         try:
             text = await asyncio.wait_for(
-                runtime.generate(model_name, prompt, sampling_params),
+                runtime.generate(
+                    model_name, prompt, sampling_params, **generate_kwargs
+                ),
                 timeout=remaining,
             )
-            return {"model_name": model_name, "generated_text": text}
+            response = {"model_name": model_name, "generated_text": text}
+            if generate_kwargs:
+                # Image-carrying requests report whether the model
+                # consumed the image (edge-vlm-image-inference
+                # Requirement 3.6); text-only responses stay
+                # byte-identical (no new keys).
+                response["image_used"] = _image_used(runtime, model_name)
+            return response
         except asyncio.TimeoutError:
             # Wall-clock expiry over the whole call, retries included
             # (Requirement 5.11).
@@ -488,11 +588,12 @@ async def generate_text_stream(
 
     prompt = effective["prompt"]
     sampling_params = _sampling_params(effective)
+    generate_kwargs = _generate_kwargs(effective)
 
     async def events() -> AsyncIterator[str]:
         try:
             async for token in runtime.generate_stream(
-                model_name, prompt, sampling_params
+                model_name, prompt, sampling_params, **generate_kwargs
             ):
                 yield _sse_event({"token": token})
         except Exception as err:  # noqa: BLE001 - one in-stream error event

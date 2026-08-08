@@ -395,7 +395,11 @@ class TestExecuteRecordsArtifactLocation:
                 post_run_handler=lambda reg, doc, tags: received.append(tags),
             ).execute(execution_id)
 
-        assert received == [{"is_anomalous": False, "confidence": 0.42}]
+        # `trigger: {}` is the seeded trigger-less-run delta
+        # (custom-python-source Requirements 2.5, 11.1).
+        assert received == [
+            {"is_anomalous": False, "confidence": 0.42, "trigger": {}}
+        ]
 
     def test_routing_failure_is_contained(self, tmp_path, session_factory):
         # R8.5: a failure in capture routing never fails the run.

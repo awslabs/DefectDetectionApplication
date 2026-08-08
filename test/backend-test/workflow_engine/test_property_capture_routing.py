@@ -321,5 +321,7 @@ def test_additive_tags_unchanged_by_routing(is_anomalous, confidence, declared):
         shutil.rmtree(repo, ignore_errors=True)
 
     # Routing was applied (capture terminal), yet the tag values reaching the
-    # post-run handler are exactly what the pipeline produced (R1.6).
-    assert received == [tag_values]
+    # post-run handler are exactly what the pipeline produced (R1.6), plus
+    # the seeded `trigger` key — the sanctioned trigger-less-run delta
+    # (custom-python-source Requirements 2.5, 11.1).
+    assert received == [dict(tag_values, trigger={})]

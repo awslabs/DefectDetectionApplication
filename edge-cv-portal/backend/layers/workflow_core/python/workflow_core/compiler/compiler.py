@@ -103,6 +103,18 @@ BINDING_CONDITIONAL = "conditional"
 #: (identity pass-through) and none of this applies.
 BINDING_BEDROCK_INFERENCE = "bedrock_inference"
 
+#: The on-device VLM/LLM inference executor binding (the llm_inference
+#: node). Like bedrock_inference, its fed VideoFrames input port gets a
+#: synthetic frame-capture sink chain on each feeding GStreamer branch
+#: and the emitted binding carries the per-input-port capture file paths
+#: (``capturePaths``, ``{work_dir}``-rooted). UNLIKE bedrock_inference,
+#: the node is NOT opaque: it stays a collapsed executor-level
+#: pass-through, so frames keep flowing through it to downstream
+#: pipeline elements exactly as before — the capture branch is an extra
+#: tee'd sink beside the downstream continuation, planned by
+#: ``_build_segments``'s existing feeder-capture fan-out.
+BINDING_LLM_INFERENCE = "llm_inference"
+
 
 def expand_unified_inputs(
     graph: WorkflowGraph,
@@ -330,6 +342,14 @@ def compile(
         n.id for n in graph.nodes
         if mappings[n.id].executor_binding == BINDING_BEDROCK_INFERENCE
     ]
+    #: llm_inference nodes join the frame-capture plan below but stay
+    #: NON-opaque: frames keep flowing through the collapsed node to
+    #: downstream pipeline elements (only Bedrock nodes terminate the
+    #: stream at their capture sinks).
+    llm_node_ids = [
+        n.id for n in graph.nodes
+        if mappings[n.id].executor_binding == BINDING_LLM_INFERENCE
+    ]
     opaque = set(bedrock_node_ids)
     stream_out = {
         node_id: _stream_successors(node_id, successors, gst_set, opaque)
@@ -341,11 +361,13 @@ def compile(
             stream_in[target].append(source)
     topo_order = _topological_sort(gst_node_ids, stream_out, stream_in)
 
-    # Bedrock frame captures: one synthetic sink chain per GStreamer
-    # branch feeding a bedrock_inference input port, plus the per-port
-    # capture file paths for each node's executor binding.
-    feeder_captures, bedrock_capture_paths = _bedrock_capture_plan(
-        graph, bedrock_node_ids, gst_set, opaque, descriptors_by_id
+    # Frame captures: one synthetic sink chain per GStreamer branch
+    # feeding a bedrock_inference or llm_inference input port, plus the
+    # per-port capture file paths for each node's executor binding. One
+    # shared path_for(feeder) map — a feeder serving both kinds of node
+    # shares a single capture sink and file.
+    feeder_captures, capture_paths = _bedrock_capture_plan(
+        graph, bedrock_node_ids + llm_node_ids, gst_set, opaque, descriptors_by_id
     )
 
     # 4./5. Emit tagged element chains linearized into segments.
@@ -400,7 +422,13 @@ def compile(
         # file paths their frame branches sink to ({work_dir}-rooted,
         # resolved by the LocalServer executor per run).
         if mappings[node_id].executor_binding == BINDING_BEDROCK_INFERENCE:
-            entry["capturePaths"] = bedrock_capture_paths.get(node_id, {})
+            entry["capturePaths"] = capture_paths.get(node_id, {})
+        # LLM/VLM inference bindings likewise carry the per-input-port
+        # capture file paths, so the device-side processor can attach
+        # the captured frame to the inference request. The node itself
+        # stays a non-opaque pass-through in the stream.
+        if mappings[node_id].executor_binding == BINDING_LLM_INFERENCE:
+            entry["capturePaths"] = capture_paths.get(node_id, {})
         # Subscribe-side trigger bindings carry the ordered activation
         # targets extracted into the activation plan; no other binding
         # gains any key (trigger-activation-runtime Requirement 5.1,
@@ -538,21 +566,23 @@ def _frame_feeders(
 
 def _bedrock_capture_plan(
     graph: WorkflowGraph,
-    bedrock_node_ids: List[str],
+    capture_node_ids: List[str],
     gst_set: set,
     opaque: set,
     descriptors_by_id: Dict[str, NodeTypeDescriptor],
 ):
-    """Plan the synthetic frame-capture sinks for bedrock_inference nodes.
+    """Plan the synthetic frame-capture sinks for frame-consuming
+    executor bindings (bedrock_inference and llm_inference nodes).
 
     Returns ``(feeder_captures, capture_paths_by_node)``:
 
     - ``feeder_captures``: GStreamer feeder node id -> capture file path.
-      Every branch feeding any bedrock input port ends in exactly one
-      capture sink chain persisting its latest frame; a feeder serving
-      several ports (or several bedrock nodes) shares its single file —
-      the frames are the same stream.
-    - ``capture_paths_by_node``: bedrock node id -> {input port name:
+      Every branch feeding any capture-consuming input port gains exactly
+      one capture sink chain persisting its latest frame; a feeder
+      serving several ports (or several consuming nodes, of either
+      binding kind) shares its single file — the frames are the same
+      stream.
+    - ``capture_paths_by_node``: consuming node id -> {input port name:
       capture path, or None when nothing feeds the port}. When several
       branches feed one port, the first (connection-ordered) feeder's
       file is used.
@@ -579,7 +609,7 @@ def _bedrock_capture_plan(
             )
         return feeder_captures[feeder_id]
 
-    for node_id in bedrock_node_ids:
+    for node_id in capture_node_ids:
         descriptor = descriptors_by_id[graph.node_by_id(node_id).type]
         ports: Dict[str, Optional[str]] = {}
         for port in descriptor.inputs:

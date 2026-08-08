@@ -58,6 +58,17 @@ Camera-type execution model. Planning and grab failures fail the run
 with ``failing_node_id`` set to the Aravis node; documents with no
 Aravis binding points take the exact pre-feature call path.
 
+The Custom Python source feed (custom-python-source Requirements 7.1-7.6)
+rides the same Frame_Feed model: ``plan_python_sources`` plans the
+document's Frame_Producer from its ``pythonSourceBinding`` point, the
+executor runs ``produce_frame(context)`` in a producer bridge subprocess
+before the pipeline starts, and the Produced_Frame is pushed through the
+compiled appsrc with its explicit caps — alone via
+``run_pipeline(launch_string, frame_data)`` or alongside pumped
+emlpython bridges via ``run_bridged_pipeline(..., frame_data=...)``.
+Producer metadata merges into the Run_Metadata under
+``python_source.<nodeId>`` before the trigger seeding.
+
 Any exception anywhere in a run is contained: the execution row is marked
 failed and nothing propagates (Requirement 13.7).
 """
@@ -72,12 +83,16 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from workflow_engine import csi_capture
 from workflow_engine import executor as executor_hook
 from workflow_engine import python_bridge, rendering
 from workflow_engine.aravis_feed import AravisFeedError, plan_aravis_feeds
+from workflow_engine.python_source import (
+    PythonSourceError,
+    plan_python_sources,
+)
 from workflow_engine.output_bindings import (
     BINDING_BEDROCK_INFERENCE,
     BINDING_LLM_INFERENCE,
@@ -467,6 +482,41 @@ def plan_capture_sources(document: dict, arch: str,
         elif node_type == _ICAM_SOURCE_TYPE_ID:
             icam_nodes.append(node_id)
     return CapturePlan(csi_nodes=csi_nodes, icam_nodes=icam_nodes)
+
+
+def load_trigger_context(raw: Optional[str]) -> Dict[str, Any]:
+    """``trigger_context_json`` -> the run's Trigger_Context. Pure, total.
+
+    The Trigger_Runtime persists the context that started a triggered run
+    as JSON in ``workflow_executions.trigger_context_json``; this is the
+    read-back half (custom-python-source Requirements 2.1-2.4):
+
+    - a serialized JSON object is deserialized and its entries reproduced
+      (Req 2.1);
+    - NULL / empty / non-JSON input and serialized non-object JSON yield
+      ``{}`` — never an exception — so the run proceeds exactly as today
+      (Req 2.2);
+    - when the context carries a ``payload`` string (the MQTT shape),
+      ``payload_json`` is added holding the payload parsed as JSON when
+      it parses, and ``None`` otherwise (Req 2.3, 2.4). Contexts without
+      a ``payload`` string (OPC UA, manual) pass through unchanged.
+    """
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    context = dict(parsed)
+    payload = context.get("payload")
+    if isinstance(payload, str):
+        try:
+            context["payload_json"] = json.loads(payload)
+        except (ValueError, TypeError):
+            context["payload_json"] = None
+    return context
 
 
 EXECUTION_STATUS_PENDING = "pending"
@@ -1085,6 +1135,14 @@ class WorkflowExecutor:
                 )
                 return
 
+            # The run's Trigger_Context (custom-python-source Requirements
+            # 2.1-2.4): read back what the Trigger_Runtime persisted for
+            # this execution. Total — NULL/empty/invalid rows yield {} and
+            # the run proceeds exactly as today.
+            trigger_context = load_trigger_context(
+                getattr(execution, "trigger_context_json", None)
+            )
+
             registration = session.get(
                 WorkflowRegistration, execution.registration_id
             )
@@ -1145,6 +1203,42 @@ class WorkflowExecutor:
                     failing_node_id=e.node_id,
                 )
                 return
+
+            # Custom Python source feed (custom-python-source Requirements
+            # 7.1-7.6): plan the document's Frame_Producer, run
+            # produce_frame(context) in its handler subprocess, and point
+            # the compiled appsrc at the Frame_Feed — the same single-frame
+            # model the Aravis feed uses (the planner guarantees the two
+            # can never coexist). Planning and production failures fail
+            # this run with the node identified BEFORE the pipeline
+            # starts; source-free documents plan zero feeds and take the
+            # exact pre-feature path.
+            try:
+                python_frame_data, producer_metadata = (
+                    self._prepare_python_source_feed(
+                        document, registration, trigger_context
+                    )
+                )
+            except (
+                PythonSourceError, python_bridge.CustomPythonNodeError
+            ) as e:
+                failing_node_id = getattr(e, "node_id", None)
+                logger.error(
+                    "Workflow execution %s failed in the Custom Python "
+                    "source feed (node %s): %s",
+                    execution_id,
+                    failing_node_id or "unidentified",
+                    e,
+                )
+                self._finish_failed(
+                    session,
+                    execution,
+                    error=str(e),
+                    failing_node_id=failing_node_id,
+                )
+                return
+            if python_frame_data is not None:
+                frame_data = python_frame_data
 
             # Custom_Python_Node bridges (Requirement 9.8): replace each
             # emlpython element with the executor-managed appsink/appsrc
@@ -1350,14 +1444,24 @@ class WorkflowExecutor:
                     artifact_path=registration.artifact_path,
                 ):
                     if bridge_specs:
+                        # A produced Frame_Feed and pumped emlpython
+                        # bridges run in the same pipeline
+                        # (custom-python-source Requirement 7.4);
+                        # frame_data=None (every pre-existing bridged
+                        # run) keeps today's exact call shape.
                         tag_values = self._run_bridged(
-                            registration, bridge_specs, launch_string
+                            registration,
+                            bridge_specs,
+                            launch_string,
+                            frame_data=python_frame_data,
                         )
                     elif frame_data is not None:
-                        # Aravis Frame_Feed: run_pipeline locates the
-                        # appsrc, wraps the grabbed frame, pushes it and
+                        # Frame_Feed (Aravis grab or Custom Python
+                        # Produced_Frame): run_pipeline locates the
+                        # appsrc, wraps the frame, pushes it and
                         # sends EOS — the classic Camera-type execution
-                        # model (Requirement 6.4).
+                        # model (Requirements 6.4; custom-python-source
+                        # 7.1, 7.5).
                         manager = self._pipeline_manager_factory()
                         tag_values = manager.run_pipeline(
                             launch_string,
@@ -1407,6 +1511,32 @@ class WorkflowExecutor:
                     failure_detail=str(e),
                 )
                 return
+
+            # Merge the Frame_Producer's metadata into the Run_Metadata
+            # under the node's key (custom-python-source Requirement
+            # 6.7) — before the trigger seeding below and therefore
+            # before the Bedrock/LLM processors and output bindings.
+            # Empty producer metadata (and source-free runs) merge
+            # nothing, keeping the source-free Run_Metadata delta to
+            # exactly the seeded ``trigger`` key (Requirement 11.1).
+            if producer_metadata:
+                tag_values.setdefault(
+                    "python_source", {}
+                ).update(producer_metadata)
+
+            # Seed the Run_Metadata with the run's Trigger_Context under
+            # ``trigger`` — on every run path, BEFORE the Bedrock/LLM
+            # processors and the output bindings run, and never
+            # overwriting a key the pipeline's TAG messages produced
+            # (custom-python-source Requirements 2.5, 2.7). Trigger-less
+            # runs seed {} — the only Run_Metadata delta allowed by
+            # Requirement 11.1. ``_persist_run_metadata`` dumps
+            # ``tag_values``, so the seeded key lands in run
+            # observability with no further change (Requirement 2.8),
+            # and ``llm_inference.render_prompt`` resolves dotted
+            # ``{trigger.…}`` placeholders from it unchanged (Req 2.6).
+            if "trigger" not in tag_values:
+                tag_values["trigger"] = trigger_context
 
             # Pipeline processing succeeded: consume every
             # directory-resolved source image (staged PNG + original JPEG)
@@ -1472,7 +1602,7 @@ class WorkflowExecutor:
             # Requirements 7.3-7.7).
             if self._llm_processor.bindings(document):
                 tag_values = self._llm_processor.process(
-                    document, tag_values
+                    document, tag_values, work_dir
                 )
                 # Truthful per-node outcomes for the llm bindings: a
                 # recorded {'error': ...} marks THAT node failed in the
@@ -1903,7 +2033,9 @@ class WorkflowExecutor:
                 execution.id,
             )
 
-    def _run_bridged(self, registration, bridge_specs, launch_string) -> dict:
+    def _run_bridged(
+        self, registration, bridge_specs, launch_string, frame_data=None
+    ) -> dict:
         """Run a launch string containing Custom_Python_Node bridges.
 
         Builds one subprocess bridge per emlpython element (handler
@@ -1912,11 +2044,24 @@ class WorkflowExecutor:
         ``python_bridge.run_bridged_pipeline`` in production, which
         mirrors GstPipelineManager's watchdog/error/tag patterns while
         pumping frames appsink -> subprocess -> appsrc (Requirement 9.8).
+
+        ``frame_data`` (a Custom Python Produced_Frame) is forwarded to
+        the runner so the fed appsrc and the pumped bridges run in the
+        same pipeline (custom-python-source Requirement 7.4); ``None``
+        (every pre-existing bridged run) keeps the runner invocation
+        bit-identical to today (Requirement 11.1).
         """
         bridges = python_bridge.build_bridges(
             bridge_specs, registration.artifact_path
         )
         try:
+            if frame_data is not None:
+                return self._bridged_pipeline_runner(
+                    launch_string,
+                    bridges,
+                    latency_metrics=_NullLatencyMetrics(),
+                    frame_data=frame_data,
+                )
             return self._bridged_pipeline_runner(
                 launch_string, bridges, latency_metrics=_NullLatencyMetrics()
             )
@@ -1983,8 +2128,72 @@ class WorkflowExecutor:
         )
         return frame_data
 
+    def _prepare_python_source_feed(
+        self, document: dict, registration, trigger_context: Dict[str, Any]
+    ):
+        """Plan the document's Frame_Producer, run it, and point the
+        compiled appsrc at the Frame_Feed (custom-python-source
+        Requirements 7.1-7.3).
+
+        Returns ``(frame_data, producer_metadata)``: the Produced_Frame
+        as ``{'data','width','height','format'}`` plus the producer's
+        metadata keyed by the node id (empty when the producer returned
+        none — Requirement 6.7), or ``(None, None)`` when the document
+        plans zero sources — the exact pre-feature path (Requirement
+        7.3). Raises :class:`PythonSourceError` /
+        :class:`~workflow_engine.python_bridge.CustomPythonNodeError`
+        carrying the node id on planning and production failures
+        (Requirements 6.4, 6.5, 7.6, 8.5).
+        """
+        feeds = plan_python_sources(document)
+        if not feeds:
+            return None, None
+        feed = feeds[0]
+        bridge = python_bridge.build_producer_bridge(
+            feed, registration.artifact_path
+        )
+        try:
+            data, width, height, frame_format, metadata = (
+                bridge.produce_frame(
+                    trigger_context, feed.allowed_uri_prefixes
+                )
+            )
+        finally:
+            bridge.stop()
+        # Every source the producer fetched through dda_frames lands in
+        # the run log via RunLogCapture (Requirement 5.4).
+        fetched_sources = list(
+            getattr(bridge, "fetched_sources", None) or ()
+        )
+        if fetched_sources:
+            logger.info(
+                "Custom Python source %s fetched %d source(s): %s",
+                feed.node_id,
+                len(fetched_sources),
+                ", ".join(fetched_sources),
+            )
+        frame_data = {
+            "data": data,
+            "width": width,
+            "height": height,
+            "format": frame_format,
+        }
+        self._point_appsrc_at_frame_feed(
+            document, feed, frame_data, error_cls=PythonSourceError
+        )
+        logger.info(
+            "Custom Python source frame produced for node %s: %dx%d %s",
+            feed.node_id,
+            width,
+            height,
+            frame_format,
+        )
+        return frame_data, ({feed.node_id: metadata} if metadata else {})
+
     @staticmethod
-    def _point_appsrc_at_frame_feed(document: dict, feed, frame_data: dict) -> None:
+    def _point_appsrc_at_frame_feed(
+        document: dict, feed, frame_data: dict, error_cls=AravisFeedError
+    ) -> None:
         """Aim ``GstPipelineManager``'s Frame_Feed at the node's appsrc.
 
         ``run_pipeline`` locates the feed's appsrc by the element name
@@ -1993,7 +2202,12 @@ class WorkflowExecutor:
         Camera-type execution model. The compiled document names the
         element ``appsrc_{nodeId}`` and renders no caps, so the planned
         feed's element (unique per the single-Frame_Feed contract) is
-        renamed and given base caps derived from the grabbed frame.
+        renamed and given base caps derived from the fed frame.
+
+        ``feed`` is duck-typed over ``node_id`` (an Aravis feed or a
+        Python source feed); ``error_cls`` names the feed family's error
+        type — both carry the ``node_id`` the executor reads for failure
+        attribution.
         """
         for segment in document.get("segments", []):
             for element in segment.get("elements", []):
@@ -2005,17 +2219,26 @@ class WorkflowExecutor:
                     args["name"] = "appsrc"
                     args["caps"] = WorkflowExecutor._frame_caps(frame_data)
                     return
-        raise AravisFeedError(
+        raise error_cls(
             feed.node_id,
             "compiled document renders no appsrc element for the node",
         )
 
     @staticmethod
     def _frame_caps(frame_data: dict) -> str:
-        """Base appsrc caps for a grabbed frame; ``run_pipeline`` appends
-        the frame's width/height. The pixel format is derived from the
-        payload size per pixel (Aravis mono cameras produce GRAY8, color
-        pipelines RGB/RGBA), defaulting to GRAY8."""
+        """Base appsrc caps for a fed frame; ``run_pipeline`` appends
+        the frame's width/height.
+
+        A frame declaring an explicit ``format`` (every Custom Python
+        Produced_Frame — custom-python-source Requirement 7.2) names
+        exactly that Pixel_Format. Otherwise the format is derived from
+        the payload size per pixel (Aravis mono cameras produce GRAY8,
+        color pipelines RGB/RGBA), defaulting to GRAY8 — Aravis grabs
+        never set ``format``, so that path is bit-identical to the
+        pre-feature behavior (Requirement 11.1)."""
+        explicit_format = frame_data.get("format")
+        if explicit_format:
+            return "video/x-raw,format={0}".format(explicit_format)
         formats = {1: "GRAY8", 3: "RGB", 4: "RGBA"}
         width = frame_data.get("width") or 0
         height = frame_data.get("height") or 0

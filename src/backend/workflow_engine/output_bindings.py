@@ -53,6 +53,7 @@ Pipeline_Configuration path (Requirement 13.7). Hardware/network clients
 are imported lazily so this module stays importable everywhere.
 """
 
+import base64
 import json
 import logging
 import re
@@ -984,12 +985,20 @@ _LLM_GENERATION_PARAMETERS = ("max_tokens", "temperature", "top_p")
 
 
 def _default_llm_invoker(
-    model_name: str, prompt: str, parameters: Dict[str, Any]
+    model_name: str,
+    prompt: str,
+    parameters: Dict[str, Any],
+    image_b64: Optional[str] = None,
 ) -> str:
     """POST the rendered prompt to the local Text_Generation_API and
     return the generated text. ``requests`` is imported lazily so this
     module stays importable everywhere; any HTTP/validation failure is
     raised for the processor to record as the node's error.
+
+    ``image_b64`` (edge-vlm-image-inference Requirement 2.1) carries the
+    captured frame as a base64-encoded JPEG; when set it rides the POST
+    body as the API's optional ``image`` field. When ``None`` the body
+    is byte-identical to the pre-feature request (Requirement 2.2).
 
     A ``409 {'state': 'loading'}`` response (transient model warm-up) is
     re-POSTed every :data:`LLM_LOADING_POLL_INTERVAL_SEC` seconds until
@@ -1004,6 +1013,8 @@ def _default_llm_invoker(
     for key in _LLM_GENERATION_PARAMETERS:
         if parameters.get(key) is not None:
             body[key] = parameters[key]
+    if image_b64 is not None:
+        body["image"] = image_b64
     url = TEXT_GENERATION_URL.format(model_name=model_name)
     deadline = time.monotonic() + LLM_LOADING_BUDGET_SEC
     while True:
@@ -1055,10 +1066,21 @@ class LlmInferenceProcessor:
             if binding.get("binding") == BINDING_LLM_INFERENCE
         ]
 
-    def process(self, document: dict, tag_values: dict) -> Dict[str, Any]:
+    def process(
+        self,
+        document: dict,
+        tag_values: dict,
+        work_dir: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Run every llm_inference binding and return the run's inference
         metadata with each node's outcome merged under
         ``metadata['llm'][nodeId]`` (Requirements 7.4, 7.7).
+
+        ``work_dir`` (edge-vlm-image-inference Requirement 2.4) is the
+        per-run work directory substituted for the ``{work_dir}``
+        placeholder in a binding's ``capturePaths``; it stays optional so
+        pre-feature call sites (and compiled documents without
+        ``capturePaths``) keep byte-identical behavior (Requirement 6.1).
 
         Never raises: a binding failure — unresolved placeholder (7.5)
         or API error/timeout (7.6) — is recorded as that node's
@@ -1081,7 +1103,7 @@ class LlmInferenceProcessor:
         metadata["llm"] = dict(metadata.get("llm") or {})
         for binding in bindings:
             node_id = binding.get("nodeId")
-            outcome = self._run_one(binding, metadata)
+            outcome = self._run_one(binding, metadata, work_dir)
             metadata["llm"][node_id] = outcome
             for key in ("is_anomalous", "confidence"):
                 if key in outcome:
@@ -1089,7 +1111,10 @@ class LlmInferenceProcessor:
         return metadata
 
     def _run_one(
-        self, binding: dict, metadata: Dict[str, Any]
+        self,
+        binding: dict,
+        metadata: Dict[str, Any],
+        work_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
         node_id = binding.get("nodeId")
         parameters = dict(binding.get("parameters") or {})
@@ -1113,10 +1138,50 @@ class LlmInferenceProcessor:
         anomaly_mode = bool(_coerce(parameters.get("anomaly_mode")))
         if anomaly_mode:
             prompt = prompt + "\n\n" + BEDROCK_JSON_INSTRUCTION
+        # Captured-frame attachment (edge-vlm-image-inference
+        # Requirements 2.1, 2.2, 2.3). Three capturePaths shapes:
+        # - 'in' maps to a path and the resolved file is readable →
+        #   the frame rides the invocation base64-encoded;
+        # - capturePaths absent or 'in' is None (pre-feature package /
+        #   unfed port) → no image, request byte-identical to today;
+        # - 'in' maps to a path but the file cannot be read → contained
+        #   node error naming node/port/path, invoker never called —
+        #   silently answering without the image is the bug being fixed.
+        image_b64: Optional[str] = None
+        capture_paths = binding.get("capturePaths") or {}
+        port = "in"
+        path = capture_paths.get(port)
+        if path:
+            if work_dir:
+                path = path.replace("{work_dir}", work_dir)
+            try:
+                with open(path, "rb") as f:
+                    image_b64 = base64.b64encode(f.read()).decode("ascii")
+            except OSError as e:
+                logger.error(
+                    "LLM inference node %s failed: could not read the "
+                    "captured '%s' frame from %s (%s); other bindings "
+                    "are unaffected", node_id, port, path, e,
+                )
+                return {
+                    "error": (
+                        "LLM inference node '{0}' could not read the "
+                        "captured '{1}' frame from {2}: {3}".format(
+                            node_id, port, path, e)
+                    )
+                }
         try:
-            text = self._invoker(
-                str(parameters.get("modelName") or ""), prompt, parameters
-            )
+            model_name = str(parameters.get("modelName") or "")
+            if image_b64 is not None:
+                text = self._invoker(
+                    model_name, prompt, parameters, image_b64
+                )
+            else:
+                # No frame: the invocation (arity included) stays
+                # byte-identical to pre-feature behavior (Requirements
+                # 2.2, 6.1) so pre-feature injected invokers keep
+                # working unchanged.
+                text = self._invoker(model_name, prompt, parameters)
         except Exception as e:  # noqa: BLE001 - recorded per 7.6, not raised
             logger.error(
                 "LLM inference node %s failed: %s; other bindings are "

@@ -54,6 +54,24 @@ from vllm_runtime.repository import (
 
 logger = logging.getLogger(__name__)
 
+#: HF architectures known to accept image input. Qwen2-VL and Qwen2.5-VL
+#: are the minimum supported vision-language families (edge-vlm-image-
+#: inference Requirements 4.2, 4.5); vLLM's own ``is_multimodal_model``
+#: flag is preferred when the model config exposes it.
+MULTIMODAL_ARCHITECTURES = frozenset(
+    {
+        "Qwen2VLForConditionalGeneration",
+        "Qwen2_5_VLForConditionalGeneration",
+    }
+)
+
+#: Documented Qwen VL chat form, used when the model tokenizer offers no
+#: usable chat template (edge-vlm-image-inference design, section 4).
+_QWEN_VL_PROMPT_FALLBACK = (
+    "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+    "{prompt}<|im_end|>\n<|im_start|>assistant\n"
+)
+
 
 class ModelState(str, Enum):
     """Per-model serving states (design: runtime model state machine)."""
@@ -122,6 +140,9 @@ class _ManagedModel:
     status: ModelStatus
     engine: Any = None
     engine_args: Dict[str, Any] = field(default_factory=dict)
+    #: Cached multimodal-capability answer for the loaded engine
+    #: (``None`` until first queried; edge-vlm-image-inference 4.2).
+    multimodal: Optional[bool] = None
 
 
 def _default_engine_factory(engine_args: Mapping[str, Any]) -> Any:
@@ -314,8 +335,14 @@ class VllmRuntimeManager:
         model_name: str,
         prompt: str,
         sampling_params: Optional[Mapping[str, Any]] = None,
+        image: Optional[bytes] = None,
     ) -> str:
         """Generate to completion and return the generated text.
+
+        ``image`` optionally carries encoded image bytes for multimodal
+        generation on vision-language models (edge-vlm-image-inference
+        Requirements 4.1, 4.3, 4.4); text-only invocations are byte-
+        identical to pre-feature behavior.
 
         Raises :class:`ModelUnavailableError` when the model is not READY
         (carrying its actual status) and :class:`GenerationError` when the
@@ -323,7 +350,9 @@ class VllmRuntimeManager:
         error, other models untouched (Requirements 4.6, 8.8).
         """
         final = None
-        async for output in self._request(model_name, prompt, sampling_params):
+        async for output in self._request(
+            model_name, prompt, sampling_params, image
+        ):
             final = output
         text = self._output_text(final)
         if text is None:
@@ -335,6 +364,7 @@ class VllmRuntimeManager:
         model_name: str,
         prompt: str,
         sampling_params: Optional[Mapping[str, Any]] = None,
+        image: Optional[bytes] = None,
     ) -> AsyncIterator[str]:
         """Async iterator of incremental token text, in generation order.
 
@@ -343,7 +373,9 @@ class VllmRuntimeManager:
         :class:`GenerationError` after already-yielded tokens (the caller
         decides how to signal them in-stream)."""
         previous = ""
-        async for output in self._request(model_name, prompt, sampling_params):
+        async for output in self._request(
+            model_name, prompt, sampling_params, image
+        ):
             text = self._output_text(output)
             if text is None:
                 continue
@@ -357,14 +389,35 @@ class VllmRuntimeManager:
         model_name: str,
         prompt: str,
         sampling_params: Optional[Mapping[str, Any]],
+        image: Optional[bytes] = None,
     ) -> AsyncIterator[Any]:
         """Shared generate/generate_stream core: READY-check, sampling
-        params construction, engine invocation, failure isolation."""
+        params construction, engine invocation, failure isolation.
+
+        Engine prompt trichotomy (edge-vlm-image-inference 4.1, 4.3, 4.4,
+        6.3): no image → the bare prompt string exactly as pre-feature;
+        image + multimodal model → a prompt dict carrying the chat-
+        templated text and ``multi_modal_data``; image + text-only model
+        → logged warning, bare prompt string.
+        """
         engine = self._ready_engine(model_name)
+        if image is None:
+            engine_prompt: Any = prompt
+        elif self._is_multimodal(model_name):
+            engine_prompt = self._build_multimodal_prompt(
+                model_name, prompt, image
+            )
+        else:
+            logger.warning(
+                "vLLM model '%s' is not multimodal; ignoring the supplied "
+                "image and generating text-only",
+                model_name,
+            )
+            engine_prompt = prompt
         params = self._sampling_params_factory(dict(sampling_params or {}))
         request_id = uuid.uuid4().hex
         try:
-            stream = engine.generate(prompt, params, request_id)
+            stream = engine.generate(engine_prompt, params, request_id)
             if inspect.isawaitable(stream):
                 stream = await stream
             async for output in stream:
@@ -394,6 +447,149 @@ class VllmRuntimeManager:
                 else UNKNOWN_STATUS
             )
         raise ModelUnavailableError(model_name, status)
+
+    # --- multimodal support (edge-vlm-image-inference) ---------------------
+
+    def image_supported(self, model_name: str) -> bool:
+        """Whether the loaded model accepts image input — the public
+        capability answer callers (the Text_Generation_API) use for
+        ``image_used`` reporting (Requirements 4.2, 4.3). ``False`` for
+        models that are not loaded."""
+        return self._is_multimodal(model_name)
+
+    def _is_multimodal(self, model_name: str) -> bool:
+        """Whether the loaded engine serves a vision-language model,
+        determined from the model's configuration alone (no per-model
+        operator settings — Requirement 4.2) and cached per loaded model
+        (the cache lives on the ``_ManagedModel`` entry, so a reload
+        re-detects)."""
+        with self._lock:
+            entry = self._models.get(model_name)
+            if entry is None:
+                return False
+            if entry.multimodal is not None:
+                return entry.multimodal
+            engine = entry.engine
+        result = self._detect_multimodal(engine)
+        with self._lock:
+            entry = self._models.get(model_name)
+            if entry is not None:
+                entry.multimodal = result
+        return result
+
+    @staticmethod
+    def _detect_multimodal(engine: Any) -> bool:
+        """Inspect an engine's model config: prefer vLLM's own
+        ``ModelConfig.is_multimodal_model`` flag where available, fall
+        back to the hf_config architectures list (Qwen2-VL / Qwen2.5-VL
+        at minimum — Requirement 4.5)."""
+        if engine is None:
+            return False
+        inner = getattr(engine, "engine", None) or engine
+        model_config = getattr(inner, "model_config", None)
+        if model_config is None:
+            model_config = getattr(engine, "model_config", None)
+        if model_config is None:
+            return False
+        try:
+            flag = getattr(model_config, "is_multimodal_model", None)
+        except Exception:  # noqa: BLE001 - property access on exotic configs
+            flag = None
+        if isinstance(flag, bool):
+            return flag
+        hf_config = getattr(model_config, "hf_config", None)
+        architectures = getattr(hf_config, "architectures", None) or []
+        return any(arch in MULTIMODAL_ARCHITECTURES for arch in architectures)
+
+    def _build_multimodal_prompt(
+        self, model_name: str, prompt: str, image_bytes: bytes
+    ) -> Dict[str, Any]:
+        """Build the vLLM multimodal engine prompt: chat-templated text
+        containing the model's image placeholder tokens plus
+        ``multi_modal_data`` carrying the decoded image (Requirement 4.1).
+
+        Undecodable image bytes raise :class:`GenerationError` naming the
+        image decoding failure, before the engine is ever invoked
+        (Requirement 4.7). PIL is imported lazily so the module keeps
+        importing on images without the vLLM wheel."""
+        import io
+
+        try:
+            from PIL import Image
+        except ImportError as err:
+            raise GenerationError(
+                model_name,
+                "image decoding unavailable: PIL could not be imported "
+                "({})".format(err),
+            ) from err
+        try:
+            pil_image = Image.open(io.BytesIO(image_bytes))
+            pil_image.load()
+        except Exception as err:  # noqa: BLE001 - decode failure isolation (4.7)
+            raise GenerationError(
+                model_name,
+                "failed to decode the supplied image bytes: {}".format(err),
+            ) from err
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        templated = None
+        tokenizer = self._resolve_tokenizer(model_name)
+        apply = getattr(tokenizer, "apply_chat_template", None)
+        if callable(apply) and getattr(tokenizer, "chat_template", None):
+            try:
+                templated = apply(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            except Exception as err:  # noqa: BLE001 - fall back to literal form
+                logger.warning(
+                    "Chat template of model '%s' failed for image content "
+                    "(%s); using the Qwen VL literal prompt form",
+                    model_name,
+                    err,
+                )
+                templated = None
+        if not templated:
+            templated = _QWEN_VL_PROMPT_FALLBACK.replace("{prompt}", prompt)
+        return {
+            "prompt": templated,
+            "multi_modal_data": {"image": pil_image},
+        }
+
+    def _resolve_tokenizer(self, model_name: str) -> Any:
+        """Best-effort synchronous tokenizer lookup on the loaded engine
+        (``LLMEngine.get_tokenizer()`` or the tokenizer group); ``None``
+        when no usable tokenizer is reachable, in which case the caller
+        falls back to the Qwen VL literal prompt form."""
+        with self._lock:
+            entry = self._models.get(model_name)
+            engine = entry.engine if entry is not None else None
+        if engine is None:
+            return None
+        inner = getattr(engine, "engine", None) or engine
+        for candidate in (inner, engine):
+            get_tokenizer = getattr(candidate, "get_tokenizer", None)
+            if callable(get_tokenizer):
+                try:
+                    tokenizer = get_tokenizer()
+                except Exception:  # noqa: BLE001 - fall through to attributes
+                    tokenizer = None
+                if inspect.isawaitable(tokenizer):
+                    tokenizer.close()  # async surface: use attribute access
+                    tokenizer = None
+                if tokenizer is not None:
+                    return tokenizer
+        group = getattr(inner, "tokenizer", None)
+        if group is None:
+            return None
+        return getattr(group, "tokenizer", group)
 
     @staticmethod
     def _output_text(output: Any) -> Optional[str]:
