@@ -159,19 +159,104 @@ describe('EventBridge wiring (Requirements 3.1, 3.5, 5.1, 6.9)', () => {
     });
   });
 
-  test('SSM command status rule matches terminal command statuses', () => {
+  test('SSM command status rule matches ALL terminal command statuses (build-fleet-execution-failures Req 2.1)', () => {
     const rule = rulesByName()['dda-portal-build-ssm-command-status'];
     const pattern = rule.Properties.EventPattern;
     expect(pattern.source).toEqual(['aws.ssm']);
+    // `Success` is included so a missing agent result after a
+    // successful command can be settled; every pre-existing failure
+    // status is preserved.
     expect(pattern.detail.status.sort()).toEqual(
-      ['Cancelled', 'Failed', 'TimedOut'].sort(),
+      ['Cancelled', 'Failed', 'Success', 'TimedOut'].sort(),
     );
+    for (const preserved of ['Failed', 'TimedOut', 'Cancelled']) {
+      expect(pattern.detail.status).toContain(preserved);
+    }
   });
 
   test('EventBridge rules stack snapshot', () => {
     // Full definition snapshot of the five rules: schedule, event
     // patterns, and Lambda target wiring.
     expect(rulesByName()).toMatchSnapshot();
+  });
+});
+
+/** Policy statements attached to one handler role (logical-id fragment). */
+function policyStatementsForRole(roleIdFragment: string): any[] {
+  const statements: any[] = [];
+  for (const policy of Object.values(
+    template.findResources('AWS::IAM::Policy'),
+  )) {
+    const roles = (policy as any).Properties.Roles ?? [];
+    const attached = roles.some((r: any) =>
+      JSON.stringify(r).includes(roleIdFragment),
+    );
+    if (attached) {
+      statements.push(...(policy as any).Properties.PolicyDocument.Statement);
+    }
+  }
+  return statements;
+}
+
+describe('reconciliation least privilege (build-fleet-execution-failures Requirements 2.1, 2.5, 2.12, 3.5)', () => {
+  const RECONCILIATION_READS = ['ssm:GetCommandInvocation', 'ssm:ListCommands'];
+
+  test('the events consumer gets exactly the read actions required for invocation recovery', () => {
+    const statements = policyStatementsForRole('BuildEventsRole');
+    for (const action of RECONCILIATION_READS) {
+      expect(
+        statements.some((s) => asArray(s.Action).includes(action)),
+      ).toBe(true);
+    }
+  });
+
+  test('the dispatcher gets ListCommands for ambiguous-send recovery', () => {
+    const statements = policyStatementsForRole('BuildDispatcherRole');
+    for (const action of RECONCILIATION_READS) {
+      expect(
+        statements.some((s) => asArray(s.Action).includes(action)),
+      ).toBe(true);
+    }
+  });
+
+  test('the events consumer receives NO mutating EC2/SSM action', () => {
+    // Least privilege (Req 2.12): the consumer reads invocation
+    // evidence; it never sends commands, launches, or terminates.
+    const forbidden = [
+      'ssm:SendCommand',
+      'ssm:CancelCommand',
+      'ec2:RunInstances',
+      'ec2:StartInstances',
+      'ec2:StopInstances',
+      'ec2:TerminateInstances',
+    ];
+    const statements = policyStatementsForRole('BuildEventsRole');
+    for (const statement of statements) {
+      for (const action of asArray(statement.Action)) {
+        expect(forbidden).not.toContain(action);
+      }
+    }
+  });
+
+  test('the reconciliation read statements grant only read actions', () => {
+    // The statement carrying GetCommandInvocation/ListCommands must not
+    // smuggle a mutating action alongside the reads.
+    const readStatements = allPolicyStatements().filter((s) =>
+      asArray(s.Action).some((a: string) => RECONCILIATION_READS.includes(a)),
+    );
+    expect(readStatements.length).toBeGreaterThan(0);
+    for (const statement of readStatements) {
+      for (const action of asArray(statement.Action)) {
+        expect(action).toMatch(
+          /^ssm:(GetCommandInvocation|ListCommands|DescribeInstanceInformation)$/,
+        );
+      }
+    }
+  });
+
+  test('the one-minute dispatcher schedule is unchanged', () => {
+    const rule = rulesByName()['dda-portal-build-dispatcher-tick'];
+    expect(rule.Properties.ScheduleExpression).toBe('rate(1 minute)');
   });
 });
 

@@ -245,7 +245,9 @@ class TestConfigReadWiring:
     def test_read_returns_every_dispatch_launch_parameter_by_default(self):
         # Nothing stored: the read is wired to the documented defaults
         # for every dispatch/launch parameter (Req 9.1 read + Req 9.2
-        # defaults: m6g.4xlarge / m6i.4xlarge / 100 GB / us-east-1 / 4 h).
+        # defaults: m6g.4xlarge / m6i.4xlarge / 200 GB / us-east-1 / 4 h;
+        # the volume default was raised 100 -> 200 by the
+        # build-fleet-execution-failures storage amendment, Req 2.20).
         config = _get_config()
 
         for parameter in _DISPATCH_LAUNCH_PARAMETERS:
@@ -253,7 +255,7 @@ class TestConfigReadWiring:
                 f"the config read must supply {parameter}"
         assert config["arm64_instance_type"] == "m6g.4xlarge"
         assert config["x86_64_instance_type"] == "m6i.4xlarge"
-        assert config["volume_size_gb"] == 100
+        assert config["volume_size_gb"] == 200
         assert config["region"] == "us-east-1"
         assert config["max_runtime_hours"] == 4
         # The full documented parameter table is returned.
@@ -361,12 +363,13 @@ class TestConfigChangeAudit:
         patches.denied_audit.assert_not_called()
 
     def test_supplied_but_unchanged_parameter_records_no_entry(self):
-        # volume_size_gb 100 equals the documented default: supplying it
-        # changes no effective value, so no change is audited (Req 9.4
-        # audits changes, not writes).
+        # volume_size_gb 200 equals the documented default (raised from
+        # 100 by the storage amendment, Req 2.20): supplying it changes
+        # no effective value, so no change is audited (Req 9.4 audits
+        # changes, not writes).
         with _as_admin() as patches:
             response = build_config.handler(
-                _event("PUT", body={"volume_size_gb": 100}), None)
+                _event("PUT", body={"volume_size_gb": 200}), None)
 
         assert response["statusCode"] == 200, response["body"]
         assert json.loads(response["body"])["changes"] == []

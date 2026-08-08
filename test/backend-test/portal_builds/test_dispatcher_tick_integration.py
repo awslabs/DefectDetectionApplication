@@ -34,8 +34,19 @@ End-to-end ``run_tick`` executions over moto-mocked DynamoDB / EC2 / SSM:
   (Req 7.5, 7.6).
 - Ephemeral provisioning: exactly one RunInstances per dispatched job,
   instance type / volume from the job's OWN ``config_snapshot``
-  (Req 3.1, 9.3), agent SendCommand once the runner is SSM-managed, and
-  runner termination once the job is terminal.
+  (Req 3.1, 9.3), agent SendCommand once the runner is SSM-managed AND
+  its Bootstrap_Marker has been observed (Req 6.1, 6.2, 6.4), the agent
+  invoked from the repository directory the provisioning pass recorded
+  (Req 5.1, 5.4) with the Source_Sync preamble and ``SOURCE_REF`` when a
+  ref is selected (Req 4.1, 4.2), and runner termination once the job is
+  terminal.
+- Dedicated readiness sequence (build-source-selection task 6):
+  allocation lock -> clean pgrep verification -> bootstrap readiness
+  policy -> agent command against the directory the Build_Server record
+  carries. Inside its bootstrap budget from launch a server with no
+  marker defers the job; past that budget (and for every server that
+  records no launch time) no probe is issued and an advisory note is
+  recorded instead (Req 5.3, 6.2, 6.4, 7.1).
 - Provisioning failure (Req 3.7): the job is marked failed with the
   provisioning cause, partially provisioned compute is terminated, and
   the failure is audited.
@@ -181,6 +192,8 @@ os.environ["BUILD_X86_64_AMI_ID"] = _AMI_ID
 
 import build_domain  # noqa: E402
 import build_planner  # noqa: E402
+import build_reconciliation  # noqa: E402
+import build_source  # noqa: E402
 import build_dispatcher  # noqa: E402
 
 
@@ -223,7 +236,7 @@ def _instance_state(instance_id):
 
 
 def _seed_server(server_id, name="server-1", running_build_job_id=None,
-                 lifecycle_state="running"):
+                 lifecycle_state="running", **extra):
     instance_id = _launch_instance()
     item = {
         "server_id": server_id,
@@ -234,6 +247,7 @@ def _seed_server(server_id, name="server-1", running_build_job_id=None,
     }
     if running_build_job_id is not None:
         item["running_build_job_id"] = running_build_job_id
+    item.update(extra)
     _SERVERS.put_item(Item=item)
     return instance_id
 
@@ -279,6 +293,43 @@ def _setup():
 
 _CLEAN_PGREP = ""  # no build process found (Req 7.5 clean verification)
 _BUSY_PGREP = "12345 /bin/sh -c gdk component build\n"
+
+# Bootstrap_Marker probe outputs (Req 6.2). Built from the build_planner
+# constants, the single definition of the probe keys and the log path, so
+# the fixture can never drift from the probe the dispatcher actually sends.
+_MARKER_ABSENT = (
+    f"{build_planner.BOOTSTRAP_DONE_PROBE_KEY}=0\n"
+    f"{build_planner.BOOTSTRAP_LOG_PROBE_KEY}="
+    f"{build_planner.BOOTSTRAP_LOG_PATH}\n"
+)
+_MARKER_OBSERVED = (
+    f"{build_planner.BOOTSTRAP_DONE_PROBE_KEY}=1\n"
+    f"{build_planner.BOOTSTRAP_LOG_PROBE_KEY}="
+    f"{build_planner.BOOTSTRAP_LOG_PATH}\n"
+)
+
+
+def _shell_sync_router(marker_output, pgrep_output=_CLEAN_PGREP):
+    """``run_shell_sync`` side effect routing on the command list.
+
+    The dispatcher runs the pgrep verification and the Bootstrap_Marker
+    probe through the same helper, so a tick that exercises both needs the
+    stub to answer per command set rather than per call order. Routing on
+    ``build_dispatcher.BOOTSTRAP_PROBE_COMMANDS`` also asserts, implicitly,
+    that the readiness probe is issued with exactly those commands.
+    """
+    def _run(instance_id, commands, **kwargs):
+        if commands == build_dispatcher.BOOTSTRAP_PROBE_COMMANDS:
+            return marker_output
+        return pgrep_output
+    return _run
+
+
+def _agent_command_text(command_id):
+    """The single AWS-RunShellScript command text of an SSM command."""
+    commands = _SSM.list_commands(CommandId=command_id)["Commands"]
+    assert len(commands) == 1
+    return commands[0]["Parameters"]["commands"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +483,142 @@ class TestPredispatchVerification:
 
 
 # ---------------------------------------------------------------------------
+# Dedicated end-to-end sequence with the bootstrap readiness policy
+# (Req 5.1, 5.2, 5.3, 6.2, 6.4, 7.5)
+# ---------------------------------------------------------------------------
+
+class TestDedicatedReadinessSequence:
+
+    def setup_method(self):
+        _setup()
+
+    def test_allocation_pgrep_readiness_then_agent_on_recorded_dir(self):
+        """The dedicated sequence end to end: allocation lock -> clean
+        pgrep verification -> bootstrap readiness policy -> agent command
+        against the repository directory the SERVER RECORD carries.
+
+        A server still inside its bootstrap budget from launch with no
+        Bootstrap_Marker observed is DEFERRED, never failed (the dedicated
+        policy is advisory, Req 5.3, 7.1); once the marker is observed the
+        job starts and the readiness evidence is recorded on the job
+        (Req 6.4). The agent path is rooted in the server's recorded
+        directory, so it cannot drift from that server's bootstrap clone
+        (Req 5.1, 5.2, 5.4)."""
+        recorded_repo_dir = "/opt/dda-build/DefectDetectionApplication"
+        assert recorded_repo_dir != build_source.DEFAULT_REPO_DIR, \
+            "the fixture must differ from the default to be meaningful"
+        instance_id = _seed_server(
+            "srv-r", name="arm-server-ready", repo_dir=recorded_repo_dir,
+            # Launched a minute ago: inside the bootstrap budget, which is
+            # the only window where the marker is required.
+            created_at=NOW - _MINUTE_MS)
+        _seed_job("job-r", build_domain.STATUS_QUEUED,
+                  build_domain.EXECUTION_MODE_DEDICATED, server_id="srv-r",
+                  created_at=NOW - 2 * _MINUTE_MS,
+                  config_snapshot={"max_runtime_hours": 4})
+
+        # Tick 1: allocation taken, pgrep clean, marker NOT observed ->
+        # the job is deferred at the head of its queue, still queued, and
+        # the allocation is retained. No agent command is sent.
+        with mock.patch.object(
+                build_dispatcher, "run_shell_sync",
+                side_effect=_shell_sync_router(_MARKER_ABSENT)) as shell:
+            build_dispatcher.run_tick(now=NOW)
+
+        assert _get_server("srv-r")["running_build_job_id"] == "job-r"
+        # Both the pgrep verification and the marker probe ran, in that
+        # order, against the server's instance (Req 6.2, 7.5).
+        assert [call.args for call in shell.call_args_list] == [
+            (instance_id, build_dispatcher.VERIFY_BUILD_PROCESS_COMMANDS),
+            (instance_id, build_dispatcher.BOOTSTRAP_PROBE_COMMANDS),
+        ]
+        job = _get_job("job-r")
+        assert job["status"] == build_domain.STATUS_QUEUED
+        assert job["deferred_at"] == NOW
+        assert "ssm" not in job
+        assert "bootstrap" not in job
+
+        # Tick 2, past the re-verification interval: marker observed ->
+        # queued -> building, readiness evidence recorded, agent started.
+        later = NOW + build_planner.PREDISPATCH_RETRY_INTERVAL_MS
+        with mock.patch.object(
+                build_dispatcher, "run_shell_sync",
+                side_effect=_shell_sync_router(_MARKER_OBSERVED)):
+            build_dispatcher.run_tick(now=later)
+
+        job = _get_job("job-r")
+        assert job["status"] == build_domain.STATUS_BUILDING
+        assert job["dispatched_at"] == later
+        assert job["started_at"] == later
+        assert job["created_at"] == NOW - 2 * _MINUTE_MS, \
+            "a deferral must retain the ORIGINAL submission time"
+        assert job["bootstrap"]["marker_at"] == later
+        assert job["bootstrap"]["log_path"] == \
+            build_planner.BOOTSTRAP_LOG_PATH
+
+        command_id = job["ssm"]["command_id"]
+        assert job["log"]["group"] == build_dispatcher.BUILD_LOG_GROUP
+        assert job["log"]["stream"] == \
+            f"{command_id}/{instance_id}/aws-runShellScript/stdout"
+        agent_text = _agent_command_text(command_id)
+        # The agent runs from the directory THIS server recorded, not the
+        # module default (Req 5.1, 5.2, 5.4).
+        assert build_source.agent_script_path(recorded_repo_dir) in agent_text
+        assert build_source.DEFAULT_REPO_DIR not in agent_text
+        assert "BUILD_JOB_ID=job-r" in agent_text
+        assert f"BUILD_TARGET={build_domain.TARGET_JP5}" in agent_text
+        assert agent_text == build_dispatcher.agent_command(
+            job, recorded_repo_dir)
+        # DEDICATED dispatch runs the build as ubuntu (the servers are
+        # groomed for the ubuntu user): the root-context ownership heal
+        # precedes the sudo build-user execution, and the wrapped body's
+        # exit status is propagated as the SSM command status.
+        assert build_dispatcher.repo_ownership_heal_command(
+            recorded_repo_dir) in agent_text
+        assert (f"sudo -H -u {build_dispatcher.BUILD_USER} bash"
+                in agent_text)
+        assert build_dispatcher.agent_run_body(
+            job, recorded_repo_dir) in agent_text
+        assert agent_text.splitlines()[-1] == \
+            f'exit "${build_dispatcher.RUN_STATUS_VAR}"'
+        assert _get_server("srv-r")["running_build_job_id"] == "job-r"
+
+    def test_server_past_bootstrap_budget_needs_no_marker(self):
+        """A Dedicated_Build_Server past its bootstrap budget from launch
+        (and every server that records no launch time, i.e. every server
+        registered before this change) requires NO marker: the dispatch
+        proceeds with an advisory note and no probe round trip at all
+        (Req 5.3, 7.1)."""
+        instance_id = _seed_server(
+            "srv-old", name="arm-server-old",
+            created_at=NOW - 2 * build_planner.DEFAULT_BOOTSTRAP_TIMEOUT_MINUTES
+            * _MINUTE_MS)
+        _seed_job("job-old", build_domain.STATUS_QUEUED,
+                  build_domain.EXECUTION_MODE_DEDICATED, server_id="srv-old",
+                  created_at=NOW - _MINUTE_MS)
+
+        with mock.patch.object(
+                build_dispatcher, "run_shell_sync",
+                side_effect=_shell_sync_router(_MARKER_ABSENT)) as shell:
+            build_dispatcher.run_tick(now=NOW)
+
+        # Only the pgrep verification ran: no marker probe is issued
+        # outside the bootstrap window.
+        assert [call.args for call in shell.call_args_list] == [
+            (instance_id, build_dispatcher.VERIFY_BUILD_PROCESS_COMMANDS),
+        ]
+        job = _get_job("job-old")
+        assert job["status"] == build_domain.STATUS_BUILDING
+        assert job["bootstrap"]["marker_observed"] is False
+        assert job["bootstrap"]["advisory"]
+        # With no recorded directory the resolution is the authoritative
+        # default every pre-existing server already uses (Req 5.3).
+        agent_text = _agent_command_text(job["ssm"]["command_id"])
+        assert build_source.agent_script_path(
+            build_source.DEFAULT_REPO_DIR) in agent_text
+
+
+# ---------------------------------------------------------------------------
 # Ephemeral provisioning, agent start, and runner termination (Req 3.1)
 # ---------------------------------------------------------------------------
 
@@ -442,9 +629,12 @@ class TestEphemeralProvisionAndTerminate:
 
     def test_provision_from_snapshot_start_agent_then_terminate(self):
         """Tick 1 provisions exactly one runner sized from the job's own
-        config_snapshot (Req 3.1, 9.3); tick 2 starts the agent once the
-        runner is SSM-managed; a tick after the job is terminal
-        terminates the runner."""
+        config_snapshot (Req 3.1, 9.3); tick 2 finds the runner
+        SSM-managed but its bootstrap not yet signalled, so NO agent
+        command is sent (Req 6.1, 6.2); tick 3 observes the
+        Bootstrap_Marker and starts the agent against the repository
+        directory the runner's own provisioning recorded (Req 5.1, 5.4,
+        6.4); a tick after the job is terminal terminates the runner."""
         _seed_job("job-eph", build_domain.STATUS_QUEUED,
                   build_domain.EXECUTION_MODE_EPHEMERAL,
                   build_target=build_domain.TARGET_JP5,
@@ -463,6 +653,11 @@ class TestEphemeralProvisionAndTerminate:
         runner_instance_id = job["runner"]["instance_id"]
         assert job["runner"]["instance_type"] == "m6g.2xlarge"
         assert job["runner"]["arch"] == build_domain.ARCH_ARM64
+        # The provisioning pass records the directory its bootstrap uses,
+        # so the agent path can never drift from it (Req 5.1, 5.4).
+        recorded_repo_dir = job["runner"]["repo_dir"]
+        assert recorded_repo_dir == build_dispatcher.BUILD_REPO_DIR
+        assert recorded_repo_dir == build_source.DEFAULT_REPO_DIR
 
         instances = _runner_instances_for_job("job-eph")
         assert len(instances) == 1, \
@@ -475,24 +670,58 @@ class TestEphemeralProvisionAndTerminate:
         assert tags[build_dispatcher.TAG_EPHEMERAL] == "true"
         assert tags[build_dispatcher.TAG_JOB_ID] == "job-eph"
 
-        # Tick 2: the runner pings SSM Online -> agent SendCommand.
+        # Tick 2: the runner pings SSM Online, but its bootstrap has NOT
+        # signalled completion yet -> the gate stays shut (Req 6.1, 6.2).
+        # SSM Online is reached long before cloud-init finishes, which is
+        # exactly the live race this gate closes.
         with mock.patch.object(build_dispatcher, "instance_ssm_online",
-                               return_value=True):
+                               return_value=True), \
+                mock.patch.object(
+                    build_dispatcher, "run_shell_sync",
+                    side_effect=_shell_sync_router(_MARKER_ABSENT)) as probe:
             build_dispatcher.run_tick(now=NOW + _MINUTE_MS)
 
+        probe.assert_called_once_with(
+            runner_instance_id, build_dispatcher.BOOTSTRAP_PROBE_COMMANDS)
         job = _get_job("job-eph")
+        assert job["status"] == build_domain.STATUS_PROVISIONING
+        assert "ssm" not in job, \
+            "no agent command may precede an observed Bootstrap_Marker"
+        assert "bootstrap" not in job
+
+        # Tick 3: the Bootstrap_Marker is observed -> readiness evidence is
+        # recorded and the agent SendCommand goes out (Req 6.2, 6.4).
+        with mock.patch.object(build_dispatcher, "instance_ssm_online",
+                               return_value=True), \
+                mock.patch.object(
+                    build_dispatcher, "run_shell_sync",
+                    side_effect=_shell_sync_router(_MARKER_OBSERVED)):
+            build_dispatcher.run_tick(now=NOW + 2 * _MINUTE_MS)
+
+        job = _get_job("job-eph")
+        assert job["bootstrap"]["marker_at"] == NOW + 2 * _MINUTE_MS
+        assert job["bootstrap"]["log_path"] == \
+            build_planner.BOOTSTRAP_LOG_PATH
         command_id = job["ssm"]["command_id"]
         assert job["log"]["stream"] == \
             f"{command_id}/{runner_instance_id}/aws-runShellScript/stdout"
-        commands = _SSM.list_commands(CommandId=command_id)["Commands"]
-        assert "BUILD_JOB_ID=job-eph" in \
-            commands[0]["Parameters"]["commands"][0]
+        agent_text = _agent_command_text(command_id)
+        assert "BUILD_JOB_ID=job-eph" in agent_text
+        # The agent is invoked from the directory the runner's own
+        # provisioning recorded, not an independent literal (Req 5.1, 5.4).
+        assert build_source.agent_script_path(recorded_repo_dir) in agent_text
+        # No ref selected -> no Source_Sync preamble; only the additive
+        # environment exports (region + PATH) precede the invocation
+        # (Req 7.1).
+        assert agent_text == build_dispatcher.agent_command(
+            job, recorded_repo_dir)
+        assert "SOURCE_REF=" not in agent_text
 
-        # Tick 3: agent already dispatched -> no second SendCommand.
+        # Tick 4: agent already dispatched -> no second SendCommand.
         with mock.patch.object(build_dispatcher, "instance_ssm_online",
                                return_value=True), \
                 mock.patch.object(build_dispatcher, "send_agent") as send:
-            build_dispatcher.run_tick(now=NOW + 2 * _MINUTE_MS)
+            build_dispatcher.run_tick(now=NOW + 3 * _MINUTE_MS)
         send.assert_not_called()
 
         # The job reaches a terminal status (event consumer's job) ->
@@ -504,12 +733,99 @@ class TestEphemeralProvisionAndTerminate:
             ExpressionAttributeValues={
                 ":s": build_domain.STATUS_SUCCEEDED},
         )
-        build_dispatcher.run_tick(now=NOW + 3 * _MINUTE_MS)
+        build_dispatcher.run_tick(now=NOW + 4 * _MINUTE_MS)
 
         job = _get_job("job-eph")
-        assert job["runner"]["terminated_at"] == NOW + 3 * _MINUTE_MS
+        assert job["runner"]["terminated_at"] == NOW + 4 * _MINUTE_MS
         assert _instance_state(runner_instance_id) in \
             ("shutting-down", "terminated")
+
+    def test_ephemeral_agent_command_carries_selected_repository_and_ref(self):
+        """The ephemeral end-to-end sequence for a job WITH a selected
+        source: queued -> provisioning -> Bootstrap_Marker observed ->
+        agent SendCommand carrying the resolved repository directory, the
+        Source_Sync preamble for the selected repository, and SOURCE_REF
+        (Req 4.1, 4.2, 5.1, 6.2)."""
+        source_ref = "feature/portal-build-fleet-and-workflow-gates"
+        _seed_job("job-ref", build_domain.STATUS_QUEUED,
+                  build_domain.EXECUTION_MODE_EPHEMERAL,
+                  build_target=build_domain.TARGET_JP5,
+                  config_snapshot={
+                      "arm64_instance_type": "m6g.2xlarge",
+                      "volume_size_gb": 120,
+                      "max_runtime_hours": 4,
+                      "source_ref": source_ref,
+                  })
+
+        build_dispatcher.run_tick(now=NOW)
+        job = _get_job("job-ref")
+        assert job["status"] == build_domain.STATUS_PROVISIONING
+        runner_instance_id = job["runner"]["instance_id"]
+        repo_dir = job["runner"]["repo_dir"]
+
+        with mock.patch.object(build_dispatcher, "instance_ssm_online",
+                               return_value=True), \
+                mock.patch.object(
+                    build_dispatcher, "run_shell_sync",
+                    side_effect=_shell_sync_router(_MARKER_OBSERVED)):
+            build_dispatcher.run_tick(now=NOW + _MINUTE_MS)
+
+        job = _get_job("job-ref")
+        agent_text = _agent_command_text(job["ssm"]["command_id"])
+
+        # EPHEMERAL dispatch uses the same run-as-ubuntu model as the
+        # dedicated fleet (ONE environment model): the root-context
+        # ownership heal precedes the sudo build-user execution of the
+        # exports + sync preamble + agent invocation body, and the
+        # wrapped body's exit status is propagated as the SSM command
+        # status.
+        body = build_dispatcher.agent_run_body(job, repo_dir)
+        assert body in agent_text
+        assert build_dispatcher.repo_ownership_heal_command(
+            repo_dir) in agent_text
+        assert (f"sudo -H -u {build_dispatcher.BUILD_USER} bash"
+                in agent_text)
+        assert agent_text.index(
+            build_dispatcher.repo_ownership_heal_command(repo_dir)) < \
+            agent_text.index(body)
+        assert agent_text.splitlines()[-1] == \
+            f'exit "${build_dispatcher.RUN_STATUS_VAR}"'
+        lines = body.split("\n")
+
+        # The agent invocation is the LAST line, rooted in the resolved
+        # repository directory and carrying the selected ref (Req 5.1,
+        # 5.4).
+        assert build_source.agent_script_path(repo_dir) in lines[-1]
+        assert "BUILD_JOB_ID=job-ref" in lines[-1]
+        assert f"SOURCE_REF={source_ref}" in lines[-1]
+
+        # Everything before it is exactly the additive environment exports
+        # (HOME: the SSM shell runs as root with HOME unset; region: a
+        # fresh runner has no region of its own and AWS CLI v1 does not
+        # infer one from instance metadata; PATH: pip3 --user installs
+        # land in $HOME/.local/bin, which a non-login shell omits)
+        # followed by the Source_Sync command text from its single
+        # generator, so the runner obtains the selected source BEFORE the
+        # agent runs (Req 4.1, 4.2, 4.3).
+        preamble = lines[:-1]
+        assert preamble, "a selected ref must produce a sync preamble"
+        assert preamble == (
+            build_dispatcher.runner_env_export_commands(job)
+            + build_dispatcher.agent_preamble_commands(job, repo_dir)
+            # The additive dispatch preflight guard (task 7.1) runs
+            # AFTER the sync and BEFORE the agent, targeting the SAME
+            # resolved repository directory (no drift).
+            + build_dispatcher.preflight_guard_commands(repo_dir))
+        checkout_index = next(
+            index for index, line in enumerate(lines)
+            if "git checkout --force" in line)
+        assert checkout_index < len(lines) - 1, \
+            "the source sync must precede the agent invocation"
+        assert f"{build_source.VAR_SOURCE_REF}={source_ref}" in agent_text
+
+        assert agent_text == build_dispatcher.agent_command(job, repo_dir)
+        assert job["log"]["stream"].endswith(
+            f"/{runner_instance_id}/aws-runShellScript/stdout")
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +895,10 @@ class TestRuntimeTimeoutWatchdog:
         """A building job past its config_snapshot max runtime gets the
         SSM stop commands, is failed with a timeout error, keeps its logs
         reference, and its dedicated server allocation is released
-        (Req 3.8)."""
+        (Req 3.8) — under the task 6.2 verified-cleanup contract: the
+        terminal write records cleanup PENDING plus the complete timing
+        diagnostic, the stop is sent idempotently, and the release
+        happens only once pgrep confirms no build process remains."""
         instance_id = _seed_server("srv-t", running_build_job_id="job-slow")
         log = {"group": "/dda/portal-builds", "stream": "cmd/inst/stdout"}
         _seed_job("job-slow", build_domain.STATUS_BUILDING,
@@ -592,13 +911,19 @@ class TestRuntimeTimeoutWatchdog:
                   ssm={"command_id": "cmd-0",
                        "last_serialization_check_at": NOW})
 
+        zero = "GDK_BUILD_COUNT=0\nCUSTOM_BUILD_COUNT=0\n"
         with mock.patch.object(build_dispatcher,
-                               "send_shell_command") as send:
+                               "send_shell_command") as send, \
+                mock.patch.object(build_dispatcher, "run_shell_sync",
+                                  return_value=zero) as confirm:
             build_dispatcher.run_tick(now=NOW)
 
-        # The build processes were stopped on the job's instance.
+        # The build processes were stopped on the job's instance, and
+        # their absence was pgrep-confirmed before the release.
         send.assert_called_once_with(
             instance_id, build_dispatcher.STOP_BUILD_COMMANDS)
+        confirm.assert_called_once_with(
+            instance_id, build_dispatcher.COUNT_BUILD_PROCESS_COMMANDS)
 
         job = _get_job("job-slow")
         assert job["status"] == build_domain.STATUS_FAILED
@@ -607,6 +932,19 @@ class TestRuntimeTimeoutWatchdog:
         assert job["ended_at"]
         # Logs produced up to termination are retained (Req 3.8).
         assert job["log"] == log
+        # The complete safe timing diagnostic was persisted with the
+        # terminal write (task 8.2 dispatcher wiring, Req 2.18).
+        assert job["timing"]["timeout_kind"] == \
+            build_reconciliation.CODE_MAX_RUNTIME_EXCEEDED
+        assert job["timing"]["timeout_decided_at"] == NOW
+        assert job["timeout_evidence"]["timeout_kind"] == \
+            build_reconciliation.CODE_MAX_RUNTIME_EXCEEDED
+        # Verified stop-before-release on the ledger (Req 3.11).
+        effects = job["terminal_effects"]
+        assert effects["compute_cleanup"] == \
+            build_reconciliation.EFFECT_DONE
+        assert effects["allocation_release"] == \
+            build_reconciliation.EFFECT_DONE
 
         # The dedicated server's slot is released for promotion.
         assert "running_build_job_id" not in (_get_server("srv-t") or {})
@@ -615,6 +953,53 @@ class TestRuntimeTimeoutWatchdog:
         assert len(audits) == 1
         assert audits[0]["resource_id"] == "job-slow"
         assert audits[0]["result"] == "failure"
+
+    def test_timeout_release_blocked_until_stop_verified(self):
+        """Verified stop before release (task 6.2, Req 3.11): while the
+        pgrep confirmation cannot positively complete, the terminal job
+        keeps its allocation and no follower can take the slot; the next
+        tick re-sends the stop idempotently, confirms, and only then
+        releases — with exactly ONE logical audit across the retries."""
+        instance_id = _seed_server("srv-t", running_build_job_id="job-slow")
+        _seed_job("job-slow", build_domain.STATUS_BUILDING,
+                  build_domain.EXECUTION_MODE_DEDICATED, server_id="srv-t",
+                  started_at=NOW - 2 * _HOUR_MS,
+                  config_snapshot={"max_runtime_hours": 1},
+                  ssm={"command_id": "cmd-0",
+                       "last_serialization_check_at": NOW})
+
+        # Tick 1: process state UNKNOWN -> failed, stop sent, slot HELD.
+        with mock.patch.object(build_dispatcher,
+                               "send_shell_command") as send, \
+                mock.patch.object(build_dispatcher, "run_shell_sync",
+                                  return_value=None):
+            build_dispatcher.run_tick(now=NOW)
+        send.assert_called_once_with(
+            instance_id, build_dispatcher.STOP_BUILD_COMMANDS)
+        job = _get_job("job-slow")
+        assert job["status"] == build_domain.STATUS_FAILED
+        assert job["terminal_effects"]["compute_cleanup"] == \
+            build_reconciliation.EFFECT_PENDING
+        assert _get_server("srv-t")["running_build_job_id"] == "job-slow"
+
+        # Tick 2: cleanup re-driven, pgrep-confirmed absent -> released.
+        zero = "GDK_BUILD_COUNT=0\nCUSTOM_BUILD_COUNT=0\n"
+        with mock.patch.object(build_dispatcher,
+                               "send_shell_command") as send2, \
+                mock.patch.object(build_dispatcher, "run_shell_sync",
+                                  return_value=zero):
+            build_dispatcher.run_tick(now=NOW + _MINUTE_MS)
+        # The stop was re-sent idempotently before the confirmation.
+        send2.assert_called_once_with(
+            instance_id, build_dispatcher.STOP_BUILD_COMMANDS)
+        job = _get_job("job-slow")
+        assert job["terminal_effects"]["compute_cleanup"] == \
+            build_reconciliation.EFFECT_DONE
+        assert job["terminal_effects"]["allocation_release"] == \
+            build_reconciliation.EFFECT_DONE
+        assert "running_build_job_id" not in (_get_server("srv-t") or {})
+        # ONE logical audit despite the retried effects (Req 2.7).
+        assert len(_audits("build_timeout")) == 1
 
     def test_job_within_runtime_limit_is_untouched(self):
         """A running job inside its max runtime is not failed."""
@@ -654,15 +1039,23 @@ class TestSerializationWatchdog:
                   config_snapshot={"max_runtime_hours": 4})
 
         count_output = "GDK_BUILD_COUNT=2\nCUSTOM_BUILD_COUNT=2\n"
+        zero_output = "GDK_BUILD_COUNT=0\nCUSTOM_BUILD_COUNT=0\n"
         with mock.patch.object(build_dispatcher, "run_shell_sync",
-                               return_value=count_output) as count, \
+                               side_effect=[count_output,
+                                            zero_output]) as count, \
                 mock.patch.object(build_dispatcher,
                                   "send_shell_command") as send:
             build_dispatcher.run_tick(now=NOW)
 
-        # The pgrep count ran against the server's instance.
-        count.assert_called_once_with(
-            instance_id, build_dispatcher.COUNT_BUILD_PROCESS_COMMANDS)
+        # The pgrep count ran against the server's instance; after the
+        # stop, the cleanup was pgrep-CONFIRMED before the release
+        # (task 6.2 verified stop-before-release, Req 3.11).
+        assert count.call_args_list == [
+            mock.call(instance_id,
+                      build_dispatcher.COUNT_BUILD_PROCESS_COMMANDS),
+            mock.call(instance_id,
+                      build_dispatcher.COUNT_BUILD_PROCESS_COMMANDS),
+        ]
         # Every build process is stopped within the 60 s window.
         send.assert_called_once_with(
             instance_id, build_dispatcher.STOP_BUILD_COMMANDS,
@@ -674,6 +1067,8 @@ class TestSerializationWatchdog:
         assert job["error"]["code"] == \
             build_planner.SERIALIZATION_VIOLATION_ERROR
         assert job["ssm"]["last_serialization_check_at"] == NOW
+        assert job["terminal_effects"]["compute_cleanup"] == \
+            build_reconciliation.EFFECT_DONE
         assert "running_build_job_id" not in (_get_server("srv-s") or {})
 
         audits = _audits("build_serialization_violation")
@@ -705,3 +1100,322 @@ class TestSerializationWatchdog:
         assert job["status"] == build_domain.STATUS_BUILDING
         assert job["ssm"]["last_serialization_check_at"] == NOW
         assert _get_server("srv-s")["running_build_job_id"] == "job-h"
+
+
+# ---------------------------------------------------------------------------
+# ADDITIVE integrated mocked reconciliation flows
+# (build-fleet-execution-failures task 10.8).
+#
+# **Validates: Requirements 2.5, 2.6, 2.7, 2.11, 3.2, 3.4**
+#
+# These flows exercise the scheduled command reconciliation step of the
+# SAME ``run_tick`` used above, end to end over moto DynamoDB/EC2, with
+# only ``retrieve_invocation`` scripted per command id (moto's SSM mock
+# does not emulate GetCommandInvocation output for AWS-RunShellScript;
+# the file-header stubbing rationale applies unchanged):
+#
+# - dedicated reconciliation of a SUPPRESSED EventBridge event: the tick
+#   retrieves the final Failed invocation, settles the deterministic
+#   outcome with full diagnostics, releases the server slot, and the
+#   next tick promotes the OLDEST eligible follower (Req 2.5, 2.7, 3.2,
+#   3.4);
+# - ephemeral reconciliation: the same settlement plus the runner's
+#   verified idempotent termination completing the ledger's
+#   compute-cleanup effect (Req 2.7, 3.2);
+# - transient InvocationDoesNotExist: bounded retry within the lookup
+#   window, never a fabricated failure, then full-evidence settlement
+#   once the invocation becomes visible (Req 2.5);
+# - `Success` settlement: nonterminal inside the callback window,
+#   AGENT_RESULT_MISSING only after it; a valid callback recorded inside
+#   the window keeps authority (Req 2.4/2.5, 2.6).
+#
+# Stop-before-release is already covered additively above
+# (TestRuntimeTimeoutWatchdog.test_timeout_release_blocked_until_stop_verified,
+# task 6.2). Existing expectations in this file are unchanged.
+# ---------------------------------------------------------------------------
+
+import uuid  # noqa: E402  (additive section import)
+
+
+def _terminal_invocation(command_id, instance_id, status="Failed",
+                         response_code=127, stdout="", stderr=""):
+    """A final GetCommandInvocation shape for the scripted lookup."""
+    return {
+        "CommandId": command_id,
+        "InstanceId": instance_id,
+        "Status": status,
+        "StatusDetails": status,
+        "ResponseCode": response_code,
+        "StandardOutputContent": stdout,
+        "StandardErrorContent": stderr,
+    }
+
+
+def _scripted_invocations(script):
+    """``retrieve_invocation`` side effect keyed by command id, so a
+    command dispatched DURING the tick (e.g. a promoted follower's brand
+    new SendCommand) is never fed another job's terminal evidence."""
+    def _lookup(command_id, instance_id):
+        return script.get(command_id)
+    return _lookup
+
+
+def _reconcile_tick(now, script=None, pgrep=None):
+    """One full ``run_tick`` with the scripted invocation lookup and the
+    synchronous-SSM stub (same seams the rest of this file uses)."""
+    with mock.patch.object(
+            build_dispatcher, "retrieve_invocation",
+            side_effect=_scripted_invocations(script or {})), \
+            mock.patch.object(build_dispatcher, "run_shell_sync",
+                              return_value=pgrep):
+        build_dispatcher.run_tick(now=now)
+
+
+def _seed_command_job(job_id, command_id, instance_id, execution_mode,
+                      server_id=None, **extra):
+    """A building job carrying its correlated attempt/command identity
+    (the state a real dispatch leaves behind)."""
+    attempt_id = str(uuid.uuid4())
+    item = {
+        "build_job_id": job_id,
+        "build_target": build_domain.TARGET_JP5,
+        "execution_mode": execution_mode,
+        "status": build_domain.STATUS_BUILDING,
+        "requested_by": "operator-1",
+        "created_at": NOW - 10 * _MINUTE_MS,
+        "started_at": NOW - 9 * _MINUTE_MS,
+        "config_snapshot": {"max_runtime_hours": 4},
+        # Serialization check recently done: only reconciliation acts.
+        "ssm": {"command_id": command_id, "instance_id": instance_id,
+                "last_serialization_check_at": NOW},
+        "execution_attempt": {
+            "attempt_id": attempt_id,
+            "command_id": command_id,
+            "instance_id": instance_id,
+        },
+    }
+    if server_id is not None:
+        item["server_id"] = server_id
+    item.update(extra)
+    _JOBS.put_item(Item=item)
+    return item
+
+
+class TestScheduledCommandReconciliation:
+
+    def setup_method(self):
+        _setup()
+
+    def test_dedicated_suppressed_event_settles_and_promotes_oldest(self):
+        """A dedicated job whose command failed with NO EventBridge
+        event delivered: the tick retrieves the final invocation,
+        settles COMMAND_EXECUTION_FAILED with the full diagnostic,
+        releases the server slot the same tick, and the NEXT tick
+        promotes exactly the OLDEST eligible follower (Req 2.5, 2.7,
+        3.2, 3.4)."""
+        instance_id = _seed_server("srv-rec", running_build_job_id="job-lead")
+        command_id = "cmd-lead-1"
+        _seed_command_job("job-lead", command_id, instance_id,
+                          build_domain.EXECUTION_MODE_DEDICATED,
+                          server_id="srv-rec")
+        _seed_job("job-follow-old", build_domain.STATUS_QUEUED,
+                  build_domain.EXECUTION_MODE_DEDICATED,
+                  server_id="srv-rec", created_at=NOW - 5 * _MINUTE_MS)
+        _seed_job("job-follow-young", build_domain.STATUS_QUEUED,
+                  build_domain.EXECUTION_MODE_DEDICATED,
+                  server_id="srv-rec", created_at=NOW - _MINUTE_MS)
+
+        script = {command_id: _terminal_invocation(
+            command_id, instance_id, stderr="agent exited 127")}
+
+        # Tick 1: the suppressed event costs only latency — the
+        # scheduled reconciliation settles the same outcome.
+        _reconcile_tick(NOW, script=script)
+
+        job = _get_job("job-lead")
+        assert job["status"] == build_domain.STATUS_FAILED
+        assert job["error"]["code"] == \
+            build_reconciliation.CODE_COMMAND_EXECUTION_FAILED
+        assert job["ended_at"]
+        diag = job["execution_diagnostic"]
+        assert diag["response_code"] == 127
+        assert diag["source"] == ["scheduled_reconciliation"]
+        assert diag["stderr"]["available"] is True
+        # The slot was released the SAME tick (release_and_promote).
+        assert "running_build_job_id" not in (_get_server("srv-rec") or {})
+        # Followers were still queued at this tick's dispatch pass.
+        assert _get_job("job-follow-old")["status"] == \
+            build_domain.STATUS_QUEUED
+        assert _get_job("job-follow-young")["status"] == \
+            build_domain.STATUS_QUEUED
+
+        # Tick 2: the scheduled dispatch pass IS the promotion path —
+        # exactly the oldest eligible follower takes the slot.
+        _reconcile_tick(NOW + _MINUTE_MS, script=script,
+                        pgrep=_CLEAN_PGREP)
+
+        promoted = _get_job("job-follow-old")
+        assert promoted["status"] == build_domain.STATUS_BUILDING
+        assert promoted["ssm"]["command_id"]
+        assert promoted["created_at"] == NOW - 5 * _MINUTE_MS, \
+            "promotion must preserve the ORIGINAL submission time"
+        assert _get_job("job-follow-young")["status"] == \
+            build_domain.STATUS_QUEUED
+        assert _get_server("srv-rec")["running_build_job_id"] == \
+            "job-follow-old"
+        # ONE logical failure audit for the settled job across both
+        # ticks (Req 2.7).
+        assert len(_audits("build_failed")) == 1
+        assert _audits("build_failed")[0]["resource_id"] == "job-lead"
+
+    def test_ephemeral_suppressed_event_settles_then_terminates_runner(self):
+        """An ephemeral job with a terminal Failed command and no event:
+        the tick settles the outcome (compute cleanup PENDING on the
+        ledger), and the following tick's termination watchdog completes
+        the idempotent runner termination as the cleanup effect
+        (Req 2.5, 2.7, 3.2)."""
+        runner_instance = _launch_instance()
+        command_id = "cmd-eph-rec-1"
+        _seed_command_job("job-eph-rec", command_id, runner_instance,
+                          build_domain.EXECUTION_MODE_EPHEMERAL,
+                          runner={"instance_id": runner_instance})
+
+        script = {command_id: _terminal_invocation(
+            command_id, runner_instance, stderr="build step failed")}
+
+        _reconcile_tick(NOW, script=script)
+
+        job = _get_job("job-eph-rec")
+        assert job["status"] == build_domain.STATUS_FAILED
+        assert job["error"]["code"] == \
+            build_reconciliation.CODE_COMMAND_EXECUTION_FAILED
+        assert job["execution_diagnostic"]["source"] == \
+            ["scheduled_reconciliation"]
+        # Ephemeral cleanup is a retryable pending effect at settlement.
+        assert job["terminal_effects"]["compute_cleanup"] == \
+            build_reconciliation.EFFECT_PENDING
+        assert "terminated_at" not in (job.get("runner") or {})
+
+        # Next tick: verified idempotent termination completes cleanup.
+        _reconcile_tick(NOW + _MINUTE_MS, script=script)
+
+        job = _get_job("job-eph-rec")
+        assert job["runner"]["terminated_at"] == NOW + _MINUTE_MS
+        assert job["terminal_effects"]["compute_cleanup"] == \
+            build_reconciliation.EFFECT_DONE
+        assert _instance_state(runner_instance) in \
+            ("shutting-down", "terminated")
+        assert len(_audits("build_failed")) == 1
+
+    def test_transient_invocation_does_not_exist_retries_then_settles(self):
+        """A terminal observation whose GetCommandInvocation is
+        transiently unavailable (InvocationDoesNotExist / eventual
+        consistency): the bounded lookup retries on the tick without
+        fabricating a failure, then settles with the FULL evidence once
+        the invocation becomes visible inside the window (Req 2.5)."""
+        instance_id = _seed_server("srv-tr", running_build_job_id="job-tr")
+        command_id = "cmd-tr-1"
+        _seed_command_job(
+            "job-tr", command_id, instance_id,
+            build_domain.EXECUTION_MODE_DEDICATED, server_id="srv-tr",
+            # The event path observed 'Failed' but could not retrieve
+            # the invocation yet — the recorded reconciliation state.
+            reconciliation={
+                "command_id": command_id,
+                "command_status": "Failed",
+                "first_observed_at": NOW - _MINUTE_MS,
+                "lookup_state": build_reconciliation.LOOKUP_PENDING,
+                "updated_at": NOW - _MINUTE_MS,
+            })
+
+        # Tick 1: still InvocationDoesNotExist -> bounded retry, the job
+        # stays nonterminal, nothing is fabricated (Req 2.2, 2.5).
+        _reconcile_tick(NOW, script={})
+        job = _get_job("job-tr")
+        assert job["status"] == build_domain.STATUS_BUILDING
+        assert "error" not in job
+        assert _get_server("srv-tr")["running_build_job_id"] == "job-tr"
+
+        # Tick 2, inside the lookup window: the invocation is now
+        # visible -> full-evidence settlement.
+        script = {command_id: _terminal_invocation(
+            command_id, instance_id, response_code=1,
+            stderr="gdk component build failed")}
+        _reconcile_tick(NOW + _MINUTE_MS, script=script)
+
+        job = _get_job("job-tr")
+        assert job["status"] == build_domain.STATUS_FAILED
+        assert job["error"]["code"] == \
+            build_reconciliation.CODE_COMMAND_EXECUTION_FAILED
+        assert job["reconciliation"]["lookup_state"] == \
+            build_reconciliation.LOOKUP_RETRIEVED
+        diag = job["execution_diagnostic"]
+        assert diag["response_code"] == 1
+        assert diag["stderr"]["available"] is True
+
+    def test_success_without_callback_settles_only_after_the_window(self):
+        """`Success` with no agent callback: the settlement window keeps
+        the job nonterminal (a valid in-flight result may still arrive);
+        AGENT_RESULT_MISSING is classified only AFTER the window
+        (Req 2.4, 2.5)."""
+        instance_id = _seed_server("srv-sw", running_build_job_id="job-sw")
+        command_id = "cmd-sw-1"
+        _seed_command_job("job-sw", command_id, instance_id,
+                          build_domain.EXECUTION_MODE_DEDICATED,
+                          server_id="srv-sw")
+        script = {command_id: _terminal_invocation(
+            command_id, instance_id, status="Success", response_code=0)}
+
+        # Tick 1: the settlement wait is recorded; still nonterminal.
+        _reconcile_tick(NOW, script=script)
+        job = _get_job("job-sw")
+        assert job["status"] == build_domain.STATUS_BUILDING
+        deadline = job["reconciliation"]["settlement_deadline"]
+        assert deadline == NOW + build_dispatcher.SETTLEMENT_WINDOW_MS
+
+        # Tick 2, INSIDE the window: never classified early.
+        _reconcile_tick(NOW + _MINUTE_MS, script=script)
+        assert _get_job("job-sw")["status"] == build_domain.STATUS_BUILDING
+
+        # Tick 3, past the deadline: AGENT_RESULT_MISSING settles.
+        _reconcile_tick(deadline + _MINUTE_MS, script=script)
+        job = _get_job("job-sw")
+        assert job["status"] == build_domain.STATUS_FAILED
+        assert job["error"]["code"] == \
+            build_reconciliation.CODE_AGENT_RESULT_MISSING
+        assert "running_build_job_id" not in (_get_server("srv-sw") or {})
+
+    def test_callback_inside_settlement_window_keeps_authority(self):
+        """A valid agent result recorded INSIDE the settlement window
+        keeps authority: the later settlement tick can only add
+        diagnostic completeness, never resurrect or overwrite the
+        absorbed terminal outcome (Req 2.4, 2.6)."""
+        instance_id = _seed_server("srv-cb", running_build_job_id="job-cb")
+        command_id = "cmd-cb-1"
+        _seed_command_job("job-cb", command_id, instance_id,
+                          build_domain.EXECUTION_MODE_DEDICATED,
+                          server_id="srv-cb")
+        script = {command_id: _terminal_invocation(
+            command_id, instance_id, status="Success", response_code=0)}
+
+        _reconcile_tick(NOW, script=script)  # settlement wait recorded
+        deadline = _get_job("job-cb")["reconciliation"][
+            "settlement_deadline"]
+
+        # The agent's succeeded callback lands (recorded by the event
+        # consumer through the existing phase path).
+        _JOBS.update_item(
+            Key={"build_job_id": "job-cb"},
+            UpdateExpression="SET #s = :succeeded, ended_at = :end",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":succeeded":
+                                       build_domain.STATUS_SUCCEEDED,
+                                       ":end": NOW + 30_000})
+
+        _reconcile_tick(deadline + _MINUTE_MS, script=script)
+
+        job = _get_job("job-cb")
+        assert job["status"] == build_domain.STATUS_SUCCEEDED
+        assert job["ended_at"] == NOW + 30_000
+        assert "error" not in job
+

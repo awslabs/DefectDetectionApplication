@@ -154,4 +154,167 @@ describe('BuildInfrastructureSettings', () => {
     // The form reflects the returned effective configuration.
     expect(screen.getByLabelText('Volume size GB')).toHaveValue(200);
   });
+
+  // -------------------------------------------------------------------
+  // build-fleet-execution-failures tasks 8.4/8.5 (Req 2.17, 2.19, 2.20,
+  // 3.6, 3.12, 3.13): optional runtime budgets and per-target volume
+  // sizes, legacy payload preservation, and the explanatory help text.
+  // -------------------------------------------------------------------
+
+  it('keeps the legacy payload shape when no optional map is configured (Requirement 3.6)', async () => {
+    setAuthRole('PortalAdmin');
+    render(<BuildInfrastructureSettings />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Volume size GB')).toHaveValue(100);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+    await waitFor(() => {
+      expect(updateBuildConfig).toHaveBeenCalled();
+    });
+    const payload = updateBuildConfig.mock.calls[0][0];
+    // The optional maps are OMITTED, not sent as null/empty: an
+    // unconfigured save is byte-compatible with the legacy payload.
+    expect('runtime_budgets' in payload).toBe(false);
+    expect('volume_size_gb_by_target' in payload).toBe(false);
+    // Every legacy field is still present.
+    expect(payload).toMatchObject({
+      arm64_instance_type: 'm6g.4xlarge',
+      x86_64_instance_type: 'm6i.4xlarge',
+      volume_size_gb: 100,
+      region: 'us-east-1',
+      max_runtime_hours: 4,
+      use_spot_for_ephemeral: false,
+      source_ref: null,
+    });
+  });
+
+  it('explains hard ceilings, independent queue/provisioning limits, and snapshot immutability (Requirements 2.17, 3.12, 3.13)', async () => {
+    setAuthRole('PortalAdmin');
+    render(<BuildInfrastructureSettings />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Volume size GB')).toHaveValue(100);
+    });
+
+    // Hard ceilings are non-extendable.
+    expect(
+      screen.getByText(/non-extendable safety limit.*can never extend it/),
+    ).toBeInTheDocument();
+    // Queue/provisioning limits are independent and optional.
+    expect(
+      screen.getByText(/Queue-wait and provisioning limits are independent and optional/),
+    ).toBeInTheDocument();
+    // Changing settings does not mutate existing snapshots.
+    expect(
+      screen.getByText(/does not mutate existing Build_Jobs.*snapshotted when it was submitted/),
+    ).toBeInTheDocument();
+    // The global volume field stays, documents the raised 200 GB
+    // default, and the per-target section names the JP6 minimum.
+    expect(screen.getByText(/positive number \(default 200\)/)).toBeInTheDocument();
+    expect(screen.getByText(/JP6 requires at least 200 GB/)).toBeInTheDocument();
+  });
+
+  it('sends an added runtime budget as the nested target/mode map (Requirement 2.17)', async () => {
+    setAuthRole('PortalAdmin');
+    render(<BuildInfrastructureSettings />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Volume size GB')).toHaveValue(100);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add runtime budget' }));
+    fireEvent.change(screen.getByLabelText('Runtime budget 1 target'), {
+      target: { value: 'JP6' },
+    });
+    fireEvent.change(screen.getByLabelText('Runtime budget 1 mode'), {
+      target: { value: 'ephemeral' },
+    });
+    fireEvent.change(screen.getByLabelText('Runtime budget 1 hard runtime hours'), {
+      target: { value: '3' },
+    });
+    fireEvent.change(screen.getByLabelText('Runtime budget 1 heartbeat lease minutes'), {
+      target: { value: '30' },
+    });
+    fireEvent.change(screen.getByLabelText('Runtime budget 1 queue wait hours'), {
+      target: { value: '6' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+    await waitFor(() => {
+      expect(updateBuildConfig).toHaveBeenCalled();
+    });
+    expect(updateBuildConfig.mock.calls[0][0]).toMatchObject({
+      runtime_budgets: {
+        JP6: {
+          ephemeral: {
+            hard_runtime_hours: 3,
+            heartbeat_lease_minutes: 30,
+            queue_wait_hours: 6,
+          },
+        },
+      },
+    });
+  });
+
+  it('sends an added per-target volume size while retaining the global field (Requirement 2.20)', async () => {
+    setAuthRole('PortalAdmin');
+    render(<BuildInfrastructureSettings />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Volume size GB')).toHaveValue(100);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add per-target volume size' }));
+    fireEvent.change(screen.getByLabelText('Per-target volume 1 target'), {
+      target: { value: 'JP6' },
+    });
+    fireEvent.change(screen.getByLabelText('Per-target volume 1 size GB'), {
+      target: { value: '400' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+    await waitFor(() => {
+      expect(updateBuildConfig).toHaveBeenCalled();
+    });
+    expect(updateBuildConfig.mock.calls[0][0]).toMatchObject({
+      // The global field is retained alongside the per-target map.
+      volume_size_gb: 100,
+      volume_size_gb_by_target: { JP6: 400 },
+    });
+  });
+
+  it('loads stored maps into rows and reverts a cleared map with null (Requirement 3.6)', async () => {
+    setAuthRole('PortalAdmin');
+    getBuildConfig.mockResolvedValue({
+      config: {
+        ...EFFECTIVE_CONFIG,
+        runtime_budgets: { AMD64: { dedicated: { hard_runtime_hours: 8 } } },
+        volume_size_gb_by_target: { JP6: 400 },
+      },
+    });
+    render(<BuildInfrastructureSettings />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Runtime budget 1 target')).toHaveValue('AMD64');
+    });
+    expect(screen.getByLabelText('Runtime budget 1 hard runtime hours')).toHaveValue(8);
+    expect(screen.getByLabelText('Per-target volume 1 target')).toHaveValue('JP6');
+    expect(screen.getByLabelText('Per-target volume 1 size GB')).toHaveValue(400);
+
+    // Clearing the stored rows reverts the stored maps with null.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove runtime budget 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove per-target volume 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+    await waitFor(() => {
+      expect(updateBuildConfig).toHaveBeenCalled();
+    });
+    expect(updateBuildConfig.mock.calls[0][0]).toMatchObject({
+      runtime_budgets: null,
+      volume_size_gb_by_target: null,
+    });
+  });
 });

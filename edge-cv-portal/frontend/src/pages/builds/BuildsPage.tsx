@@ -7,6 +7,15 @@
  *   RadioGroup: the dedicated option lists running servers and is
  *   disabled while the fleet has no non-terminated server, making
  *   ephemeral the only selectable mode (Req 2.1, 2.5).
+ * - Source selection (build-source-selection Req 1.1-1.4, 2.1-2.4,
+ *   2.7): a repository Input pre-filled from the effective build
+ *   config's `default_repository`, and a branch Autosuggest populated
+ *   by debounced branch discovery against the entered repository. The
+ *   Autosuggest accepts a typed value, so manual entry (tags, SHAs, or
+ *   discovery failure) always works and discovery failure never blocks
+ *   submission. The submitted body carries `repository`/`source_ref`
+ *   only when non-default and non-empty, keeping the zero-effort
+ *   request byte-identical to the pre-feature shape (Req 1.2, 7.1).
  * - Cloudscape Table of the 90-day Build_Job history, most recent
  *   first: status Badge, target, mode, requester, times, published
  *   version for succeeded jobs (Req 4.7). The list refreshes every
@@ -16,12 +25,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Autosuggest,
+  AutosuggestProps,
   Box,
   Button,
   Container,
   Form,
   FormField,
   Header,
+  Input,
   Link,
   Multiselect,
   MultiselectProps,
@@ -33,7 +45,7 @@ import {
   Table,
 } from '@cloudscape-design/components';
 import { useNavigate } from 'react-router-dom';
-import { apiService } from '../../services/api';
+import { ApiError, apiService } from '../../services/api';
 import type { BuildServer } from '../../services/api';
 import BuildStatusBadge from './BuildStatusBadge';
 import {
@@ -65,6 +77,44 @@ const TARGET_OPTIONS: MultiselectProps.Option[] = [
   },
 ];
 
+/**
+ * Debounce before branch discovery re-runs after the repository value
+ * settles (build-source-selection Req 2.2).
+ */
+const BRANCH_DISCOVERY_DEBOUNCE_MS = 500;
+
+/**
+ * User-facing message per branch-discovery error code (the distinct
+ * codes GET /build-branches returns, build-source-selection Req 2.3,
+ * 3.3). Every message points at manual ref entry, because discovery
+ * failure never blocks submission.
+ */
+export const DISCOVERY_ERROR_MESSAGES: Record<string, string> = {
+  REPOSITORY_NOT_FOUND:
+    'Repository not found. Check the URL — you can still type a ref manually.',
+  REPOSITORY_FORBIDDEN:
+    'Repository is not accessible (it may be private). You can still type a ref manually.',
+  DISCOVERY_RATE_LIMITED:
+    'Branch discovery is rate-limited right now. Retry shortly, or type a ref manually.',
+  DISCOVERY_TIMEOUT:
+    'Branch discovery timed out. Retry, or type a ref manually.',
+  DISCOVERY_UPSTREAM_ERROR:
+    'Branch discovery failed upstream. Retry, or type a ref manually.',
+  REPOSITORY_EMPTY:
+    'The repository has no branches. You can still type a ref manually.',
+};
+
+/** Derive the Autosuggest error text from a discovery failure (Req 2.3). */
+export function discoveryErrorMessage(err: unknown): string {
+  if (err instanceof ApiError && err.code && DISCOVERY_ERROR_MESSAGES[err.code]) {
+    return DISCOVERY_ERROR_MESSAGES[err.code];
+  }
+  if (err instanceof Error && err.message) {
+    return `Branch discovery failed: ${err.message}. You can still type a ref manually.`;
+  }
+  return 'Branch discovery failed. You can still type a ref manually.';
+}
+
 export function formatTimestamp(ms?: number | null): string {
   if (!ms) return '-';
   return new Date(ms).toLocaleString();
@@ -94,6 +144,24 @@ export default function BuildsPage() {
   const [targetsError, setTargetsError] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
   const [submittedRequest, setSubmittedRequest] = useState<string | null>(null);
+
+  // Source selection state (build-source-selection Req 1.1-1.4, 2.1-2.4).
+  // The repository pre-fills from the effective build config's
+  // default_repository (Req 1.1, 1.5); the branch Autosuggest is fed by
+  // debounced discovery against the entered repository (Req 2.1, 2.2).
+  const [defaultRepository, setDefaultRepository] = useState('');
+  const [repository, setRepository] = useState('');
+  const [sourceRef, setSourceRef] = useState('');
+  const [branchOptions, setBranchOptions] = useState<AutosuggestProps.Option[]>(
+    []
+  );
+  const [branchStatus, setBranchStatus] = useState<
+    'pending' | 'loading' | 'error' | 'finished'
+  >('pending');
+  const [branchError, setBranchError] = useState<string | null>(null);
+  const [discoveryRetry, setDiscoveryRetry] = useState(0);
+  /** Guards against out-of-order discovery responses. */
+  const discoveryRunRef = useRef(0);
 
   // Row action state (cancel / retry in flight).
   const [actionJobId, setActionJobId] = useState<string | null>(null);
@@ -143,6 +211,65 @@ export default function BuildsPage() {
     const interval = setInterval(() => loadData(true), LIST_POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [loadData]);
+
+  // Pre-fill the repository from the effective build config's
+  // default_repository (Req 1.1, 1.5). A config read failure leaves the
+  // field editable and empty — it never blocks the form.
+  useEffect(() => {
+    let cancelled = false;
+    apiService
+      .getBuildConfig()
+      .then(({ config }) => {
+        if (cancelled) return;
+        const configured = config.default_repository || '';
+        setDefaultRepository(configured);
+        setRepository((current) => current || configured);
+      })
+      .catch((err) => {
+        console.error('Failed to load build config default repository:', err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Branch discovery, re-run debounced whenever the repository value
+  // settles (Req 2.1, 2.2). Failures surface on the Autosuggest via
+  // statusType/errorText and never block submission (Req 2.3).
+  useEffect(() => {
+    const repo = repository.trim();
+    if (!repo) {
+      discoveryRunRef.current += 1;
+      setBranchOptions([]);
+      setBranchStatus('pending');
+      setBranchError(null);
+      return;
+    }
+    const runId = ++discoveryRunRef.current;
+    setBranchStatus('loading');
+    setBranchError(null);
+    const timer = setTimeout(async () => {
+      try {
+        const response = await apiService.listBuildBranches(repo);
+        if (discoveryRunRef.current !== runId) return;
+        setBranchOptions(
+          (response.branches || []).map((branch) => ({
+            value: branch,
+            ...(branch === response.default_branch
+              ? { description: 'default branch' }
+              : {}),
+          }))
+        );
+        setBranchStatus('finished');
+      } catch (err) {
+        if (discoveryRunRef.current !== runId) return;
+        setBranchOptions([]);
+        setBranchStatus('error');
+        setBranchError(discoveryErrorMessage(err));
+      }
+    }, BRANCH_DISCOVERY_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [repository, discoveryRetry]);
 
   // Fleet-derived form facts. Ephemeral is the only selectable mode
   // while the fleet has no non-terminated server (Req 2.5); the
@@ -212,12 +339,22 @@ export default function BuildsPage() {
     setSubmitError(null);
     setSubmittedRequest(null);
     try {
+      // repository/source_ref ride only when non-default and non-empty,
+      // so the zero-effort request body stays byte-identical to the
+      // pre-feature shape (Req 1.2, 2.4, 7.1). The backend validates
+      // and rejects malformed values with the field named (Req 1.4).
+      const trimmedRepository = repository.trim();
+      const trimmedRef = sourceRef.trim();
       const response = await apiService.submitBuild({
         targets: selectedTargets.map((o) => o.value as BuildTarget),
         execution_mode: executionMode,
         ...(executionMode === 'dedicated' && selectedServer?.value
           ? { server_id: selectedServer.value }
           : {}),
+        ...(trimmedRepository && trimmedRepository !== defaultRepository
+          ? { repository: trimmedRepository }
+          : {}),
+        ...(trimmedRef ? { source_ref: trimmedRef } : {}),
       });
       setSubmittedRequest(
         `Build request submitted: ${response.jobs.length} job${
@@ -327,6 +464,49 @@ export default function BuildsPage() {
                 options={TARGET_OPTIONS}
                 placeholder="Select one or more build targets"
                 keepOpen
+              />
+            </FormField>
+            <FormField
+              label="Repository"
+              description="HTTPS Git repository to build from. Defaults to the configured repository; enter a fork to build your own."
+            >
+              <Input
+                value={repository}
+                onChange={({ detail }) => setRepository(detail.value)}
+                placeholder={
+                  defaultRepository || 'https://github.com/owner/repository'
+                }
+                ariaLabel="Repository"
+              />
+            </FormField>
+            <FormField
+              label={
+                <span>
+                  Branch or ref <i>- optional</i>
+                </span>
+              }
+              description="Pick a discovered branch or type any branch, tag, or commit SHA. Leave empty to build the repository's default branch."
+            >
+              <Autosuggest
+                value={sourceRef}
+                onChange={({ detail }) => setSourceRef(detail.value)}
+                options={branchOptions}
+                statusType={branchStatus}
+                loadingText="Discovering branches"
+                errorText={branchError ?? undefined}
+                recoveryText="Retry discovery"
+                onLoadItems={() => {
+                  // Recovery click re-runs discovery; failure never
+                  // blocks manual entry or submission (Req 2.3).
+                  if (branchStatus === 'error') {
+                    setDiscoveryRetry((n) => n + 1);
+                  }
+                }}
+                empty="No branches discovered. Type a branch, tag, or commit SHA."
+                enteredTextLabel={(value) => `Use ref: "${value}"`}
+                placeholder="Repository default branch"
+                filteringType="auto"
+                ariaLabel="Branch or ref"
               />
             </FormField>
             <FormField

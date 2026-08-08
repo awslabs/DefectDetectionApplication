@@ -15,8 +15,11 @@ Routes (API Gateway REST):
     GET /build-config   Effective configuration: the stored values
                         merged over the documented defaults (ARM64
                         instance type m6g.4xlarge, x86_64 instance type
-                        m6i.4xlarge, volume size 100 GB, region
-                        us-east-1, max runtime 4 hours) applied per
+                        m6i.4xlarge, volume size 200 GB, region
+                        us-east-1, max runtime 4 hours, plus the
+                        OPTIONAL target/mode runtime_budgets and
+                        per-target volume_size_gb_by_target maps,
+                        None while unconfigured) applied per
                         field on read (Req 9.1, 9.2). Permission:
                         builds:read.
     PUT /build-config   Partial configuration update validated by
@@ -79,6 +82,14 @@ SETTINGS_TABLE = os.environ.get('SETTINGS_TABLE')
 #: PortalSettings item key holding the build infrastructure configuration
 #: (design §7).
 BUILD_CONFIG_SETTING_KEY = 'build_infrastructure_config'
+
+#: The documented ephemeral volume-size default in GB, raised from 100 to
+#: 200 (build-fleet-execution-failures storage amendment, Req 2.20).
+#: build_domain.DEFAULT_BUILD_CONFIG is the authoritative table; this
+#: named alias exists for traceability. The raised default applies only
+#: to Build_Jobs created after deployment: existing jobs keep their
+#: snapshotted volume sizes (Req 3.13).
+DEFAULT_VOLUME_SIZE_GB = build_domain.DEFAULT_BUILD_CONFIG['volume_size_gb']
 
 #: The configurable parameters (design §7 table). Fields outside this set
 #: are ignored on update so arbitrary junk never reaches the stored
@@ -238,7 +249,9 @@ def update_build_config(event: Dict, context: Any) -> Dict:
 
     The update is validated by build_domain.validate_build_config
     (instance-family → architecture lookup table, positive volume size,
-    positive max runtime); a rejected update is discarded in full and
+    positive max runtime, OPTIONAL target/mode runtime_budgets shape,
+    OPTIONAL per-target volume sizes with JP6 >= 200 GB); a rejected
+    update is discarded in full and
     every prior configuration value is retained (atomic reject,
     Req 9.5). Every applied change records an Audit_Log entry with the
     parameter, prior value, new value, user, and time (Req 9.4).

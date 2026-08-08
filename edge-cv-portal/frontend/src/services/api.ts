@@ -25,6 +25,7 @@ import type {
 } from '../pages/workflows/cameraReference';
 import type { CameraBindingContext } from '../pages/deployments/cameraBindings';
 import type {
+  BuildBranchesResponse,
   BuildJob,
   BuildJobsPage,
   BuildLogsPage,
@@ -143,6 +144,12 @@ export interface BuildInfrastructureConfig {
   use_spot_for_ephemeral: boolean;
   /** null means "the repository's default branch". */
   source_ref: string | null;
+  /**
+   * Operator-controlled repository the submission form defaults to
+   * (build-source-selection Req 1.5); the documented default is the
+   * DDA repository.
+   */
+  default_repository: string;
 }
 
 /**
@@ -3014,6 +3021,21 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  /**
+   * Branches of the selected repository with its default branch
+   * identified, for the submission form's branch dropdown
+   * (build-source-selection Req 3.1). Failures carry a distinct error
+   * code per condition (REPOSITORY_NOT_FOUND, REPOSITORY_FORBIDDEN,
+   * DISCOVERY_RATE_LIMITED, DISCOVERY_TIMEOUT, DISCOVERY_UPSTREAM_ERROR,
+   * REPOSITORY_EMPTY) in the standard envelope; the form falls back to
+   * manual ref entry. The configured default repository comes from the
+   * existing getBuildConfig() read (`default_repository`, Req 1.5).
+   */
+  async listBuildBranches(repository: string): Promise<BuildBranchesResponse> {
+    const query = new URLSearchParams({ repository });
+    return this.request(`/build-branches?${query.toString()}`);
   }
 
   /**

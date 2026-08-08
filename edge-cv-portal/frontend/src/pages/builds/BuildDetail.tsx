@@ -5,6 +5,9 @@
  * - Job fields: target, mode, requester, submission/start/end times,
  *   assigned server, published artifact identifiers for succeeded jobs
  *   (Req 4.3).
+ * - Built source: repository, ref, and resolved commit, with a
+ *   placeholder for legacy jobs that lack them
+ *   (build-source-selection Req 2.6).
  * - Status polling every 15 s while the job is not terminal (Req 4.2).
  * - Log viewer polling GET /builds/{id}/logs every 30 s while the job
  *   runs, forward-paginated with the CloudWatch nextToken (Req 4.4).
@@ -31,6 +34,8 @@ import {
   BuildJob,
   BuildLogEvent,
   CANCELLABLE_BUILD_STATUSES,
+  DiagnosticStreamField,
+  ExecutionDiagnostic,
   isTerminalBuildStatus,
 } from './types';
 
@@ -54,6 +59,208 @@ function formatLogEvents(events: BuildLogEvent[]): string {
     .join('\n');
 }
 
+/**
+ * Human-readable duration for a diagnostic phase/budget value
+ * (build-fleet-execution-failures Req 2.18). A null/absent value has no
+ * recorded evidence and renders the explicit unavailable placeholder.
+ */
+function formatDurationMs(ms?: number | null): string {
+  if (ms === null || ms === undefined) return 'not recorded';
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(' ');
+}
+
+/**
+ * One stdout/stderr excerpt of the execution diagnostic with its
+ * explicit unavailable / empty / truncated states (Req 2.2, 2.18,
+ * 3.10) — states are written out in text, never signaled by color.
+ */
+function DiagnosticStreamExcerpt({
+  label,
+  field,
+}: {
+  label: string;
+  field?: DiagnosticStreamField;
+}) {
+  let content: JSX.Element;
+  if (!field || field.available !== true) {
+    content = (
+      <Box color="text-status-inactive">
+        Not available from the command provider.
+      </Box>
+    );
+  } else if (!field.text) {
+    content = (
+      <Box color="text-status-inactive">
+        Available but empty (the command produced no output on this
+        stream).
+      </Box>
+    );
+  } else {
+    content = (
+      <SpaceBetween size="xxs">
+        {field.truncated && (
+          <Box color="text-status-inactive">
+            Excerpt truncated to the retained byte limit.
+          </Box>
+        )}
+        <Box fontSize="body-s">
+          <pre
+            style={{
+              fontFamily: 'monospace',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              margin: 0,
+            }}
+          >
+            {field.text}
+          </pre>
+        </Box>
+      </SpaceBetween>
+    );
+  }
+  return (
+    <SpaceBetween size="xxs">
+      <Header variant="h3">{label}</Header>
+      {content}
+    </SpaceBetween>
+  );
+}
+
+/**
+ * Execution diagnostics panel (build-fleet-execution-failures Req 2.3,
+ * 2.10, 2.18, 3.10): safe classification, response/status details,
+ * phase durations, timeout kind/budget/source, last heartbeat/progress,
+ * disk evidence, and stdout/stderr excerpts with explicit
+ * unavailable/truncated states. Rendered only when the Build Log API
+ * returned the optional diagnostic; legacy responses show no panel.
+ */
+function ExecutionDiagnosticsPanel({
+  diagnostic,
+}: {
+  diagnostic: ExecutionDiagnostic;
+}) {
+  const timing = diagnostic.timing || {};
+  const timeout = diagnostic.timeout;
+  const disk = diagnostic.disk;
+  return (
+    <Container
+      header={
+        <Header
+          variant="h2"
+          description="Retained evidence recorded for this build job's command execution."
+        >
+          Execution diagnostics
+        </Header>
+      }
+    >
+      <SpaceBetween size="m">
+        <ColumnLayout columns={2} variant="text-grid">
+          <KeyValuePairs
+            columns={1}
+            items={[
+              {
+                label: 'Classification',
+                value: diagnostic.classification || 'not recorded',
+              },
+              {
+                label: 'Command status',
+                value: diagnostic.status || 'not recorded',
+              },
+              {
+                label: 'Status details',
+                value: diagnostic.statusDetails || 'not recorded',
+              },
+              {
+                label: 'Response code',
+                value:
+                  diagnostic.responseCode !== null &&
+                  diagnostic.responseCode !== undefined
+                    ? String(diagnostic.responseCode)
+                    : 'not recorded',
+              },
+              {
+                label: 'Observed',
+                value: diagnostic.observedAt
+                  ? formatTimestamp(diagnostic.observedAt)
+                  : 'not recorded',
+              },
+            ]}
+          />
+          <KeyValuePairs
+            columns={1}
+            items={[
+              {
+                label: 'Queue wait',
+                value: formatDurationMs(timing.queueMs),
+              },
+              {
+                label: 'Provisioning',
+                value: formatDurationMs(timing.provisioningMs),
+              },
+              {
+                label: 'Execution',
+                value: formatDurationMs(timing.executionMs),
+              },
+              ...(timeout
+                ? [
+                    {
+                      label: 'Timeout',
+                      value: `${timeout.kind || 'not recorded'} (budget ${formatDurationMs(
+                        timeout.budgetMs
+                      )}${timeout.budgetSource ? ` from ${timeout.budgetSource}` : ''})`,
+                    },
+                    {
+                      label: 'Last heartbeat',
+                      value: timeout.lastHeartbeatAt
+                        ? formatTimestamp(timeout.lastHeartbeatAt)
+                        : 'not recorded',
+                    },
+                    {
+                      label: 'Last progress',
+                      value: timeout.lastProgressAt
+                        ? formatTimestamp(timeout.lastProgressAt)
+                        : 'not recorded',
+                    },
+                  ]
+                : []),
+              ...(disk
+                ? [
+                    {
+                      label: 'Runner disk',
+                      value: disk.available
+                        ? `${disk.available_gb ?? '?'} GB free of ${disk.total_gb ?? '?'} GB${
+                            disk.docker_storage_path
+                              ? ` at ${disk.docker_storage_path}`
+                              : ''
+                          }`
+                        : 'not measured',
+                    },
+                  ]
+                : []),
+            ]}
+          />
+        </ColumnLayout>
+        <DiagnosticStreamExcerpt
+          label="Command stdout"
+          field={diagnostic.stdout}
+        />
+        <DiagnosticStreamExcerpt
+          label="Command stderr"
+          field={diagnostic.stderr}
+        />
+      </SpaceBetween>
+    </Container>
+  );
+}
+
 export default function BuildDetail() {
   const { buildJobId } = useParams<{ buildJobId: string }>();
   const navigate = useNavigate();
@@ -66,6 +273,12 @@ export default function BuildDetail() {
 
   const [logs, setLogs] = useState('');
   const [logsLoading, setLogsLoading] = useState(false);
+  // Optional execution diagnostic returned with Build Log pages
+  // (build-fleet-execution-failures Req 2.3): immutable metadata,
+  // identical on every page; absent from legacy responses.
+  const [diagnostic, setDiagnostic] = useState<ExecutionDiagnostic | null>(
+    null
+  );
   // Accumulated log events and the CloudWatch forward token; the same
   // token is re-polled for new output of a running build (Req 4.4).
   const logEventsRef = useRef<BuildLogEvent[]>([]);
@@ -103,6 +316,9 @@ export default function BuildDetail() {
         });
         if (response.events.length > 0) {
           logEventsRef.current = [...logEventsRef.current, ...response.events];
+        }
+        if (response.diagnostic) {
+          setDiagnostic(response.diagnostic);
         }
         logTokenRef.current = response.nextToken;
         if (!response.nextToken || response.nextToken === sentToken) {
@@ -277,6 +493,30 @@ export default function BuildDetail() {
                     : 'ephemeral',
               },
               { label: 'Requested by', value: job.requested_by },
+              // Built source (build-source-selection Req 2.6): legacy
+              // jobs lack these snapshot fields and show '-'. A null or
+              // absent source_ref on a source-selection-era job means
+              // the repository's default branch.
+              {
+                label: 'Repository',
+                value: job.config_snapshot?.repository || '-',
+              },
+              {
+                label: 'Source ref',
+                value: job.config_snapshot?.repository
+                  ? job.config_snapshot.source_ref ?? 'default branch'
+                  : '-',
+              },
+              {
+                label: 'Resolved commit',
+                value: job.source_commit ? (
+                  <span style={{ fontFamily: 'monospace' }}>
+                    {job.source_commit}
+                  </span>
+                ) : (
+                  '-'
+                ),
+              },
               ...(job.retry_of
                 ? [
                     {
@@ -376,13 +616,27 @@ export default function BuildDetail() {
               logs ||
               (running
                 ? 'No log output yet.'
-                : 'No log output was recorded for this build job.')
+                : diagnostic
+                  ? 'No CloudWatch log output was recorded for this build ' +
+                    'job. The Execution diagnostics section below shows ' +
+                    'the evidence retained for this job.'
+                  : 'No log output was recorded for this build job. No ' +
+                    'execution diagnostics were retained either; the ' +
+                    'evidence is unavailable or may have expired.')
             }
             rows={25}
             readOnly
           />
         </SpaceBetween>
       </Container>
+
+      {/* Execution diagnostics (build-fleet-execution-failures Req 2.3,
+          2.18, 3.10): rendered whenever the Build Log API returned the
+          optional diagnostic — independently of CloudWatch events — so
+          retained SSM/timeout evidence is never hidden behind an
+          empty-log message. Legacy responses omit the diagnostic and
+          render exactly as before. */}
+      {diagnostic && <ExecutionDiagnosticsPanel diagnostic={diagnostic} />}
     </SpaceBetween>
   );
 }

@@ -62,7 +62,10 @@ import build_domain  # noqa: E402
 _DOCUMENTED_DEFAULTS = {
     "arm64_instance_type": "m6g.4xlarge",
     "x86_64_instance_type": "m6i.4xlarge",
-    "volume_size_gb": 100,
+    # Raised from 100 to 200 by the build-fleet-execution-failures
+    # storage amendment (Req 2.20): the JP6 target exhausted the 100 GB
+    # single-volume default (evidence job bd91c5d8).
+    "volume_size_gb": 200,
     "region": "us-east-1",
     "max_runtime_hours": 4,
 }

@@ -85,10 +85,21 @@ def rbac_check(required_permissions: List[Permission],
                         'parameter': usecase_param
                     })
                 
-                # Check if user has any of the required permissions
+                # Check if user has any of the required permissions.
+                # Thread the JWT-derived user dict as user_info so the
+                # Cognito custom:role claim reaches role resolution. This
+                # matters most at the 'global' scope (allow_global routes,
+                # e.g. build-fleet endpoints): there is no per-usecase
+                # UserRoles row for 'global', so without user_info the role
+                # defaulted to Viewer and JWT PortalAdmins got 403s.
+                # Known residual gap (by design of the resolution order in
+                # shared_utils.RBACManager.get_user_role): per-usecase-only
+                # users (no JWT role, only per-usecase UserRoles rows) still
+                # resolve to Viewer at 'global' scope — acceptable for now.
                 has_permission = False
                 for permission in required_permissions:
-                    if rbac_manager.has_permission(user_id, usecase_id, permission):
+                    if rbac_manager.has_permission(user_id, usecase_id, permission,
+                                                   user_info=user):
                         has_permission = True
                         break
                 
@@ -103,7 +114,7 @@ def rbac_check(required_permissions: List[Permission],
                         details={
                             'required_permissions': [p.value for p in required_permissions],
                             'usecase_id': usecase_id,
-                            'user_role': rbac_manager.get_user_role(user_id, usecase_id).value if rbac_manager.get_user_role(user_id, usecase_id) else 'none',
+                            'user_role': rbac_manager.get_user_role(user_id, usecase_id, user_info=user).value if rbac_manager.get_user_role(user_id, usecase_id, user_info=user) else 'none',
                             'method': event.get('httpMethod'),
                             'path': event.get('path')
                         }
@@ -122,17 +133,24 @@ def rbac_check(required_permissions: List[Permission],
                 event['rbac_context'].update({
                     'user_id': user_id,
                     'usecase_id': usecase_id,
-                    'user_role': rbac_manager.get_user_role(user_id, usecase_id),
-                    'permissions': rbac_manager.get_user_permissions(user_id, usecase_id),
-                    'is_super_user': rbac_manager.is_portal_admin(user_id)
+                    'user_role': rbac_manager.get_user_role(user_id, usecase_id, user_info=user),
+                    'permissions': rbac_manager.get_user_permissions(user_id, usecase_id, user_info=user),
+                    'is_super_user': rbac_manager.is_portal_admin(user_id, user_info=user)
                 })
-                
-                # Call the original function
-                return func(event, context)
                 
             except Exception as e:
                 logger.error(f"Error in RBAC check: {str(e)}", exc_info=True)
                 return create_response(500, {'error': 'Authorization check failed'})
+            
+            # Call the original function OUTSIDE the authorization
+            # try/except: only failures of the authorization logic itself
+            # may answer 'Authorization check failed'. A handler error has
+            # to surface through the handler's own error handling (the
+            # portal handlers wrap their routing in try/except and return
+            # their own error envelope), otherwise a post-authorization
+            # bug is reported as an authorization failure and the real
+            # cause stays invisible (Req 2.7, 3.2).
+            return func(event, context)
         
         return wrapper
     return decorator
@@ -148,7 +166,9 @@ def super_user_only(func):
             user = get_user_from_event(event)
             user_id = user['user_id']
             
-            if not rbac_manager.is_portal_admin(user_id):
+            # Pass user_info so the JWT custom:role claim (PortalAdmin)
+            # reaches role resolution (same gap as rbac_check above).
+            if not rbac_manager.is_portal_admin(user_id, user_info=user):
                 log_audit_event(
                     user_id=user_id,
                     action='unauthorized_super_user_access',
@@ -156,7 +176,7 @@ def super_user_only(func):
                     resource_id=event.get('resource', 'unknown'),
                     result='denied',
                     details={
-                        'user_role': rbac_manager.get_user_role(user_id, 'global').value if rbac_manager.get_user_role(user_id, 'global') else 'none',
+                        'user_role': rbac_manager.get_user_role(user_id, 'global', user_info=user).value if rbac_manager.get_user_role(user_id, 'global', user_info=user) else 'none',
                         'method': event.get('httpMethod'),
                         'path': event.get('path')
                     }
@@ -177,11 +197,13 @@ def super_user_only(func):
                 'user_role': Role.PORTAL_ADMIN
             })
             
-            return func(event, context)
-            
         except Exception as e:
             logger.error(f"Error in super user check: {str(e)}", exc_info=True)
             return create_response(500, {'error': 'Authorization check failed'})
+        
+        # Handler call outside the authorization try/except: same
+        # reasoning as rbac_check above (Req 2.7, 3.2).
+        return func(event, context)
     
     return wrapper
 

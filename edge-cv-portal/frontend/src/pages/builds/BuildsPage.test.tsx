@@ -18,19 +18,41 @@ import BuildsPage from './BuildsPage';
 import type { BuildJob } from './types';
 import type { BuildServer } from '../../services/api';
 
-const { listBuilds, listBuildServers, submitBuild, cancelBuild, retryBuild, navigateMock } =
-  vi.hoisted(() => ({
-    listBuilds: vi.fn(),
-    listBuildServers: vi.fn(),
-    submitBuild: vi.fn(),
-    cancelBuild: vi.fn(),
-    retryBuild: vi.fn(),
-    navigateMock: vi.fn(),
-  }));
-
-vi.mock('../../services/api', () => ({
-  apiService: { listBuilds, listBuildServers, submitBuild, cancelBuild, retryBuild },
+const {
+  listBuilds,
+  listBuildServers,
+  submitBuild,
+  cancelBuild,
+  retryBuild,
+  getBuildConfig,
+  listBuildBranches,
+  navigateMock,
+} = vi.hoisted(() => ({
+  listBuilds: vi.fn(),
+  listBuildServers: vi.fn(),
+  submitBuild: vi.fn(),
+  cancelBuild: vi.fn(),
+  retryBuild: vi.fn(),
+  getBuildConfig: vi.fn(),
+  listBuildBranches: vi.fn(),
+  navigateMock: vi.fn(),
 }));
+
+vi.mock('../../services/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/api')>();
+  return {
+    ...actual,
+    apiService: {
+      listBuilds,
+      listBuildServers,
+      submitBuild,
+      cancelBuild,
+      retryBuild,
+      getBuildConfig,
+      listBuildBranches,
+    },
+  };
+});
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => navigateMock,
@@ -69,6 +91,21 @@ beforeEach(() => {
   listBuilds.mockResolvedValue({ jobs: [], nextToken: null, total: 0 });
   listBuildServers.mockResolvedValue({ servers: [] });
   submitBuild.mockResolvedValue({ request_id: 'r-1', jobs: [CREATED_JOB] });
+  // Source selection reads (build-source-selection Req 1.1, 2.1): the
+  // repository pre-fills from the configured default, and discovery
+  // resolves so the submit-body assertions exercise the "untouched
+  // fields stay omitted" zero-effort path (Req 1.2, 7.1).
+  getBuildConfig.mockResolvedValue({
+    config: {
+      default_repository:
+        'https://github.com/awslabs/DefectDetectionApplication',
+    },
+  });
+  listBuildBranches.mockResolvedValue({
+    branches: ['main'],
+    default_branch: 'main',
+    truncated: false,
+  });
 });
 
 async function renderPage() {
