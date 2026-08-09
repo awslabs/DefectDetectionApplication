@@ -78,3 +78,140 @@ Live verification proceeds only through tasks 6 (approval-gated push) and
 Per the user-mandated completion criterion in `bugfix.md`, this spec is NOT
 complete until a portal build reaches `succeeded` including artifact
 publication (task 7).
+
+## Task 7 live verification build evidence
+
+Date: 2026-08-09 (dispatched ~00:54 UTC). AWS account 164152369890, us-east-1,
+portal API `https://<portal-api-id>.execute-api.us-east-1.amazonaws.com/v1` (redacted).
+
+### Approved scope (restated)
+Exactly ONE live build: target AMD64, execution mode dedicated (existing X86
+build server — same shape as failing evidence job `40b036fc`), source_ref
+`feature/workflow-triggers` (user's task-6 branch choice, overriding the
+tasks.md original; fix commit `63ecb99f6d523ef2695aba7edf318cd11190877c` is on
+origin there). No JP5/arm64 build authorized. Builds one at a time per
+steering.
+
+### Preflight (pre-dispatch, per .kiro/steering/builds.md)
+- No concurrent build: `pgrep -af "gdk component build"` and
+  `pgrep -af "build-custom.sh"` both empty.
+- No preservation-tracked file drift: `git status` clean for
+  `src/docker-compose.yaml`, backend/frontend/edgemlsdk Dockerfiles,
+  `src/backend/requirements.txt`, recipes, `station_install/setup_station.sh`
+  (only `.kiro/.../tasks.md` locally modified; tree at `63ecb99` == origin).
+- Guard run GREEN: `python3 -m pytest
+  test/backend-test/security/preservation/test_preservation_out_of_scope_guard.py
+  test/backend-test/security/preservation/test_preservation_secrets_out_of_scope_guard.py
+  -p no:cacheprovider --noconftest -q` → **6 passed, 1 skipped** (known
+  vendored-duplicate skip).
+- Fleet/instance health: server `srv-5b214096-91a9-41b7-9d62-cc03ba205c15`
+  ("X86 build server", x86_64, dedicated) lifecycle_state `running`, no busy
+  residue; instance `i-0865b0697fb050036` (m6i.4xlarge) EC2 `running`, SSM
+  PingStatus `Online`. Build-jobs table scan: zero non-terminal jobs
+  (one-at-a-time honored).
+- AWS session had expired mid-preflight; user refreshed credentials
+  (account 164152369890 re-verified via `sts get-caller-identity`).
+
+### Portal API auth (user-selected mechanism)
+Temporary Cognito user `kiro-build-verify-1786236861` (user pool
+`us-east-1_<pool-id>` (redacted), `custom:role=UseCaseAdmin` → `builds:submit`), random
+password held only in a 600-perm temp file, USER_PASSWORD_AUTH ID token via
+client `<app-client-id>` (redacted). User to be deleted after the build
+settles; no credentials stored in the repo or notes.
+
+### Job
+- build_job_id: `08a1e2bd-45f9-4521-ac4a-b41b52222e2e`
+  (request_id `98d4028d-a8e9-4b0b-9a81-918e29f690e7`, request_order 0, single
+  job as approved).
+- Submitted via POST /builds → 201, status `queued`, created_at 1786236899876
+  (2026-08-09T00:54:59.876Z).
+- config_snapshot: repository
+  `https://github.com/awslabs/DefectDetectionApplication`, source_ref
+  `feature/workflow-triggers`, max_runtime_hours 4, volume_size_gb 200,
+  x86_64_instance_type m6i.4xlarge, region us-east-1.
+
+### Dispatcher preflight (deployed backend, runs first)
+PASSED at dispatched_at 1786236900294 (00:55:00.294Z; queue ~418 ms):
+checks {execution_mode dedicated, build_target AMD64, required_arch x86_64,
+component_name aws.edgeml.dda.LocalServer.amd64, repo_dir
+/home/ubuntu/DefectDetectionApplication, callback_bus default,
+quoting_round_trip true}, failures []. Disk evidence: 90 GB available
+(/var/snap/docker/common), agent_checks passed. SSM attempt
+`91e0d6ca-398b-4106-8e8f-dbf184f735ad`, CommandId
+`6257c0b1-ccfa-4d32-9369-10d38b4c58bb`, instance `i-0865b0697fb050036`.
+
+### CMake-step evidence (Build Log API, ~5 min in) — BUG FIXED
+Docker build step #16 (edgemlsdk CMake install) now logs:
+
+```
+#16 0.574 CMake Installer Version: 3.31.6, Copyright (c) Kitware
+#16 0.574 This is a self-extracting archive.
+#16 0.574 The archive will be extracted to: /usr/local
+#16 1.688 Unpacking finished successfully
+#16 1.696 cmake version 3.31.6
+#16 1.696 CMake suite maintained and supported by Kitware (kitware.com/cmake).
+```
+
+- GitHub-release self-contained installer ran and the in-build
+  `cmake --version` check printed `cmake version 3.31.6` (Req 2.1, 2.3).
+- NO `apt.kitware.com` resolution, NO `cmake=3.21.3-0kitware*` pin, NO apt
+  exit 100 — the defect from job `40b036fc` no longer reproduces (Req 1.4).
+- Build proceeded past the CMake step into the Python 3.11 source build
+  (step #19) — strictly further than the failing evidence job ever got.
+
+### Final status — FAILED at a LATER step (new evidence, outside this spec's fix scope)
+
+Job `08a1e2bd-45f9-4521-ac4a-b41b52222e2e` settled **`failed`**, error code
+`BUILD_FAILED` ("Build failed (exit 1)"). Timeline (build-jobs record):
+created 2026-08-09T00:54:59.876Z → dispatched 00:55:00.294Z → execution start
+00:55:03.498Z → ended 2026-08-09T01:08:35.299Z (~13m35s total). Terminal
+effects completed (allocation release, audit, promotion wakeup done).
+
+#### Failing step (CloudWatch `/dda/portal-builds`, stream
+`6257c0b1-ccfa-4d32-9369-10d38b4c58bb/i-0865b0697fb050036/aws-runShellScript/stdout`)
+
+Docker build step **#65 = Dockerfile step 61/83**, `src/edgemlsdk/Dockerfile`
+**line 286** (`RUN apt-get install python-dev -y`), apt **exit code 100**:
+
+```
+ > [61/83] RUN apt-get install python-dev -y:
+1.403 Package python-dev is not available, but is referred to by another package.
+1.403 However the following packages replace it:
+1.403   python2-dev python2 python-dev-is-python3
+1.407 E: Package 'python-dev' has no installation candidate
+#65 ERROR: process "/bin/sh -c apt-get install python-dev -y" did not complete successfully: exit code: 100
+ERROR: failed to build: failed to solve: process "/bin/sh -c apt-get install python-dev -y" did not complete successfully: exit code: 100
+ERROR: edgemlsdk Docker build failed
+```
+
+`gdk component build` then failed (`build-custom.sh ... exit status 1`), the
+agent emitted `phase=failed error_kind=building`, and the job settled `failed`.
+No publish step was reached.
+
+#### Classification: (b) follow-on failure PAST the CMake step — NOT a fix insufficiency
+
+- The fixed CMake step (**#16, step 12/83**) succeeded: GitHub-release
+  installer, `cmake version 3.31.6`, zero `apt.kitware.com` resolution, no
+  `cmake=3.21.3-0kitware*` pin, no apt exit 100 at that step (see CMake-step
+  evidence above). The original defect (job `40b036fc`) did **not** reproduce
+  — this spec's fix held (Req 1.4, 2.1, 2.3).
+- The new failure is a **pre-existing latent defect ~49 Dockerfile steps
+  later**: `python-dev` is a transitional package absent on Ubuntu 22.04
+  (replaced by `python-dev-is-python3` / `python2-dev`). It was previously
+  unreachable because the build always died at the CMake step before it; this
+  spec's fix unmasked it. It is unrelated to CMake, Kitware, or any file this
+  spec changed a behavior of (line 286 is a non-CMake line preserved
+  byte-for-byte per Property 2).
+
+#### Routing
+
+- New evidence recorded here per the task 7 new-failure handling; route the
+  `python-dev` defect to a **follow-on bugfix spec** (suggested name:
+  `edgemlsdk-python-dev-ubuntu2204`) covering `src/edgemlsdk/Dockerfile:286`
+  (and a repo scan for other obsolete `python-dev` install sites).
+- **This spec stays open**: per the user-mandated completion criterion in
+  `bugfix.md`, it completes only when a portal build reaches `succeeded`
+  including artifact publication. This job is progress evidence (strictly
+  further than `40b036fc`), not completion.
+- Cleanup reminder (from the auth note above): temporary Cognito user
+  `kiro-build-verify-1786236861` is to be deleted now that the build settled.

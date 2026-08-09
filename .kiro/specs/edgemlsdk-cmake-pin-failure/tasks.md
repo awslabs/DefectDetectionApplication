@@ -152,7 +152,7 @@ graph TD
     - **STOP**: Do not deploy, push, send an SSM command, start/stop/terminate an instance, publish an artifact, or launch a build in this checkpoint. Live verification proceeds only through tasks 6 and 7. Ask the user if questions arise.
     - _Requirements: 2.5, 3.1, 3.4_
 
-- [-] 6. Approval-gated commit and push to origin feature branch
+- [x] 6. Approval-gated commit and push to origin feature branch
   - **STOP: obtain explicit user approval after task 5. Local validation completion is not push approval.**
   - Build servers sync from origin, so local commits are invisible to them — pushing the fix to origin `feature/portal-build-fleet-and-workflow-gates` is the precondition for task 7's live verification (its `source_ref` is that branch, post-push).
   - Before requesting approval, present the exact diff scope: the three fixed source files, the two regenerated baseline goldens (shipped in the same commit per steering), and the new `test/backend-test/edgemlsdk_cmake/` tests. This is a public repo — run the per-repo secret-hygiene checks (secrets guard per `.kiro/steering/builds.md`) over the diff before pushing; confirm no credentials, tokens, or internal identifiers appear in any added text.
@@ -160,7 +160,7 @@ graph TD
   - This task authorizes the push only — it does NOT authorize dispatching any build; task 7 requires its own separate approval.
   - _Requirements: 2.5 (goldens ship with the fix); precondition for the bugfix Introduction completion criterion_
 
-- [~] 7. Separately approval-gated live verification build (user-mandated completion criterion)
+- [-] 7. Separately approval-gated live verification build (user-mandated completion criterion)
   - **STOP: obtain a new explicit user approval after task 6. Push approval does not authorize this build.**
   - The approval request must state: target `AMD64`, mode dedicated (the existing x86 server — same shape as failing evidence job `40b036fc`), `source_ref` `feature/portal-build-fleet-and-workflow-gates`, estimated duration/cost, artifact-publication effects, monitoring scope, and stop criteria. Builds run strictly one at a time per steering.
   - After approval only: run the portal build preflight first, per the established build-fleet workflow (including the pre-build guard run: out-of-scope guard + secrets guard per `.kiro/steering/builds.md`). If preflight fails, do not dispatch; record diagnostics and stop.

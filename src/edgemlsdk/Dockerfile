@@ -283,7 +283,7 @@ RUN apt-get install ffmpeg -y
 # Install Triton Server and it's dependencies
 RUN apt-get update && \
     apt-get install rapidjson-dev libre2-dev -y
-RUN apt-get install python-dev -y
+RUN apt-get install python-dev-is-python3 -y
 
 # Use --no-check-certificate to resolve following error
 # ERROR: cannot verify boostorg.jfrog.io's certificate, issued by 'CN=GeoTrust TLS RSA CA G1,OU=www.digicert.com,O=DigiCert Inc,C=US':
