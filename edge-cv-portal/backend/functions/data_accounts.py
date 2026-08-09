@@ -83,8 +83,9 @@ CAMERA_STALENESS_SETTING_KEY = 'camera_registry.staleness_threshold_hours'
 # even before anything is stored (camera-registry-sync Req 4.3).
 DEFAULT_CAMERA_STALENESS_THRESHOLD_HOURS = 24
 
-# Requirement 10.7: invocation timeout is configurable up to 60 seconds.
-MAX_BEDROCK_TIMEOUT_SECONDS = 60
+# Requirement 10.7: invocation timeout is configurable up to 240 seconds
+# (raised from 60: large-output generations regularly exceed 60 s).
+MAX_BEDROCK_TIMEOUT_SECONDS = 240
 
 # Must mirror workflow_generator.DEFAULT_BEDROCK_CONFIG so reads return
 # the effective configuration even before anything is stored.
@@ -529,7 +530,7 @@ def _native_to_dynamo(obj):
 def read_stored_bedrock_configuration() -> Dict:
     """
     Effective Bedrock_Configuration: stored values merged over defaults,
-    timeout clamped to at most 60 seconds. Mirrors the read logic in
+    timeout clamped to at most 240 seconds. Mirrors the read logic in
     workflow_generator.get_bedrock_configuration() so the settings UI
     shows exactly what the Workflow_Generator will use.
     """

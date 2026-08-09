@@ -55,7 +55,7 @@ def test_settings_read_failure_falls_back_to_defaults(
         config = bedrock_common.get_bedrock_configuration()  # must not raise
 
     # The returned configuration is exactly the workflow-generation
-    # defaults, with the timeout already an int clamped to [1, 60].
+    # defaults, with the timeout already an int clamped to [1, 240].
     expected = dict(bedrock_common.DEFAULT_BEDROCK_CONFIG)
     expected["timeout_seconds"] = int(expected["timeout_seconds"])
     assert config == expected

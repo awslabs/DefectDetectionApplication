@@ -9,8 +9,8 @@ feature (workflow generation, custom node code assist) reads the same
 - Defaults overridden by stored values; sampling parameters
   (temperature / top_p) honor an explicitly stored null (the parameter
   stays unset and is omitted from the invocation).
-- The invocation timeout is coerced to an int (junk -> 60) and clamped
-  to [1, 60] seconds.
+- The invocation timeout is coerced to an int (junk -> 240) and clamped
+  to [1, 240] seconds.
 - bedrock-runtime clients are cached per (region, timeout) with a
   client-side read timeout equal to the configured invocation timeout
   and retries disabled, so total wall time cannot exceed the timeout.
@@ -43,9 +43,11 @@ SETTINGS_TABLE = os.environ.get('SETTINGS_TABLE')
 # PortalAdmin via bedrock-config:write (workflow-manager Requirement 10.6).
 BEDROCK_CONFIG_SETTING_KEY = 'bedrock_configuration'
 
-# The invocation timeout is configurable up to 60 seconds
+# The invocation timeout is configurable up to 240 seconds
 # (workflow-manager Requirement 10.7; code-assist Requirement 4.4).
-MAX_TIMEOUT_SECONDS = 60
+# Raised from 60: large-output scaffold generations (e.g. node designer
+# with high max_tokens models) regularly exceed 60 s.
+MAX_TIMEOUT_SECONDS = 240
 
 DEFAULT_BEDROCK_CONFIG = {
     # Cross-region inference profile: current Anthropic models on Bedrock
@@ -92,7 +94,7 @@ def get_bedrock_configuration() -> Dict:
                  timeout_seconds}}
     A flat item (attributes directly on the item) is also accepted.
 
-    The timeout is clamped to at most 60 seconds.
+    The timeout is clamped to at most 240 seconds.
     """
     config = dict(DEFAULT_BEDROCK_CONFIG)
     if SETTINGS_TABLE:

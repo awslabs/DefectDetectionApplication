@@ -12,7 +12,7 @@ by data_accounts.py. These tests cover:
    read or write; every other role gets 403 and a denied audit record.
 2. Reads return the effective configuration (defaults before anything is
    stored, stored values afterwards).
-3. Writes validate inputs (timeout <= 60, temperature/top_p in [0, 1],
+3. Writes validate inputs (timeout <= 240, temperature/top_p in [0, 1],
    non-empty model id, positive max_tokens) and persist the exact item
    shape read by workflow_generator.get_bedrock_configuration():
        {setting_key: 'bedrock_configuration',
@@ -163,7 +163,7 @@ class TestBedrockConfigurationRead:
         assert status == 200
         config = payload["bedrock_configuration"]
         assert config["model_id"]
-        assert config["timeout_seconds"] == 60
+        assert config["timeout_seconds"] == 240
         assert set(config) == {"model_id", "region", "max_tokens",
                                "temperature", "top_p", "timeout_seconds"}
 
@@ -214,7 +214,7 @@ class TestBedrockConfigurationWrite:
         assert config["timeout_seconds"] == VALID_CONFIG["timeout_seconds"]
 
     @pytest.mark.parametrize("overrides,expected_error", [
-        ({"timeout_seconds": 61}, "timeout_seconds"),
+        ({"timeout_seconds": 241}, "timeout_seconds"),
         ({"timeout_seconds": 0}, "timeout_seconds"),
         ({"temperature": 1.5}, "temperature"),
         ({"temperature": -0.1}, "temperature"),
@@ -225,7 +225,7 @@ class TestBedrockConfigurationWrite:
     ])
     def test_invalid_values_are_rejected(self, bedrock_env, overrides,
                                          expected_error):
-        """Timeout <= 60, temperature/top_p in [0, 1], non-empty model id,
+        """Timeout <= 240, temperature/top_p in [0, 1], non-empty model id,
         positive integer max_tokens (task 10.2 validation rules)."""
         admin = make_user("PortalAdmin")
         body = dict(VALID_CONFIG, **overrides)

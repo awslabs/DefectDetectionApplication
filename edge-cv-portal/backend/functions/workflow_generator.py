@@ -22,7 +22,7 @@ Design (design.md section 9):
 - Tool output is parsed by the Workflow_Serializer and then run through the
   Workflow_Validator; the definition plus findings are returned for canvas
   rendering and review - never auto-saved or deployed (10.3).
-- Bedrock_Configuration (model id, region, inference params, timeout <= 60 s)
+- Bedrock_Configuration (model id, region, inference params, timeout <= 240 s)
   is read from the existing portal settings storage; the Lambda invokes with
   a client-side timeout equal to the configured value, and invocation
   failures/timeouts are returned as descriptive errors (10.6, 10.7).

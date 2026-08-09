@@ -24,7 +24,7 @@ Converse API). Covered:
    regenerate; a client-provided current_definition is authoritative.
 4. Timeout and invocation failure (10.7): a read timeout returns 504
    GENERATION_TIMEOUT carrying the configured timeout; the configured
-   timeout is clamped to at most 60 seconds when building the client;
+   timeout is clamped to at most 240 seconds when building the client;
    ClientError returns 502 - all without touching the session.
 
 _Requirements: 10.2, 10.5, 10.7_
@@ -537,15 +537,15 @@ class TestTimeoutAndFailure:
         assert sessions_for(gen_env, ctx.usecase_id) == []
         assert s3_keys_for(gen_env, ctx.usecase_id) == []
 
-    def test_configured_timeout_is_clamped_to_60_seconds(self, gen_env,
-                                                         bedrock, ctx):
-        """A stored timeout above the 60-second maximum is clamped before
-        the client is built (Requirement 10.7: at most 60 seconds)."""
+    def test_configured_timeout_is_clamped_to_240_seconds(self, gen_env,
+                                                          bedrock, ctx):
+        """A stored timeout above the 240-second maximum is clamped before
+        the client is built (Requirement 10.7: at most 240 seconds)."""
         put_bedrock_config(gen_env, timeout_seconds=300)
 
         status, _ = generate(gen_env, ctx, "Camera to capture")
         assert status == 200
-        assert bedrock.client_requests[-1][1] == 60
+        assert bedrock.client_requests[-1][1] == 240
 
     def test_invocation_client_error_returns_502(self, gen_env, bedrock, ctx):
         """A Bedrock invocation failure yields 502 with the Bedrock error

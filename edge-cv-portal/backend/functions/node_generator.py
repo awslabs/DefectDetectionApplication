@@ -50,7 +50,7 @@ workflow_generator.py:
 - Bedrock_Configuration handling is reused verbatim from
   workflow_generator.get_bedrock_configuration(): model id, region, and
   inference parameters from the portal settings table, invocation timeout
-  clamped to at most 60 seconds, cached bedrock-runtime client with a
+  clamped to at most 240 seconds, cached bedrock-runtime client with a
   client-side read timeout and retries disabled (2.7).
 - Follow-up prompts include the current generated source and instruct
   modification rather than regeneration (2.4).
@@ -100,7 +100,7 @@ from workflow_core.scaffold import (
 
 # Bedrock_Configuration and client handling are shared with the workflow
 # generator (workflow_generator.py lives in the same Lambda bundle):
-# settings-table configuration, timeout clamped <= 60 s, cached client
+# settings-table configuration, timeout clamped <= 240 s, cached client
 # with a client-side read timeout and no retries (Requirement 2.7).
 from workflow_generator import get_bedrock_client, get_bedrock_configuration
 

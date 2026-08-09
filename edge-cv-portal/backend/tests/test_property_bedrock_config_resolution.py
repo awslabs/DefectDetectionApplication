@@ -11,7 +11,7 @@ every number), explicit nulls for the sampling parameters, junk
 shape, or no stored item at all - `bedrock_common.get_bedrock_configuration()`
 SHALL return the defaults overridden by the present non-null stored values,
 with an explicitly-null `temperature`/`top_p` left unset, and a resolved
-`timeout_seconds` that is an integer in [1, 60], equal to 60 whenever the
+`timeout_seconds` that is an integer in [1, 240], equal to 240 whenever the
 stored value is missing or uninterpretable.
 
 **Validates: Requirements 4.1, 4.4, 4.6, 4.7**
@@ -199,8 +199,8 @@ def test_bedrock_configuration_resolution(config_env, case):
     """For any stored configuration item, the resolved configuration equals
     the defaults overridden by the present non-null stored values, with
     explicit-null sampling parameters unset, and a timeout that is an
-    integer in [1, 60], equal to 60 whenever the stored value is missing or
-    uninterpretable (Requirements 4.1, 4.4, 4.6, 4.7)."""
+    integer in [1, 240], equal to 240 whenever the stored value is missing
+    or uninterpretable (Requirements 4.1, 4.4, 4.6, 4.7)."""
     shape, stored = case
     apply_store_state(config_env, shape, stored)
 
@@ -239,13 +239,13 @@ def test_bedrock_configuration_resolution(config_env, case):
                 f"{key}: unstored sampling parameter must stay unset, "
                 f"got {resolved[key]!r}")
 
-    # Timeout: always an integer in [1, 60]; 60 whenever the stored value
+    # Timeout: always an integer in [1, 240]; 240 whenever the stored value
     # is missing or uninterpretable; otherwise the interpreted integer
-    # clamped to [1, 60] (Requirement 4.4).
+    # clamped to [1, 240] (Requirement 4.4).
     timeout = resolved["timeout_seconds"]
     assert isinstance(timeout, int) and not isinstance(timeout, bool), (
         f"timeout must resolve to an int, got {timeout!r}")
-    assert 1 <= timeout <= 60, f"timeout must be in [1, 60], got {timeout!r}"
+    assert 1 <= timeout <= 240, f"timeout must be in [1, 240], got {timeout!r}"
 
     raw = native.get("timeout_seconds")
     try:
@@ -253,10 +253,10 @@ def test_bedrock_configuration_resolution(config_env, case):
     except (TypeError, ValueError):
         interpreted = None
     if raw is None or interpreted is None:
-        assert timeout == 60, (
+        assert timeout == 240, (
             f"missing/uninterpretable stored timeout {raw!r} must resolve "
-            f"to 60, got {timeout}")
+            f"to 240, got {timeout}")
     else:
-        assert timeout == max(1, min(interpreted, 60)), (
+        assert timeout == max(1, min(interpreted, 240)), (
             f"stored timeout {raw!r} must resolve to its clamped integer "
             f"value, got {timeout}")

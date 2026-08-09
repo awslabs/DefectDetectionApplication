@@ -418,9 +418,9 @@ class TestBedrockFailures:
         assert bedrock.client_requests[-1][1] == 45
 
     def test_read_timeout_echoes_clamped_timeout(self, ca, bedrock, ctx):
-        """A stored timeout above the 60-second maximum is clamped before
+        """A stored timeout above the 240-second maximum is clamped before
         the client is built, and the 504 echoes the clamped value
-        (Requirement 5.2: the applied timeout, at most 60 seconds)."""
+        (Requirement 5.2: the applied timeout, at most 240 seconds)."""
         put_bedrock_config(ca, timeout_seconds=300)
         bedrock.client.converse.side_effect = ReadTimeoutError(
             endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com")
@@ -429,8 +429,8 @@ class TestBedrockFailures:
             ca, ctx.user, request_body(ctx.usecase_id))
         assert status == 504
         assert payload["error"]["code"] == "GENERATION_TIMEOUT"
-        assert payload["error"]["details"]["timeout_seconds"] == 60
-        assert bedrock.client_requests[-1][1] == 60
+        assert payload["error"]["details"]["timeout_seconds"] == 240
+        assert bedrock.client_requests[-1][1] == 240
 
     def test_response_without_tool_call_returns_422_no_code(self, ca,
                                                             bedrock, ctx):

@@ -661,7 +661,7 @@ export class NodeDesignerStack extends cdk.Stack {
 
     // node_generator.py - Bedrock Converse scaffold-generation sessions
     // (mirrors workflow_generator.py: settings-table Bedrock_Configuration,
-    // clamped <= 60 s timeout, forced tool use).
+    // clamped <= 240 s timeout, forced tool use).
     this.nodeGeneratorHandler = new lambda.Function(this, 'NodeGeneratorHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'node_generator.handler',
@@ -672,8 +672,8 @@ export class NodeDesignerStack extends cdk.Stack {
         CODE_VERSION: '2026-02-17-node-generator-async',
       },
       layers: [sharedLayer, workflowCoreLayer],
-      // Bedrock invocation timeout is configurable up to 60s; leave headroom
-      timeout: cdk.Duration.seconds(90),
+      // Bedrock invocation timeout is configurable up to 240s; leave headroom
+      timeout: cdk.Duration.seconds(270),
     });
     // Async start/poll generation: the start routes Event-invoke this same
     // function (the worker path runs the Bedrock turn outside the API

@@ -4,7 +4,7 @@
  * Lets a PortalAdmin configure the Amazon Bedrock model used by the
  * Workflow_Generator: model identifier, region, inference parameters
  * (max tokens, temperature, top_p), and the invocation timeout
- * (at most 60 seconds, Requirement 10.7). Users without the PortalAdmin
+ * (at most 240 seconds, Requirement 10.7). Users without the PortalAdmin
  * role see an access notice instead of the form.
  */
 import { useEffect, useState } from 'react';
@@ -25,7 +25,7 @@ import { apiService } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import { getErrorMessage } from '../utils/errorHandling';
 
-export const MAX_BEDROCK_TIMEOUT_SECONDS = 60;
+export const MAX_BEDROCK_TIMEOUT_SECONDS = 240;
 
 interface BedrockFormState {
   model_id: string;
