@@ -50,12 +50,12 @@ MAX_DATASET_BYTES = 500 * MB
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 
-# Catalog-conformant definition: camera_source -> capture with every
+# Catalog-conformant definition: csi_camera_source -> capture with every
 # required parameter set (validates clean, compiles for x86_64).
 VALID_DEFINITION = {
     "schemaVersion": 1,
     "nodes": [
-        {"id": "n1", "type": "camera_source",
+        {"id": "n1", "type": "csi_camera_source",
          "position": {"x": 100, "y": 100}, "parameters": {}},
         {"id": "n2", "type": "capture",
          "position": {"x": 350, "y": 100},
@@ -73,7 +73,7 @@ VALID_DEFINITION = {
 INVALID_DEFINITION = {
     "schemaVersion": 1,
     "nodes": [
-        {"id": "n1", "type": "camera_source",
+        {"id": "n1", "type": "csi_camera_source",
          "position": {"x": 100, "y": 100}, "parameters": {}},
         {"id": "n2", "type": "capture",
          "position": {"x": 350, "y": 100}, "parameters": {}},
@@ -978,11 +978,11 @@ from test_custom_node_types import make_declaration  # noqa: E402
 
 
 def custom_definition(type_id):
-    """camera_source -> <custom type> (VideoFrames in/out) -> capture."""
+    """csi_camera_source -> <custom type> (VideoFrames in/out) -> capture."""
     return {
         "schemaVersion": 1,
         "nodes": [
-            {"id": "n1", "type": "camera_source",
+            {"id": "n1", "type": "csi_camera_source",
              "position": {"x": 100, "y": 100}, "parameters": {}},
             {"id": "n2", "type": type_id,
              "position": {"x": 350, "y": 100}, "parameters": {"radius": 5}},

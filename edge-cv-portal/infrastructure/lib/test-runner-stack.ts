@@ -368,6 +368,18 @@ export class TestRunnerStack extends cdk.Stack {
               name: 'STAGED_MODELS',
               value: sfn.JsonPath.stringAt('$.staged_models_json'),
             },
+            {
+              // Best-effort staging fallbacks [{nodeId, modelName,
+              // reason}, ...]: the model inference nodes whose artifacts
+              // could not be staged (12.16, 12.17). The harness runs
+              // these nodes with the injected simulated inference
+              // outcome and reports the fallback reason in the node's
+              // results (harness/harness.py parse_staging_fallbacks).
+              // Always pre-serialized by the start endpoint ("[]" when
+              // every model staged).
+              name: 'STAGING_FALLBACKS',
+              value: sfn.JsonPath.stringAt('$.staging_fallbacks_json'),
+            },
           ],
         },
       ],

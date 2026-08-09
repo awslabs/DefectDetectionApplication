@@ -1,0 +1,140 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`EventBridge wiring (Requirements 3.1, 3.5, 5.1, 6.9) EventBridge rules stack snapshot 1`] = `
+{
+  "dda-portal-build-dispatcher-tick": {
+    "Properties": {
+      "Description": "Runs the build dispatcher tick every minute",
+      "Name": "dda-portal-build-dispatcher-tick",
+      "ScheduleExpression": "rate(1 minute)",
+      "State": "ENABLED",
+      "Targets": [
+        {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BuildDispatcherHandlerD50EBD7C",
+              "Arn",
+            ],
+          },
+          "Id": "Target0",
+        },
+      ],
+    },
+    "Type": "AWS::Events::Rule",
+  },
+  "dda-portal-build-instance-state": {
+    "Properties": {
+      "Description": "Delivers EC2 instance state-change notifications to build_events.py",
+      "EventPattern": {
+        "detail-type": [
+          "EC2 Instance State-change Notification",
+        ],
+        "source": [
+          "aws.ec2",
+        ],
+      },
+      "Name": "dda-portal-build-instance-state",
+      "State": "ENABLED",
+      "Targets": [
+        {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BuildEventsHandlerC22E41E0",
+              "Arn",
+            ],
+          },
+          "Id": "Target0",
+        },
+      ],
+    },
+    "Type": "AWS::Events::Rule",
+  },
+  "dda-portal-build-phase-events": {
+    "Properties": {
+      "Description": "Delivers dda.portal.builds agent phase events to build_events.py",
+      "EventPattern": {
+        "source": [
+          "dda.portal.builds",
+        ],
+      },
+      "Name": "dda-portal-build-phase-events",
+      "State": "ENABLED",
+      "Targets": [
+        {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BuildEventsHandlerC22E41E0",
+              "Arn",
+            ],
+          },
+          "Id": "Target0",
+        },
+      ],
+    },
+    "Type": "AWS::Events::Rule",
+  },
+  "dda-portal-build-spot-interruption": {
+    "Properties": {
+      "Description": "Delivers EC2 spot interruption warnings to build_events.py",
+      "EventPattern": {
+        "detail-type": [
+          "EC2 Spot Instance Interruption Warning",
+        ],
+        "source": [
+          "aws.ec2",
+        ],
+      },
+      "Name": "dda-portal-build-spot-interruption",
+      "State": "ENABLED",
+      "Targets": [
+        {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BuildEventsHandlerC22E41E0",
+              "Arn",
+            ],
+          },
+          "Id": "Target0",
+        },
+      ],
+    },
+    "Type": "AWS::Events::Rule",
+  },
+  "dda-portal-build-ssm-command-status": {
+    "Properties": {
+      "Description": "Delivers SSM command status changes to build_events.py",
+      "EventPattern": {
+        "detail": {
+          "status": [
+            "Cancelled",
+            "Failed",
+            "Success",
+            "TimedOut",
+          ],
+        },
+        "detail-type": [
+          "EC2 Command Status-change Notification",
+          "EC2 Command Invocation Status-change Notification",
+        ],
+        "source": [
+          "aws.ssm",
+        ],
+      },
+      "Name": "dda-portal-build-ssm-command-status",
+      "State": "ENABLED",
+      "Targets": [
+        {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BuildEventsHandlerC22E41E0",
+              "Arn",
+            ],
+          },
+          "Id": "Target0",
+        },
+      ],
+    },
+    "Type": "AWS::Events::Rule",
+  },
+}
+`;

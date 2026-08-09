@@ -20,6 +20,7 @@ import { apiService } from '../services/api';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 import { useAuth } from '../contexts/AuthContext';
 import BedrockConfigurationSettings from '../components/BedrockConfigurationSettings';
+import BuildInfrastructureSettings from '../components/BuildInfrastructureSettings';
 
 interface DataAccount {
   data_account_id: string;
@@ -410,6 +411,14 @@ export default function Settings() {
                     id: 'bedrock-configuration',
                     label: 'Bedrock Configuration',
                     content: <BedrockConfigurationSettings />,
+                  },
+                  // Build infrastructure configuration
+                  // (portal-build-fleet-and-workflow-gates Req 9.1, 9.5):
+                  // changes are PortalAdmin-only (Req 9.6).
+                  {
+                    id: 'build-infrastructure',
+                    label: 'Build Infrastructure',
+                    content: <BuildInfrastructureSettings />,
                   },
                 ]
               : []),

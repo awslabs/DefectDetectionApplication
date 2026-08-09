@@ -45,6 +45,8 @@ from workflow_engine.camera_binding import (
 )
 from workflow_engine.discovery import (
     STATUS_INVALID,
+    STATUS_REMOVED,
+    STATUS_SUPERSEDED,
     WORKFLOWS_ROOT,
     DiscoveredArtifactSet,
 )
@@ -64,6 +66,18 @@ REASON_BINDINGS_UNAVAILABLE = "bindings unavailable"
 def registration_id_for(workflow_id: str, version: str) -> str:
     """Deterministic registration id so rescans upsert instead of duplicating."""
     return f"{workflow_id}:{version}"
+
+
+def _numeric_version(version: str) -> Optional[int]:
+    """The version as an int when it parses as one, else None.
+
+    Only integer-parsing version directories participate in supersession
+    ordering; non-numeric directories (manual tinkering) never supersede
+    and are never superseded."""
+    try:
+        return int(version)
+    except (TypeError, ValueError):
+        return None
 
 
 class WorkflowWatcher:
@@ -111,6 +125,14 @@ class WorkflowWatcher:
         # registration id -> ResolutionResult for registrations whose
         # bindings resolved (substituted document + adapter assignments).
         self._binding_resolutions: Dict[str, ResolutionResult] = {}
+        # Additive registration-change listeners (trigger-activation-
+        # runtime Requirement 6.1): zero-argument callables invoked after
+        # every ``sync_once`` reconciliation — which includes removed/
+        # superseded marking — so the TriggerSubscriptionManager can diff
+        # the
+        # registered trigger-driven artifact sets. Each listener is
+        # contained: a failure never disturbs the scan or LocalServer.
+        self.registrations_listeners: List[Callable[[], None]] = []
 
     # ------------------------------------------------------------------
     # Public interface
@@ -175,28 +197,83 @@ class WorkflowWatcher:
 
         Returns the registration ids that were created or updated.
         Safe to call from any thread; each call uses its own session.
+
+        Stale-registration reconciliation (stale-workflow-registrations
+        bugfix): among the integer-parsing version directories of one
+        workflow only the HIGHEST is the deployed one — it validates and
+        registers exactly as before, while every lower numeric version is
+        upserted as ``superseded`` (not runnable, filtered from the
+        default listing). Non-numeric version directories never
+        participate in supersession and register as before. Rows whose
+        artifact directory disappeared are marked ``removed``. A
+        directory that reappears (component restart re-copy, rollback)
+        goes back through this normal path, so non-active rows flip back
+        to ``registered``/``invalid``/``superseded`` per the current disk
+        state. Rows and executions are never deleted.
         """
         artifact_sets = discovery.scan_workflow_root(self._root)
         touched: List[str] = []
         session = self._session_factory()
         try:
             seen_ids = set()
+            by_workflow: Dict[str, List[DiscoveredArtifactSet]] = {}
             for artifact_set in artifact_sets:
-                registration_id = registration_id_for(
-                    artifact_set.workflow_id, artifact_set.version
+                by_workflow.setdefault(artifact_set.workflow_id, []).append(
+                    artifact_set
                 )
-                seen_ids.add(registration_id)
-                if self._register(session, registration_id, artifact_set):
-                    touched.append(registration_id)
 
-            touched.extend(self._invalidate_removed(session, seen_ids))
+            for sets in by_workflow.values():
+                numeric = [
+                    s for s in sets if _numeric_version(s.version) is not None
+                ]
+                highest = (
+                    max(numeric, key=lambda s: _numeric_version(s.version))
+                    if numeric
+                    else None
+                )
+                for artifact_set in sets:
+                    registration_id = registration_id_for(
+                        artifact_set.workflow_id, artifact_set.version
+                    )
+                    seen_ids.add(registration_id)
+                    is_superseded = (
+                        highest is not None
+                        and artifact_set is not highest
+                        and _numeric_version(artifact_set.version) is not None
+                    )
+                    if is_superseded:
+                        changed = self._mark_superseded(
+                            session, registration_id, artifact_set,
+                            highest.version,
+                        )
+                    else:
+                        changed = self._register(
+                            session, registration_id, artifact_set
+                        )
+                    if changed:
+                        touched.append(registration_id)
+
+            touched.extend(self._mark_removed(session, seen_ids))
             session.commit()
         except Exception:
             session.rollback()
             raise
         finally:
             session.close()
+        self._notify_registrations_listeners()
         return touched
+
+    def _notify_registrations_listeners(self) -> None:
+        """Invoke the additive registration-change listeners, each
+        contained so one failing listener never affects the others, the
+        scan cycle, or LocalServer."""
+        for listener in list(self.registrations_listeners):
+            try:
+                listener()
+            except Exception:  # noqa: BLE001 - listener isolation
+                logger.exception(
+                    "Workflow registrations listener failed; continuing"
+                )
 
     # ------------------------------------------------------------------
     # Registration
@@ -338,19 +415,80 @@ class WorkflowWatcher:
             logger.exception("Local camera inventory read failed")
             return {}
 
-    def _invalidate_removed(self, session, seen_ids) -> List[str]:
-        """Mark registrations whose artifacts disappeared as invalid."""
+    def _mark_superseded(
+        self,
+        session,
+        registration_id: str,
+        artifact_set: DiscoveredArtifactSet,
+        highest_version: str,
+    ) -> bool:
+        """Upsert a lower-than-highest numeric version as ``superseded``.
+
+        Artifact validation is skipped — a superseded version is not
+        runnable regardless of its artifact state. Returns True when the
+        row changed. The row (and its executions) is preserved; a later
+        scan where this version is the highest again flips it back to an
+        active status through the normal ``_register`` path.
+        """
+        reason = f"superseded by version {highest_version}"
+        with self._reasons_lock:
+            self._invalid_reasons[registration_id] = reason
+            self._binding_resolutions.pop(registration_id, None)
+
+        row = session.get(WorkflowRegistration, registration_id)
+        if row is None:
+            session.add(
+                WorkflowRegistration(
+                    id=registration_id,
+                    workflow_id=artifact_set.workflow_id,
+                    version=artifact_set.version,
+                    arch="unknown",
+                    artifact_path=artifact_set.path,
+                    status=STATUS_SUPERSEDED,
+                    registered_at=int(time.time()),
+                )
+            )
+            changed = True
+        else:
+            changed = (
+                row.status != STATUS_SUPERSEDED
+                or row.artifact_path != artifact_set.path
+            )
+            if changed:
+                row.artifact_path = artifact_set.path
+                row.status = STATUS_SUPERSEDED
+                row.registered_at = int(time.time())
+
+        if changed:
+            logger.info(
+                "Workflow registration %s marked superseded: %s",
+                registration_id,
+                reason,
+            )
+        return changed
+
+    def _mark_removed(self, session, seen_ids) -> List[str]:
+        """Mark registrations whose artifact directory disappeared as
+        ``removed`` (from any prior status, idempotently).
+
+        This is what the fixed recipe's Shutdown cleanup produces on
+        component replace/remove. The row and its execution history are
+        never deleted; a reappearing directory flips the registration
+        back to an active status on the next scan."""
         touched: List[str] = []
+        reason = "Artifact directory was removed"
         rows = session.query(WorkflowRegistration).all()
         for row in rows:
-            if row.id in seen_ids or row.status == STATUS_INVALID:
+            if row.id in seen_ids:
                 continue
-            reason = "Artifact directory was removed"
-            row.status = STATUS_INVALID
             with self._reasons_lock:
                 self._invalid_reasons[row.id] = reason
-            logger.error(
-                "Workflow registration %s marked invalid: %s", row.id, reason
+                self._binding_resolutions.pop(row.id, None)
+            if row.status == STATUS_REMOVED:
+                continue  # already retired; no touched-churn
+            row.status = STATUS_REMOVED
+            logger.info(
+                "Workflow registration %s marked removed: %s", row.id, reason
             )
             touched.append(row.id)
         return touched

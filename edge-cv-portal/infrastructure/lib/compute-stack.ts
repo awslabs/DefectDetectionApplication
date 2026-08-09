@@ -1702,8 +1702,8 @@ export class ComputeStack extends cdk.Stack {
         CODE_VERSION: '2025-01-25-workflow-generator',
       },
       layers: [sharedLayer, workflowCoreLayer],
-      // Bedrock invocation timeout is configurable up to 60s; leave headroom
-      timeout: cdk.Duration.seconds(90),
+      // Bedrock invocation timeout is configurable up to 240s; leave headroom
+      timeout: cdk.Duration.seconds(270),
     });
 
     // Grant the generator permission to invoke the configured Bedrock model via

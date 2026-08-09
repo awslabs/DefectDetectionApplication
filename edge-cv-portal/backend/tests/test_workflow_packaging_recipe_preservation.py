@@ -107,11 +107,21 @@ def expected_recipe_modulo_dependencies(workflow_id, workflow_version,
         manifests.append({
             "Platform": platform,
             "Lifecycle": {
+                # The Run script opens with the stale-workflow-registrations
+                # (2.1) cleanup prefix: best-effort rm -rf of the workflow's
+                # staging root (joined by ';' so failure never blocks
+                # staging) before the mandatory mkdir && cp staging chain.
+                # Deliberately NO Shutdown step: Greengrass runs Shutdown
+                # ~10ms after a one-shot Run exits 0 (verified on device),
+                # which deleted the freshly staged artifacts on every
+                # deploy when the first fix tried a Shutdown cleanup.
                 "Run": {
                     "Script": (
+                        "rm -rf /aws_dda/workflows/{wf} 2>/dev/null; "
                         "mkdir -p {install} && cp -r "
                         "{{artifacts:decompressedPath}}/workflow-{arch}/. "
-                        "{install}/".format(install=install_dir, arch=arch)),
+                        "{install}/".format(wf=workflow_id,
+                                            install=install_dir, arch=arch)),
                     "Timeout": 300,
                     "requiresPrivilege": True,
                 },

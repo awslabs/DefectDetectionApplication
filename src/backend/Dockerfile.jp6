@@ -289,9 +289,55 @@ RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
             ${VLLM_SPEC} "torch==2.8.0" "numpy>=1.26,<2" "transformers>=4.51.1,<5" && \
         if [ -n "$VLLM_INDEX_URL" ]; then \
             pip install --no-cache-dir --index-url ${VLLM_INDEX_URL} "triton==3.6.0"; \
+            # torchvision is required by transformers' AutoVideoProcessor for
+            # vision-language models (Qwen2.5-VL preprocessing); without it
+            # every VL model load fails on-device with "AutoVideoProcessor
+            # requires the Torchvision library" (observed on the JP6 Orin AGX,
+            # edge-vlm-image-inference rollout). Pinned to 0.23.0 — the
+            # torchvision release paired with torch 2.8.0 (a floating install
+            # resolves 0.26.x, which requires torch 2.9 and breaks at import
+            # in _meta_registrations). --no-deps for the same reason as the
+            # torch step: the Jetson wheel must not be displaced by PyPI. \
+            pip install --no-cache-dir --index-url ${VLLM_INDEX_URL} --no-deps "torchvision==0.23.0"; \
         fi; \
     else \
         echo "vLLM layer skipped (VLLM_ENABLE=${VLLM_ENABLE}, VLLM_SPEC='${VLLM_SPEC}')"; \
+    fi
+# ── VL (vision-language) model enablement fixes ─────────────────────────────
+# (edge-vlm-image-inference rollout; every fix below was verified live on the
+# JP6 Orin AGX by hot-patching the running container until a Qwen2.5-VL-7B
+# AWQ load + image generate succeeded end-to-end. Text-only models never
+# exercise these paths, which is why the gaps went unnoticed until now.)
+#   1. Triton JIT toolchain wiring: loading a VL model makes triton JIT-compile
+#      its cuda_utils shim, which needs cuda.h on its include path and a ptxas
+#      binary in its backend bin dir. The Jetson triton wheel ships neither;
+#      both exist in the image's CUDA 12.6 toolkit — link them in. Without
+#      this every VL load fails with "fatal error: cuda.h: No such file or
+#      directory" and then "Cannot find ptxas".
+#   2. ViT attention backend: vllm 0.9.3's get_vit_attn_backend hardcodes
+#      XFORMERS when flash-attn is unavailable, but no cp310 CUDA xformers
+#      wheel exists for Jetson (the index's wheel is cp312-built; its CUDA
+#      extensions cannot load, failing with "No operator found for
+#      memory_efficient_attention_forward"). Patch the two XFORMERS fallback
+#      selections to TORCH_SDPA — qwen2_5_vl.py fully supports SDPA, and the
+#      DECODER attention is unaffected (it uses the wheel's bundled
+#      vllm-flash-attn, the same path text-only models use today). The sed is
+#      guarded: zero replacements fail the build so a future vllm bump that
+#      changes the file is caught here instead of on-device.
+RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
+        TRITON_NV=/usr/local/lib/python3.10/dist-packages/triton/backends/nvidia && \
+        CUDA_INC=$(find /usr/local/cuda*/targets/aarch64-linux/include -name cuda.h | head -1) && \
+        PTXAS=$(find /usr/local/cuda*/bin -name ptxas | head -1) && \
+        test -n "$CUDA_INC" && test -n "$PTXAS" && \
+        mkdir -p ${TRITON_NV}/include ${TRITON_NV}/bin && \
+        ln -sf "$CUDA_INC" ${TRITON_NV}/include/cuda.h && \
+        ln -sf "$PTXAS" ${TRITON_NV}/bin/ptxas && \
+        VISION_PY=/usr/local/lib/python3.10/dist-packages/vllm/model_executor/models/vision.py && \
+        grep -q "selected_backend = _Backend.XFORMERS" "$VISION_PY" && \
+        sed -i "s/selected_backend = _Backend.XFORMERS/selected_backend = _Backend.TORCH_SDPA  # jetson: no cp310 CUDA xformers wheel; SDPA verified on-device/g" "$VISION_PY" && \
+        grep -q "jetson: no cp310 CUDA xformers wheel" "$VISION_PY"; \
+    else \
+        echo "VL enablement fixes skipped (VLLM_ENABLE=${VLLM_ENABLE}, VLLM_SPEC='${VLLM_SPEC}')"; \
     fi
 # Post-install verification (gated to mirror the install condition):
 #   1. the installed vllm distribution is exactly ${VLLM_SPEC}'s version —
@@ -317,6 +363,9 @@ RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
         python3 -c "import triton; print('triton', triton.__version__, 'OK (vLLM CUDA-path kernel compiler)')" && \
         python3 -c "import os, torch; assert torch.version.cuda, 'torch is CPU-only (torch.version.cuda is None)'; lib = os.path.join(os.path.dirname(torch.__file__), 'lib', 'libtorch_cuda.so'); assert os.path.exists(lib), 'libtorch_cuda.so missing: ' + lib; print('torch', torch.__version__, 'CUDA', torch.version.cuda, 'OK')" && \
         python3 -c "import numpy, cv2, gi, dlr, fastapi, sqlalchemy, awscrt.mqtt; print('app deps OK')" && \
+        python3 -c "import torch, torchvision; from torchvision.ops import nms; assert torchvision.__version__.startswith('0.23'), 'torchvision %s not the torch-2.8 pair (0.23.x)' % torchvision.__version__; print('torchvision', torchvision.__version__, 'OK (VL preprocessing)')" && \
+        python3 -c "import os; nv='/usr/local/lib/python3.10/dist-packages/triton/backends/nvidia'; assert os.path.exists(nv+'/include/cuda.h'), 'triton cuda.h link missing'; assert os.path.exists(nv+'/bin/ptxas'), 'triton ptxas link missing'; print('triton JIT toolchain links OK')" && \
+        python3 -c "src=open('/usr/local/lib/python3.10/dist-packages/vllm/model_executor/models/vision.py').read(); assert 'selected_backend = _Backend.XFORMERS' not in src, 'ViT XFORMERS fallback not patched to TORCH_SDPA'; print('ViT SDPA patch OK')" && \
         pip check; \
     else \
         echo "vLLM verification skipped (VLLM_ENABLE=${VLLM_ENABLE}, VLLM_SPEC='${VLLM_SPEC}')"; \

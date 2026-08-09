@@ -2,7 +2,7 @@
  * Component tests for the Bedrock_Configuration settings section
  * (workflow-manager Requirement 10.6): the form is visible and editable
  * only for PortalAdmin, loads the stored configuration, validates the
- * timeout bound (<= 60 seconds, Requirement 10.7) client-side, and
+ * timeout bound (<= 240 seconds, Requirement 10.7) client-side, and
  * offers the model identifier as a dropdown of invokable models (with a
  * free-text fallback when the model list is unavailable).
  */
@@ -46,7 +46,7 @@ beforeEach(() => {
   getBedrockConfiguration.mockResolvedValue({
     bedrock_configuration: STORED_CONFIG,
     defaults: {},
-    max_timeout_seconds: 60,
+    max_timeout_seconds: 240,
   });
   getBedrockModels.mockResolvedValue({
     models: MODEL_OPTIONS,
@@ -164,18 +164,18 @@ describe('BedrockConfigurationSettings', () => {
     expect(createWrapper(container).findSelect()).toBeNull();
   });
 
-  it('rejects a timeout above 60 seconds without calling the API (Requirement 10.7)', async () => {
+  it('rejects a timeout above 240 seconds without calling the API (Requirement 10.7)', async () => {
     setAuthRole('PortalAdmin');
     render(<BedrockConfigurationSettings />);
     await waitFor(() => {
       expect(screen.getByLabelText('Timeout seconds')).toHaveValue(60);
     });
 
-    fireEvent.change(screen.getByLabelText('Timeout seconds'), { target: { value: '61' } });
+    fireEvent.change(screen.getByLabelText('Timeout seconds'), { target: { value: '241' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
 
     expect(
-      await screen.findByText('Timeout must be an integer between 1 and 60 seconds'),
+      await screen.findByText('Timeout must be an integer between 1 and 240 seconds'),
     ).toBeInTheDocument();
     expect(updateBedrockConfiguration).not.toHaveBeenCalled();
   });
@@ -209,7 +209,7 @@ describe('BedrockConfigurationSettings', () => {
     getBedrockConfiguration.mockResolvedValue({
       bedrock_configuration: { ...STORED_CONFIG, temperature: null, top_p: null },
       defaults: {},
-      max_timeout_seconds: 60,
+      max_timeout_seconds: 240,
     });
     render(<BedrockConfigurationSettings />);
 

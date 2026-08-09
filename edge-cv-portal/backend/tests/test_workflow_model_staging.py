@@ -117,7 +117,7 @@ class FakeStepFunctions:
 # (one model shared is exercised separately). start_test_run does not
 # validate, so the raw JSON shape is all that matters here.
 def model_definition(*inference_nodes):
-    nodes = [{"id": "src", "type": "camera_source",
+    nodes = [{"id": "src", "type": "csi_camera_source",
               "position": {"x": 0, "y": 0}, "parameters": {}}]
     connections = []
     for index, (node_id, model_name) in enumerate(inference_nodes):
@@ -629,7 +629,7 @@ class TestStartRunManifestPassing:
             self, staging_env, ctx, monkeypatch):
         definition = {
             "schemaVersion": 1,
-            "nodes": [{"id": "src", "type": "camera_source",
+            "nodes": [{"id": "src", "type": "csi_camera_source",
                        "position": {"x": 0, "y": 0}, "parameters": {}}],
             "connections": [],
         }

@@ -14,6 +14,8 @@ Argument templates use ``{placeholder}`` tokens resolved at compile time:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .models import (
     ARCH_ARM64_JP4,
     ARCH_ARM64_JP5,
@@ -30,6 +32,7 @@ from .models import (
     CATEGORY_OUTPUT,
     CATEGORY_POST_PROCESSING,
     CATEGORY_PREPROCESSING,
+    CATEGORY_TRIGGER,
     GstMapping,
     NodeTypeDescriptor,
     ParameterDescriptor,
@@ -169,7 +172,9 @@ CSI_CAMERA_SOURCE = NodeTypeDescriptor(
     type_id="csi_camera_source",
     category=CATEGORY_INPUT,
     display_name="CSI Camera Input",
-    inputs=[],
+    # Optional inert activation scaffolding port (Requirement 7): edges
+    # into it are dropped at compile time; no activation binding exists.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
     outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
     parameters=[
         ParameterDescriptor("gain", "int", required=False, default=4,
@@ -215,7 +220,9 @@ ICAM_SOURCE = NodeTypeDescriptor(
     type_id="icam_source",
     category=CATEGORY_INPUT,
     display_name="ICAM",
-    inputs=[],
+    # Optional inert activation scaffolding port (Requirement 7): edges
+    # into it are dropped at compile time; no activation binding exists.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
     outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
     parameters=[
         ParameterDescriptor("device", "string", required=True, default="/dev/video0",
@@ -243,7 +250,9 @@ ARAVIS_CAMERA_SOURCE = NodeTypeDescriptor(
     type_id="aravis_camera_source",
     category=CATEGORY_INPUT,
     display_name="Aravis Camera Source",
-    inputs=[],
+    # Optional inert activation scaffolding port (Requirement 7): edges
+    # into it are dropped at compile time; no activation binding exists.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
     outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
     parameters=[
         ParameterDescriptor("camera_id", "string", required=True, default=None,
@@ -289,7 +298,9 @@ FOLDER_SOURCE = NodeTypeDescriptor(
     type_id="folder_source",
     category=CATEGORY_INPUT,
     display_name="Folder Source",
-    inputs=[],
+    # Optional inert activation scaffolding port (Requirement 7): edges
+    # into it are dropped at compile time; no activation binding exists.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
     outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
     parameters=[
         ParameterDescriptor("location", "string", required=True, default=None,
@@ -338,7 +349,7 @@ FOLDER_SOURCE = NodeTypeDescriptor(
 
 DIGITAL_INPUT = NodeTypeDescriptor(
     type_id="digital_input",
-    category=CATEGORY_INPUT,
+    category=CATEGORY_TRIGGER,
     display_name="Digital Input",
     inputs=[],
     outputs=[PortDescriptor("out", PORT_TYPE_EVENT_SIGNAL)],
@@ -1197,6 +1208,557 @@ CAPTURE = NodeTypeDescriptor(
 )
 
 # --------------------------------------------------------------------------
+# Unified input node (Requirements 3.1-3.5, 3.7, 3.9) — a single palette
+# entry whose ``source_kind`` selects which underlying frame source it
+# represents. It never compiles directly: the compiler's
+# ``expand_unified_inputs`` pre-pass rewrites each unified node into the
+# ``SOURCE_KIND_TO_SOURCE_TYPE[source_kind]`` source descriptor before
+# mapping resolution, so the unified ``type_id`` never reaches
+# ``mapping_for`` (see design C3/C5).
+# --------------------------------------------------------------------------
+
+#: Source-kind → source type map: the single source of truth for both the
+#: frontend parameter gating and the compiler expansion. Deliberately
+#: excludes ``digital_input`` — a trigger, not a selectable frame source
+#: (Requirement 3.3).
+SOURCE_KIND_TO_SOURCE_TYPE = {
+    "csi_camera": "csi_camera_source",
+    "icam": "icam_source",
+    "aravis_camera": "aravis_camera_source",
+    "folder": "folder_source",
+}
+
+#: The four retained source descriptors, keyed by their type id. Referenced
+#: directly (not via ``get_node_type``, which is defined below) so the union
+#: can be built at module import time.
+_UNIFIED_SOURCE_DESCRIPTORS = {
+    "csi_camera_source": CSI_CAMERA_SOURCE,
+    "icam_source": ICAM_SOURCE,
+    "aravis_camera_source": ARAVIS_CAMERA_SOURCE,
+    "folder_source": FOLDER_SOURCE,
+}
+
+
+def _unified_source_parameters():
+    """Union of the four source descriptors' parameters, required-relaxed.
+
+    Reuses the live ``ParameterDescriptor`` objects via
+    ``dataclasses.replace(p, required=False)`` so the unified node's
+    names/types/defaults/constraints cannot drift from the originals
+    (Requirement 3.4). Parameters are concatenated in source-kind order and
+    de-duplicated by name (only the identical ``gain``/``exposure`` collide,
+    between ``csi_camera_source`` and ``aravis_camera_source``; the first is
+    kept). The only overridden field is ``required`` → ``False``: V4 has no
+    notion of "required only when source_kind == X", so keeping the
+    underlying required flags would fail every unified node; genuine
+    required-ness is enforced at compile time by expansion into the
+    underlying descriptor, which retains ``required=True`` (see design C3/C5).
+    """
+    seen, params = {}, []
+    for type_id in SOURCE_KIND_TO_SOURCE_TYPE.values():
+        for p in _UNIFIED_SOURCE_DESCRIPTORS[type_id].parameters:
+            if p.name in seen:
+                continue
+            seen[p.name] = type_id
+            params.append(replace(p, required=False))
+    return params
+
+
+UNIFIED_INPUT = NodeTypeDescriptor(
+    type_id="unified_input",
+    category=CATEGORY_INPUT,
+    display_name="Input Source",
+    # Optional activation port: a CATEGORY_TRIGGER output may feed it, but
+    # the port is inert at compile time (Requirements 3.7, 3.9).
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
+    # Single video-frame output (Requirement 3.5).
+    outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
+    parameters=[
+        ParameterDescriptor("source_kind", "enum", required=True, default="folder",
+                            constraints={"values": list(SOURCE_KIND_TO_SOURCE_TYPE)},
+                            description="Which underlying source this input "
+                                        "represents.",
+                            examples=["folder", "csi_camera"]),
+        *_unified_source_parameters(),
+    ],
+    # Empty-but-present placeholder: the unified type never reaches
+    # ``mapping_for`` because ``expand_unified_inputs`` rewrites it into its
+    # underlying source before mapping resolution (design C3/C5).
+    mappings=[],
+    hardware_dependent=True,
+)
+
+# --------------------------------------------------------------------------
+# Subscribe trigger node types (trigger-activation-runtime Requirements
+# 1, 2) — executor-level triggers that fire a run activation when an
+# external event arrives: an MQTT message on a subscribed topic filter
+# or an OPC UA monitored-value change.
+# --------------------------------------------------------------------------
+
+
+def _trigger_policy_parameters():
+    """The shared per-trigger-node activation policy parameter family
+    (trigger-activation-runtime Requirements 1.3, 1.4, 2.5), built by one
+    helper so the ``mqtt_subscribe`` and ``opcua_subscribe`` descriptors
+    cannot drift: ``concurrency_policy`` with its gated ``queue_depth`` /
+    ``debounce_ms`` companions (``depends_on`` ``"name=value"`` form),
+    ``retry_limit`` (0 = retry forever), and ``priority`` (lower value =
+    higher priority; ties served FIFO by firing time)."""
+    return [
+        ParameterDescriptor("concurrency_policy", "enum", required=False,
+                            default="queue",
+                            constraints={"values": ["queue", "drop", "debounce"]},
+                            description="What happens when this trigger "
+                                        "fires while a run it activated is "
+                                        "still in flight or pending: queue "
+                                        "the firing (bounded by queue "
+                                        "depth), drop it, or debounce — "
+                                        "coalesce firings within the "
+                                        "debounce interval into one run "
+                                        "carrying the most recent trigger "
+                                        "context.",
+                            examples=["queue", "drop"]),
+        ParameterDescriptor("queue_depth", "int", required=False, default=10,
+                            constraints={"min": 1, "max": 1000},
+                            depends_on="concurrency_policy=queue",
+                            description="Maximum pending activations queued "
+                                        "for this trigger (1-1000); further "
+                                        "firings are discarded and logged, "
+                                        "e.g. 10.",
+                            examples=[10, 100]),
+        ParameterDescriptor("debounce_ms", "int", required=False, default=500,
+                            constraints={"min": 1, "max": 60000},
+                            depends_on="concurrency_policy=debounce",
+                            description="Trailing debounce interval in "
+                                        "milliseconds (1-60000): firings "
+                                        "within it coalesce into one "
+                                        "activation carrying the most "
+                                        "recent trigger context, e.g. 500.",
+                            examples=[500, 2000]),
+        ParameterDescriptor("retry_limit", "int", required=False, default=0,
+                            constraints={"min": 0, "max": 1000},
+                            description="Maximum automatic reconnect "
+                                        "attempts after the trigger's "
+                                        "connection drops (0-1000); 0 = "
+                                        "retry forever, e.g. 0.",
+                            examples=[0, 5]),
+        ParameterDescriptor("priority", "int", required=False, default=100,
+                            constraints={"min": 0, "max": 1000},
+                            description="Activation priority relative to "
+                                        "the workflow's other triggers "
+                                        "(0-1000); lower value = higher "
+                                        "priority, ties served in firing "
+                                        "order, e.g. 100.",
+                            examples=[100, 10]),
+    ]
+
+
+MQTT_SUBSCRIBE = NodeTypeDescriptor(
+    type_id="mqtt_subscribe",
+    category=CATEGORY_TRIGGER,
+    display_name="MQTT Subscribe",
+    inputs=[],
+    outputs=[PortDescriptor("out", PORT_TYPE_EVENT_SIGNAL)],
+    parameters=[
+        # Connection parameters mirror mqtt_publish field-for-field
+        # (trigger-activation-runtime Requirement 1.2): same names, types,
+        # defaults, and constraints, so the three transports (greengrass,
+        # aws_iot, plain broker) are configured exactly like publishing.
+        # broker_host is not statically required so a topic-only
+        # Greengrass config (greengrass=True) is not force-failed by the
+        # V4 required check; a mqtt_subscribe-specific validator check
+        # (V8) still rejects a config that supplies no target (no
+        # greengrass, no aws_iot, no host).
+        ParameterDescriptor("broker_host", "string", required=False, default=None,
+                            constraints={"min_length": 1},
+                            description="MQTT broker hostname or IP, e.g. "
+                                        "10.0.0.12 or broker.local.",
+                            examples=["10.0.0.12", "broker.local"]),
+        ParameterDescriptor("broker_port", "int", required=False, default=1883,
+                            constraints={"min": 1, "max": 65535},
+                            description="MQTT broker TCP port, e.g. 1883 "
+                                        "(plain MQTT) or 8883 (TLS).",
+                            examples=[1883, 8883]),
+        ParameterDescriptor("topic", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="Topic filter the trigger "
+                                        "subscribes to; a message arriving "
+                                        "on a matching topic starts a "
+                                        "workflow run, e.g. "
+                                        "factory/line1/trigger or "
+                                        "factory/+/trigger.",
+                            examples=["factory/line1/trigger",
+                                      "factory/+/trigger"]),
+        ParameterDescriptor("qos", "enum", required=False, default=0,
+                            constraints={"values": [0, 1, 2]},
+                            description="MQTT quality of service: 0 (at "
+                                        "most once), 1 (at least once), or "
+                                        "2 (exactly once; AWS IoT Core "
+                                        "supports up to 1).",
+                            examples=[0, 1]),
+        # Zero-config publishing through the device's Greengrass-managed
+        # MQTT: the Greengrass nucleus already holds the AWS IoT Core
+        # connection, so only the topic is needed — no broker host/port
+        # and no certificate file paths. Additive and off by default; the
+        # broker and aws_iot paths are unchanged when greengrass is off.
+        ParameterDescriptor("greengrass", "bool", required=False, default=False,
+                            constraints={},
+                            description="Publish through the device's "
+                                        "Greengrass-managed MQTT (the "
+                                        "Greengrass nucleus's AWS IoT Core "
+                                        "connection) instead of a plain "
+                                        "broker or your own AWS IoT "
+                                        "credentials. Zero configuration: "
+                                        "only the topic is required — no "
+                                        "broker host or port and no "
+                                        "certificate paths.",
+                            examples=[True]),
+        # AWS IoT Core publishing over mutual TLS. Certificates are
+        # referenced by file paths on the device (e.g. /greengrass/v2/...),
+        # never uploaded to the portal. The iot_* fields are shown in the
+        # config panel only while aws_iot is enabled (depends_on).
+        ParameterDescriptor("aws_iot", "bool", required=False, default=False,
+                            constraints={},
+                            description="Publish to AWS IoT Core over "
+                                        "mutual TLS instead of a plain MQTT "
+                                        "broker; enables the IoT thing name "
+                                        "and certificate path fields.",
+                            examples=[True]),
+        ParameterDescriptor("iot_thing_name", "string", required=False,
+                            default=None, constraints={"min_length": 1},
+                            depends_on="aws_iot",
+                            description="AWS IoT thing name used as the "
+                                        "MQTT client id, e.g. "
+                                        "dda-edge-device-01.",
+                            examples=["dda-edge-device-01"]),
+        # Amazon root CA path on the device.
+        ParameterDescriptor("iot_ca_cert_path", "string", required=False,
+                            default=None, constraints={"min_length": 1},
+                            depends_on="aws_iot",
+                            description="Path of the Amazon root CA "
+                                        "certificate on the device, e.g. "
+                                        "/greengrass/v2/rootCA.pem.",
+                            examples=["/greengrass/v2/rootCA.pem"]),
+        ParameterDescriptor("iot_client_cert_path", "string", required=False,
+                            default=None, constraints={"min_length": 1},
+                            depends_on="aws_iot",
+                            description="Path of the device client "
+                                        "certificate on the device, e.g. "
+                                        "/greengrass/v2/thingCert.crt.",
+                            examples=["/greengrass/v2/thingCert.crt"]),
+        ParameterDescriptor("iot_private_key_path", "string", required=False,
+                            default=None, constraints={"min_length": 1},
+                            depends_on="aws_iot",
+                            description="Path of the device private key on "
+                                        "the device, e.g. "
+                                        "/greengrass/v2/privKey.key.",
+                            examples=["/greengrass/v2/privKey.key"]),
+        *_trigger_policy_parameters(),
+    ],
+    # Executor-level MQTT subscription held by the device's trigger
+    # subscription manager. paho-mqtt serves the plain-broker and aws_iot
+    # paths; awsiotsdk provides the Greengrass IPC client used by the
+    # zero-config Greengrass SubscribeToIoTCore path. Simulation: an
+    # appsrc event source the test harness feeds from the Test_Dataset
+    # instead of any subscription, mirroring digital_input
+    # (Requirement 12.6).
+    mappings=_same_on_device_archs(
+        executor_binding="mqtt_subscribe",
+        plugin_dependencies=["python:paho-mqtt", "python:awsiotsdk"],
+    ) + [
+        GstMapping(
+            arch=ARCH_SIM,
+            element_chain=[_element("appsrc", name="{sim_source_name}")],
+            plugin_dependencies=["app"],
+        ),
+    ],
+    hardware_dependent=True,
+)
+
+OPCUA_SUBSCRIBE = NodeTypeDescriptor(
+    type_id="opcua_subscribe",
+    category=CATEGORY_TRIGGER,
+    display_name="OPC UA Subscribe",
+    inputs=[],
+    outputs=[PortDescriptor("out", PORT_TYPE_EVENT_SIGNAL)],
+    parameters=[
+        # endpoint/node_id and the security parameters mirror opcua_write
+        # field-for-field (trigger-activation-runtime Requirements 2.2,
+        # 2.3): same names, types, defaults, and constraints, so the
+        # session is configured exactly like writing.
+        ParameterDescriptor("endpoint", "string", required=True, default=None,
+                            constraints={"min_length": 1,
+                                         "regex": r"^opc\.tcp://.+"},
+                            description="OPC UA server endpoint URL, e.g. "
+                                        "opc.tcp://192.168.1.20:4840.",
+                            examples=["opc.tcp://192.168.1.20:4840"]),
+        ParameterDescriptor("node_id", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="OPC UA node id the value is "
+                                        "written to, e.g. "
+                                        "ns=2;s=Machine1.Reject.",
+                            examples=["ns=2;s=Machine1.Reject"]),
+        ParameterDescriptor("sampling_interval_ms", "int", required=False,
+                            default=100,
+                            constraints={"min": 10, "max": 60000},
+                            description="Sampling/publishing interval of "
+                                        "the OPC UA subscription in "
+                                        "milliseconds (10-60000), e.g. 100.",
+                            examples=[100, 1000]),
+        ParameterDescriptor("mode", "enum", required=False, default="subscribe",
+                            constraints={"values": ["subscribe", "poll"]},
+                            description="How value changes are detected: "
+                                        "subscribe registers a true OPC UA "
+                                        "data-change subscription (the "
+                                        "default); poll reads the node "
+                                        "periodically and fires when the "
+                                        "value changes.",
+                            examples=["subscribe", "poll"]),
+        ParameterDescriptor("poll_interval_ms", "int", required=False,
+                            default=500,
+                            constraints={"min": 10, "max": 60000},
+                            depends_on="mode=poll",
+                            description="How often the node is read in poll "
+                                        "mode, in milliseconds (10-60000), "
+                                        "e.g. 500.",
+                            examples=[500, 2000]),
+        # --- Authentication / security (all optional; anonymous + no
+        # security when unset). username/password enable user-token auth;
+        # security_policy + client_cert_path + client_key_path enable
+        # certificate-based signing/encryption. NOTE: password and cert
+        # paths are stored with the workflow definition — treat the
+        # password as a secret and prefer per-device certificate files.
+        ParameterDescriptor("username", "string", required=False, default=None,
+                            constraints={},
+                            description="Optional OPC UA user name for "
+                                        "user-token authentication. Leave "
+                                        "empty for anonymous access.",
+                            examples=["operator"]),
+        ParameterDescriptor("password", "string", required=False, default=None,
+                            constraints={},
+                            description="Optional password for the OPC UA "
+                                        "user. Stored with the workflow "
+                                        "definition; treat as a secret.",
+                            examples=["changeit"]),
+        ParameterDescriptor("security_policy", "string", required=False,
+                            default=None, constraints={},
+                            description="Optional OPC UA security policy for "
+                                        "an encrypted/signed session, e.g. "
+                                        "Basic256Sha256. Requires "
+                                        "client_cert_path and client_key_path.",
+                            examples=["Basic256Sha256"]),
+        ParameterDescriptor("security_mode", "string", required=False,
+                            default=None, constraints={},
+                            description="Optional message security mode used "
+                                        "with security_policy: Sign or "
+                                        "SignAndEncrypt (defaults to "
+                                        "SignAndEncrypt when a policy is set).",
+                            examples=["SignAndEncrypt", "Sign"]),
+        ParameterDescriptor("client_cert_path", "string", required=False,
+                            default=None, constraints={},
+                            description="Optional path (on the device) to the "
+                                        "client application certificate used "
+                                        "for certificate-based security.",
+                            examples=["/aws_dda/opcua/client-cert.der"]),
+        ParameterDescriptor("client_key_path", "string", required=False,
+                            default=None, constraints={},
+                            description="Optional path (on the device) to the "
+                                        "client certificate private key.",
+                            examples=["/aws_dda/opcua/client-key.pem"]),
+        ParameterDescriptor("server_cert_path", "string", required=False,
+                            default=None, constraints={},
+                            description="Optional path (on the device) to the "
+                                        "server's certificate to pin/trust.",
+                            examples=["/aws_dda/opcua/server-cert.der"]),
+        *_trigger_policy_parameters(),
+    ],
+    # Executor-level OPC UA subscription (or poll loop) held by the
+    # device's trigger subscription manager; the opcua Python lib is the
+    # same packaged dependency the opcua_write node uses. Simulation: an
+    # appsrc event source the test harness feeds from the Test_Dataset
+    # instead of any session, mirroring digital_input (Requirement 12.6).
+    mappings=_same_on_device_archs(
+        executor_binding="opcua_subscribe",
+        plugin_dependencies=["python:opcua"],
+    ) + [
+        GstMapping(
+            arch=ARCH_SIM,
+            element_chain=[_element("appsrc", name="{sim_source_name}")],
+            plugin_dependencies=["app"],
+        ),
+    ],
+    hardware_dependent=True,
+)
+
+# --------------------------------------------------------------------------
+# Modbus TCP output node (modbus-tcp-output Requirements 1.1-1.6) — an
+# OUTPUT-category node that, after a workflow run completes, writes one
+# value to one coil or holding register on a Modbus TCP server (typically
+# a PLC), gated by upstream conditional / inference_filter nodes exactly
+# like digital_output / mqtt_publish / opcua_write.
+# --------------------------------------------------------------------------
+
+MODBUS_WRITE = NodeTypeDescriptor(
+    type_id="modbus_write",
+    category=CATEGORY_OUTPUT,
+    display_name="Modbus TCP Write",
+    inputs=[PortDescriptor("in", PORT_TYPE_INFERENCE_META)],
+    outputs=[],
+    parameters=[
+        ParameterDescriptor("host", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="Modbus TCP server (PLC) hostname "
+                                        "or IP, e.g. 192.168.1.30.",
+                            examples=["192.168.1.30", "plc.local"]),
+        ParameterDescriptor("port", "int", required=False, default=502,
+                            constraints={"min": 1, "max": 65535},
+                            description="Modbus TCP port, e.g. 502 (the "
+                                        "standard Modbus port).",
+                            examples=[502]),
+        ParameterDescriptor("unit_id", "int", required=False, default=1,
+                            constraints={"min": 0, "max": 255},
+                            description="Modbus unit (slave) id addressed "
+                                        "by the write (0-255), e.g. 1.",
+                            examples=[1, 0]),
+        ParameterDescriptor("register_type", "enum", required=True,
+                            default="coil",
+                            constraints={"values": ["coil",
+                                                    "holding_register"]},
+                            description="Write target kind: coil (a single "
+                                        "on/off bit, Write Single Coil "
+                                        "function code 0x05) or "
+                                        "holding_register (a 16-bit "
+                                        "register, Write Single Register "
+                                        "function code 0x06).",
+                            examples=["coil", "holding_register"]),
+        ParameterDescriptor("address", "int", required=True, default=None,
+                            constraints={"min": 0, "max": 65535},
+                            description="Address of the coil or holding "
+                                        "register written (0-65535), "
+                                        "e.g. 12.",
+                            examples=[12, 40]),
+        ParameterDescriptor("value_template", "string", required=False,
+                            default="{is_anomalous}", constraints={},
+                            description="Value written to the target. "
+                                        "Placeholders in curly braces are "
+                                        "replaced from the inference "
+                                        "metadata: {is_anomalous}, "
+                                        "{confidence}, or {inference_json}; "
+                                        "a single placeholder keeps its "
+                                        "native type. Coil writes coerce "
+                                        "the rendered value to a boolean; "
+                                        "holding-register writes coerce it "
+                                        "to an integer 0-65535.",
+                            examples=["{is_anomalous}", "{confidence}"]),
+        ParameterDescriptor("pulse_ms", "int", required=False, default=0,
+                            constraints={"min": 0, "max": 60000},
+                            depends_on="register_type=coil",
+                            description="Coil pulse duration in "
+                                        "milliseconds (0-60000): 0 latches "
+                                        "the written value (single write); "
+                                        "a positive value writes the "
+                                        "rendered value, waits pulse_ms "
+                                        "milliseconds, then writes the "
+                                        "inverse coil value, e.g. 250.",
+                            examples=[0, 250]),
+    ],
+    # Executor-level Modbus TCP client write (stdlib socket exchange; no
+    # packaged plugin dependency). Simulation: recording binding, no PLC
+    # contact (Requirement 12.6).
+    mappings=_same_on_device_archs(executor_binding="modbus_write")
+             + [_recording_binding("modbus_write")],
+    hardware_dependent=True,
+)
+
+# --------------------------------------------------------------------------
+# Custom Python source node (custom-python-source Requirements 1.1-1.8)
+# --------------------------------------------------------------------------
+
+CUSTOM_PYTHON_SOURCE = NodeTypeDescriptor(
+    type_id="custom_python_source",
+    category=CATEGORY_INPUT,
+    display_name="Custom Python (Source)",
+    # The activation port is how a subscription trigger starts the run
+    # whose Trigger_Context the Frame_Producer receives.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
+    outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
+    parameters=[
+        ParameterDescriptor("code", "code", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="Python run once per workflow run "
+                                        "to produce the run's frame. Define "
+                                        "produce_frame(context) and return "
+                                        "the frame; context is the trigger "
+                                        "context that started the run: for "
+                                        "MQTT triggers the keys topic, "
+                                        "payload, payload_json, qos and "
+                                        "timestamp (payload_json is the "
+                                        "payload parsed as JSON, or None "
+                                        "when it does not parse); for "
+                                        "OPC UA triggers the keys endpoint, "
+                                        "node_id, value and "
+                                        "source_timestamp; an empty dict "
+                                        "for manual runs. Return a NumPy "
+                                        "uint8 array (rows x cols "
+                                        "grayscale, rows x cols x 3 BGR, "
+                                        "or rows x cols x 4 BGRA — OpenCV "
+                                        "channel order), or {'array': arr, "
+                                        "'format': 'RGB'|'RGBA'|'GRAY8'} "
+                                        "to use the array's bytes without "
+                                        "channel conversion, or {'data': "
+                                        "bytes, 'width': W, 'height': H, "
+                                        "'format': ...} for raw bytes; "
+                                        "returning None fails the run. "
+                                        "cv2/np are pre-imported. Helpers: "
+                                        "import dda_frames for "
+                                        "load_image(source) -> BGR uint8 "
+                                        "array and load_bytes(source) -> "
+                                        "raw bytes, for local paths, "
+                                        "s3://bucket/key URIs, and "
+                                        "http(s):// URLs.",
+                            examples=["def produce_frame(context):\n"
+                                      "    import dda_frames\n"
+                                      "    payload = context.get(\"payload_json\") or {}\n"
+                                      "    return dda_frames.load_image(payload[\"image_url\"])",
+                                      "def produce_frame(context):\n"
+                                      "    import dda_frames\n"
+                                      "    return dda_frames.load_image(\"s3://plant-images/reference.jpg\")"]),
+        ParameterDescriptor("requirements", "string", required=False, default="",
+                            constraints={},
+                            description="Extra pip packages the code needs, "
+                                        "one per line in requirements.txt "
+                                        "form.",
+                            examples=["requests==2.32.3"]),
+        ParameterDescriptor("allowed_uri_prefixes", "string", required=False, default="",
+                            constraints={},
+                            description="Optional newline-separated list of "
+                                        "URI prefixes that "
+                                        "dda_frames.load_image and "
+                                        "load_bytes may fetch from, e.g. "
+                                        "s3://plant-images/; empty permits "
+                                        "any source. The restriction "
+                                        "applies only to fetches made "
+                                        "through the dda_frames helpers — "
+                                        "it is not a sandbox boundary.",
+                            examples=["s3://plant-images/\nhttps://mes.local/"]),
+    ],
+    # The Frame_Producer runs in the LocalServer's Python_Bridge before
+    # the pipeline starts; the produced frame is pushed into the compiled
+    # appsrc through the existing single-frame Frame_Feed model — the
+    # byte-for-byte Aravis chain (appsrc name compile-time rendered per
+    # node via {nodeId}). Simulation: fed from the Test_Dataset like the
+    # other hardware frame sources (Requirement 12.6).
+    mappings=_same_on_device_archs(
+        element_chain=[
+            _element("appsrc", name="appsrc_{nodeId}"),
+            _element("videoconvert"),
+        ],
+        plugin_dependencies=["app", "videoconvertscale"],
+    ) + [_dataset_fed_sim_source()],
+    hardware_dependent=True,
+)
+
+# --------------------------------------------------------------------------
 # Catalog access
 # --------------------------------------------------------------------------
 
@@ -1223,6 +1785,19 @@ NODE_CATALOG = (
     # Appended (additive — vllm-triton-inference Requirement 8.1): every
     # pre-existing descriptor keeps its position and content.
     LLM_INFERENCE,
+    # Appended (additive — triggers-stage-and-unified-input Requirement 3.1):
+    # every pre-existing descriptor keeps its position and content.
+    UNIFIED_INPUT,
+    # Appended (additive — trigger-activation-runtime Requirement 3.2):
+    # every pre-existing descriptor keeps its position and content.
+    MQTT_SUBSCRIBE,
+    OPCUA_SUBSCRIBE,
+    # Appended (additive — modbus-tcp-output Requirement 2.1): every
+    # pre-existing descriptor keeps its position and content.
+    MODBUS_WRITE,
+    # Appended (additive — custom-python-source Requirement 11.4): every
+    # pre-existing descriptor keeps its position and content.
+    CUSTOM_PYTHON_SOURCE,
 )
 
 _CATALOG_BY_ID = {descriptor.type_id: descriptor for descriptor in NODE_CATALOG}

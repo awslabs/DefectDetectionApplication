@@ -32,13 +32,15 @@ non-hardware nodes compile identically.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..catalog import ARCH_SIM, ARCHITECTURES, NODE_CATALOG, bundled_plugins_for
 from ..catalog.models import GstMapping, NodeTypeDescriptor
-from ..serializer.models import Node, WorkflowGraph
+from ..catalog.nodes import SOURCE_KIND_TO_SOURCE_TYPE
+from ..serializer.models import Connection, Node, WorkflowGraph
 from ..validator import SEVERITY_ERROR, validate
 from .models import (
     CODE_UNMAPPED_ARCHITECTURE,
@@ -49,7 +51,32 @@ from .models import (
     DEFAULT_CONTEXT_VALUES,
 )
 
-__all__ = ["compile"]
+__all__ = ["compile", "expand_unified_inputs"]
+
+#: The unified input node type id and its optional activation input port
+#: (design C3/C5). ``expand_unified_inputs`` rewrites unified nodes into
+#: their underlying source and drops edges targeting this port.
+UNIFIED_INPUT_TYPE = "unified_input"
+UNIFIED_ACTIVATION_PORT = "activation"
+
+#: Node type ids whose ``activation`` input port is inert scaffolding:
+#: the unified input node plus the four legacy source descriptors
+#: (Requirement 7.2). ``expand_unified_inputs`` drops every connection
+#: targeting an ``activation`` port on any of these types before the
+#: validation re-run and mapping resolution; no trigger-driven
+#: activation binding is ever emitted for these ports.
+INERT_ACTIVATION_TYPE_IDS = frozenset(
+    {UNIFIED_INPUT_TYPE} | set(SOURCE_KIND_TO_SOURCE_TYPE.values())
+)
+
+#: The subscribe-side trigger node types (trigger-activation-runtime,
+#: design C3/D3). Activation edges whose SOURCE node is one of these
+#: types are real activation-target declarations: ``expand_unified_inputs``
+#: keeps them (all other activation edges — notably ``digital_input`` —
+#: keep today's inert drop, Requirement 5.3), and ``compile()`` extracts
+#: them into the activation plan attached to the trigger's executor
+#: binding as ``"activates"`` (Requirements 5.1, 5.2).
+TRIGGER_EXECUTOR_TYPES = frozenset({"mqtt_subscribe", "opcua_subscribe"})
 
 #: The two-path routing executor binding (the conditional node): the
 #: compiler emits per-port gate conditions for it ("true" = the
@@ -75,6 +102,133 @@ BINDING_CONDITIONAL = "conditional"
 #: downstream). In simulation the node resolves to its sim stub chain
 #: (identity pass-through) and none of this applies.
 BINDING_BEDROCK_INFERENCE = "bedrock_inference"
+
+#: The on-device VLM/LLM inference executor binding (the llm_inference
+#: node). Like bedrock_inference, its fed VideoFrames input port gets a
+#: synthetic frame-capture sink chain on each feeding GStreamer branch
+#: and the emitted binding carries the per-input-port capture file paths
+#: (``capturePaths``, ``{work_dir}``-rooted). UNLIKE bedrock_inference,
+#: the node is NOT opaque: it stays a collapsed executor-level
+#: pass-through, so frames keep flowing through it to downstream
+#: pipeline elements exactly as before — the capture branch is an extra
+#: tee'd sink beside the downstream continuation, planned by
+#: ``_build_segments``'s existing feeder-capture fan-out.
+BINDING_LLM_INFERENCE = "llm_inference"
+
+
+def expand_unified_inputs(
+    graph: WorkflowGraph,
+    catalog: Sequence[NodeTypeDescriptor] = NODE_CATALOG,
+) -> WorkflowGraph:
+    """Rewrite ``unified_input`` nodes into their underlying source nodes.
+
+    Returns a **new** :class:`WorkflowGraph` (the input graph is never
+    mutated — nodes and connections are deep-copied). Each
+    ``unified_input`` node is replaced by a synthetic node carrying the
+    **same** ``id`` and ``position``, ``type`` set to
+    ``SOURCE_KIND_TO_SOURCE_TYPE[source_kind]``, and only the parameters
+    whose names appear on the underlying source descriptor (``source_kind``
+    and any non-applicable union parameters are dropped). Every connection
+    targeting an ``activation`` port on a unified node or on any of the
+    four legacy source nodes (``INERT_ACTIVATION_TYPE_IDS``) is dropped;
+    all other nodes and connections pass through unchanged (design C5,
+    Requirements 3.6, 3.8, 3.9, 2.6, 7.2).
+
+    Defensive on an unknown/missing ``source_kind``: the node is left as-is
+    so that ``compile()``'s validation re-run reports the invalid enum
+    (``V4``) and refuses to compile, rather than dereferencing the map with
+    an invalid key.
+    """
+    descriptors_by_id: Dict[str, NodeTypeDescriptor] = {
+        descriptor.type_id: descriptor for descriptor in catalog
+    }
+
+    #: Original node id -> type, for the inert-activation edge drop below
+    #: (the pre-expansion type is what identifies unified/legacy sources).
+    node_types: Dict[str, str] = {node.id: node.type for node in graph.nodes}
+
+    new_nodes: List[Node] = []
+    for node in graph.nodes:
+        if node.type != UNIFIED_INPUT_TYPE:
+            new_nodes.append(copy.deepcopy(node))
+            continue
+
+        source_kind = node.parameters.get("source_kind")
+        source_type = SOURCE_KIND_TO_SOURCE_TYPE.get(source_kind)
+        source_descriptor = (
+            descriptors_by_id.get(source_type) if source_type is not None else None
+        )
+        if source_descriptor is None:
+            # Unknown/missing source_kind: leave the node untouched so the
+            # compile-time validation re-run reports it (V4) and refuses.
+            new_nodes.append(copy.deepcopy(node))
+            continue
+
+        applicable = {parameter.name for parameter in source_descriptor.parameters}
+        expanded_parameters = {
+            name: copy.deepcopy(value)
+            for name, value in node.parameters.items()
+            if name in applicable
+        }
+        new_nodes.append(Node(
+            id=node.id,
+            type=source_type,
+            position=node.position,
+            parameters=expanded_parameters,
+            data=copy.deepcopy(node.data),
+        ))
+
+    new_connections: List[Connection] = []
+    for connection in graph.connections:
+        if (
+            connection.target.port == UNIFIED_ACTIVATION_PORT
+            and node_types.get(connection.target.node) in INERT_ACTIVATION_TYPE_IDS
+            and node_types.get(connection.source.node) not in TRIGGER_EXECUTOR_TYPES
+        ):
+            # Drop edges into an inert activation port — on a unified node
+            # (the expanded source has no activation realization,
+            # Requirement 3.9, P4) or on a legacy source node
+            # (Requirement 7.2); no activation binding is ever emitted.
+            # Edges sourced from a subscribe-side trigger node
+            # (``TRIGGER_EXECUTOR_TYPES``) are real Activation_Edges and
+            # survive expansion for ``compile()``'s activation-plan
+            # extraction (trigger-activation-runtime Requirements 5.2,
+            # 5.3 — ``digital_input`` edges keep today's drop).
+            continue
+        new_connections.append(copy.deepcopy(connection))
+
+    return WorkflowGraph(nodes=new_nodes, connections=new_connections)
+
+
+def _extract_activation_plan(graph: WorkflowGraph) -> Dict[str, List[str]]:
+    """Pull the subscribe-side triggers' Activation_Edges out of the graph.
+
+    Removes (in place, on the compile-local graph copy) every connection
+    targeting an ``activation`` port whose SOURCE node type is in
+    :data:`TRIGGER_EXECUTOR_TYPES`, and returns the activation plan
+    ``{trigger_node_id: [target_node_id, ...]}`` with targets in
+    connection order (deduplicated). Stream topology, segments, and
+    predecessors/successors are computed on the reduced connection set,
+    so Activation_Edges never reach GStreamer stream-topology resolution
+    (trigger-activation-runtime Requirement 5.2, design D3). For graphs
+    without the new trigger types nothing is removed and the plan is
+    empty, keeping compiled output identical (Requirement 5.4).
+    """
+    node_types: Dict[str, str] = {node.id: node.type for node in graph.nodes}
+    plan: Dict[str, List[str]] = {}
+    kept: List[Connection] = []
+    for connection in graph.connections:
+        if (
+            connection.target.port == UNIFIED_ACTIVATION_PORT
+            and node_types.get(connection.source.node) in TRIGGER_EXECUTOR_TYPES
+        ):
+            targets = plan.setdefault(connection.source.node, [])
+            if connection.target.node not in targets:
+                targets.append(connection.target.node)
+            continue
+        kept.append(connection)
+    graph.connections = kept
+    return plan
 
 
 def compile(
@@ -105,6 +259,14 @@ def compile(
     errors, or nodes without a mapping for the architecture).
     """
     context = context or CompileContext()
+
+    # 0. Expand unified_input nodes into their underlying source nodes on a
+    #    copy of the graph (never mutating the input), before validation and
+    #    mapping resolution — so the unified type_id never reaches
+    #    mapping_for and the expanded source flows through the existing path
+    #    (design C5, Requirements 3.6, 3.8, 3.9, 2.6).
+    graph = expand_unified_inputs(graph, catalog)
+
     descriptors_by_id: Dict[str, NodeTypeDescriptor] = {
         descriptor.type_id: descriptor for descriptor in catalog
     }
@@ -124,6 +286,16 @@ def compile(
             )
             for finding in validation_errors
         ]
+
+    # 1b. Extract the subscribe-side triggers' Activation_Edges into the
+    #     activation plan (post-expansion, post-validation): the working
+    #     connection set is reduced so stream topology, segments, and
+    #     predecessors/successors are computed as if the Activation_Edges
+    #     were absent; the plan is attached to the trigger executor
+    #     bindings below (trigger-activation-runtime Requirements 5.1,
+    #     5.2, 5.4 — design C3/D3). Graphs without the new trigger types
+    #     are untouched (empty plan, identical connection set).
+    activation_plan = _extract_activation_plan(graph)
 
     # 2. Resolve mappings; collect every unmapped node (Requirement 6.5).
     #    In simulation mode, hardware-dependent node types resolve their
@@ -170,6 +342,14 @@ def compile(
         n.id for n in graph.nodes
         if mappings[n.id].executor_binding == BINDING_BEDROCK_INFERENCE
     ]
+    #: llm_inference nodes join the frame-capture plan below but stay
+    #: NON-opaque: frames keep flowing through the collapsed node to
+    #: downstream pipeline elements (only Bedrock nodes terminate the
+    #: stream at their capture sinks).
+    llm_node_ids = [
+        n.id for n in graph.nodes
+        if mappings[n.id].executor_binding == BINDING_LLM_INFERENCE
+    ]
     opaque = set(bedrock_node_ids)
     stream_out = {
         node_id: _stream_successors(node_id, successors, gst_set, opaque)
@@ -181,11 +361,13 @@ def compile(
             stream_in[target].append(source)
     topo_order = _topological_sort(gst_node_ids, stream_out, stream_in)
 
-    # Bedrock frame captures: one synthetic sink chain per GStreamer
-    # branch feeding a bedrock_inference input port, plus the per-port
-    # capture file paths for each node's executor binding.
-    feeder_captures, bedrock_capture_paths = _bedrock_capture_plan(
-        graph, bedrock_node_ids, gst_set, opaque, descriptors_by_id
+    # Frame captures: one synthetic sink chain per GStreamer branch
+    # feeding a bedrock_inference or llm_inference input port, plus the
+    # per-port capture file paths for each node's executor binding. One
+    # shared path_for(feeder) map — a feeder serving both kinds of node
+    # shares a single capture sink and file.
+    feeder_captures, capture_paths = _bedrock_capture_plan(
+        graph, bedrock_node_ids + llm_node_ids, gst_set, opaque, descriptors_by_id
     )
 
     # 4./5. Emit tagged element chains linearized into segments.
@@ -240,7 +422,19 @@ def compile(
         # file paths their frame branches sink to ({work_dir}-rooted,
         # resolved by the LocalServer executor per run).
         if mappings[node_id].executor_binding == BINDING_BEDROCK_INFERENCE:
-            entry["capturePaths"] = bedrock_capture_paths.get(node_id, {})
+            entry["capturePaths"] = capture_paths.get(node_id, {})
+        # LLM/VLM inference bindings likewise carry the per-input-port
+        # capture file paths, so the device-side processor can attach
+        # the captured frame to the inference request. The node itself
+        # stays a non-opaque pass-through in the stream.
+        if mappings[node_id].executor_binding == BINDING_LLM_INFERENCE:
+            entry["capturePaths"] = capture_paths.get(node_id, {})
+        # Subscribe-side trigger bindings carry the ordered activation
+        # targets extracted into the activation plan; no other binding
+        # gains any key (trigger-activation-runtime Requirement 5.1,
+        # design D2).
+        if mappings[node_id].executor_binding in TRIGGER_EXECUTOR_TYPES:
+            entry["activates"] = activation_plan.get(node_id, [])
         executor_bindings.append(entry)
 
     # 6. Plugin dependencies beyond the LocalServer-bundled set
@@ -372,21 +566,23 @@ def _frame_feeders(
 
 def _bedrock_capture_plan(
     graph: WorkflowGraph,
-    bedrock_node_ids: List[str],
+    capture_node_ids: List[str],
     gst_set: set,
     opaque: set,
     descriptors_by_id: Dict[str, NodeTypeDescriptor],
 ):
-    """Plan the synthetic frame-capture sinks for bedrock_inference nodes.
+    """Plan the synthetic frame-capture sinks for frame-consuming
+    executor bindings (bedrock_inference and llm_inference nodes).
 
     Returns ``(feeder_captures, capture_paths_by_node)``:
 
     - ``feeder_captures``: GStreamer feeder node id -> capture file path.
-      Every branch feeding any bedrock input port ends in exactly one
-      capture sink chain persisting its latest frame; a feeder serving
-      several ports (or several bedrock nodes) shares its single file —
-      the frames are the same stream.
-    - ``capture_paths_by_node``: bedrock node id -> {input port name:
+      Every branch feeding any capture-consuming input port gains exactly
+      one capture sink chain persisting its latest frame; a feeder
+      serving several ports (or several consuming nodes, of either
+      binding kind) shares its single file — the frames are the same
+      stream.
+    - ``capture_paths_by_node``: consuming node id -> {input port name:
       capture path, or None when nothing feeds the port}. When several
       branches feed one port, the first (connection-ordered) feeder's
       file is used.
@@ -413,7 +609,7 @@ def _bedrock_capture_plan(
             )
         return feeder_captures[feeder_id]
 
-    for node_id in bedrock_node_ids:
+    for node_id in capture_node_ids:
         descriptor = descriptors_by_id[graph.node_by_id(node_id).type]
         ports: Dict[str, Optional[str]] = {}
         for port in descriptor.inputs:

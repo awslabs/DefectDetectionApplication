@@ -32,7 +32,7 @@ poll it to a settled state, returning the effective outcome. Covered:
    history and snapshot untouched so the prompt is preserved for retry.
 5. Timeout and invocation failure (2.7): a read timeout fails the turn
    with GENERATION_TIMEOUT (504) carrying the configured timeout
-   (clamped to at most 60 seconds when building the client); ClientError
+   (clamped to at most 240 seconds when building the client); ClientError
    fails with BEDROCK_INVOCATION_FAILED (502); an unreachable endpoint
    fails with BEDROCK_UNREACHABLE (502) - all without mutating the
    session history or snapshot, so the prompt is preserved for retry.
@@ -599,15 +599,15 @@ class TestTimeoutAndFailure:
 
         assert_failed_first_turn_untouched(gen_env, ctx.usecase_id)
 
-    def test_configured_timeout_is_clamped_to_60_seconds(self, gen_env,
-                                                         bedrock, ctx):
-        """A stored timeout above the 60-second maximum is clamped before
-        the client is built (2.7: at most 60 seconds)."""
+    def test_configured_timeout_is_clamped_to_240_seconds(self, gen_env,
+                                                          bedrock, ctx):
+        """A stored timeout above the 240-second maximum is clamped before
+        the client is built (2.7: at most 240 seconds)."""
         put_bedrock_config(gen_env, timeout_seconds=300)
 
         status, _ = generate(gen_env, ctx, "Blur frames")
         assert status == 200
-        assert bedrock.client_requests[-1][1] == 60
+        assert bedrock.client_requests[-1][1] == 240
 
     def test_invocation_client_error_returns_502(self, gen_env, bedrock,
                                                  ctx):

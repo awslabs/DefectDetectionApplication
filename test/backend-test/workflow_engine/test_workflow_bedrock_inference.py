@@ -439,10 +439,13 @@ class TestExecutorIntegration:
             ("Input image", JPEG_BYTES_IN),
             ("Reference image", JPEG_BYTES_REF),
         ]
+        # `trigger: {}` is the seeded trigger-less-run delta
+        # (custom-python-source Requirements 2.5, 11.1).
         assert received == [{
             "is_anomalous": True, "confidence": 0.93,
             "bedrock_text": answer,
-            "bedrock": {"bedrock1": {"text": answer}}}]
+            "bedrock": {"bedrock1": {"text": answer}},
+            "trigger": {}}]
         row = get_execution(session_factory)
         assert row.status == EXECUTION_STATUS_COMPLETED
         # The per-run working directory is removed afterwards.

@@ -57,30 +57,18 @@ RUN if [ "$OS" = "18.04" ]; then \
 RUN apt update && \
     apt-get install clang -y
 
-# Install the latest versions of CMake
-RUN if [ "$OS" = "18.04" ]; then \
-        apt-get install -y software-properties-common lsb-release && \
-        apt-get clean all && \
-        wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null && \
-        apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main" && \
-        apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80  6AF7F09730B3F0A4 && \
-        apt-get update && \
-        apt-get install kitware-archive-keyring && \
-        rm /etc/apt/trusted.gpg.d/kitware.gpg && \
-        apt-get update && \
-        apt-get install cmake=3.21.3-0kitware1ubuntu18.04.1 cmake-data=3.21.3-0kitware1ubuntu18.04.1 -y; \
-    else \
-        apt-get install -y software-properties-common lsb-release && \
-        apt-get clean all && \
-        wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null && \
-        apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main" && \
-        apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80  6AF7F09730B3F0A4 && \
-        apt-get update && \
-        apt-get install kitware-archive-keyring && \
-        rm /etc/apt/trusted.gpg.d/kitware.gpg && \
-        apt-get update && \
-        apt-get install cmake=3.21.3-0kitware1ubuntu20.04.1 cmake-data=3.21.3-0kitware1ubuntu20.04.1 -y; \
-    fi
+# Install pinned CMake 3.x from the official upstream release binary (see
+# Dockerfile.jp6): the Kitware apt repo no longer serves the pinned 3.21.3
+# packages and its current cmake is 4.x, which breaks Triton's transitively
+# fetched dependencies. The upstream installer is self-contained (no apt
+# resolution) and gives a clean, pinned 3.x.
+RUN CMAKE_VER=3.31.6 && \
+    ARCH_TAG=$(uname -m) && \
+    if [ "$ARCH_TAG" = "x86_64" ]; then CM_ARCH=x86_64; else CM_ARCH=aarch64; fi && \
+    wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CM_ARCH}.sh" -O /tmp/cmake.sh && \
+    sh /tmp/cmake.sh --skip-license --prefix=/usr/local && \
+    rm -f /tmp/cmake.sh && \
+    cmake --version
 
 # Install specific version of Python
 #ARG PYTHON_VERSION
@@ -295,7 +283,7 @@ RUN apt-get install ffmpeg -y
 # Install Triton Server and it's dependencies
 RUN apt-get update && \
     apt-get install rapidjson-dev libre2-dev -y
-RUN apt-get install python-dev -y
+RUN apt-get install python-dev-is-python3 -y
 
 # Use --no-check-certificate to resolve following error
 # ERROR: cannot verify boostorg.jfrog.io's certificate, issued by 'CN=GeoTrust TLS RSA CA G1,OU=www.digicert.com,O=DigiCert Inc,C=US':

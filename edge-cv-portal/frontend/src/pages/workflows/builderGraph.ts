@@ -53,8 +53,9 @@ export const WORKFLOW_NODE_TYPE = 'workflowNode' as const;
 // Category presentation (palette groups and node header colors)
 // --------------------------------------------------------------------------
 
-/** Display label and color for each of the five node categories. */
+/** Display label and color for each node category. */
 export const CATEGORY_META: Record<NodeCategory, { label: string; color: string }> = {
+  trigger: { label: 'Triggers', color: '#0d7d84' },
   input: { label: 'Input', color: '#037f0c' },
   preprocessing: { label: 'Preprocessing', color: '#0972d3' },
   inference: { label: 'Model inference', color: '#7d3ac1' },

@@ -182,7 +182,12 @@ class TestSuccessfulRun:
         registration_id, document, tag_values = received[0]
         assert registration_id == "wf-1:3"
         assert document["executorBindings"] == COMPILED_DOC["executorBindings"]
-        assert tag_values == {"is_anomalous": False, "confidence": 0.42}
+        # The pipeline's tags plus the seeded `trigger` key — the
+        # sanctioned trigger-less-run delta (custom-python-source
+        # Requirements 2.5, 11.1).
+        assert tag_values == {
+            "is_anomalous": False, "confidence": 0.42, "trigger": {},
+        }
 
     def test_post_run_hook_failure_does_not_fail_the_run(
         self, tmp_path, session_factory

@@ -558,18 +558,18 @@ def non_sampling_field_cases(draw):
                 st.text(max_size=10), st.none(),
             ))
         snippet = "max_tokens must be a positive integer"
-    else:  # timeout_seconds: integer in [1, 60]
+    else:  # timeout_seconds: integer in [1, 240]
         if valid:
-            value = draw(st.integers(min_value=1, max_value=60))
+            value = draw(st.integers(min_value=1, max_value=240))
         else:
             value = draw(st.one_of(
                 st.integers(min_value=-1000, max_value=0),
-                st.integers(min_value=61, max_value=1000),
+                st.integers(min_value=241, max_value=1000),
                 st.booleans(),
                 st.floats(allow_nan=False, allow_infinity=False),
                 st.text(max_size=10), st.none(),
             ))
-        snippet = "timeout_seconds must be an integer between 1 and 60"
+        snippet = "timeout_seconds must be an integer between 1 and 240"
     return field, value, valid, snippet
 
 
@@ -578,7 +578,7 @@ def non_sampling_field_cases(draw):
 def test_settings_non_sampling_rules_unchanged(sampling_env, case):
     """model_id / region / max_tokens / timeout_seconds keep accepting and
     rejecting exactly as today (unchanged validation rules, timeout clamp
-    domain 1..60)."""
+    domain 1..240)."""
     field, value, valid, snippet = case
     clear_stored_config(sampling_env)
 

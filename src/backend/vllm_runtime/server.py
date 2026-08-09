@@ -47,6 +47,8 @@ Like the rest of this package, importing this module never imports
 ``vllm``: FastAPI/uvicorn are existing LocalServer dependencies and the
 manager defers every vLLM import to engine construction.
 """
+import base64
+import binascii
 import json
 import logging
 import threading
@@ -54,7 +56,7 @@ import time
 from typing import Any, Dict, Optional
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -88,10 +90,27 @@ def sampling_params_from(parameters: Optional[Dict[str, Any]]) -> Dict[str, Any]
 
 class GenerateRequest(BaseModel):
     """Body of ``/v2/models/{m}/generate[_stream]`` (Triton generate
-    extension)."""
+    extension). ``image`` optionally carries one base64-encoded JPEG for
+    multimodal generation (Requirement 4.8)."""
 
     text_input: str
     parameters: Dict[str, Any] = Field(default_factory=dict)
+    image: Optional[str] = None
+
+
+def _decoded_image(image: Optional[str]) -> Optional[bytes]:
+    """The decoded bytes of an optional base64 ``image`` field, or None
+    when absent. Undecodable content is the caller's schema violation ->
+    422, matching FastAPI's validation status (Requirement 4.8)."""
+    if image is None:
+        return None
+    try:
+        return base64.b64decode(image, validate=True)
+    except (binascii.Error, ValueError) as err:
+        raise HTTPException(
+            status_code=422,
+            detail="image is not valid base64: {}".format(err),
+        )
 
 
 def _status_payload(model_name: str, status) -> Dict[str, Any]:
@@ -139,7 +158,10 @@ def create_app(manager: VllmRuntimeManager) -> FastAPI:
     @app.post("/v2/models/{model_name}/generate")
     async def generate(model_name: str, body: GenerateRequest):
         text = await manager.generate(
-            model_name, body.text_input, sampling_params_from(body.parameters)
+            model_name,
+            body.text_input,
+            sampling_params_from(body.parameters),
+            image=_decoded_image(body.image),
         )
         return {"model_name": model_name, "text_output": text}
 
@@ -153,11 +175,14 @@ def create_app(manager: VllmRuntimeManager) -> FastAPI:
         if status.state is not ModelState.READY:
             raise ModelUnavailableError(model_name, status)
         params = sampling_params_from(body.parameters)
+        # Decoded before the response starts so invalid base64 still gets
+        # the 422 mapping rather than a mid-stream error event.
+        image = _decoded_image(body.image)
 
         async def events():
             try:
                 async for delta in manager.generate_stream(
-                    model_name, body.text_input, params
+                    model_name, body.text_input, params, image=image
                 ):
                     yield _sse_event(
                         {"model_name": model_name, "text_output": delta}

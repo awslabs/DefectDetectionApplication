@@ -523,14 +523,17 @@ def zip_artifact_name(arch: str) -> str:
 #: Node types whose per-node code and declared pip dependencies ship as
 #: python/{nodeId}/handler.py + requirements.txt in every architecture
 #: artifact zip and are listed together in the manifest's
-#: customPythonNodeIds (custom-python-frames Requirements 2.4, 2.5).
-CUSTOM_PYTHON_NODE_TYPES = ('custom_python', 'custom_python_preprocess')
+#: customPythonNodeIds (custom-python-frames Requirements 2.4, 2.5;
+#: custom-python-source Requirements 9.1, 9.2).
+CUSTOM_PYTHON_NODE_TYPES = ('custom_python', 'custom_python_preprocess',
+                            'custom_python_source')
 
 
 def gather_custom_python_nodes(graph) -> List[Dict]:
     """Custom_Python_Nodes whose code + declared dependencies ship in the
-    Workflow_Component artifacts (Requirement 7.3; both Custom Python node
-    types — custom-python-frames Requirements 2.4, 2.5)"""
+    Workflow_Component artifacts (Requirement 7.3; all three Custom Python
+    node types — custom-python-frames Requirements 2.4, 2.5;
+    custom-python-source Requirements 9.1, 9.2)"""
     nodes = []
     for node in graph.nodes:
         if node.type in CUSTOM_PYTHON_NODE_TYPES:
@@ -594,6 +597,25 @@ ICAM_SOURCE_TYPE_ID = 'icam_source'
 #: element argument: the binding point carries ``aravisBinding: true``
 #: with empty slots on every physical device architecture.
 ARAVIS_CAMERA_SOURCE_TYPE_ID = 'aravis_camera_source'
+
+#: The Custom Python source node type (custom-python-source Requirements
+#: 9.1, 9.2). The Frame_Producer runs in the LocalServer's Python_Bridge
+#: and feeds the compiled ``appsrc_{nodeId}`` through the executor's
+#: single-frame Frame_Feed, so the binding never lands in an element
+#: argument: the binding point carries ``pythonSourceBinding: true`` with
+#: empty slots and ONLY the rendered ``allowed_uri_prefixes`` parameter —
+#: ``code``/``requirements`` ship as artifact files, never duplicated
+#: into the binding point.
+CUSTOM_PYTHON_SOURCE_TYPE_ID = 'custom_python_source'
+
+
+def gather_python_source_nodes(graph) -> List:
+    """The graph's Custom Python source nodes, in graph node order: each
+    gains a ``pythonSourceBinding`` bindingPoints entry so the device
+    planner can locate the node's compiled appsrc
+    (custom-python-source Requirement 9.2)."""
+    return [node for node in graph.nodes
+            if node.type == CUSTOM_PYTHON_SOURCE_TYPE_ID]
 
 #: Optional Custom_Node_Type descriptor flag declaring the type
 #: camera-backed. Both the snake_case spelling from the design and the
@@ -707,7 +729,12 @@ def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
     device value. aravis_camera_source is executor-feed-bound on every
     physical device architecture (``aravisBinding: true``, empty slots)
     with the rendered camera_id/gain/exposure values in ``parameters``
-    (aravis-camera-input Requirement 4.2)."""
+    (aravis-camera-input Requirement 4.2). custom_python_source is
+    executor-feed-bound the same way (``pythonSourceBinding: true``,
+    empty slots) with ONLY the rendered ``allowed_uri_prefixes`` value in
+    ``parameters`` — ``code``/``requirements`` ship as artifact files and
+    are never duplicated into the binding point (custom-python-source
+    Requirements 9.1, 9.2)."""
     binding_points: List[Dict] = []
     for node in camera_nodes:
         descriptor = descriptors_by_id[node.type]
@@ -720,7 +747,12 @@ def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
         hint = hints.get(node.id)
         if hint:
             entry['bindingHint'] = hint
-        if node.type == ARAVIS_CAMERA_SOURCE_TYPE_ID:
+        if node.type == CUSTOM_PYTHON_SOURCE_TYPE_ID:
+            entry['pythonSourceBinding'] = True
+            entry['parameters'] = {
+                'allowed_uri_prefixes':
+                    entry['parameters'].get('allowed_uri_prefixes') or ''}
+        elif node.type == ARAVIS_CAMERA_SOURCE_TYPE_ID:
             entry['aravisBinding'] = True
         elif node.type == CSI_CAMERA_SOURCE_TYPE_ID:
             entry['csiSensorBinding'] = True
@@ -1013,6 +1045,57 @@ def llm_arch_gate_findings(definition: Dict, requested_archs: List[str]) -> List
                 'arch': arch,
             })
     return findings
+
+
+# --------------------------------------------------------------------------
+# Subscribed-topic recording for greengrass mqtt_subscribe triggers
+# (trigger-activation-runtime Requirements 10.1, 10.4)
+#
+# A workflow whose ``mqtt_subscribe`` trigger nodes use the Greengrass IPC
+# transport needs a ``SubscribeToIoTCore`` accessControl authorization at
+# deployment time. The packager records the set of subscribed topic
+# filters as ``subscribed_topics`` on the workflow version item and in the
+# packaged manifest.json — ONLY when the set is non-empty, so every
+# workflow without a greengrass-enabled ``mqtt_subscribe`` node packages
+# byte-identically to pre-feature output (10.4). The deployment merge
+# (deployments.py) reads the version-item copy.
+# --------------------------------------------------------------------------
+
+#: The MQTT subscribe trigger catalog type (workflow_core.catalog
+#: MQTT_SUBSCRIBE, trigger-activation-runtime C1).
+MQTT_SUBSCRIBE_TYPE_ID = 'mqtt_subscribe'
+
+
+def gather_subscribed_topics(definition: Dict) -> List[str]:
+    """The sorted, de-duplicated ``topic`` values of the definition's
+    ``mqtt_subscribe`` nodes whose effective ``greengrass`` is true
+    (Requirement 10.1).
+
+    The effective value follows the validator's rule (``_effective_value``
+    / gather_model_references): the explicitly set value when the key is
+    present — an explicit null counts as cleared — else the declared
+    default, which is false for ``greengrass``. Only the greengrass
+    transport needs recipe accessControl, so aws_iot/broker subscribe
+    nodes contribute nothing. Non-string/blank topics are excluded
+    (validation's problem, not packaging's). Empty for every pre-feature
+    workflow (10.4)."""
+    topics: List[str] = []
+    for node in definition.get('nodes') or []:
+        if not isinstance(node, dict) or node.get('type') != MQTT_SUBSCRIBE_TYPE_ID:
+            continue
+        parameters = node.get('parameters')
+        if not isinstance(parameters, dict):
+            parameters = {}
+        # Effective greengrass: explicit value if present, else the
+        # declared default (False). Truthiness mirrors the V6/V8 target
+        # checks.
+        greengrass = parameters['greengrass'] if 'greengrass' in parameters else False
+        if not greengrass:
+            continue
+        topic = parameters.get('topic')
+        if isinstance(topic, str) and topic.strip() and topic not in topics:
+            topics.append(topic)
+    return sorted(topics)
 
 
 # --------------------------------------------------------------------------
@@ -1509,7 +1592,8 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
                    plugin_checksums: Optional[Dict[str, str]] = None,
                    plugin_components: Optional[Dict[str, str]] = None,
                    component_version: Optional[str] = None,
-                   workflow_name: Optional[str] = None) -> Dict:
+                   workflow_name: Optional[str] = None,
+                   subscribed_topics: Optional[List[str]] = None) -> Dict:
     """manifest.json content: what WorkflowWatcher needs to register the
     workflow and what the deployment compatibility check reads (8.4).
 
@@ -1517,8 +1601,12 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
     ``plugin_components`` ({<pluginComponentName>: <componentVersion>})
     let the LocalServer plugin loader verify each Plugin_Component-
     delivered custom plugin file and derive its install root
-    (custom-node-designer Requirements 10.4, 10.6, 11.1)."""
-    return {
+    (custom-node-designer Requirements 10.4, 10.6, 11.1).
+
+    ``subscribed_topics`` (trigger-activation-runtime 10.1, 10.4): the
+    greengrass mqtt_subscribe topic filters, recorded ONLY when non-empty
+    so trigger-less manifests stay byte-identical to pre-feature output."""
+    manifest = {
         'componentName': component_name_for(workflow_id),
         # The resolved (possibly patch-bumped) version when provided, else the
         # base version for the workflow version.
@@ -1545,6 +1633,9 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
         'packagedAt': now_ms(),
         'packagedBy': user['user_id']
     }
+    if subscribed_topics:
+        manifest['subscribed_topics'] = list(subscribed_topics)
+    return manifest
 
 
 def build_arch_zip(zip_path: str, arch: str, manifest: Dict, definition_json: str,
@@ -1699,6 +1790,25 @@ def build_recipe(workflow_id: str, workflow_version: int, bucket: str,
     on-disk manifest (observed on JP6: the device kept the original
     ``minLocalServerVersion`` after re-packaging and never became runnable).
 
+    Stale-version cleanup (stale-workflow-registrations 2.1) rides INSIDE
+    the Run script, not a ``Shutdown`` lifecycle step: before staging, the
+    script best-effort removes the workflow's whole directory tree
+    (``rm -rf /aws_dda/workflows/{id}`` — every previously staged version,
+    including a prior copy of the incoming one), then re-creates and
+    re-copies the incoming version. A Shutdown step CANNOT be used for
+    replace-time cleanup on these one-shot components: verified on-device,
+    Greengrass transitions a FINISHED generic component RUNNING → STOPPING
+    as soon as its Run script exits 0 and executes Shutdown ~10ms later, so
+    a Shutdown ``rm -rf {install_dir}`` deleted the freshly staged
+    artifacts on EVERY deploy (the workflow never registered), not just on
+    replace/remove. With cleanup in Run, sibling version directories are
+    removed exactly when a new version lands (Run re-executes on every
+    component version change) and the re-copy-on-every-(re)start behavior
+    is unchanged. The cleanup is best-effort (joined with ``;`` so a
+    cleanup failure never blocks staging) while the ``mkdir && cp`` staging
+    chain remains mandatory; ``rm -rf`` is a safe no-op when the workflow
+    directory does not exist yet (first install).
+
     ``component_dependencies`` is the ComponentDependencies block
     declaring the Plugin_Components of the workflow's Custom_Node_Types
     (custom-node-designer Requirement 16.4); omitted when the workflow
@@ -1725,7 +1835,18 @@ def build_recipe(workflow_id: str, workflow_version: int, bucket: str,
         elif arch == ARCH_X86_64_NVIDIA:
             platform['runtime'] = 'nvidia'
         unarchived_dir = zip_artifact_name(arch)[:-len('.zip')]
+        # Stale-version cleanup rides the Run script: best-effort remove
+        # every previously staged version of THIS workflow (rm -rf is a
+        # no-op when the dir doesn't exist yet), then re-create and re-copy
+        # the incoming version. Deliberately NOT a Shutdown lifecycle step:
+        # Greengrass runs Shutdown ~10ms after a one-shot Run exits 0
+        # (RUNNING → STOPPING on FINISHED, verified on device), which would
+        # delete the freshly staged artifacts on every deploy
+        # (stale-workflow-registrations 2.1). The ';' keeps the cleanup
+        # best-effort — a cleanup failure never blocks the mandatory
+        # 'mkdir && cp' staging chain.
         run_script = (
+            f"rm -rf {DEVICE_WORKFLOWS_ROOT}/{workflow_id} 2>/dev/null; "
             f"mkdir -p {install_dir} && "
             f"cp -r {{artifacts:decompressedPath}}/{unarchived_dir}/. {install_dir}/"
         )
@@ -1911,6 +2032,12 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # without an llm_inference node contribute zero findings.
     llm_node_ids = gather_llm_inference_node_ids(definition_dict)
     llm_findings = llm_arch_gate_findings(definition_dict, architectures)
+
+    # Greengrass mqtt_subscribe topic filters (trigger-activation-runtime
+    # 10.1, 10.4): recorded on the manifests and the version item only
+    # when non-empty, so trigger-less packaging output is byte-identical
+    # to pre-feature output.
+    subscribed_topics = gather_subscribed_topics(definition_dict)
     if llm_findings:
         return error_response(
             409, GATE_LLM_ARCH_UNSUPPORTED, llm_findings[0]['message'],
@@ -1943,10 +2070,15 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # Camera_Input_Node binding points (camera-registry-sync 8.6, 11.5):
     # one bindingPoints entry per camera node in each arch's compiled
     # document, plus the version-item discriminator recorded on success.
-    # Workflows without camera nodes serialize byte-identically to the
-    # plain compiler output.
+    # Custom Python source nodes additionally get a pythonSourceBinding
+    # point so the device planner can locate the node's compiled appsrc
+    # (custom-python-source 9.2); they never join camera_nodes, so the
+    # camera-binding discriminator and camera_input_nodes record are
+    # untouched. Workflows without camera or source nodes serialize
+    # byte-identically to the plain compiler output.
     camera_nodes = gather_camera_input_nodes(
         graph, camera_backed_type_ids(resolved_items))
+    python_source_nodes = gather_python_source_nodes(graph)
     binding_hints = binding_hints_from_definition(definition_dict)
     descriptors_by_id = {descriptor.type_id: descriptor for descriptor in catalog}
 
@@ -1966,7 +2098,8 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     for arch, compiled in compiled_docs.items():
         compiled_dict = compiled.to_dict()
         binding_points = build_binding_points(
-            camera_nodes, compiled_dict, arch, binding_hints, descriptors_by_id)
+            camera_nodes + python_source_nodes, compiled_dict, arch,
+            binding_hints, descriptors_by_id)
         arch_compiled_dicts[arch] = compiled_dict
         arch_binding_points[arch] = binding_points
         arch_compiled_json[arch] = compiled_document_json(compiled, binding_points)
@@ -2082,7 +2215,8 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                 plugin_checksums=arch_plugin_checksums[arch],
                 plugin_components=arch_plugin_components[arch],
                 component_version=resolved_component_version,
-                workflow_name=item.get('name'))
+                workflow_name=item.get('name'),
+                subscribed_topics=subscribed_topics)
             zip_path = os.path.join(work_dir, zip_artifact_name(arch))
             build_arch_zip(zip_path, arch, manifest, packaged_definition_json,
                            arch_compiled_json[arch], gst_plugins,
@@ -2163,26 +2297,37 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # architecture gate for this workflow component, and
     # packaged_architectures is the arch set the gate compares device
     # architectures against (3.3) without re-reading compiled documents.
+    # Greengrass mqtt_subscribe topic filters (trigger-activation-runtime
+    # 10.1, 10.4): the attribute is written ONLY when the set is non-empty,
+    # keeping the version item byte-identical to pre-feature output for
+    # every workflow without a greengrass-enabled mqtt_subscribe node.
+    update_expression = ('SET component_arn = :arn, component_version = :cv, '
+                         'compiled_arch_keys = :keys, '
+                         'plugin_components = :pc, '
+                         'has_binding_points = :hbp, '
+                         'camera_input_nodes = :cin, '
+                         'has_llm_inference = :hli, '
+                         'packaged_architectures = :pa, '
+                         'packaged_at = :at, packaged_by = :by')
+    update_values = {
+        ':arn': component_arn,
+        ':cv': resolved_component_version,
+        ':keys': compiled_arch_keys,
+        ':pc': workflow_plugin_components,
+        ':hbp': bool(camera_nodes),
+        ':cin': _dynamo_safe(camera_input_nodes),
+        ':hli': bool(llm_node_ids),
+        ':pa': architectures,
+        ':at': now_ms(),
+        ':by': user['user_id']
+    }
+    if subscribed_topics:
+        update_expression += ', subscribed_topics = :st'
+        update_values[':st'] = subscribed_topics
     dynamodb.Table(WORKFLOW_VERSIONS_TABLE).update_item(
         Key={'workflow_id': workflow_id, 'version': version},
-        UpdateExpression=('SET component_arn = :arn, compiled_arch_keys = :keys, '
-                          'plugin_components = :pc, '
-                          'has_binding_points = :hbp, '
-                          'camera_input_nodes = :cin, '
-                          'has_llm_inference = :hli, '
-                          'packaged_architectures = :pa, '
-                          'packaged_at = :at, packaged_by = :by'),
-        ExpressionAttributeValues={
-            ':arn': component_arn,
-            ':keys': compiled_arch_keys,
-            ':pc': workflow_plugin_components,
-            ':hbp': bool(camera_nodes),
-            ':cin': _dynamo_safe(camera_input_nodes),
-            ':hli': bool(llm_node_ids),
-            ':pa': architectures,
-            ':at': now_ms(),
-            ':by': user['user_id']
-        }
+        UpdateExpression=update_expression,
+        ExpressionAttributeValues=update_values
     )
 
     # Audit log entry for packaging (Requirement 11.5)

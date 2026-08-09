@@ -12,8 +12,10 @@ import {
   Button,
   ColumnLayout,
   Container,
+  FormField,
   Header,
   Input,
+  Multiselect,
   Select,
   SelectProps,
   SpaceBetween,
@@ -25,6 +27,9 @@ import { useNavigate, useParams } from 'react-router-dom';
 import ConfirmationModal from '../../components/ConfirmationModal';
 import { nodeDesignerApi } from './api';
 import {
+  ARCHITECTURE_LABELS,
+  DEEPSTREAM_ARCHITECTURES,
+  DEVICE_ARCHITECTURES,
   PluginBuildsView,
   PluginRecordSummary,
   PluginVersionDetail,
@@ -57,6 +62,14 @@ export default function PluginDetail() {
   // the retry-all action share this so double submission is blocked).
   const [retrying, setRetrying] = useState<string[]>([]);
   const [retryError, setRetryError] = useState<string | null>(null);
+  // Manual build submission (the Build header action): a generated or
+  // scaffold record accepted without a build round has no artifacts yet,
+  // so the page offers an explicit build trigger with an architecture
+  // selection (defaulted from the declaration / last build round).
+  const [buildPanelOpen, setBuildPanelOpen] = useState(false);
+  const [buildArchs, setBuildArchs] = useState<string[]>([]);
+  const [buildSubmitting, setBuildSubmitting] = useState(false);
+  const [buildError, setBuildError] = useState<string | null>(null);
   // Post-import revision adjustment (incompatible platforms carrying a
   // suggestedRevision): which architecture's inline input is open, its
   // editable value, the in-flight flag, and per-arch errors surfaced
@@ -172,6 +185,69 @@ export default function PluginDetail() {
       setRetryError(err?.message || 'The build retry could not be started');
     } finally {
       setRetrying([]);
+    }
+  };
+
+  // Architectures the Build panel may target: DeepStream-flagged
+  // records are restricted to the JetPack builds (the backend enforces
+  // the same rule, Requirement 5.1).
+  const buildableArchitectures: string[] = plugin.deepstream
+    ? [...DEEPSTREAM_ARCHITECTURES]
+    : [...DEVICE_ARCHITECTURES];
+
+  // Default architecture selection for a new build round: the last
+  // round's requested architectures when one exists, else the
+  // Target_Architectures of the recorded scaffold declaration (create
+  // wizard and generate-and-accept records both carry it in
+  // provenance.scaffoldDeclaration), else x86_64.
+  const defaultBuildArchitectures = (): string[] => {
+    const requested = (builds?.requested_architectures || []).filter((arch) =>
+      buildableArchitectures.includes(arch)
+    );
+    if (requested.length > 0) return requested;
+    const raw = plugin.provenance?.scaffoldDeclaration;
+    if (typeof raw === 'string') {
+      try {
+        const declared = JSON.parse(raw)?.architectures;
+        if (Array.isArray(declared)) {
+          const valid = declared.filter(
+            (arch): arch is string =>
+              typeof arch === 'string' && buildableArchitectures.includes(arch)
+          );
+          if (valid.length > 0) return valid;
+        }
+      } catch {
+        // unparseable provenance: fall through to the default
+      }
+    }
+    return buildableArchitectures.includes('x86_64') ? ['x86_64'] : [];
+  };
+
+  const openBuildPanel = () => {
+    setBuildArchs(defaultBuildArchitectures());
+    setBuildError(null);
+    setBuildPanelOpen(true);
+  };
+
+  // Submit a build round for the selected Target_Architectures via the
+  // existing build endpoint; the response's builds view is unsettled,
+  // so the status poll resumes automatically.
+  const startBuild = async () => {
+    if (!pluginId || !plugin || buildArchs.length === 0) return;
+    setBuildSubmitting(true);
+    setBuildError(null);
+    try {
+      const view = await nodeDesignerApi.startBuilds(
+        pluginId,
+        plugin.version,
+        buildArchs
+      );
+      setBuilds(view);
+      setBuildPanelOpen(false);
+    } catch (err: any) {
+      setBuildError(err?.message || 'The build could not be started');
+    } finally {
+      setBuildSubmitting(false);
     }
   };
 
@@ -416,20 +492,83 @@ export default function PluginDetail() {
           <Header
             variant="h2"
             actions={
-              failedArchs.length > 1 ? (
+              <SpaceBetween direction="horizontal" size="xs">
+                {failedArchs.length > 1 && (
+                  <Button
+                    disabled={retrying.length > 0}
+                    onClick={() => retryBuilds(failedArchs)}
+                  >
+                    Retry failed builds
+                  </Button>
+                )}
                 <Button
-                  disabled={retrying.length > 0}
-                  onClick={() => retryBuilds(failedArchs)}
+                  variant="primary"
+                  disabled={buildPanelOpen || retrying.length > 0}
+                  onClick={openBuildPanel}
                 >
-                  Retry failed builds
+                  Build
                 </Button>
-              ) : undefined
+              </SpaceBetween>
             }
           >
             Builds
           </Header>
         }
       >
+        <SpaceBetween size="m">
+        {buildPanelOpen && (
+          <SpaceBetween size="s">
+            {buildError && (
+              <Alert type="error" dismissible onDismiss={() => setBuildError(null)}>
+                {buildError}
+              </Alert>
+            )}
+            <FormField
+              label="Target architectures"
+              description="One build is submitted per selected Target_Architecture."
+            >
+              <Multiselect
+                selectedOptions={buildArchs.map((arch) => ({
+                  label:
+                    ARCHITECTURE_LABELS[arch as keyof typeof ARCHITECTURE_LABELS] ??
+                    arch,
+                  value: arch,
+                }))}
+                options={buildableArchitectures.map((arch) => ({
+                  label:
+                    ARCHITECTURE_LABELS[arch as keyof typeof ARCHITECTURE_LABELS] ??
+                    arch,
+                  value: arch,
+                }))}
+                onChange={({ detail }) =>
+                  setBuildArchs(
+                    detail.selectedOptions
+                      .map((option) => option.value)
+                      .filter((value): value is string => Boolean(value))
+                  )
+                }
+                placeholder="Select target architectures"
+                disabled={buildSubmitting}
+              />
+            </FormField>
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button
+                variant="primary"
+                loading={buildSubmitting}
+                disabled={buildArchs.length === 0}
+                onClick={startBuild}
+              >
+                Start build
+              </Button>
+              <Button
+                disabled={buildSubmitting}
+                onClick={() => setBuildPanelOpen(false)}
+              >
+                Cancel
+              </Button>
+            </SpaceBetween>
+          </SpaceBetween>
+        )}
         {retryError && (
           <Alert type="error" dismissible onDismiss={() => setRetryError(null)}>
             {retryError}
@@ -566,6 +705,7 @@ export default function PluginDetail() {
               })}
           </SpaceBetween>
         )}
+        </SpaceBetween>
       </Container>
 
       <Container

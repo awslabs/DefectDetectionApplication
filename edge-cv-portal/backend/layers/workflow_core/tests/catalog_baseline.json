@@ -3,7 +3,12 @@
     "category": "input",
     "display_name": "Aravis Camera Source",
     "hardware_dependent": true,
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
     "mappings": [
       {
         "arch": "x86_64",
@@ -330,7 +335,7 @@
         "constraints": {},
         "default": true,
         "depends_on": null,
-        "description": "Checked: anomaly mode — the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs. Unchecked: freeform mode — the prompt is sent as-is and the raw model text is recorded in the run metadata as bedrock_text (and bedrock.{nodeId}.text), with no JSON parsing.",
+        "description": "Checked: anomaly mode \u2014 the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs. Unchecked: freeform mode \u2014 the prompt is sent as-is and the raw model text is recorded in the run metadata as bedrock_text (and bedrock.{nodeId}.text), with no JSON parsing.",
         "examples": [
           true,
           false
@@ -854,7 +859,12 @@
     "category": "input",
     "display_name": "CSI Camera Input",
     "hardware_dependent": true,
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
     "mappings": [
       {
         "arch": "x86_64",
@@ -1446,6 +1456,198 @@
     ],
     "type_id": "custom_python_preprocess"
   },
+  "custom_python_source": {
+    "category": "input",
+    "display_name": "Custom Python (Source)",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp4",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Python run once per workflow run to produce the run's frame. Define produce_frame(context) and return the frame; context is the trigger context that started the run: for MQTT triggers the keys topic, payload, payload_json, qos and timestamp (payload_json is the payload parsed as JSON, or None when it does not parse); for OPC UA triggers the keys endpoint, node_id, value and source_timestamp; an empty dict for manual runs. Return a NumPy uint8 array (rows x cols grayscale, rows x cols x 3 BGR, or rows x cols x 4 BGRA \u2014 OpenCV channel order), or {'array': arr, 'format': 'RGB'|'RGBA'|'GRAY8'} to use the array's bytes without channel conversion, or {'data': bytes, 'width': W, 'height': H, 'format': ...} for raw bytes; returning None fails the run. cv2/np are pre-imported. Helpers: import dda_frames for load_image(source) -> BGR uint8 array and load_bytes(source) -> raw bytes, for local paths, s3://bucket/key URIs, and http(s):// URLs.",
+        "examples": [
+          "def produce_frame(context):\n    import dda_frames\n    payload = context.get(\"payload_json\") or {}\n    return dda_frames.load_image(payload[\"image_url\"])",
+          "def produce_frame(context):\n    import dda_frames\n    return dda_frames.load_image(\"s3://plant-images/reference.jpg\")"
+        ],
+        "name": "code",
+        "param_type": "code",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Extra pip packages the code needs, one per line in requirements.txt form.",
+        "examples": [
+          "requests==2.32.3"
+        ],
+        "name": "requirements",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional newline-separated list of URI prefixes that dda_frames.load_image and load_bytes may fetch from, e.g. s3://plant-images/; empty permits any source. The restriction applies only to fetches made through the dda_frames helpers \u2014 it is not a sandbox boundary.",
+        "examples": [
+          "s3://plant-images/\nhttps://mes.local/"
+        ],
+        "name": "allowed_uri_prefixes",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "custom_python_source"
+  },
   "dewarp": {
     "category": "preprocessing",
     "display_name": "Dewarp",
@@ -1600,7 +1802,7 @@
     "type_id": "dewarp"
   },
   "digital_input": {
-    "category": "input",
+    "category": "trigger",
     "display_name": "Digital Input",
     "hardware_dependent": true,
     "inputs": [],
@@ -1887,7 +2089,12 @@
     "category": "input",
     "display_name": "Folder Source",
     "hardware_dependent": true,
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
     "mappings": [
       {
         "arch": "x86_64",
@@ -2332,7 +2539,12 @@
     "category": "input",
     "display_name": "ICAM",
     "hardware_dependent": true,
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
     "mappings": [
       {
         "arch": "x86_64",
@@ -2674,6 +2886,168 @@
       }
     ],
     "type_id": "llm_inference"
+  },
+  "modbus_write": {
+    "category": "output",
+    "display_name": "Modbus TCP Write",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp4",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "recording_modbus_write",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Modbus TCP server (PLC) hostname or IP, e.g. 192.168.1.30.",
+        "examples": [
+          "192.168.1.30",
+          "plc.local"
+        ],
+        "name": "host",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 65535,
+          "min": 1
+        },
+        "default": 502,
+        "depends_on": null,
+        "description": "Modbus TCP port, e.g. 502 (the standard Modbus port).",
+        "examples": [
+          502
+        ],
+        "name": "port",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 255,
+          "min": 0
+        },
+        "default": 1,
+        "depends_on": null,
+        "description": "Modbus unit (slave) id addressed by the write (0-255), e.g. 1.",
+        "examples": [
+          1,
+          0
+        ],
+        "name": "unit_id",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "coil",
+            "holding_register"
+          ]
+        },
+        "default": "coil",
+        "depends_on": null,
+        "description": "Write target kind: coil (a single on/off bit, Write Single Coil function code 0x05) or holding_register (a 16-bit register, Write Single Register function code 0x06).",
+        "examples": [
+          "coil",
+          "holding_register"
+        ],
+        "name": "register_type",
+        "param_type": "enum",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 65535,
+          "min": 0
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Address of the coil or holding register written (0-65535), e.g. 12.",
+        "examples": [
+          12,
+          40
+        ],
+        "name": "address",
+        "param_type": "int",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": "{is_anomalous}",
+        "depends_on": null,
+        "description": "Value written to the target. Placeholders in curly braces are replaced from the inference metadata: {is_anomalous}, {confidence}, or {inference_json}; a single placeholder keeps its native type. Coil writes coerce the rendered value to a boolean; holding-register writes coerce it to an integer 0-65535.",
+        "examples": [
+          "{is_anomalous}",
+          "{confidence}"
+        ],
+        "name": "value_template",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": "register_type=coil",
+        "description": "Coil pulse duration in milliseconds (0-60000): 0 latches the written value (single write); a positive value writes the rendered value, waits pulse_ms milliseconds, then writes the inverse coil value, e.g. 250.",
+        "examples": [
+          0,
+          250
+        ],
+        "name": "pulse_ms",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "modbus_write"
   },
   "model_inference": {
     "category": "inference",
@@ -3060,6 +3434,630 @@
     ],
     "type_id": "mqtt_publish"
   },
+  "mqtt_subscribe": {
+    "category": "trigger",
+    "display_name": "MQTT Subscribe",
+    "hardware_dependent": true,
+    "inputs": [],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "arm64_jp4",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "{sim_source_name}"
+            },
+            "factory": "appsrc"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "EventSignal"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "MQTT broker hostname or IP, e.g. 10.0.0.12 or broker.local.",
+        "examples": [
+          "10.0.0.12",
+          "broker.local"
+        ],
+        "name": "broker_host",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 65535,
+          "min": 1
+        },
+        "default": 1883,
+        "depends_on": null,
+        "description": "MQTT broker TCP port, e.g. 1883 (plain MQTT) or 8883 (TLS).",
+        "examples": [
+          1883,
+          8883
+        ],
+        "name": "broker_port",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Topic filter the trigger subscribes to; a message arriving on a matching topic starts a workflow run, e.g. factory/line1/trigger or factory/+/trigger.",
+        "examples": [
+          "factory/line1/trigger",
+          "factory/+/trigger"
+        ],
+        "name": "topic",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            0,
+            1,
+            2
+          ]
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "MQTT quality of service: 0 (at most once), 1 (at least once), or 2 (exactly once; AWS IoT Core supports up to 1).",
+        "examples": [
+          0,
+          1
+        ],
+        "name": "qos",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": false,
+        "depends_on": null,
+        "description": "Publish through the device's Greengrass-managed MQTT (the Greengrass nucleus's AWS IoT Core connection) instead of a plain broker or your own AWS IoT credentials. Zero configuration: only the topic is required \u2014 no broker host or port and no certificate paths.",
+        "examples": [
+          true
+        ],
+        "name": "greengrass",
+        "param_type": "bool",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": false,
+        "depends_on": null,
+        "description": "Publish to AWS IoT Core over mutual TLS instead of a plain MQTT broker; enables the IoT thing name and certificate path fields.",
+        "examples": [
+          true
+        ],
+        "name": "aws_iot",
+        "param_type": "bool",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "AWS IoT thing name used as the MQTT client id, e.g. dda-edge-device-01.",
+        "examples": [
+          "dda-edge-device-01"
+        ],
+        "name": "iot_thing_name",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "Path of the Amazon root CA certificate on the device, e.g. /greengrass/v2/rootCA.pem.",
+        "examples": [
+          "/greengrass/v2/rootCA.pem"
+        ],
+        "name": "iot_ca_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "Path of the device client certificate on the device, e.g. /greengrass/v2/thingCert.crt.",
+        "examples": [
+          "/greengrass/v2/thingCert.crt"
+        ],
+        "name": "iot_client_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "Path of the device private key on the device, e.g. /greengrass/v2/privKey.key.",
+        "examples": [
+          "/greengrass/v2/privKey.key"
+        ],
+        "name": "iot_private_key_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "queue",
+            "drop",
+            "debounce"
+          ]
+        },
+        "default": "queue",
+        "depends_on": null,
+        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce \u2014 coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
+        "examples": [
+          "queue",
+          "drop"
+        ],
+        "name": "concurrency_policy",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 1
+        },
+        "default": 10,
+        "depends_on": "concurrency_policy=queue",
+        "description": "Maximum pending activations queued for this trigger (1-1000); further firings are discarded and logged, e.g. 10.",
+        "examples": [
+          10,
+          100
+        ],
+        "name": "queue_depth",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 1
+        },
+        "default": 500,
+        "depends_on": "concurrency_policy=debounce",
+        "description": "Trailing debounce interval in milliseconds (1-60000): firings within it coalesce into one activation carrying the most recent trigger context, e.g. 500.",
+        "examples": [
+          500,
+          2000
+        ],
+        "name": "debounce_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Maximum automatic reconnect attempts after the trigger's connection drops (0-1000); 0 = retry forever, e.g. 0.",
+        "examples": [
+          0,
+          5
+        ],
+        "name": "retry_limit",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 0
+        },
+        "default": 100,
+        "depends_on": null,
+        "description": "Activation priority relative to the workflow's other triggers (0-1000); lower value = higher priority, ties served in firing order, e.g. 100.",
+        "examples": [
+          100,
+          10
+        ],
+        "name": "priority",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "mqtt_subscribe"
+  },
+  "opcua_subscribe": {
+    "category": "trigger",
+    "display_name": "OPC UA Subscribe",
+    "hardware_dependent": true,
+    "inputs": [],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:opcua"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:opcua"
+        ]
+      },
+      {
+        "arch": "arm64_jp4",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:opcua"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:opcua"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:opcua"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "{sim_source_name}"
+            },
+            "factory": "appsrc"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "EventSignal"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1,
+          "regex": "^opc\\.tcp://.+"
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "OPC UA server endpoint URL, e.g. opc.tcp://192.168.1.20:4840.",
+        "examples": [
+          "opc.tcp://192.168.1.20:4840"
+        ],
+        "name": "endpoint",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "OPC UA node id the value is written to, e.g. ns=2;s=Machine1.Reject.",
+        "examples": [
+          "ns=2;s=Machine1.Reject"
+        ],
+        "name": "node_id",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 10
+        },
+        "default": 100,
+        "depends_on": null,
+        "description": "Sampling/publishing interval of the OPC UA subscription in milliseconds (10-60000), e.g. 100.",
+        "examples": [
+          100,
+          1000
+        ],
+        "name": "sampling_interval_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "subscribe",
+            "poll"
+          ]
+        },
+        "default": "subscribe",
+        "depends_on": null,
+        "description": "How value changes are detected: subscribe registers a true OPC UA data-change subscription (the default); poll reads the node periodically and fires when the value changes.",
+        "examples": [
+          "subscribe",
+          "poll"
+        ],
+        "name": "mode",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 10
+        },
+        "default": 500,
+        "depends_on": "mode=poll",
+        "description": "How often the node is read in poll mode, in milliseconds (10-60000), e.g. 500.",
+        "examples": [
+          500,
+          2000
+        ],
+        "name": "poll_interval_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional OPC UA user name for user-token authentication. Leave empty for anonymous access.",
+        "examples": [
+          "operator"
+        ],
+        "name": "username",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional password for the OPC UA user. Stored with the workflow definition; treat as a secret.",
+        "examples": [
+          "changeit"
+        ],
+        "name": "password",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional OPC UA security policy for an encrypted/signed session, e.g. Basic256Sha256. Requires client_cert_path and client_key_path.",
+        "examples": [
+          "Basic256Sha256"
+        ],
+        "name": "security_policy",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional message security mode used with security_policy: Sign or SignAndEncrypt (defaults to SignAndEncrypt when a policy is set).",
+        "examples": [
+          "SignAndEncrypt",
+          "Sign"
+        ],
+        "name": "security_mode",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional path (on the device) to the client application certificate used for certificate-based security.",
+        "examples": [
+          "/aws_dda/opcua/client-cert.der"
+        ],
+        "name": "client_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional path (on the device) to the client certificate private key.",
+        "examples": [
+          "/aws_dda/opcua/client-key.pem"
+        ],
+        "name": "client_key_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional path (on the device) to the server's certificate to pin/trust.",
+        "examples": [
+          "/aws_dda/opcua/server-cert.der"
+        ],
+        "name": "server_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "queue",
+            "drop",
+            "debounce"
+          ]
+        },
+        "default": "queue",
+        "depends_on": null,
+        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce \u2014 coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
+        "examples": [
+          "queue",
+          "drop"
+        ],
+        "name": "concurrency_policy",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 1
+        },
+        "default": 10,
+        "depends_on": "concurrency_policy=queue",
+        "description": "Maximum pending activations queued for this trigger (1-1000); further firings are discarded and logged, e.g. 10.",
+        "examples": [
+          10,
+          100
+        ],
+        "name": "queue_depth",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 1
+        },
+        "default": 500,
+        "depends_on": "concurrency_policy=debounce",
+        "description": "Trailing debounce interval in milliseconds (1-60000): firings within it coalesce into one activation carrying the most recent trigger context, e.g. 500.",
+        "examples": [
+          500,
+          2000
+        ],
+        "name": "debounce_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Maximum automatic reconnect attempts after the trigger's connection drops (0-1000); 0 = retry forever, e.g. 0.",
+        "examples": [
+          0,
+          5
+        ],
+        "name": "retry_limit",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 0
+        },
+        "default": 100,
+        "depends_on": null,
+        "description": "Activation priority relative to the workflow's other triggers (0-1000); lower value = higher priority, ties served in firing order, e.g. 100.",
+        "examples": [
+          100,
+          10
+        ],
+        "name": "priority",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "opcua_subscribe"
+  },
   "opcua_write": {
     "category": "output",
     "display_name": "OPC UA Write",
@@ -3384,5 +4382,137 @@
       }
     ],
     "type_id": "rotate"
+  },
+  "unified_input": {
+    "category": "input",
+    "display_name": "Input Source",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "values": [
+            "csi_camera",
+            "icam",
+            "aravis_camera",
+            "folder"
+          ]
+        },
+        "default": "folder",
+        "depends_on": null,
+        "description": "Which underlying source this input represents.",
+        "examples": [
+          "folder",
+          "csi_camera"
+        ],
+        "name": "source_kind",
+        "param_type": "enum",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 100,
+          "min": 0
+        },
+        "default": 4,
+        "depends_on": null,
+        "description": "NVIDIA CSI sensor gain (0-100) applied through the CSI capture service; e.g. 4.",
+        "examples": [
+          4,
+          10
+        ],
+        "name": "gain",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": 5000000,
+        "depends_on": null,
+        "description": "NVIDIA CSI sensor exposure time in nanoseconds, e.g. 5000000 (5 ms).",
+        "examples": [
+          5000000,
+          16000000
+        ],
+        "name": "exposure",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "/dev/video0",
+        "depends_on": null,
+        "description": "V4L2 device path of the smart (ICAM) camera on the edge device, e.g. /dev/video0.",
+        "examples": [
+          "/dev/video0",
+          "/dev/video1"
+        ],
+        "name": "device",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Aravis (GenICam) camera identifier as enumerated on the edge device, e.g. Aravis-Fake-GV01 or Basler-12345678.",
+        "examples": [
+          "Aravis-Fake-GV01",
+          "Basler-12345678"
+        ],
+        "name": "camera_id",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Path of the image file (or folder of files) to read on the device, e.g. /aws_dda/images/latest.jpg.",
+        "examples": [
+          "/aws_dda/images/latest.jpg",
+          "/aws_dda/captures"
+        ],
+        "name": "location",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "*.jpg",
+        "depends_on": null,
+        "description": "Glob pattern selecting which files in the folder are read, e.g. *.jpg.",
+        "examples": [
+          "*.jpg",
+          "line1_*.jpg"
+        ],
+        "name": "file_pattern",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "unified_input"
   }
 }

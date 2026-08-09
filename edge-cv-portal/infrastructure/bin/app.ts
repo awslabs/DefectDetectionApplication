@@ -7,6 +7,7 @@ import { StorageStack } from '../lib/storage-stack';
 import { ComputeStack } from '../lib/compute-stack';
 import { TestRunnerStack } from '../lib/test-runner-stack';
 import { NodeDesignerStack } from '../lib/node-designer-stack';
+import { BuildFleetStack } from '../lib/build-fleet-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 
 const app = new cdk.App();
@@ -164,6 +165,26 @@ const nodeDesignerStack = new NodeDesignerStack(app, 'EdgeCVPortalNodeDesignerSt
   workflowVersionsTable: storageStack.workflowVersionsTable,
   testDatasetsTable: storageStack.testDatasetsTable,
   trustedUseCaseAccountIds,
+  userPool: authStack.userPool,
+  restApiId: computeStack.api.restApiId,
+  restApiRootResourceId: computeStack.api.restApiRootResourceId,
+  // Must match ApiGatewayStack deployOptions.stageName.
+  apiStageName: 'v1',
+});
+
+// Build Fleet Stack (portal-build-fleet-and-workflow-gates: BuildJobs/
+// BuildServers tables, the five build Lambdas, the 1-minute dispatcher
+// schedule + build event rules, the /dda/portal-builds log group, the
+// dda-portal-build-alerts SNS topic, the extended dda-build-role instance
+// profile, and the /builds, /build-servers, /build-config routes registered
+// against the ComputeStack API. The bootstrap repo URL is configurable via
+// `-c buildRepoUrl=<url>`.
+const buildFleetStack = new BuildFleetStack(app, 'EdgeCVPortalBuildFleetStack', {
+  env,
+  description: 'Portal build fleet infrastructure (build jobs, dedicated/ephemeral build compute, dispatcher, API) for Edge CV Portal',
+  userRolesTable: storageStack.userRolesTable,
+  auditLogTable: storageStack.auditLogTable,
+  settingsTable: storageStack.settingsTable,
   userPool: authStack.userPool,
   restApiId: computeStack.api.restApiId,
   restApiRootResourceId: computeStack.api.restApiRootResourceId,

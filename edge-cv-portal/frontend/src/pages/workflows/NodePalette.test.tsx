@@ -27,6 +27,7 @@ function descriptor(
 
 const CATALOG: NodeTypeDescriptor[] = [
   descriptor('camera_source', 'input', 'Camera source'),
+  descriptor('custom_python_source', 'input', 'Custom Python (Source)'),
   descriptor('crop', 'preprocessing', 'Crop'),
   descriptor('custom_python_preprocess', 'preprocessing', 'Custom Python (Frames)'),
   descriptor('model_inference', 'inference', 'Model inference'),
@@ -59,6 +60,14 @@ describe('NodePalette', () => {
     expect(within(preprocessingSection).getByText('Custom Python (Frames)')).toBeInTheDocument();
     // It appears only under Preprocessing, not in any other section.
     expect(screen.getAllByText('Custom Python (Frames)')).toHaveLength(1);
+  });
+
+  it('renders the custom_python_source node in the Input section (custom-python-source Requirement 10.1)', () => {
+    render(<NodePalette catalog={CATALOG} />);
+    const inputSection = screen.getByRole('region', { name: 'Input' });
+    expect(within(inputSection).getByText('Custom Python (Source)')).toBeInTheDocument();
+    // It appears only under Input, not in any other section.
+    expect(screen.getAllByText('Custom Python (Source)')).toHaveLength(1);
   });
 
   it('renders the llm_inference node with the "VLM/LLM Inference" label (Bug 4, Requirement 2.4)', () => {

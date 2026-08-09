@@ -257,18 +257,22 @@ def stage_models_for_run(
     - ``staged``: the staging manifest ``[{nodeId, modelName, s3Key}]``
       recorded in the state-machine input (one entry per node; nodes
       sharing a model share the same staged object).
-    - ``errors``: per-node error records ``{nodeId, status, outputs,
-      stubActivity, error:{code, message}}`` (the results-document shape
-      of workflow_test_steps.error_records). Any error fails the run
-      before the state machine starts.
+    - ``errors``: per-node error records ``{nodeId, modelName, status,
+      outputs, stubActivity, error:{code, message}}`` (the
+      results-document shape of workflow_test_steps.error_records, plus
+      the model name). Staging is best-effort (12.16, 12.17): the caller
+      converts these records into ``STAGING_FALLBACKS`` entries — the
+      node is omitted from ``STAGED_MODELS``, the run still starts, and
+      the sandbox runs the node with the simulated inference outcome.
     """
     staged: List[Dict] = []
     errors: List[Dict] = []
     copied_keys: Dict[str, str] = {}  # modelName -> staged s3 key
 
-    def record_error(node_id, code, message):
+    def record_error(node_id, model_name, code, message):
         errors.append({
             'nodeId': node_id,
+            'modelName': model_name,
             'status': 'error',
             'outputs': [],
             'stubActivity': [],
@@ -279,7 +283,7 @@ def stage_models_for_run(
         node_id = node.get('nodeId')
         model_name = node.get('modelName')
         if not model_name:
-            record_error(node_id, CODE_MODEL_NOT_REGISTERED,
+            record_error(node_id, model_name, CODE_MODEL_NOT_REGISTERED,
                          'Model inference node has no model selected')
             continue
 
@@ -290,12 +294,12 @@ def stage_models_for_run(
 
         item, component_arn = resolve_model_item(model_items, model_name)
         if item is None:
-            record_error(node_id, CODE_MODEL_NOT_REGISTERED,
+            record_error(node_id, model_name, CODE_MODEL_NOT_REGISTERED,
                          'Model {0} is not registered for this use '
                          'case'.format(model_name))
             continue
         if not component_arn:
-            record_error(node_id, CODE_NO_CPU_VARIANT,
+            record_error(node_id, model_name, CODE_NO_CPU_VARIANT,
                          no_cpu_variant_message(model_name))
             continue
 
@@ -304,7 +308,7 @@ def stage_models_for_run(
         except (ClientError, ValueError, KeyError) as error:
             logger.error('Could not load recipe for %s: %s',
                          component_arn, str(error))
-            record_error(node_id, CODE_MODEL_STAGING_FAILED,
+            record_error(node_id, model_name, CODE_MODEL_STAGING_FAILED,
                          'Model {0}: the component recipe could not be '
                          'read ({1})'.format(
                              model_name,
@@ -313,7 +317,7 @@ def stage_models_for_run(
 
         location = artifact_location_from_recipe(recipe)
         if not location:
-            record_error(node_id, CODE_MODEL_STAGING_FAILED,
+            record_error(node_id, model_name, CODE_MODEL_STAGING_FAILED,
                          'Model {0}: the component recipe declares no S3 '
                          'model artifact'.format(model_name))
             continue
@@ -331,7 +335,7 @@ def stage_models_for_run(
         except ClientError as error:
             logger.error('Could not stage model artifact s3://%s/%s: %s',
                          source_bucket, source_key, str(error))
-            record_error(node_id, CODE_MODEL_STAGING_FAILED,
+            record_error(node_id, model_name, CODE_MODEL_STAGING_FAILED,
                          'Model {0}: the model artifact could not be '
                          'copied from s3://{1}/{2}'.format(
                              model_name, source_bucket, source_key))

@@ -280,9 +280,12 @@ class TestExecutorIntegration:
         executor.execute(execution_id)
 
         # The merged metadata (7.4) reached the output bindings (7.7).
+        # `trigger: {}` is the seeded trigger-less-run delta
+        # (custom-python-source Requirements 2.5, 11.1).
         assert received == [{
             "is_anomalous": True,
             "llm": {"llm1": {"generated_text": "anomaly summary"}},
+            "trigger": {},
         }]
         assert get_execution(session_factory).status == \
             EXECUTION_STATUS_COMPLETED
@@ -308,9 +311,12 @@ class TestExecutorIntegration:
 
         # Recorded, not raised (7.6): the run completes and the error
         # indication reaches downstream consumers (7.7).
+        # `trigger: {}` is the seeded trigger-less-run delta
+        # (custom-python-source Requirements 2.5, 11.1).
         assert received == [{
             "is_anomalous": True,
             "llm": {"llm1": {"error": "connection refused"}},
+            "trigger": {},
         }]
         assert get_execution(session_factory).status == \
             EXECUTION_STATUS_COMPLETED

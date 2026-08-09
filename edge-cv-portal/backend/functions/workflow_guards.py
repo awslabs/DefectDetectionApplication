@@ -26,6 +26,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import boto3
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
@@ -81,6 +82,55 @@ def get_version_item(workflow_id: str, version: int) -> Optional[Dict]:
     response = table.get_item(Key={'workflow_id': workflow_id, 'version': int(version)})
     item = response.get('Item')
     return _decimal_to_native(item) if item else None
+
+
+def find_version_item_by_component_version(workflow_id: str,
+                                           component_version: str) -> Optional[Dict]:
+    """
+    Find the WorkflowVersions item whose registered component version
+    equals `component_version`, or None.
+
+    Scans the workflow's version items (paged Query on the partition;
+    version counts per workflow are small) and matches on the discrete
+    `component_version` field when present, else on the `component_arn`
+    suffix after the last ':versions:'.
+
+    The match is unambiguous by construction: component majors strictly
+    increase per workflow_packaging.next_component_version (first package
+    of version N is N.0.0, each re-package takes the next free major), so
+    at most one version item of a workflow can record a given component
+    version.
+
+    Table-read errors are logged and return None so callers can fall back
+    (e.g. to the legacy major-parse resolution).
+    """
+    if not component_version:
+        return None
+    try:
+        table = dynamodb.Table(WORKFLOW_VERSIONS_TABLE)
+        query_kwargs = {
+            'KeyConditionExpression': Key('workflow_id').eq(workflow_id)
+        }
+        while True:
+            response = table.query(**query_kwargs)
+            for item in response.get('Items', []):
+                recorded = item.get('component_version')
+                if not recorded:
+                    arn = item.get('component_arn')
+                    if isinstance(arn, str) and ':versions:' in arn:
+                        recorded = arn.rsplit(':versions:', 1)[-1]
+                if recorded == component_version:
+                    return _decimal_to_native(item)
+            last_key = response.get('LastEvaluatedKey')
+            if not last_key:
+                return None
+            query_kwargs['ExclusiveStartKey'] = last_key
+    except ClientError as e:
+        logger.error(
+            f"Error querying version items for workflow {workflow_id} "
+            f"by component version {component_version}: {str(e)}"
+        )
+        return None
 
 
 def load_recorded_findings(validation_status: Dict) -> List[Dict]:

@@ -14,6 +14,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import GenerateChatPanel, { type GenerateChatPanelProps } from './GenerateChatPanel';
 import type { UserRole } from '../../types';
 import type {
+  GenerationStructuralError,
   NodeTypeDescriptor,
   WorkflowDefinition,
   WorkflowGenerationResult,
@@ -564,5 +565,188 @@ describe('GenerateChatPanel canvas snapshot rules (10.5)', () => {
         current_definition: GENERATED_DEFINITION,
       })
     );
+  });
+});
+
+// --------------------------------------------------------------------------
+// Generation_Gate rejection and repaired-notice rendering (task 12.7,
+// portal-build-fleet-and-workflow-gates Requirements 8.6, 8.8)
+// --------------------------------------------------------------------------
+
+/** Structural errors of a gate rejection envelope (Req 8.8 fixtures). */
+const STRUCTURAL_ERRORS: GenerationStructuralError[] = [
+  {
+    code: 'V2_PORT_TYPE_MISMATCH',
+    message: "Port type mismatch: 'VideoFrames' cannot feed 'InferenceResults'",
+    affected: [
+      // Carries a display name: labeled by it (8.8).
+      { id: 'camera_source_1', kind: 'node', displayName: 'Line 3 camera' },
+      // No display name: falls back to the id (8.8).
+      { id: 'camera_source_1.out->capture_1.in', kind: 'connection' },
+    ],
+    explanation:
+      'The camera output produces video frames but the connection expects inference results, so data cannot flow.',
+  },
+  {
+    code: 'V5_MISSING_OUTPUT_NODE',
+    message: 'Workflow has no output node',
+    // Graph-level error: no affected elements, explanation only (8.8).
+    affected: [],
+    explanation: 'The workflow produces no output, so running it would have no effect.',
+  },
+];
+
+describe('GenerateChatPanel gate rejection (8.8)', () => {
+  it('renders the rejection alert with display-name fallback labels and explanations, preserving the prompt (8.8)', async () => {
+    const { ApiError } = await import('../../services/api');
+    generateWorkflow.mockRejectedValue(
+      new ApiError(
+        'The generated workflow has structural errors and was rejected.',
+        422,
+        'GENERATION_REJECTED',
+        { structural_errors: STRUCTURAL_ERRORS }
+      )
+    );
+    const { onApplyGenerated } = renderPanel();
+
+    send('Camera to capture pipeline');
+
+    // The rejection is rendered as an error Alert with its own header,
+    // distinct from the generic failure alert.
+    expect(await screen.findByText('Generation rejected')).toBeInTheDocument();
+    expect(screen.queryByText('Generation failed')).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/The generated workflow has structural errors and was rejected\./)
+    ).toBeInTheDocument();
+
+    const list = screen.getByRole('list', { name: 'Structural errors' });
+    const items = Array.from(list.querySelectorAll('li')).map((li) => li.textContent);
+    expect(items).toHaveLength(2);
+    // Affected elements labeled by display name, falling back to the id,
+    // followed by the plain-language explanation (8.8).
+    expect(items[0]).toContain('Line 3 camera, camera_source_1.out->capture_1.in');
+    expect(items[0]).toContain(
+      'The camera output produces video frames but the connection expects inference results, so data cannot flow.'
+    );
+    // Graph-level error: explanation alone, no affected-element label.
+    expect(items[1]).toBe(
+      'The workflow produces no output, so running it would have no effect.'
+    );
+
+    // The canvas is untouched and the prompt stays for retry (8.8).
+    expect(onApplyGenerated).not.toHaveBeenCalled();
+    expect(promptInput().value).toBe('Camera to capture pipeline');
+  });
+
+  it('renders the rejection alert for the fail-closed GENERATION_VALIDATION_INCOMPLETE code (8.8)', async () => {
+    const { ApiError } = await import('../../services/api');
+    generateWorkflow.mockRejectedValue(
+      new ApiError(
+        'Validation could not be completed for the generated workflow.',
+        422,
+        'GENERATION_VALIDATION_INCOMPLETE',
+        {}
+      )
+    );
+    const { onApplyGenerated } = renderPanel();
+
+    send('Camera to capture pipeline');
+
+    expect(await screen.findByText('Generation rejected')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Validation could not be completed for the generated workflow\./)
+    ).toBeInTheDocument();
+    // No structural errors in the envelope: no error list is rendered.
+    expect(screen.queryByRole('list', { name: 'Structural errors' })).toBeNull();
+    expect(onApplyGenerated).not.toHaveBeenCalled();
+    expect(promptInput().value).toBe('Camera to capture pipeline');
+  });
+
+  it('clears the rejection and the prompt only on a subsequent 200 (8.8)', async () => {
+    const { ApiError } = await import('../../services/api');
+    generateWorkflow
+      .mockRejectedValueOnce(
+        new ApiError('Rejected.', 422, 'GENERATION_REJECTED', {
+          structural_errors: STRUCTURAL_ERRORS,
+        })
+      )
+      .mockResolvedValueOnce(generationResult());
+    const { onApplyGenerated } = renderPanel();
+
+    send('Camera to capture pipeline');
+    expect(await screen.findByText('Generation rejected')).toBeInTheDocument();
+    expect(promptInput().value).toBe('Camera to capture pipeline');
+
+    // Retry with the preserved prompt succeeds: the rejection alert is
+    // cleared and the prompt input empties (cleared only on 200).
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('Generation rejected')).not.toBeInTheDocument();
+    expect(promptInput().value).toBe('');
+  });
+});
+
+describe('GenerateChatPanel repaired notice (8.6)', () => {
+  it('renders the automatic-correction info alert listing the corrected errors on a repaired acceptance (8.6)', async () => {
+    generateWorkflow.mockResolvedValue(
+      generationResult({
+        gate: {
+          passed: true,
+          repaired: true,
+          corrected_errors: [
+            {
+              severity: 'error',
+              code: 'V3_BACKWARDS_EDGE',
+              message: 'Connection goes backwards against the pipeline flow',
+              nodeId: null,
+              connectionId: 'capture_1.out->camera_source_1.in',
+            },
+            {
+              severity: 'error',
+              code: 'V6_UNREACHABLE_NODE',
+              message: 'Node is not reachable from any input node',
+              nodeId: 'capture_1',
+              connectionId: null,
+            },
+          ],
+          structural_error_codes: ['V3_BACKWARDS_EDGE', 'V6_UNREACHABLE_NODE'],
+        },
+      })
+    );
+    const { onApplyGenerated } = renderPanel();
+
+    send('Camera to capture pipeline');
+
+    // The repaired result is still applied to the canvas (accept path).
+    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    expect(screen.getByText('Automatic correction applied')).toBeInTheDocument();
+
+    // The corrected original Structural_Errors are listed (8.6).
+    const list = screen.getByRole('list', { name: 'Corrected structural errors' });
+    const items = Array.from(list.querySelectorAll('li')).map((li) => li.textContent);
+    expect(items).toHaveLength(2);
+    expect(items[0]).toContain(
+      'V3_BACKWARDS_EDGE: Connection goes backwards against the pipeline flow'
+    );
+    expect(items[0]).toContain('(connection: capture_1.out->camera_source_1.in)');
+    expect(items[1]).toContain('V6_UNREACHABLE_NODE: Node is not reachable from any input node');
+    expect(items[1]).toContain('(node: capture_1)');
+
+    // The prompt clears on the 200 as usual.
+    expect(promptInput().value).toBe('');
+  });
+
+  it('shows no correction notice when the gate accepted without repair (8.6)', async () => {
+    generateWorkflow.mockResolvedValue(
+      generationResult({
+        gate: { passed: true, repaired: false, corrected_errors: [], structural_error_codes: [] },
+      })
+    );
+    const { onApplyGenerated } = renderPanel();
+
+    send('Camera to capture pipeline');
+
+    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('Automatic correction applied')).not.toBeInTheDocument();
   });
 });

@@ -879,46 +879,21 @@ def append_run_progress(test_run_id: str, message: str) -> None:
         logger.warning(f"Could not record progress for run {test_run_id}: {str(e)}")
 
 
-def fail_run_before_start(run_item: Dict, error_records: List[Dict]) -> Dict:
-    """Fail a test run before its state-machine execution starts.
+def staging_fallbacks_from_errors(error_records: List[Dict]) -> List[Dict]:
+    """``[{nodeId, modelName, reason}]`` from per-node staging error records.
 
-    Writes the per-node error records as the run's results document
-    (the shape GET /test-runs/{id} serves) and marks the TestRuns item
-    failed with the first failing node identified — the Requirement
-    12.10/12.12 semantics, applied to model staging errors. Returns the
-    202 response carrying the failed run.
+    Model staging is best-effort (12.16, 12.17): a model that cannot be
+    staged no longer fails the run. Its node is omitted from
+    ``STAGED_MODELS`` and surfaced here instead; the sandbox harness runs
+    the node with the injected simulated inference outcome and reports
+    the fallback reason in the node's results.
     """
-    test_run_id = run_item['test_run_id']
-    first = error_records[0]
-    message = (first.get('error') or {}).get('message') or 'Model staging failed'
-    node_id = next((r.get('nodeId') for r in error_records if r.get('nodeId')), None)
-    try:
-        s3.put_object(
-            Bucket=PORTAL_ARTIFACTS_BUCKET,
-            Key=run_item['results_s3_key'],
-            Body=json.dumps({'nodes': error_records}, indent=2).encode('utf-8'),
-            ContentType='application/json',
-        )
-    except ClientError as e:
-        logger.error(f"Could not write staging error results for run "
-                     f"{test_run_id}: {str(e)}")
-    dynamodb.Table(TEST_RUNS_TABLE).update_item(
-        Key={'test_run_id': test_run_id},
-        UpdateExpression='SET #s = :status, finished_at = :finished, failure = :failure',
-        ExpressionAttributeNames={'#s': 'status'},
-        ExpressionAttributeValues={
-            ':status': 'failed',
-            ':finished': now_ms(),
-            ':failure': {'nodeId': node_id, 'message': message, 'timeout': False},
-        },
-    )
-    append_run_progress(test_run_id, 'Test run failed: {0}'.format(message))
-    run_item = dict(run_item)
-    run_item['status'] = 'failed'
-    run_item['failure'] = {'nodeId': node_id, 'message': message,
-                           'timeout': False}
-    run_item['finished_at'] = now_ms()
-    return create_response(202, {'test_run': test_run_summary(run_item)})
+    return [{
+        'nodeId': record.get('nodeId'),
+        'modelName': record.get('modelName'),
+        'reason': ((record.get('error') or {}).get('message')
+                   or 'Model staging failed'),
+    } for record in error_records]
 
 
 def stage_test_run_models(run_item: Dict, definition: Optional[Dict]) -> Tuple[List[Dict], List[Dict]]:
@@ -947,6 +922,7 @@ def stage_test_run_models(run_item: Dict, definition: Optional[Dict]) -> Tuple[L
                      f"{usecase_id}: {str(e)}")
         return [], [{
             'nodeId': node.get('nodeId'),
+            'modelName': node.get('modelName'),
             'status': 'error',
             'outputs': [],
             'stubActivity': [],
@@ -1058,23 +1034,20 @@ def start_test_run(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # Triton model staging: every model_inference node's model artifact
     # is copied into the portal artifacts bucket before the execution
     # starts, so the sandbox harness can populate the (initially empty)
-    # Triton model repository and actually run inference on CPU. A model
-    # without a CPU-compatible variant (or one that cannot be staged)
-    # fails the run with a per-node error and never starts the pipeline.
+    # Triton model repository and actually run inference on CPU. Staging
+    # is best-effort (12.16, 12.17): a model without a CPU-compatible
+    # variant (or one that cannot be staged) no longer fails the run —
+    # its node is omitted from STAGED_MODELS and reported in
+    # STAGING_FALLBACKS, and the sandbox runs it with the injected
+    # simulated inference outcome.
     definition = load_stored_definition(version_item.get('s3_definition_key'))
     staged_models, staging_errors = stage_test_run_models(run_item, definition)
-    if staging_errors:
-        log_audit_event(
-            user_id=user['user_id'],
-            action='start_test_run',
-            resource_type='test_run',
-            resource_id=test_run_id,
-            result='failed',
-            details={'usecase_id': usecase_id, 'workflow_id': workflow_id,
-                     'version': version, 'dataset_id': dataset_id,
-                     'reason': 'model_staging_failed'}
-        )
-        return fail_run_before_start(run_item, staging_errors)
+    staging_fallbacks = staging_fallbacks_from_errors(staging_errors)
+    for fallback in staging_fallbacks:
+        append_run_progress(
+            test_run_id,
+            'Model staging fallback for node {0}: {1}'.format(
+                fallback.get('nodeId'), fallback.get('reason')))
 
     # State machine input per design section 10: the sandbox compiles for
     # x86_64 with simulation=true and feeds sources from the Test_Dataset.
@@ -1107,7 +1080,14 @@ def start_test_run(event: Dict, user: Dict, workflow_id: str) -> Dict:
         # JSON string the RunSandbox containerOverrides pass through as
         # the STAGED_MODELS env value.
         'staged_models': staged_models,
-        'staged_models_json': json.dumps(staged_models)
+        'staged_models_json': json.dumps(staged_models),
+        # Best-effort staging fallbacks [{nodeId, modelName, reason}]:
+        # the nodes whose models could not be staged (12.16, 12.17). The
+        # list for readability, plus the pre-serialized JSON string the
+        # RunSandbox containerOverrides pass through as the
+        # STAGING_FALLBACKS env value.
+        'staging_fallbacks': staging_fallbacks,
+        'staging_fallbacks_json': json.dumps(staging_fallbacks)
     }
     try:
         execution = stepfunctions.start_execution(

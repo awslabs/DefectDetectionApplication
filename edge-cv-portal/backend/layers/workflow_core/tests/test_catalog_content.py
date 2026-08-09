@@ -22,6 +22,7 @@ from workflow_core.catalog import (
     CATEGORY_OUTPUT,
     CATEGORY_POST_PROCESSING,
     CATEGORY_PREPROCESSING,
+    CATEGORY_TRIGGER,
     NODE_CATALOG,
     PORT_TYPE_EVENT_SIGNAL,
     PORT_TYPE_INFERENCE_META,
@@ -45,14 +46,26 @@ def _port_types(ports):
 
 class TestInputNodeTypes:
     def test_required_input_types_present(self):
-        for type_id in ("csi_camera_source", "icam_source", "folder_source",
-                        "digital_input"):
+        for type_id in ("csi_camera_source", "icam_source", "folder_source"):
             descriptor = get_node_type(type_id)
             assert descriptor is not None, type_id
             assert descriptor.category == CATEGORY_INPUT
-            # Input nodes originate data: no input ports, at least one output.
-            assert descriptor.inputs == []
+            # Input nodes originate data: their only input port is the
+            # single optional inert activation scaffolding port
+            # (triggers-stage-and-unified-input Requirement 7.1); at
+            # least one output.
+            assert [(p.name, p.port_type) for p in descriptor.inputs] == [
+                ("activation", PORT_TYPE_EVENT_SIGNAL)]
             assert len(descriptor.outputs) >= 1
+
+    def test_digital_input_relocated_to_triggers(self):
+        # triggers-stage-and-unified-input: digital_input moved from
+        # CATEGORY_INPUT to CATEGORY_TRIGGER (metadata-only relocation).
+        descriptor = get_node_type("digital_input")
+        assert descriptor is not None
+        assert descriptor.category == CATEGORY_TRIGGER
+        assert descriptor.inputs == []
+        assert len(descriptor.outputs) >= 1
 
     def test_csi_camera_source_parameterization(self):
         # csi-icam-input-nodes Requirements 1.1, 1.2: gain/exposure only,
@@ -141,7 +154,10 @@ class TestAravisCameraSourceNodeType:
         assert descriptor.type_id == "aravis_camera_source"
         assert descriptor.category == CATEGORY_INPUT
         assert descriptor.display_name == "Aravis Camera Source"
-        assert descriptor.inputs == []
+        # Single optional inert activation scaffolding port
+        # (triggers-stage-and-unified-input Requirement 7.1).
+        assert [(p.name, p.port_type) for p in descriptor.inputs] == [
+            ("activation", PORT_TYPE_EVENT_SIGNAL)]
         assert [(port.name, port.port_type) for port in descriptor.outputs] == [
             ("out", PORT_TYPE_VIDEO_FRAMES)]
 
@@ -226,7 +242,10 @@ class TestCsiCameraSourceNodeType:
         assert descriptor.type_id == "csi_camera_source"
         assert descriptor.category == CATEGORY_INPUT
         assert descriptor.display_name == "CSI Camera Input"
-        assert descriptor.inputs == []
+        # Single optional inert activation scaffolding port
+        # (triggers-stage-and-unified-input Requirement 7.1).
+        assert [(p.name, p.port_type) for p in descriptor.inputs] == [
+            ("activation", PORT_TYPE_EVENT_SIGNAL)]
         assert [(port.name, port.port_type) for port in descriptor.outputs] == [
             ("out", PORT_TYPE_VIDEO_FRAMES)]
         assert descriptor.hardware_dependent is True
@@ -276,7 +295,10 @@ class TestIcamSourceNodeType:
         assert descriptor.type_id == "icam_source"
         assert descriptor.category == CATEGORY_INPUT
         assert descriptor.display_name == "ICAM"
-        assert descriptor.inputs == []
+        # Single optional inert activation scaffolding port
+        # (triggers-stage-and-unified-input Requirement 7.1).
+        assert [(p.name, p.port_type) for p in descriptor.inputs] == [
+            ("activation", PORT_TYPE_EVENT_SIGNAL)]
         assert [(port.name, port.port_type) for port in descriptor.outputs] == [
             ("out", PORT_TYPE_VIDEO_FRAMES)]
         assert descriptor.hardware_dependent is True
@@ -303,30 +325,68 @@ class TestIcamSourceNodeType:
 
 
 class TestCatalogMirrorEquality:
-    def test_portal_and_vendor_catalog_nodes_are_byte_identical(self):
-        # Requirement 1.6: the portal layer catalog and the edge vendor
-        # mirror carry the node identically — the two nodes.py sources
-        # stay byte-identical.
+    PORTAL_CATALOG_RELATIVE = (
+        "edge-cv-portal/backend/layers/workflow_core/python/workflow_core/"
+        "catalog")
+    VENDOR_CATALOG_RELATIVE = (
+        "src/backend/workflow_engine/vendor/workflow_core/catalog")
+
+    def _assert_mirrored(self, filename):
+        """Byte/sha256-compare a catalog file between the portal layer copy
+        (the import actually in use) and the edge vendor mirror."""
+        import hashlib
         import workflow_core.catalog.nodes as portal_nodes
 
-        portal_path = os.path.abspath(portal_nodes.__file__)
-        if portal_path.endswith(".pyc"):
-            portal_path = portal_path[:-1]
+        portal_nodes_path = os.path.abspath(portal_nodes.__file__)
+        if portal_nodes_path.endswith(".pyc"):
+            portal_nodes_path = portal_nodes_path[:-1]
+        portal_path = os.path.join(
+            os.path.dirname(portal_nodes_path), filename)
         # tests/ -> workflow_core -> layers -> backend -> edge-cv-portal
         # -> repository root
         repo_root = os.path.abspath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "..", "..", "..", "..", ".."))
         vendor_path = os.path.join(
-            repo_root, "src", "backend", "workflow_engine", "vendor",
-            "workflow_core", "catalog", "nodes.py")
+            repo_root, *self.VENDOR_CATALOG_RELATIVE.split("/"), filename)
+        assert os.path.isfile(portal_path), portal_path
         assert os.path.isfile(vendor_path), vendor_path
         with open(portal_path, "rb") as handle:
             portal_bytes = handle.read()
         with open(vendor_path, "rb") as handle:
             vendor_bytes = handle.read()
+        portal_sha = hashlib.sha256(portal_bytes).hexdigest()
+        vendor_sha = hashlib.sha256(vendor_bytes).hexdigest()
         assert portal_bytes == vendor_bytes, (
-            "portal layer and edge vendor catalog nodes.py have diverged")
+            f"portal layer and edge vendor catalog {filename} have diverged.\n"
+            f"  portal sha256={portal_sha} "
+            f"({self.PORTAL_CATALOG_RELATIVE}/{filename})\n"
+            f"  vendor sha256={vendor_sha} "
+            f"({self.VENDOR_CATALOG_RELATIVE}/{filename})\n"
+            "Re-sync with: cp "
+            f"{self.PORTAL_CATALOG_RELATIVE}/{filename} "
+            f"{self.VENDOR_CATALOG_RELATIVE}/{filename}")
+
+    def test_portal_and_vendor_catalog_nodes_are_byte_identical(self):
+        # Requirement 1.6: the portal layer catalog and the edge vendor
+        # mirror carry the node identically — the two nodes.py sources
+        # stay byte-identical.
+        # Feature: triggers-stage-and-unified-input, Property 7: Catalog copies stay byte-identical
+        self._assert_mirrored("nodes.py")
+
+    def test_portal_and_vendor_catalog_models_are_byte_identical(self):
+        # triggers-stage-and-unified-input Requirements 1.3, 6.5: the
+        # catalog data model (CATEGORY_TRIGGER, PORT_TYPE_EVENT_SIGNAL,
+        # trigger port wiring) lives in models.py, so the mirror must
+        # stay byte-identical there too.
+        # Feature: triggers-stage-and-unified-input, Property 7: Catalog copies stay byte-identical
+        self._assert_mirrored("models.py")
+
+    def test_portal_and_vendor_catalog_init_are_byte_identical(self):
+        # Defensive third file: catalog/__init__.py re-exports the
+        # public catalog surface and is mirrored in both trees.
+        # Feature: triggers-stage-and-unified-input, Property 7: Catalog copies stay byte-identical
+        self._assert_mirrored("__init__.py")
 
 
 # --------------------------------------------------------------------------
@@ -760,6 +820,16 @@ class TestCatalogCoverage:
         "model_inference", "bedrock_inference", "llm_inference",
         "custom_python", "inference_filter", "conditional",
         "digital_output", "mqtt_publish", "opcua_write", "capture",
+        "unified_input",
+        # trigger-activation-runtime: the two subscribe-side triggers
+        # appended after unified_input (Requirements 3.2, 3.4).
+        "mqtt_subscribe", "opcua_subscribe",
+        # modbus-tcp-output: the Modbus TCP write output appended last
+        # (Requirement 2.1).
+        "modbus_write",
+        # custom-python-source: the Custom Python frame source appended
+        # last (Requirements 1.1, 11.4).
+        "custom_python_source",
     }
 
     def test_catalog_contains_exactly_the_expected_types(self):
@@ -768,8 +838,8 @@ class TestCatalogCoverage:
     def test_every_palette_section_is_populated(self):
         grouped = nodes_by_category()
         assert set(grouped) == {
-            CATEGORY_INPUT, CATEGORY_PREPROCESSING, CATEGORY_INFERENCE,
-            CATEGORY_POST_PROCESSING, CATEGORY_OUTPUT,
+            CATEGORY_TRIGGER, CATEGORY_INPUT, CATEGORY_PREPROCESSING,
+            CATEGORY_INFERENCE, CATEGORY_POST_PROCESSING, CATEGORY_OUTPUT,
         }
         for category, descriptors in grouped.items():
             assert descriptors, category

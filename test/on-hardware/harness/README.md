@@ -186,6 +186,7 @@ The stages, in run order (module naming keeps health first):
 | `test_00_health.py` | `health` | — (`auth_enabled` for the auth check) | `/system-health`, `/dda-component-status`, device identity, auth surface |
 | `test_10_vision_models.py` | `vision_models` | DLR entries on `dlr_models` | expected vision models present, start → READY, restoration |
 | `test_20_vllm_textgen.py` | `vllm_textgen` | `vllm` | expected vLLM models READY, non-streaming generate, SSE streaming, metrics |
+| `test_25_vlm_image_generate.py` | `vlm_image_generate` | `vllm` (+ skips unless a Qwen VL / multimodal model is deployed) | image-carrying generate → `image_used: true` + non-empty answer; text-only generate unchanged |
 | `test_30_workflows.py` | `workflows` | `workflows` | expected workflows present, run → observable output, `llm_inference` metadata |
 | `test_40_coexistence.py` | `coexistence` | `vllm` | vision + vLLM READY simultaneously through a completed generate |
 

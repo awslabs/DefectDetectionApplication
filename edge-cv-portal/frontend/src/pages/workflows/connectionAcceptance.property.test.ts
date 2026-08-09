@@ -32,6 +32,7 @@ import { resolvedPorts } from './inlineChecks';
 import {
   CATEGORIES,
   PORT_TYPES,
+  PORT_TYPE_EVENT_SIGNAL,
   PORT_TYPE_INFERENCE_META,
   PORT_TYPE_VIDEO_FRAMES,
   type JsonValue,
@@ -146,6 +147,30 @@ const sourceWithOutputArb: fc.Arbitrary<NodeInstance> = fc.oneof(
   plainInstanceArb.filter((instance) => instance.descriptor.outputs.length > 0),
   customPythonInstanceArb
 );
+
+/**
+ * A custom_python_source-shaped node (custom-python-source Requirement
+ * 1.1): a fixed VideoFrames `out` port and an EventSignal `activation`
+ * input, with no per-instance port type override parameters, so the
+ * declared port types are always the effective ones.
+ */
+const customPythonSourceInstance: NodeInstance = {
+  descriptor: {
+    typeId: 'custom_python_source',
+    category: 'input',
+    displayName: 'Custom Python (Source)',
+    inputs: [{ name: 'activation', portType: PORT_TYPE_EVENT_SIGNAL }],
+    outputs: [{ name: 'out', portType: PORT_TYPE_VIDEO_FRAMES }],
+    parameters: [
+      { name: 'code', paramType: 'code', required: true },
+      { name: 'requirements', paramType: 'string', required: false },
+      { name: 'allowed_uri_prefixes', paramType: 'string', required: false },
+    ],
+    mappings: [],
+    hardwareDependent: true,
+  },
+  parameters: {},
+};
 
 /** A source node plus one of its declared output ports as the dragged handle. */
 const fixedPortScenarioArb = sourceWithOutputArb.chain((source) =>
@@ -285,6 +310,66 @@ describe('Property 11: Designer connection acceptance for fixed VideoFrames port
         }
       }),
       { numRuns: 25 }
+    );
+  });
+});
+
+/**
+ * **Feature: custom-python-source, Property 22: Connection acceptance matches the port compatibility oracle**
+ *
+ * For any target node descriptor and input port drawn from the catalog,
+ * the Workflow_Builder accepts a connection from a
+ * Custom_Python_Source_Node's `out` port exactly when
+ * `arePortsCompatible(VideoFrames, targetType)` holds under the declared
+ * coercion rules, with a displayed (non-empty) reason on rejection.
+ *
+ * **Validates: Requirements 10.3**
+ */
+
+/** A target instance guaranteed to declare at least one input port. */
+const targetWithInputArb: fc.Arbitrary<NodeInstance> = fc.oneof(
+  plainInstanceArb.filter((instance) => instance.descriptor.inputs.length > 0),
+  customPythonInstanceArb,
+  fc.constant(customPythonPreprocessInstance)
+);
+
+/** A target node plus one of its declared input ports as the drop handle. */
+const sourceOutDropScenarioArb = targetWithInputArb.chain((target) =>
+  fc.record({
+    target: fc.constant(target),
+    targetHandle: fc.constantFrom(...target.descriptor.inputs.map((port) => port.name)),
+  })
+);
+
+describe('Property 22: Connection acceptance matches the port compatibility oracle', () => {
+  it("accepts a drag from the custom_python_source 'out' port iff the target input port type is compatible with VideoFrames under the declared coercion rules, with a non-empty reason otherwise", () => {
+    fc.assert(
+      fc.property(sourceOutDropScenarioArb, ({ target, targetHandle }) => {
+        const sourceNode = builderNode('src', customPythonSourceInstance);
+        const targetNode = builderNode('tgt', target);
+        const nodes = [sourceNode, targetNode];
+
+        const reason = connectionRejectionReason(
+          { source: 'src', sourceHandle: 'out', target: 'tgt', targetHandle },
+          nodes
+        );
+
+        // The effective target input port type (per-instance overrides
+        // applied for custom_python targets; declared type otherwise).
+        const targetType = resolvedPorts(toWorkflowNode(targetNode), target.descriptor).inputs[
+          targetHandle
+        ];
+        const expectedAccepted =
+          targetType !== undefined && arePortsCompatible(PORT_TYPE_VIDEO_FRAMES, targetType);
+
+        if (expectedAccepted) {
+          expect(reason).toBeNull();
+        } else {
+          expect(typeof reason).toBe('string');
+          expect((reason as string).length).toBeGreaterThan(0);
+        }
+      }),
+      { numRuns: 100 }
     );
   });
 });

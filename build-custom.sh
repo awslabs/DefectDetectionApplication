@@ -67,8 +67,12 @@ export IMAGE_VER
 # Determine the JetPack target from the component name.
 # JP5 components are named with "JP5" (e.g. aws.edgeml.dda.LocalServer.arm64JP5),
 # JP6 components with "JP6" (e.g. aws.edgeml.dda.LocalServer.arm64JP6).
+# x86 NVIDIA components are named with "Nvidia"
+# (e.g. aws.edgeml.dda.LocalServer.amd64Nvidia): x86_64 hosts with the NVIDIA
+# GPU runtime — CUDA-based backend image + GPU onnxruntime, no JetPack.
 IS_JP5=0
 IS_JP6=0
+IS_X86_NVIDIA=0
 JETPACK_ARG=""
 if echo "$COMPONENT_NAME" | grep -q "JP6"; then
     IS_JP6=1
@@ -76,6 +80,8 @@ if echo "$COMPONENT_NAME" | grep -q "JP6"; then
 elif echo "$COMPONENT_NAME" | grep -q "JP5"; then
     IS_JP5=1
     JETPACK_ARG="5"
+elif echo "$COMPONENT_NAME" | grep -q "Nvidia"; then
+    IS_X86_NVIDIA=1
 fi
 
 # DDA backend interpreter: 3.10 on JP6 (the Jetson AI Lab vLLM wheels are
@@ -94,6 +100,7 @@ echo "Ubuntu version: $IMAGE_VER"
 echo "Architecture: $ARCHITECTURE"
 echo "JetPack 5: $IS_JP5"
 echo "JetPack 6: $IS_JP6"
+echo "x86 NVIDIA: $IS_X86_NVIDIA"
 echo "Backend python: $BACKEND_PYTHON_VERSION (edgemlsdk/tooling python: $PYTHON_VERSION)"
 # copy recipe to greengrass-build
 cp recipe.yaml ./greengrass-build/recipes
@@ -147,28 +154,33 @@ docker cp $id:/tars/triton_installation_files.tar.gz  $(pwd)/backend/edgemlsdk/
 docker rm -v $id
 echo done copying binaries
 # rest of the application
-# Select the backend Dockerfile: JP5 uses an L4T r35.x base, JP6 an L4T r36.x base.
+# Select the backend Dockerfile: JP5 uses an L4T r35.x base, JP6 an L4T r36.x
+# base, x86 NVIDIA a CUDA x86 base (Dockerfile.x86_64_nvidia).
 if [ "$IS_JP6" = "1" ]; then
   export BACKEND_DOCKERFILE="Dockerfile.jp6"
 elif [ "$IS_JP5" = "1" ]; then
   export BACKEND_DOCKERFILE="Dockerfile.jp5"
+elif [ "$IS_X86_NVIDIA" = "1" ]; then
+  export BACKEND_DOCKERFILE="Dockerfile.x86_64_nvidia"
 else
   export BACKEND_DOCKERFILE="Dockerfile"
 fi
 echo "Backend Dockerfile: $BACKEND_DOCKERFILE"
 
-# ── GPU ONNX Runtime (JP5/JP6) ─────────────────────────────────────────────
-# The OnnxRunner uses a GPU (CUDA/TensorRT) onnxruntime built from source in the
-# backend image. GPU is enabled by default on JetPack 5 and 6; JetPack 4 stays
-# CPU-only (its native python 3.6 has no compatible build path) and x86 uses the
-# CPU wheel. The source build is long and memory-heavy (~1-2h), so it can be
-# turned off for a fast CPU-only build with ONNXRUNTIME_GPU=0.
-if [ "$IS_JP6" = "1" ] || [ "$IS_JP5" = "1" ]; then
+# ── GPU ONNX Runtime (JP5/JP6/x86 NVIDIA) ──────────────────────────────────
+# The OnnxRunner uses a GPU (CUDA/TensorRT) onnxruntime in the backend image.
+# GPU is enabled by default on JetPack 5 and 6 (built from source, ~1-2h, can
+# be turned off for a fast CPU-only build with ONNXRUNTIME_GPU=0) and on the
+# x86 NVIDIA target (Dockerfile.x86_64_nvidia installs the prebuilt x86_64
+# onnxruntime-gpu wheel — PyPI ships GPU wheels for x86_64 only, so no source
+# build is needed there). JetPack 4 stays CPU-only (its native python 3.6 has
+# no compatible build path) and plain x86 uses the CPU wheel.
+if [ "$IS_JP6" = "1" ] || [ "$IS_JP5" = "1" ] || [ "$IS_X86_NVIDIA" = "1" ]; then
   export ONNXRUNTIME_GPU="${ONNXRUNTIME_GPU:-1}"
 else
   export ONNXRUNTIME_GPU=0
 fi
-echo "ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU (1=build GPU onnxruntime from source; JP5/JP6 only. Set 0 for fast CPU-only build)"
+echo "ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU (1=GPU onnxruntime: source build on JP5/JP6, prebuilt wheel on x86 NVIDIA. Set 0 for fast CPU-only build)"
 
 echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 # Select profiles by architecture. The `tegra` service targets Jetson
@@ -176,7 +188,10 @@ echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 # forces an emulated arm64 build that fails compiling Python from source
 # ("cannot compute sizeof (long double)"). x86_64 uses only `generic`.
 if [ "$ARCHITECTURE" = "x86_64" ]; then
-  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" --no-cache \
+  # ONNXRUNTIME_GPU is passed explicitly (as on arm) so the x86 NVIDIA target's
+  # Dockerfile.x86_64_nvidia installs the GPU onnxruntime wheel; plain x86
+  # builds keep ONNXRUNTIME_GPU=0 (CPU wheel).
+  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU --no-cache \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 else
   docker-compose --profile tegra --profile generic -f docker-compose.yaml build \
@@ -343,13 +358,43 @@ fi
 
 # save Docker images as tar
 echo "save docker images as tarvballs"
-# Use stdout redirection rather than `docker save --output`. Under snap Docker,
-# `--output` writes a transient `.tmp-<name><rand>` file in the destination dir
-# and renames it; that temp file would briefly appear in the staging dir and
-# break the packaging `zip` (exit 18 "could not open for reading"). Redirecting
-# stdout lets the shell create the final file directly — no snap temp file.
-docker save flask-app > ./custom-build/$COMPONENT_NAME/flask-app.tar
-docker save react-webapp > ./custom-build/$COMPONENT_NAME/react-webapp.tar
+# Save via `docker save --output` to a .partial name, then atomically mv
+# into place. NEITHER historical form works bare under snap Docker:
+#  - `docker save <img> > <file>` fails under the SSM RunShellScript
+#    context with "write /dev/stdout: bad file descriptor" (EBADF),
+#    leaving a 0-byte tar (portal job d844a5fb, 2026-08-09).
+#  - bare `--output <final-name>` writes a transient `.tmp-<name><rand>`
+#    in the destination dir and renames it, which raced the old recursive
+#    packaging zip (exit 18).
+# The .partial suffix + atomic same-dir mv means the final tar name only
+# ever exists complete; transient `.tmp-*`/`.partial` names are policed by
+# the pre-zip `rm -f .tmp-*` cleanup and the explicit ZIP_MEMBERS list
+# with its `-x '*/.tmp-*'` exclusion below. The integrity guard makes any
+# residual save failure loud — a 0-byte or truncated tar can never reach
+# the zip silently.
+save_image_tar() {
+  local image=$1 dest=$2
+  rm -f "$dest" "$dest.partial"
+  if ! docker save --output "$dest.partial" "$image"; then
+    echo "ERROR: docker save $image failed."
+    echo "  docker: $(docker --version 2>/dev/null || echo 'version unavailable')"
+    echo "  Staging dir:"
+    ls -lh "$(dirname "$dest")" || true
+    echo "  Disk free:"
+    df -h "$(dirname "$dest")" || true
+    exit 1
+  fi
+  mv "$dest.partial" "$dest"
+  local size
+  size=$(stat -c%s "$dest")
+  if [ "$size" -lt 1048576 ] || ! tar -tf "$dest" > /dev/null; then
+    echo "ERROR: saved image tar $dest failed integrity check (size ${size} bytes)."
+    exit 1
+  fi
+  echo "Saved $image -> $dest ($size bytes, tar structure OK)"
+}
+save_image_tar flask-app ./custom-build/$COMPONENT_NAME/flask-app.tar
+save_image_tar react-webapp ./custom-build/$COMPONENT_NAME/react-webapp.tar
 
 # include docker-compose.yaml in archive
 cp src/docker-compose.yaml ./custom-build/$COMPONENT_NAME/

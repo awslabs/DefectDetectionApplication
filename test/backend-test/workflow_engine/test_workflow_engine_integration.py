@@ -650,8 +650,10 @@ class TestOutputBindingsEndToEnd:
         assert message["qos"] == 1
         assert message["hostname"] == "127.0.0.1"
         assert message["port"] == 1883
+        # `trigger: {}` is the seeded trigger-less-run delta
+        # (custom-python-source Requirements 2.5, 11.1).
         assert json.loads(message["payload"]) == {
-            "is_anomalous": True, "confidence": 0.93,
+            "is_anomalous": True, "confidence": 0.93, "trigger": {},
         }
 
         # opcua_write (9.6): the real _default_opcua_writer connected,

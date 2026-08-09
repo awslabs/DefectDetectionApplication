@@ -13,7 +13,9 @@
  * nodes with non-empty `data.validationMessages`). The oracle independently
  * computes the offending node set: nodes with a parameter whose effective
  * value violates `checkParameterValue` (V4), plus nodes not reached by a BFS
- * from input-category nodes (V5). The property generates arbitrary canvas
+ * from input- or trigger-category nodes (V5 — the triggers-stage feature
+ * widened the reachability roots to `CATEGORY_INPUT ∪ CATEGORY_TRIGGER`).
+ * The property generates arbitrary canvas
  * graphs from catalog-shaped descriptors and then applies a random sequence
  * of canvas mutations (parameter edits, edge/node additions and removals),
  * re-applying markers after every mutation — so markers must both appear on
@@ -34,6 +36,7 @@ import {
 import {
   CATEGORIES,
   CATEGORY_INPUT,
+  CATEGORY_TRIGGER,
   PORT_TYPE_VIDEO_FRAMES,
   type JsonValue,
   type NodeTypeDescriptor,
@@ -273,7 +276,8 @@ function applyMutation(
  * Nodes with a V4 finding (a parameter whose effective value — explicit
  * value when the key is present, else the declared default — violates
  * `checkParameterValue`) plus nodes with a V5 finding (not reached by a
- * BFS from input-category nodes).
+ * BFS from input- or trigger-category nodes; triggers were added to the
+ * V5 root set by the triggers-stage-and-unified-input feature).
  */
 function expectedOffenders(nodes: BuilderNode[], edges: Edge[]): Set<string> {
   const offenders = new Set<string>();
@@ -291,7 +295,7 @@ function expectedOffenders(nodes: BuilderNode[], edges: Edge[]): Set<string> {
     }
   }
 
-  // V5: unreachable from input-category nodes (forward BFS).
+  // V5: unreachable from input-/trigger-category nodes (forward BFS).
   const ids = new Set(nodes.map((node) => node.id));
   const successors = new Map<string, string[]>();
   for (const id of ids) {
@@ -303,7 +307,11 @@ function expectedOffenders(nodes: BuilderNode[], edges: Edge[]): Set<string> {
     }
   }
   const roots = nodes
-    .filter((node) => node.data.descriptor.category === CATEGORY_INPUT)
+    .filter(
+      (node) =>
+        node.data.descriptor.category === CATEGORY_INPUT ||
+        node.data.descriptor.category === CATEGORY_TRIGGER
+    )
     .map((node) => node.id);
   const visited = new Set(roots);
   const frontier = [...roots];

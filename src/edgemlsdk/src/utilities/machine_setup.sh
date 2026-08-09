@@ -57,20 +57,18 @@ check_and_install_python_module() {
 
 install_cmake()
 {
-    if ! dpkg -s "cmake" >/dev/null 2>&1; then
+    if ! dpkg -s "cmake" >/dev/null 2>&1 && ! command -v cmake >/dev/null 2>&1; then
         . /etc/os-release
         if [ $VERSION_ID = "18.04" ]; then
-            apt-get clean all;
-            apt-get install gpg wget -y;
-            wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /etc/apt/trusted.gpg.d/kitware.gpg >/dev/null;
-            apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main";
-            apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80  6AF7F09730B3F0A4;
-	    apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 16FAAD7AF99A65E2
-            apt-get update;
-            apt-get install kitware-archive-keyring;
-            rm /etc/apt/trusted.gpg.d/kitware.gpg;
-            apt-get update;
-            apt-get install cmake -y;
+            # Pinned upstream release binary (see src/edgemlsdk/Dockerfile.jp6):
+            # the Kitware apt repo no longer serves pinned 3.x packages and its
+            # current cmake is 4.x (Triton-incompatible).
+            CMAKE_VER=3.31.6
+            if [ $(uname -m) = "x86_64" ]; then CM_ARCH=x86_64; else CM_ARCH=aarch64; fi
+            wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CM_ARCH}.sh" -O /tmp/cmake.sh
+            $do_sudo sh /tmp/cmake.sh --skip-license --prefix=/usr/local
+            rm -f /tmp/cmake.sh
+            cmake --version
         else
             check_and_install_package cmake;
         fi

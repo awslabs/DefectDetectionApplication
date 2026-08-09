@@ -1211,7 +1211,16 @@ def create_deployment(body, user):
             if 'configurationUpdate' not in nucleus_entry:
                 nucleus_entry['configurationUpdate'] = (
                     _nucleus_store_configuration_update())
-        
+
+        # Subscribe accessControl (trigger-activation-runtime 10.2, 10.3):
+        # when the set carries a workflow component whose version item
+        # records subscribed_topics AND the LocalServer component, merge the
+        # per-workflow aws.greengrass#SubscribeToIoTCore policy into the
+        # LocalServer entry's configurationUpdate; when LocalServer is
+        # absent, the returned warnings surface in the response. No-op —
+        # zero new keys anywhere — when no workflow records topics.
+        deployment_warnings = apply_subscribe_access_control(components_map)
+
         # Determine whether this target already has a deployment. Greengrass
         # deployments are immutable; creating a new deployment to the same target
         # ARN supersedes the previous one (a revision). To keep the deployment
@@ -1290,7 +1299,7 @@ def create_deployment(body, user):
             for name, config in components_map.items()
         ]
         
-        return create_response(201, {
+        response_body = {
             'deployment_id': deployment_id,
             'iot_job_id': response.get('iotJobId', ''),
             'iot_job_arn': response.get('iotJobArn', ''),
@@ -1299,7 +1308,13 @@ def create_deployment(body, user):
             'is_revision': is_revision,
             'superseded_deployment_id': existing_deployment.get('deploymentId') if is_revision else None,
             'message': 'Deployment updated successfully' if is_revision else 'Deployment created successfully'
-        })
+        }
+        # Additive: only present when the subscribe accessControl merge had
+        # something to say (trigger-activation-runtime 10.3) — pre-feature
+        # responses stay byte-identical.
+        if deployment_warnings:
+            response_body['warnings'] = deployment_warnings
+        return create_response(201, response_body)
         
     except ClientError as e:
         logger.error(f"AWS error creating deployment: {str(e)}")
@@ -2004,16 +2019,14 @@ def collect_vllm_component_manifests(components):
             }
         elif name.startswith(WORKFLOW_COMPONENT_PREFIX):
             workflow_id = name[len(WORKFLOW_COMPONENT_PREFIX):]
-            major = str(version or '').split('.')[0]
-            if not workflow_id or not major.isdigit():
+            if not workflow_id:
                 continue
-            try:
-                version_item = workflow_guards.get_version_item(
-                    workflow_id, int(major))
-            except Exception as e:  # noqa: BLE001 — activation only
-                logger.warning(
-                    f"Could not read workflow version item for {name}: {e}")
-                version_item = None
+            # D2 scan-first resolution: bumped-major entries (re-packaged
+            # versions) resolve their true version item, so LLM-bearing
+            # workflows keep activating the gate; unrecorded entries ride
+            # the legacy major parse and failures degrade to no item.
+            _, version_item = _resolve_workflow_version_item(
+                workflow_id, version)
             if not version_item or not version_item.get('has_llm_inference'):
                 continue
             manifests[name] = {
@@ -2110,6 +2123,192 @@ def workflow_component_name(workflow_id):
 def workflow_component_version(workflow_version):
     """Component version derived from the workflow version"""
     return f"{int(workflow_version)}.0.0"
+
+
+def resolve_workflow_component_version(version_item, workflow_version):
+    """The REGISTERED component version of a packaged workflow version
+    (workflow-deploy-component-version design D1, forward resolution).
+
+    Re-packaging deliberately bumps the component MAJOR past the workflow
+    version (workflow_packaging.next_component_version — Greengrass
+    component versions are immutable), so the legacy
+    ``{workflow_version}.0.0`` derivation goes stale after a re-package.
+    Resolution order:
+
+    1. the discrete ``component_version`` field the Component_Packager
+       records at packaging time (the declared contract);
+    2. the ``component_arn`` suffix after the last ``:versions:`` —
+       authoritative for every version ever packaged, past and future;
+    3. ``workflow_component_version(workflow_version)`` as the last
+       resort (present-but-unparseable arn), keeping the function total.
+
+    For first packages the arn suffix equals ``{workflow_version}.0.0``,
+    so resolution and the legacy derivation agree by construction.
+    """
+    version_item = version_item or {}
+    recorded = version_item.get('component_version')
+    if isinstance(recorded, str) and recorded:
+        return recorded
+    arn = version_item.get('component_arn')
+    if isinstance(arn, str) and ':versions:' in arn:
+        suffix = arn.rsplit(':versions:', 1)[-1]
+        if re.match(r'^\d+\.\d+\.\d+$', suffix):
+            return suffix
+    return workflow_component_version(workflow_version)
+
+
+def _resolve_workflow_version_item(workflow_id, entry_component_version):
+    """Resolve a deployment entry's ``componentVersion`` to
+    ``(workflow_version, version_item_or_None)`` — design D2, scan-first
+    reverse resolution — or ``(None, None)`` when nothing resolves.
+
+    Scan-first: the version item whose RECORDED component version
+    (discrete ``component_version`` field or ``component_arn``
+    ``:versions:`` suffix) equals the entry's version is the
+    authoritative match — unambiguous because component majors strictly
+    increase per re-package, so at most one item of a workflow records a
+    given component version. When nothing matches (items packaged before
+    the discrete field existed, unrecorded items, and test fakes of
+    ``get_version_item``), fall back to today's major parse routed
+    through ``workflow_guards.get_version_item``. Table-read failures
+    are logged and degrade to the fallback (and the fallback's, to a
+    ``None`` item), so resolution never raises — mirroring the
+    consumers' resilience shape.
+    """
+    entry_component_version = str(entry_component_version or '')
+    try:
+        item = workflow_guards.find_version_item_by_component_version(
+            workflow_id, entry_component_version)
+    except Exception as e:  # noqa: BLE001 — degrade to the major parse
+        logger.warning(
+            f"Could not scan version items of workflow {workflow_id} for "
+            f"component version {entry_component_version}: {e}")
+        item = None
+    if item is not None:
+        try:
+            return int(item.get('version')), item
+        except (TypeError, ValueError):
+            pass  # unusable recorded workflow version; ride the fallback
+    major = entry_component_version.split('.')[0]
+    if not major.isdigit():
+        return None, None
+    try:
+        return int(major), workflow_guards.get_version_item(
+            workflow_id, int(major))
+    except Exception as e:  # noqa: BLE001 — resolution never raises
+        logger.warning(
+            f"Could not read workflow version item {major} of workflow "
+            f"{workflow_id}: {e}")
+        return int(major), None
+
+
+def collect_workflow_subscribed_topics(components_map):
+    """``{workflow_id: [topic filters]}`` for the workflow components
+    (dda.workflow.*) in a deployment component set whose version item
+    records non-empty ``subscribed_topics`` (trigger-activation-runtime
+    10.2). The Component_Packager records the sorted, de-duplicated
+    greengrass-path ``mqtt_subscribe`` topic filters on the version item
+    at packaging time; versions without the field (all pre-feature
+    packages and every non-subscribing workflow) contribute nothing, so
+    deployments without a subscribing workflow are untouched. Entries
+    resolve to their version item by D2 scan-first resolution (the
+    registered component version survives bumped majors from
+    re-packaging), with the legacy major parse as fallback; resolution
+    failures degrade to no item, never raise."""
+    topics_by_workflow = {}
+    for name in sorted(components_map or {}):
+        if not name.startswith(WORKFLOW_COMPONENT_PREFIX):
+            continue
+        workflow_id = name[len(WORKFLOW_COMPONENT_PREFIX):]
+        version = (components_map[name] or {}).get('componentVersion')
+        if not workflow_id:
+            continue
+        _, version_item = _resolve_workflow_version_item(workflow_id, version)
+        topics = [str(topic) for topic in
+                  (version_item or {}).get('subscribed_topics') or []
+                  if str(topic)]
+        if topics:
+            topics_by_workflow[workflow_id] = topics
+    return topics_by_workflow
+
+
+def apply_subscribe_access_control(components_map):
+    """Deep-merge the ``aws.greengrass#SubscribeToIoTCore`` accessControl
+    policies for subscribing workflow components into the LocalServer
+    entry's ``configurationUpdate.merge`` (trigger-activation-runtime
+    10.2, 10.3, design D5).
+
+    The IPC subscribe caller is the LocalServer process, so the
+    authorization lands on the LocalServer component: one uniquely-keyed
+    ``dda:workflow-subscribe:<workflowId>`` policy per subscribing
+    workflow, scoped to exactly that workflow's recorded topic filters.
+    Greengrass deep-merges configuration maps by key, so the recipe's
+    default accessControl policies stay untouched and multiple
+    subscribing workflows coexist under their own keys. Any existing
+    ``configurationUpdate.merge`` on the LocalServer entry is merged
+    into non-destructively.
+
+    Returns the list of actionable warnings: one per subscribing
+    workflow when the LocalServer component is absent from the set (the
+    merge has nowhere to attach; Requirement 10.3). Empty — and
+    ``components_map`` untouched — when no workflow in the set records
+    subscribed topics (Requirement 10.4 byte-identity)."""
+    topics_by_workflow = collect_workflow_subscribed_topics(components_map)
+    if not topics_by_workflow:
+        return []
+
+    local_server_name = next(
+        (name for name in sorted(components_map)
+         if name.startswith(LOCAL_SERVER_COMPONENT_PREFIX)), None)
+    if not local_server_name:
+        return [
+            (f"Workflow {workflow_id} subscribes to MQTT topics "
+             f"[{', '.join(topics)}] via Greengrass, but this deployment "
+             "does not include the LocalServer component, so the "
+             "aws.greengrass#SubscribeToIoTCore authorization could not be "
+             "attached. Deploy the LocalServer component together with this "
+             "workflow so the subscribe authorization can attach; until "
+             "then the trigger's subscription will be denied on the device.")
+            for workflow_id, topics in sorted(topics_by_workflow.items())
+        ]
+
+    entry = components_map[local_server_name]
+    config_update = entry.setdefault('configurationUpdate', {})
+    existing_merge = config_update.get('merge')
+    merge_doc = {}
+    if existing_merge:
+        try:
+            merge_doc = json.loads(existing_merge)
+        except (TypeError, ValueError) as e:
+            # Never clobber a caller-supplied merge we cannot parse.
+            logger.warning(
+                f"Could not parse existing configurationUpdate.merge on "
+                f"{local_server_name}; skipping subscribe accessControl "
+                f"merge: {e}")
+            return [
+                (f"Workflow {workflow_id} subscribes to MQTT topics "
+                 f"[{', '.join(topics)}] via Greengrass, but the LocalServer "
+                 "component's existing configurationUpdate could not be "
+                 "parsed, so the aws.greengrass#SubscribeToIoTCore "
+                 "authorization was not attached.")
+                for workflow_id, topics in sorted(topics_by_workflow.items())
+            ]
+    if not isinstance(merge_doc, dict):
+        merge_doc = {}
+    policies = merge_doc.setdefault('accessControl', {}).setdefault(
+        'aws.greengrass.ipc.mqttproxy', {})
+    for workflow_id, topics in sorted(topics_by_workflow.items()):
+        policies[f'dda:workflow-subscribe:{workflow_id}'] = {
+            'policyDescription': 'Workflow mqtt_subscribe trigger topics',
+            'operations': ['aws.greengrass#SubscribeToIoTCore'],
+            'resources': list(topics),
+        }
+        logger.info(
+            f"Merged SubscribeToIoTCore accessControl for workflow "
+            f"{workflow_id} ({len(topics)} topic filter(s)) into "
+            f"{local_server_name}")
+    config_update['merge'] = json.dumps(merge_doc)
+    return []
 
 
 def resolve_target_thing_names(iot_client, target_devices, target_thing_group):
@@ -2250,13 +2449,18 @@ def record_workflow_deployment(deployment_id, usecase_id, workflow_id,
                                workflow_version, target_arn, target_devices,
                                target_thing_group, is_revision,
                                superseded_deployment_id, user,
-                               camera_bindings=None):
+                               camera_bindings=None, component_version=None):
     """
     Record the workflow version -> deployment -> devices association in the
     Deployments table (Requirement 8.2). component_type: 'workflow' plus
     workflow_id is the shape workflows.py's delete flow matches on (5.6).
     Delivered Camera_Bindings are stored on the record for display and
     audit (camera-registry-sync Requirements 8.2, 12.3).
+
+    ``component_version`` is the REGISTERED component version the caller
+    resolved (resolve_workflow_component_version) and actually deployed;
+    when omitted the legacy ``{workflow_version}.0.0`` derivation is
+    recorded, keeping the signature safe for any other caller.
     """
     timestamp = int(datetime.utcnow().timestamp() * 1000)
     item = {
@@ -2266,7 +2470,8 @@ def record_workflow_deployment(deployment_id, usecase_id, workflow_id,
         'workflow_id': workflow_id,
         'workflow_version': int(workflow_version),
         'component_name': workflow_component_name(workflow_id),
-        'component_version': workflow_component_version(workflow_version),
+        'component_version': (component_version
+                              or workflow_component_version(workflow_version)),
         'target_arn': target_arn,
         'target_devices': target_devices,
         'target_thing_group': target_thing_group or None,
@@ -2916,16 +3121,23 @@ def _workflow_binding_key(workflow_id, workflow_version):
 
 def _deployed_workflow_binding_keys(components_map):
     """The binding keys of every Workflow_Component in a deployment's
-    component set — the keys that must survive a shadow prune."""
+    component set — the keys that must survive a shadow prune. Each
+    entry's workflow version comes from D2 scan-first resolution (a
+    bumped-major entry from re-packaging resolves its true workflow
+    version, so the live key survives), falling back to the legacy major
+    parse for unrecorded entries; table-read failures degrade to the
+    fallback rather than raising."""
     keys = set()
     for name in components_map or {}:
         if not name.startswith(WORKFLOW_COMPONENT_PREFIX):
             continue
         wf_id = name[len(WORKFLOW_COMPONENT_PREFIX):]
         version = str((components_map[name] or {}).get('componentVersion', ''))
-        major = version.split('.')[0]
-        if wf_id and major.isdigit():
-            keys.add(_workflow_binding_key(wf_id, int(major)))
+        if not wf_id:
+            continue
+        workflow_version, _ = _resolve_workflow_version_item(wf_id, version)
+        if workflow_version is not None:
+            keys.add(_workflow_binding_key(wf_id, workflow_version))
     return keys
 
 
@@ -3077,6 +3289,18 @@ def create_workflow_deployment(body, user):
                 'component; package it before deploying',
                 {'workflow_id': workflow_id, 'version': workflow_version})
 
+        # The REGISTERED component version of this workflow version (D1
+        # forward resolution from the version item just gated on):
+        # re-packaging bumps the component major past the workflow
+        # version, so the legacy {workflow_version}.0.0 derivation goes
+        # stale — pinning it deploys the OLD component and Greengrass
+        # reports COMPLETED while delivering nothing (live incident
+        # 72c2f784). Threaded to the components-map entry, the vLLM gate
+        # manifest, the association record, the audit entry, and the 201
+        # response below.
+        component_version = resolve_workflow_component_version(
+            version_item, workflow_version)
+
         usecase = get_usecase(usecase_id)
         if not usecase:
             return _workflow_error(404, 'USECASE_NOT_FOUND', 'Use case not found')
@@ -3143,7 +3367,7 @@ def create_workflow_deployment(body, user):
         if version_item.get('has_llm_inference'):
             vllm_manifests = {
                 workflow_component_name(workflow_id): {
-                    'version': workflow_component_version(workflow_version),
+                    'version': component_version,
                     'architectures': [
                         str(arch) for arch in
                         version_item.get('packaged_architectures') or []],
@@ -3220,10 +3444,21 @@ def create_workflow_deployment(body, user):
                     f"{existing_deployment.get('deploymentId')}: {e}")
 
         component_name = workflow_component_name(workflow_id)
-        component_version = workflow_component_version(workflow_version)
         # Setting the entry (re)places the workflow component at the new
         # version; Greengrass replaces the older version on the device (8.5).
+        # component_version is the REGISTERED version resolved above (D1).
         components_map[component_name] = {'componentVersion': component_version}
+
+        # Subscribe accessControl (trigger-activation-runtime 10.2, 10.3):
+        # same merge as create_deployment, applied to the FINAL merged
+        # component set (target's existing components + this workflow
+        # entry). The helper resolves each entry's version item
+        # authoritatively BY RESOLUTION (D2 scan-first on the recorded
+        # component version, legacy major parse as fallback) — covering
+        # this entry, generic-path entries, and carried-over bumped-major
+        # entries alike, superseding the subscribe-merge design's
+        # "{workflow_version}.0.0 by construction" note.
+        deployment_warnings = apply_subscribe_access_control(components_map)
 
         if not deployment_name:
             if is_revision and existing_deployment.get('deploymentName'):
@@ -3290,7 +3525,8 @@ def create_workflow_deployment(body, user):
             deployment_id, usecase_id, workflow_id, workflow_version,
             target_arn, resolved_devices, target_thing_group,
             is_revision, superseded_id, user,
-            camera_bindings=delivered_bindings)
+            camera_bindings=delivered_bindings,
+            component_version=component_version)
 
         # Audit log entry for deploy (Requirement 11.5; camera-registry-sync
         # 12.3 — a deployment created with Camera_Bindings records them).
@@ -3317,7 +3553,7 @@ def create_workflow_deployment(body, user):
             f"{'Revised' if is_revision else 'Created'} workflow deployment "
             f"{deployment_id} for workflow {workflow_id} v{workflow_version}")
 
-        return create_response(201, {
+        response_body = {
             'deployment_id': deployment_id,
             'iot_job_id': response.get('iotJobId', ''),
             'iot_job_arn': response.get('iotJobArn', ''),
@@ -3334,7 +3570,12 @@ def create_workflow_deployment(body, user):
             'camera_warnings': camera_warnings,
             'message': ('Workflow deployment updated successfully' if is_revision
                         else 'Workflow deployment created successfully')
-        })
+        }
+        # Additive: present only when the merge produced warnings,
+        # mirroring create_deployment (10.3/10.4 byte-identity).
+        if deployment_warnings:
+            response_body['warnings'] = deployment_warnings
+        return create_response(201, response_body)
 
     except ClientError as e:
         logger.error(f"AWS error creating workflow deployment: {str(e)}")

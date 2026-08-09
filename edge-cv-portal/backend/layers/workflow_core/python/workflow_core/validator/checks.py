@@ -39,6 +39,7 @@ from ..catalog.compatibility import incompatibility_reason
 from ..catalog.models import (
     CATEGORY_INPUT,
     CATEGORY_OUTPUT,
+    CATEGORY_TRIGGER,
     NodeTypeDescriptor,
     PARAM_TYPE_MODEL_REF,
     PORT_TYPES,
@@ -90,6 +91,66 @@ CODE_V5_UNREACHABLE_NODE = "V5_UNREACHABLE_NODE"
 # ``aws_iot`` and supplies no non-empty ``broker_host``.
 CODE_V6_MQTT_NO_TARGET = "V6_MQTT_NO_TARGET"
 
+# V7 (triggers-stage-and-unified-input Requirements 4.2, 4.3): a
+# CATEGORY_TRIGGER node has no input ports and may only feed an Input's
+# activation port, so any connection whose target is a trigger node is an
+# illegal stage ordering (a trigger placed downstream of another node).
+CODE_V7_STAGE_ORDER = "V7_STAGE_ORDER"
+
+# V8 (trigger-activation-runtime Requirement 1.6): an ``mqtt_subscribe``
+# trigger node must declare a connection target, mirroring V6's
+# ``mqtt_publish`` rule — an error when the node enables neither
+# ``greengrass`` nor ``aws_iot`` and supplies no non-empty
+# ``broker_host``. Kept as a code separate from V6 so V6's
+# publish-specific message and existing finding sets are untouched.
+CODE_V8_MQTT_SUB_NO_TARGET = "V8_MQTT_SUB_NO_TARGET"
+
+# V9 (trigger-activation-runtime Requirements 4.1, 4.2): a workflow has
+# exactly one activation model — when the graph contains at least one
+# subscription trigger (``mqtt_subscribe`` / ``opcua_subscribe``), every
+# CATEGORY_INPUT node must have its ``activation`` input port connected.
+# Graphs without the new trigger types produce zero V9 findings
+# (``digital_input`` alone does not engage V9).
+CODE_V9_MIXED_ACTIVATION_MODEL = "V9_MIXED_ACTIVATION_MODEL"
+
+# V7-coexistence (portal-build-fleet-and-workflow-gates Requirement 8.2):
+# note the "V7" prefix was independently assigned by two features; the
+# finding-code strings remain distinct (V7_STAGE_ORDER vs
+# V7_COEXISTENCE_CONFLICT) so no consumer is ambiguous. Node types
+# that cannot coexist in one workflow. The rule table below is grounded
+# in real runtime contracts of the workflow engine: the entries are the
+# frame-feed source types (``aravis_camera_source`` and
+# ``custom_python_source``), whose single-frame appsrc Frame_Feed
+# supports exactly one frame-feed source per workflow (a document
+# with more than one frame-feed binding point fails feed planning on the
+# device — see workflow_engine.aravis_feed.plan_aravis_feeds). V7
+# surfaces that conflict at validation time, one error finding per
+# offending node, each naming the full conflicting membership.
+CODE_V7_COEXISTENCE_CONFLICT = "V7_COEXISTENCE_CONFLICT"
+
+#: Node types allowed at most once per workflow: two or more instances
+#: cannot coexist. Maps type id -> the plain-language reason.
+COEXISTENCE_SINGLETON_TYPES: Dict[str, str] = {
+    "aravis_camera_source": (
+        "the single-frame appsrc feed supports exactly one Aravis "
+        "camera source per workflow"
+    ),
+    # custom-python-source Requirement 8.1: the source node rides the same
+    # single-frame appsrc Frame_Feed machinery as the Aravis source.
+    "custom_python_source": (
+        "the single-frame appsrc feed serves exactly one frame-feed "
+        "source per workflow"
+    ),
+}
+
+#: Node types that all bind the runtime's single frame feed; at most one
+#: node across the whole group may exist per workflow (custom-python-source
+#: Requirements 8.1, 8.2). When BOTH types appear in one workflow, the
+#: mixed frame-feed group rule below reports every member of the union;
+#: same-type-only multiples stay covered by the singleton rule, so no
+#: graph is double-reported.
+FRAME_FEED_SOURCE_TYPES = frozenset({"aravis_camera_source", "custom_python_source"})
+
 # W1 warnings (Requirement 4.6)
 CODE_W1_OUTPUT_NODE_NO_INPUT = "W1_OUTPUT_NODE_NO_INPUT"
 CODE_W1_UNUSED_OUTPUT_PORT = "W1_UNUSED_OUTPUT_PORT"
@@ -111,6 +172,22 @@ TYPE_LLM_INFERENCE = "llm_inference"
 #: Output node type that publishes over MQTT; V6 requires it to declare a
 #: publish target (Greengrass, AWS IoT Core, or a plain broker host).
 TYPE_MQTT_PUBLISH = "mqtt_publish"
+
+#: Trigger node type that subscribes over MQTT; V8 requires it to declare
+#: a connection target (Greengrass, AWS IoT Core, or a plain broker host).
+TYPE_MQTT_SUBSCRIBE = "mqtt_subscribe"
+
+#: Trigger node type that subscribes to an OPC UA monitored node.
+TYPE_OPCUA_SUBSCRIBE = "opcua_subscribe"
+
+#: The subscription trigger node types whose presence engages the V9
+#: mixed-activation-model rule (``digital_input`` is deliberately absent:
+#: its activation behavior is unchanged by trigger-activation-runtime).
+SUBSCRIPTION_TRIGGER_TYPES = frozenset({TYPE_MQTT_SUBSCRIBE, TYPE_OPCUA_SUBSCRIBE})
+
+#: The activation input port name on CATEGORY_INPUT nodes (the unified
+#: input node and the four legacy sources all declare it).
+ACTIVATION_PORT = "activation"
 
 
 @dataclass(frozen=True)
@@ -182,7 +259,11 @@ def validate(
     findings.extend(_check_v4(graph, typed_nodes))
     findings.extend(_check_v5(graph, typed_nodes))
     findings.extend(_check_v6(graph, typed_nodes))
+    findings.extend(_check_v7_coexistence(graph))
     findings.extend(_check_w1(graph, typed_nodes))
+    findings.extend(_check_v7(graph, typed_nodes))
+    findings.extend(_check_v8(graph, typed_nodes))
+    findings.extend(_check_v9(graph, typed_nodes))
     if model_registry is not None:
         findings.extend(_check_model_references(graph, typed_nodes, model_registry))
 
@@ -226,7 +307,7 @@ def _resolved_ports(node: Node, descriptor: NodeTypeDescriptor) -> tuple:
 def _check_v1(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
     findings = []
     categories = {descriptor.category for descriptor in typed_nodes.values()}
-    if CATEGORY_INPUT not in categories:
+    if not (categories & {CATEGORY_INPUT, CATEGORY_TRIGGER}):
         findings.append(ValidationFinding(
             SEVERITY_ERROR,
             CODE_V1_NO_INPUT_NODE,
@@ -563,7 +644,7 @@ def _check_v5(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) 
     roots = [
         node.id for node in graph.nodes
         if typed_nodes.get(node.id) is not None
-        and typed_nodes[node.id].category == CATEGORY_INPUT
+        and typed_nodes[node.id].category in (CATEGORY_INPUT, CATEGORY_TRIGGER)
     ]
 
     visited = set(roots)
@@ -627,6 +708,195 @@ def _check_v6(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) 
                 "Node '{0}': mqtt_publish requires a publish target — enable "
                 "'greengrass', enable 'aws_iot', or set 'broker_host'".format(node.id),
                 node_id=node.id,
+            ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# V7: trigger stage ordering
+# (triggers-stage-and-unified-input Requirements 4.2, 4.3)
+# --------------------------------------------------------------------------
+
+def _check_v7(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """A ``CATEGORY_TRIGGER`` node has no input ports and may only feed an
+    Input's activation port, so any connection whose target resolves to a
+    trigger node is an illegal ordering — the only way to place a trigger
+    downstream of another node. The check is target-category based, which
+    also makes the legal ``Trigger -> Unified activation-port`` case pass
+    automatically (its target is the ``CATEGORY_INPUT`` unified node)."""
+    findings = []
+    for connection in graph.connections:
+        target = typed_nodes.get(connection.target.node)
+        if target is not None and target.category == CATEGORY_TRIGGER:
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V7_STAGE_ORDER,
+                "Connection '{0}' targets trigger node '{1}': a trigger may not be "
+                "downstream of any node (Trigger -> Input ordering)".format(
+                    connection.id, connection.target.node
+                ),
+                connection_id=connection.id,
+            ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# V8: mqtt_subscribe must declare a connection target
+# (trigger-activation-runtime Requirement 1.6)
+# --------------------------------------------------------------------------
+
+def _check_v8(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """Every ``mqtt_subscribe`` node must name a connection target.
+
+    V6's target logic applied to the subscribe trigger: ``broker_host``
+    is not statically required (so a topic-only Greengrass config is not
+    force-failed by V4), so this check rejects a target-less config under
+    a dedicated code — an error when the node enables neither the
+    Greengrass path (``greengrass``) nor the AWS IoT Core path
+    (``aws_iot``) and supplies no non-empty ``broker_host``. Kept
+    separate from V6 so V6's publish-specific behavior is untouched."""
+    findings = []
+    for node in graph.nodes:
+        if node.type != TYPE_MQTT_SUBSCRIBE:
+            continue
+        descriptor = typed_nodes.get(node.id)
+        if descriptor is None:
+            continue
+        values = {
+            parameter.name: _effective_value(node, parameter)
+            for parameter in descriptor.parameters
+        }
+        greengrass = bool(values.get("greengrass"))
+        aws_iot = bool(values.get("aws_iot"))
+        broker_host = values.get("broker_host")
+        has_broker_host = isinstance(broker_host, str) and broker_host.strip() != ""
+        if not (greengrass or aws_iot or has_broker_host):
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V8_MQTT_SUB_NO_TARGET,
+                "Node '{0}': mqtt_subscribe requires a connection target — enable "
+                "'greengrass', enable 'aws_iot', or set 'broker_host'".format(node.id),
+                node_id=node.id,
+            ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# V9: one activation model per workflow
+# (trigger-activation-runtime Requirements 4.1, 4.2)
+# --------------------------------------------------------------------------
+
+def _check_v9(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """A workflow has exactly one activation model: when the graph
+    contains at least one subscription trigger node (``mqtt_subscribe``
+    or ``opcua_subscribe``), every ``CATEGORY_INPUT`` node must have at
+    least one connection targeting its ``activation`` input port — one
+    error finding per unconnected input node. Graphs with zero
+    subscription trigger nodes produce zero V9 findings, preserving the
+    pre-feature finding set (``digital_input`` presence alone does not
+    engage V9: its activation behavior is unchanged)."""
+    has_subscription_trigger = any(
+        node.type in SUBSCRIPTION_TRIGGER_TYPES for node in graph.nodes
+    )
+    if not has_subscription_trigger:
+        return []
+
+    activation_connected = {
+        connection.target.node
+        for connection in graph.connections
+        if connection.target.port == ACTIVATION_PORT
+    }
+
+    findings = []
+    for node in graph.nodes:
+        descriptor = typed_nodes.get(node.id)
+        if descriptor is None or descriptor.category != CATEGORY_INPUT:
+            continue
+        if node.id not in activation_connected:
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V9_MIXED_ACTIVATION_MODEL,
+                "Input node '{0}' has no trigger connected to its 'activation' "
+                "port: a workflow with subscription triggers must drive every "
+                "input from a trigger".format(node.id),
+                node_id=node.id,
+            ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# V7-coexistence: node-type coexistence conflicts
+# (portal-build-fleet-and-workflow-gates Requirement 8.2)
+# --------------------------------------------------------------------------
+
+def _check_v7_coexistence(graph: WorkflowGraph) -> List[ValidationFinding]:
+    """Report node types that cannot coexist in one workflow.
+
+    Driven by :data:`COEXISTENCE_SINGLETON_TYPES` — node types whose
+    runtime contract allows at most one instance per workflow. When two
+    or more nodes of such a type are present, every one of them gets an
+    error finding naming the full conflicting membership (mirroring the
+    V3 cycle-reporting shape), so each offending node is individually
+    addressable by the caller.
+
+    The check keys on ``node.type`` directly (not the catalog) so a
+    conflict is reported even when the type is also unknown to the
+    catalog in use.
+
+    Mixed frame-feed group rule (custom-python-source Requirement 8.2):
+    the :data:`FRAME_FEED_SOURCE_TYPES` all bind the runtime's single
+    frame feed, so when the workflow contains BOTH types, every
+    frame-feed node gets one error finding (same finding code) naming
+    the full conflicting membership across both types and stating that
+    the runtime serves one frame-feed source per workflow. The mixed
+    rule is restricted to "both types present", and the singleton loop
+    skips the frame-feed types in that case, so each offending node is
+    reported exactly once; graphs with only one of the types present
+    (including Aravis-only graphs, Requirement 8.3) take the singleton
+    path unchanged.
+    """
+    findings = []
+    by_type: Dict[str, List[str]] = {}
+    for node in graph.nodes:
+        if node.type in COEXISTENCE_SINGLETON_TYPES:
+            by_type.setdefault(node.type, []).append(node.id)
+
+    mixed_frame_feed = FRAME_FEED_SOURCE_TYPES <= set(by_type)
+    if mixed_frame_feed:
+        member_ids = sorted(
+            node_id
+            for node_type in FRAME_FEED_SOURCE_TYPES
+            for node_id in by_type[node_type]
+        )
+        members = ", ".join("'{0}'".format(i) for i in member_ids)
+        for node_id in member_ids:
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V7_COEXISTENCE_CONFLICT,
+                "Node '{0}': frame-feed source nodes ({1}) cannot coexist "
+                "in one workflow: the runtime serves one frame-feed source "
+                "per workflow".format(node_id, members),
+                node_id=node_id,
+            ))
+
+    for node_type, node_ids in sorted(by_type.items()):
+        if mixed_frame_feed and node_type in FRAME_FEED_SOURCE_TYPES:
+            # Already reported by the mixed frame-feed rule above; a
+            # singleton finding here would double-report these nodes.
+            continue
+        if len(node_ids) < 2:
+            continue
+        reason = COEXISTENCE_SINGLETON_TYPES[node_type]
+        members = ", ".join("'{0}'".format(i) for i in sorted(node_ids))
+        for node_id in sorted(node_ids):
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_V7_COEXISTENCE_CONFLICT,
+                "Node '{0}': {1} nodes of type '{2}' cannot coexist in "
+                "one workflow ({3}): {4}".format(
+                    node_id, len(node_ids), node_type, members, reason
+                ),
+                node_id=node_id,
             ))
     return findings
 

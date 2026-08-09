@@ -2,11 +2,23 @@
 
 **Feature: aravis-camera-input, Property 1: Aravis node definitions round-trip and compile through generic catalog paths**
 
-For any valid workflow definition containing ``aravis_camera_source``
-nodes, serializing then parsing the definition produces an equivalent
-graph, and validating then compiling it for a device architecture
-succeeds and renders the node's appsrc-headed element chain — with the
-appsrc ``name`` resolving the ``{nodeId}`` token uniquely per node.
+For any workflow definition containing ``aravis_camera_source`` nodes,
+serializing then parsing the definition produces an equivalent graph.
+The rest of the property splits on the V7-coexistence singleton rule
+(portal-build-fleet-and-workflow-gates Requirement 8.2), which encodes
+the device runtime's Frame_Feed contract — the single-frame appsrc feed
+supports exactly one Aravis camera source per workflow
+(``workflow_engine.aravis_feed.plan_aravis_feeds`` raises when a
+document carries more than one Aravis binding point):
+
+- With exactly one Aravis node, validating then compiling for every
+  device architecture succeeds and renders the node's appsrc-headed
+  element chain, with the appsrc ``name`` resolving the ``{nodeId}``
+  token uniquely per node.
+- With two or more Aravis nodes, ``validate()`` reports exactly one
+  ``V7_COEXISTENCE_CONFLICT`` error finding per Aravis node, each
+  naming the full conflicting membership, and ``compile()`` refuses the
+  definition on every device architecture.
 
 **Validates: Requirements 1.5**
 """
@@ -27,7 +39,11 @@ from workflow_core.serializer import (
     parse,
     serialize,
 )
-from workflow_core.validator import SEVERITY_ERROR, validate
+from workflow_core.validator import (
+    CODE_V7_COEXISTENCE_CONFLICT,
+    SEVERITY_ERROR,
+    validate,
+)
 
 from .generators import graph_strategy, node_parameters_strategy
 
@@ -39,16 +55,18 @@ _CAPTURE_DESCRIPTOR = get_node_type("capture")
 
 @st.composite
 def aravis_graph_strategy(draw):
-    """Valid Workflow_Definitions guaranteed to contain 1..3
+    """Workflow_Definitions guaranteed to contain 1..3
     ``aravis_camera_source`` nodes.
 
     A drawn boolean starts from a random valid catalog graph (which may
-    itself contain Aravis nodes now that the shared generators include
-    the type among the video inputs), producing mixed-camera documents;
-    otherwise the graph is Aravis-only. Each appended Aravis node feeds
-    its own ``capture`` sink so the graph stays validator-valid (input +
-    output present, everything reachable, all connections type-
-    compatible).
+    itself contain at most one Aravis node — the shared generators
+    respect the V7-coexistence singleton rule), producing mixed-camera
+    documents; otherwise the graph is Aravis-only. Each appended Aravis
+    node feeds its own ``capture`` sink so the graph is structurally
+    valid (input + output present, everything reachable, all
+    connections type-compatible); a graph with two or more Aravis nodes
+    is *deliberately* V7-coexistence-invalid — the multi-Aravis branch
+    of the property asserts exactly that finding set.
     """
     if draw(st.booleans()):
         base = draw(graph_strategy())
@@ -119,11 +137,51 @@ def test_aravis_definitions_round_trip_and_compile(graph):
         "re-serialized document is not byte-identical to the original"
     )
 
-    # --- validation succeeds (generic validator path) --------------------
     errors = [
         finding for finding in validate(graph)
         if finding.severity == SEVERITY_ERROR
     ]
+
+    if len(aravis_nodes) > 1:
+        # --- multi-Aravis: the V7-coexistence singleton rule fires -------
+        # Runtime grounding: workflow_engine.aravis_feed.plan_aravis_feeds
+        # raises AravisFeedError for >1 Aravis binding point per workflow
+        # (the single-frame appsrc feed supports exactly one Aravis camera
+        # source), so validation must reject these documents up front
+        # (portal-build-fleet-and-workflow-gates Requirement 8.2): exactly
+        # one V7_COEXISTENCE_CONFLICT error per offending node, each
+        # naming the full conflicting membership, and no other error.
+        assert all(f.code == CODE_V7_COEXISTENCE_CONFLICT for f in errors), (
+            "expected only V7_COEXISTENCE_CONFLICT errors, got: "
+            "{0}".format(errors)
+        )
+        assert sorted(f.node_id for f in errors) == sorted(
+            node.id for node in aravis_nodes
+        ), (
+            "expected exactly one V7_COEXISTENCE_CONFLICT finding per "
+            "Aravis node, got: {0}".format(errors)
+        )
+        membership = ", ".join(
+            "'{0}'".format(i) for i in sorted(node.id for node in aravis_nodes)
+        )
+        for finding in errors:
+            assert membership in finding.message, (
+                "finding for node '{0}' does not name the full conflicting "
+                "membership {1}: {2!r}".format(
+                    finding.node_id, membership, finding.message)
+            )
+
+        # compile() re-runs validation and must refuse on every arch, the
+        # same way the device would fail feed planning.
+        for arch in DEVICE_ARCHITECTURES:
+            compiled = compile(graph, arch)
+            assert not isinstance(compiled, CompiledPipelineDocument), (
+                "compile accepted a multi-Aravis definition on "
+                "'{0}'".format(arch)
+            )
+        return
+
+    # --- single Aravis node: validation succeeds (generic validator path)
     assert not errors, (
         "validate reported errors for a valid Aravis definition: "
         "{0}".format(errors)

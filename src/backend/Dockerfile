@@ -67,7 +67,13 @@ RUN python3.11 -m pip install --no-cache-dir ${ONNXRUNTIME_SPEC}
 RUN ./edge_ml1_p_camera_management/install_aravis.sh
 RUN python3.11 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
 RUN apt update -y
-RUN apt-get install libssl1.1 -y
+# libssl1.1 (OpenSSL 1.1 runtime) exists only through focal; on
+# jammy the base already ships libssl3 and the edgemlsdk debs carry their
+# own OpenSSL 3.x (openssl.deb). Gate on the base's own /etc/os-release:
+# the OS build-arg is out of scope in RUN (declared only before FROM).
+RUN . /etc/os-release && if [ "$VERSION_ID" = "18.04" ] || [ "$VERSION_ID" = "20.04" ] ; then \
+    apt-get install libssl1.1 -y; \
+    fi
 RUN apt update -y
 RUN apt install libexif12 libcurl4 libarchive13 gstreamer1.0-tools gstreamer1.0-libav ffmpeg -y
 RUN if [ "$OS" = "18.04" ] ; then \

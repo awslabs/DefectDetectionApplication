@@ -80,6 +80,22 @@ const CAPTURE = descriptor({
   inputs: [port('in', 'VideoFrames')],
 });
 
+const MQTT_SUBSCRIBE = descriptor({
+  typeId: 'mqtt_subscribe',
+  category: 'trigger',
+  displayName: 'MQTT Subscribe',
+  outputs: [port('out', 'EventSignal')],
+});
+
+const CUSTOM_PYTHON_SOURCE = descriptor({
+  typeId: 'custom_python_source',
+  category: 'input',
+  displayName: 'Custom Python (Source)',
+  inputs: [port('activation', 'EventSignal')],
+  outputs: [port('out', 'VideoFrames')],
+  parameters: [parameter({ name: 'code', paramType: 'code', required: true })],
+});
+
 function nodeOf(d: NodeTypeDescriptor, id: string): BuilderNode {
   return {
     id,
@@ -189,6 +205,17 @@ describe('connectionRejectionReason', () => {
         nodes
       )
     ).toBe('Cannot connect VideoFrames output to InferenceMeta input');
+  });
+
+  it("accepts a trigger output into the custom_python_source 'activation' port (custom-python-source Requirement 10.4)", () => {
+    const trigger = nodeOf(MQTT_SUBSCRIBE, 'trig');
+    const source = nodeOf(CUSTOM_PYTHON_SOURCE, 'src');
+    expect(
+      connectionRejectionReason(
+        { source: 'trig', sourceHandle: 'out', target: 'src', targetHandle: 'activation' },
+        [trigger, source]
+      )
+    ).toBeNull();
   });
 
   it('rejects self connections', () => {

@@ -301,6 +301,14 @@ echo ""
 # actually valid (the export can emit a stale/past expiration for SSO/login
 # credential sources). Without the expiration var, botocore uses the token as a
 # static credential and signs successfully.
+#
+# ALSO IMPORTANT: unset any static AWS env credentials BEFORE re-exporting.
+# Env credentials sit first in the AWS CLI credential chain, so if the shell
+# that launched this script exported static session creds, `aws configure
+# export-credentials` just re-reads those same (now expired) env vars instead
+# of resolving the underlying login/SSO source — making this refresh a no-op
+# on expired tokens. That exact failure killed builds v49 and v50 at publish.
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_CREDENTIAL_EXPIRATION
 if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null | grep -v AWS_CREDENTIAL_EXPIRATION); then
     eval "$_CREDS_ENV"
     unset _CREDS_ENV
@@ -312,7 +320,13 @@ PUB_REGION=$(aws configure get region 2>/dev/null || true)
 if [ -z "$PUB_REGION" ]; then
     PUB_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 fi
-PUB_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
+# Don't swallow STS errors: surface them so a credential failure is visible in
+# the log (the empty-check guard below still handles the failure path).
+PUB_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>&1) || {
+    echo "⚠ WARNING: 'aws sts get-caller-identity' failed: $PUB_ACCOUNT_ID"
+    PUB_ACCOUNT_ID=""
+}
+echo "Publish identity: account='${PUB_ACCOUNT_ID:-<unresolved>}' region='${PUB_REGION:-<unresolved>}'"
 
 # Measure total built-artifact size. Greengrass rejects single artifacts over
 # 2 GB, so when the packaged zip exceeds that we publish the Docker images to
@@ -511,7 +525,20 @@ echo ""
 echo "The InferenceUploader component enables edge devices to automatically"
 echo "upload inference results (images and metadata) to S3 for centralized storage."
 echo ""
-read -p "Build and publish InferenceUploader component now? (y/n): " BUILD_INFERENCE_UPLOADER
+# Guard the prompt for non-interactive runs (nohup/setsid detachment closes or
+# detaches stdin, and a bare `read` then aborts the script under `set -e` with
+# "read error: 0: Bad file descriptor"). Behavior:
+#   - interactive TTY:            prompt as before
+#   - piped stdin (echo n | ...): consume the piped answer
+#   - no usable stdin (detached): default to "n" (skip InferenceUploader)
+if [ -t 0 ]; then
+    read -p "Build and publish InferenceUploader component now? (y/n): " BUILD_INFERENCE_UPLOADER
+else
+    if ! read -r BUILD_INFERENCE_UPLOADER 2>/dev/null || [ -z "$BUILD_INFERENCE_UPLOADER" ]; then
+        BUILD_INFERENCE_UPLOADER="n"
+    fi
+    echo "Non-interactive stdin detected; InferenceUploader answer: '$BUILD_INFERENCE_UPLOADER' (defaults to 'n' when no input is available)"
+fi
 
 if [ "$BUILD_INFERENCE_UPLOADER" = "y" ] || [ "$BUILD_INFERENCE_UPLOADER" = "Y" ]; then
     echo ""
