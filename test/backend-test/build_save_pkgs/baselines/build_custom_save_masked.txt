@@ -358,45 +358,6 @@ fi
 
 # save Docker images as tar
 echo "save docker images as tarvballs"
-# Save via `docker save --output` to a .partial name, then atomically mv
-# into place. NEITHER historical form works bare under snap Docker:
-#  - `docker save <img> > <file>` fails under the SSM RunShellScript
-#    context with "write /dev/stdout: bad file descriptor" (EBADF),
-#    leaving a 0-byte tar (portal job d844a5fb, 2026-08-09).
-#  - bare `--output <final-name>` writes a transient `.tmp-<name><rand>`
-#    in the destination dir and renames it, which raced the old recursive
-#    packaging zip (exit 18).
-# The .partial suffix + atomic same-dir mv means the final tar name only
-# ever exists complete; transient `.tmp-*`/`.partial` names are policed by
-# the pre-zip `rm -f .tmp-*` cleanup and the explicit ZIP_MEMBERS list
-# with its `-x '*/.tmp-*'` exclusion below. The integrity guard makes any
-# residual save failure loud — a 0-byte or truncated tar can never reach
-# the zip silently.
-save_image_tar() {
-  local image=$1 dest=$2
-  rm -f "$dest" "$dest.partial"
-  if ! docker save --output "$dest.partial" "$image"; then
-    echo "ERROR: docker save $image failed."
-    echo "  docker: $(docker --version 2>/dev/null || echo 'version unavailable')"
-    echo "  Staging dir:"
-    ls -lh "$(dirname "$dest")" || true
-    echo "  Disk free:"
-    df -h "$(dirname "$dest")" || true
-    exit 1
-  fi
-  mv "$dest.partial" "$dest"
-  local size
-  size=$(stat -c%s "$dest")
-  if [ "$size" -lt 1048576 ] || ! tar -tf "$dest" > /dev/null; then
-    echo "ERROR: saved image tar $dest failed integrity check (size ${size} bytes)."
-    exit 1
-  fi
-  echo "Saved $image -> $dest ($size bytes, tar structure OK)"
-}
-save_image_tar flask-app ./custom-build/$COMPONENT_NAME/flask-app.tar
-save_image_tar react-webapp ./custom-build/$COMPONENT_NAME/react-webapp.tar
-
-# include docker-compose.yaml in archive
 cp src/docker-compose.yaml ./custom-build/$COMPONENT_NAME/
 
 # include empty directories for each image build context
