@@ -32,13 +32,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV LD_LIBRARY_PATH=/usr/local/lib/
 
-# ── 2. CMake 3.21.3 from Kitware ──────────────────────────────────────────
-RUN wget -O /etc/apt/trusted.gpg.d/kitware.asc https://apt.kitware.com/keys/kitware-archive-latest.asc && \
-    echo "deb https://apt.kitware.com/ubuntu/ focal main" > /etc/apt/sources.list.d/kitware.list && \
-    apt-get update && \
-    apt-get install -y cmake-data=3.21.3-0kitware1ubuntu20.04.1 cmake=3.21.3-0kitware1ubuntu20.04.1 && \
-    rm -f /etc/apt/sources.list.d/kitware.list /etc/apt/trusted.gpg.d/kitware.asc && \
-    rm -rf /var/lib/apt/lists/*
+# ── 2. CMake 3.x (JP5 / Ubuntu 20.04 base) ────────────────────────────────
+# Install CMake 3.x from the official upstream binary tarball rather than the
+# Kitware apt repo. The latest Kitware cmake is now 4.x (which removed support
+# for `cmake_minimum_required(VERSION < 3.5)` and breaks Triton's transitively
+# fetched dependencies), and pinning the apt packages to a 3.x version fails
+# with "cmake : Breaks: cmake-data (< 4.3)" dependency conflicts. The upstream
+# tarball is self-contained (no apt resolution) and gives a clean, pinned 3.x.
+RUN CMAKE_VER=3.31.6 && \
+    ARCH_TAG=$(uname -m) && \
+    if [ "$ARCH_TAG" = "x86_64" ]; then CM_ARCH=x86_64; else CM_ARCH=aarch64; fi && \
+    wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CM_ARCH}.sh" -O /tmp/cmake.sh && \
+    sh /tmp/cmake.sh --skip-license --prefix=/usr/local && \
+    rm -f /tmp/cmake.sh && \
+    cmake --version
 
 # ── 3. Python 3.11 (built from source) + pip tooling ───────────────────────
 # focal/arm64 has NO apt python3.11: the deadsnakes PPA publishes no arm64

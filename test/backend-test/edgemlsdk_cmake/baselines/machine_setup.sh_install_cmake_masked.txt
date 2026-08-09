@@ -55,27 +55,6 @@ check_and_install_python_module() {
     source ~/.profile
 }
 
-install_cmake()
-{
-    if ! dpkg -s "cmake" >/dev/null 2>&1 && ! command -v cmake >/dev/null 2>&1; then
-        . /etc/os-release
-        if [ $VERSION_ID = "18.04" ]; then
-            # Pinned upstream release binary (see src/edgemlsdk/Dockerfile.jp6):
-            # the Kitware apt repo no longer serves pinned 3.x packages and its
-            # current cmake is 4.x (Triton-incompatible).
-            CMAKE_VER=3.31.6
-            if [ $(uname -m) = "x86_64" ]; then CM_ARCH=x86_64; else CM_ARCH=aarch64; fi
-            wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CM_ARCH}.sh" -O /tmp/cmake.sh
-            $do_sudo sh /tmp/cmake.sh --skip-license --prefix=/usr/local
-            rm -f /tmp/cmake.sh
-            cmake --version
-        else
-            check_and_install_package cmake;
-        fi
-    else
-        echo "CMake is already installed"
-    fi
-}
 
 install_powershell()
 {

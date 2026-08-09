@@ -49,6 +49,7 @@ mechanism (whose masked-bytes goldens for the changed files must be
 regenerated as an intended consequence of the fix). An actual verification
 build through the portal is a separately approved operational task, not part
 of this spec's automated validation.
+The build must succeed and publish to be successful and complete.
 
 ## Bug Analysis
 
