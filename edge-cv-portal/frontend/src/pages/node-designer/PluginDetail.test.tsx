@@ -208,6 +208,111 @@ describe('PluginDetail build retry', () => {
   });
 });
 
+describe('PluginDetail build trigger (Build header action)', () => {
+  // An accepted generated (or scaffold) record has no build round yet:
+  // the Builds section offers an explicit Build action with an
+  // architecture selection defaulted from the recorded declaration.
+  function generatedDetail(
+    overrides: Partial<PluginVersionDetail> = {}
+  ): PluginVersionDetail {
+    return importedDetail({
+      name: 'resize-image',
+      kind: 'generated',
+      import_status: undefined,
+      plugins_found: undefined,
+      selected_plugins: undefined,
+      provenance: {
+        prompt: 'resize frames',
+        scaffoldDeclaration: JSON.stringify({
+          typeId: 'resize_image',
+          architectures: ['x86_64', 'arm64_jp5'],
+        }),
+      },
+      ...overrides,
+    });
+  }
+
+  async function mockStartBuilds(mock: ReturnType<typeof vi.fn>) {
+    const api = (await import('./api')).nodeDesignerApi as Record<string, unknown>;
+    api.startBuilds = mock;
+  }
+
+  it('offers a Build action even when no builds were submitted yet', async () => {
+    await renderDetail(generatedDetail());
+
+    expect(
+      screen.getByText('No builds submitted for this version yet.')
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Build' })).toBeInTheDocument();
+  });
+
+  it('submits a build for the declared architectures and shows the round', async () => {
+    const startedView = {
+      plugin_id: 'p-1',
+      version: 1,
+      requested_architectures: ['arm64_jp5', 'x86_64'],
+      builds: {
+        x86_64: { buildStatus: 'building', logTail: '', prebuilt: false },
+        arm64_jp5: { buildStatus: 'building', logTail: '', prebuilt: false },
+      },
+      settled: false,
+      component_packaging_triggered: false,
+    };
+    const startBuilds = vi.fn().mockResolvedValue(startedView);
+    await mockStartBuilds(startBuilds);
+    await renderDetail(generatedDetail());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Build' }));
+    // The selection defaults to the declaration's architectures; the
+    // user confirms with Start build.
+    fireEvent.click(screen.getByRole('button', { name: 'Start build' }));
+
+    await waitFor(() =>
+      expect(startBuilds).toHaveBeenCalledWith('p-1', 1, ['x86_64', 'arm64_jp5'])
+    );
+    // The page reflects the response's builds view.
+    await waitFor(() =>
+      expect(screen.getByText('x86_64: building')).toBeInTheDocument()
+    );
+    expect(screen.getByText('arm64 JetPack 5: building')).toBeInTheDocument();
+  });
+
+  it('surfaces the submission error and keeps the panel open for retry', async () => {
+    const startBuilds = vi
+      .fn()
+      .mockRejectedValue(new Error('build submission rejected'));
+    await mockStartBuilds(startBuilds);
+    await renderDetail(generatedDetail());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Build' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Start build' }));
+
+    await waitFor(() =>
+      expect(screen.getByText('build submission rejected')).toBeInTheDocument()
+    );
+    expect(screen.getByRole('button', { name: 'Start build' })).toBeInTheDocument();
+  });
+
+  it('cancel closes the panel without submitting anything', async () => {
+    const startBuilds = vi.fn();
+    await mockStartBuilds(startBuilds);
+    await renderDetail(generatedDetail());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Build' }));
+    // The delete confirmation modal stays mounted (hidden) with its own
+    // Cancel; pick the build panel's Cancel outside the dialog.
+    const cancel = screen
+      .getAllByRole('button', { name: 'Cancel' })
+      .find((button) => !button.closest('[class*="awsui_dialog"]'))!;
+    fireEvent.click(cancel);
+
+    expect(startBuilds).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole('button', { name: 'Start build' })
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe('PluginDetail platform compatibility warnings', () => {
   const compatibilityMap = {
     x86_64: {
