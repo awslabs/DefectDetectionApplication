@@ -216,10 +216,14 @@ def test_recorded_llm_error_leaves_run_completed_and_bindings_running(
     received_metadata = []
 
     class _RecordingHandler(OutputBindingProcessor):
-        def process(self, registration, document, tag_values):
+        # Mirrors the current OutputBindingProcessor.process signature:
+        # detail_sink was added by the output-node-sent-message feature and
+        # __call__ always forwards it, so an override must accept it.
+        def process(self, registration, document, tag_values, detail_sink=None):
             received_metadata.append(dict(tag_values))
             return OutputBindingProcessor.process(
-                self, registration, document, tag_values)
+                self, registration, document, tag_values,
+                detail_sink=detail_sink)
 
     handler = _RecordingHandler(
         greengrass_publisher=lambda topic, payload, qos:

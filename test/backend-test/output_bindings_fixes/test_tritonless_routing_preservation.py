@@ -266,8 +266,13 @@ def test_default_path_routing_identity(shape):
     {workflow_id}-{execution_id}`` / ``has_image_results``, and hands the
     pipeline the reference launch string (base file target rewritten to the
     per-run dir, ``{capture_meta}`` placeholder untouched, terminal
-    fakesink appended). Non-capture documents record none of those fields
-    and render byte-identically to the compiled document.
+    fakesink appended). Non-capture documents render byte-identically to
+    the compiled document and record no image results; since
+    vlm-parity-run-results (Requirement 2.3) they DO record the per-run
+    ``output_dir``/``capture_id`` so the run metadata JSON and
+    inference-node frames have a destination (Bedrock-only runs used to
+    persist nothing) — ``has_image_results`` alone stays gated on a
+    routed terminal capture.
 
     **Validates: Requirements 3.6**
     """
@@ -278,19 +283,21 @@ def test_default_path_routing_identity(shape):
         "expected exactly one pipeline run, got {0!r}".format(manager.calls))
     launch = manager.calls[0]
 
+    expected_output_dir = os.path.join(
+        capture_root, WORKFLOW_ID, execution_id)
+    expected_capture_id = "{0}-{1}".format(WORKFLOW_ID, execution_id)
+
     if not shape["is_capture"]:
-        # Non-capture: untouched — no routing fields, identical rendering.
-        assert result["output_dir"] is None
-        assert result["capture_id"] is None
+        # Non-capture: identical rendering and no image results. The
+        # per-run artifact fields are recorded for every run
+        # (vlm-parity-run-results Req 2.3).
+        assert result["output_dir"] == expected_output_dir
+        assert result["capture_id"] == expected_capture_id
         assert result["has_image_results"] is False
         assert launch == rendering.render_launch_string(document), (
             "PRESERVATION REGRESSION (Property 6): a non-capture document "
             "was mutated before rendering")
         return
-
-    expected_output_dir = os.path.join(
-        capture_root, WORKFLOW_ID, execution_id)
-    expected_capture_id = "{0}-{1}".format(WORKFLOW_ID, execution_id)
 
     assert result["output_dir"] == expected_output_dir, (
         "PRESERVATION REGRESSION (Property 6): compiled path {0!r} routed "

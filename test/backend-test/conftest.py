@@ -72,7 +72,13 @@ def mock_log_fixture():
 
 @pytest.fixture(scope="function")
 def caplog(request, caplog):
-    request.cls.caplog = caplog
+    """Expose pytest's caplog to unittest-style classes as ``self.caplog``
+    while still returning the real fixture, so plain pytest tests that take
+    ``caplog`` as a parameter receive it (previously they got None, which
+    broke any test written against vanilla caplog semantics)."""
+    if request.cls is not None:
+        request.cls.caplog = caplog
+    return caplog
 
 @pytest.fixture(scope="session",autouse=True)
 def setup_teardown_actions():
