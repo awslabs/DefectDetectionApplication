@@ -12,7 +12,7 @@ import { Construct } from 'constructs';
  * - MINOR: New features (new permissions, new resources)
  * - PATCH: Bug fixes
  */
-const STACK_VERSION = '1.5.0';
+const STACK_VERSION = '1.6.0';
 
 export interface UseCaseAccountStackProps extends cdk.StackProps {
   /**
@@ -788,6 +788,22 @@ export class UseCaseAccountStack extends cdk.Stack {
     const cameraShadowReportQueueArn = `arn:aws:sqs:${region}:${portalAccountId}:${cameraShadowReportQueueName}`;
     const cameraShadowReportQueueUrl = `https://sqs.${region}.amazonaws.com/${portalAccountId}/${cameraShadowReportQueueName}`;
 
+    // Only create the fixed-name camera-shadow rule/role when this use-case
+    // account is NOT the portal account. In the single-account topology the
+    // ComputeStack provisions the equivalent rule
+    // (dda_camera_registry_shadow_documents_portal), and creating these
+    // fixed-name copies there would collide. Deploy-time condition (not a
+    // synth-time if): keeps the synthesized IAM statements identical for the
+    // security preservation baselines and stays correct even when the synth
+    // environment does not resolve the account.
+    const cameraShadowCrossAccountCondition = new cdk.CfnCondition(
+      this, 'CameraShadowCrossAccountCondition', {
+        expression: cdk.Fn.conditionNot(
+          cdk.Fn.conditionEquals(portalAccountId, cdk.Aws.ACCOUNT_ID)
+        ),
+      }
+    );
+
     const cameraShadowRuleRole = new iam.Role(this, 'CameraShadowRuleRole', {
       roleName: 'DDACameraShadowRuleRole',
       description: 'Role for the dda-camera-registry shadow IoT topic rule to deliver shadow documents events to the DDA Portal shadow-report queue',
@@ -803,7 +819,7 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
-    new iot.CfnTopicRule(this, 'CameraRegistryShadowRule', {
+    const cameraRegistryShadowRule = new iot.CfnTopicRule(this, 'CameraRegistryShadowRule', {
       ruleName: 'dda_camera_registry_shadow_documents',
       topicRulePayload: {
         // topic(3) is the thing name in $aws/things/{thing}/shadow/...
@@ -822,6 +838,16 @@ export class UseCaseAccountStack extends cdk.Stack {
         ],
       },
     });
+
+    // Attach the cross-account condition to exactly the three fixed-name
+    // resources; the CameraShadowReportQueueArn output below stays
+    // unconditional (its value is a plain derived string, not a resource
+    // reference).
+    (cameraShadowRuleRole.node.defaultChild as iam.CfnRole)
+      .cfnOptions.condition = cameraShadowCrossAccountCondition;
+    (cameraShadowRuleRole.node.findChild('DefaultPolicy').node.defaultChild as iam.CfnPolicy)
+      .cfnOptions.condition = cameraShadowCrossAccountCondition;
+    cameraRegistryShadowRule.cfnOptions.condition = cameraShadowCrossAccountCondition;
 
     new cdk.CfnOutput(this, 'CameraShadowReportQueueArn', {
       value: cameraShadowReportQueueArn,

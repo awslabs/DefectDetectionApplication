@@ -1100,15 +1100,26 @@ echo ""
 
 echo "▶ Ensuring IoT thing policy allows shadow data-plane sync..."
 # The Greengrass installer creates GreengrassV2IoTThingPolicy with MQTT-only
-# grants (iot:Connect/Publish/Subscribe/Receive + greengrass:*). The Shadow
-# Manager component syncs named shadows (dda-camera-registry,
-# dda-user-accounts, dda-camera-bindings) to the cloud over the HTTP IoT data
-# plane, which requires the explicit iot:*ThingShadow actions — without them
-# cloud sync fails with ForbiddenException (403) while local shadows keep
-# working, so cloud/portal shadow copies silently go stale. Idempotent: skips
-# when the default policy version already grants UpdateThingShadow; prunes the
+# grants (iot:Connect/Publish/Subscribe/Receive + greengrass:*).
+# aws.greengrass.ShadowManager syncs named shadows (dda-camera-registry,
+# dda-user-accounts, dda-camera-bindings) to the cloud over the IoT data
+# plane via HTTPS (port 8443), authenticated with the device X.509
+# certificate — so it is authorized by the certificate's IoT policy, never by
+# the token exchange IAM role. Thing policy variables
+# (${iot:Connection.Thing.ThingName}) resolve only on MQTT connections; a
+# shadow statement scoped with them denies every HTTPS sync request with
+# ForbiddenException (403) while local shadows keep working, so cloud/portal
+# shadow copies silently go stale. This step appends the HTTPS-compatible
+# ShadowManagerHttpsDataPlaneSync statement (no policy variables) to the
+# CURRENT default policy document; existing statements — including any
+# variable-scoped shadow statement, which continues to serve MQTT
+# connections — are preserved verbatim and in order. Idempotent: skips when
+# the default version already carries an HTTPS-compatible grant; prunes the
 # oldest non-default version first when the 5-version limit is reached.
 gg_thing_policy="GreengrassV2IoTThingPolicy"
+# Decision logic (idempotency predicate + statement append) lives in the
+# property-tested sibling helper; bash only orchestrates the AWS CLI calls.
+shadow_helper="$(dirname "$0")/iot_policy_shadow_statement.py"
 # Distinguish "check inconclusive" (CLI missing, auth failure, access denied)
 # from "policy absent" (API positively returns ResourceNotFoundException).
 # Previously CLI/auth errors were swallowed (2>/dev/null || echo "") and
@@ -1119,6 +1130,7 @@ gg_thing_policy="GreengrassV2IoTThingPolicy"
 gg_policy_check="ok"       # ok | inconclusive | absent
 gg_policy_check_detail=""
 policy_doc=""
+default_version=""
 if ! command -v aws >/dev/null 2>&1; then
     gg_policy_check="inconclusive"
     gg_policy_check_detail="AWS CLI unavailable"
@@ -1127,68 +1139,83 @@ elif ! aws sts get-caller-identity >/dev/null 2>&1; then
     gg_policy_check_detail="credentials not resolvable (aws sts get-caller-identity failed)"
 else
     gg_policy_err_file=$(mktemp)
-    if ! policy_doc=$(aws iot get-policy --policy-name "$gg_thing_policy" --query policyDocument --output text 2>"$gg_policy_err_file"); then
+    if ! default_version=$(aws iot get-policy --policy-name "$gg_thing_policy" --query defaultVersionId --output text 2>"$gg_policy_err_file"); then
         gg_policy_err=$(tr '\n' ' ' < "$gg_policy_err_file")
         if echo "$gg_policy_err" | grep -qE "ResourceNotFoundException|NoSuchEntity"; then
             gg_policy_check="absent"
+            # Discovery fallback: the conventional name above is authoritative
+            # for stations provisioned by this script (the installer invocation
+            # passes --thing-policy-name GreengrassV2IoTThingPolicy), but a
+            # pre-provisioned device may carry a differently named policy on
+            # its certificate — discover it via the thing's principal before
+            # giving up.
+            gg_principal=$(aws iot list-thing-principals --thing-name "$thing_name" --query 'principals[0]' --output text 2>/dev/null || echo "")
+            gg_discovered_policy=""
+            if [ -n "$gg_principal" ] && [ "$gg_principal" != "None" ]; then
+                gg_discovered_policy=$(aws iot list-attached-policies --target "$gg_principal" --query 'policies[0].policyName' --output text 2>/dev/null || echo "")
+            fi
+            if [ -n "$gg_discovered_policy" ] && [ "$gg_discovered_policy" != "None" ]; then
+                gg_thing_policy="$gg_discovered_policy"
+                if default_version=$(aws iot get-policy --policy-name "$gg_thing_policy" --query defaultVersionId --output text 2>/dev/null); then
+                    gg_policy_check="ok"
+                fi
+            fi
         else
             gg_policy_check="inconclusive"
             gg_policy_check_detail="CLI error: ${gg_policy_err:-unknown error}"
         fi
-        policy_doc=""
     fi
     rm -f "$gg_policy_err_file"
+    # Read the document of the version actually in force (explicit
+    # default-version read, not the get-policy shortcut) so the augmented
+    # document is built from what is really the default.
+    if [ "$gg_policy_check" = "ok" ]; then
+        gg_policy_err_file=$(mktemp)
+        if ! policy_doc=$(aws iot get-policy-version --policy-name "$gg_thing_policy" --policy-version-id "$default_version" --query policyDocument --output text 2>"$gg_policy_err_file"); then
+            gg_policy_err=$(tr '\n' ' ' < "$gg_policy_err_file")
+            gg_policy_check="inconclusive"
+            gg_policy_check_detail="CLI error reading default version ${default_version}: ${gg_policy_err:-unknown error}"
+            policy_doc=""
+        fi
+        rm -f "$gg_policy_err_file"
+    fi
 fi
 if [ "$gg_policy_check" = "inconclusive" ]; then
-    add_warning "Could not verify $gg_thing_policy — the check itself failed (${gg_policy_check_detail}); verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow)"
+    add_warning "Could not verify $gg_thing_policy — the check itself failed (${gg_policy_check_detail}); verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/*, no policy variables)"
 elif [ "$gg_policy_check" = "absent" ]; then
-    add_warning "Could not read $gg_thing_policy - verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow)"
-elif echo "$policy_doc" | grep -q "iot:UpdateThingShadow"; then
-    echo "✓ $gg_thing_policy already grants shadow data-plane actions"
+    add_warning "Could not read $gg_thing_policy - verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/*, no policy variables)"
+elif [ ! -f "$shadow_helper" ]; then
+    add_warning "iot_policy_shadow_statement.py helper not found next to setup_station.sh — cannot verify/repair the IoT policy shadow statement; ensure $gg_thing_policy allows iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/* (no policy variables) manually"
+elif printf '%s' "$policy_doc" | python3 "$shadow_helper" check; then
+    echo "✓ $gg_thing_policy already grants HTTPS-compatible shadow data-plane actions"
 else
-    version_count=$(aws iot list-policy-versions --policy-name "$gg_thing_policy" --query 'length(policyVersions)' --output text 2>/dev/null || echo "0")
-    if [ "$version_count" -ge 5 ]; then
-        oldest_version=$(aws iot list-policy-versions --policy-name "$gg_thing_policy" \
-            --query 'policyVersions[?isDefaultVersion==`false`] | sort_by(@, &createDate)[0].versionId' --output text 2>/dev/null || echo "")
-        if [ -n "$oldest_version" ] && [ "$oldest_version" != "None" ]; then
-            run_cmd "aws iot delete-policy-version --policy-name $gg_thing_policy --policy-version-id $oldest_version" \
-                || add_warning "Could not prune old $gg_thing_policy version"
-        fi
-    fi
-    shadow_policy_file=$(mktemp)
-    cat > "$shadow_policy_file" <<'POLICY_EOF'
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "iot:Connect",
-        "iot:Publish",
-        "iot:Subscribe",
-        "iot:Receive",
-        "greengrass:*"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "iot:GetThingShadow",
-        "iot:UpdateThingShadow",
-        "iot:DeleteThingShadow"
-      ],
-      "Resource": "arn:aws:iot:*:*:thing/${iot:Connection.Thing.ThingName}"
-    }
-  ]
-}
-POLICY_EOF
-    if run_cmd "aws iot create-policy-version --policy-name $gg_thing_policy --policy-document file://$shadow_policy_file --set-as-default"; then
-        echo "✓ Added shadow data-plane actions to $gg_thing_policy"
+    shadow_check_status=$?
+    if [ "$shadow_check_status" -eq 2 ]; then
+        # Exit code 2 = unparseable/malformed document: inconclusive — never
+        # build a new policy version from a document we could not understand.
+        add_warning "Could not parse the $gg_thing_policy default version document — cannot verify/repair the IoT policy shadow statement; verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/*, no policy variables)"
     else
-        add_warning "Could not update $gg_thing_policy with shadow permissions - shadow cloud sync will fail with 403. Add iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow manually."
+        shadow_policy_file=$(mktemp)
+        if printf '%s' "$policy_doc" | python3 "$shadow_helper" augment > "$shadow_policy_file"; then
+            version_count=$(aws iot list-policy-versions --policy-name "$gg_thing_policy" --query 'length(policyVersions)' --output text 2>/dev/null || echo "0")
+            if [ "$version_count" -ge 5 ]; then
+                oldest_version=$(aws iot list-policy-versions --policy-name "$gg_thing_policy" \
+                    --query 'policyVersions[?isDefaultVersion==`false`] | sort_by(@, &createDate)[0].versionId' --output text 2>/dev/null || echo "")
+                if [ -n "$oldest_version" ] && [ "$oldest_version" != "None" ]; then
+                    run_cmd "aws iot delete-policy-version --policy-name $gg_thing_policy --policy-version-id $oldest_version" \
+                        || add_warning "Could not prune old $gg_thing_policy version"
+                fi
+            fi
+            if run_cmd "aws iot create-policy-version --policy-name $gg_thing_policy --policy-document file://$shadow_policy_file --set-as-default"; then
+                echo "✓ Added ShadowManagerHttpsDataPlaneSync statement to $gg_thing_policy (existing statements preserved)"
+            else
+                add_warning "Could not update $gg_thing_policy - ShadowManager HTTPS shadow cloud sync will fail with 403. Add iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/* (no policy variables) manually."
+            fi
+        else
+            add_warning "Could not build the augmented $gg_thing_policy document — repair the policy manually (add iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/*, no policy variables)."
+        fi
+        rm -f "$shadow_policy_file"
     fi
-    rm -f "$shadow_policy_file"
 fi
 echo ""
 
@@ -1540,12 +1567,13 @@ else
     fi
     echo ""
     
-    # ShadowManager cloud sync needs the IoT data-plane shadow actions on the
-    # token exchange role. Without them, its sync loop fails with
-    # ForbiddenException (403) and the dda-camera-registry /
-    # dda-camera-bindings named shadows never mirror to IoT Core — the Portal
-    # shows devices as "Never synced" and camera refresh fails with
-    # "Device has no camera registry shadow to refresh from".
+    # IAM-layer grant on the token exchange role for SigV4 data-plane callers
+    # (includes iot:ListNamedShadowsForThing, which the IoT-policy-layer
+    # ShadowManagerHttpsDataPlaneSync statement does not carry). NOTE:
+    # ShadowManager cloud sync does NOT use this role — it authenticates with
+    # the device certificate over HTTPS and is authorized by the certificate's
+    # IoT policy (see the "Ensuring IoT thing policy allows shadow data-plane
+    # sync" step above). Kept as belt-and-braces.
     echo "3.6 Adding ShadowManager shadow sync policy..."
     if run_cmd "aws iam put-role-policy \
       --role-name GreengrassV2TokenExchangeRole \
@@ -1568,7 +1596,7 @@ else
       }'"; then
         echo "   ✓ ShadowManager shadow sync policy attached"
     else
-        add_warning "Could not attach ShadowManager shadow sync policy. Camera registry sync to the Portal will fail with ForbiddenException."
+        add_warning "Could not attach ShadowManager IAM shadow policy (belt-and-braces for SigV4 callers). ShadowManager HTTPS sync itself is authorized by the IoT thing policy step."
     fi
     echo ""
     

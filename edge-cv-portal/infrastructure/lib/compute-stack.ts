@@ -1361,6 +1361,50 @@ export class ComputeStack extends cdk.Stack {
     // the redrive policy above).
     cameraShadowReportDlq.grantSendMessages(cameraSyncHandler);
 
+    // Portal-account IoT topic rule for the SINGLE-ACCOUNT topology (portal
+    // account == use-case account): forwards every dda-camera-registry shadow
+    // documents event to the shadow-report queue above. Cross-account use-case
+    // accounts get the equivalent rule from the UseCaseAccountStack instead
+    // (condition-gated there to the cross-account case). Deliberately distinct
+    // rule name and CDK-generated role name so this never collides with the
+    // fixed-name UseCaseAccountStack copies (or resources created manually
+    // before this fix existed — see the camera-shadow-sync-provisioning spec
+    // migration note).
+    const cameraShadowRuleRole = new iam.Role(this, 'CameraShadowRuleRole', {
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com'),
+      description:
+        'Role for the portal-account dda-camera-registry shadow IoT topic rule ' +
+        'to deliver shadow documents events to the DDA Portal shadow-report queue',
+    });
+    cameraShadowRuleRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SendCameraShadowReports',
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:SendMessage'],
+      resources: [cameraShadowReportQueue.queueArn],
+    }));
+
+    new iot.CfnTopicRule(this, 'CameraRegistryShadowRule', {
+      ruleName: 'dda_camera_registry_shadow_documents_portal',
+      topicRulePayload: {
+        // topic(3) is the thing name in $aws/things/{thing}/shadow/...
+        sql: "SELECT *, topic(3) AS thing_name FROM '$aws/things/+/shadow/name/dda-camera-registry/update/documents'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        description:
+          'Forward dda-camera-registry shadow documents events to the DDA ' +
+          'Portal camera shadow-report queue (single-account topology)',
+        actions: [
+          {
+            sqs: {
+              queueUrl: cameraShadowReportQueue.queueUrl,
+              roleArn: cameraShadowRuleRole.roleArn,
+              useBase64: false,
+            },
+          },
+        ],
+      },
+    });
+
     // Camera_Registry API Lambda (camera_registry.py) — device cameras
     // read/mutate routes, conflict listing/re-apply, and on-demand refresh
     // (GetThingShadow pull through the assumed use-case role).
