@@ -11,6 +11,16 @@ frame feed. Each defect was first live-fixed and verified on hardware,
 then fixed at the source so every future custom node inherits the
 corrections.
 
+An eighth defect surfaced later — not at run time but at packaging time:
+re-packaging a workflow after publishing a new plugin version fails the
+Portal "Package workflow for deployment" dialog with a Requirement 10.4
+checksum-verification error, because the build promoted every version's
+artifact to a single unversioned Plugin_Library key that later builds
+overwrote. It is documented and fixed here alongside the run-time
+cascade because it shares the same plugin (`custom.resize_image`) and
+Plugin_Library build/packaging path; its fix is still in progress (see
+Tests and Deployment notes).
+
 ## Verification environment
 
 - Device: ryan-orin-nano (Jetson Orin Nano, JetPack 6 / arm64_jp6)
@@ -142,6 +152,47 @@ camera_id)` resolves the local ImageSource
 prefers it over the planned feed config. The resolver is injectable for
 tests (`camera_config_resolver` ctor arg).
 
+### 8. Plugin_Library promotion key overwrite invalidates older versions' checksums (packaging rejected, Req 10.4)
+
+The Portal "Package workflow for deployment" dialog rejects packaging
+with "Package failed — Custom plugin artifact 'resize-image.so' for
+architecture 'arm64_jp6' (Custom_Node_Type 'custom.resize_image', plugin
+`7878501d-389d-4db5-832c-6ee2429fecb9` v1) failed checksum verification
+against the Plugin_Record (Requirement 10.4)". The per-arch plugin build
+promoted every built artifact to a single UNVERSIONED Plugin_Library key
+— `workflow-plugins/custom/{usecase}/{arch}/{plugin}.so`
+(`plugin_builds.library_so_key`) — so every rebuild of every version of
+the plugin overwrote the same object. A Plugin_Record version records
+its SHA-256 against the bytes at that key at build time; as soon as ANY
+later version of the same plugin built and overwrote the key, the
+earlier version's recorded checksum no longer matched the bytes now at
+its `s3Key`. The Component_Packager's Requirement 10.4 verification
+(`workflow_packaging.verify_custom_plugin_artifact`: recompute the
+Plugin_Artifact SHA-256 at the recorded `s3Key` and KMS-verify the
+recorded signature) then rejected packaging of every workflow pinned to
+the older Custom_Node_Type version. Observed concretely: building
+resize-image v2 broke packaging of workflows pinned to resize-image v1.
+
+Fix (`functions/plugin_builds.py`): a new
+`versioned_library_so_key(usecase_id, arch, plugin_id, version,
+plugin_name)` returns an IMMUTABLE per-version key
+`workflow-plugins/custom/{usecase}/{arch}/{plugin_id}/{version}/{plugin}.so`.
+`record_promoted_artifact(...)` (successful-build path) now streams the
+`.so` from the unversioned promotion key the build image wrote,
+RE-HOMES the bytes to the versioned key, records SHA-256 + KMS
+signature, writes the detached signature beside the versioned copy, and
+returns `s3Key` = the versioned key; the x86_64 `gstIntrospection`
+report is still read from the promoted (unversioned) key where the build
+image uploads it. `store_signed_artifact(...)` (prebuilt upload path)
+also stores at the versioned key. Both functions gained `plugin_id` and
+`version` parameters, and their call sites in `handle_build_result` and
+`start_builds` were updated. Because the recorded artifact now lives at
+a version-scoped key, a later version's rebuild can never overwrite an
+earlier version's recorded bytes, so each version stays verifiable
+against its recorded checksum forever. The fix is currently uncommitted;
+it protects FUTURE builds only (see Deployment notes for the data-repair
+dimension).
+
 ## Tests
 
 - `edge-cv-portal/backend/layers/workflow_core/tests/test_scaffold.py`:
@@ -158,6 +209,26 @@ tests (`camera_config_resolver` ctor arg).
 - Vendored `workflow_core` copies under
   `src/backend/workflow_engine/vendor/` synced;
   `test_vendored_catalog_mirror.py` green.
+- `edge-cv-portal/backend/tests/test_plugin_builds.py` and
+  `test_property_sign_verify.py`: versioned Plugin_Library key on both
+  the promoted-build and prebuilt-upload paths (defect 8). Remaining
+  work before this fix can ship:
+  - `test_property_sign_verify.py` (~line 118) still calls
+    `store_signed_artifact(usecase_id, arch, plugin_name, data)` with the
+    OLD 4-arg signature (now raises `TypeError`); update it to pass
+    `plugin_id`/`version`.
+  - `test_plugin_builds.py` — the `library_key` helper (~line 154)
+    returns the unversioned key and the success and prebuilt paths assert
+    `entry["s3Key"] == library_key(...)` (~lines 294 and 486); these must
+    expect the versioned key
+    (`workflow-plugins/custom/{usecase}/{arch}/{plugin_id}/{version}/{plugin}.so`).
+  - Add a regression/property test that pins the core invariant:
+    building a LATER version of a plugin MUST NOT invalidate an EARLIER
+    version's recorded artifact/checksum — each version's recorded
+    `s3Key` bytes stay verifiable against its recorded checksum after any
+    number of later-version rebuilds. `test_workflow_packaging_custom_plugins.py`
+    exercises the consuming `verify_custom_plugin_artifact` (Req 10.4)
+    end of the same invariant.
 
 ## Related hardening (same investigation, committed earlier)
 
@@ -179,3 +250,23 @@ recompile. The resize node's parameters in existing deployed documents
 were hand-set (4608x3288, ch=4, target 1152x822 + post-resize
 videoconvert) and will not survive repackaging; re-deploy the workflow
 after rebuilding the plugin.
+
+Defect 8 has a data-repair dimension beyond the code fix: the versioned
+key protects FUTURE builds only. Existing Plugin_Record versions (e.g.
+resize-image v1) still point their `s3Key` at the overwritten
+unversioned key, so even after the backend deploys they remain broken —
+their recorded checksum will not match the bytes at that key — until the
+plugin version is REBUILT, which re-promotes and re-records the artifact
+at a versioned key with a matching checksum. Deployment sequence to
+actually clear the user's "Package failed" (Req 10.4) error:
+
+1. Finish and commit the `plugin_builds.py` fix — update the two broken
+   tests (`test_property_sign_verify.py` `store_signed_artifact` call and
+   `test_plugin_builds.py` `library_key`/`s3Key` assertions) and add the
+   versioned-key invariant regression test.
+2. Deploy the backend Lambda functions.
+3. Rebuild the `resize_image` plugin (v1 and any affected versions) so
+   artifacts are re-homed/re-recorded at versioned keys — this rebuild
+   also picks up the committed defect-1 meson/symbol fix — then
+   republish the Plugin_Component.
+4. Repackage and redeploy the workflow.

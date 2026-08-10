@@ -197,8 +197,31 @@ def sanitize_plugin_name(name: Optional[str], fallback: str) -> str:
 
 
 def library_so_key(usecase_id: str, arch: str, plugin_name: str) -> str:
-    """Plugin_Library custom key: workflow-plugins/custom/{usecase}/{arch}/{plugin}.so"""
+    """Plugin_Library custom key: workflow-plugins/custom/{usecase}/{arch}/{plugin}.so
+
+    This is the UNVERSIONED promotion target the per-arch build image
+    writes to — every build of every version of the plugin overwrites
+    it. It is only a hand-off location: the recorded Plugin_Artifact
+    lives at :func:`versioned_library_so_key`, immutable per version.
+    """
     return f"{PLUGIN_LIBRARY_CUSTOM_PREFIX}/{usecase_id}/{arch}/{plugin_name}.so"
+
+
+def versioned_library_so_key(usecase_id: str, arch: str, plugin_id: str,
+                             version: int, plugin_name: str) -> str:
+    """Immutable per-version Plugin_Library key:
+    workflow-plugins/custom/{usecase}/{arch}/{plugin_id}/{version}/{plugin}.so
+
+    The unversioned promotion key is overwritten by every rebuild, so a
+    Plugin_Record version whose artifact stayed there fails checksum
+    verification (Requirement 10.4) as soon as ANY later version builds —
+    breaking workflow packaging for every workflow pinned to the older
+    Custom_Node_Type version (observed: resize-image v2 build broke
+    packaging of workflows pinned to v1). Recording the artifact at a
+    version-scoped key keeps each version's bytes verifiable forever.
+    """
+    return (f"{PLUGIN_LIBRARY_CUSTOM_PREFIX}/{usecase_id}/{arch}/"
+            f"{plugin_id}/{int(version)}/{plugin_name}.so")
 
 
 def signature_key(so_key: str) -> str:
@@ -359,14 +382,15 @@ def sign_digest(digest: bytes) -> str:
 
 
 def store_signed_artifact(usecase_id: str, arch: str, plugin_name: str,
-                          data: bytes) -> Dict:
+                          data: bytes, plugin_id: str, version: int) -> Dict:
     """
-    Store artifact bytes to the Plugin_Library custom prefix with the
-    detached signature ({plugin}.so + {plugin}.so.sig) and return the
-    per-arch artifact entry fields (s3Key, checksum, signature).
-    Used by the prebuilt upload path (3.6).
+    Store artifact bytes to the Plugin_Library with the detached
+    signature ({plugin}.so + {plugin}.so.sig) at the immutable
+    per-version key and return the per-arch artifact entry fields
+    (s3Key, checksum, signature). Used by the prebuilt upload path (3.6).
     """
-    so_key = library_so_key(usecase_id, arch, plugin_name)
+    so_key = versioned_library_so_key(usecase_id, arch, plugin_id, version,
+                                      plugin_name)
     checksum = sha256_hex(data)
     signature = sign_digest(hashlib.sha256(data).digest())
     s3.put_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=so_key, Body=data)
@@ -443,14 +467,18 @@ def build_gst_introspection_stanza(so_key: str) -> Dict:
                 'message': f'Could not record introspection report: {e}'}
 
 
-def record_promoted_artifact(usecase_id: str, arch: str,
-                             plugin_name: str) -> Optional[Dict]:
+def record_promoted_artifact(usecase_id: str, arch: str, plugin_name: str,
+                             plugin_id: str, version: int) -> Optional[Dict]:
     """
     Checksum + sign the artifact a successful CodeBuild run promoted to
-    the Plugin_Library (3.3): stream the .so, record its SHA-256, sign
-    the digest with the portal key, and (re)write the authoritative
-    detached signature. Returns the artifact entry fields, or None when
-    the promoted object is missing.
+    the Plugin_Library (3.3): stream the .so from the build image's
+    unversioned promotion key, RE-HOME it to the immutable per-version
+    key (rebuilds of later versions overwrite the promotion key, which
+    must never invalidate this version's recorded artifact — Requirement
+    10.4), record its SHA-256, sign the digest with the portal key, and
+    write the authoritative detached signature beside the versioned
+    copy. Returns the artifact entry fields (s3Key = the versioned key),
+    or None when the promoted object is missing.
 
     For the x86_64 artifact the entry additionally carries the
     gstIntrospection stanza validated from the report the build uploaded
@@ -458,9 +486,9 @@ def record_promoted_artifact(usecase_id: str, arch: str,
     stanza recording is best-effort and never alters the build outcome
     (1.4). Non-x86_64 entries are unchanged.
     """
-    so_key = library_so_key(usecase_id, arch, plugin_name)
+    promoted_key = library_so_key(usecase_id, arch, plugin_name)
     try:
-        obj = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=so_key)
+        obj = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=promoted_key)
     except ClientError as e:
         if e.response.get('Error', {}).get('Code') in ('NoSuchKey', '404'):
             return None
@@ -468,11 +496,17 @@ def record_promoted_artifact(usecase_id: str, arch: str,
     data = obj['Body'].read()
     checksum = sha256_hex(data)
     signature = sign_digest(hashlib.sha256(data).digest())
+    so_key = versioned_library_so_key(usecase_id, arch, plugin_id, version,
+                                      plugin_name)
+    s3.put_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=so_key, Body=data)
     s3.put_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=signature_key(so_key),
                   Body=base64.b64decode(signature))
     fields = {'s3Key': so_key, 'checksum': checksum, 'signature': signature}
     if arch == INTROSPECTION_ARCH:
-        fields['gstIntrospection'] = build_gst_introspection_stanza(so_key)
+        # The introspection report is uploaded beside the PROMOTED key by
+        # the build image; record it from there.
+        fields['gstIntrospection'] = build_gst_introspection_stanza(
+            promoted_key)
     return fields
 
 
@@ -805,7 +839,8 @@ def start_builds(event: Dict, user: Dict, plugin_id: str, version: int) -> Dict:
         data, err = _load_prebuilt_bytes(item, arch, prebuilt[arch])
         if err:
             return err
-        entry = store_signed_artifact(usecase_id, arch, plugin_name, data)
+        entry = store_signed_artifact(usecase_id, arch, plugin_name, data,
+                                      plugin_id, version)
         entry.update({'buildStatus': BUILD_SUCCEEDED, 'logTail': '',
                       'prebuilt': True})
         entries[arch] = entry
@@ -965,7 +1000,8 @@ def handle_build_result(event: Dict) -> Dict:
         item.get('name'), plugin_id)
 
     if build_status == 'SUCCEEDED':
-        fields = record_promoted_artifact(usecase_id, arch, plugin_name)
+        fields = record_promoted_artifact(usecase_id, arch, plugin_name,
+                                          plugin_id, version)
         if fields is None:
             entry = {
                 'buildStatus': BUILD_FAILED,

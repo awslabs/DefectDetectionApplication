@@ -115,7 +115,9 @@ def test_sign_then_verify_round_trip_with_tamper_detection(
     node_type_id = "custom.sign-verify"
 
     # --- signing path (3.3 / 3.6): checksum, KMS-sign, store .so + .sig
-    entry = builds.store_signed_artifact(usecase_id, arch, plugin_name, data)
+    # at the immutable per-version Plugin_Library key (defect 8).
+    entry = builds.store_signed_artifact(usecase_id, arch, plugin_name, data,
+                                         plugin_id, 1)
     record = {
         "plugin_id": plugin_id,
         "version": 1,

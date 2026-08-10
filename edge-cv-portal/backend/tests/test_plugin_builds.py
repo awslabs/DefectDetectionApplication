@@ -152,7 +152,16 @@ class PluginBuildsEnv:
 
     # ------------------------------------------------------ conveniences
     def library_key(self, usecase_id, arch, plugin_name):
+        """The UNVERSIONED promotion key the build image writes to."""
         return f"workflow-plugins/custom/{usecase_id}/{arch}/{plugin_name}.so"
+
+    def versioned_library_key(self, usecase_id, arch, plugin_id, version,
+                              plugin_name):
+        """The IMMUTABLE per-version key the recorded artifact is homed to
+        (defect 8): later-version rebuilds overwrite the promotion key but
+        never this one, so each version stays verifiable forever."""
+        return (f"workflow-plugins/custom/{usecase_id}/{arch}/"
+                f"{plugin_id}/{int(version)}/{plugin_name}.so")
 
     def put_promoted_artifact(self, usecase_id, arch, plugin_name, data):
         key = self.library_key(usecase_id, arch, plugin_name)
@@ -288,8 +297,12 @@ class TestBuildResults:
         assert result["recorded"] is True
         item = benv.get_item(plugin["plugin_id"], plugin["version"])
         entry = item["artifacts"]["x86_64"]
-        so_key = benv.library_key(usecase_id, "x86_64", "blur-regions")
+        so_key = benv.versioned_library_key(
+            usecase_id, "x86_64", plugin["plugin_id"], plugin["version"],
+            "blur-regions")
         assert entry["buildStatus"] == "succeeded"
+        # The recorded artifact is homed to the immutable per-version key,
+        # not the overwritten unversioned promotion key (defect 8).
         assert entry["s3Key"] == so_key
         assert entry["checksum"] == hashlib.sha256(data).hexdigest()
         # The signature verifies against the artifact digest with the
@@ -306,6 +319,57 @@ class TestBuildResults:
         # The detached signature was stored alongside the artifact.
         sig = benv.s3.get_object(Bucket=benv.bucket, Key=so_key + ".sig")
         assert sig["Body"].read() == base64.b64decode(entry["signature"])
+
+    def test_later_version_rebuild_preserves_earlier_versions_artifact(
+            self, benv):
+        """Defect 8 invariant: building a LATER version of a plugin must
+        NOT invalidate an EARLIER version's recorded artifact.
+
+        Every build promotes to the same unversioned Plugin_Library key,
+        so before the fix a v2 build overwrote the bytes v1's record
+        still pointed at and v1 failed Requirement 10.4 checksum
+        verification at packaging. Re-homing each build's bytes to an
+        immutable per-version key means v1's recorded s3Key keeps v1's
+        bytes — and stays verifiable against v1's recorded checksum —
+        after any number of later-version rebuilds overwrite the shared
+        promotion key.
+        """
+        usecase_id = benv.create_usecase()
+        plugin_id = "plg-defect8"
+        plugin_name = "blur-regions"
+        arch = "arm64_jp6"
+        v1_bytes = b"\x7fELF version-one artifact bytes"
+        v2_bytes = b"\x7fELF version-two DIFFERENT artifact bytes"
+
+        # v1 builds: promotion key holds v1's bytes; record + re-home.
+        benv.put_promoted_artifact(usecase_id, arch, plugin_name, v1_bytes)
+        v1 = benv.module.record_promoted_artifact(
+            usecase_id, arch, plugin_name, plugin_id, 1)
+
+        # v2 builds LATER, overwriting the SAME unversioned promotion key.
+        benv.put_promoted_artifact(usecase_id, arch, plugin_name, v2_bytes)
+        v2 = benv.module.record_promoted_artifact(
+            usecase_id, arch, plugin_name, plugin_id, 2)
+
+        # Each version recorded a distinct, version-scoped key.
+        assert v1["s3Key"] != v2["s3Key"]
+        assert v1["s3Key"] == benv.versioned_library_key(
+            usecase_id, arch, plugin_id, 1, plugin_name)
+        assert v2["s3Key"] == benv.versioned_library_key(
+            usecase_id, arch, plugin_id, 2, plugin_name)
+
+        # v1's recorded bytes/checksum survive v2's rebuild (the pre-fix
+        # Req 10.4 packaging rejection of v1 can no longer occur).
+        v1_stored = benv.s3.get_object(
+            Bucket=benv.bucket, Key=v1["s3Key"])["Body"].read()
+        assert v1_stored == v1_bytes
+        assert v1["checksum"] == hashlib.sha256(v1_bytes).hexdigest()
+
+        # v2 is independently intact at its own key.
+        v2_stored = benv.s3.get_object(
+            Bucket=benv.bucket, Key=v2["s3Key"])["Body"].read()
+        assert v2_stored == v2_bytes
+        assert v2["checksum"] == hashlib.sha256(v2_bytes).hexdigest()
 
     def test_failure_records_log_tail_and_no_artifact(self, benv):
         usecase_id = benv.create_usecase()
@@ -480,7 +544,9 @@ class TestPrebuiltUpload:
         assert status == 202, body
         item = benv.get_item(plugin["plugin_id"], plugin["version"])
         entry = item["artifacts"]["arm64_jp5"]
-        so_key = benv.library_key(usecase_id, "arm64_jp5", "blur-regions")
+        so_key = benv.versioned_library_key(
+            usecase_id, "arm64_jp5", plugin["plugin_id"], plugin["version"],
+            "blur-regions")
         assert entry["buildStatus"] == "succeeded"
         assert entry["prebuilt"] is True
         assert entry["s3Key"] == so_key
