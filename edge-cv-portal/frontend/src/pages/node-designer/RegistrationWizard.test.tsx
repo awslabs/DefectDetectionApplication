@@ -106,8 +106,10 @@ const AVAILABLE: GstPropertiesResponse = {
   capturedAt: '2026-02-14T12:00:00Z',
   elements: [
     {
-      // Matches defaultElementFactory('My Blur').
-      factory: 'my_blur',
+      // The element a scaffold-built plugin named 'My Blur' registers:
+      // matches defaultElementFactory('My Blur') (element_name_for over
+      // typeId 'custom.my_blur').
+      factory: 'custommyblur',
       suggestions: [
         {
           name: 'radius',
@@ -135,7 +137,7 @@ const AVAILABLE: GstPropertiesResponse = {
 
 // Port-scan fixtures (task 8.5): one confident input suggestion and one
 // unconfirmed output suggestion derived for the wizard's preferred
-// factory (defaultElementFactory('My Blur') === 'my_blur').
+// factory (defaultElementFactory('My Blur') === 'custommyblur').
 
 const VIDEO_IN: PortSuggestion = {
   name: 'video_in',
@@ -165,7 +167,7 @@ const PORTS_AVAILABLE: GstPropertiesResponse = {
   capturedAt: '2026-02-14T12:00:00Z',
   elements: [
     {
-      factory: 'my_blur',
+      factory: 'custommyblur',
       suggestions: [],
       skipped: [],
       portSuggestions: [VIDEO_IN, META_OUT],
@@ -183,7 +185,7 @@ const PADS_NOT_CAPTURED: GstPropertiesResponse = {
   capturedAt: '2026-02-14T12:00:00Z',
   elements: [
     {
-      factory: 'my_blur',
+      factory: 'custommyblur',
       suggestions: [],
       skipped: [],
       padsReason: 'pads_not_captured',
@@ -211,7 +213,7 @@ const EXISTING: NodeTypeDetail = {
     mappings: [
       {
         arch: 'x86_64',
-        elementChain: [{ factory: 'my_blur', argsTemplate: {} }],
+        elementChain: [{ factory: 'custommyblur', argsTemplate: {} }],
         pluginDependencies: [],
       },
     ],

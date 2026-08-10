@@ -132,6 +132,27 @@ class TestRenderLaunchString:
         assert rendering.render_launch_string(make_document([])) == ""
 
 
+class TestDeclaredFactories:
+    def test_distinct_factories_with_first_node_attribution(self):
+        factories = rendering.declared_factories(
+            make_document(BRANCHING_SEGMENTS)
+        )
+        assert factories == {
+            "videotestsrc": "n1",
+            "tee": None,
+            "queue": None,
+            "emltriton": "n2",
+            "jpegenc": "n3",
+            # fakesink first appears synthetically (nodeId None) in s1;
+            # the workflow-originated occurrence in s2 upgrades the
+            # attribution so a missing factory names its node.
+            "fakesink": "n3",
+        }
+
+    def test_empty_document_yields_no_factories(self):
+        assert rendering.declared_factories(make_document([])) == {}
+
+
 class TestElementNameMap:
     def test_per_factory_counters_and_explicit_names(self):
         document = make_document(BRANCHING_SEGMENTS)

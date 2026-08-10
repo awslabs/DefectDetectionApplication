@@ -13,7 +13,7 @@
  * the first successful build" predicate (Requirement 4.6).
  */
 import { ApiError } from '../../services/api';
-import { buildDeclaration } from './declaration';
+import { buildDeclaration, typeIdFromName } from './declaration';
 import type { ParameterForm, PortForm } from './declaration';
 import type {
   MappingDeclaration,
@@ -83,13 +83,23 @@ export function shouldPromptRegistration(
 
 /**
  * Default element factory name for the mapping step, mirroring the
- * scaffold's element naming (lower-cased, non-alphanumerics collapsed).
+ * scaffold's element naming exactly (workflow_core.scaffold
+ * .element_name_for): the `custom.<slug>` type id derived from the
+ * name, lower-cased with every non-alphanumeric stripped — e.g.
+ * "Resize Image" -> typeId "custom.resize_image" -> element
+ * "customresizeimage". The built plugin registers precisely this
+ * factory, and the declared mapping factory must match it or the
+ * device pipeline fails with `no element "<factory>"`.
  */
 export function defaultElementFactory(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
+  const element = typeIdFromName(name).replace(/[^a-z0-9]/g, '');
+  if (!element) {
+    return '';
+  }
+  // element_name_for prefixes a leading non-letter so the name is a
+  // valid element factory name (unreachable for `custom.` type ids,
+  // kept for exact parity with the scaffold rule).
+  return /^[a-z]/.test(element) ? element : `x${element}`;
 }
 
 /** One editable mapping row per successfully built architecture. */

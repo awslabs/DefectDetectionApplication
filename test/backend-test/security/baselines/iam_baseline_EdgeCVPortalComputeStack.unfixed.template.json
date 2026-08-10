@@ -22680,6 +22680,88 @@
     "aws:cdk:path": "EdgeCVPortalComputeStack/CameraSyncHandler/SqsEventSource:EdgeCVPortalComputeStackCameraShadowReportQueueDB82D2A0/Resource"
    }
   },
+  "CameraShadowRuleRole6FFE3D5D": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "iot.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "Description": "Role for the portal-account dda-camera-registry shadow IoT topic rule to deliver shadow documents events to the DDA Portal shadow-report queue"
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/CameraShadowRuleRole/Resource"
+   }
+  },
+  "CameraShadowRuleRoleDefaultPolicyC0A975DB": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sqs:SendMessage",
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::GetAtt": [
+         "CameraShadowReportQueue78573A06",
+         "Arn"
+        ]
+       },
+       "Sid": "SendCameraShadowReports"
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "CameraShadowRuleRoleDefaultPolicyC0A975DB",
+    "Roles": [
+     {
+      "Ref": "CameraShadowRuleRole6FFE3D5D"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/CameraShadowRuleRole/DefaultPolicy/Resource"
+   }
+  },
+  "CameraRegistryShadowRule": {
+   "Type": "AWS::IoT::TopicRule",
+   "Properties": {
+    "RuleName": "dda_camera_registry_shadow_documents_portal",
+    "TopicRulePayload": {
+     "Actions": [
+      {
+       "Sqs": {
+        "QueueUrl": {
+         "Ref": "CameraShadowReportQueue78573A06"
+        },
+        "RoleArn": {
+         "Fn::GetAtt": [
+          "CameraShadowRuleRole6FFE3D5D",
+          "Arn"
+         ]
+        },
+        "UseBase64": false
+       }
+      }
+     ],
+     "AwsIotSqlVersion": "2016-03-23",
+     "Description": "Forward dda-camera-registry shadow documents events to the DDA Portal camera shadow-report queue (single-account topology)",
+     "RuleDisabled": false,
+     "Sql": "SELECT *, topic(3) AS thing_name FROM '$aws/things/+/shadow/name/dda-camera-registry/update/documents'"
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/CameraRegistryShadowRule"
+   }
+  },
   "CameraRegistryRole44B4564D": {
    "Type": "AWS::IAM::Role",
    "Properties": {

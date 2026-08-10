@@ -180,15 +180,37 @@ class NodeStatusCollector:
         except Exception:  # noqa: BLE001 - collector is best-effort (R8.5)
             logger.debug("NodeStatusCollector.set_detail ignored an error", exc_info=True)
 
-    def finalize(self) -> None:
+    def finalize(self, failure_detail: Optional[str] = None) -> None:
         """Resolve any remaining non-terminal node to a terminal state.
 
-        Any node still ``pending``/``running`` becomes ``success`` (best
-        effort, R3.6) so the terminal map is fully resolved and never holds a
-        ``pending``/``running`` entry (Property 1)."""
+        On the success path (``failure_detail`` is None), and on the failure
+        path when the failing node was identified (some node already holds
+        ``failure``), any node still ``pending``/``running`` becomes
+        ``success`` (best effort, R3.6) so the terminal map is fully resolved
+        and never holds a ``pending``/``running`` entry (Property 1).
+
+        When the run FAILED but no failing node could be identified
+        (``failure_detail`` given and no node holds ``failure`` — e.g. a
+        pre-parse ``gst_parse_error`` names an element the map does not
+        know), remaining non-terminal nodes resolve to ``warning`` carrying
+        the run's error detail instead of ``success``: an all-green terminal
+        map would contradict the failed run outcome (R3.6/R6.6 "coloring
+        consistent with the run outcome"), while ``warning`` keeps Property 2
+        intact (no node is spuriously marked ``failure``)."""
+        unattributed_failure = failure_detail is not None and not any(
+            status == STATUS_FAILURE for status in self._statuses.values()
+        )
         for node_id, status in self._statuses.items():
             if status in _NON_TERMINAL_STATES:
-                self._statuses[node_id] = STATUS_SUCCESS
+                if unattributed_failure:
+                    self._statuses[node_id] = STATUS_WARNING
+                    self._details.setdefault(
+                        node_id,
+                        "The run failed before this node reported a "
+                        "result: {0}".format(failure_detail),
+                    )
+                else:
+                    self._statuses[node_id] = STATUS_SUCCESS
 
     # -- serialization ------------------------------------------------------
 

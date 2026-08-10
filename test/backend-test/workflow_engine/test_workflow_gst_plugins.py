@@ -23,6 +23,7 @@ invalid with the file identified.
 import hashlib
 import json
 import os
+import sys
 from unittest.mock import patch
 
 from workflow_engine_test_utils import (
@@ -338,3 +339,26 @@ class TestDiscoveryChecksumValidation:
         write_artifact_set(root)  # VALID_MANIFEST has no pluginChecksums
         outcome = self._validate(root, tmp_path / "device-plugins")
         assert outcome.status == STATUS_REGISTERED
+
+
+class TestFactoryPreflightContainment:
+    """The pipeline-factory preflight helpers are contained: without a
+    usable GStreamer they disable the guard by reporting nothing, never
+    raising (Requirement 13.7). ``gi`` is forced unavailable so the
+    behavior is deterministic on machines that do have GStreamer."""
+
+    def test_missing_factories_without_gstreamer_reports_nothing(self):
+        with patch.dict(sys.modules, {"gi": None}):
+            assert gst_plugins.missing_factories(
+                ["resize_image", "fakesink"]
+            ) == []
+
+    def test_provided_elements_without_directories_is_empty(self, tmp_path):
+        assert gst_plugins.provided_elements(str(tmp_path / "absent")) == []
+
+    def test_provided_elements_without_gstreamer_is_empty(self, tmp_path):
+        plugin_dir = tmp_path / "plugins"
+        plugin_dir.mkdir()
+        (plugin_dir / "libgstcustom.so").write_bytes(b"\x7fELF")
+        with patch.dict(sys.modules, {"gi": None}):
+            assert gst_plugins.provided_elements(str(plugin_dir)) == []

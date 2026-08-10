@@ -127,6 +127,26 @@ def node_id_for_element(
     return name_map.get(element_name)
 
 
+def declared_factories(document: Dict) -> Dict[str, Optional[str]]:
+    """Element factory name -> originating nodeId for every distinct
+    factory the document renders, in render order.
+
+    The first workflow-originated (non-None) nodeId seen for a factory
+    wins, so an unregistered factory can be attributed to its node in
+    the pipeline preflight (a synthetic tee/queue occurrence never
+    shadows a node's attribution).
+    """
+    factories: Dict[str, Optional[str]] = {}
+    for segment in document.get("segments", []):
+        for element in segment.get("elements", []):
+            factory = element["factory"]
+            # Insert, or upgrade a synthetic (None) attribution to the
+            # first workflow-originated nodeId.
+            if factories.get(factory) is None:
+                factories[factory] = element.get("nodeId")
+    return factories
+
+
 def resolve_placeholder(document: Dict, placeholder: str, value: str) -> int:
     """Resolve ``{placeholder}`` occurrences left in element argument
     values (the same lenient-placeholder rule the test-sandbox harness

@@ -105,6 +105,7 @@ from workflow_engine.discovery import (
     MANIFEST_FILE,
     STATUS_REGISTERED,
 )
+from workflow_engine import gst_plugins
 from workflow_engine.gst_plugins import workflow_plugin_path
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
 from workflow_engine.node_status import NodeStatusCollector
@@ -305,6 +306,24 @@ class FrameSourceError(Exception):
         #: ``_move_bad_folder_image_source``) instead of letting it wedge
         #: every subsequent run (folder-source-image-consumption Req 2.4).
         self.source_image: Optional[str] = None
+
+
+class MissingPipelineElementError(Exception):
+    """A compiled element factory is not registered with GStreamer, so
+    ``Gst.parse_launch`` would fail with ``no element "<factory>"``.
+
+    Raised by the pipeline-factory preflight after the run's workflow
+    plugin scan, instead of letting the pre-parse syntax error surface
+    unattributed: it carries the originating node id so the failing node
+    is identified on the execution row and in the run-status graph
+    (Requirement 9.7 discipline), and its message names the elements the
+    run's plugin directories actually register — for a custom node, the
+    declared ``elementChain`` factory must exactly match the element
+    name its built plugin registers."""
+
+    def __init__(self, message: str, node_id: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.node_id = node_id
 
 
 @dataclass(frozen=True)
@@ -1443,6 +1462,19 @@ class WorkflowExecutor:
                     manifest=manifest,
                     artifact_path=registration.artifact_path,
                 ):
+                    # Preflight: every declared element factory must be
+                    # registered now that the workflow plugin scan ran;
+                    # a missing one (e.g. a custom node whose declared
+                    # factory does not match the element its built
+                    # plugin registers) raises with the node identified
+                    # instead of an unattributable pre-parse
+                    # gst_parse_error.
+                    self._preflight_pipeline_factories(
+                        document,
+                        plugin_dir,
+                        manifest,
+                        registration.artifact_path,
+                    )
                     if bridge_specs:
                         # A produced Frame_Feed and pumped emlpython
                         # bridges run in the same pipeline
@@ -1778,6 +1810,60 @@ class WorkflowExecutor:
         (R8.1)."""
         return collector.sink if collector is not None else None
 
+    def _preflight_pipeline_factories(
+        self,
+        document: Dict,
+        plugin_dir: str,
+        manifest: Optional[Dict],
+        artifact_path: str,
+    ) -> None:
+        """Verify every declared element factory is registered before the
+        pipeline parse, raising :class:`MissingPipelineElementError` with
+        the originating node identified when one is not.
+
+        Runs inside :func:`workflow_plugin_path` so custom plugin elements
+        are already scanned into the registry. The check itself is
+        contained (Requirement 13.7): any error computing it skips the
+        guard and leaves the pipeline parse as the authority. Only the
+        deliberate raise escapes."""
+        try:
+            factories = rendering.declared_factories(document)
+            missing = gst_plugins.missing_factories(list(factories))
+        except Exception:  # noqa: BLE001 - guard must never fail a run itself
+            logger.debug(
+                "Pipeline factory preflight skipped", exc_info=True
+            )
+            return
+        if not missing:
+            return
+        provided = gst_plugins.provided_elements(
+            plugin_dir, manifest=manifest, artifact_path=artifact_path
+        )
+        described = ", ".join(
+            '"{0}" (node {1})'.format(
+                factory, factories.get(factory) or "unidentified"
+            )
+            for factory in missing
+        )
+        provided_note = (
+            "the run's workflow plugin directories register: {0}".format(
+                ", ".join(provided)
+            )
+            if provided
+            else "the run's workflow plugin directories register no elements"
+        )
+        node_id = next(
+            (factories.get(f) for f in missing if factories.get(f)), None
+        )
+        raise MissingPipelineElementError(
+            "Pipeline element(s) not registered with GStreamer: {0}; {1}. "
+            "A custom node's declared elementChain factory must exactly "
+            "match the element name its built plugin registers.".format(
+                described, provided_note
+            ),
+            node_id=node_id,
+        )
+
     def _persist_node_status(
         self,
         session,
@@ -1793,8 +1879,12 @@ class WorkflowExecutor:
         the mapped node ``failure`` (R3.2); on the clean path pass
         ``success=True`` to mark participating nodes ``success`` (R3.3).
         :meth:`NodeStatusCollector.finalize` then guarantees a fully-terminal
-        map (R3.6). Entirely best-effort: any error is logged and swallowed so
-        status persistence never fails a run (R8.5)."""
+        map (R3.6) — handed the ``failure_detail`` on the failure path so an
+        unattributable failure (e.g. a pre-parse ``gst_parse_error``) resolves
+        the remaining nodes to ``warning`` with the run error instead of an
+        all-``success`` map that would contradict the failed run outcome.
+        Entirely best-effort: any error is logged and swallowed so status
+        persistence never fails a run (R8.5)."""
         if collector is None:
             return
         try:
@@ -1802,7 +1892,9 @@ class WorkflowExecutor:
                 collector.mark_failure(failing_node_id, failure_detail)
             if success:
                 collector.mark_success_all()
-            collector.finalize()
+            collector.finalize(
+                failure_detail=None if success else failure_detail
+            )
             execution.node_status_json = collector.to_json()
             session.commit()
         except Exception:  # noqa: BLE001 - contained per 13.7 / R8.5

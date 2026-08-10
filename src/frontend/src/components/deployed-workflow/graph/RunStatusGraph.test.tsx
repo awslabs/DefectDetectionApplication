@@ -195,6 +195,45 @@ describe("RunStatusGraph", () => {
     });
   });
 
+  it("shows a red run-failed header with the run error for a failed run (R7.6)", async () => {
+    // A pre-parse pipeline failure attributes no failing node, so the
+    // header and the run error are the only failure surface — the screen
+    // must never read "Run finished" (green) for a failed run.
+    mockAPIs({
+      exec: execution({
+        status: "failed",
+        error: 'gst_parse_error: no element "resize_image" (1)',
+      }),
+      statusMap: {
+        camera: { status: "warning" },
+        detect: { status: "warning" },
+        capture: { status: "warning" },
+      },
+    });
+
+    renderGraph();
+
+    // Both the header indicator and the run-error alert carry "Run failed".
+    expect((await screen.findAllByText("Run failed")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Run finished")).toBeNull();
+    expect(screen.getByTestId("run-error").textContent).toContain(
+      'no element "resize_image"',
+    );
+  });
+
+  it("keeps the green run-finished header for a completed run", async () => {
+    mockAPIs({
+      exec: execution({ status: "completed" }),
+      statusMap: { camera: { status: "success" } },
+    });
+
+    renderGraph();
+
+    expect(await screen.findByText("Run finished")).toBeInTheDocument();
+    expect(screen.queryByText("Run failed")).toBeNull();
+    expect(screen.queryByTestId("run-error")).toBeNull();
+  });
+
   it("surfaces the warning detail when a warning node is selected (R7.4)", async () => {
     mockAPIs({
       exec: execution({ status: "completed" }),

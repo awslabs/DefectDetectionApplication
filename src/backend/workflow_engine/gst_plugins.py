@@ -351,3 +351,81 @@ def workflow_plugin_path(
             os.environ.pop(GST_PLUGIN_PATH_ENV, None)
         else:
             os.environ[GST_PLUGIN_PATH_ENV] = previous
+
+
+# ---------------------------------------------------------------------------
+# Pipeline factory preflight (custom-node element name hardening)
+# ---------------------------------------------------------------------------
+
+
+def missing_factories(factories: List[str]) -> List[str]:
+    """The names in ``factories`` with no registered GStreamer element
+    factory — i.e. names ``Gst.parse_launch`` would reject with
+    ``no element "<name>"``.
+
+    Called after the run's :func:`workflow_plugin_path` scan so custom
+    plugin elements are already in the registry. Contained like
+    :func:`_scan_registry`: any error (including GStreamer being
+    unavailable, e.g. in tests) disables the guard by reporting nothing
+    missing — the pipeline parse remains the authority (Requirement 13.7).
+    """
+    try:
+        import gi
+
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+
+        Gst.init(None)
+        return [
+            name for name in factories
+            if Gst.ElementFactory.find(name) is None
+        ]
+    except Exception:  # noqa: BLE001 - preflight must never fail a run itself
+        logger.debug(
+            "Pipeline factory preflight unavailable; skipping", exc_info=True
+        )
+        return []
+
+
+def provided_elements(
+    plugin_dir: str,
+    manifest: Optional[dict] = None,
+    artifact_path: Optional[str] = None,
+    plugins_root: str = DEVICE_PLUGINS_ROOT,
+) -> List[str]:
+    """The element factory names registered by plugins living in this
+    run's verified workflow plugin directories (the same directories
+    :func:`workflow_plugin_path` scans).
+
+    Diagnostic companion to :func:`missing_factories`: when a declared
+    custom-node factory is missing, these are the names the delivered
+    plugin actually registers. Contained: any error yields ``[]``.
+    """
+    dirs = _verified_scan_dirs(plugin_dir, manifest, artifact_path, plugins_root)
+    if not dirs:
+        return []
+    try:
+        import gi
+
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+
+        Gst.init(None)
+        roots = tuple(os.path.abspath(d) for d in dirs)
+        registry = Gst.Registry.get()
+        names = set()
+        for plugin in registry.get_plugin_list():
+            filename = plugin.get_filename() or ""
+            if os.path.dirname(os.path.abspath(filename)) not in roots:
+                continue
+            for feature in registry.get_feature_list_by_plugin(
+                plugin.get_name()
+            ):
+                names.add(feature.get_name())
+        return sorted(names)
+    except Exception:  # noqa: BLE001 - diagnostics must never fail a run
+        logger.debug(
+            "Could not list workflow plugin elements for %s", dirs,
+            exc_info=True,
+        )
+        return []

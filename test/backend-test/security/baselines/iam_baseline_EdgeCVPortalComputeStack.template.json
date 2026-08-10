@@ -9,13 +9,13 @@
     ],
     "Content": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "b06ad3eab63b956b73e4575c71b3249a82594855fbfc49b9d781ffe39277887d.zip"
+     "S3Key": "124a4309fef16d621850e55167a9f46c3bf69c14660bca509f75e9c0456630e9.zip"
     },
     "Description": "Shared utilities for Edge CV Portal Lambda functions - v2024-12-12-fixed-syntax"
    },
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/SharedLayer/Resource",
-    "aws:asset:path": "asset.b06ad3eab63b956b73e4575c71b3249a82594855fbfc49b9d781ffe39277887d",
+    "aws:asset:path": "asset.124a4309fef16d621850e55167a9f46c3bf69c14660bca509f75e9c0456630e9",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Content"
    }
@@ -47,13 +47,13 @@
     ],
     "Content": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "b7055d4afd3a6283d9d3ec07c7dab5f6c9cd6c0bd17338a9ecf390b88b7b5a55.zip"
+     "S3Key": "2c74a5a3f2297226bffb712f22197fd9c4fcca2a57812ff5cffb3ad336c8585c.zip"
     },
     "Description": "workflow_core shared package (catalog, serializer, validator, compiler) for Workflow Manager"
    },
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowCoreLayer/Resource",
-    "aws:asset:path": "asset.b7055d4afd3a6283d9d3ec07c7dab5f6c9cd6c0bd17338a9ecf390b88b7b5a55",
+    "aws:asset:path": "asset.2c74a5a3f2297226bffb712f22197fd9c4fcca2a57812ff5cffb3ad336c8585c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Content"
    }
@@ -87,7 +87,7 @@
      "cdk-hnb659fds-assets-111111111111-us-east-1"
     ],
     "SourceObjectKeys": [
-     "e1332585e87642c42622e593f7bb527282fb3b17b058299a6abdb9b8c5c88f58.zip"
+     "00ec2bad745a10fff861c3d748297daeba9f567d2c70a276bcef904dae877b6d.zip"
     ],
     "DestinationBucketName": {
      "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefPortalArtifactsBucket31E9D39212014EED"
@@ -1148,7 +1148,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -1247,7 +1247,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceRegistrationsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -1466,7 +1466,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -1541,7 +1541,7 @@
        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefDeviceRegistrationsTableA5AE63AF9541290C"
       },
       "QUICK_SETUP_BUNDLE_KEY": "quick-setup/current/setup-bundle.tar.gz",
-      "QUICK_SETUP_BUNDLE_SHA256": "59063ddbfbda5198bed1229150e539dc0efc7262036b82d8bf81eb9508a63fe1",
+      "QUICK_SETUP_BUNDLE_SHA256": "a6211a321d651106c1451753c462a4f5d6ac79e91ace34cc49c53012f31f68aa",
       "QUICK_SETUP_BOOTSTRAP_KEY": "quick-setup/current/bootstrap.sh",
       "QUICK_SETUP_BOOTSTRAP_SHA256": "1cb1c136bcadfe112074f11d0d4bf83610aaf3093f65146b616835aaf55e5804",
       "QUICK_SETUP_PROVISIONING_ROLE_ARN": {
@@ -1581,7 +1581,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/QuickSetupHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -2693,7 +2693,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -2789,7 +2789,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/UseCasesHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -3683,7 +3683,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -3779,7 +3779,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DevicesHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -4661,7 +4661,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -4757,7 +4757,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceLogsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -5639,7 +5639,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -5735,7 +5735,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceLogsAnalyzerHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -6720,7 +6720,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -6819,7 +6819,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeploymentsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -7759,7 +7759,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -7854,7 +7854,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/AuthHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -8736,7 +8736,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -8832,7 +8832,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/UserManagementHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -9714,7 +9714,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -9750,7 +9750,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/JwtAuthorizerHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -10632,7 +10632,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -10727,7 +10727,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DatasetsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -11609,7 +11609,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -11704,7 +11704,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CapturesHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -12586,7 +12586,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -12681,7 +12681,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/PreLabeledDatasetsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -13563,7 +13563,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -13659,7 +13659,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/LabelingHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -14541,7 +14541,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -14636,7 +14636,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/LabelingMonitorHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -15518,7 +15518,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -15614,7 +15614,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/TrainingHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -16496,7 +16496,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -16595,7 +16595,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CompilationHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -17503,7 +17503,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -17609,7 +17609,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/PackagingHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -18491,7 +18491,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -18586,7 +18586,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/GreengrassPublishHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -19543,7 +19543,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -19640,7 +19640,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ComponentsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -20522,7 +20522,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -20617,7 +20617,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DataManagementHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -21601,7 +21601,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -21698,7 +21698,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/SharedComponentsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -22588,7 +22588,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -22686,7 +22686,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DataAccountsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -23594,7 +23594,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -23697,7 +23697,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ModelImportHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -24605,7 +24605,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -24708,7 +24708,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ModelConverterHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -25590,7 +25590,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -25686,7 +25686,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ModelsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -26597,7 +26597,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -26693,7 +26693,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/AuditLogsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -27736,7 +27736,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -27835,7 +27835,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CameraSyncHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -27859,6 +27859,88 @@
    },
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CameraSyncHandler/SqsEventSource:EdgeCVPortalComputeStackCameraShadowReportQueueDB82D2A0/Resource"
+   }
+  },
+  "CameraShadowRuleRole6FFE3D5D": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "iot.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "Description": "Role for the portal-account dda-camera-registry shadow IoT topic rule to deliver shadow documents events to the DDA Portal shadow-report queue"
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/CameraShadowRuleRole/Resource"
+   }
+  },
+  "CameraShadowRuleRoleDefaultPolicyC0A975DB": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sqs:SendMessage",
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::GetAtt": [
+         "CameraShadowReportQueue78573A06",
+         "Arn"
+        ]
+       },
+       "Sid": "SendCameraShadowReports"
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "CameraShadowRuleRoleDefaultPolicyC0A975DB",
+    "Roles": [
+     {
+      "Ref": "CameraShadowRuleRole6FFE3D5D"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/CameraShadowRuleRole/DefaultPolicy/Resource"
+   }
+  },
+  "CameraRegistryShadowRule": {
+   "Type": "AWS::IoT::TopicRule",
+   "Properties": {
+    "RuleName": "dda_camera_registry_shadow_documents_portal",
+    "TopicRulePayload": {
+     "Actions": [
+      {
+       "Sqs": {
+        "QueueUrl": {
+         "Ref": "CameraShadowReportQueue78573A06"
+        },
+        "RoleArn": {
+         "Fn::GetAtt": [
+          "CameraShadowRuleRole6FFE3D5D",
+          "Arn"
+         ]
+        },
+        "UseBase64": false
+       }
+      }
+     ],
+     "AwsIotSqlVersion": "2016-03-23",
+     "Description": "Forward dda-camera-registry shadow documents events to the DDA Portal camera shadow-report queue (single-account topology)",
+     "RuleDisabled": false,
+     "Sql": "SELECT *, topic(3) AS thing_name FROM '$aws/things/+/shadow/name/dda-camera-registry/update/documents'"
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/CameraRegistryShadowRule"
    }
   },
   "CameraRegistryRole44B4564D": {
@@ -28738,7 +28820,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -28834,7 +28916,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CameraRegistryHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -30056,7 +30138,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -30159,7 +30241,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/AccountSyncHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -31235,7 +31317,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -31344,7 +31426,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/UserAdminHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -32301,7 +32383,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -32402,7 +32484,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -33359,7 +33441,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -33460,7 +33542,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowValidationHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -34465,7 +34547,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -34587,7 +34669,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowPackagingHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -35586,7 +35668,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -35678,7 +35760,7 @@
      ]
     },
     "Runtime": "python3.11",
-    "Timeout": 90
+    "Timeout": 270
    },
    "DependsOn": [
     "WorkflowGeneratorRoleDefaultPolicyC965FB38",
@@ -35688,7 +35770,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowGeneratorHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -36646,7 +36728,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -36750,7 +36832,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowTestingHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -37675,7 +37757,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -37776,7 +37858,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/TrainingEventsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -38737,7 +38819,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608.zip"
+     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
     },
     "Environment": {
      "Variables": {
@@ -38842,7 +38924,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CompilationEventsHandler/Resource",
-    "aws:asset:path": "asset.71b42b9c9196226889b366831e5555813faf39ac66ea5dc2782856427a11d608",
+    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -39096,7 +39178,7 @@
       "Arn"
      ]
     },
-    "Timestamp": "1785807383918"
+    "Timestamp": "1786307973924"
    },
    "UpdateReplacePolicy": "Delete",
    "DeletionPolicy": "Delete",
@@ -39294,7 +39376,7 @@
        {
         "Ref": "AWS::URLSuffix"
        },
-       "/cdk-hnb659fds-assets-111111111111-us-east-1/74acfe5115cdfa82e78055d24ee7f930c0a5ee338498f1e7ed869cee3ccfb6b0.json"
+       "/cdk-hnb659fds-assets-111111111111-us-east-1/efd7561a9bf58304be7624d0ba363c22ec7817d10e1d1a18583d7ff868bfcfca.json"
       ]
      ]
     }
@@ -40442,7 +40524,7 @@
       "Outputs.EdgeCVPortalComputeStackApiGatewayEdgeCVPortalAPI899B3E89Ref"
      ]
     },
-    "Timestamp": "1785807384035"
+    "Timestamp": "1786307974043"
    },
    "DependsOn": [
     "ApiGatewayNestedStackApiGatewayNestedStackResource85A55C6F",
@@ -40457,7 +40539,7 @@
   "CDKMetadata": {
    "Type": "AWS::CDK::Metadata",
    "Properties": {
-    "Analytics": "v2:deflate64:H4sIAAAAAAAA/2WRTU/DMAyGf8vuWYBy4rgVODExWsS1cluvypaPUierqij/HSXdp5Ci+PUj23HsjGfZC39awEjLpj0spai5Ly00BwYjVV6Cqlvg/gMmHH5wIGE0y3f6zi+F7iRao9+dbmwkF5Hv9K3e4qAEpaS3I2pbGjc0uIG+F7qLAf9pYPRceSBCS3wVDWuxl2ZSqC1fu+aA9vUCYvQJroGQCVDcF0ZiLJ7s1kjRTKmZWW1AQ4ftld+BwDC2RNwX7lTFSQyMfon7L4cusVmk+1rnxg2snTQo09bcf0M9F0oiMGEsj57pRZPeIE3cJ5edeQgsfb200MVJzWupZNxCBSM1UvDVSLkUaTEsd2SNKpDSJFPXZ30LtzCAQhsTdvrT2d7ZqNL+A9OmRb6nh2P2yONZ7EmI5eC0FQp5Mds//KBLlkECAAA="
+    "Analytics": "v2:deflate64:H4sIAAAAAAAA/2WRTU/DMAyGfwv3LEA5cdwKnJgY7cR1clO3ypaPUierqqj/HSXdp5Ci+PUj+5UTZzzLXvnzAwy0EPVhoWTFQ+lAHBgMtAsKdFUDD58wYv+DPUlrWN6Yu7yUplXorPnwRrhILiJvzK3eYK8lpab3IxpXWt8LXEPXSdPGgv90YvSyC0CEjvgyBlZjp+yo0Ti+8uKA7u0CYvUJroCQSdA8FFZhNE9xY5UUYxpmVmsw0GJ95XdgYhhHIh4Kf3LxCidGv8TDt0ef2CzSffW5SScmreN5Y7a2kyI51aMBbeuKhy1Us3MSEyNDPKRCdu6YJpaeXjpo40/Na9mpuIUdDCSU5MuBciXTYljuyVldIKWfTFOf9S3cQA8aXWxozJd3nXdRpf1PzNga+Z4ej9kTj+dhT1Iuem+c1MiLOf4B8Dr5lEECAAA="
    },
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CDKMetadata/Default"
