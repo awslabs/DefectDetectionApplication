@@ -590,6 +590,51 @@ def _default_frame_grabber(camera_id, config):
     return camera_manager.get_camera_frame(camera_id, config)
 
 
+def _default_camera_config_resolver(session, camera_id):
+    """The device's own Image_Source configuration for ``camera_id``, or
+    ``None`` when the camera has no locally configured Image_Source.
+
+    A workflow run must respect the Aravis camera settings the operator
+    configured on the device (gain, exposure, advanced GenICam controls)
+    — the same ``imageSourceConfiguration`` every classic preview /
+    capture / digital-input grab applies — instead of only the workflow's
+    compiled-in defaults. Imported lazily (dao/utils) and fully
+    contained: any lookup failure returns None and the caller falls back
+    to the planned feed config."""
+    try:
+        from dao.sqlite_db import image_source_dao
+        from utils import utils as _server_utils
+
+        source_ids = sorted(
+            image_source_dao.list_image_source_ids_by_camera(
+                session, camera_id
+            )
+            or []
+        )
+        if not source_ids:
+            return None
+        image_source = image_source_dao.get_image_source(
+            session, source_ids[0]
+        )
+        configuration = getattr(
+            image_source, "imageSourceConfiguration", None
+        )
+        if configuration is None:
+            return None
+        config = _server_utils.convert_sqlalchemy_object_to_dict(
+            configuration
+        )
+        return config if isinstance(config, dict) and config else None
+    except Exception:  # noqa: BLE001 - lookup is best-effort
+        logger.debug(
+            "Local Image_Source configuration lookup failed for camera "
+            "'%s'; the workflow's planned feed config applies",
+            camera_id,
+            exc_info=True,
+        )
+        return None
+
+
 class WorkflowExecutor:
     """Executes pending workflow runs dispatched by the executor hook."""
 
@@ -603,6 +648,7 @@ class WorkflowExecutor:
         llm_processor: Optional[LlmInferenceProcessor] = None,
         binding_resolution_provider: Optional[Callable] = None,
         frame_grabber: Optional[Callable] = None,
+        camera_config_resolver: Optional[Callable] = None,
     ) -> None:
         if session_factory is None:
             # Imported lazily so the module is importable without the
@@ -646,6 +692,13 @@ class WorkflowExecutor:
         # {'data','height','width'}. Injectable for tests without the
         # gi/Aravis runtime (Requirements 6.4, 6.5).
         self._frame_grabber = frame_grabber or _default_frame_grabber
+        # (session, camera_id) -> the device's Image_Source configuration
+        # for the camera (or None). Injectable for tests; the default
+        # reads the local DB so a workflow grab always respects the
+        # operator's configured camera settings.
+        self._camera_config_resolver = (
+            camera_config_resolver or _default_camera_config_resolver
+        )
 
     def set_post_run_handler(self, handler: Optional[PostRunHandler]) -> None:
         """Register the post-pipeline output-binding processor (task 12.4)."""
@@ -1205,7 +1258,7 @@ class WorkflowExecutor:
             # take the exact pre-feature path.
             try:
                 frame_data = self._prepare_aravis_frame_feed(
-                    document, resolution
+                    session, document, resolution
                 )
             except AravisFeedError as e:
                 logger.error(
@@ -1828,7 +1881,27 @@ class WorkflowExecutor:
         deliberate raise escapes."""
         try:
             factories = rendering.declared_factories(document)
-            missing = gst_plugins.missing_factories(list(factories))
+            # Pre-scan the LocalServer-bundled plugin path (eml* elements):
+            # gst_pipeline only adds it to the registry when the pipeline
+            # manager initializes, which is AFTER this preflight on a fresh
+            # process — without it the bundled elements false-positive as
+            # missing. GST_PLUGIN_PATH-style ':'-joined; contained.
+            bundled_dirs: List[str] = []
+            try:
+                from utils import utils as _server_utils
+
+                bundled_dirs = [
+                    d for d in
+                    _server_utils.get_gst_plugins_path().split(":") if d
+                ]
+            except Exception:  # noqa: BLE001 - path resolution is best-effort
+                logger.debug(
+                    "Bundled plugin path unavailable for preflight",
+                    exc_info=True,
+                )
+            missing = gst_plugins.missing_factories(
+                list(factories), scan_dirs=bundled_dirs
+            )
         except Exception:  # noqa: BLE001 - guard must never fail a run itself
             logger.debug(
                 "Pipeline factory preflight skipped", exc_info=True
@@ -2183,9 +2256,17 @@ class WorkflowExecutor:
             )
             return None
 
-    def _prepare_aravis_frame_feed(self, document: dict, resolution):
+    def _prepare_aravis_frame_feed(self, session, document: dict, resolution):
         """Plan the document's Aravis feed, grab its frame, and point the
         compiled appsrc at the Frame_Feed.
+
+        The grab config is the device's own Image_Source configuration
+        for the camera when one is locally configured — a workflow run
+        always respects the operator's Aravis camera settings (gain,
+        exposure, advanced GenICam controls), exactly like every classic
+        preview/capture grab — falling back to the feed's planned
+        (binding/rendered) parameters for cameras without a local
+        Image_Source.
 
         Returns the grabbed ``{'data','height','width'}`` frame, or None
         when the document has no Aravis binding points (the pre-feature
@@ -2196,8 +2277,18 @@ class WorkflowExecutor:
         if not feeds:
             return None
         feed = feeds[0]
+        grab_config = self._camera_config_resolver(session, feed.camera_id)
+        if grab_config:
+            logger.info(
+                "Aravis feed for node %s uses the device Image_Source "
+                "configuration for camera '%s'",
+                feed.node_id,
+                feed.camera_id,
+            )
+        else:
+            grab_config = feed.config
         try:
-            frame_data = self._frame_grabber(feed.camera_id, feed.config)
+            frame_data = self._frame_grabber(feed.camera_id, grab_config)
         except Exception as e:  # noqa: BLE001 - attributed to the node
             raise AravisFeedError(
                 feed.node_id,
@@ -2301,15 +2392,29 @@ class WorkflowExecutor:
         type — both carry the ``node_id`` the executor reads for failure
         attribution.
         """
+        caps = WorkflowExecutor._frame_caps(frame_data)
         for segment in document.get("segments", []):
-            for element in segment.get("elements", []):
+            elements = segment.get("elements", [])
+            for index, element in enumerate(elements):
                 if (
                     element.get("nodeId") == feed.node_id
                     and element.get("factory") == "appsrc"
                 ):
                     args = element.setdefault("args", {})
                     args["name"] = "appsrc"
-                    args["caps"] = WorkflowExecutor._frame_caps(frame_data)
+                    args["caps"] = caps
+                    if caps.startswith("video/x-bayer"):
+                        # A Bayer-mosaic camera frame must be demosaiced
+                        # before the compiled chain's videoconvert (which
+                        # cannot consume video/x-bayer). Mirrors the classic
+                        # Image_Source conversion (`... video/x-bayer ! `
+                        # `bayer2rgb ! ...`), attributed to the source node
+                        # so a bayer2rgb failure names it.
+                        elements.insert(index + 1, {
+                            "nodeId": element.get("nodeId"),
+                            "factory": "bayer2rgb",
+                            "args": {},
+                        })
                     return
         raise error_cls(
             feed.node_id,
@@ -2323,14 +2428,24 @@ class WorkflowExecutor:
 
         A frame declaring an explicit ``format`` (every Custom Python
         Produced_Frame — custom-python-source Requirement 7.2) names
-        exactly that Pixel_Format. Otherwise the format is derived from
-        the payload size per pixel (Aravis mono cameras produce GRAY8,
-        color pipelines RGB/RGBA), defaulting to GRAY8 — Aravis grabs
-        never set ``format``, so that path is bit-identical to the
-        pre-feature behavior (Requirement 11.1)."""
+        exactly that Pixel_Format. A frame tagged ``pixel_format`` by the
+        camera grab (camera_manager.gst_pixel_format) names the camera's
+        ACTUAL format: ``bayer:<pattern>`` becomes ``video/x-bayer`` caps
+        (the caller inserts the bayer2rgb demosaic), a raw name becomes
+        ``video/x-raw`` — a Bayer mosaic is 1 byte/pixel like Mono8, so
+        the size guess below cannot distinguish them and used to mislabel
+        Bayer cameras GRAY8 (garbage frames downstream). Untagged frames
+        keep the byte-per-pixel derivation, defaulting to GRAY8 —
+        bit-identical to the pre-feature behavior (Requirement 11.1)."""
         explicit_format = frame_data.get("format")
         if explicit_format:
             return "video/x-raw,format={0}".format(explicit_format)
+        pixel_format = frame_data.get("pixel_format")
+        if isinstance(pixel_format, str) and pixel_format:
+            if pixel_format.startswith("bayer:"):
+                return "video/x-bayer,format={0}".format(
+                    pixel_format.split(":", 1)[1])
+            return "video/x-raw,format={0}".format(pixel_format)
         formats = {1: "GRAY8", 3: "RGB", 4: "RGBA"}
         width = frame_data.get("width") or 0
         height = frame_data.get("height") or 0

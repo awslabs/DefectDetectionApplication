@@ -217,6 +217,70 @@ class TestDeviceCompilation:
         assert sorted(document.referenced_node_ids()) == [
             "bedrock", "cam", "cap", "mqtt", "ref"]
 
+    def test_gst_node_behind_bedrock_is_fed_by_the_upstream_branch(self):
+        """A GStreamer node wired DOWNSTREAM of the opaque bedrock node
+        (cam -> bedrock -> capture) must not be emitted as an unfed root
+        segment (from=None, no tee) — that starves the pipeline until
+        the run watchdog fires (observed on ryan-orin-nano/JP6, workflow
+        f81a4c66-...:9). It re-attaches to the nearest upstream GStreamer
+        feeder: cam tees into the bedrock frame sink AND the capture
+        node's branch."""
+        graph = _graph(
+            nodes=[
+                _node("cam", "icam_source"),
+                _node("bedrock", "bedrock_inference"),
+                _node("cap", "capture", output_path="/aws_dda/captures"),
+            ],
+            connections=[
+                _connect("c1", ("cam", "out"), ("bedrock", "in")),
+                _connect("c2", ("bedrock", "out"), ("cap", "in")),
+            ],
+        )
+        document = _compile_ok(graph)
+
+        # Exactly one unfed segment: the camera source root. Every other
+        # segment is fed from a tee.
+        roots = [s for s in document.segments if s["from"] is None]
+        assert len(roots) == 1
+        assert any(e["nodeId"] == "cam" for e in roots[0]["elements"])
+
+        # cam fans out through a tee: one queue-headed branch carries the
+        # bedrock frame sink, the other carries the capture node's chain.
+        tees = [e for e in _all_elements(document) if e["factory"] == "tee"]
+        assert len(tees) == 1
+        tee_name = tees[0]["args"]["name"]
+        branches = [s for s in document.segments if s["from"] == tee_name]
+        assert len(branches) == 2
+        for branch in branches:
+            assert branch["elements"][0]["factory"] == "queue"
+        assert any(
+            any(e["nodeId"] == "cap" for e in branch["elements"])
+            for branch in branches
+        )
+        assert any(
+            [e["factory"] for e in branch["elements"][-3:]]
+            == ["videoconvert", "jpegenc", "multifilesink"]
+            for branch in branches
+        )
+        assert sorted(document.referenced_node_ids()) == [
+            "bedrock", "cam", "cap"]
+
+    def test_unconnected_source_node_stays_a_root_segment(self):
+        """Re-attachment only applies to nodes with incoming connections:
+        a source node with no wiring above it is a legitimate root."""
+        graph = _graph(
+            nodes=[
+                _node("cam", "icam_source"),
+                _node("cap", "capture", output_path="/aws_dda/captures"),
+            ],
+            connections=[
+                _connect("c1", ("cam", "out"), ("cap", "in")),
+            ],
+        )
+        document = _compile_ok(graph)
+        roots = [s for s in document.segments if s["from"] is None]
+        assert len(roots) == 1
+
     def test_unconnected_reference_port_has_no_capture_path(self):
         graph = _graph(
             nodes=[

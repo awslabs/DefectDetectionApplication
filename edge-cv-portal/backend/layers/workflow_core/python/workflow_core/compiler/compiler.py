@@ -359,6 +359,28 @@ def compile(
     for source, targets in stream_out.items():
         for target in targets:
             stream_in[target].append(source)
+
+    # 3b. Re-attach dangling branches: a GStreamer node sitting only
+    #     BEHIND an opaque executor node (e.g. capture wired after
+    #     bedrock_inference) gains no stream feeder above — the frame
+    #     stream terminates at the opaque node's capture sink — and
+    #     would otherwise be emitted as an unfed root segment
+    #     (from=None, no tee), starving the pipeline until the run
+    #     watchdog fires (verified on ryan-orin-nano/JP6, workflow
+    #     f81a4c66-...:9). Feed it from its nearest upstream GStreamer
+    #     feeder(s) instead, looking through the opaque node: the feeder
+    #     then fans out (tee + queue branches) to both the capture sink
+    #     and this branch.
+    incoming = {
+        connection.target.node for connection in graph.connections
+    }
+    for node_id in gst_node_ids:
+        if stream_in[node_id] or node_id not in incoming:
+            continue
+        for feeder in _upstream_gst_feeders(graph, node_id, gst_set):
+            stream_out[feeder].append(node_id)
+            stream_in[node_id].append(feeder)
+
     topo_order = _topological_sort(gst_node_ids, stream_out, stream_in)
 
     # Frame captures: one synthetic sink chain per GStreamer branch
@@ -521,6 +543,40 @@ def _stream_successors(
         elif current not in opaque:
             frontier.extend(successors.get(current, []))
     return result
+
+
+def _upstream_gst_feeders(
+    graph: WorkflowGraph,
+    node_id: str,
+    gst_set: set,
+) -> List[str]:
+    """The nearest upstream GStreamer nodes of ``node_id``, looking
+    through EVERY executor-level node — including opaque
+    frame-terminating ones (bedrock_inference). Used to re-attach a
+    dangling GStreamer branch: opacity governs where the *forward*
+    stream terminates, but a branch that would otherwise be unfed must
+    still be wired to the frames its author routed toward it
+    (connection-ordered, deduplicated)."""
+    frontier = [
+        connection.source.node for connection in graph.connections
+        if connection.target.node == node_id
+    ]
+    feeders: List[str] = []
+    seen = {node_id}
+    while frontier:
+        current = frontier.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        if current in gst_set:
+            if current not in feeders:
+                feeders.append(current)
+        else:
+            frontier.extend(
+                connection.source.node for connection in graph.connections
+                if connection.target.node == current
+            )
+    return feeders
 
 
 # --------------------------------------------------------------------------

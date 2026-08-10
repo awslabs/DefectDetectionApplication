@@ -159,29 +159,90 @@ class _Resp:
 
 
 class TestRequestLoadHttpError:
-    def test_request_load_http_error_logs_prominent_line(self, monkeypatch, caplog):
+    # INTENTIONAL GOLDEN UPDATE (vllm-restart-model-recovery): a KV-cache
+    # OOM failure no longer stays single-attempt. The failed load leaves
+    # its GPU allocations pinned in the runtime, so every plain retry
+    # keeps OOMing; the validated on-device recovery (ryan-orin-nano/JP6)
+    # is unload -> reload, run exactly once. Non-KV HTTP errors keep the
+    # original single-attempt semantics (asserted below and in the
+    # deploy_reliability preservation suite).
+
+    def test_kv_cache_failure_triggers_one_unload_reload_cycle(
+            self, monkeypatch, caplog):
         caplog = self.caplog
         monkeypatch.setattr(mp, "wait_for_server", lambda *a, **k: True)
-        monkeypatch.setattr(
-            mp.requests,
-            "post",
-            lambda url, timeout=None: _Resp(409, KV_CACHE_409_BODY),
-        )
+        urls = []
+
+        def scripted_post(url, timeout=None):
+            urls.append(url)
+            return _Resp(409, KV_CACHE_409_BODY)
+
+        monkeypatch.setattr(mp.requests, "post", scripted_post)
         with caplog.at_level(logging.ERROR):
             outcome = mp.request_load(
                 "model-vllm-qwen-2-5-7b",
                 {"gpu_memory_utilization": 0.3, "max_model_len": 4096},
             )
-        # Classification semantics unchanged: authoritative non-200, no retry.
+        # The retry failing too is authoritative: LOAD_HTTP_ERROR, and the
+        # cycle ran exactly once (load, unload, load - no further posts).
         assert outcome == mp.LOAD_HTTP_ERROR
+        assert [u.rsplit("/", 1)[-1] for u in urls] == [
+            "load", "unload", "load"]
+        # The prominent failure line (format unchanged) appears for each
+        # load attempt, still carrying the remediation hint + staged args.
+        lines = [line for line in _error_lines(caplog)
+                 if "FAILED to load" in line]
+        assert len(lines) == 2
+        for line in lines:
+            assert "model 'model-vllm-qwen-2-5-7b'" in line
+            assert "HTTP 409" in line
+            assert "No available memory for the cache blocks" in line
+            assert "RAISE" in line
+            assert "gpu_memory_utilization=0.3" in line
+
+    def test_kv_cache_recovery_reload_success_returns_ok(
+            self, monkeypatch, caplog):
+        caplog = self.caplog
+        monkeypatch.setattr(mp, "wait_for_server", lambda *a, **k: True)
+        urls = []
+
+        def scripted_post(url, timeout=None):
+            urls.append(url)
+            if url.endswith("/unload"):
+                return _Resp(200)
+            if len([u for u in urls if u.endswith("/load")]) == 1:
+                return _Resp(409, KV_CACHE_409_BODY)
+            return _Resp(200)
+
+        monkeypatch.setattr(mp.requests, "post", scripted_post)
+        with caplog.at_level(logging.ERROR):
+            outcome = mp.request_load(
+                "model-vllm-qwen-2-5-7b",
+                {"gpu_memory_utilization": 0.3, "max_model_len": 4096},
+            )
+        assert outcome == mp.LOAD_OK
+        assert [u.rsplit("/", 1)[-1] for u in urls] == [
+            "load", "unload", "load"]
+
+    def test_non_kv_http_error_stays_single_attempt(
+            self, monkeypatch, caplog):
+        caplog = self.caplog
+        monkeypatch.setattr(mp, "wait_for_server", lambda *a, **k: True)
+        urls = []
+
+        def scripted_post(url, timeout=None):
+            urls.append(url)
+            return _Resp(400, '{"error": "unknown model"}')
+
+        monkeypatch.setattr(mp.requests, "post", scripted_post)
+        with caplog.at_level(logging.ERROR):
+            outcome = mp.request_load("model-x")
+        assert outcome == mp.LOAD_HTTP_ERROR
+        assert [u.rsplit("/", 1)[-1] for u in urls] == ["load"]
         errors = _error_lines(caplog)
         assert len(errors) == 1
-        line = errors[0]
-        assert "model 'model-vllm-qwen-2-5-7b'" in line
-        assert "HTTP 409" in line
-        assert "No available memory for the cache blocks" in line
-        assert "RAISE" in line
-        assert "gpu_memory_utilization=0.3" in line
+        assert "model 'model-x'" in errors[0]
+        assert "HTTP 400" in errors[0]
 
 
 def test_request_load_200_unchanged(monkeypatch):

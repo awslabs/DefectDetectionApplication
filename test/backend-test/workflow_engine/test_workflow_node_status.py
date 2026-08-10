@@ -464,7 +464,7 @@ def test_preflight_fails_the_run_naming_the_node_and_the_plugin_elements(
     with patch.object(pipeline_executor, "_WORKFLOW_CAPTURE_ROOT", capture_root), \
             patch.object(
                 gst_plugins, "missing_factories",
-                side_effect=lambda factories: [
+                side_effect=lambda factories, scan_dirs=None: [
                     f for f in factories if f == "resize_image"
                 ],
             ), \

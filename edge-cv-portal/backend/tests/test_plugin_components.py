@@ -319,6 +319,62 @@ class TestAutoPackaging:
         }
         assert cenv.account_keys(f"plugins/staging/{pid}/") == []
 
+    def test_frame_processing_hook_ships_beside_every_arch_so(self, cenv):
+        """A scaffold version's Frame_Processing_Hook (plugin-sources
+        plugin/frame_processing_hook.py) is packaged beside the .so on
+        every arch, listed as a recipe artifact, and copied by the
+        Install script — the C skeleton imports it from its own install
+        directory at run time (custom-node-plugin-runtime-fixes,
+        defect 2)."""
+        plugin = cenv.seed_plugin(["x86_64", "arm64_jp6"])
+        item = cenv.get_item(plugin)
+        hook_bytes = b"def process_frame(frame, params):\n    return frame\n"
+        cenv.s3.put_object(
+            Bucket=cenv.bucket,
+            Key=item["source_s3_prefix"] + "plugin/frame_processing_hook.py",
+            Body=hook_bytes)
+        gg = cenv.patch_usecase_clients()
+        pid, ver = plugin["plugin_id"], plugin["version"]
+
+        result = cenv.package(plugin)
+
+        assert result["packaged"] is True, result
+        for arch in ("x86_64", "arm64_jp6"):
+            final_prefix = f"plugins/components/{pid}/{ver}/{arch}/"
+            assert final_prefix + "frame_processing_hook.py" in \
+                cenv.account_keys(final_prefix)
+            staged = cenv.s3.get_object(
+                Bucket=cenv.usecase_bucket,
+                Key=final_prefix + "frame_processing_hook.py")
+            assert staged["Body"].read() == hook_bytes
+        recipe, _tags = cenv.sent_recipe(gg)
+        for manifest in recipe["Manifests"]:
+            uris = [a["Uri"] for a in manifest["Artifacts"]]
+            assert any(uri.endswith("/frame_processing_hook.py")
+                       for uri in uris), uris
+            assert "frame_processing_hook.py" in \
+                manifest["Lifecycle"]["Install"]["Script"]
+
+    def test_version_without_hook_packages_without_it(self, cenv):
+        """Prebuilt imports ship no Frame_Processing_Hook; packaging
+        stays exactly the signed .so + plugin-manifest.json."""
+        plugin = cenv.seed_plugin(["x86_64"])
+        gg = cenv.patch_usecase_clients()
+        pid, ver = plugin["plugin_id"], plugin["version"]
+
+        result = cenv.package(plugin)
+
+        assert result["packaged"] is True, result
+        final_prefix = f"plugins/components/{pid}/{ver}/x86_64/"
+        assert cenv.account_keys(final_prefix) == [
+            final_prefix + "blur-regions.so",
+            final_prefix + "plugin-manifest.json",
+        ]
+        recipe, _tags = cenv.sent_recipe(gg)
+        for manifest in recipe["Manifests"]:
+            assert all(not a["Uri"].endswith("/frame_processing_hook.py")
+                       for a in manifest["Artifacts"])
+
     def test_failed_registration_deletes_component_and_artifacts(self, cenv):
         """A version that never becomes DEPLOYABLE is deleted and no
         promoted artifacts remain (all-or-nothing)."""

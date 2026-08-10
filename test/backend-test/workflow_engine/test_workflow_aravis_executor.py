@@ -331,6 +331,103 @@ class TestRenderedDefaultFeed:
         launch = manager.calls[0][0]
         assert "caps=video/x-raw,format=RGB " in launch
 
+    def test_bayer_tagged_frame_gets_bayer_caps_and_demosaic(
+        self, tmp_path, session_factory
+    ):
+        """A camera-tagged Bayer frame (camera_manager pixel_format) must
+        NOT be mislabeled GRAY8 (it is 1 byte/pixel, indistinguishable by
+        size): the appsrc gets video/x-bayer caps and a bayer2rgb demosaic
+        is inserted before the compiled videoconvert, mirroring the classic
+        Image_Source conversion chain."""
+        artifact_path = write_artifact_set(
+            tmp_path, compiled=make_aravis_document()
+        )
+        execution_id = seed_run(session_factory, artifact_path)
+        frame = make_frame(bytes_per_pixel=1)
+        frame["pixel_format"] = "bayer:bggr"
+        grabber = FakeCameraManager(frame=frame)
+        manager = FakePipelineManager()
+
+        make_executor(session_factory, manager, grabber=grabber).execute(
+            execution_id
+        )
+
+        launch = manager.calls[0][0]
+        assert (
+            "appsrc name=appsrc caps=video/x-bayer,format=bggr "
+            "! bayer2rgb ! videoconvert" in launch
+        )
+
+    def test_local_image_source_configuration_drives_the_grab(
+        self, tmp_path, session_factory
+    ):
+        """A camera with a locally configured Image_Source grabs with THAT
+        configuration (gain/exposure/advanced GenICam settings) — the
+        workflow always respects the device's own camera settings; the
+        planned binding/rendered parameters only apply to cameras without
+        a local Image_Source."""
+        from dao.sqlite_db.models import (
+            ImageSource as ImageSourceRow,
+            ImageSourceConfiguration as ImageSourceConfigurationRow,
+        )
+
+        artifact_path = write_artifact_set(
+            tmp_path, compiled=make_aravis_document()
+        )
+        execution_id = seed_run(session_factory, artifact_path)
+
+        session = session_factory()
+        try:
+            session.add(ImageSourceConfigurationRow(
+                imageSourceConfigId="isc-1", gain=17, exposure=250000,
+                advancedSettings={"reverseX": True},
+            ))
+            session.add(ImageSourceRow(
+                imageSourceId="is-1", name="Basler bench",
+                cameraId="Aravis-Fake-GV01", imageSourceConfigId="isc-1",
+            ))
+            session.commit()
+        finally:
+            session.close()
+
+        grabber = FakeCameraManager()
+        manager = FakePipelineManager()
+        make_executor(session_factory, manager, grabber=grabber).execute(
+            execution_id
+        )
+
+        assert len(grabber.calls) == 1
+        camera_id, config = grabber.calls[0]
+        assert camera_id == "Aravis-Fake-GV01"
+        # The local Image_Source configuration, not the rendered
+        # {gain: 4, exposure: 5000000} defaults.
+        assert config["gain"] == 17
+        assert config["exposure"] == 250000
+        assert config["advancedSettings"] == {"reverseX": True}
+        assert get_execution(session_factory).status == EXECUTION_STATUS_COMPLETED
+
+    def test_raw_tagged_frame_uses_the_tagged_format(
+        self, tmp_path, session_factory
+    ):
+        """A camera-tagged raw frame names its actual format even when the
+        bytes-per-pixel guess would agree (Mono8) or disagree (packed)."""
+        artifact_path = write_artifact_set(
+            tmp_path, compiled=make_aravis_document()
+        )
+        execution_id = seed_run(session_factory, artifact_path)
+        frame = make_frame(bytes_per_pixel=4)
+        frame["pixel_format"] = "BGRA"
+        grabber = FakeCameraManager(frame=frame)
+        manager = FakePipelineManager()
+
+        make_executor(session_factory, manager, grabber=grabber).execute(
+            execution_id
+        )
+
+        launch = manager.calls[0][0]
+        assert "caps=video/x-raw,format=BGRA " in launch
+        assert "bayer2rgb" not in launch
+
 
 class TestGrabFailure:
     def test_raising_camera_manager_fails_with_the_aravis_node(

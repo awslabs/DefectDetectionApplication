@@ -77,26 +77,76 @@ FRAME_POP_TIMEOUT_MARGIN_US = 5_000_000  # 5s beyond the exposure time
 # (de)serializer on this call site is replaced.
 # ---------------------------------------------------------------------------
 def encode_frame(frame):
-    """Serialize a ``{'data','height','width'}`` frame dict (or ``None``) into the
-    non-executable length-prefixed JSON-header + raw-bytes transport."""
+    """Serialize a ``{'data','height','width'[,'pixel_format']}`` frame dict
+    (or ``None``) into the non-executable length-prefixed JSON-header +
+    raw-bytes transport. ``pixel_format`` is the optional camera pixel
+    format tag (see :func:`gst_pixel_format`); absent for older callers."""
     if frame is None:
         header = json.dumps({"null": True}).encode("utf-8")
         return struct.pack(">I", len(header)) + header
-    header = json.dumps(
-        {"null": False, "height": frame["height"], "width": frame["width"]}
-    ).encode("utf-8")
+    header_fields = {
+        "null": False, "height": frame["height"], "width": frame["width"],
+    }
+    if frame.get("pixel_format"):
+        header_fields["pixel_format"] = frame["pixel_format"]
+    header = json.dumps(header_fields).encode("utf-8")
     return struct.pack(">I", len(header)) + header + bytes(frame["data"])
 
 
 def decode_frame(buf):
     """Inverse of :func:`encode_frame`. Returns the identical
-    ``{'data','height','width'}`` dict, or ``None`` for the null/timeout frame."""
+    ``{'data','height','width'[,'pixel_format']}`` dict, or ``None`` for the
+    null/timeout frame."""
     (hlen,) = struct.unpack(">I", buf[:4])
     header = json.loads(buf[4:4 + hlen].decode("utf-8"))
     if header.get("null"):
         return None
     data = buf[4 + hlen:]
-    return {"data": data, "height": header["height"], "width": header["width"]}
+    frame = {"data": data, "height": header["height"], "width": header["width"]}
+    if header.get("pixel_format"):
+        frame["pixel_format"] = header["pixel_format"]
+    return frame
+
+
+# ---------------------------------------------------------------------------
+# Camera pixel format -> portable tag (aravis workflow feed correctness).
+#
+# The workflow Frame_Feed path pushes the RAW grabbed bytes into an appsrc;
+# without the camera's actual pixel format the executor can only guess from
+# bytes-per-pixel, and a Bayer mosaic (1 byte/pixel, like Mono8) gets
+# mislabeled GRAY8 — downstream then treats the un-demosaiced mosaic as a
+# grayscale image (garbage frames). The classic Image_Source pipeline avoids
+# this only because its configured conversion chain (e.g.
+# `video/x-bayer,format=bggr ! bayer2rgb`) carries the knowledge; the feed
+# path needs it from the buffer itself.
+# ---------------------------------------------------------------------------
+
+#: GenICam PFNC pixel format codes -> portable tag. Raw formats map to the
+#: GStreamer video/x-raw format name; Bayer mosaics map to "bayer:<pattern>"
+#: (the video/x-raw vs video/x-bayer split is the consumer's concern).
+#: Values are the PFNC constants Aravis.PIXEL_FORMAT_* resolve to, inlined so
+#: the map is usable in tests without the Aravis runtime.
+_PFNC_TO_TAG = {
+    0x01080001: "GRAY8",         # Mono8
+    0x01080008: "bayer:grbg",    # BayerGR8
+    0x01080009: "bayer:rggb",    # BayerRG8
+    0x0108000A: "bayer:gbrg",    # BayerGB8
+    0x0108000B: "bayer:bggr",    # BayerBG8
+    0x02180014: "RGB",           # RGB8Packed
+    0x02180015: "BGR",           # BGR8Packed
+    0x02200016: "RGBA",          # RGBA8Packed
+    0x02200017: "BGRA",          # BGRA8Packed
+}
+
+
+def gst_pixel_format(pfnc_code):
+    """The portable pixel-format tag for a GenICam PFNC code, or ``None``
+    for unknown/unmapped formats (the caller falls back to the historic
+    bytes-per-pixel guess)."""
+    try:
+        return _PFNC_TO_TAG.get(int(pfnc_code))
+    except (TypeError, ValueError):
+        return None
 
 # Tier 2 GenICam controls surfaced under "Advanced settings". Scoped to the
 # "safe" controls that are persisted and don't affect the stream payload /
@@ -520,6 +570,19 @@ class Camera():
                 #update camera connection status 
                 self.update_camera_status(CameraStatusEnum.CONNECTED)
                 data_dict = {'data': data, 'height': ht, 'width': wd}
+                # Tag the frame with the camera's actual pixel format so the
+                # workflow Frame_Feed can set truthful appsrc caps (a Bayer
+                # mosaic must not be mislabeled GRAY8). Best-effort: older
+                # Aravis bindings without the getter just omit the tag.
+                try:
+                    pixel_format = gst_pixel_format(
+                        arv_buffer.get_image_pixel_format())
+                    if pixel_format:
+                        data_dict['pixel_format'] = pixel_format
+                except Exception:
+                    logger.debug(
+                        f"Camera ID {self.camera_id}: pixel format "
+                        "unavailable on this Aravis buffer; frame untagged")
                 encoded_data = encode_frame(data_dict)
                 self._lock.release()
                 return encoded_data

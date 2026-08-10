@@ -36,6 +36,7 @@ inside the default engine/sampling-params factories. Both factories are
 injectable, which is also how tests drive the manager with a fake
 ``AsyncLLMEngine`` and no GPU.
 """
+import gc
 import inspect
 import logging
 import threading
@@ -296,13 +297,22 @@ class VllmRuntimeManager:
             return False
         if entry.engine is not None:
             self._shutdown_engine(model_name, entry.engine)
+        self._reclaim_gpu_memory(model_name)
         logger.info("vLLM model '%s' unloaded", model_name)
         return True
 
     def _fail(self, model_name: str, reason: str) -> ModelStatus:
         """Transition one model to FAILED, retaining and logging the
         backend reason with the model name (Requirement 4.6). No other
-        model is touched."""
+        model is touched.
+
+        A failed engine CONSTRUCTION (the GPU out-of-memory case) has no
+        engine object to shut down, yet the aborted initialization can
+        leave many GB of GPU allocations behind — observed on-device as a
+        first-load OOM that keeps OOMing on every plain retry until an
+        unload releases the memory. Reclaim it here so the next load
+        attempt starts from a clean allocator state.
+        """
         logger.error("vLLM model '%s' failed: %s", model_name, reason)
         status = ModelStatus(ModelState.FAILED, reason=reason)
         with self._lock:
@@ -313,6 +323,7 @@ class VllmRuntimeManager:
                 entry.engine = None
         if engine is not None:
             self._shutdown_engine(model_name, engine)
+        self._reclaim_gpu_memory(model_name)
         return status
 
     @staticmethod
@@ -327,6 +338,31 @@ class VllmRuntimeManager:
                     "Error shutting down the engine of vLLM model '%s'",
                     model_name,
                 )
+
+    @staticmethod
+    def _reclaim_gpu_memory(model_name: str) -> None:
+        """Best-effort release of GPU memory left behind by a failed or
+        shut-down engine: drop unreachable Python objects, then return
+        cached CUDA blocks to the driver. ``torch`` is imported lazily
+        (it only exists on vLLM-capable images) and every failure is
+        swallowed — reclaim must never break unload/fail handling."""
+        gc.collect()
+        try:
+            import torch
+        except ImportError:
+            return
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info(
+                    "Reclaimed cached CUDA memory after unload/failure of "
+                    "vLLM model '%s'", model_name,
+                )
+        except Exception:  # noqa: BLE001 - reclaim is strictly best-effort
+            logger.exception(
+                "Error reclaiming CUDA memory after vLLM model '%s'",
+                model_name,
+            )
 
     # --- inference ---------------------------------------------------------
 

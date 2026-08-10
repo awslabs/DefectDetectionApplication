@@ -34,6 +34,7 @@ to the architectures of the declaration's ``mappings`` when absent).
 
 from __future__ import annotations
 
+import re
 from string import Template
 from typing import Any, Mapping, Sequence
 
@@ -115,6 +116,48 @@ def element_name_for(declaration: Any) -> str:
     return name
 
 
+def plugin_ident_for(declaration: Any) -> str:
+    """The GST_PLUGIN_DEFINE plugin name token for ``declaration``.
+
+    GStreamer only loads a plugin library when it exports the symbol
+    ``gst_plugin_<ident>_get_desc`` where ``<ident>`` is derived from the
+    library FILENAME (strip a leading ``libgst``/``lib``, cut the
+    extension at the first dot, then map every non-alphanumeric to
+    ``_``). The Plugin_Build_Service promotes the built artifact as
+    ``{plugin}.so`` where ``{plugin}`` is
+    ``plugin_builds.sanitize_plugin_name`` of the Plugin_Record name -
+    which the designer wizard sets from the declaration's
+    ``displayName``. This helper mirrors that exact chain so the
+    generated GST_PLUGIN_DEFINE matches the promoted filename; a
+    mismatch makes GStreamer silently reject the library and the run
+    fails with "the run's workflow plugin directories register no
+    elements".
+
+    Falls back to :func:`element_name_for` when the displayName
+    sanitizes to nothing usable.
+    """
+    element = element_name_for(declaration)
+    display = declaration.get("displayName")
+    if not isinstance(display, str):
+        return element
+    # plugin_builds.sanitize_plugin_name: the promoted artifact base name.
+    sanitized = re.sub(r'[^A-Za-z0-9_.-]+', '-', display).strip('-.')
+    if not sanitized:
+        return element
+    # GStreamer extract_symname on "{sanitized}.so": '-' -> '_' first,
+    # then strip a libgst/lib/gst prefix, then cut at the first dot.
+    sanitized = sanitized.replace("-", "_")
+    for prefix in ("libgst", "lib", "gst"):
+        if sanitized.startswith(prefix):
+            sanitized = sanitized[len(prefix):]
+            break
+    ident = sanitized.split(".", 1)[0]
+    if not ident or not all(ch == "_" or (ch.isascii() and ch.isalnum())
+                            for ch in ident):
+        return element
+    return ident
+
+
 def _validated(declaration: Any) -> tuple:
     """Validate the declaration, returning ``(descriptor, architectures)``.
 
@@ -168,17 +211,19 @@ def render_scaffold(declaration: Any) -> dict:
     """
     descriptor, architectures = _validated(declaration)
     element = element_name_for(declaration)
+    plugin_ident = plugin_ident_for(declaration)
     description = declaration.get("description") or descriptor.display_name
 
     files = {
         HOOK_FILE: _render_hook(descriptor),
         c_source_path(declaration): _render_c_source(
-            descriptor, element, description),
+            descriptor, element, description, plugin_ident),
         README_FILE: _render_readme(
             descriptor, element, description, architectures),
     }
     for arch in architectures:
-        files[build_config_path(arch)] = _render_meson(element, arch)
+        files[build_config_path(arch)] = _render_meson(
+            element, arch, plugin_ident)
     return files
 
 
@@ -303,6 +348,19 @@ port and emits the returned frame content on the node's output port.
 ``frame`` is the raw frame payload (``bytes``); ``params`` is a dict
 carrying the current value of every parameter declared on this node type,
 keyed by the declared parameter name.
+
+Besides the declared parameters, the element always injects the
+NEGOTIATED input frame geometry so the hook never has to guess the
+incoming layout:
+
+- ``params["frame_width"]`` (int): negotiated frame width in pixels.
+- ``params["frame_height"]`` (int): negotiated frame height in pixels.
+- ``params["frame_format"]`` (str): negotiated pixel format (e.g.
+  ``"RGBA"``, ``"RGB"``, ``"GRAY8"``; empty when caps carry no format).
+
+If your processing CHANGES the frame geometry or format (resize, crop,
+colorspace change), also update ``gst_..._sync_out_caps`` in the C
+skeleton so downstream elements interpret the emitted bytes correctly.
 """
 
 #: The parameters declared on this node type: every key below is present
@@ -318,7 +376,8 @@ def process_frame(frame, params):
     Args:
         frame: the raw frame bytes arriving at the input port.
         params: dict of declared parameter values, keyed by parameter
-            name${param_hint}.
+            name${param_hint}, plus the negotiated input geometry under
+            "frame_width", "frame_height", and "frame_format".
 
     Returns:
         The frame bytes to emit on the output port.
@@ -363,12 +422,19 @@ _C_TEMPLATE = Template('''\
  * parameters, and the params-dict plumbing into the hook.
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* dladdr: self-locate the Frame_Processing_Hook */
+#endif
+#include <dlfcn.h>
+#include <libgen.h>
+#include <string.h>
+
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
 #include <Python.h>
 
-#define PACKAGE "${element}"
+#define PACKAGE "${plugin_ident}"
 
 #define GST_TYPE_${element_upper} (gst_${element}_get_type ())
 
@@ -441,24 +507,81 @@ ${get_property_cases}
  * Frame_Processing_Hook bridge: appsink -> Python -> appsrc
  * (Requirement 1.3).
  * -------------------------------------------------------------------- */
-static GstFlowReturn
-gst_${element}_on_new_sample (GstElement * sink, gpointer user_data)
+
+/* Emit the element's OUTPUT caps on the internal appsrc so downstream
+ * can negotiate. The default contract is a same-geometry transform:
+ * the input caps pass through unchanged. IF YOUR HOOK CHANGES THE FRAME
+ * GEOMETRY OR FORMAT (resize, crop, colorspace change), adjust the
+ * copied caps here (gst_caps_set_simple width/height/format) to match
+ * what process_frame returns, or downstream will misinterpret the
+ * buffer bytes. */
+static void
+gst_${element}_sync_out_caps (Gst${element_camel} * self, GstSample * sample)
+{
+  GstCaps *in_caps = gst_sample_get_caps (sample);
+  GstCaps *out_caps;
+  if (in_caps == NULL)
+    return;
+  out_caps = gst_caps_copy (in_caps);
+  gst_app_src_set_caps (GST_APP_SRC (self->appsrc), out_caps);
+  gst_caps_unref (out_caps);
+}
+
+/* Forward EOS so a bounded run (the workflow engine's single-frame
+ * execution model) terminates instead of hanging until the pipeline
+ * watchdog fires. */
+static void
+gst_${element}_on_eos (GstElement * sink, gpointer user_data)
 {
   Gst${element_camel} *self = (Gst${element_camel} *) user_data;
-  GstSample *sample = gst_app_sink_pull_sample (GST_APP_SINK (sink));
+  (void) sink;
+  gst_app_src_end_of_stream (GST_APP_SRC (self->appsrc));
+}
+
+static GstFlowReturn
+gst_${element}_process_sample (Gst${element_camel} * self, GstSample * sample)
+{
   GstBuffer *buffer;
   GstMapInfo info;
   GstFlowReturn ret = GST_FLOW_ERROR;
 
-  if (sample == NULL)
-    return GST_FLOW_EOS;
+  gst_${element}_sync_out_caps (self, sample);
 
   buffer = gst_sample_get_buffer (sample);
   if (buffer != NULL && gst_buffer_map (buffer, &info, GST_MAP_READ)) {
+    GstBuffer *out = NULL;
     PyGILState_STATE gil = PyGILState_Ensure ();
     PyObject *frame = PyBytes_FromStringAndSize ((const char *) info.data,
         (Py_ssize_t) info.size);
     PyObject *params = gst_${element}_params_dict (self);
+
+    /* The NEGOTIATED frame geometry rides along in params so the hook
+     * never has to guess (or be configured with) the incoming width /
+     * height / pixel format: frame_width, frame_height, frame_format. */
+    {
+      GstCaps *caps = gst_sample_get_caps (sample);
+      GstStructure *s = caps != NULL ? gst_caps_get_structure (caps, 0) : NULL;
+      gint fw = 0, fh = 0;
+      const gchar *ffmt = NULL;
+      if (s != NULL) {
+        gst_structure_get_int (s, "width", &fw);
+        gst_structure_get_int (s, "height", &fh);
+        ffmt = gst_structure_get_string (s, "format");
+      }
+      if (params != NULL) {
+        PyObject *v;
+        v = PyLong_FromLong (fw);
+        PyDict_SetItemString (params, "frame_width", v);
+        Py_XDECREF (v);
+        v = PyLong_FromLong (fh);
+        PyDict_SetItemString (params, "frame_height", v);
+        Py_XDECREF (v);
+        v = PyUnicode_FromString (ffmt != NULL ? ffmt : "");
+        PyDict_SetItemString (params, "frame_format", v);
+        Py_XDECREF (v);
+      }
+    }
+
     PyObject *result = PyObject_CallMethod (self->hook_module,
         "process_frame", "OO", frame, params);
 
@@ -470,10 +593,9 @@ gst_${element}_on_new_sample (GstElement * sink, gpointer user_data)
          * newer one-shot memdup helper, so the plugin links on every
          * supported device stack (JetPack 4 ships GStreamer 1.14,
          * JetPack 5 ships 1.16). */
-        GstBuffer *out = gst_buffer_new_allocate (NULL, (gsize) out_size, NULL);
+        out = gst_buffer_new_allocate (NULL, (gsize) out_size, NULL);
         gst_buffer_fill (out, 0, out_data, (gsize) out_size);
         gst_buffer_copy_into (out, buffer, GST_BUFFER_COPY_TIMESTAMPS, 0, -1);
-        ret = gst_app_src_push_buffer (GST_APP_SRC (self->appsrc), out);
       }
     } else {
       GST_ELEMENT_ERROR (self, STREAM, FAILED,
@@ -485,12 +607,44 @@ gst_${element}_on_new_sample (GstElement * sink, gpointer user_data)
     Py_XDECREF (result);
     Py_XDECREF (params);
     Py_XDECREF (frame);
+    /* Release the GIL BEFORE pushing downstream: the push chains into
+     * the rest of the pipeline (tee/queue branches, encoders, sinks)
+     * and may synchronize with threads that themselves need the GIL —
+     * in an embedding Python host (LocalServer) holding it across the
+     * push deadlocks the whole process. */
     PyGILState_Release (gil);
     gst_buffer_unmap (buffer, &info);
+    if (out != NULL)
+      ret = gst_app_src_push_buffer (GST_APP_SRC (self->appsrc), out);
   }
 
   gst_sample_unref (sample);
   return ret;
+}
+
+static GstFlowReturn
+gst_${element}_on_new_sample (GstElement * sink, gpointer user_data)
+{
+  Gst${element_camel} *self = (Gst${element_camel} *) user_data;
+  GstSample *sample = gst_app_sink_pull_sample (GST_APP_SINK (sink));
+  if (sample == NULL)
+    return GST_FLOW_EOS;
+  return gst_${element}_process_sample (self, sample);
+}
+
+/* The FIRST buffer arrives as the appsink PREROLL sample — only
+ * new-preroll fires for it. It must be processed and pushed too, or
+ * downstream never receives a preroll buffer and the whole pipeline
+ * hangs in PREROLLING (the deadlock behind "pipeline timed out without
+ * completing"). */
+static GstFlowReturn
+gst_${element}_on_new_preroll (GstElement * sink, gpointer user_data)
+{
+  Gst${element_camel} *self = (Gst${element_camel} *) user_data;
+  GstSample *sample = gst_app_sink_pull_preroll (GST_APP_SINK (sink));
+  if (sample == NULL)
+    return GST_FLOW_EOS;
+  return gst_${element}_process_sample (self, sample);
 }
 
 static void
@@ -514,22 +668,56 @@ gst_${element}_init (Gst${element_camel} * self)
 {
   GstPad *pad;
 
-  if (!Py_IsInitialized ())
-    Py_InitializeEx (0);
-
   {
-    PyGILState_STATE gil = PyGILState_Ensure ();
+    gboolean we_initialized = FALSE;
+    PyGILState_STATE gil;
+    if (!Py_IsInitialized ()) {
+      Py_InitializeEx (0);
+      we_initialized = TRUE;
+    }
+    gil = PyGILState_Ensure ();
+    /* The Frame_Processing_Hook travels beside this shared library; the
+     * embedded interpreter knows nothing about that directory, so add it
+     * to sys.path (idempotent) before the import — self-locating via
+     * dladdr so it works in any host process (gst-launch, LocalServer). */
+    {
+      Dl_info dlinfo;
+      if (dladdr ((void *) gst_${element}_get_type, &dlinfo)
+          && dlinfo.dli_fname != NULL) {
+        char *dup = strdup (dlinfo.dli_fname);
+        if (dup != NULL) {
+          PyObject *sys_path = PySys_GetObject ("path");
+          PyObject *dir = PyUnicode_FromString (dirname (dup));
+          if (sys_path != NULL && dir != NULL
+              && !PySequence_Contains (sys_path, dir))
+            PyList_Insert (sys_path, 0, dir);
+          Py_XDECREF (dir);
+          free (dup);
+        }
+      }
+    }
     self->hook_module = PyImport_ImportModule ("frame_processing_hook");
     if (self->hook_module == NULL && PyErr_Occurred ())
       PyErr_Print ();
     PyGILState_Release (gil);
+    /* Py_InitializeEx leaves this thread holding the GIL; release it or
+     * the streaming thread deadlocks in PyGILState_Ensure inside the
+     * new-sample callback and no buffer ever flows. */
+    if (we_initialized)
+      PyEval_SaveThread ();
   }
 
   self->appsink = gst_element_factory_make ("appsink", NULL);
   self->appsrc = gst_element_factory_make ("appsrc", NULL);
   g_object_set (self->appsink, "emit-signals", TRUE, "sync", FALSE, NULL);
+  g_object_set (self->appsrc, "format", GST_FORMAT_TIME, NULL);
   g_signal_connect (self->appsink, "new-sample",
       G_CALLBACK (gst_${element}_on_new_sample), self);
+  g_signal_connect (self->appsink, "new-preroll",
+      G_CALLBACK (gst_${element}_on_new_preroll), self);
+  /* Forward EOS so a bounded run (single-frame workflow) terminates. */
+  g_signal_connect (self->appsink, "eos",
+      G_CALLBACK (gst_${element}_on_eos), self);
 
   gst_bin_add_many (GST_BIN (self), self->appsink, self->appsrc, NULL);
 
@@ -552,10 +740,16 @@ plugin_init (GstPlugin * plugin)
       GST_TYPE_${element_upper});
 }
 
+/* The plugin name token MUST match the symbol GStreamer derives from the
+ * promoted artifact filename ({plugin}.so from the sanitized node display
+ * name): the loader resolves gst_plugin_${plugin_ident}_get_desc and
+ * silently rejects the library when it is absent — the element then
+ * "registers no elements" at run time. plugin_ident_for() mirrors that
+ * filename-to-symbol derivation. */
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR, GST_VERSION_MINOR,
-    ${element},
+    ${plugin_ident},
     "${description_c}",
-    plugin_init, "1.0.0", "LGPL", "${element}",
+    plugin_init, "1.0.0", "LGPL", "${plugin_ident}",
     "https://github.com/awslabs/defect-detection-application")
 ''')
 
@@ -679,12 +873,13 @@ def _property_snippets(parameters: Sequence[ParameterDescriptor]) -> dict:
 
 
 def _render_c_source(descriptor: NodeTypeDescriptor, element: str,
-                     description: str) -> str:
+                     description: str, plugin_ident: str) -> str:
     snippets = _property_snippets(descriptor.parameters)
     return _C_TEMPLATE.substitute(
         element=element,
         element_upper=element.upper(),
         element_camel=element[:1].upper() + element[1:],
+        plugin_ident=plugin_ident,
         display_name=descriptor.display_name,
         display_name_c=_c_escape(descriptor.display_name),
         category_c=_c_escape("Filter/Effect/" + descriptor.category),
@@ -727,7 +922,13 @@ python_dep = dependency('python3-embed')
 
 plugins_install_dir = join_paths(get_option('libdir'), 'gstreamer-1.0')
 
-shared_library('gst${element}',
+# The library base name matters: GStreamer derives the plugin loader
+# symbol (gst_plugin_<ident>_get_desc) from the FILENAME. 'gst${plugin_ident}'
+# yields libgst${plugin_ident}.so, and the Plugin_Build_Service's promoted
+# copy of the artifact derives the same <ident> - both match the
+# GST_PLUGIN_DEFINE in the C skeleton. Renaming the library or the
+# promoted .so breaks plugin loading silently.
+shared_library('gst${plugin_ident}',
   '../../plugin/gst${element}.c',
   dependencies : [gst_dep, gst_app_dep, python_dep],
   install : true,
@@ -741,9 +942,10 @@ install_data('../../plugin/frame_processing_hook.py',
 ''')
 
 
-def _render_meson(element: str, arch: str) -> str:
+def _render_meson(element: str, arch: str, plugin_ident: str) -> str:
     return _MESON_TEMPLATE.substitute(
-        element=element, arch=arch, arch_note=_ARCH_NOTES.get(arch, "#"))
+        element=element, arch=arch, plugin_ident=plugin_ident,
+        arch_note=_ARCH_NOTES.get(arch, "#"))
 
 
 # --------------------------------------------------------------------------
@@ -771,8 +973,15 @@ def process_frame(frame, params):
 
 - `frame` is the raw frame payload (`bytes`) for one frame.
 - `params` is a dict with the current value of every declared parameter,
-  keyed by the declared parameter name.
+  keyed by the declared parameter name. The element additionally injects
+  the negotiated input frame geometry: `frame_width` (int),
+  `frame_height` (int), and `frame_format` (str, e.g. `"RGBA"`), so the
+  hook never has to guess the incoming layout.
 - Return the frame bytes to emit on the output port.
+- If your processing changes the frame geometry or pixel format (resize,
+  crop, colorspace change), also update the marked `sync_out_caps`
+  section in `plugin/gst${element}.c` so downstream elements interpret
+  the emitted bytes correctly.
 
 ${parameters_section}
 ## Project layout

@@ -384,12 +384,46 @@ def request_load(model_name: str, engine_args=None) -> str:
     connection failures with backoff (deployment races recreate the backend
     under us); an HTTP error response (e.g. 409 FAILED) is authoritative and
     is not retried — the runtime reports LOADING/READY/FAILED through the
-    device model-status mechanisms.
+    device model-status mechanisms — with ONE exception: a KV-cache
+    out-of-memory failure triggers a single unload -> reload recovery
+    cycle (see below).
+
+    KV-cache OOM recovery (validated on-device, ryan-orin-nano/JP6): the
+    first load after a runtime restart can fail with "No available memory
+    for the cache blocks" because the failed attempt itself leaves its GPU
+    allocations pinned in the runtime process; an unload releases them and
+    the immediately following load succeeds. When the authoritative
+    failure reason matches the KV-cache markers, that unload -> reload
+    cycle runs exactly once; if the retry fails too, the failure is
+    authoritative (a genuinely oversized model still fails fast with the
+    sizing remediation hint). Every other HTTP error keeps the
+    single-attempt semantics.
 
     Returns a classification: ``LOAD_OK`` (HTTP 200), ``LOAD_HTTP_ERROR``
     (authoritative non-200 HTTP response received), or ``LOAD_UNREACHABLE``
     (no HTTP response ever received — every attempt died at the connection
     level or the server was never reachable)."""
+    outcome, reason = _request_load_attempt(model_name, engine_args)
+    if (
+        outcome == LOAD_HTTP_ERROR
+        and reason is not None
+        and any(marker in reason for marker in KV_CACHE_HINT_MARKERS)
+    ):
+        logging.warning(
+            "VllmLoadModel: load of '{}' hit a KV-cache out-of-memory "
+            "failure; attempting the validated unload -> reload recovery "
+            "(a failed load can leave its GPU allocations pinned in the "
+            "runtime)".format(model_name)
+        )
+        request_unload(model_name)
+        outcome, _ = _request_load_attempt(model_name, engine_args)
+    return outcome
+
+
+def _request_load_attempt(model_name: str, engine_args=None):
+    """One load-request cycle (connection-failure retries included).
+    Returns ``(classification, failure_reason)`` where ``failure_reason``
+    is the extracted reason of an authoritative HTTP failure, else None."""
     port = runtime_port()
     url = "http://{}:{}/v2/repository/models/{}/load".format(
         VLLM_RUNTIME_HOST, port, model_name
@@ -404,7 +438,7 @@ def request_load(model_name: str, engine_args=None) -> str:
                     VLLM_RUNTIME_HOST, port, model_name
                 )
             )
-            return LOAD_UNREACHABLE
+            return LOAD_UNREACHABLE, None
         logging.info(
             "VllmLoadModel: requesting load of '{}' (attempt {}/{})".format(
                 model_name, attempt, attempts
@@ -422,14 +456,15 @@ def request_load(model_name: str, engine_args=None) -> str:
                 )
                 time.sleep(delay)
                 continue
-            return LOAD_HTTP_ERROR if got_http_response else LOAD_UNREACHABLE
+            return (LOAD_HTTP_ERROR if got_http_response
+                    else LOAD_UNREACHABLE), None
         got_http_response = True
         if response.status_code == 200:
             logging.info("Model '{}' loaded successfully!".format(model_name))
-            return LOAD_OK
+            return LOAD_OK, None
         log_load_failure(model_name, response.status_code, response.text, engine_args)
-        return LOAD_HTTP_ERROR
-    return LOAD_HTTP_ERROR if got_http_response else LOAD_UNREACHABLE
+        return LOAD_HTTP_ERROR, extract_load_failure_reason(response.text)
+    return (LOAD_HTTP_ERROR if got_http_response else LOAD_UNREACHABLE), None
 
 
 def request_unload(model_name: str) -> bool:

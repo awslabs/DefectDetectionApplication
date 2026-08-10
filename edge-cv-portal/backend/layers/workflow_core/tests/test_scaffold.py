@@ -20,6 +20,7 @@ from workflow_core.scaffold import (
     build_config_path,
     c_source_path,
     element_name_for,
+    plugin_ident_for,
     render_scaffold,
     scaffold_defects,
     validate_scaffold,
@@ -215,6 +216,117 @@ class TestElementName:
         with pytest.raises(ScaffoldError) as exc_info:
             element_name_for({"typeId": "---"})
         assert exc_info.value.field == "typeId"
+
+
+class TestPluginIdent:
+    """plugin_ident_for mirrors the promoted-artifact filename-to-symbol
+    derivation (sanitize_plugin_name of displayName, then GStreamer's
+    extract_symname): a mismatch makes the loader silently reject the
+    built library (custom-node-plugin-runtime-fixes, defect 1)."""
+
+    def test_mirrors_sanitized_display_name(self):
+        # displayName 'resize image' promotes as 'resize-image.so';
+        # GStreamer derives 'resize_image' from that filename.
+        ident = plugin_ident_for(
+            {"typeId": "custom.resize_image", "displayName": "resize image"})
+        assert ident == "resize_image"
+
+    def test_strips_gstreamer_library_prefixes(self):
+        # extract_symname strips libgst/lib/gst before deriving the ident.
+        ident = plugin_ident_for(
+            {"typeId": "gstblur", "displayName": "gstblur"})
+        assert ident == "blur"
+
+    def test_falls_back_to_element_name_without_display_name(self):
+        declaration = {"typeId": "custom_blur"}
+        assert plugin_ident_for(declaration) == \
+            element_name_for(declaration)
+
+    def test_c_skeleton_plugin_define_and_meson_agree_on_ident(self):
+        # GST_PLUGIN_DEFINE token, PACKAGE, and the meson library base
+        # name must all carry the same ident so the built
+        # libgst<ident>.so AND the promoted {plugin}.so both resolve
+        # gst_plugin_<ident>_get_desc.
+        declaration = make_declaration(displayName="resize image")
+        files = render_scaffold(declaration)
+        ident = plugin_ident_for(declaration)
+        assert ident == "resize_image"
+        c_source = files[c_source_path(declaration)]
+        assert "GST_PLUGIN_DEFINE (GST_VERSION_MAJOR, GST_VERSION_MINOR,\n" \
+               "    {0},".format(ident) in c_source
+        assert '#define PACKAGE "{0}"'.format(ident) in c_source
+        meson = files[build_config_path(ARCH_X86_64)]
+        assert "shared_library('gst{0}'".format(ident) in meson
+        # the element factory name is independent of the plugin ident
+        assert 'gst_element_register (plugin, "customblur"' in c_source
+
+
+class TestRuntimeBridgeHardening:
+    """On-device verified fixes to the appsink/appsrc bridge
+    (custom-node-plugin-runtime-fixes; LocalServer v1.0.56 on
+    ryan-orin-nano/JP6)."""
+
+    def c_source(self, **overrides):
+        declaration = make_declaration(**overrides)
+        return render_scaffold(declaration)[c_source_path(declaration)]
+
+    def test_preroll_sample_is_processed(self):
+        # Without a new-preroll handler the FIRST buffer is never pushed
+        # and the whole pipeline hangs in PREROLLING until the watchdog.
+        c_source = self.c_source()
+        assert 'g_signal_connect (self->appsink, "new-preroll"' in c_source
+        assert "gst_app_sink_pull_preroll" in c_source
+
+    def test_eos_is_forwarded(self):
+        # Bounded (single-frame) runs must terminate instead of hanging.
+        c_source = self.c_source()
+        assert 'g_signal_connect (self->appsink, "eos"' in c_source
+        assert "gst_app_src_end_of_stream" in c_source
+
+    def test_output_caps_are_synced_to_appsrc(self):
+        c_source = self.c_source()
+        assert "gst_app_src_set_caps" in c_source
+
+    def test_gil_released_before_push(self):
+        # Holding the GIL across gst_app_src_push_buffer deadlocks the
+        # embedding LocalServer process.
+        c_source = self.c_source()
+        release = c_source.index("PyGILState_Release (gil);\n"
+                                 "    gst_buffer_unmap")
+        push = c_source.index("gst_app_src_push_buffer")
+        assert release < push
+
+    def test_interpreter_init_releases_gil(self):
+        # Py_InitializeEx leaves the caller holding the GIL; without
+        # PyEval_SaveThread the streaming thread deadlocks on Ensure.
+        c_source = self.c_source()
+        assert "PyEval_SaveThread" in c_source
+
+    def test_hook_import_self_locates_via_dladdr(self):
+        # The hook travels beside the .so; sys.path must gain that
+        # directory before the import, in any host process.
+        c_source = self.c_source()
+        assert "dladdr" in c_source
+        assert "PyList_Insert (sys_path, 0, dir)" in c_source
+        assert c_source.index("PyList_Insert") < c_source.index(
+            'PyImport_ImportModule ("frame_processing_hook")')
+
+    def test_appsrc_uses_time_format(self):
+        c_source = self.c_source()
+        assert 'g_object_set (self->appsrc, "format", GST_FORMAT_TIME' \
+            in c_source
+
+    def test_frame_geometry_rides_in_params(self):
+        # The negotiated caps geometry is injected so hooks never guess
+        # the incoming width/height/pixel format.
+        declaration = make_declaration()
+        files = render_scaffold(declaration)
+        c_source = files[c_source_path(declaration)]
+        for key in ("frame_width", "frame_height", "frame_format"):
+            assert 'PyDict_SetItemString (params, "{0}"'.format(key) \
+                in c_source
+            assert key in files[HOOK_FILE]
+            assert key in files[README_FILE]
 
 
 class TestValidateScaffold:

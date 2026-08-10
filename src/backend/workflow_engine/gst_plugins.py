@@ -358,13 +358,21 @@ def workflow_plugin_path(
 # ---------------------------------------------------------------------------
 
 
-def missing_factories(factories: List[str]) -> List[str]:
+def missing_factories(
+    factories: List[str],
+    scan_dirs: Optional[List[str]] = None,
+) -> List[str]:
     """The names in ``factories`` with no registered GStreamer element
     factory — i.e. names ``Gst.parse_launch`` would reject with
     ``no element "<name>"``.
 
     Called after the run's :func:`workflow_plugin_path` scan so custom
-    plugin elements are already in the registry. Contained like
+    plugin elements are already in the registry. ``scan_dirs`` names
+    additional plugin directories to scan first — the caller passes the
+    LocalServer-bundled plugin path, which ``gst_pipeline`` only adds to
+    the registry when the pipeline manager initializes (AFTER this
+    preflight on a fresh process); without the pre-scan the bundled
+    ``eml*`` elements would false-positive as missing. Contained like
     :func:`_scan_registry`: any error (including GStreamer being
     unavailable, e.g. in tests) disables the guard by reporting nothing
     missing — the pipeline parse remains the authority (Requirement 13.7).
@@ -376,6 +384,9 @@ def missing_factories(factories: List[str]) -> List[str]:
         from gi.repository import Gst
 
         Gst.init(None)
+        for directory in scan_dirs or ():
+            if directory and os.path.isdir(directory):
+                _scan_registry(directory)
         return [
             name for name in factories
             if Gst.ElementFactory.find(name) is None

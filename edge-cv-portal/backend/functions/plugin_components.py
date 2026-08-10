@@ -116,6 +116,18 @@ DEVICE_PLUGINS_ROOT = '/aws_dda/plugins'
 # The per-arch plugin metadata artifact shipped beside the signed .so
 PLUGIN_MANIFEST_FILENAME = 'plugin-manifest.json'
 
+# The Frame_Processing_Hook the scaffold's C skeleton imports at run time.
+# It MUST ship beside the installed .so: the element self-locates its own
+# shared library (dladdr) and imports the hook from that directory. A
+# scaffold-built plugin without its hook loads but fails every frame
+# (custom-node-plugin-runtime-fixes, defect 2 - verified on
+# ryan-orin-nano/JP6, LocalServer v1.0.56).
+HOOK_FILENAME = 'frame_processing_hook.py'
+
+# Where the hook lives inside the version's plugin-sources prefix (the
+# scaffold layout rendered by workflow_core.scaffold).
+HOOK_SOURCE_RELATIVE_KEY = 'plugin/' + HOOK_FILENAME
+
 # arch id -> Greengrass platform architecture. Task 10.1 extends
 # workflow_packaging.ARCH_TO_GG_PLATFORM with x86_64_nvidia; until then the
 # mapping is completed locally (established deviation - workflow_packaging.py
@@ -211,7 +223,8 @@ def platform_for(arch: str) -> Dict[str, str]:
 
 
 def build_plugin_recipe(plugin_id: str, plugin_version: int, bucket: str,
-                        arch_so_names: Dict[str, str]) -> Dict:
+                        arch_so_names: Dict[str, str],
+                        include_hook: bool = False) -> Dict:
     """
     Install-only Greengrass recipe for a Plugin_Component (16.1): one
     platform manifest per successfully built Target_Architecture (the
@@ -220,18 +233,27 @@ def build_plugin_recipe(plugin_id: str, plugin_version: int, bucket: str,
     plugin never restarts LocalServer; the LocalServer plugin loader
     discovers the installed files under /aws_dda/plugins/ at runtime.
 
-    Pure over (plugin_id, plugin_version, bucket, arch_so_names) so
-    recipe assembly is property-testable without AWS.
+    ``include_hook`` ships the Frame_Processing_Hook
+    (frame_processing_hook.py) beside the .so on every manifest - the
+    scaffold's C skeleton imports it from its own install directory at
+    run time (custom-node-plugin-runtime-fixes, defect 2).
+
+    Pure over (plugin_id, plugin_version, bucket, arch_so_names,
+    include_hook) so recipe assembly is property-testable without AWS.
     """
     manifests = []
     for arch in manifest_arch_order(arch_so_names):
         so_name = arch_so_names[arch]
         final_prefix = artifact_final_prefix(plugin_id, plugin_version, arch)
         install_dir = device_install_dir(plugin_id, plugin_version, arch)
+        filenames = [so_name, PLUGIN_MANIFEST_FILENAME]
+        if include_hook:
+            filenames.append(HOOK_FILENAME)
         install_script = (
             f"mkdir -p {install_dir} && "
-            f"cp -f {{artifacts:path}}/{so_name} "
-            f"{{artifacts:path}}/{PLUGIN_MANIFEST_FILENAME} {install_dir}/"
+            f"cp -f "
+            + " ".join(f"{{artifacts:path}}/{name}" for name in filenames)
+            + f" {install_dir}/"
         )
         manifests.append({
             'Platform': platform_for(arch),
@@ -244,13 +266,10 @@ def build_plugin_recipe(plugin_id: str, plugin_version: int, bucket: str,
             },
             'Artifacts': [
                 {
-                    'Uri': f"s3://{bucket}/{final_prefix}/{so_name}",
+                    'Uri': f"s3://{bucket}/{final_prefix}/{name}",
                     'Permission': {'Read': 'ALL'}
-                },
-                {
-                    'Uri': f"s3://{bucket}/{final_prefix}/{PLUGIN_MANIFEST_FILENAME}",
-                    'Permission': {'Read': 'ALL'}
-                },
+                }
+                for name in filenames
             ]
         })
 
@@ -317,6 +336,31 @@ def load_portal_artifact(s3_key: str, label: str) -> bytes:
         raise PackagingError(
             label,
             f"Plugin artifact could not be read from the Plugin_Library: "
+            f"{code or str(e)}")
+    return obj['Body'].read()
+
+
+def load_frame_processing_hook(item: Dict) -> Optional[bytes]:
+    """The version's Frame_Processing_Hook bytes from its plugin-sources
+    prefix, or None when the record ships no hook (prebuilt imports).
+    Read errors other than absence raise PackagingError: silently
+    packaging a scaffold-built plugin WITHOUT its hook produces a
+    component that loads but fails every frame at run time
+    (custom-node-plugin-runtime-fixes, defect 2)."""
+    source_prefix = item.get('source_s3_prefix')
+    if not source_prefix:
+        return None
+    hook_key = source_prefix + HOOK_SOURCE_RELATIVE_KEY
+    try:
+        obj = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=hook_key)
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        if code in ('NoSuchKey', '404'):
+            return None
+        raise PackagingError(
+            HOOK_FILENAME,
+            f"Frame_Processing_Hook could not be read from the plugin "
+            f"sources (s3://{PORTAL_ARTIFACTS_BUCKET}/{hook_key}): "
             f"{code or str(e)}")
     return obj['Body'].read()
 
@@ -554,6 +598,10 @@ def _package(item: Dict, plugin_id: str, version: int, usecase_id: str,
     # the Plugin_Library plus its plugin-manifest.json (16.1).
     plugin_name = item.get('name') or plugin_id
     artifacts = item.get('artifacts') or {}
+    # The Frame_Processing_Hook (arch-independent) travels beside every
+    # arch's .so: the C skeleton imports it from its own install
+    # directory at run time (custom-node-plugin-runtime-fixes, defect 2).
+    hook_bytes = load_frame_processing_hook(item)
     arch_payloads: Dict[str, Dict[str, bytes]] = {}
     arch_so_names: Dict[str, str] = {}
     for arch in built:
@@ -572,6 +620,8 @@ def _package(item: Dict, plugin_id: str, version: int, usecase_id: str,
             PLUGIN_MANIFEST_FILENAME: json.dumps(
                 manifest, sort_keys=True, indent=2).encode('utf-8'),
         }
+        if hook_bytes is not None:
+            arch_payloads[arch][HOOK_FILENAME] = hook_bytes
         arch_so_names[arch] = so_name
 
     # Use_Case account clients via the assumed cross-account role.
@@ -588,7 +638,8 @@ def _package(item: Dict, plugin_id: str, version: int, usecase_id: str,
             usecase_s3, bucket, plugin_id, version, arch_payloads)
 
         # Register only after every artifact promoted successfully.
-        recipe = build_plugin_recipe(plugin_id, version, bucket, arch_so_names)
+        recipe = build_plugin_recipe(plugin_id, version, bucket, arch_so_names,
+                                     include_hook=hook_bytes is not None)
         component_arn = register_plugin_component(
             greengrass, recipe, usecase, usecase_id, plugin_id, version)
     except PackagingError:
