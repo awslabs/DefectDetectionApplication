@@ -920,6 +920,13 @@ gst_dep = dependency('gstreamer-1.0')
 gst_app_dep = dependency('gstreamer-app-1.0')
 python_dep = dependency('python3-embed')
 
+# dladdr (the hook's sys.path self-location) lives in libdl on older
+# glibc (the JetPack 4/5 cross toolchains); on glibc >= 2.34 (JetPack 6,
+# modern x86_64) it is merged into libc and this resolves to an empty
+# dependency. required:false keeps both cases linking.
+cc = meson.get_compiler('c')
+dl_dep = cc.find_library('dl', required : false)
+
 plugins_install_dir = join_paths(get_option('libdir'), 'gstreamer-1.0')
 
 # The library base name matters: GStreamer derives the plugin loader
@@ -930,7 +937,7 @@ plugins_install_dir = join_paths(get_option('libdir'), 'gstreamer-1.0')
 # promoted .so breaks plugin loading silently.
 shared_library('gst${plugin_ident}',
   '../../plugin/gst${element}.c',
-  dependencies : [gst_dep, gst_app_dep, python_dep],
+  dependencies : [gst_dep, gst_app_dep, python_dep, dl_dep],
   install : true,
   install_dir : plugins_install_dir,
 )
