@@ -84,9 +84,13 @@ describe('successfulBuildArchs / shouldPromptRegistration (4.6)', () => {
 });
 
 describe('defaultElementFactory / initialMappings', () => {
-  it('derives the element factory from the plugin name', () => {
-    expect(defaultElementFactory('Blur Regions')).toBe('blur_regions');
-    expect(defaultElementFactory('  Edge-Detect 2 ')).toBe('edge_detect_2');
+  it('derives the element factory the scaffold registers (element_name_for over the typeId)', () => {
+    // typeId "custom.blur_regions" -> element "customblurregions": the
+    // scaffold strips every non-alphanumeric, so the underscored slug
+    // "blur_regions" would NOT match the built plugin's element and the
+    // device pipeline would fail with `no element "blur_regions"`.
+    expect(defaultElementFactory('Blur Regions')).toBe('customblurregions');
+    expect(defaultElementFactory('  Edge-Detect 2 ')).toBe('customedgedetect2');
   });
 
   it('creates one included mapping row per built architecture', () => {

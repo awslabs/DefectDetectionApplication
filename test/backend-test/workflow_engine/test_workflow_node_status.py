@@ -182,9 +182,44 @@ class TestTerminalMapOnFailure:
         collector = NodeStatusCollector(NAME_MAP)
         collector.mark_running_all()
         collector.mark_failure(None, "unattributable error")
-        collector.finalize()
+        collector.finalize(failure_detail="unattributable error")
         result = collector.to_map()
         assert all(e["status"] != STATUS_FAILURE for e in result.values())
+
+    def test_unattributed_failure_resolves_nodes_to_warning_not_success(self):
+        """A failed run whose failing element cannot be mapped (e.g. a
+        pre-parse gst_parse_error) must not finalize to an all-green map
+        (R3.6/R6.6: coloring consistent with the run outcome)."""
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.mark_running_all()
+        collector.mark_failure(None, 'gst_parse_error: no element "resize_image" (1)')
+        collector.finalize(
+            failure_detail='gst_parse_error: no element "resize_image" (1)'
+        )
+        result = collector.to_map()
+        for entry in result.values():
+            assert entry["status"] == STATUS_WARNING
+            assert 'no element "resize_image"' in entry["detail"]
+
+    def test_attributed_failure_keeps_best_effort_success_for_others(self):
+        """When the failing node IS identified, the pre-existing best-effort
+        resolution of the other nodes to success is unchanged (R3.6)."""
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.mark_running_all()
+        collector.mark_failure("n2", "emltriton failed")
+        collector.finalize(failure_detail="emltriton failed")
+        result = collector.to_map()
+        assert result["n2"]["status"] == STATUS_FAILURE
+        assert result["n1"]["status"] == STATUS_SUCCESS
+
+    def test_unattributed_failure_does_not_downgrade_terminal_states(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.sink("videotestsrc0", "warning", "flaky source")
+        collector.finalize(failure_detail="unattributable error")
+        result = collector.to_map()
+        # The pre-existing warning and its own detail are retained.
+        assert result["n1"]["status"] == STATUS_WARNING
+        assert result["n1"]["detail"] == "flaky source"
 
     def test_to_json_round_trips_the_map(self):
         collector = NodeStatusCollector(NAME_MAP)
@@ -372,3 +407,103 @@ def test_executor_attributes_failure_to_the_failing_node(
     assert status["n1"]["status"] == STATUS_SUCCESS
     for entry in status.values():
         assert entry["status"] in TERMINAL_STATES
+
+
+def test_executor_never_persists_all_success_for_an_unattributable_failure(
+    tmp_path, session_factory
+):
+    """A pre-parse pipeline syntax error (e.g. a custom node whose declared
+    factory does not exist in the registry) names no known element, so no
+    node can be marked failure — but the terminal map must still be
+    consistent with the failed run outcome (R3.6/R6.6), not all-green."""
+    artifact_path = write_artifact_set(tmp_path, compiled=COMPILED_DOC)
+    execution_id = _seed(session_factory, artifact_path)
+    manager = _RecordingManager(
+        error=RuntimeError('gst_parse_error: no element "resize_image" (1)')
+    )
+    capture_root = str(tmp_path / "captures")
+
+    with patch.object(pipeline_executor, "_WORKFLOW_CAPTURE_ROOT", capture_root):
+        WorkflowExecutor(
+            session_factory=session_factory,
+            pipeline_manager_factory=lambda: manager,
+        ).execute(execution_id)
+
+    row = _get(session_factory)
+    assert row.status == EXECUTION_STATUS_FAILED
+    assert row.failing_node_id is None
+    status = json.loads(row.node_status_json)
+    assert set(status) == {"n1", "n2"}
+    for entry in status.values():
+        assert entry["status"] in TERMINAL_STATES
+        # Not all-green: every unresolved node carries the run error as a
+        # warning instead of a spurious success.
+        assert entry["status"] == STATUS_WARNING
+        assert 'no element "resize_image"' in entry["detail"]
+
+
+def test_preflight_fails_the_run_naming_the_node_and_the_plugin_elements(
+    tmp_path, session_factory
+):
+    """The pipeline-factory preflight (MissingPipelineElementError): a
+    declared factory absent from the GStreamer registry after the plugin
+    scan fails the run BEFORE the parse, with the originating node
+    identified and the plugin's actual element names in the error —
+    instead of an unattributable `no element "..."` gst_parse_error."""
+    doc = json.loads(json.dumps(COMPILED_DOC))
+    # The inference node's factory is a custom-node declaration mismatch:
+    # the built plugin registers "customresizeimage".
+    doc["segments"][0]["elements"][1] = {
+        "nodeId": "n2", "factory": "resize_image", "args": {},
+    }
+    artifact_path = write_artifact_set(tmp_path, compiled=doc)
+    execution_id = _seed(session_factory, artifact_path)
+    manager = _RecordingManager(tag_values={"is_anomalous": False})
+    capture_root = str(tmp_path / "captures")
+
+    with patch.object(pipeline_executor, "_WORKFLOW_CAPTURE_ROOT", capture_root), \
+            patch.object(
+                gst_plugins, "missing_factories",
+                side_effect=lambda factories: [
+                    f for f in factories if f == "resize_image"
+                ],
+            ), \
+            patch.object(
+                gst_plugins, "provided_elements",
+                return_value=["customresizeimage"],
+            ):
+        WorkflowExecutor(
+            session_factory=session_factory,
+            pipeline_manager_factory=lambda: manager,
+        ).execute(execution_id)
+
+    # The pipeline was never parsed/run.
+    assert manager.status_sink == "unset"
+    row = _get(session_factory)
+    assert row.status == EXECUTION_STATUS_FAILED
+    # The failure is attributed to the declaring node...
+    assert row.failing_node_id == "n2"
+    # ...and the error names both the missing factory and what the
+    # delivered plugin actually registers.
+    assert 'resize_image' in row.error
+    assert "customresizeimage" in row.error
+    status = json.loads(row.node_status_json)
+    assert status["n2"]["status"] == STATUS_FAILURE
+    assert status["n1"]["status"] == STATUS_SUCCESS
+
+
+def test_preflight_with_nothing_missing_is_a_noop(tmp_path, session_factory):
+    """With every factory registered (or GStreamer unavailable, as in
+    this environment) the preflight changes nothing about a clean run."""
+    artifact_path = write_artifact_set(tmp_path, compiled=COMPILED_DOC)
+    execution_id = _seed(session_factory, artifact_path)
+    manager = _RecordingManager(tag_values={"is_anomalous": False})
+    capture_root = str(tmp_path / "captures")
+
+    with patch.object(pipeline_executor, "_WORKFLOW_CAPTURE_ROOT", capture_root):
+        WorkflowExecutor(
+            session_factory=session_factory,
+            pipeline_manager_factory=lambda: manager,
+        ).execute(execution_id)
+
+    assert _get(session_factory).status == EXECUTION_STATUS_COMPLETED

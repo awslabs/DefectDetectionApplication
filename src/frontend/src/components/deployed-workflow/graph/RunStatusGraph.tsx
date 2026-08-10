@@ -166,11 +166,19 @@ export default function RunStatusGraph(): JSX.Element {
 
   const selectedVisual = visuals.find((visual) => visual.id === selectedNodeId);
 
+  // The run-level outcome must never read "finished" (green) for a failed
+  // run: a failure that cannot be attributed to a node (e.g. a pre-parse
+  // pipeline syntax error) has no red node to carry it, so the header and
+  // the run error are the only truthful failure surface (R7.6).
+  const failed = executionQuery.data?.status === "failed";
   const runIndicator = active ? (
     <StatusIndicator type="in-progress">Run in progress</StatusIndicator>
+  ) : failed ? (
+    <StatusIndicator type="error">Run failed</StatusIndicator>
   ) : (
     <StatusIndicator type="success">Run finished</StatusIndicator>
   );
+  const runError = !active && failed ? executionQuery.data?.error : null;
 
   return (
     <ContentLayout
@@ -186,6 +194,11 @@ export default function RunStatusGraph(): JSX.Element {
         >
           <SpaceBetween size="m">
             {runIndicator}
+            {runError && (
+              <Alert data-testid="run-error" type="error" header="Run failed">
+                {runError}
+              </Alert>
+            )}
             <div
               data-testid="run-status-graph-canvas"
               style={{
