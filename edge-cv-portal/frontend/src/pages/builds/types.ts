@@ -9,7 +9,7 @@
  */
 
 /** The four supported Build_Targets (Req 1.1). */
-export type BuildTarget = 'JP5' | 'JP6' | 'AMD64' | 'AMD64_NVIDIA';
+export type BuildTarget = 'JP5' | 'JP6' | 'JP7' | 'AMD64' | 'AMD64_NVIDIA';
 
 /** Build_Job execution modes (Req 2.1). */
 export type BuildExecutionMode = 'ephemeral' | 'dedicated';

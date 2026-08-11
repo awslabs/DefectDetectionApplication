@@ -65,10 +65,11 @@ const MAX_HISTORY_PAGES = 25;
 /** Client-side table page size. */
 const TABLE_PAGE_SIZE = 15;
 
-/** The four supported Build_Targets in display order (Req 1.1). */
+/** The five supported Build_Targets in display order (Req 1.1; JP7 added by jetpack7-support). */
 const TARGET_OPTIONS: MultiselectProps.Option[] = [
   { value: 'JP5', label: 'JP5', description: 'Jetson JetPack 5 (arm64)' },
   { value: 'JP6', label: 'JP6', description: 'Jetson JetPack 6 (arm64)' },
+  { value: 'JP7', label: 'JP7', description: 'Jetson JetPack 7 / Thor (arm64)' },
   { value: 'AMD64', label: 'AMD64', description: 'x86_64 (CPU)' },
   {
     value: 'AMD64_NVIDIA',
