@@ -126,6 +126,11 @@ describe('buildRegistrationDeclaration (8.1)', () => {
         arch: 'x86_64',
         elementChain: [
           { factory: 'blur_regions', argsTemplate: { radius: '{radius}' } },
+          // VideoFrames-output nodes gain a trailing videoconvert: the
+          // scaffold bridge emits fixed caps that strict downstream
+          // encoders (capture's jpegenc) reject without a converter
+          // (custom-node-plugin-runtime-fixes, verified on JP6).
+          { factory: 'videoconvert', argsTemplate: {} },
         ],
         pluginDependencies: [],
       },
@@ -304,6 +309,9 @@ describe('formFromDeclaration (update mode)', () => {
         arch: 'x86_64',
         elementChain: [
           { factory: 'rtspsrc', argsTemplate: { latency: '{latency}' } },
+          // Trailing videoconvert appended on save for VideoFrames
+          // outputs (custom-node-plugin-runtime-fixes).
+          { factory: 'videoconvert', argsTemplate: {} },
         ],
         pluginDependencies: [],
       },
