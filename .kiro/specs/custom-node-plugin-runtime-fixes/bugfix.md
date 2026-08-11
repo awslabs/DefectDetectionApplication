@@ -230,6 +230,36 @@ dimension).
     exercises the consuming `verify_custom_plugin_artifact` (Req 10.4)
     end of the same invariant.
 
+### 8. Fixed output caps vs strict downstream encoders (not-negotiated)
+
+The bridge's internal appsrc emits FIXED caps (the negotiated input
+format — RGBA from a Bayer camera chain). Downstream chains commonly
+start with strict encoders: the capture node's `jpegenc` accepts no
+alpha formats, so the tee branch rejected the caps and the run failed
+with `not-negotiated (-4)` at the node's internal appsrc (execution
+`9abbc457...`, workflow `0c7fe31a...:5`).
+
+Fix: registrations for VideoFrames-output custom nodes append a
+trailing `videoconvert` to the elementChain — applied to the
+resize_image registration (v4) and made the wizard default for future
+nodes (`registration.ts mappingFromForm`).
+
+### 9. Property defaults masked negotiated-format channel detection
+
+The v2 hook read the `channels` parameter before the injected
+`frame_format`; the GObject property always carries its declared
+default (3) even when the user never set it, so an RGBA (4-channel)
+frame failed the size sanity check and passed through UNRESIZED while
+the output caps claimed the target geometry. Fixed in plugin v3: the
+negotiated `frame_format` is authoritative, then size derivation, and
+the declared parameter is only a fallback for caps without a format.
+The hook template's docs already direct future hooks at
+`frame_format`; v3 encodes the priority correctly for this node.
+
+Related registration fix: earlier registrations carried an empty
+`argsTemplate`, so designer parameter values never reached the element;
+registration v4 wires `target-width`/`target-height`/`channels`.
+
 ## Related hardening (same investigation, committed earlier)
 
 - Node-designer wizard registered a factory name that could never match

@@ -206,7 +206,10 @@ export function formFromDeclaration(
   };
 }
 
-function mappingFromForm(mapping: MappingForm): MappingDeclaration {
+function mappingFromForm(
+  mapping: MappingForm,
+  emitsVideoFrames: boolean
+): MappingDeclaration {
   const argsTemplate: Record<string, string> = {};
   for (const row of mapping.properties) {
     const property = row.property.trim();
@@ -214,9 +217,21 @@ function mappingFromForm(mapping: MappingForm): MappingDeclaration {
       argsTemplate[property] = row.value;
     }
   }
+  const elementChain = [{ factory: mapping.factory.trim(), argsTemplate }];
+  // A scaffold-built element's appsink/appsrc bridge emits FIXED output
+  // caps (the negotiated input format, e.g. RGBA from a Bayer camera
+  // chain), and downstream chains commonly start with strict encoders
+  // (the capture node's jpegenc accepts no alpha formats) — without a
+  // converter the pipeline fails with `not-negotiated` at the node's
+  // internal appsrc (verified on ryan-orin-nano/JP6, custom-node-
+  // plugin-runtime-fixes). Appending videoconvert lets the output
+  // negotiate with any raw-video consumer.
+  if (emitsVideoFrames) {
+    elementChain.push({ factory: 'videoconvert', argsTemplate: {} });
+  }
   return {
     arch: mapping.arch,
-    elementChain: [{ factory: mapping.factory.trim(), argsTemplate }],
+    elementChain,
     pluginDependencies: [],
   };
 }
@@ -248,7 +263,14 @@ export function buildRegistrationDeclaration(
     inputs: base.inputs,
     outputs: base.outputs,
     parameters: base.parameters,
-    mappings: form.mappings.filter((m) => m.include).map(mappingFromForm),
+    mappings: form.mappings
+      .filter((m) => m.include)
+      .map((m) =>
+        mappingFromForm(
+          m,
+          form.outputs.some((port) => port.portType === 'VideoFrames')
+        )
+      ),
     hardwareDependent: form.hardwareDependent,
   };
 }
