@@ -33,6 +33,7 @@ const FIXED_ARCHS = [
   'arm64_jp4',
   'arm64_jp5',
   'arm64_jp6',
+  'arm64_jp7',
 ];
 const archArb = fc.constantFrom(...FIXED_ARCHS, 'arm64', 'aarch64', 'amd64', '');
 const supportedArb = fc.uniqueArray(archArb, { maxLength: 5 });
@@ -175,6 +176,11 @@ describe('archCompatibility twin', () => {
       expect(inferComponentTargetArchs('aws.edgeml.dda.LocalServer.arm64JP6'))
         .toEqual(['arm64_jp6']);
       expect(inferComponentTargetArchs('jp4mic730ai')).toEqual(['arm64_jp4']);
+      // jetpack7-support Req 7.3: the JP7 token requires arm64_jp7.
+      expect(inferComponentTargetArchs('aws.edgeml.dda.LocalServer.arm64JP7'))
+        .toEqual(['arm64_jp7']);
+      expect(inferComponentTargetArchs('model-x-jetson-thor-jp7'))
+        .toEqual(['arm64_jp7']);
     });
 
     it('returns [] for names with no JetPack token (kept, not hidden)', () => {
@@ -193,8 +199,21 @@ describe('archCompatibility twin', () => {
       expect(isArchCompatible('arm64_jp5', inferred)).toBe(true);
     });
 
+    it('a jp7 build only matches a jp7 device by exact name (Req 7.3)', () => {
+      const inferred = inferComponentTargetArchs(
+        'aws.edgeml.dda.LocalServer.arm64JP7'
+      );
+      expect(isArchCompatible('arm64_jp7', inferred)).toBe(true);
+      expect(isArchCompatible('arm64_jp5', inferred)).toBe(false);
+      expect(isArchCompatible('arm64_jp6', inferred)).toBe(false);
+      // And jp5/jp6 builds are incompatible with a jp7 device.
+      expect(
+        isArchCompatible('arm64_jp7', inferComponentTargetArchs('model-x-jp6'))
+      ).toBe(false);
+    });
+
     it('only ever returns fixed-set arm64_jpN values', () => {
-      const majorArb = fc.constantFrom('4', '5', '6');
+      const majorArb = fc.constantFrom('4', '5', '6', '7');
       const prefixArb = fc.constantFrom('jp', 'JP', 'jetpack', 'JetPack');
       fc.assert(
         fc.property(

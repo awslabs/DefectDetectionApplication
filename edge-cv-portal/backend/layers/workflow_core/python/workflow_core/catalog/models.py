@@ -55,6 +55,7 @@ ARCH_X86_64_NVIDIA = "x86_64_nvidia"
 ARCH_ARM64_JP4 = "arm64_jp4"
 ARCH_ARM64_JP5 = "arm64_jp5"
 ARCH_ARM64_JP6 = "arm64_jp6"
+ARCH_ARM64_JP7 = "arm64_jp7"
 ARCH_SIM = "sim"
 
 #: All architectures a workflow can be compiled for. ``sim`` is the
@@ -76,6 +77,7 @@ DEVICE_ARCHITECTURES = (
     ARCH_ARM64_JP4,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
+    ARCH_ARM64_JP7,
 )
 
 #: Feature flag for vLLM support on JetPack 5 devices. No viable vLLM

@@ -40,21 +40,29 @@ import pytest
 from _docker_preservation_support import (
     BACKEND_JP5_REL,
     BACKEND_JP6_REL,
+    BACKEND_JP7_REL,
     EDGEMLSDK_JP5_REL,
     EDGEMLSDK_JP6_REL,
+    EDGEMLSDK_JP7_REL,
     IN_SCOPE_FILES,
     capture_or_assert_text,
     mask_dockerfile,
     read_repo_file,
 )
 
-# baseline-name key per in-scope file (dir-prefixed to disambiguate the two
-# Dockerfile.jp5 / .jp6 basenames across backend/ and edgemlsdk/).
+# baseline-name key per in-scope file (dir-prefixed to disambiguate the
+# per-JetPack Dockerfile basenames across backend/ and edgemlsdk/). The JP7
+# pair was registered by the jetpack7-support spec (Req 9.3); each file is an
+# independent parametrized check, so the JP7 checks pass regardless of any
+# unrelated jp5/jp6 baseline state (Req 9.5) and fail identifying the file
+# when its content drifts from the captured baseline (Req 9.6).
 _GOLDEN_NAME = {
     BACKEND_JP5_REL: "docker_baseline_backend_Dockerfile.jp5_masked.txt",
     EDGEMLSDK_JP5_REL: "docker_baseline_edgemlsdk_Dockerfile.jp5_masked.txt",
     BACKEND_JP6_REL: "docker_baseline_backend_Dockerfile.jp6_masked.txt",
     EDGEMLSDK_JP6_REL: "docker_baseline_edgemlsdk_Dockerfile.jp6_masked.txt",
+    BACKEND_JP7_REL: "docker_baseline_backend_Dockerfile.jp7_masked.txt",
+    EDGEMLSDK_JP7_REL: "docker_baseline_edgemlsdk_Dockerfile.jp7_masked.txt",
 }
 
 

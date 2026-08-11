@@ -111,6 +111,26 @@
         ]
       },
       {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
         "arch": "sim",
         "element_chain": [
           {
@@ -259,6 +279,17 @@
       },
       {
         "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "bedrock_inference",
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "jpeg",
+          "multifile",
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
         "element_chain": [],
         "executor_binding": "bedrock_inference",
         "plugin_dependencies": [
@@ -1568,6 +1599,26 @@
         ]
       },
       {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
         "arch": "sim",
         "element_chain": [
           {
@@ -1838,6 +1889,12 @@
         "plugin_dependencies": []
       },
       {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "digital_input",
+        "plugin_dependencies": []
+      },
+      {
         "arch": "sim",
         "element_chain": [
           {
@@ -1991,6 +2048,22 @@
       },
       {
         "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "config": "{dio_config_json}",
+              "script-path": "{dio_script_path}"
+            },
+            "factory": "emoutputevent"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "emoutputevent"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
         "element_chain": [
           {
             "args_template": {
@@ -2647,6 +2720,26 @@
         ]
       },
       {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "device": "{device}"
+            },
+            "factory": "v4l2src"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "video4linux2",
+          "videoconvertscale"
+        ]
+      },
+      {
         "arch": "sim",
         "element_chain": [
           {
@@ -2929,6 +3022,12 @@
         "plugin_dependencies": []
       },
       {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
         "arch": "sim",
         "element_chain": [],
         "executor_binding": "recording_modbus_write",
@@ -3158,6 +3257,30 @@
       },
       {
         "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
+            "args_template": {
+              "model": "{modelName}",
+              "model-repo": "{triton_model_repo}",
+              "server-path": "{triton_server_path}"
+            },
+            "factory": "emltriton"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emltriton"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
         "element_chain": [
           {
             "args_template": {
@@ -3486,6 +3609,15 @@
         ]
       },
       {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
         "arch": "sim",
         "element_chain": [
           {
@@ -3779,6 +3911,14 @@
       },
       {
         "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:opcua"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
         "element_chain": [],
         "executor_binding": "opcua_subscribe",
         "plugin_dependencies": [
@@ -4103,6 +4243,14 @@
       },
       {
         "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "opcua_write",
+        "plugin_dependencies": [
+          "python:opcua"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
         "element_chain": [],
         "executor_binding": "opcua_write",
         "plugin_dependencies": [

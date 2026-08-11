@@ -79,7 +79,7 @@ DEVICES_TABLE = os.environ.get("DEVICES_TABLE")
 # devices.py TARGET_ARCHITECTURES. A reported value outside this fixed set is
 # ignored and never written (device-arch-compatibility Req 2.2, 2.3).
 TARGET_ARCHITECTURES = ("x86_64", "x86_64_nvidia",
-                        "arm64_jp4", "arm64_jp5", "arm64_jp6")
+                        "arm64_jp4", "arm64_jp5", "arm64_jp6", "arm64_jp7")
 
 # Portal artifacts bucket + the deploy-time key of the bootstrap script.
 PORTAL_ARTIFACTS_BUCKET = os.environ.get("PORTAL_ARTIFACTS_BUCKET")

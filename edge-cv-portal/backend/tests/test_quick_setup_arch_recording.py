@@ -50,7 +50,7 @@ INVALID_TOKEN_ERROR_CODE = "invalid_token"
 
 # The fixed set the write gate accepts — identical to devices.py / quick_setup.py.
 TARGET_ARCHITECTURES = ("x86_64", "x86_64_nvidia",
-                        "arm64_jp4", "arm64_jp5", "arm64_jp6")
+                        "arm64_jp4", "arm64_jp5", "arm64_jp6", "arm64_jp7")
 
 REPORTABLE_FROM = ("in_progress", "failed")
 
@@ -246,7 +246,7 @@ def test_completed_invalid_arch_no_write_still_completed(qs_stack):
     device_name = seeded["device_name"]
 
     resp = _report(qs, seeded["registration_id"], "s3cr3t",
-                   arch="arm64_jp7")  # not in the fixed set
+                   arch="arm64_jp8")  # not in the fixed set
     assert resp["statusCode"] == 200, resp
     assert json.loads(resp["body"])["status"] == "completed"
 
@@ -325,7 +325,7 @@ def test_unauthenticated_report_no_write(qs_stack):
 # and arbitrary text.
 arch_values = st.one_of(
     st.sampled_from(TARGET_ARCHITECTURES),
-    st.sampled_from(["arm64_jp7", "x86", "X86_64", "arm64", "aarch64", ""]),
+    st.sampled_from(["arm64_jp8", "x86", "X86_64", "arm64", "aarch64", ""]),
     st.text(max_size=24),
     st.none(),
 )

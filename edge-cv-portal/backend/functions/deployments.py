@@ -2336,6 +2336,7 @@ def local_server_component_arch(component_name):
 
     LocalServer components are named ``aws.edgeml.dda.LocalServer.<suffix>``
     where the suffix identifies the variant lineage:
+    ``arm64JP7`` -> ``arm64_jp7``,
     ``arm64JP6`` -> ``arm64_jp6``, ``arm64JP5`` -> ``arm64_jp5``,
     ``arm64JP4`` -> ``arm64_jp4`` (explicit JetPack 4), and the legacy
     ``arm64``/``aarch64`` -> ``arm64_jp4`` (the bare pre-rename JetPack 4
@@ -2348,8 +2349,10 @@ def local_server_component_arch(component_name):
         return None
     suffix = component_name[len(LOCAL_SERVER_COMPONENT_PREFIX):].lstrip('.').lower()
     # Match the longer JetPack-tagged tokens BEFORE the bare ``arm64`` prefix:
-    # "arm64jp4"/"arm64jp5"/"arm64jp6" all start with "arm64", so an explicit
-    # arm64JP4 must not be misclassified as the legacy bare arm64.
+    # "arm64jp4"/"arm64jp5"/"arm64jp6"/"arm64jp7" all start with "arm64", so
+    # an explicit arm64JP4 must not be misclassified as the legacy bare arm64.
+    if 'jp7' in suffix:
+        return 'arm64_jp7'
     if 'jp6' in suffix:
         return 'arm64_jp6'
     if 'jp5' in suffix:

@@ -75,10 +75,17 @@ def _is_disk_free(text: str) -> bool:
     """Independent (non-regex) oracle: True iff the text carries no
     disk-exhaustion evidence. Deliberately conservative — it excludes
     even embedded 'enospc' substrings so the negative direction never
-    depends on the implementation's own word-boundary subtleties."""
+    depends on the implementation's own word-boundary subtleties.
+
+    Also excludes the dispatch preflight failure marker: filler text
+    carrying ``DDA_PREFLIGHT_FAILED`` would legitimately classify as
+    COMMAND_PREFLIGHT_FAILED (that row precedes the disk row at the
+    same authority), which is a different classification question than
+    this property tests."""
     lower = text.lower()
     return ("enospc" not in lower
-            and "no space left on device" not in lower)
+            and "no space left on device" not in lower
+            and br.PREFLIGHT_FAILURE_MARKER.lower() not in lower)
 
 
 #: Arbitrary build-output-like text guaranteed to be disk-free.

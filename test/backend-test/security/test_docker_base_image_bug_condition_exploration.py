@@ -175,30 +175,35 @@ def test_docker_audit_returns_no_disallowed_hits():
 
 
 def test_run_audit_non_empty():
-    """The RAW ``run_audit()`` enumeration is NON-EMPTY and enumerates the six
-    in-scope ``FROM``s (D1-D5 plus the Dockerfile.jp6 TensorRT 8 provider stage)
+    """The RAW ``run_audit()`` enumeration is NON-EMPTY and enumerates the eight
+    in-scope ``FROM``s (D1-D5, the Dockerfile.jp6 TensorRT 8 provider stage, and
+    the two JP7 Dockerfiles added compliant-from-creation by jetpack7-support)
     while excluding the vendored duplicate. This is the enumeration anchor and
     stays green before and after the fix."""
     all_hits = audit.run_audit()
     assert all_hits, "expected a non-empty raw enumeration of in-scope FROM lines"
 
-    # Six in-scope FROMs: D1, D2, D3 (cuda114), D4 (final), D5, and the
+    # Eight in-scope FROMs: D1, D2, D3 (cuda114), D4 (final), D5, the
     # Dockerfile.jp6 ``trt8`` TensorRT 8 provider stage added for the Neo/DLR
-    # model runtime (device-arch-compatibility: libnvinfer.so.8).
-    assert len(all_hits) == 6, (
-        f"expected 6 in-scope FROM lines (D1-D5 + jp6 trt8 stage), got {len(all_hits)}:\n"
+    # model runtime (device-arch-compatibility: libnvinfer.so.8), and the two
+    # JP7 Dockerfile FROMs (jetpack7-support, compliant from creation).
+    assert len(all_hits) == 8, (
+        f"expected 8 in-scope FROM lines (D1-D5 + jp6 trt8 stage + 2 JP7), "
+        f"got {len(all_hits)}:\n"
         + "\n".join(
             f"  {os.path.relpath(h.path, REPO_ROOT)}:{h.lineno}: {h.text.strip()}"
             for h in all_hits
         )
     )
 
-    # Each of the four in-scope files is represented; jp6 backend carries three
+    # Each of the six in-scope files is represented; jp6 backend carries three
     # (cuda114 provider, trt8 provider, final runtime).
     assert len(audit.hits_for(audit.BACKEND_JP5_REL, all_hits)) == 1
     assert len(audit.hits_for(audit.EDGEMLSDK_JP5_REL, all_hits)) == 1
     assert len(audit.hits_for(audit.BACKEND_JP6_REL, all_hits)) == 3
     assert len(audit.hits_for(audit.EDGEMLSDK_JP6_REL, all_hits)) == 1
+    assert len(audit.hits_for(audit.BACKEND_JP7_REL, all_hits)) == 1
+    assert len(audit.hits_for(audit.EDGEMLSDK_JP7_REL, all_hits)) == 1
 
     # The vendored edgemlsdk/edgemlsdk/... duplicate is never enumerated.
     vendored = [h for h in all_hits if audit.VENDORED_DUP_SUBSTRING in h.path]

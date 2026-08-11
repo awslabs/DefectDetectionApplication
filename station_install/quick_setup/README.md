@@ -71,7 +71,7 @@ No action is required to enable this for same-account portals beyond deploying
 
 On a successful run, `run.sh` determines the Station's DDA **Target_Architecture**
 via `detect_arch.sh` (`detect_target_architecture`) — one of
-`x86_64`, `x86_64_nvidia`, `arm64_jp4`, `arm64_jp5`, or `arm64_jp6`, or nothing
+`x86_64`, `x86_64_nvidia`, `arm64_jp4`, `arm64_jp5`, `arm64_jp6`, or `arm64_jp7`, or nothing
 when it cannot be resolved. Detection is read-only: on Jetson hosts the JetPack
 major is read from the L4T release (`/etc/nv_tegra_release`, falling back to the
 `nvidia-l4t-core` package version), which distinguishes JetPack 4/5/6 where the

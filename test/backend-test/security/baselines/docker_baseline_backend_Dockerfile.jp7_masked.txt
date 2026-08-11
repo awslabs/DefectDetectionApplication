@@ -1,0 +1,376 @@
+# ── JP7 base image selection (jetpack7-support, Requirements 2.1, 2.2, 2.5) ─
+# CHECKED-AND-CHOSEN RATIONALE: NVIDIA NGC was re-checked at implementation
+# time (registry tag list for nvcr.io/nvidia/l4t-jetpack): the newest published
+# tag is r36.4.0 — there is NO l4t-jetpack tag for Jetson Linux r38.x, so the
+# Requirement 2.5 preferred option does not exist and the Requirement 2.2
+# fallback applies: a nvcr.io/nvidia/cuda CUDA 13.0.x Ubuntu 24.04 arm64 image,
+# the NVIDIA-developer-forum-recommended base for Jetson Thor (r38.x, CUDA 13,
+# SBSA-aligned aarch64) containers.
+#   Registry path : nvcr.io/nvidia/cuda
+#   Tag           : 13.0.2-devel-ubuntu24.04
+#   Digest        : sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6
+# The digest is the multi-arch manifest-list digest (linux/arm64 is published
+# under it) and is character-identical to the digest in the FROM reference
+# below. Unlike l4t-jetpack bases, this image bundles only the CUDA 13.0
+# toolkit — NOT cuDNN or TensorRT — so this Dockerfile installs the cuDNN 9.x
+# and TensorRT 10.x dev packages itself at EXACT pinned versions from the
+# NVIDIA CUDA apt repository already configured in the base image
+# (Requirement 1.3), then verifies the resulting versions in-build
+# (Requirement 2.4):
+#   CUDA     : 13.0 (bundled in base, verified via nvcc)
+#   cuDNN    : 9.14.0  (apt pin 9.14.0.64-1,           verified via cudnn_version.h)
+#   TensorRT : 10.14.1 (apt pin 10.14.1.48-1+cuda13.0, verified via NvInferVersion.h
+#              — the newest TensorRT 10.x line built against cuda13.0, matching
+#              the base's CUDA 13.0.2)
+# Interpreter: CPython 3.11 from the deadsnakes PPA — deadsnakes publishes
+# python3.11 binaries for noble/arm64 (verified against the PPA's
+# noble/binary-arm64 package index at implementation time), so the JP5-style
+# from-source CPython fallback documented in the design is NOT needed.
+ARG OS
+ARG PLATFORM
+ARG PYTHON_VERSION
+# No cuda114/trt8 provider stages (unlike Dockerfile.jp6): the Neo/DLR model
+# runtime's r35-era libdlr.so needs L4T driver libs that do not exist on Thor,
+# so DLR-only models are not supported on JP7 (a documented limitation —
+# engines are imported lazily per-runner, so this degrades per-model, not at
+# startup). Single build stage.
+# Re-declare after FROM so the build arg is available in the build stage.
+ARG PYTHON_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Disable py3compile during apt installs. On the l4t-jetpack bases (jp5/jp6)
+# this prevents segfaults; on this non-l4t base it is a harmless no-op kept to
+# align the layer structure with Dockerfile.jp5/Dockerfile.jp6.
+RUN if [ -f /usr/bin/py3compile ]; then mv /usr/bin/py3compile /usr/bin/py3compile.bak && \
+    echo '#!/bin/sh' > /usr/bin/py3compile && chmod +x /usr/bin/py3compile; fi && \
+    if [ -f /usr/bin/py3clean ]; then mv /usr/bin/py3clean /usr/bin/py3clean.bak && \
+    echo '#!/bin/sh' > /usr/bin/py3clean && chmod +x /usr/bin/py3clean; fi
+
+# ── GPU libraries: cuDNN 9.x + TensorRT 10.x dev, EXACT pins ────────────────
+# (Requirements 1.3, 2.4) The base image bundles the CUDA 13.0 toolkit but not
+# cuDNN/TensorRT; install both at exact pinned versions (no floating or range
+# specifiers) from the NVIDIA CUDA apt repository the base image ships
+# pre-configured (/etc/apt/sources.list.d/cuda*, ubuntu2404/sbsa). The
+# tensorrt-dev metapackage pins its whole dependency closure (libnvinfer-dev,
+# libnvinfer10, plugin/parser/headers packages, …) to the same exact version
+# via `=` Depends, so every TensorRT package installed here is exactly
+# ${TENSORRT_PKG_VERSION}.
+ARG CUDNN_PKG_VERSION=9.14.0.64-1
+ARG TENSORRT_PKG_VERSION=10.14.1.48-1+cuda13.0
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libcudnn9-cuda-13=${CUDNN_PKG_VERSION} \
+    libcudnn9-dev-cuda-13=${CUDNN_PKG_VERSION} \
+    libcudnn9-headers-cuda-13=${CUDNN_PKG_VERSION} \
+    tensorrt-dev=${TENSORRT_PKG_VERSION}
+
+# ── Version verification layer (Requirement 2.4) ────────────────────────────
+# Compare the CUDA / cuDNN / TensorRT versions actually present in the image
+# against the ARG-declared pins; fail the build naming the mismatched
+# component with the expected and actual values. The header locations are the
+# ubuntu2404/sbsa arm64 multiarch paths (verified against the pinned .debs),
+# with the non-multiarch /usr/include fallback kept for robustness.
+ARG CUDA_VERSION_PIN=13.0
+ARG CUDNN_VERSION_PIN=9.14.0
+ARG TENSORRT_VERSION_PIN=10.14.1
+RUN set -e; \
+    NVCC_VER=$(nvcc --version | sed -n 's/^.*release \([0-9][0-9.]*\),.*$/\1/p'); \
+    if [ "$NVCC_VER" != "${CUDA_VERSION_PIN}" ]; then \
+        echo "ERROR: CUDA version mismatch: expected ${CUDA_VERSION_PIN} got ${NVCC_VER}"; exit 1; \
+    fi; \
+    CUDNN_H=/usr/include/aarch64-linux-gnu/cudnn_version.h; \
+    [ -f "$CUDNN_H" ] || CUDNN_H=/usr/include/cudnn_version.h; \
+    CUDNN_VER=$(awk '$1=="#define" && $2=="CUDNN_MAJOR"{ma=$3} $1=="#define" && $2=="CUDNN_MINOR"{mi=$3} $1=="#define" && $2=="CUDNN_PATCHLEVEL"{pa=$3} END{print ma"."mi"."pa}' "$CUDNN_H"); \
+    if [ "$CUDNN_VER" != "${CUDNN_VERSION_PIN}" ]; then \
+        echo "ERROR: cuDNN version mismatch: expected ${CUDNN_VERSION_PIN} got ${CUDNN_VER}"; exit 1; \
+    fi; \
+    TRT_H=/usr/include/aarch64-linux-gnu/NvInferVersion.h; \
+    [ -f "$TRT_H" ] || TRT_H=/usr/include/NvInferVersion.h; \
+    TRT_VER=$(awk '$1=="#define" && $2=="TRT_MAJOR_ENTERPRISE"{ma=$3} $1=="#define" && $2=="TRT_MINOR_ENTERPRISE"{mi=$3} $1=="#define" && $2=="TRT_PATCH_ENTERPRISE"{pa=$3} END{print ma"."mi"."pa}' "$TRT_H"); \
+    if [ "$TRT_VER" = ".." ]; then \
+        TRT_VER=$(awk '$1=="#define" && $2=="NV_TENSORRT_MAJOR" && $3 ~ /^[0-9]+$/{ma=$3} $1=="#define" && $2=="NV_TENSORRT_MINOR" && $3 ~ /^[0-9]+$/{mi=$3} $1=="#define" && $2=="NV_TENSORRT_PATCH" && $3 ~ /^[0-9]+$/{pa=$3} END{print ma"."mi"."pa}' "$TRT_H"); \
+    fi; \
+    if [ "$TRT_VER" != "${TENSORRT_VERSION_PIN}" ]; then \
+        echo "ERROR: TensorRT version mismatch: expected ${TENSORRT_VERSION_PIN} got ${TRT_VER}"; exit 1; \
+    fi; \
+    echo "GPU library versions verified: CUDA ${NVCC_VER}, cuDNN ${CUDNN_VER}, TensorRT ${TRT_VER}"
+
+# DDA interpreter (PYTHON_VERSION, 3.11 on JP7): CPython 3.11 from the
+# deadsnakes PPA, which publishes noble/arm64 binaries (verified — so the
+# Dockerfile.jp5-style from-source build fallback is not needed; if deadsnakes
+# ever drops the noble arm64 binaries, fall back to compiling CPython 3.11
+# from source under /usr/local with --enable-shared exactly as
+# Dockerfile.jp5 does). Unlike JP6 there is NO interpreter split: the JP6
+# 3.10/3.11 split existed only because the JP6 vLLM wheels are cp310-only,
+# and vLLM is disabled on JP7 — the DDA backend and the Triton
+# Python-backend-stub tooling interpreter are BOTH ${PYTHON_VERSION} (3.11).
+# The purge list mirrors Dockerfile.jp6 (harmless no-ops on this base, all
+# guarded); python3 stays the distro python (3.12 on noble) through the apt
+# phase below, matching the jp5/jp6 apt-before-switch ordering.
+RUN apt-get update && \
+    dpkg --configure -a || true && \
+    apt-get install -f -y || true && \
+    dpkg --purge --force-depends python3-distro-info unattended-upgrades python3-urllib3 python3-requests python3-requests-unixsocket python3-six python3-software-properties || true && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends wget build-essential cmake libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-distutils
+
+RUN apt-get update
+
+# No toolchain PPA / gcc override (unlike jammy-based Dockerfile.jp6, which
+# installs gcc-11): noble's default toolchain is gcc-13, which CUDA 13.0's
+# nvcc supports as the host compiler.
+
+RUN apt-get install --only-upgrade ncurses-base
+RUN apt-get install --only-upgrade ncurses-bin
+RUN apt-get update && apt-get install -y libb64-0d && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt ./
+
+COPY edge_ml1_p_camera_management ./edge_ml1_p_camera_management
+COPY edgeagent ./edgeagent
+
+# Run apt installs from prereqs while python3 is still the distro python
+# (matches the jp5/jp6 apt-before-switch ordering). Noble package renames vs
+# the jammy list in Dockerfile.jp6: libgl1-mesa-glx was split — libgl1 +
+# libglx-mesa0 provide the same GL runtime.
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    pkgconf libcairo2-dev libgirepository1.0-dev libgl1 libglx-mesa0 libsm6 libxext6
+
+# Install aravis apt dependencies before switching python3 (same package set
+# as Dockerfile.jp6 — every name verified present on noble/arm64)
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends wget build-essential ninja-build \
+    gstreamer1.0-plugins-bad libxml2-dev libglib2.0-dev libusb-1.0-0-dev gobject-introspection \
+    libgtk-3-dev gtk-doc-tools xsltproc libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good \
+    libgirepository1.0-dev gettext pkg-config libcairo2-dev
+
+# Install remaining apt packages before switching python3. Noble 64-bit
+# time_t renames vs the jammy list: libssl3 -> libssl3t64,
+# libcurl4 -> libcurl4t64, libarchive13 -> libarchive13t64.
+RUN apt update -y && \
+    apt-get install -y libssl3t64 libexif12 libcurl4t64 libarchive13t64 \
+    gstreamer1.0-tools gstreamer1.0-libav ffmpeg
+
+# CVE fixes - also before python3 switch (noble rename: libuv1 -> libuv1t64)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    libgnutls28-dev libuv1t64 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Restore py3compile/py3clean now that all apt installs are done
+RUN if [ -f /usr/bin/py3compile.bak ]; then mv /usr/bin/py3compile.bak /usr/bin/py3compile; fi && \
+    if [ -f /usr/bin/py3clean.bak ]; then mv /usr/bin/py3clean.bak /usr/bin/py3clean; fi
+
+# NOW switch python3 to the DDA interpreter (PYTHON_VERSION, 3.11 on JP7) —
+# all apt installs are done. Every `pip`/`python3` layer below targets the
+# DDA interpreter via this alternative.
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}
+# Single get-pip.py bootstrap (single-interpreter layout — no JP6-style
+# ordering constraint between two bootstraps): installs the
+# /usr/local/bin/pip console script for the DDA interpreter, so every bare
+# `pip install` layer below targets python${PYTHON_VERSION}. The deadsnakes
+# noble python3.11 carries no PEP 668 EXTERNALLY-MANAGED marker (verified),
+# so bare pip installs work exactly as on jp5/jp6.
+RUN wget -q https://bootstrap.pypa.io/get-pip.py && python3 get-pip.py && rm get-pip.py
+# Fail fast if the bare `pip` script does not target the DDA interpreter
+# (Requirement 1.8).
+RUN pip --version | grep -F "(python ${PYTHON_VERSION})" || \
+    (echo "ERROR: bare pip targets the wrong interpreter:" && pip --version && exit 1)
+
+# Install pip packages (native build, no QEMU workarounds needed)
+RUN pip install --no-cache-dir pycairo==1.23.0
+RUN pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2
+RUN pip install --no-cache-dir psutil==5.9.5
+# Pre-build the PINNED awscrt==0.14.7 (transitive dep of awsiotsdk==1.11.9) so its
+# vendored aws-lc is linked correctly. awscrt 0.14.7 always builds and statically
+# links its own bundled aws-lc (BoringSSL) — it has no flag to opt out — but on
+# this image the system OpenSSL static archive (/usr/lib/<triplet>/libcrypto.a,
+# from libssl-dev) sits EARLIER on the linker search path (-L/usr/lib/<triplet>
+# precedes awscrt's vendored -Lbuild/.../deps/install/lib), so the final
+# `_awscrt*.so` link resolves `-l:libcrypto.a` against system OpenSSL, which lacks
+# the AWS-LC AEAD API. Result at import: `undefined symbol:
+# EVP_aead_aes_128_gcm_tls13`. Temporarily move the system static archive aside
+# (its .so + headers stay in place for every other build) while awscrt compiles so
+# the linker falls through to the vendored aws-lc lib, then restore it. This
+# pre-install satisfies awsiotsdk's pin, so the requirements install below does not
+# rebuild awscrt. The awscrt/awsiotsdk versions are unchanged.
+RUN ARCH_TRIPLET="$(gcc -dumpmachine)" && LC="/usr/lib/${ARCH_TRIPLET}/libcrypto.a" && \
+    if [ -f "$LC" ]; then mv "$LC" "${LC}.bak"; fi && \
+    pip install --no-cache-dir --no-binary :all: awscrt==0.14.7 && \
+    if [ -f "${LC}.bak" ]; then mv "${LC}.bak" "$LC"; fi && \
+    python3 -c "import awscrt.mqtt; print('awscrt vendored aws-lc link OK')"
+RUN pip install --no-cache-dir -r ./requirements.txt
+RUN pip install --no-cache-dir --upgrade requests
+
+# Bake the model conversion dependencies into the image at build time so the runtime
+# Triton/model setup (dda_triton.triton_setup.create_virtual_env) needs no network on
+# offline/air-gapped devices. model_conversion_requirements.txt is the single source of
+# truth for the pinned versions.
+COPY dda_triton/model_conversion_requirements.txt ./model_conversion_requirements.txt
+RUN pip install --no-cache-dir -r ./model_conversion_requirements.txt
+# model_conversion_requirements.txt includes an UNPINNED setuptools, which pulls
+# setuptools>=81 and removes the bundled pkg_resources that grpc_tools.protoc imports
+# (the deadsnakes 3.11 interpreter here has no system pkg_resources fallback). Re-assert
+# the setuptools<81 cap immediately so the grpc_tools.protoc step below keeps working.
+RUN pip install --no-cache-dir 'setuptools<81'
+
+# ── ONNX Runtime for the pluggable ONNX inference engine ───────────────────
+# The OnnxRunner in dda_triton/resources_for_copy/inference_runtimes.py is
+# imported inside the Triton Python-backend stub, which the edgemlsdk build
+# links against libpython3.11 — on JP7 that is the SAME interpreter as the
+# DDA backend (single-interpreter layout, no JP6-style split), so both
+# branches target python${PYTHON_VERSION} via the bare pip / default PYBIN.
+# Two modes, selected by build-args:
+#   * CPU (ONNXRUNTIME_GPU=0): prebuilt CPU wheel (onnxruntime 1.16.3 ships a
+#     cp311 aarch64 manylinux_2_17 wheel, works on this glibc 2.39 base). Fast.
+#   * GPU (ONNXRUNTIME_GPU=1, the build-custom.sh default for JP7): build
+#     onnxruntime-gpu from source with the CUDA + TensorRT execution providers
+#     against this image's CUDA 13.0 / TRT 10.14 (installed and verified
+#     above), for the cp311 interpreter (PYBIN defaults to python3 = the
+#     ${PYTHON_VERSION} alternative). No prebuilt Jetson Thor cp311 GPU wheel
+#     exists, so a GPU build must be compiled here. This is a long,
+#     memory-heavy build (~1-2 h), hence the opt-out.
+# OnnxRunner prefers TensorRT -> CUDA -> CPU providers automatically, so the
+# same code path works for either wheel. PyTorch-only models are unaffected
+# (engines are imported lazily per-runner). DLR-only models are NOT supported
+# on JP7 (no cuda114/trt8 staging stages — see the header comment).
+ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
+ARG ONNXRUNTIME_GPU=0
+RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
+        JETPACK_MAJOR=7 ./edge_ml1_p_camera_management/install_onnxruntime_gpu.sh; \
+    else \
+        pip install --no-cache-dir ${ONNXRUNTIME_SPEC}; \
+    fi
+
+# ── vLLM hook (disabled by default) ────────────────────────────────────────
+# (jetpack7-support, Requirement 1.9) JetPack 7 conditional-support hook,
+# mirroring Dockerfile.jp5's build-arg-gated vLLM layer with VLLM_ENABLE=0:
+# with the default the RUN below installs nothing. No verified Jetson
+# Thor/cu130 vLLM wheel index exists at implementation time; if one ever
+# materializes, enabling it is these build args — app.py's capability probe
+# (importlib.util.find_spec("vllm")) governs runtime behavior either way.
+# Keeping the hook keeps the build-arg contract uniform with Dockerfile.jp6
+# (the Build_Script can pass the same VLLM_* args to every JetPack target).
+ARG VLLM_ENABLE=0
+ARG VLLM_SPEC=""
+ARG VLLM_INDEX_URL=""
+RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
+        if [ -n "$VLLM_INDEX_URL" ]; then \
+            pip install --no-cache-dir --index-url ${VLLM_INDEX_URL} ${VLLM_SPEC}; \
+        else \
+            pip install --no-cache-dir ${VLLM_SPEC}; \
+        fi; \
+    else \
+        echo "vLLM layer skipped (VLLM_ENABLE=${VLLM_ENABLE}, VLLM_SPEC='${VLLM_SPEC}')"; \
+    fi
+
+# Build aravis from source (apt deps already installed above)
+RUN pip install --no-cache-dir meson ninja
+# Downgrade setuptools so g-ir-scanner can find distutils.msvccompiler (removed in setuptools>=71)
+RUN pip install --no-cache-dir 'setuptools<71'
+# Fix g-ir-scanner to use the base image's system python (its _giscanner C
+# extension is built for the distro python — 3.12 on the noble base). Detect
+# it dynamically rather than hardcoding. The exclusion grep drops the 3.11
+# DDA interpreter (deadsnakes) from the candidates so the distro python
+# (3.12) is selected for the rewrite.
+RUN SYS_PY=$(ls /usr/bin/python3.1? /usr/bin/python3.8 2>/dev/null | grep -v 3.11 | head -1) && \
+    SYS_PY=${SYS_PY:-/usr/bin/python3.12} && \
+    echo "Using system python for g-ir-scanner: $SYS_PY" && \
+    cp /usr/bin/g-ir-scanner /usr/bin/g-ir-scanner.bak && \
+    echo "#!$SYS_PY" > /usr/bin/g-ir-scanner && \
+    tail -n +2 /usr/bin/g-ir-scanner.bak >> /usr/bin/g-ir-scanner && \
+    chmod +x /usr/bin/g-ir-scanner && \
+    head -1 /usr/bin/g-ir-scanner
+RUN ./edge_ml1_p_camera_management/install_aravis.sh
+# Restore a modern setuptools after the aravis build, but cap below 81: setuptools
+# 81 removed bundled pkg_resources, which grpc_tools.protoc imports (the deadsnakes
+# 3.11 has no system pkg_resources fallback).
+RUN pip install --no-cache-dir 'setuptools<81'
+RUN python${PYTHON_VERSION} -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
+
+RUN find / -name "libpython${PYTHON_VERSION}.so.1.0" -print
+
+RUN apt clean -y
+
+# ── GPU-dependent import check gate (Requirements 1.6, 1.7, 5.7) ────────────
+# Consolidated gate: every GPU-dependent Python package this Dockerfile
+# installed (each package that loads CUDA/cuDNN/TensorRT libraries when
+# imported) must load under the interpreter it was installed for. Each
+# package gets its own `python3 -c "import X"` step so a failure names the
+# failing package in the build log. On JP7 the set is exactly onnxruntime:
+# torch/vLLM are not installed (vLLM hook disabled above) and DLR is not
+# supported on JP7. Passing this gate does NOT short-circuit the remaining
+# build steps — ordinary RUN failure semantics continue to apply to every
+# step below (Requirement 1.7).
+RUN python3 -c "import onnxruntime; print('onnxruntime', onnxruntime.__version__, 'import OK')" || \
+    (echo "ERROR: GPU-dependent package failed to import: onnxruntime" && exit 1)
+# When GPU-enabled, onnxruntime must also report both the CUDA and TensorRT
+# execution providers as available (Requirement 5.7). install_onnxruntime_gpu.sh
+# already verifies this at install time; this gate re-asserts it against the
+# final image state so a later layer clobbering the wheel cannot slip through.
+RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
+        python3 -c "import onnxruntime as ort; provs = ort.get_available_providers(); missing = {'CUDAExecutionProvider', 'TensorrtExecutionProvider'} - set(provs); assert not missing, 'providers missing: %s (have %s)' % (missing, provs); print('onnxruntime GPU providers OK:', provs)" || \
+        (echo "ERROR: GPU-dependent package failed provider check: onnxruntime" && exit 1); \
+    else \
+        echo "onnxruntime GPU provider check skipped (ONNXRUNTIME_GPU=${ONNXRUNTIME_GPU})"; \
+    fi
+
+COPY app.py ./
+# Docker healthcheck helper (edge-deploy-reliability, Defect B): compose runs
+# `python3 /healthcheck.py` as the backend healthcheck. Lands at /healthcheck.py
+# (no WORKDIR is set, so ./ is /).
+COPY healthcheck.py ./
+COPY logging.conf ./
+COPY dao ./dao
+COPY utils ./utils
+COPY metrics ./metrics
+COPY model ./model
+COPY mqtt ./mqtt
+COPY resources ./resources
+COPY gstreamer ./gstreamer
+COPY triggers ./triggers
+COPY exceptions ./exceptions
+COPY snapshot ./snapshot
+COPY defect_detection_config ./defect_detection_config
+COPY dda_logging ./dda_logging
+COPY endpoints ./endpoints
+COPY data_models ./data_models
+COPY camera_discovery ./camera_discovery
+COPY camera_sync ./camera_sync
+COPY workflow_engine ./workflow_engine
+# vllm-triton-inference (Requirements 4.1, 8.7): the companion vLLM runtime
+# package — new module, needs its own COPY (missing COPY lines have caused
+# startup regressions). Copied on JP7 too (COPY-set parity with
+# Dockerfile.jp6, Requirement 1.5) even though the vLLM hook above is
+# disabled: app.py's capability probe governs runtime behavior.
+COPY vllm_runtime ./vllm_runtime
+COPY local_auth ./local_auth
+COPY user_accounts_sync ./user_accounts_sync
+COPY alembic ./alembic
+COPY alembic.ini ./
+COPY dda_triton ./dda_triton
+COPY lyra_anomalies_mask_utils ./lyra_anomalies_mask_utils
+COPY lyra_science_processing_utils ./lyra_science_processing_utils
+# python3 is the update-alternatives-managed DDA interpreter selected by the
+# PYTHON_VERSION build arg (3.11 on JP7) — no hardcoded interpreter binary.
+CMD ["python3", "app.py"]
+
+## TODO: Remove copy edgemlsdk files here. Change to direct build in Docker
+# To test and build - Copy artifacts file to /src/backend/edgemlsdk
+COPY edgemlsdk ./edgemlsdk
+# The script's default DDA_PYTHON (python3.11) is already the JP7 DDA
+# interpreter, so no override is needed (unlike JP6, whose DDA interpreter
+# is 3.10).
+RUN ./edge_ml1_p_camera_management/install_edgemlsdk.sh
+COPY dlr_disable_phone_home.py ./
+# Single-interpreter layout: dlr is installed only under the DDA interpreter
+# (python${PYTHON_VERSION} = 3.11), so one phone-home disable suffices.
+RUN python${PYTHON_VERSION} dlr_disable_phone_home.py
+
+#TODO:change to user to scope the permission. Currently needed to persist the TinyDB data
+USER root

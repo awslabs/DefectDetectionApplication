@@ -182,13 +182,14 @@ class TestDecidePreflight:
 # ===========================================================================
 
 class TestTargetMatrixThroughPreflight:
-    """JP5/JP6 -> arm64, AMD64/AMD64_NVIDIA -> x86_64 and the current
+    """JP5/JP6/JP7 -> arm64, AMD64/AMD64_NVIDIA -> x86_64 and the current
     component identities survive preflight for BOTH execution modes,
     with no cross-target assumption (Req 2.9, 3.7, 3.9)."""
 
     EXPECTED = {
         "JP5": ("arm64", "aws.edgeml.dda.LocalServer.arm64JP5"),
         "JP6": ("arm64", "aws.edgeml.dda.LocalServer.arm64JP6"),
+        "JP7": ("arm64", "aws.edgeml.dda.LocalServer.arm64JP7"),
         "AMD64": ("x86_64", "aws.edgeml.dda.LocalServer.amd64"),
         "AMD64_NVIDIA": ("x86_64", "aws.edgeml.dda.LocalServer.amd64Nvidia"),
     }
@@ -218,11 +219,12 @@ class TestTargetMatrixThroughPreflight:
 
     def test_agent_preflight_imposes_no_amd64_only_assumption(self):
         """The agent-side preflight checks target-specific architecture
-        without imposing AMD64-only tooling on JP5/JP6 or vice versa:
-        one arch case per target family, common tools otherwise."""
+        without imposing AMD64-only tooling on JP5/JP6/JP7 or vice
+        versa: one arch case per target family, common tools
+        otherwise."""
         with open(AGENT_SCRIPT, encoding="utf-8") as handle:
             script = handle.read()
-        assert "JP5|JP6)" in script
+        assert "JP5|JP6|JP7)" in script
         assert "AMD64|AMD64_NVIDIA)" in script
         assert 'aarch64|arm64' in script
         assert '"$MACHINE_ARCH" = "x86_64"' in script

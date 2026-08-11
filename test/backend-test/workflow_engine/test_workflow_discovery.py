@@ -191,6 +191,7 @@ class TestEnvironment:
 
     def test_device_arch_jetpack_variants(self):
         cases = {
+            ".../aws.edgeml.dda.LocalServer.arm64JP7/1.0.0/x-aarch64": "arm64_jp7",
             ".../aws.edgeml.dda.LocalServer.arm64JP6/1.0.0/x-aarch64": "arm64_jp6",
             ".../aws.edgeml.dda.LocalServer.arm64JP5/1.0.0/x-aarch64": "arm64_jp5",
             ".../aws.edgeml.dda.LocalServer.arm64/1.0.0/x-aarch64": "arm64_jp4",

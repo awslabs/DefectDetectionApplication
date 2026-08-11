@@ -2,11 +2,11 @@
 inclusion: always
 ---
 
-# Greengrass Component Builds (JP5 / JP6)
+# Greengrass Component Builds (JP5 / JP6 / JP7)
 
 ## CRITICAL: never run two component builds at the same time
 
-JP5 and JP6 (and any other target) builds **must run strictly one at a time**.
+JP5, JP6, and JP7 (and any other target) builds **must run strictly one at a time**.
 Running two builds concurrently **corrupts the model versioning** (the builds
 share the `NEXT_PATCH` version resolution plus the working directories and
 docker image tags — `greengrass-build/`, `custom-build/`, and the shared
@@ -20,19 +20,24 @@ finished.
 ## How to build
 
 `gdk component build` builds the single component named in `gdk-config.json`.
-To build multiple targets, build them **sequentially**, swapping the component
-name in `gdk-config.json` between runs (JP6 =
+The gdk config schema allows exactly ONE entry under `component`, so the file
+holds one target at a time. To build multiple targets, build them
+**sequentially**, swapping the component name in `gdk-config.json` between runs
+(JP7 = `aws.edgeml.dda.LocalServer.arm64JP7`, JP6 =
 `aws.edgeml.dda.LocalServer.arm64JP6`, JP5 =
-`aws.edgeml.dda.LocalServer.arm64JP5`). The target (JP5 vs JP6) is derived from
-the component name by `build-custom.sh`.
+`aws.edgeml.dda.LocalServer.arm64JP5`). Every entry follows the same structure
+with the custom build command `bash build-custom.sh <component-name>
+NEXT_PATCH`. The target (JP5 vs JP6 vs JP7) is derived from the component name
+by `build-custom.sh`. `run_jp_builds.sh` automates the swap (e.g.
+`TARGETS="7" ./run_jp_builds.sh`).
 
 - Build only (no AWS creds needed): `gdk component build`.
 - `gdk-config.json` is a build artifact excluded from commits; swapping it per
   target is fine, but restore it when done.
 - Each target runs a full GPU `onnxruntime` source build by default
-  (`ONNXRUNTIME_GPU=1` for JP5/JP6), so a single target takes ~1–2h.
-- Capture each target's output to its own log: `.gdk_build_jp6.log` /
-  `.gdk_build_jp5.log`.
+  (`ONNXRUNTIME_GPU=1` for JP5/JP6/JP7), so a single target takes ~1–2h.
+- Capture each target's output to its own log: `.gdk_build_jp7.log` /
+  `.gdk_build_jp6.log` / `.gdk_build_jp5.log`.
 
 ## Before dispatching any build
 

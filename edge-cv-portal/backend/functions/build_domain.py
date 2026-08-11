@@ -33,6 +33,7 @@ ARCH_X86_64 = 'x86_64'
 # Build_Target names
 TARGET_JP5 = 'JP5'
 TARGET_JP6 = 'JP6'
+TARGET_JP7 = 'JP7'
 TARGET_AMD64 = 'AMD64'
 TARGET_AMD64_NVIDIA = 'AMD64_NVIDIA'
 
@@ -46,6 +47,11 @@ BUILD_TARGETS: Dict[str, Dict[str, str]] = {
     TARGET_JP6: {
         'component_name': 'aws.edgeml.dda.LocalServer.arm64JP6',
         'recipe': 'recipe-arm64-jp6.yaml',
+        'required_arch': ARCH_ARM64,
+    },
+    TARGET_JP7: {
+        'component_name': 'aws.edgeml.dda.LocalServer.arm64JP7',
+        'recipe': 'recipe-arm64-jp7.yaml',
         'required_arch': ARCH_ARM64,
     },
     TARGET_AMD64: {

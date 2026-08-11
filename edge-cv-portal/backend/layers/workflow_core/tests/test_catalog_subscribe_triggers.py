@@ -161,7 +161,8 @@ class TestTriggerMappings:
     def test_device_mappings_are_executor_bindings(self, type_id):
         descriptor = get_node_type(type_id)
         binding, plugin_deps = self.EXPECTED[type_id]
-        assert {m.arch for m in descriptor.mappings} == set(ARCHITECTURES)
+        assert {m.arch for m in descriptor.mappings} == (
+            set(DEVICE_ARCHITECTURES) | {"sim"})
         for arch in DEVICE_ARCHITECTURES:
             mapping = descriptor.mapping_for(arch)
             assert mapping is not None, arch

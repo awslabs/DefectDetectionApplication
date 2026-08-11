@@ -7,7 +7,7 @@
 # **Validates: Requirements 1.1, 1.4**
 #
 # detect_target_architecture must print exactly one member of the fixed set
-#   {x86_64, x86_64_nvidia, arm64_jp4, arm64_jp5, arm64_jp6}
+#   {x86_64, x86_64_nvidia, arm64_jp4, arm64_jp5, arm64_jp6, arm64_jp7}
 # or nothing (empty) when undetermined, and must NEVER exit non-zero.
 #
 # Strategy: the function resolves its inputs from (a) overridable file/uname
@@ -120,6 +120,12 @@ _tegra_release() {  # <R-major-line-body>
     _run_detect "arm64_jp6"
 }
 
+@test "aarch64: nv_tegra_release R38 -> arm64_jp7" {
+    export DETECT_ARCH_UNAME_M="aarch64"
+    _tegra_release "# R38 (release), REVISION: 4.0, GCID: 12345, BOARD: generic"
+    _run_detect "arm64_jp7"
+}
+
 @test "arm64 machine name is treated like aarch64" {
     export DETECT_ARCH_UNAME_M="arm64"
     _tegra_release "# R35 (release), REVISION: 4.1"
@@ -156,6 +162,13 @@ _tegra_release() {  # <R-major-line-body>
     export NV_TEGRA_RELEASE_FILE="${FIX}/absent-tegra-release"
     export STUB_DPKG_L4T_VERSION="32.7.1-20220219090344"
     _run_detect "arm64_jp4"
+}
+
+@test "aarch64: dpkg nvidia-l4t-core 38.x fallback -> arm64_jp7" {
+    export DETECT_ARCH_UNAME_M="aarch64"
+    export NV_TEGRA_RELEASE_FILE="${FIX}/absent-tegra-release"
+    export STUB_DPKG_L4T_VERSION="38.4.0-20251201000000"
+    _run_detect "arm64_jp7"
 }
 
 @test "aarch64: tegra release wins over dpkg fallback" {

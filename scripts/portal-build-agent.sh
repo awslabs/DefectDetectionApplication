@@ -11,7 +11,7 @@
 #
 # Parameters (environment variables, or KEY=VALUE command-line arguments):
 #   BUILD_JOB_ID   (required)  Build_Job identifier, included in every event
-#   BUILD_TARGET   (required)  One of: JP5, JP6, AMD64, AMD64_NVIDIA
+#   BUILD_TARGET   (required)  One of: JP5, JP6, JP7, AMD64, AMD64_NVIDIA
 #   EVENT_BUS      (optional)  EventBridge bus name for phase events; when
 #                              unset, events are skipped (standalone/debug run)
 #   SOURCE_REF     (optional)  Git ref to sync the repo clone to before the
@@ -38,6 +38,7 @@
 #   4. Map BUILD_TARGET → portal-build.sh arguments and run the build+publish:
 #        JP5          → aarch64 5       (aws.edgeml.dda.LocalServer.arm64JP5)
 #        JP6          → aarch64 6       (aws.edgeml.dda.LocalServer.arm64JP6)
+#        JP7          → aarch64 7       (aws.edgeml.dda.LocalServer.arm64JP7)
 #        AMD64        → x86_64          (aws.edgeml.dda.LocalServer.amd64)
 #        AMD64_NVIDIA → x86_64_nvidia   (aws.edgeml.dda.LocalServer.amd64Nvidia)
 #      (portal-build.sh itself emits phase=publishing between build and
@@ -69,7 +70,7 @@ for arg in "$@"; do
         ATTEMPT_ID=*)    ATTEMPT_ID="${arg#ATTEMPT_ID=}" ;;
         *)
             echo "ERROR: unknown argument: $arg" >&2
-            echo "Usage: $0 [BUILD_JOB_ID=<id>] [BUILD_TARGET=<JP5|JP6|AMD64|AMD64_NVIDIA>] [EVENT_BUS=<bus>] [SOURCE_REF=<ref>] [ATTEMPT_ID=<id>]" >&2
+            echo "Usage: $0 [BUILD_JOB_ID=<id>] [BUILD_TARGET=<JP5|JP6|JP7|AMD64|AMD64_NVIDIA>] [EVENT_BUS=<bus>] [SOURCE_REF=<ref>] [ATTEMPT_ID=<id>]" >&2
             exit 64
             ;;
     esac
@@ -247,11 +248,12 @@ echo "✓ Acquired build lock ${LOCK_FILE}"
 case "$BUILD_TARGET" in
     JP5)          BUILD_ARGS=(aarch64 5) ;;
     JP6)          BUILD_ARGS=(aarch64 6) ;;
+    JP7)          BUILD_ARGS=(aarch64 7) ;;
     AMD64)        BUILD_ARGS=(x86_64) ;;
     AMD64_NVIDIA) BUILD_ARGS=(x86_64_nvidia) ;;
     *)
-        echo "ERROR: unsupported BUILD_TARGET '${BUILD_TARGET}' (supported: JP5, JP6, AMD64, AMD64_NVIDIA)" >&2
-        emit_failed "building" "Unsupported BUILD_TARGET '${BUILD_TARGET}' (supported: JP5, JP6, AMD64, AMD64_NVIDIA)"
+        echo "ERROR: unsupported BUILD_TARGET '${BUILD_TARGET}' (supported: JP5, JP6, JP7, AMD64, AMD64_NVIDIA)" >&2
+        emit_failed "building" "Unsupported BUILD_TARGET '${BUILD_TARGET}' (supported: JP5, JP6, JP7, AMD64, AMD64_NVIDIA)"
         exit 64
         ;;
 esac
@@ -314,11 +316,11 @@ if [ -n "$ATTEMPT_ID" ]; then
     done
     command -v gdk >/dev/null 2>&1 || [ -x "${HOME:-/home/ubuntu}/.local/bin/gdk" ] \
         || PREFLIGHT_FAILURES="${PREFLIGHT_FAILURES} tool_gdk"
-    # Machine architecture matches the target mapping (JP5/JP6 -> arm64,
+    # Machine architecture matches the target mapping (JP5/JP6/JP7 -> arm64,
     # AMD64/AMD64_NVIDIA -> x86_64; task 7.3 preserves the matrix).
     MACHINE_ARCH="$(uname -m)"
     case "$BUILD_TARGET" in
-        JP5|JP6)
+        JP5|JP6|JP7)
             case "$MACHINE_ARCH" in
                 aarch64|arm64) : ;;
                 *) PREFLIGHT_FAILURES="${PREFLIGHT_FAILURES} arch_mismatch" ;;

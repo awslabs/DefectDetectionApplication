@@ -66,18 +66,26 @@ def _ensure_audit_on_path():
 
 
 # --------------------------------------------------------------------------- #
-# In-scope source paths (relative to REPO_ROOT) this spec owns.
+# In-scope source paths (relative to REPO_ROOT) the preservation gate tracks.
+# The JP7 pair was added by the jetpack7-support spec (Req 9.3): their masked
+# baselines were captured at creation (docker_baseline_*_Dockerfile.jp7_masked
+# .txt), so the same capture-or-assert flow verifies them per-file, independent
+# of the jp5/jp6 baselines (Req 9.5).
 # --------------------------------------------------------------------------- #
 BACKEND_JP5_REL = "src/backend/Dockerfile.jp5"
 EDGEMLSDK_JP5_REL = "src/edgemlsdk/Dockerfile.jp5"
 BACKEND_JP6_REL = "src/backend/Dockerfile.jp6"
 EDGEMLSDK_JP6_REL = "src/edgemlsdk/Dockerfile.jp6"
+BACKEND_JP7_REL = "src/backend/Dockerfile.jp7"
+EDGEMLSDK_JP7_REL = "src/edgemlsdk/Dockerfile.jp7"
 
 IN_SCOPE_FILES = (
     BACKEND_JP5_REL,
     EDGEMLSDK_JP5_REL,
     BACKEND_JP6_REL,
     EDGEMLSDK_JP6_REL,
+    BACKEND_JP7_REL,
+    EDGEMLSDK_JP7_REL,
 )
 
 # The in-scope findings keyed to (file, 1-based line number of the FROM
