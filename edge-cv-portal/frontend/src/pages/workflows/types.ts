@@ -284,6 +284,7 @@ const DEVICE_ARCHITECTURES = [
   'arm64_jp4',
   'arm64_jp5',
   'arm64_jp6',
+  'arm64_jp7',
 ] as const;
 
 /**

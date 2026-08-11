@@ -66,7 +66,7 @@ export function requiresAcknowledgment(
 /**
  * The Target_Architectures selectable for an import: DeepStream-flagged
  * imports are restricted to the Jetson JetPack builds (Requirement
- * 5.1); everything else may target all five architectures.
+ * 5.1); everything else may target all six architectures.
  */
 export function selectableArchitectures(
   deepstream: boolean

@@ -200,7 +200,7 @@ export function LaunchServerModal({ onSuccess, onDismiss }: LaunchModalProps) {
                 value: 'arm64',
                 label: 'ARM64',
                 description:
-                  'For ARM64 edge component builds (e.g. JP5, JP6).',
+                  'For ARM64 edge component builds (e.g. JP5, JP6, JP7).',
               },
               {
                 value: 'x86_64',

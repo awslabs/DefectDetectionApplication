@@ -19,6 +19,7 @@ export const DEVICE_ARCHITECTURES = [
   'arm64_jp4',
   'arm64_jp5',
   'arm64_jp6',
+  'arm64_jp7',
 ] as const;
 
 export type DeviceArchitecture = (typeof DEVICE_ARCHITECTURES)[number];
@@ -37,6 +38,7 @@ export const ARCHITECTURE_LABELS: Record<DeviceArchitecture, string> = {
   arm64_jp4: 'arm64 JetPack 4',
   arm64_jp5: 'arm64 JetPack 5',
   arm64_jp6: 'arm64 JetPack 6',
+  arm64_jp7: 'arm64 JetPack 7',
 };
 
 // --------------------------------------------------------------------------
