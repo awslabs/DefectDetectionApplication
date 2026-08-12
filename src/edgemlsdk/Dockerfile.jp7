@@ -166,7 +166,7 @@ RUN pip3 install --ignore-installed pip setuptools==64.0.3 wheel build hatchling
     pip3 install conan && conan profile detect && \
     pip3 install --upgrade pydantic setuptools==64.0.3 meson && \
     pip3 install Cython boto3 awscrt multiprocess coverage pylint && \
-    pip3 install pygobject==3.44.1
+    pip3 install --ignore-installed pygobject==3.44.1
 
 # ── 5. AWS CLI ─────────────────────────────────────────────────────────────
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-${PLATFORM}.zip" -o awscliv2.zip && \
