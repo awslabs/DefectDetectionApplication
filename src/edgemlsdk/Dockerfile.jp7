@@ -119,7 +119,7 @@ ENV LD_LIBRARY_PATH=/usr/local/lib/
 # fetched dependencies), and pinning the apt packages to a 3.x version fails
 # with "cmake : Breaks: cmake-data (< 4.3)" dependency conflicts. The upstream
 # tarball is self-contained (no apt resolution) and gives a clean, pinned 3.x.
-RUN CMAKE_VER=3.31.6 && \
+RUN CMAKE_VER=3.31.8 && \
     ARCH_TAG=$(uname -m) && \
     if [ "$ARCH_TAG" = "x86_64" ]; then CM_ARCH=x86_64; else CM_ARCH=aarch64; fi && \
     wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CM_ARCH}.sh" -O /tmp/cmake.sh && \
