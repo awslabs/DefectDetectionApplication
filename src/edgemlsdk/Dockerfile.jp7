@@ -197,7 +197,7 @@ RUN . /tmp/build-env.sh && \
             shared zlib no-docs no-tests && \
         $MAKE_CMD && \
         test -f libssl.so || (echo "OpenSSL build failed" && exit 1) && \
-        checkinstall -y && \
+        checkinstall -y --fstrans=no && \
         mv /dependencies/openssl/openssl*.deb /dependencies/debs && \
         rm -rf /dependencies/openssl; \
     fi
