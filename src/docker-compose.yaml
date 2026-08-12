@@ -119,6 +119,13 @@ services:
       - PYTHONPATH=/opt/tritonserver/backends/python:/
       - ARGUS_HEADLESS=1
       - NVARGUS_ENABLE_HEADLESS=1
+      # Persist the HF hub cache across container recreations (/aws_dda is
+      # already bind-mounted rw). Without this, vLLM/huggingface_hub caches
+      # weights at /root/.cache/huggingface on the ephemeral container layer,
+      # forcing a full re-download on every recreation (and a BROKEN component
+      # if huggingface.co is unreachable in that window). HF_HOME (not the
+      # deprecated TRANSFORMERS_CACHE) covers the hub cache, token, and modules.
+      - HF_HOME=/aws_dda/hf_cache
     # On Jetson/L4T, GPU access is provided by the NVIDIA Container Runtime, not
     # by the Compose `deploy.resources.reservations.devices` (--gpus / CDI)
     # mechanism. The latter invokes the NVIDIA Container Runtime Hook directly,
@@ -185,6 +192,9 @@ services:
       - GRPC_POLL_STRATEGY=poll
       - GRPC_ENABLE_FORK_SUPPORT=1
       - PYTHONPATH=/opt/tritonserver/backends/python:/
+      # Persist the HF hub cache across container recreations (/aws_dda is
+      # already bind-mounted rw); see backend_tegra_gpu_enabled above.
+      - HF_HOME=/aws_dda/hf_cache
     profiles: [generic]
   backend_generic_nvidia:
     # x86_64 hosts with the NVIDIA GPU runtime (AMD64_NVIDIA target,
@@ -239,6 +249,9 @@ services:
       - GRPC_POLL_STRATEGY=poll
       - GRPC_ENABLE_FORK_SUPPORT=1
       - PYTHONPATH=/opt/tritonserver/backends/python:/
+      # Persist the HF hub cache across container recreations (/aws_dda is
+      # already bind-mounted rw); see backend_tegra_gpu_enabled above.
+      - HF_HOME=/aws_dda/hf_cache
     # x86_64 GPU access: docker compose's device-reservation mechanism drives
     # the NVIDIA Container Toolkit (`--gpus all` equivalent). This is the
     # supported mechanism on x86 hosts — the Jetson-only `runtime: nvidia`
