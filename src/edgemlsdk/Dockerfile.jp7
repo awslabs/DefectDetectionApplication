@@ -303,6 +303,13 @@ RUN . /tmp/build-env.sh && \
     export PYBIND11_FINDPYTHON=ON && \
     export MAKEFLAGS="-j$JOBS" && \
     git apply edgeml-triton-server.diff && \
+    # v2.63.0's tritonfrontend py-bindings miss the libevhtp interface
+    # include dirs the main server target gets (src/CMakeLists.txt wires
+    # them via $<TARGET_PROPERTY:libevhtp::evhtp,...>; src/python does
+    # not), so http_server.h fails on evhtp/evhtp.h in the non-container
+    # build. Mirror the same generator expression into the bindings.
+    sed -i 's|^  ${repo-common_SOURCE_DIR}/include$|  ${repo-common_SOURCE_DIR}/include\n  $<TARGET_PROPERTY:libevhtp::evhtp,INTERFACE_INCLUDE_DIRECTORIES>|' src/python/tritonfrontend/CMakeLists.txt && \
+    grep -q 'libevhtp::evhtp' src/python/tritonfrontend/CMakeLists.txt && \
     python3.11 build.py --enable-logging --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
         --build-parallel $TRITON_PARALLEL \
         --extra-core-cmake-arg=TRITON_ENABLE_ENSEMBLE=ON \
