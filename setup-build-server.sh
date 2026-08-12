@@ -89,6 +89,24 @@ echo "Setting up build server..."
 echo "Log file: $LOG_FILE"
 echo ""
 
+echo "▶ Detecting host Ubuntu release..."
+# Detect the host release once: /etc/os-release first, with the
+# lsb_release fallback the Python 3.11 block below already uses.
+OS_RELEASE=$(. /etc/os-release 2>/dev/null && echo "$VERSION_ID") || OS_RELEASE=""
+if [ -z "$OS_RELEASE" ] && command -v lsb_release >/dev/null 2>&1; then
+    OS_RELEASE=$(lsb_release -rs 2>/dev/null) || OS_RELEASE=""
+fi
+echo "✓ Detected Ubuntu release: ${OS_RELEASE:-unknown}"
+
+# Ubuntu 24.04 (noble) marks the system Python as externally managed
+# (PEP 668), so pip installs need --break-system-packages there. Jammy's
+# pip rejects that option as unknown, so the flag is release-keyed: it
+# expands to nothing on 22.04 and earlier.
+PIP_BREAK_FLAG=''
+if [ "$OS_RELEASE" = "24.04" ]; then
+    PIP_BREAK_FLAG='--break-system-packages'
+fi
+
 echo "▶ Updating package manager..."
 run_cmd "sudo apt-get update" || true
 
@@ -106,10 +124,21 @@ else
     echo "✓ Docker already installed"
 fi
 
-echo "▶ Installing docker-compose via snap..."
+echo "▶ Installing docker-compose..."
 if ! command -v docker-compose >/dev/null 2>&1; then
-    run_cmd "sudo snap install docker-compose" || add_error "Failed to install docker-compose via snap"
-    echo "✓ docker-compose installed via snap"
+    if [ "$OS_RELEASE" = "24.04" ]; then
+        # Noble ships only the `docker compose` plugin; write a
+        # docker-compose shim delegating to it instead of the snap.
+        if run_cmd "printf '#!/bin/sh\nexec docker compose \"\$@\"\n' | sudo tee /usr/local/bin/docker-compose > /dev/null" \
+            && run_cmd "sudo chmod +x /usr/local/bin/docker-compose"; then
+            echo "✓ docker-compose shim installed (delegates to the docker compose plugin)"
+        else
+            add_error "Failed to install docker-compose shim"
+        fi
+    else
+        run_cmd "sudo snap install docker-compose" || add_error "Failed to install docker-compose via snap"
+        echo "✓ docker-compose installed via snap"
+    fi
 else
     echo "✓ docker-compose already installed"
 fi
@@ -201,13 +230,13 @@ export PATH="$HOME/.local/bin:$PATH"
 
 echo "▶ Installing AWS CLI..."
 if ! command -v aws >/dev/null 2>&1; then
-    run_cmd "sudo pip3 install awscli" || add_warning "Failed to install AWS CLI"
+    run_cmd "sudo pip3 install $PIP_BREAK_FLAG awscli" || add_warning "Failed to install AWS CLI"
 else
     echo "✓ AWS CLI already installed"
 fi
 
 echo "▶ Installing botocore[crt] (required by GDK publish for credential resolution)..."
-run_cmd "sudo pip3 install --no-compile 'botocore[crt]'" || add_warning "Failed to install botocore[crt] - 'gdk component publish' may fail to resolve credentials"
+run_cmd "sudo pip3 install $PIP_BREAK_FLAG --no-compile 'botocore[crt]'" || add_warning "Failed to install botocore[crt] - 'gdk component publish' may fail to resolve credentials"
 
 echo "▶ Installing AWS CDK (optional for build server)..."
 if ! command -v cdk >/dev/null 2>&1; then
@@ -218,7 +247,7 @@ fi
 
 echo "▶ Installing AWS Greengrass Development Kit (GDK)..."
 if ! command -v gdk >/dev/null 2>&1; then
-    run_cmd "pip3 install --user git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git@v1.6.2" || add_warning "Failed to install GDK CLI from GitHub"
+    run_cmd "pip3 install --user $PIP_BREAK_FLAG git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git@v1.6.2" || add_warning "Failed to install GDK CLI from GitHub"
 else
     echo "✓ GDK CLI already installed"
 fi
