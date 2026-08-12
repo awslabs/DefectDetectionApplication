@@ -347,16 +347,17 @@ COPY src ./src
 COPY create_aws_triton_deps_pkg.sh /dependencies/debs/
 RUN cd /dependencies/debs && chmod +x create_aws_triton_deps_pkg.sh && ./create_aws_triton_deps_pkg.sh
 
-# Download system packages needed by backend. The names are apt regex
-# patterns (as on jp5/jp6): on noble `liborc-0.4-0` matches the renamed
-# 64-bit time_t package liborc-0.4-0t64, so the same pattern works unchanged.
+# Download system packages needed by backend. Non-exact names fall back to
+# apt regex matching (libgstreamer1.0 -> libgstreamer1.0-0), but liborc-0.4-0
+# IS a known package name on noble with no candidate (renamed in the 64-bit
+# time_t transition), so the t64 name must be spelled out explicitly.
 RUN cd /dependencies/debs && \
     apt-get update && \
     apt-get download libgstreamer1.0-dev && \
     apt-get download libgstreamer1.0 && \
     apt-get download libgstreamer-plugins-base1.0 && \
     apt-get download libgstreamer-plugins-base1.0-dev && \
-    apt-get download liborc-0.4-0 && \
+    apt-get download liborc-0.4-0t64 && \
     apt-get download libstdc++6
 
 # Build EdgeML SDK (conan + cmake)
