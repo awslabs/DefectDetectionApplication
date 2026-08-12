@@ -156,7 +156,11 @@ ENV Python3_INCLUDE_DIR=/usr/include/python3.11
 ENV Python3_LIBRARY=/usr/lib/aarch64-linux-gnu/libpython3.11.so
 
 # ── 4. Python packages ────────────────────────────────────────────────────
-RUN pip3 install --upgrade pip setuptools==64.0.3 wheel build hatchling packaging==24.2 && \
+# packaging and PyYAML are Debian-managed in the noble base image (no pip
+# RECORD file), so pip cannot uninstall them for an upgrade; install both
+# with --ignore-installed so the pip copy shadows the distro copy.
+RUN pip3 install --ignore-installed packaging==24.2 && \
+    pip3 install --upgrade pip setuptools==64.0.3 wheel build hatchling && \
     pip3 install --ignore-installed PyYAML && \
     pip3 install conan && conan profile detect && \
     pip3 install --upgrade pydantic setuptools==64.0.3 meson && \
