@@ -240,6 +240,12 @@ RUN ARCH_TRIPLET="$(gcc -dumpmachine)" && LC="/usr/lib/${ARCH_TRIPLET}/libcrypto
     if [ -f "${LC}.bak" ]; then mv "${LC}.bak" "$LC"; fi && \
     python3 -c "import awscrt.mqtt; print('awscrt vendored aws-lc link OK')"
 RUN pip install --no-cache-dir -r ./requirements.txt
+# The noble base pulls Debian's python3-cryptography/python3-cffi into the
+# shared /usr/lib/python3/dist-packages (compiled for the distro 3.12), so
+# pip treats the transitive cryptography dep as satisfied while the DDA
+# 3.11 interpreter has no matching _cffi_backend. Install real 3.11 wheels.
+RUN pip install --no-cache-dir --ignore-installed cffi cryptography && \
+    python3 -c "import _cffi_backend, cryptography; print('cryptography/cffi OK')"
 RUN pip install --no-cache-dir --upgrade requests
 
 # Bake the model conversion dependencies into the image at build time so the runtime
