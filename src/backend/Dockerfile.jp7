@@ -288,26 +288,49 @@ RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
         pip install --no-cache-dir ${ONNXRUNTIME_SPEC}; \
     fi
 
-# ── vLLM hook (disabled by default) ────────────────────────────────────────
-# (jetpack7-support, Requirement 1.9) JetPack 7 conditional-support hook,
-# mirroring Dockerfile.jp5's build-arg-gated vLLM layer with VLLM_ENABLE=0:
-# with the default the RUN below installs nothing. No verified Jetson
-# Thor/cu130 vLLM wheel index exists at implementation time; if one ever
-# materializes, enabling it is these build args — app.py's capability probe
-# (importlib.util.find_spec("vllm")) governs runtime behavior either way.
-# Keeping the hook keeps the build-arg contract uniform with Dockerfile.jp6
-# (the Build_Script can pass the same VLLM_* args to every JetPack target).
-ARG VLLM_ENABLE=0
-ARG VLLM_SPEC=""
-ARG VLLM_INDEX_URL=""
-RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
-        if [ -n "$VLLM_INDEX_URL" ]; then \
-            pip install --no-cache-dir --index-url ${VLLM_INDEX_URL} ${VLLM_SPEC}; \
-        else \
-            pip install --no-cache-dir ${VLLM_SPEC}; \
-        fi; \
+# ── PyTorch cu130 stack for the vLLM source build (Req 2.1, 2.3, 2.6) ──────
+# Verified at design time on https://download.pytorch.org/whl/cu130:
+# cp311/manylinux_2_28_aarch64 wheels exist for every pin below (aarch64
+# CUDA companions on this index carry no +cu130 local tag except torch).
+# xformers is NOT installed: vLLM v0.11.2 excludes it on aarch64 by marker.
+# Gated on VLLM_ENABLE so the opt-out image carries no torch (Req 3.7).
+ARG VLLM_ENABLE=1
+ARG TORCH_SPEC="torch==2.9.0+cu130"
+ARG TORCHVISION_SPEC="torchvision==0.24.0"
+ARG TORCHAUDIO_SPEC="torchaudio==2.9.0"
+ARG TRITON_SPEC="triton==3.5.0"
+ARG TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
+RUN if [ "$VLLM_ENABLE" = "1" ]; then \
+        pip install --no-cache-dir --index-url ${TORCH_INDEX_URL} \
+            ${TORCH_SPEC} ${TORCHVISION_SPEC} ${TORCHAUDIO_SPEC} ${TRITON_SPEC}; \
     else \
-        echo "vLLM layer skipped (VLLM_ENABLE=${VLLM_ENABLE}, VLLM_SPEC='${VLLM_SPEC}')"; \
+        echo "torch layer skipped (VLLM_ENABLE=${VLLM_ENABLE})"; \
+    fi
+# Torch import gate (Req 2.3): torch imports and reports a CUDA 13.x build.
+RUN if [ "$VLLM_ENABLE" = "1" ]; then \
+        (python3 -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)" || \
+            (echo "ERROR: torch import check failed" && exit 1)) && \
+        (python3 -c "import torch; assert (torch.version.cuda or '').startswith('13.'), 'torch CUDA build is %s, expected 13.x' % torch.version.cuda" || \
+            (echo "ERROR: torch CUDA-13 build check failed" && exit 1)); \
+    else \
+        echo "torch import gate skipped (VLLM_ENABLE=${VLLM_ENABLE})"; \
+    fi
+
+# ── vLLM from-source build (jp7-vllm-enablement, Req 3.1–3.4, 3.7–3.9) ─────
+# No prebuilt vLLM wheel exists for Thor/cu130/cp311 (vLLM releases are
+# x86_64 cu12x; pypi.jetson-ai-lab.io publishes nothing for Thor cp311), so
+# the wheel is compiled here for sm_110 against the torch layer above.
+# VLLM_ENABLE is the SOLE gate (legacy VLLM_SPEC/VLLM_INDEX_URL removed —
+# nothing outside this file ever passed them). Opt-out: VLLM_ENABLE=0
+# skips this layer AND the torch layer above, restoring the vLLM-free image.
+# NOTE: no ENV VLLM_USE_V1 here (unlike Dockerfile.jp6): v0.11.2 removed the
+# V0 engine and the env var; the classic API surface is provided by the
+# build script's compatibility subclass instead.
+ARG VLLM_VERSION=v0.11.2
+RUN if [ "$VLLM_ENABLE" = "1" ]; then \
+        VLLM_VERSION=${VLLM_VERSION} ./edge_ml1_p_camera_management/install_vllm_gpu.sh; \
+    else \
+        echo "vLLM layer skipped (VLLM_ENABLE=${VLLM_ENABLE})"; \
     fi
 
 # Build aravis from source (apt deps already installed above)
@@ -343,11 +366,11 @@ RUN apt clean -y
 # installed (each package that loads CUDA/cuDNN/TensorRT libraries when
 # imported) must load under the interpreter it was installed for. Each
 # package gets its own `python3 -c "import X"` step so a failure names the
-# failing package in the build log. On JP7 the set is exactly onnxruntime:
-# torch/vLLM are not installed (vLLM hook disabled above) and DLR is not
-# supported on JP7. Passing this gate does NOT short-circuit the remaining
-# build steps — ordinary RUN failure semantics continue to apply to every
-# step below (Requirement 1.7).
+# failing package in the build log. On JP7 the default set is onnxruntime,
+# torch, and vllm (torch/vLLM installed by the VLLM_ENABLE-gated layers
+# above; DLR is not supported on JP7). Passing this gate does NOT
+# short-circuit the remaining build steps — ordinary RUN failure semantics
+# continue to apply to every step below (Requirement 1.7).
 RUN python3 -c "import onnxruntime; print('onnxruntime', onnxruntime.__version__, 'import OK')" || \
     (echo "ERROR: GPU-dependent package failed to import: onnxruntime" && exit 1)
 # When GPU-enabled, onnxruntime must also report both the CUDA and TensorRT
@@ -359,6 +382,40 @@ RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
         (echo "ERROR: GPU-dependent package failed provider check: onnxruntime" && exit 1); \
     else \
         echo "onnxruntime GPU provider check skipped (ONNXRUNTIME_GPU=${ONNXRUNTIME_GPU})"; \
+    fi
+# vLLM import gate (jp7-vllm-enablement, Requirement 3.4): with VLLM_ENABLE=1
+# the final image state must expose vllm, torch, and every Classic_Engine_API
+# symbol vllm_runtime/manager.py uses. Each check is its own guarded step so
+# a failure names the specific failing package or symbol in the build log.
+# Skipped with a logged message on the VLLM_ENABLE=0 opt-out (Requirement 3.7).
+RUN if [ "$VLLM_ENABLE" = "1" ]; then \
+        (python3 -c "import vllm; print('vllm', vllm.__version__, 'import OK')" || \
+            (echo "ERROR: GPU-dependent package failed to import: vllm" && exit 1)) && \
+        (python3 -c "import torch; print('torch', torch.__version__, 'import OK')" || \
+            (echo "ERROR: GPU-dependent package failed to import: torch" && exit 1)) && \
+        (python3 -c "from vllm import AsyncEngineArgs" || (echo "ERROR: missing vLLM symbol: AsyncEngineArgs" && exit 1)) && \
+        (python3 -c "from vllm import SamplingParams" || (echo "ERROR: missing vLLM symbol: SamplingParams" && exit 1)) && \
+        (python3 -c "from vllm.engine.async_llm_engine import AsyncLLMEngine; assert hasattr(AsyncLLMEngine, 'from_engine_args')" || (echo "ERROR: missing vLLM symbol: AsyncLLMEngine.from_engine_args" && exit 1)) && \
+        (python3 -c "from vllm.engine.async_llm_engine import AsyncLLMEngine; assert hasattr(AsyncLLMEngine, 'shutdown_background_loop')" || (echo "ERROR: missing vLLM symbol: AsyncLLMEngine.shutdown_background_loop" && exit 1)) && \
+        (python3 -c "from vllm.engine.async_llm_engine import AsyncLLMEngine; assert hasattr(AsyncLLMEngine, 'errored')" || (echo "ERROR: missing vLLM symbol: AsyncLLMEngine.errored" && exit 1)); \
+    else \
+        echo "vLLM import gate skipped (VLLM_ENABLE=${VLLM_ENABLE})"; \
+    fi
+# Dependency-consistency gate (jp7-vllm-enablement, Requirements 2.4, 2.7):
+# the vLLM layer's transitive installs must leave the DDA interpreter's
+# environment functionally consistent — the backend's startup-critical
+# imports still load, numpy stays inside the app constraint >=1.24,<2
+# (the 2.0 ABI break guard), and pip's resolver reports zero broken or
+# conflicting requirements (a failure names the package in pip's output).
+# Skipped with a logged message on the VLLM_ENABLE=0 opt-out.
+RUN if [ "$VLLM_ENABLE" = "1" ]; then \
+        (python3 -c "import numpy, cv2, gi, fastapi, sqlalchemy, awscrt.mqtt, transformers; print('app deps OK: numpy', numpy.__version__)" || \
+            (echo "ERROR: app dependency import failed after vLLM layer" && exit 1)) && \
+        (python3 -c "import numpy; from packaging.version import Version; v=Version(numpy.__version__); assert Version('1.24') <= v < Version('2'), 'numpy %s outside app constraint >=1.24,<2' % v" || \
+            (echo "ERROR: dependency constraint check failed: numpy" && exit 1)) && \
+        pip check; \
+    else \
+        echo "dependency consistency gate skipped (VLLM_ENABLE=${VLLM_ENABLE})"; \
     fi
 
 COPY app.py ./

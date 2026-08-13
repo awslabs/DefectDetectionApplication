@@ -144,7 +144,7 @@ const publishedComponentArb: fc.Arbitrary<VllmPublishedComponent> = fc.record({
     .map((s) => `model-vllm-${s}`),
   component_version: versionArb,
   supported_architectures: fc.array(
-    fc.constantFrom('arm64_jp6', 'arm64_jp5', 'x86_64'),
+    fc.constantFrom('arm64_jp6', 'arm64_jp5', 'arm64_jp7', 'x86_64'),
     { maxLength: 3 }
   ),
   runtime: fc.constant('vllm'),

@@ -20,6 +20,7 @@ from .models import (
     ARCH_ARM64_JP4,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
+    ARCH_ARM64_JP7,
     ARCH_SIM,
     ARCH_X86_64,
     ARCH_X86_64_NVIDIA,
@@ -719,13 +720,15 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
 # 6.4, 6.8, 6.9, 6.10)
 # --------------------------------------------------------------------------
 
-#: Architectures capable of vLLM execution. JetPack 6 always; JetPack 5
-#: only while ``JP5_VLLM_ENABLED`` is flipped on (see models.py). The
-#: other architectures (``x86_64``, ``x86_64_nvidia``, ``arm64_jp4``)
-#: never appear here, so ``llm_inference`` has no mapping for them and
-#: the compiler's existing unmapped-architecture error (node + arch, no
-#: document) implements Requirement 6.8 with no new compiler code path.
-VLLM_ARCHITECTURES = (ARCH_ARM64_JP6,) + \
+#: Architectures capable of vLLM execution. JetPack 6 and JetPack 7
+#: always (JP7 via the from-source vLLM build — jp7-vllm-enablement
+#: Requirement 4.1); JetPack 5 only while ``JP5_VLLM_ENABLED`` is
+#: flipped on (see models.py). The other architectures (``x86_64``,
+#: ``x86_64_nvidia``, ``arm64_jp4``) never appear here, so
+#: ``llm_inference`` has no mapping for them and the compiler's
+#: existing unmapped-architecture error (node + arch, no document)
+#: implements Requirement 6.8 with no new compiler code path.
+VLLM_ARCHITECTURES = (ARCH_ARM64_JP6, ARCH_ARM64_JP7) + \
     ((ARCH_ARM64_JP5,) if JP5_VLLM_ENABLED else ())
 
 LLM_INFERENCE = NodeTypeDescriptor(

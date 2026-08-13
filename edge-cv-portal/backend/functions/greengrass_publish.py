@@ -283,9 +283,10 @@ JP5_VLLM_ENABLED = os.environ.get('JP5_VLLM_ENABLED', 'false').lower() == 'true'
 
 def vllm_supported_architectures() -> list:
     """Supported Target_Architecture set for vLLM_Model_Components:
-    always arm64_jp6, arm64_jp5 only when JP5 support is flagged on,
-    never arm64_jp4 (2.5). Mirrors packaging.vllm_supported_architectures."""
-    archs = ['arm64_jp6']
+    always arm64_jp6 and arm64_jp7, arm64_jp5 only when JP5 support is
+    flagged on, never arm64_jp4 (2.5). Mirrors
+    packaging.vllm_supported_architectures."""
+    archs = ['arm64_jp6', 'arm64_jp7']
     if JP5_VLLM_ENABLED:
         archs.append('arm64_jp5')
     return archs

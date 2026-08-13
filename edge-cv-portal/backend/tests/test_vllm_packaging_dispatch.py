@@ -175,14 +175,16 @@ def test_vllm_dispatch_packages_uploads_and_records(pkg_env, seeded):
     assert response["statusCode"] == 200, response["body"]
     body = json.loads(response["body"])
 
-    # One entry per supported target — jp6 only with the flag off —
+    # One entry per supported target — jp6 and jp7 with the flag off —
     # each carrying supported_architectures (2.5).
     assert pkg_env.module.JP5_VLLM_ENABLED is False
     assert [c["target"] for c in body["packaged_components"]] == \
-        ["jetson-xavier-jp6"]
+        ["jetson-xavier-jp6", "jetson-xavier-jp7"]
+    for packaged in body["packaged_components"]:
+        assert packaged["status"] == "packaged"
+        assert packaged["supported_architectures"] == \
+            ["arm64_jp6", "arm64_jp7"]
     entry = body["packaged_components"][0]
-    assert entry["status"] == "packaged"
-    assert entry["supported_architectures"] == ["arm64_jp6"]
 
     # Uploaded to the Use_Case bucket under the model_artifacts scheme.
     new_keys = set(bucket_keys(pkg_env)) - before_keys
@@ -208,8 +210,10 @@ def test_vllm_dispatch_packages_uploads_and_records(pkg_env, seeded):
     stored = pkg_env.training_jobs.get_item(
         Key={"training_id": record["training_id"]})["Item"]
     assert stored["packaged_components"][0]["target"] == "jetson-xavier-jp6"
-    assert stored["packaged_components"][0]["supported_architectures"] == \
-        ["arm64_jp6"]
+    assert stored["packaged_components"][1]["target"] == "jetson-xavier-jp7"
+    for stored_entry in stored["packaged_components"]:
+        assert stored_entry["supported_architectures"] == \
+            ["arm64_jp6", "arm64_jp7"]
 
 
 def test_jp5_flag_adds_jp5_target(pkg_env, seeded, monkeypatch):
@@ -222,9 +226,10 @@ def test_jp5_flag_adds_jp5_target(pkg_env, seeded, monkeypatch):
     body = json.loads(response["body"])
 
     assert [c["target"] for c in body["packaged_components"]] == \
-        ["jetson-xavier-jp6", "jetson-xavier-jp5"]
+        ["jetson-xavier-jp6", "jetson-xavier-jp7", "jetson-xavier-jp5"]
     for entry in body["packaged_components"]:
-        assert entry["supported_architectures"] == ["arm64_jp6", "arm64_jp5"]
+        assert entry["supported_architectures"] == \
+            ["arm64_jp6", "arm64_jp7", "arm64_jp5"]
         # One artifact serves both targets (same key scheme as ONNX).
         assert entry["component_package_s3"] == \
             body["packaged_components"][0]["component_package_s3"]

@@ -386,7 +386,15 @@ cd DefectDetectionApplication
 The target derivation, recipe (`recipe-arm64-jp7.yaml`), and packaging follow
 the same flow as JP5/JP6. Builds must run **one at a time** per host (see
 `.kiro/steering/builds.md`); a JP7 build with the default GPU onnxruntime
-compile takes ~1–2 h.
+compile takes ~1–2 h, and the default from-source vLLM build (`VLLM_ENABLE=1`,
+see [Using LLMs (vLLM)](#using-llms-vllm)) adds **~N–M h** on top of that.
+<!-- TODO(jp7-vllm-enablement): replace ~N–M h with the bounded range measured
+     on the build server during the VLLM_ENABLE=1 validation build -->
+To skip the from-source vLLM compile entirely, build with
+`--build-arg VLLM_ENABLE=0`: the resulting image carries no vLLM or torch
+install, the backend's capability probe runs the pre-feature (vision-only)
+startup sequence, and vLLM model features are unavailable on devices running
+that image.
 
 **6. Portal registration (dispatched builds).** Portal-dispatched JP7 builds
 use the existing dedicated-server registration flow: the **Build Server
@@ -545,12 +553,14 @@ the JP7 component only to devices recorded with that exact architecture
   fails at its first load on a JP7 device. Use ONNX (GPU onnxruntime with
   CUDA and TensorRT execution providers is built in) or Triton-served models
   instead.
-- **vLLM is disabled.** The JP7 image is built with `VLLM_ENABLE=0` because
-  no verified vLLM wheel index exists for Jetson Thor / CUDA 13.0 (cu130).
-  The backend's capability probe handles the absence at runtime: vLLM model
-  features are simply unavailable on JP7 devices (the portal also does not
-  offer `arm64_jp7` as a vLLM-supported architecture). This will be
-  revisited when a Thor/cu130 vLLM wheel index is available.
+- **vLLM is enabled by default via a from-source build.** No prebuilt vLLM
+  wheel exists for Jetson Thor / CUDA 13.0 (cu130), so the JP7 image compiles
+  vLLM from source during the image build (`install_vllm_gpu.sh`, vLLM
+  `v0.11.2`, Thor `sm_110`, against `torch==2.9.0+cu130`), and the portal
+  offers `arm64_jp7` as a vLLM-supported architecture. The from-source
+  compile adds build time on the JP7 build server — see
+  [JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
+  for the expected duration and the `VLLM_ENABLE=0` opt-out.
 
 #### Edge Device IAM Permissions
 
@@ -838,27 +848,36 @@ compilation), packaged and published as a Greengrass model component, and
 served through device text-generation APIs and the `llm_inference` workflow
 node.
 
-**Hardware requirement**: vLLM runs on **JetPack 6 devices only**
-(`arm64_jp6`, e.g. AGX Orin). The JP6 LocalServer image installs
-`vllm==0.10.2+cu126` from the Jetson AI Lab index **by default**; the
-deployment architecture gate rejects vLLM components targeted at JP4/JP5
-devices, and vLLM is likewise **disabled on JP7** (no verified Thor/cu130
-wheel index — see
-[JetPack 7 (JP7) Devices](#jetpack-7-jp7-devices-jetson-thor-jetpack-71--72)).
-The full stage-by-stage validation procedure lives in
+**Hardware requirement**: vLLM runs on **JetPack 6 and JetPack 7 devices**
+(`arm64_jp6`, e.g. AGX Orin; `arm64_jp7`, e.g. Jetson Thor). The JP6
+LocalServer image installs `vllm==0.10.2+cu126` from the Jetson AI Lab index
+**by default**; the JP7 image builds vLLM **`v0.11.2` from source by
+default** (`install_vllm_gpu.sh`, Thor `sm_110`, against
+`torch==2.9.0+cu130`) since no prebuilt Thor/cu130 wheel exists — see
+[JetPack 7 (JP7) Devices](#jetpack-7-jp7-devices-jetson-thor-jetpack-71--72).
+The deployment architecture gate rejects vLLM components targeted at JP4/JP5
+devices. The full stage-by-stage validation procedure lives in
 [test/on-hardware/jp6_vllm_validation.md](test/on-hardware/jp6_vllm_validation.md).
 
 ### Build requirement
 
-The default JP6 build includes vLLM — nothing extra to enable:
+The default JP6 and JP7 builds include vLLM — nothing extra to enable:
 
 ```bash
 ./gdk-component-build-and-publish.sh aarch64 6   # vLLM layer on by default (VLLM_ENABLE=1)
+./gdk-component-build-and-publish.sh aarch64 7   # vLLM built from source by default (VLLM_ENABLE=1)
 ```
 
-To build an explicitly vLLM-free JP6 image, pass `--build-arg VLLM_ENABLE=0`;
-the app's capability probe then runs the pre-feature (vision-only) startup
-sequence and the text-generation routes are absent.
+The JP7 build compiles vLLM from source (no prebuilt Thor/cu130 wheel exists),
+which adds substantial build time on the JP7 build server — see
+[JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
+for the expected duration; JP7 builds run on the build server one at a time.
+
+To build an explicitly vLLM-free JP6 or JP7 image, pass
+`--build-arg VLLM_ENABLE=0`; the image then carries no vLLM install (on JP7
+the torch/vLLM layers are skipped entirely), the app's capability probe runs
+the pre-feature (vision-only) startup sequence, and the text-generation
+routes are absent.
 
 ### Example: install the smoke-test model (`facebook/opt-125m`)
 

@@ -223,7 +223,8 @@ def test_publish_success_writes_metadata_and_marks_published(
     default_config = gg.created[0]["ComponentConfiguration"][
         "DefaultConfiguration"]
     assert default_config["runtime"] == "vllm"
-    assert default_config["supported_architectures"] == ["arm64_jp6"]
+    assert default_config["supported_architectures"] == \
+        ["arm64_jp6", "arm64_jp7"]
 
     stored = stored_record(pub_env, record["training_id"])
 
@@ -231,7 +232,7 @@ def test_publish_success_writes_metadata_and_marks_published(
     published = stored["published_component"]
     assert published["component_name"] == "model-vllm-my-llm"
     assert published["component_version"] == "1.0.0"
-    assert published["supported_architectures"] == ["arm64_jp6"]
+    assert published["supported_architectures"] == ["arm64_jp6", "arm64_jp7"]
     assert published["runtime"] == "vllm"
     assert published["component_arns"]["jetson-xavier-jp6"].endswith(
         "components:model-vllm-my-llm:versions:1.0.0")

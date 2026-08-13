@@ -436,9 +436,9 @@ def generate_vllm_repository(record: Dict) -> Dict[str, str]:
 
 def vllm_supported_architectures() -> List[str]:
     """Supported Target_Architecture set for vLLM_Model_Components:
-    always arm64_jp6, arm64_jp5 only when JP5 support is flagged on,
-    never arm64_jp4 (2.5)."""
-    archs = ['arm64_jp6']
+    always arm64_jp6 and arm64_jp7, arm64_jp5 only when JP5 support is
+    flagged on, never arm64_jp4 (2.5)."""
+    archs = ['arm64_jp6', 'arm64_jp7']
     if JP5_VLLM_ENABLED:
         archs.append('arm64_jp5')
     return archs
@@ -449,6 +449,7 @@ def vllm_supported_architectures() -> List[str]:
 # the Jetson targets vllm_supported_architectures() allows — never jp4.
 VLLM_ARCH_TO_TARGET = {
     'arm64_jp6': 'jetson-xavier-jp6',
+    'arm64_jp7': 'jetson-xavier-jp7',   # id reserved by workflow_packaging.py
     'arm64_jp5': 'jetson-xavier-jp5',
 }
 

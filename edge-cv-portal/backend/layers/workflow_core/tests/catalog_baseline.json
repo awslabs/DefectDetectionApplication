@@ -2889,6 +2889,12 @@
         "plugin_dependencies": []
       },
       {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "llm_inference",
+        "plugin_dependencies": []
+      },
+      {
         "arch": "sim",
         "element_chain": [],
         "executor_binding": "sim_llm_inference",
