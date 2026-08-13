@@ -405,15 +405,35 @@ RUN if [ "$VLLM_ENABLE" = "1" ]; then \
 # the vLLM layer's transitive installs must leave the DDA interpreter's
 # environment functionally consistent — the backend's startup-critical
 # imports still load, numpy stays inside the app constraint >=1.24,<2
-# (the 2.0 ABI break guard), and pip's resolver reports zero broken or
-# conflicting requirements (a failure names the package in pip's output).
+# (the 2.0 ABI break guard), and pip's resolver reports no broken or
+# conflicting requirements beyond the one documented benign exception
+# below (a failure names the package in pip's output).
+#
+# ALLOWLISTED CONFLICT — grpcio-tools vs protobuf. vLLM v0.11.x's
+# transitive closure installs protobuf 6.x, which violates the
+# `protobuf<5.0dev` pin of the grpcio-tools release this image uses for
+# `grpc_tools.protoc` (requirements.txt, shared with JP4/JP5/JP6/x86).
+# The mismatch is metadata-only here: the protoc invocation that consumes
+# grpcio-tools runs EARLIER in this same build and succeeds against
+# protobuf 6.x, and nothing at runtime imports grpc_tools. Upgrading
+# grpcio-tools to satisfy pip would change the generated edge-agent stubs
+# for every architecture — a far larger blast radius than this gate is
+# meant to police — so the single known pair is allowlisted by pattern
+# and EVERY other conflict still fails the build.
 # Skipped with a logged message on the VLLM_ENABLE=0 opt-out.
 RUN if [ "$VLLM_ENABLE" = "1" ]; then \
         (python3 -c "import numpy, cv2, gi, fastapi, sqlalchemy, awscrt.mqtt, transformers; print('app deps OK: numpy', numpy.__version__)" || \
             (echo "ERROR: app dependency import failed after vLLM layer" && exit 1)) && \
         (python3 -c "import numpy; from packaging.version import Version; v=Version(numpy.__version__); assert Version('1.24') <= v < Version('2'), 'numpy %s outside app constraint >=1.24,<2' % v" || \
             (echo "ERROR: dependency constraint check failed: numpy" && exit 1)) && \
-        pip check; \
+        { pip check > /tmp/pip_check.out 2>&1 || true; } && \
+        cat /tmp/pip_check.out && \
+        { if grep -vE "^grpcio-tools [0-9.]+ has requirement protobuf" /tmp/pip_check.out \
+              | grep -qE "has requirement|is not installed"; then \
+              echo "ERROR: unexpected dependency conflict after vLLM layer (see pip check output above)"; \
+              exit 1; \
+          fi; } && \
+        rm -f /tmp/pip_check.out; \
     else \
         echo "dependency consistency gate skipped (VLLM_ENABLE=${VLLM_ENABLE})"; \
     fi

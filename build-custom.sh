@@ -104,7 +104,29 @@ rm -rf ./custom-build
 mkdir -p ./custom-build/$COMPONENT_NAME
 
 # build Docker images
-# to save build time, remove "--no-cache" parameter
+#
+# Docker layer cache policy (DDA_BUILD_NO_CACHE). Historically both
+# docker-compose build invocations below hard-coded --no-cache, so every
+# build recompiled everything from source — on JP7 that is the ~1-2 h GPU
+# onnxruntime build PLUS the multi-hour from-source vLLM wheel compile, even
+# when the change under test was a single late layer. The cache is now reused
+# by default so iteration builds reuse those layers, and --no-cache is
+# opt-in for the cases that genuinely need a provably clean image:
+#
+#   DDA_BUILD_NO_CACHE=1 ./gdk-component-build-and-publish.sh ...
+#
+# Set it for release/publish builds where reproducibility from scratch
+# matters, or when a base image or apt pin changed in a way Docker cannot
+# see. Note the cache is only reused when the earlier Dockerfile layers are
+# byte-identical: editing a line invalidates that layer and everything after
+# it, which is why the expensive compiles sit early in Dockerfile.jp7.
+DOCKER_BUILD_CACHE_ARGS=""
+if [ "${DDA_BUILD_NO_CACHE:-0}" = "1" ]; then
+  DOCKER_BUILD_CACHE_ARGS="--no-cache"
+  echo "Docker layer cache: DISABLED (DDA_BUILD_NO_CACHE=1) — full rebuild"
+else
+  echo "Docker layer cache: ENABLED (set DDA_BUILD_NO_CACHE=1 for a clean rebuild)"
+fi
 cd src
 #edgemlsdk
 cd edgemlsdk/
@@ -174,12 +196,12 @@ if [ "$ARCHITECTURE" = "x86_64" ]; then
   # ONNXRUNTIME_GPU is passed explicitly (as on arm) so the x86 NVIDIA target's
   # Dockerfile.x86_64_nvidia installs the GPU onnxruntime wheel; plain x86
   # builds keep ONNXRUNTIME_GPU=0 (CPU wheel).
-  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU --no-cache \
+  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU $DOCKER_BUILD_CACHE_ARGS \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 else
   docker-compose --profile tegra --profile generic -f docker-compose.yaml build \
     --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" \
-    --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU --no-cache \
+    --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU $DOCKER_BUILD_CACHE_ARGS \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 fi
 cd ..
