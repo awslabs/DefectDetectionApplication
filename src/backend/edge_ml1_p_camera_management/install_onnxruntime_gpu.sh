@@ -72,6 +72,10 @@ case "$JETPACK_MAJOR" in
     7)
         ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.23.2}"
         CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-110}"
+        # CUDA 13 deprecates longlong4 (use longlong4_16a/_32a); ORT
+        # v1.23.2's bert attention kernels still reference it and the CI
+        # build treats deprecation warnings as errors. JP7-only.
+        ORT_EXTRA_BUILD_FLAGS="--compile_no_warning_as_error"
         ;;
     *)
         echo "ERROR: JETPACK_MAJOR must be 5, 6 or 7 (got '${JETPACK_MAJOR}')." >&2
@@ -218,6 +222,7 @@ ${PYBIN} ./tools/ci_build/build.py \
     --build_wheel \
     --skip_tests \
     --allow_running_as_root \
+    ${ORT_EXTRA_BUILD_FLAGS:-} \
     --use_cuda --cuda_home "${CUDA_HOME}" --cudnn_home "${CUDNN_HOME}" \
     --use_tensorrt --tensorrt_home "${TENSORRT_HOME}" \
     --cmake_extra_defines \
