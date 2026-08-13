@@ -212,6 +212,11 @@ CSI_CAMERA_SOURCE = NodeTypeDescriptor(
                                         "videoconvertscale", "videofilter"]),
         GstMapping(arch=ARCH_ARM64_JP6, element_chain=_jp6_png_staged_chain("/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"),
                    plugin_dependencies=["coreelements", "png", "videoconvertscale", "python:pillow"]),
+        # JP7 reads the staged capture JPEG directly — see the folder_source
+        # JP7 mapping for why the JP6 PNG staging path does not apply here.
+        GstMapping(arch=ARCH_ARM64_JP7, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg"),
+                   plugin_dependencies=["coreelements", "emexifextract", "jpeg",
+                                        "videoconvertscale", "videofilter"]),
         _dataset_fed_sim_source(),
     ],
     hardware_dependent=True,
@@ -335,6 +340,18 @@ FOLDER_SOURCE = NodeTypeDescriptor(
         GstMapping(arch=ARCH_ARM64_JP6, element_chain=_jp6_png_staged_chain("{location}"),
                    plugin_dependencies=["coreelements", "png", "videoconvertscale",
                                         "python:pillow"]),
+        # JP7 uses the STANDARD jpeg chain, not the JP6 PNG staging path, for
+        # two independent reasons: (1) the device-side stager only triggers on
+        # JP6 — PipelineBuilder._is_jp6() matches "JP6" in the LocalServer
+        # component path, and the JP7 component is arm64JP7 — so no
+        # `.dda_decoded.png` is ever produced on JP7 and a png chain would read
+        # a file that does not exist; (2) the collision the JP6 path works
+        # around is libdlr.so's libjpeg, and DLR is unsupported on JP7 (its
+        # r35-era libdlr.so needs L4T driver libs absent on Thor), so plain
+        # jpegdec is not at risk there.
+        GstMapping(arch=ARCH_ARM64_JP7, element_chain=_jpeg_file_chain("{location}"),
+                   plugin_dependencies=["coreelements", "emexifextract", "jpeg",
+                                        "videoconvertscale", "videofilter"]),
         # Simulation: fed from the Test_Dataset like camera_source, never
         # from the device file system — the location path and the DDA
         # decode elements (emexifextract) do not exist in the sandbox
