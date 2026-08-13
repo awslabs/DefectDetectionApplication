@@ -144,8 +144,10 @@ RUN apt-get update
 # installs gcc-11): noble's default toolchain is gcc-13, which CUDA 13.0's
 # nvcc supports as the host compiler.
 
-RUN apt-get install --only-upgrade ncurses-base
-RUN apt-get install --only-upgrade ncurses-bin
+# -y is required on noble: the upgrade pulls companion packages
+# (libncursesw6/libtinfo6), so apt prompts and aborts without it.
+RUN apt-get install -y --only-upgrade ncurses-base
+RUN apt-get install -y --only-upgrade ncurses-bin
 RUN apt-get update && apt-get install -y libb64-0d && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
 
