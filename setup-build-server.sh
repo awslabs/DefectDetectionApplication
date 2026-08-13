@@ -169,7 +169,7 @@ if ! command -v python3.11 >/dev/null 2>&1; then
         run_cmd "sudo apt-get install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget" || add_warning "Failed to install build dependencies"
         
         if [ ! -d /tmp/Python-3.11.9 ]; then
-            run_cmd "cd /tmp && wget https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz" || add_error "Failed to download Python 3.11"
+            run_cmd "cd /tmp && wget --tries=5 --waitretry=30 --retry-on-http-error=429,500,502,503 https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz" || add_error "Failed to download Python 3.11"
             run_cmd "cd /tmp && tar -xf Python-3.11.9.tgz" || add_error "Failed to extract Python 3.11"
         fi
         
