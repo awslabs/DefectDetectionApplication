@@ -216,8 +216,10 @@ RUN pip --version | grep -F "(python ${PYTHON_VERSION})" || \
 # Install pip packages (native build, no QEMU workarounds needed)
 RUN pip install --no-cache-dir pycairo==1.23.0
 # --ignore-installed: apt's python3-gi ships PyGObject 3.48.2 as a
-# distutils install pip cannot uninstall on noble.
-RUN pip install --no-cache-dir --no-build-isolation --ignore-installed PyGObject==3.42.2
+# distutils install pip cannot uninstall on noble. --no-deps keeps
+# --ignore-installed from re-resolving pycairo (pinned 1.23.0 above) to a
+# newer sdist whose mesonpy backend is unavailable without build isolation.
+RUN pip install --no-cache-dir --no-build-isolation --ignore-installed --no-deps PyGObject==3.42.2
 RUN pip install --no-cache-dir psutil==5.9.5
 # Pre-build the PINNED awscrt==0.14.7 (transitive dep of awsiotsdk==1.11.9) so its
 # vendored aws-lc is linked correctly. awscrt 0.14.7 always builds and statically
