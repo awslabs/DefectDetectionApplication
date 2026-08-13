@@ -203,6 +203,11 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTH
 # --ignore-installed: get-pip.py upgrades packaging/wheel, and the distro
 # copies have no pip RECORD file on noble (uninstall-no-record-file).
 RUN wget -q https://bootstrap.pypa.io/get-pip.py && python3 get-pip.py --ignore-installed && rm get-pip.py
+# Shadow Debian's patched setuptools with upstream (same <81 pin as the
+# final runtime install below): --no-build-isolation builds otherwise mix
+# Debian setuptools (expects its install_layout patch) with the upstream
+# wheel get-pip installed, failing with "AttributeError: install_layout".
+RUN pip install --no-cache-dir --ignore-installed 'setuptools<81'
 # Fail fast if the bare `pip` script does not target the DDA interpreter
 # (Requirement 1.8).
 RUN pip --version | grep -F "(python ${PYTHON_VERSION})" || \
