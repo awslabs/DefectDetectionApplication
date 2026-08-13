@@ -200,7 +200,9 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTH
 # `pip install` layer below targets python${PYTHON_VERSION}. The deadsnakes
 # noble python3.11 carries no PEP 668 EXTERNALLY-MANAGED marker (verified),
 # so bare pip installs work exactly as on jp5/jp6.
-RUN wget -q https://bootstrap.pypa.io/get-pip.py && python3 get-pip.py && rm get-pip.py
+# --ignore-installed: get-pip.py upgrades packaging/wheel, and the distro
+# copies have no pip RECORD file on noble (uninstall-no-record-file).
+RUN wget -q https://bootstrap.pypa.io/get-pip.py && python3 get-pip.py --ignore-installed && rm get-pip.py
 # Fail fast if the bare `pip` script does not target the DDA interpreter
 # (Requirement 1.8).
 RUN pip --version | grep -F "(python ${PYTHON_VERSION})" || \
