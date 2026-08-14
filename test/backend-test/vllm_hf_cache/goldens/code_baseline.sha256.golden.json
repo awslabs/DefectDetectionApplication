@@ -1,0 +1,8 @@
+{
+  "recipe-amd64-nvidia.yaml": "7daa2818914409a5709722a845271de1b6f9d6abf6a420440c686ddbc65eb375",
+  "recipe-amd64.yaml": "2e649925d234b2ac23545a0d2e9c59881bc4168dd815e6c7ebf96790a1047506",
+  "recipe-arm64-jp5.yaml": "a06f4575b9f23ecbc6c2c0408a5a037d081fb3ce4c706eb18a22d298527b237a",
+  "recipe-arm64-jp6.yaml": "0ca2e8a23104c5085bbcf75c25deafefa4fb3c1a77fbab0033ab27f0e6d9e770",
+  "recipe-arm64.yaml": "31f736b07f01c368861d13992073cf1924c0da8b71d890e73f64ab22d8700b50",
+  "src/backend/dda_triton/vllm_model_prep.py": "9f3b148a19c9f91e2bdd389428437246deabf8d533c08c0477951f196f7271b9"
+}

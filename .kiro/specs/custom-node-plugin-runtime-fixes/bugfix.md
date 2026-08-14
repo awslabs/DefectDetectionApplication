@@ -271,6 +271,17 @@ registration v4 wires `target-width`/`target-height`/`channels`.
 - Unattributable pipeline failures no longer finalize all nodes green
   (NodeStatusCollector.finalize failure_detail, commit 9f8d9b8).
 
+## Final verification (2026-08-11)
+
+End-to-end confirmed by the user on ryan-orin-nano/JP6 from a clean
+build-package-deploy chain (no hot patches): plugin v3 (component
+3.0.0, immutable versioned artifact keys), registration v4
+(elementChain customresizeimage ! videoconvert, argsTemplate wiring
+target-width/target-height/channels), workflows re-saved against
+registration v4, repackaged, and deployed - both resize workflows run
+green. Defects 1-9 all reproduce-verified and fix-verified on this
+device.
+
 ## Deployment notes
 
 The live-patched device artifacts (renamed .so, hand-copied hook,

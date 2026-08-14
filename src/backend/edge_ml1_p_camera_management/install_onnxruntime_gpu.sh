@@ -191,7 +191,7 @@ if [ -f cmake/deps.txt ]; then
         EIGEN_NAME=$(echo "${EIGEN_LINE}" | cut -d';' -f1)
         EIGEN_URL=$(echo "${EIGEN_LINE}" | cut -d';' -f2)
         echo "Re-pinning eigen hash from ${EIGEN_URL}"
-        if wget -q -O /tmp/eigen_dep.zip "${EIGEN_URL}"; then
+        if wget -q --tries=5 --waitretry=30 --retry-on-http-error=429,500,502,503 -O /tmp/eigen_dep.zip "${EIGEN_URL}"; then
             EIGEN_SHA=$(sha1sum /tmp/eigen_dep.zip | cut -d' ' -f1)
             rm -f /tmp/eigen_dep.zip
             sed -i "s|^${EIGEN_NAME};.*|${EIGEN_NAME};${EIGEN_URL};${EIGEN_SHA}|" cmake/deps.txt

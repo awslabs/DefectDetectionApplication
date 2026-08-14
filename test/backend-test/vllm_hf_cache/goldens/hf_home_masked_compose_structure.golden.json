@@ -32,8 +32,7 @@
         "LD_LIBRARY_PATH=$LD_LIBRARY_PATH",
         "GRPC_POLL_STRATEGY=poll",
         "GRPC_ENABLE_FORK_SUPPORT=1",
-        "PYTHONPATH=/opt/tritonserver/backends/python:/",
-        "HF_HOME=/aws_dda/hf_cache"
+        "PYTHONPATH=/opt/tritonserver/backends/python:/"
       ],
       "expose": [
         "5000",
@@ -42,12 +41,25 @@
         "8001",
         "8002"
       ],
+      "healthcheck": {
+        "interval": "15s",
+        "retries": 4,
+        "start_period": "300s",
+        "test": [
+          "CMD",
+          "python3",
+          "/healthcheck.py"
+        ],
+        "timeout": "10s"
+      },
       "image": "flask-app",
       "network_mode": "host",
       "privileged": true,
       "profiles": [
         "generic"
       ],
+      "restart": "always",
+      "stop_grace_period": "120s",
       "volumes": [
         "/aws_dda:/aws_dda",
         "/tmp:/tmp",
@@ -93,8 +105,7 @@
         "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64",
         "GRPC_POLL_STRATEGY=poll",
         "GRPC_ENABLE_FORK_SUPPORT=1",
-        "PYTHONPATH=/opt/tritonserver/backends/python:/",
-        "HF_HOME=/aws_dda/hf_cache"
+        "PYTHONPATH=/opt/tritonserver/backends/python:/"
       ],
       "expose": [
         "5000",
@@ -109,6 +120,7 @@
       "profiles": [
         "generic_nvidia"
       ],
+      "restart": "unless-stopped",
       "volumes": [
         "/aws_dda:/aws_dda",
         "/tmp:/tmp",
@@ -153,13 +165,23 @@
         "GRPC_ENABLE_FORK_SUPPORT=1",
         "PYTHONPATH=/opt/tritonserver/backends/python:/",
         "ARGUS_HEADLESS=1",
-        "NVARGUS_ENABLE_HEADLESS=1",
-        "HF_HOME=/aws_dda/hf_cache"
+        "NVARGUS_ENABLE_HEADLESS=1"
       ],
       "expose": [
         "5000",
         "5443"
       ],
+      "healthcheck": {
+        "interval": "15s",
+        "retries": 4,
+        "start_period": "300s",
+        "test": [
+          "CMD",
+          "python3",
+          "/healthcheck.py"
+        ],
+        "timeout": "10s"
+      },
       "image": "flask-app",
       "network_mode": "host",
       "platform": "linux/arm64/v8",
@@ -167,7 +189,9 @@
       "profiles": [
         "tegra"
       ],
+      "restart": "always",
       "runtime": "nvidia",
+      "stop_grace_period": "120s",
       "volumes": [
         "/aws_dda:/aws_dda",
         "/tmp:/tmp",
@@ -181,11 +205,26 @@
     },
     "frontend": {
       "build": "./frontend",
+      "healthcheck": {
+        "interval": "30s",
+        "retries": 3,
+        "start_period": "30s",
+        "test": [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:80/"
+        ],
+        "timeout": "5s"
+      },
       "image": "react-webapp",
       "ports": [
         "3000:80",
         "3443:443"
       ],
+      "restart": "unless-stopped",
       "volumes": [
         "/aws_dda:/aws_dda"
       ]
