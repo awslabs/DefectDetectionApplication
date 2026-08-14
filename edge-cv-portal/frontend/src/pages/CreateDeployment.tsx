@@ -42,6 +42,7 @@ import {
   evaluateVllmArchGate,
   isVllmModelComponent,
   parseVllmGateRejection,
+  vllmArchsForComponent,
 } from './deployments/vllmArchGate';
 import {
   classifyGatedComponent,
@@ -367,9 +368,10 @@ export default function CreateDeployment() {
   }, [selectedComponents]);
 
   // Resolve the supported Target_Architecture set of every selected
-  // model-vllm-* component from its backing vLLM_Model_Record
-  // (published_component.supported_architectures, written at publish
-  // time). Components whose record cannot be resolved get an empty set
+  // model-vllm-* component from its backing vLLM_Model_Record's
+  // published_component map, per component via vllmArchsForComponent —
+  // each Per_JetPack_Component gates on its own architecture (2.13,
+  // 2.14). Components whose record cannot be resolved get an empty set
   // so the gate twin fails closed, like the backend's GSI lookup (15.3).
   useEffect(() => {
     // Resolve both the selected model-vllm-* components AND the catalog
@@ -401,9 +403,14 @@ export default function CreateDeployment() {
         }
         try {
           const resp = await apiService.getModel(trainingJobId);
-          resolved[name] = (
-            resp.model.published_component?.supported_architectures || []
-          ).map(String);
+          // Per-component resolution (design step 14): a
+          // Per_JetPack_Component resolves to its OWN architecture, a
+          // legacy unsuffixed name to the record-wide set; an
+          // out-of-set suffix fails closed with [].
+          resolved[name] = vllmArchsForComponent(
+            name,
+            resp.model.published_component
+          );
         } catch (err) {
           console.error(`Failed to load vLLM model record for ${name}:`, err);
           resolved[name] = []; // fail closed

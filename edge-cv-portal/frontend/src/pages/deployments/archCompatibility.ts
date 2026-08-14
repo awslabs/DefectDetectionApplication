@@ -16,6 +16,16 @@
  *
  * Kept free of React/UI imports so the fast-check property test
  * (task 3.2) can exercise it directly.
+ *
+ * vLLM keying note (vllm-multi-arch-publish-conflict design step 13): a
+ * published vLLM model is now ONE Per_JetPack_Component per packaged
+ * target, so the `vllmArchs` entries this module reads are keyed by the
+ * SUFFIXED per-JetPack component name (`model-vllm-{safe}-jetson-xavier-jp7`)
+ * and each entry holds that component's own single architecture, resolved
+ * by `vllmArchsForComponent` in `vllmArchGate.ts`. No production change is
+ * needed here: `componentSupportedArchs` already keys `vllmArchs` by the
+ * exact component name, and `inferComponentTargetArchs` already matches the
+ * `jp5`/`jp6`/`jp7` token a suffixed name carries (Requirement 2.13).
  */
 import { architectureLabel, isPluginComponent } from './pluginComponents';
 import { isVllmModelComponent } from './vllmArchGate';

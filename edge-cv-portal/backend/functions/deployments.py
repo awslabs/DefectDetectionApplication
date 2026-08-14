@@ -60,6 +60,20 @@ VLLM_MODEL_COMPONENT_PREFIX = 'model-vllm-'
 TRAINING_JOBS_TABLE = os.environ.get('TRAINING_JOBS_TABLE')
 TRAINING_JOBS_COMPONENT_NAME_INDEX = 'component_name-index'
 
+# Per_JetPack_Component naming: greengrass_publish.py suffixes the
+# Base_Component_Name with `target.replace('_', '-')` for one component per
+# packaged target, so `model-vllm-{safe}-jetson-xavier-jp7` serves exactly
+# `arm64_jp7`. This closed suffix vocabulary is the reverse of
+# packaging.VLLM_ARCH_TO_TARGET — KEEP IN SYNC with
+# `packaging.VLLM_ARCH_TO_TARGET` (the same mirrored-map convention
+# greengrass_publish.VLLM_TARGET_TO_ARCH uses; these Lambdas bundle the
+# shared layer only, so packaging cannot be imported).
+VLLM_TARGET_SUFFIX_TO_ARCH = {
+    'jetson-xavier-jp5': 'arm64_jp5',
+    'jetson-xavier-jp6': 'arm64_jp6',
+    'jetson-xavier-jp7': 'arm64_jp7',
+}
+
 # Devices table: carries the UseCaseAdmin-set `test_device` flag (9.8) and
 # the device's recorded Target_Architecture (16.6)
 DEVICES_TABLE = os.environ.get('DEVICES_TABLE')
@@ -1952,13 +1966,25 @@ def check_plugin_deployment_gates(plugin_components, thing_names):
     return None
 
 
-def load_vllm_model_record(component_name):
-    """The backing vLLM_Model_Record of one model-vllm-* component, via
-    the component_name-index GSI on the training-jobs table, or None —
-    the gate fails closed on unresolvable records, like
-    ``load_plugin_record``."""
-    if not TRAINING_JOBS_TABLE or not component_name:
-        return None
+def split_vllm_component_name(component_name):
+    """Split a vLLM component name into its Base_Component_Name and the
+    Target_Architecture its per-JetPack target suffix names, or
+    ``(name, None)`` when the name carries no known suffix (a legacy
+    unsuffixed component). Pure: the suffix vocabulary is closed
+    (``VLLM_TARGET_SUFFIX_TO_ARCH``), so an arbitrary model name that
+    merely happens to end in a `-jetson-…` fragment cannot be misread as
+    a target suffix."""
+    name = str(component_name or '')
+    for suffix, arch in VLLM_TARGET_SUFFIX_TO_ARCH.items():
+        marker = f"-{suffix}"
+        if name.endswith(marker) and len(name) > len(marker):
+            return name[:-len(marker)], arch
+    return name, None
+
+
+def _query_vllm_record_by_component_name(component_name):
+    """One GSI query on ``component_name-index`` for the exact name, or
+    None. Unresolvable reads warn and fail closed."""
     try:
         response = dynamodb.Table(TRAINING_JOBS_TABLE).query(
             IndexName=TRAINING_JOBS_COMPONENT_NAME_INDEX,
@@ -1977,18 +2003,66 @@ def load_vllm_model_record(component_name):
     return _decimal_to_native(items[0])
 
 
-def vllm_component_architectures(record):
-    """The supported Target_Architectures recorded on a published
-    vLLM_Model_Record: greengrass_publish.py writes
-    ``published_component.supported_architectures`` at publish time.
-    Empty when unresolvable, so the gate fails closed for every
-    device."""
+def load_vllm_model_record(component_name):
+    """The backing vLLM_Model_Record of one model-vllm-* component, via
+    the component_name-index GSI on the training-jobs table, or None —
+    the gate fails closed on unresolvable records, like
+    ``load_plugin_record``.
+
+    The record's top-level ``component_name`` stays the unsuffixed
+    Base_Component_Name, so a Per_JetPack_Component name
+    (``{base}-jetson-xavier-jp7``) resolves in two steps: the exact name
+    FIRST (the legacy path — one query, byte-identical for unsuffixed
+    names), and only on a miss AND a known target suffix a second query
+    with the stripped base name."""
+    if not TRAINING_JOBS_TABLE or not component_name:
+        return None
+    record = _query_vllm_record_by_component_name(component_name)
+    if record is not None:
+        return record
+    base_name, arch = split_vllm_component_name(component_name)
+    if arch is None or base_name == str(component_name):
+        return None
+    return _query_vllm_record_by_component_name(base_name)
+
+
+def vllm_component_architectures(record, component_name=None):
+    """The supported Target_Architectures of one published vLLM component.
+
+    ``component_name`` is optional and keyword-compatible with the legacy
+    single-argument callers. Resolution order (design step 11):
+
+    1. a ``published_component.components`` entry whose ``component_name``
+       matches → that entry's ``supported_architectures`` (the per-JetPack
+       write-back greengrass_publish.py produced);
+    2. elif the name carries a known target suffix → ``[arch]`` when that
+       arch is in the record-wide set, else ``[]`` (fail closed on an
+       out-of-set suffix);
+    3. else (no name given, or an unsuffixed legacy name) → the
+       record-wide ``published_component.supported_architectures`` /
+       ``record.supported_architectures``, exactly as before.
+
+    Empty when unresolvable, so the gate fails closed for every device."""
     if not record:
         return []
     published = record.get('published_component') or {}
-    architectures = (published.get('supported_architectures')
-                     or record.get('supported_architectures'))
-    return [str(arch) for arch in architectures or []]
+    record_wide = [str(arch) for arch in
+                   (published.get('supported_architectures')
+                    or record.get('supported_architectures') or [])]
+
+    if component_name:
+        name = str(component_name)
+        for entry in published.get('components') or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get('component_name') or '') == name:
+                return [str(arch) for arch in
+                        entry.get('supported_architectures') or []]
+        _, arch = split_vllm_component_name(name)
+        if arch is not None:
+            return [arch] if arch in record_wide else []
+
+    return record_wide
 
 
 def collect_vllm_component_manifests(components):
@@ -2015,7 +2089,10 @@ def collect_vllm_component_manifests(components):
             record = load_vllm_model_record(name)
             manifests[name] = {
                 'version': str(version) if version else None,
-                'architectures': vllm_component_architectures(record),
+                # Per-component resolution: a Per_JetPack_Component gates
+                # on its OWN architecture, a legacy unsuffixed name on the
+                # record-wide set (2.12).
+                'architectures': vllm_component_architectures(record, name),
             }
         elif name.startswith(WORKFLOW_COMPONENT_PREFIX):
             workflow_id = name[len(WORKFLOW_COMPONENT_PREFIX):]
