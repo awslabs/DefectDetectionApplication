@@ -532,11 +532,18 @@ if [ -z "$REGION" ]; then
     REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 fi
 
-COMPONENT_ARN=$(aws greengrassv2 list-components \
-    --scope PRIVATE \
-    --region "$REGION" \
-    --query "components[?componentName=='${COMPONENT_NAME}'].arn | [0]" \
-    --output text 2>/dev/null || true)
+# Construct the component ARN directly instead of searching
+# list-components: the CLI auto-paginates that call and applies the
+# --query JMESPath PER PAGE, so once the account exceeds one page of
+# components the output becomes "None\n<arn>" (one line per page) and
+# the subsequent tag-resource call fails on the mangled multi-line ARN.
+# That silent failure left aws.edgeml.dda.LocalServer.arm64JP7 untagged
+# and therefore invisible to the portal's component discovery.
+TAG_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
+COMPONENT_ARN=""
+if [ -n "$TAG_ACCOUNT_ID" ] && [ "$TAG_ACCOUNT_ID" != "None" ] && [ -n "$REGION" ]; then
+    COMPONENT_ARN="arn:aws:greengrass:${REGION}:${TAG_ACCOUNT_ID}:components:${COMPONENT_NAME}"
+fi
 
 if [ -n "$COMPONENT_ARN" ] && [ "$COMPONENT_ARN" != "None" ]; then
     echo "Found component ARN: $COMPONENT_ARN"

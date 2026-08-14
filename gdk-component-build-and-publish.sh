@@ -505,11 +505,16 @@ if [ -z "$REGION" ]; then
 fi
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
 
-COMPONENT_ARN=$(aws greengrassv2 list-components \
-    --scope PRIVATE \
-    --region $REGION \
-    --query "components[?componentName=='${COMPONENT_NAME}'].arn | [0]" \
-    --output text 2>/dev/null || true)
+# Construct the component ARN directly instead of searching
+# list-components: the CLI auto-paginates that call and applies the
+# --query JMESPath PER PAGE, so once the account exceeds one page of
+# components the output becomes "None\n<arn>" (one line per page) and
+# the subsequent tag-resource call fails on the mangled multi-line ARN,
+# leaving the component untagged and invisible to portal discovery.
+COMPONENT_ARN=""
+if [ -n "$ACCOUNT_ID" ] && [ "$ACCOUNT_ID" != "None" ] && [ -n "$REGION" ]; then
+    COMPONENT_ARN="arn:aws:greengrass:${REGION}:${ACCOUNT_ID}:components:${COMPONENT_NAME}"
+fi
 
 if [ -n "$COMPONENT_ARN" ] && [ "$COMPONENT_ARN" != "None" ]; then
     echo "Found component ARN: $COMPONENT_ARN"
