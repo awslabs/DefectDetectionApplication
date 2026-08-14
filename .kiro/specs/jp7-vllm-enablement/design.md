@@ -453,3 +453,11 @@ The image-build half of this feature is not property-testable (declarative Docke
 **On-hardware (documented manual procedure — repo convention):**
 
 - `test/on-hardware/jp7_vllm_validation.md` executed on a Jetson Thor JP7 device: opt-125m full-pipeline smoke (register → package → publish → deploy → READY → generate → SSE stream), Qwen2.5-7B-Instruct realistic run, `llm_inference` workflow node, vision-model coexistence, in-container `torch.cuda.is_available()` and engine-load checks (Requirements 2.8, 6.1–6.7).
+
+## Amendment (vllm-multi-arch-publish-conflict)
+
+Amended by `.kiro/specs/vllm-multi-arch-publish-conflict/` (branch `spec/jetpack7-support`):
+
+- JP7 vLLM support is now delivered as its own per-JetPack component `model-vllm-{safe}-jetson-xavier-jp7`, advertising exactly `['arm64_jp7']` in `DefaultConfiguration.supported_architectures` and carrying a HARD dependency on `aws.edgeml.dda.LocalServer.arm64JP7`.
+- Task 6.2 of this spec added `arm64_jp7` to `vllm_supported_architectures()` and `packaging.VLLM_ARCH_TO_TARGET` but omitted the two module-level maps in `greengrass_publish.py`; the missing `jetson-xavier-jp7` entries in `TARGET_TO_LOCAL_SERVER` and `TARGET_TO_PLATFORM` were completed by the amending spec (which also made platform resolution fail closed instead of defaulting to `amd64`).
+- Requirement 4.4 and the manual-validation row "Publish → component `model-vllm-*` published, architectures include `arm64_jp7`" are now satisfied per-component rather than record-wide: there is no longer ONE component advertising both JetPacks — the record publishes one component per architecture, and the JP7 one is the component that advertises `arm64_jp7`.

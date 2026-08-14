@@ -238,3 +238,11 @@ Model_Component recipe `ComponentDependencies` shape and `VersionRequirement` (`
 | 4.1–4.2 (min-version map) | Component 5 | 5 |
 | 5.1–5.4 (migration / backward compat) | Components 2, 3, 6 | 3, 4, 5 |
 | 6.1–6.4 (regression coverage) | Testing Strategy | 1, 2, 3, 4 |
+
+## Amendment (vllm-multi-arch-publish-conflict)
+
+Amended by `.kiro/specs/vllm-multi-arch-publish-conflict/` (branch `spec/jetpack7-support`):
+
+- `greengrass_publish.py` gained the `jetson-xavier-jp7` entries: `TARGET_TO_LOCAL_SERVER['jetson-xavier-jp7'] = 'aws.edgeml.dda.LocalServer.arm64JP7'` and `TARGET_TO_PLATFORM['jetson-xavier-jp7'] = 'aarch64'`.
+- The unmapped JP7 target had been silently covered by the `platform == 'amd64'` branch of `resolve_local_server_component`, because `TARGET_TO_PLATFORM.get(target, 'amd64')` defaulted the platform to `amd64` — bypassing this spec's fail-closed guarantee without any error surfacing.
+- Any future aarch64 target must be added to BOTH maps, or the amd64 default defeats fail-closed resolution. This is why `resolve_target_platform` now raises `PublishError` for a target absent from either map instead of defaulting, so the guarantee can no longer be bypassed silently.

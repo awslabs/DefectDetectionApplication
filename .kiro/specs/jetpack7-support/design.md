@@ -409,3 +409,7 @@ The feature mixes pure decision logic (property-tested), fixed-file conventions 
 | 7 (portal target matrix + device compat) | Components #8, #9; Properties 3–6 |
 | 8 (JetPack 7.1/7.2 devices) | Overview scope decisions; Error Handling (on-device); integration test 3 |
 | 9 (test baselines) | Components #11; Property 8; example tests |
+
+## Amendment (vllm-multi-arch-publish-conflict)
+
+JP7 vLLM model publishing (delivered under this umbrella by `.kiro/specs/jp7-vllm-enablement/`) was amended by `.kiro/specs/vllm-multi-arch-publish-conflict/` (branch `spec/jetpack7-support`): a vLLM model on JP7 now means a JP7-specific model component (`model-vllm-{safe}-jetson-xavier-jp7`, advertising only `arm64_jp7` and depending on `aws.edgeml.dda.LocalServer.arm64JP7`), not a shared component advertising both JetPacks. See that spec for the per-JetPack naming, publishing, and deploy-gate details.

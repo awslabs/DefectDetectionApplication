@@ -697,3 +697,10 @@ The dual approach used across this repo's specs: **property-based tests** (Hypot
 - Cloud: one end-to-end register → publish → deploy-rejection (jp4 target) → deploy-success (jp6 target) flow against a test account (2.4-registration, 3.x wiring).
 
 **PBT library and configuration**: Hypothesis (already in use across `edge-cv-portal/backend` and `workflow_core`) with `@settings(max_examples=100)` minimum; fast-check for the TypeScript gate-predicate twin. No property-testing machinery is hand-rolled.
+
+## Amendment (vllm-multi-arch-publish-conflict)
+
+Amended by `.kiro/specs/vllm-multi-arch-publish-conflict/` (branch `spec/jetpack7-support`), which split vLLM publishing into per-JetPack components with suffixed names (e.g. `model-vllm-{safe}-jetson-xavier-jp6` / `-jp7`):
+
+- `evaluate_vllm_arch_gate`, the 409 `VLLM_ARCH_UNSUPPORTED` contract, the fail-closed rules (null device arch, empty supported set), and the JP4 `JP4_UNSUPPORTED` reason are all unchanged.
+- Only the *source* of a `model-vllm-*` component's supported architecture set changed: it now comes from a per-component entry (each suffixed component advertises exactly its own architecture), while the record-wide set is retained for legacy unsuffixed components.

@@ -330,3 +330,10 @@ For any list of deployments, the default sort places every item with an unparsea
 ### Regression
 
 - Existing quick-setup shell/backend tests, the existing vLLM/plugin gate twin tests, and the existing `CreateDeployment` tests must remain green; the backend gate functions are unmodified.
+
+## Amendment (vllm-multi-arch-publish-conflict)
+
+Amended by `.kiro/specs/vllm-multi-arch-publish-conflict/` (branch `spec/jetpack7-support`), which introduced per-JetPack vLLM components with suffixed names:
+
+- `vllmComponentArchs` entries in `archCompatibility.ts` / `vllmArchGate.ts` / `CreateDeployment.tsx` are now keyed by the exact suffixed component name and resolved with `vllmArchsForComponent` (`vllmArchGate.ts`), so one model record can contribute several keys with disjoint single-arch sets (e.g. its JP6 component maps to `['arm64_jp6']` and its JP7 component to `['arm64_jp7']`).
+- The exact-name, no-fallback matching contract and the fail-closed rules — null device arch, empty supported set, still-resolving `undefined` — are unchanged.

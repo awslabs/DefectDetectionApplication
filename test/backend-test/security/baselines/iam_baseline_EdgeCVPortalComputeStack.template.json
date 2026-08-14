@@ -929,6 +929,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -2440,6 +2441,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -3485,6 +3487,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -4475,6 +4478,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -5453,6 +5457,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -6431,6 +6436,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -7561,6 +7567,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -8550,6 +8557,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -9528,6 +9536,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -10446,6 +10455,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -11423,6 +11433,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -12400,6 +12411,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -13377,6 +13389,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -14355,6 +14368,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -15332,6 +15346,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -16310,6 +16325,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -17291,6 +17307,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -18305,6 +18322,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -19282,6 +19300,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -20336,6 +20355,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -21313,6 +21333,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -22394,6 +22415,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -23382,6 +23404,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -24393,6 +24416,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -25404,6 +25428,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -26382,6 +26407,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -27520,6 +27546,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -28634,6 +28661,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -29879,6 +29907,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -31003,6 +31032,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -32122,6 +32152,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -33180,6 +33211,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -34238,6 +34270,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -35365,6 +35398,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -36466,6 +36500,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -37538,6 +37573,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -38554,6 +38590,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -40085,6 +40122,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
