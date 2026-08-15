@@ -92,3 +92,10 @@ This feature adds a web-GUI action on the model detail page that lets users pack
 3. WHEN a vLLM_Model_Record is packaged and published through the Package_Publish_Action, THE resulting Packaged_Component_Entry and Published_Component data SHALL contain the same set of fields with the same value types as the data produced by invoking the Packaging_API with `auto_triggered` set to true directly, differing only in the values of timestamps, component versions, and component ARNs.
 4. WHEN the Model_Detail_Page displays a model record that is not a vLLM_Model_Record, THE Portal frontend SHALL display no Package_Publish_Action and no publish-only retry action and SHALL initiate no Published_Component polling for that record.
 5. WHEN a CompilationTab package or publish control is activated for a Vision_Model_Record, THE Portal frontend SHALL invoke the same backend operations with the same request contracts that the CompilationTab used before this feature.
+
+> **Amendment note** (see `.kiro/specs/onnx-compile-error-diagnostics/`): that
+> spec changes `CompilationTab`'s **status classification and error rendering
+> ONLY**. The package/publish controls, their request contracts, the 15 s
+> polling, the version derivation and validation, and the `trained`/`imported`
+> → `CompilationTab` routing are all untouched, so criteria 5.1 and 5.5
+> (Vision_Model_Record) still hold as written.

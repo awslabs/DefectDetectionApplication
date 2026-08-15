@@ -61,6 +61,12 @@ interface Model {
     target: string;
     status: string;
     compiled_model_s3?: string;
+    // Diagnostic fields preserved by the backend so a failure is never
+    // reduced to a bare status token (onnx-compile-error-diagnostics, 2.15).
+    failure_reason?: string;
+    error?: string;
+    poll_error?: string;
+    job_started?: boolean;
   }>;
   packaging_status?: string;
   packaged_components?: Array<{
@@ -687,10 +693,34 @@ export default function ModelDetail() {
               columnDefinitions={[
                 { id: 'target', header: 'Target', cell: (item) => <Badge>{item.target}</Badge> },
                 { id: 'status', header: 'Status', cell: (item) => {
-                  if (item.status === 'COMPLETED') return <Badge color="green">Completed</Badge>;
-                  if (item.status === 'INPROGRESS') return <Badge color="blue">In Progress</Badge>;
-                  if (item.status === 'FAILED') return <Badge color="red">Failed</Badge>;
+                  // Case-insensitive classification so 'Completed'/'COMPLETED'
+                  // etc. all reach their intended arm (2.16, 2.17).
+                  const status = String(item.status || '').toUpperCase();
+                  if (status === 'COMPLETED') return <Badge color="green">Completed</Badge>;
+                  if (status === 'INPROGRESS' || status === 'IN_PROGRESS' || status === 'STARTING') return <Badge color="blue">In Progress</Badge>;
+                  if (status === 'FAILED') return <Badge color="red">Failed</Badge>;
+                  // Transient poll fault: the job's true status is unknown and
+                  // it will be re-polled — not a terminal failure.
+                  if (status === 'ERROR') return <Badge color="grey">Status unavailable — retrying</Badge>;
                   return <Badge>{item.status}</Badge>;
+                }},
+                { id: 'reason', header: 'Reason', cell: (item) => {
+                  // Surface the preserved originating reason so this page can
+                  // never again show only a status token (2.14, 2.15).
+                  const reason = item.failure_reason || item.error;
+                  if (!reason && !item.poll_error) {
+                    return <Box fontSize="body-s" color="text-status-inactive">N/A</Box>;
+                  }
+                  return (
+                    <SpaceBetween size="xxs">
+                      {reason && <Box fontSize="body-s">{reason}</Box>}
+                      {item.poll_error && (
+                        <Box fontSize="body-s" color="text-status-inactive">
+                          Status lookup error: {item.poll_error}
+                        </Box>
+                      )}
+                    </SpaceBetween>
+                  );
                 }},
                 { id: 'output', header: 'Output', cell: (item) => item.compiled_model_s3 ? 
                   <Box fontSize="body-s" color="text-status-info">Available</Box> : 

@@ -35,6 +35,16 @@ Ubuntu 24.04 (noble) ships Python 3.12 as the distro python. The DDA stack is st
 - **Neo/DLR model runtime**: the JP6-only CUDA 11.4 cudart + TensorRT 8 staging stages are **not** carried to JP7. Those stages exist to satisfy r35-era `libdlr.so` binaries; their transitive L4T driver dependencies do not exist on Thor. DLR-only models are not supported on JP7 (engines are imported lazily per-runner, so this degrades per-model, not at startup). Documented as a known limitation in the JP7 deployment docs.
 - **GPU onnxruntime**: enabled by default (source build, ~1–2 h), same `ONNXRUNTIME_GPU=0` opt-out as JP5/JP6.
 
+> **Amendment note** (see `.kiro/specs/onnx-compile-error-diagnostics/`): because
+> DLR-only models are not supported on JP7, the ONNX export path
+> (`compilation.py`, `target=onnx`) is the designated route for vision models on
+> JP7; its start-failure diagnostics are hardened by the referenced spec. There
+> is deliberately NO `jetson-xavier-jp7` SageMaker Neo **compile** target and
+> none is added — `jetson-xavier-jp7` remains a packaging-target identifier only
+> (`packaging.py` `VLLM_ARCH_TO_TARGET`, `workflow_packaging.py`) — because
+> SageMaker Neo cannot target CUDA 13 (its `cuda-ver` ceiling is 11.x, per the
+> `jetson-xavier-jp6` comment in `COMPILATION_TARGETS`).
+
 ### Research summary
 
 - JetPack 7.1 = Jetson Linux r38.4, Ubuntu 24.04, kernel 6.8, CUDA 13.0, SBSA-aligned aarch64 (Thor, compute capability `sm_110`). JetPack 7.2 is the follow-on release on the same r38.x/CUDA 13 userspace generation — one component artifact covers both (Requirement 8.1).

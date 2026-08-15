@@ -19,6 +19,12 @@ from shared_utils import (
     check_user_access, validate_required_fields,
     get_usecase, get_usecase_client
 )
+# Shared compilation-status vocabulary: one classifier and one derivation for
+# every poller (see .kiro/specs/onnx-compile-error-diagnostics/).
+from compilation_status import (
+    classify_poll_kind, is_terminal_status, derive_compilation_status,
+    POLL_KIND_NONE, POLL_KIND_TRAINING, POLL_KIND_COMPILATION
+)
 
 # Configure logging
 logger = logging.getLogger()
@@ -234,11 +240,15 @@ def get_model(event: Dict, context: Any) -> Dict:
         # so the model detail page reflects current state (jobs are otherwise
         # only refreshed from the training detail page's Compilation tab).
         compilation_jobs = item.get('compilation_jobs', [])
-        TERMINAL = {'COMPLETED', 'FAILED', 'STOPPED'}
+        # Terminal entries (COMPLETED/FAILED/STOPPING/STOPPED) are never
+        # re-polled, and entries with no live SageMaker job (POLL_KIND_NONE,
+        # e.g. an ONNX start failure) are never described — the shared
+        # is_terminal_status / classify_poll_kind rules keep this filter in
+        # lockstep with poller A (compilation.py::get_compilation_status).
         jobs_to_sync = [
             j for j in compilation_jobs
-            if j.get('compilation_job_name')
-            and str(j.get('status', '')).upper() not in TERMINAL
+            if not is_terminal_status(j.get('status'))
+            and classify_poll_kind(j) != POLL_KIND_NONE
         ]
         if jobs_to_sync:
             try:
@@ -250,6 +260,25 @@ def get_model(event: Dict, context: Any) -> Dict:
                 changed = False
                 for job in jobs_to_sync:
                     try:
+                        # Select the describe API from the entry's own
+                        # markers: ONNX exports run as SageMaker *training*
+                        # jobs, everything else is a Neo compilation job.
+                        if classify_poll_kind(job) == POLL_KIND_TRAINING:
+                            resp = sagemaker.describe_training_job(
+                                TrainingJobName=job['compilation_job_name']
+                            )
+                            new_status = resp['TrainingJobStatus']
+                            if new_status != job.get('status'):
+                                changed = True
+                            job['status'] = new_status
+                            if new_status == 'Completed':
+                                arts = resp.get('ModelArtifacts', {})
+                                if arts.get('S3ModelArtifacts'):
+                                    job['compiled_model_s3'] = arts['S3ModelArtifacts']
+                            elif new_status == 'Failed':
+                                job['failure_reason'] = resp.get('FailureReason', 'Unknown')
+                            continue
+
                         resp = sagemaker.describe_compilation_job(
                             CompilationJobName=job['compilation_job_name']
                         )
@@ -264,15 +293,9 @@ def get_model(event: Dict, context: Any) -> Dict:
                     except Exception as e:
                         logger.warning(f"Could not sync compilation job {job.get('compilation_job_name')}: {str(e)}")
                 if changed:
-                    # Derive overall status to match what the Models list reads.
-                    statuses = [str(j.get('status', '')).upper() for j in compilation_jobs]
-                    running = {'STARTING', 'INPROGRESS', 'IN_PROGRESS'}
-                    if any(s in running for s in statuses):
-                        overall = 'InProgress'
-                    elif statuses and all(s == 'COMPLETED' for s in statuses):
-                        overall = 'Completed'
-                    else:
-                        overall = 'Failed'
+                    # One shared derivation for the overall status (the same
+                    # implementation compilation.py uses).
+                    overall = derive_compilation_status(compilation_jobs)
                     item['compilation_jobs'] = compilation_jobs
                     item['compilation_status'] = overall
                     try:

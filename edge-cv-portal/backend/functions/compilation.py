@@ -24,6 +24,19 @@ from shared_utils import (
     check_user_access, validate_required_fields, create_s3_path_builder,
     is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
 )
+# Shared compilation-status vocabulary and aggregation (same layer).
+# derive_compilation_status is re-exported here so existing importers keep
+# working; its body lives in exactly one place (compilation_status.py).
+from compilation_status import (  # noqa: F401  (derive_compilation_status re-exported)
+    derive_compilation_status,
+    classify_poll_kind,
+    is_terminal_status,
+    STATUS_POLL_ERROR,
+    POLL_ERROR_MAX_ATTEMPTS,
+    POLL_KIND_NONE,
+    POLL_KIND_TRAINING,
+    POLL_KIND_COMPILATION,
+)
 
 # Configure logging
 logger = logging.getLogger()
@@ -151,29 +164,6 @@ ONNX_EXPORT_IMAGE = os.environ.get(
 )
 # Default ONNX opset for export; overridable via env without a code change.
 ONNX_OPSET = int(os.environ.get('ONNX_OPSET', '17'))
-
-
-def derive_compilation_status(compilation_jobs):
-    """Aggregate per-target compilation job statuses into a single overall
-    status for the model/training record. Returns one of the values the UI
-    understands: 'InProgress', 'Completed', or 'Failed'.
-
-    SageMaker compilation statuses are uppercase (STARTING, INPROGRESS,
-    COMPLETED, FAILED, STOPPING, STOPPED). Rules:
-      - any job still running (STARTING/INPROGRESS) -> 'InProgress'
-      - otherwise, all jobs COMPLETED -> 'Completed'
-      - otherwise (some FAILED/STOPPED and none running) -> 'Failed'
-    """
-    if not compilation_jobs:
-        return None
-
-    statuses = [str(j.get('status', '')).upper() for j in compilation_jobs]
-    running = {'STARTING', 'INPROGRESS', 'IN_PROGRESS'}
-    if any(s in running for s in statuses):
-        return 'InProgress'
-    if statuses and all(s == 'COMPLETED' for s in statuses):
-        return 'Completed'
-    return 'Failed'
 
 
 def get_training_job_details(training_id: str) -> Dict:
@@ -556,11 +546,48 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
                     compilation_jobs.append(export_job)
                 except Exception as e:
                     logger.error(f"Failed to start ONNX export job: {str(e)}")
+                    # No SageMaker job exists for this entry, so no
+                    # compilation_job_name is written. Three consumers depend
+                    # on that absence:
+                    #   - classify_poll_kind (shared layer) returns
+                    #     POLL_KIND_NONE for job_started False / no name, so
+                    #     poller A never issues a doomed describe call that
+                    #     would clobber the reason recorded below;
+                    #   - poller B (models.py::get_model) filters on
+                    #     j.get('compilation_job_name') and skips the entry;
+                    #   - writer C (compilation_events.py) matches events by
+                    #     compilation_job_name, so it can never touch this
+                    #     entry — no SageMaker job ever bore a name for it.
+                    #
+                    # The two most likely triggers of the create_training_job
+                    # failure recorded in 'error' below are:
+                    #   1. the hardcoded execution role in
+                    #      _start_onnx_export_job: role_arn =
+                    #      f"arn:aws:iam::{account_id}:role/DDASageMakerExecutionRole"
+                    #      (the role may not exist or may lack permissions in
+                    #      the use-case account);
+                    #   2. the region-pinned ONNX_EXPORT_IMAGE default
+                    #      (763104351884.dkr.ecr.us-east-1.amazonaws.com/
+                    #      pytorch-training:1.13.1-cpu-py39), unusable from a
+                    #      non-us-east-1 account/region.
+                    # Changing how either is resolved is OUT OF SCOPE for
+                    # .kiro/specs/onnx-compile-error-diagnostics/ — this fix
+                    # only guarantees the reason survives and is surfaced.
+                    #
+                    # Note: IAM is NOT the cause of the *poll* failure that
+                    # used to destroy this reason: compute-stack.ts grants
+                    # sagemaker:DescribeTrainingJob / DescribeCompilationJob
+                    # on unscoped arn:aws:sagemaker:*:*:training-job/* and
+                    # compilation-job/*, so a poll ClientError here is a
+                    # ValidationException on a non-existent job name, not a
+                    # permission denial.
                     compilation_jobs.append({
                         'target': 'onnx',
-                        'compilation_job_name': f"{safe_model_name}-onnx-failed",
+                        'export_format': 'onnx',
                         'status': 'Failed',
+                        'job_started': False,
                         'error': str(e),
+                        'failed_step': 'start_onnx_export_job',
                     })
                 continue
 
@@ -662,7 +689,10 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
             result='success',
             details={
                 'targets': targets,
-                'compilation_jobs': [j['compilation_job_name'] for j in compilation_jobs],
+                'compilation_jobs': [
+                    j.get('compilation_job_name') or f"{j.get('target')}:not-started"
+                    for j in compilation_jobs
+                ],
                 'auto_triggered': auto_triggered
             }
         )
@@ -748,13 +778,21 @@ def get_compilation_status(event: Dict, context: Any) -> Dict:
             session_name=f"stat-{int(datetime.utcnow().timestamp())}"
         )
         
-        # Update status for each compilation job
+        # Update status for each compilation job. Entries are routed by
+        # Poll_Kind (classify_poll_kind): 'none' entries have no live
+        # SageMaker job and are never described nor mutated.
         updated_jobs = []
         for job in compilation_jobs:
+            kind = classify_poll_kind(job)
+            if kind == POLL_KIND_NONE:
+                # No live SageMaker job: no describe call, no mutation.
+                updated_jobs.append(job)
+                continue
             try:
-                # ONNX export jobs are SageMaker *training* jobs, not Neo
-                # compilation jobs, so they're polled with describe_training_job.
-                if job.get('export_format') == 'onnx':
+                if kind == POLL_KIND_TRAINING:
+                    # ONNX export jobs are SageMaker *training* jobs, not Neo
+                    # compilation jobs, so they're polled with
+                    # describe_training_job.
                     response = sagemaker_usecase.describe_training_job(
                         TrainingJobName=job['compilation_job_name']
                     )
@@ -766,27 +804,55 @@ def get_compilation_status(event: Dict, context: Any) -> Dict:
                             job['compiled_model_s3'] = arts['S3ModelArtifacts']
                     elif job_status == 'Failed':
                         job['failure_reason'] = response.get('FailureReason', 'Unknown')
-                    updated_jobs.append(job)
-                    continue
+                else:
+                    response = sagemaker_usecase.describe_compilation_job(
+                        CompilationJobName=job['compilation_job_name']
+                    )
 
-                response = sagemaker_usecase.describe_compilation_job(
-                    CompilationJobName=job['compilation_job_name']
-                )
-                
-                job_status = response['CompilationJobStatus']
-                job['status'] = job_status
-                
-                if job_status == 'COMPLETED':
-                    job['compiled_model_s3'] = response['ModelArtifacts']['S3ModelArtifacts']
-                elif job_status == 'FAILED':
-                    job['failure_reason'] = response.get('FailureReason', 'Unknown')
-                
+                    job_status = response['CompilationJobStatus']
+                    job['status'] = job_status
+
+                    if job_status == 'COMPLETED':
+                        job['compiled_model_s3'] = response['ModelArtifacts']['S3ModelArtifacts']
+                    elif job_status == 'FAILED':
+                        job['failure_reason'] = response.get('FailureReason', 'Unknown')
+
+                # A successful poll clears any previously recorded poll fault.
+                job.pop('poll_error', None)
+                job.pop('poll_error_count', None)
                 updated_jobs.append(job)
-                
+
             except ClientError as e:
-                logger.error(f"Error getting compilation status for {job['compilation_job_name']}: {str(e)}")
-                job['status'] = 'ERROR'
-                job['error'] = str(e)
+                # Write-once invariant: a poll is NEVER a writer of `error`
+                # or `failure_reason` — `error` is owned by start time
+                # (start_compilation_job) and `failure_reason` by describe
+                # responses (the Originating_Reason). A poll may only write
+                # the poll_error* fields, so a poll fault can never displace
+                # the originating diagnostic. Do not assign `error` or
+                # `failure_reason` in this handler (setdefault below is the
+                # single sanctioned exception): doing so would silently
+                # reintroduce Defect 2, where the portal's own first poll
+                # destroyed the recorded reason.
+                logger.error(f"Error getting compilation status for {job.get('compilation_job_name')}: {str(e)}")
+                job['poll_error'] = str(e)
+                job['poll_error_at'] = int(datetime.utcnow().timestamp() * 1000)
+                job['poll_error_count'] = int(job.get('poll_error_count', 0)) + 1
+                if not is_terminal_status(job.get('status')):
+                    if job['poll_error_count'] >= POLL_ERROR_MAX_ATTEMPTS:
+                        # The "unknown, keep polling" window is bounded:
+                        # latch genuinely terminal, promoting the poll reason
+                        # into failure_reason ONLY where no Originating_Reason
+                        # exists (setdefault).
+                        job['status'] = 'FAILED'
+                        job.setdefault(
+                            'failure_reason',
+                            f"status could not be retrieved after "
+                            f"{job['poll_error_count']} attempts: {e}"
+                        )
+                    else:
+                        # Transient poll fault: the job's true status is
+                        # unknown — re-poll, never latch terminal.
+                        job['status'] = STATUS_POLL_ERROR
                 updated_jobs.append(job)
         
         # Update DynamoDB with latest status

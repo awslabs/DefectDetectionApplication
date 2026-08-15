@@ -175,6 +175,7 @@ Add the JP7 build target following the established per-target patterns: new JP7 
   - [x] 11.2 Write the JP7 deployment documentation
     - Host-side prerequisites for JetPack 7.1/7.2 devices (required host packages or driver interfaces per release, as discovered); documented known limitations: DLR-only models unsupported on JP7 (per-model lazy-import degradation), vLLM disabled on JP7
     - _Requirements: 8.5_
+    > **Amendment note** (see `.kiro/specs/onnx-compile-error-diagnostics/`): the DLR-only limitation makes the ONNX export path the designated vision route for JP7; its start-failure diagnostics are hardened by the referenced spec. There is still NO `jetson-xavier-jp7` **compile** target and none is added (`jetson-xavier-jp7` remains a packaging-target identifier only, in `packaging.py` `VLLM_ARCH_TO_TARGET` and `workflow_packaging.py`; SageMaker Neo cannot target CUDA 13 — its `cuda-ver` ceiling is 11.x, per the `jetson-xavier-jp6` comment in `COMPILATION_TARGETS`).
 
 - [x] 12. Final checkpoint - Ensure all tests pass
   - Run the full offline test suite; ensure all tests pass, ask the user if questions arise.

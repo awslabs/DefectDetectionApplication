@@ -18,6 +18,10 @@ import {
 } from '@cloudscape-design/components';
 import { CompilationJob, TrainingJob } from '../types';
 import { apiService } from '../services/api';
+import {
+  normalizeCompilationStatus,
+  isDiagnosticCompilationJob,
+} from './compilationStatus';
 
 interface CompilationTabProps {
   trainingId: string;
@@ -142,18 +146,36 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
     console.log('Modal state changed to:', showTargetModal);
   }, [showTargetModal]);
 
-  const getStatusIndicator = (status: CompilationJob['status']) => {
-    switch (status) {
-      case 'Completed':
+  // Classify statuses case-insensitively: portal-synthesized entries carry
+  // 'InProgress' / 'Failed' while SageMaker describe responses are stored
+  // verbatim in uppercase ('STARTING', 'INPROGRESS', 'COMPLETED', 'FAILED'),
+  // so both forms must reach the same arm.
+  const getStatusIndicator = (job: CompilationJob) => {
+    switch (normalizeCompilationStatus(job.status)) {
+      case 'COMPLETED':
         return <StatusIndicator type="success">Completed</StatusIndicator>;
-      case 'InProgress':
+      case 'STARTING':
+      case 'INPROGRESS':
+      case 'IN_PROGRESS':
         return <StatusIndicator type="in-progress">In Progress</StatusIndicator>;
-      case 'Failed':
+      case 'FAILED':
         return <StatusIndicator type="error">Failed</StatusIndicator>;
-      case 'Stopped':
+      case 'STOPPING':
+      case 'STOPPED':
         return <StatusIndicator type="stopped">Stopped</StatusIndicator>;
+      case 'ERROR':
+        // Transient poll fault: the job's true status is unknown and it will
+        // be re-polled — this is NOT a compile outcome. Show the lookup error
+        // so the token is never rendered bare.
+        return (
+          <StatusIndicator type="in-progress">
+            Status unavailable — retrying{job.poll_error ? `: ${job.poll_error}` : ''}
+          </StatusIndicator>
+        );
       default:
-        return <StatusIndicator type="info">{status}</StatusIndicator>;
+        // Unmodeled value — surface it explicitly as unknown rather than
+        // printing a raw token with no context.
+        return <StatusIndicator type="info">Unknown status: {job.status}</StatusIndicator>;
     }
   };
 
@@ -608,7 +630,7 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
             {
               id: 'status',
               header: 'Status',
-              cell: (item) => getStatusIndicator(item.status),
+              cell: (item) => getStatusIndicator(item),
               sortingField: 'status',
             },
             {
@@ -631,7 +653,11 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
               header: 'SageMaker Job Name',
               cell: (item) => (
                 <Box fontSize="body-s">
-                  <span style={{ fontFamily: 'monospace' }}>{item.compilation_job_name}</span>
+                  {/* A job that failed to start has no live SageMaker job and
+                      therefore no name — say so instead of an empty cell. */}
+                  <span style={{ fontFamily: 'monospace' }}>
+                    {item.compilation_job_name || 'not started'}
+                  </span>
                 </Box>
               ),
             },
@@ -788,17 +814,22 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
         </SpaceBetween>
       </Modal>
 
-      {/* Error Details */}
-      {compilationJobs.some(job => job.status === 'Failed') ? (
+      {/* Error Details. The panel is gated on a diagnostic predicate rather
+          than the old exact-match `status === 'Failed'`: any job whose
+          normalized status is FAILED / STOPPED / ERROR, or that carries a
+          recorded reason (failure_reason / error) or a poll fault
+          (poll_error). This surfaces the ONNX no-live-job reason and the
+          uppercase Neo FAILED reasons the exact match always excluded. */}
+      {compilationJobs.some(isDiagnosticCompilationJob) ? (
         <Container header={<Header variant="h2">Compilation Errors</Header>}>
           <SpaceBetween size="m">
             {compilationJobs
-              .filter(job => job.status === 'Failed')
+              .filter(isDiagnosticCompilationJob)
               .map((job, index) => (
                 <Alert key={index} type="error" header={`${job.target} Compilation Failed`}>
                   <SpaceBetween size="s">
                     <Box>
-                      <strong>Job:</strong> {job.compilation_job_name}
+                      <strong>Job:</strong> {job.compilation_job_name || 'not started'}
                     </Box>
                     {job.failure_reason ? (
                       <Box>
@@ -808,6 +839,19 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
                     {job.error ? (
                       <Box>
                         <strong>Error:</strong> {job.error}
+                      </Box>
+                    ) : null}
+                    {/* A poll fault is a status-lookup failure, not a compile
+                        outcome — keep it under its own label so it is never
+                        conflated with the originating reason above. */}
+                    {job.poll_error ? (
+                      <Box>
+                        <strong>Status lookup error:</strong> {job.poll_error}
+                      </Box>
+                    ) : null}
+                    {job.failed_step ? (
+                      <Box>
+                        <strong>Failed step:</strong> {job.failed_step}
                       </Box>
                     ) : null}
                     <Box variant="small" color="text-body-secondary">

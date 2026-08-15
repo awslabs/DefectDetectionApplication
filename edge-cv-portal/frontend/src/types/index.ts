@@ -144,10 +144,23 @@ export interface CompilationJob {
   target: string;
   compilation_job_name: string;
   compilation_job_arn: string;
-  status: 'InProgress' | 'Completed' | 'Failed' | 'Stopped' | 'INPROGRESS' | 'COMPLETED' | 'FAILED' | 'STOPPED';
+  // 'ERROR' is a transient poll fault: the job's true status is unknown and it
+  // will be re-polled. It is not a terminal state.
+  // Uppercase values come verbatim from SageMaker Neo (STARTING/STOPPING
+  // included) and the event writer's normalization; mixed-case values come
+  // from the training-job API ('Stopping' included) and start time.
+  status: 'InProgress' | 'Completed' | 'Failed' | 'Stopping' | 'Stopped' | 'STARTING' | 'INPROGRESS' | 'COMPLETED' | 'FAILED' | 'STOPPING' | 'STOPPED' | 'ERROR';
   compiled_model_s3?: string;
   failure_reason?: string;
   error?: string;
+  // False when the start call itself failed and no live job exists to poll.
+  job_started?: boolean;
+  // Last status-lookup (describe) failure recorded by the poller; distinct
+  // from `error` / `failure_reason`, which carry the originating reason.
+  poll_error?: string;
+  // Name of the step that failed when the job never started
+  // (e.g. 'start_onnx_export_job').
+  failed_step?: string;
   created_at?: number;
   completed_at?: number;
 }

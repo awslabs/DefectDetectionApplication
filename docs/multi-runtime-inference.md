@@ -445,6 +445,19 @@ Caveat: "compile to ONNX" and "package" are currently two Smart-Import steps
 export output directly into packaging is a follow-up. On-device validation
 pending.
 
+> **Amendment note** (see `.kiro/specs/onnx-compile-error-diagnostics/`): the
+> compile step's *success* path was validated end to end as stated above, but
+> its start-failure path destroyed its own diagnostics on the first status poll
+> (the poller described a fabricated job name with the wrong API and overwrote
+> the originating error). Fixed by the referenced spec, which establishes three
+> contracts: (1) `error` / `failure_reason` are **write-once with respect to
+> polling** — a poll never overwrites them, poll faults land in `poll_error`;
+> (2) a failed ONNX start writes **no** `compilation_job_name` and carries
+> `job_started: false`, so no describe call is ever issued for it; (3) every
+> `compilation_jobs` entry is routed to its describe API (training vs. Neo
+> compilation, or none) by the shared `classify_poll_kind` in the
+> `compilation_status` layer module.
+
 ## 21. RF-DETR detection architecture (DETR-family decoder)
 
 YOLO is not the only object-detection export a user may bring. RF-DETR (and the

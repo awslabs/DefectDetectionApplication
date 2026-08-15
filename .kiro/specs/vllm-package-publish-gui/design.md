@@ -407,6 +407,15 @@ Example tests cover the interaction and timer behavior that the pure reducer can
 - **Live record refresh** (Req 2.3, 2.4, 4.4): completion poll result calls `onModelUpdate`; rendering `ModelDetail`'s architecture derivation with the new record shows the badges.
 - **Backward-compatibility regression** (Req 1.3, 5.1, 5.4, 5.5): rendering the page with a `trained`/`imported` record shows CompilationTab and no vLLM section; a vLLM record shows the section and never mounts CompilationTab; existing `CompilationTab` behavior is otherwise covered by its current tests and is not modified.
 
+> **Amendment note** (see `.kiro/specs/onnx-compile-error-diagnostics/`): that
+> spec changes `CompilationTab`'s **status classification and error rendering
+> ONLY** (case-insensitive status matching, an explicit `ERROR` arm, and a
+> widened "Compilation Errors" diagnostic filter). The package/publish controls,
+> their request contracts, the 15 s polling, the version derivation and
+> validation, and the `trained`/`imported` → `CompilationTab` routing are all
+> untouched, so the "not modified" claim above continues to hold for everything
+> this feature depends on.
+
 ### Out of scope
 
 Requirement 5.3 concerns backend output equivalence with no backend change in this feature; it is covered by the existing vllm-triton-inference backend tests and needs no new frontend test.
