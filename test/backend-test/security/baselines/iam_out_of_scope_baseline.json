@@ -3,12 +3,12 @@
     "edge-cv-portal/infrastructure/cdk.out/asset.059ba3c3f5e38ab1b92a54c9676715959ad324a82455d4730fad64a53d4c586a/audit_logs.py": "6d35b01067e9caa86d74a6913a189d974472fcbfd0dd5212c1c80ed4efb127b3"
   },
   "missing_at_capture": [],
-  "note": "Out-of-scope preservation guard for security-iam-authorization-fixes (Req 3.18). These files belong to sibling specs / generated build artifacts and MUST remain byte-for-byte unchanged by this spec. Rebaselined: packaging.py hash updated after the completed vllm-model-name-mismatch spec intentionally added the model_naming import + _safe_model_name delegation (verified diff contains only that edit). Rebaselined again after the jp7-vllm-enablement spec (commit c622850) intentionally added arm64_jp7 to vllm_supported_architectures() and VLLM_ARCH_TO_TARGET (verified diff contains only those two edits).",
+  "note": "Out-of-scope preservation guard for security-iam-authorization-fixes (Req 3.18). These files belong to sibling specs / generated build artifacts and MUST remain byte-for-byte unchanged by this spec. Rebaselined: packaging.py hash updated after the completed vllm-model-name-mismatch spec intentionally added the model_naming import + _safe_model_name delegation (verified diff contains only that edit). Rebaselined again after the jp7-vllm-enablement spec (commit c622850) intentionally added arm64_jp7 to vllm_supported_architectures() and VLLM_ARCH_TO_TARGET (verified diff contains only those two edits). Rebaselined again after the onnx-jetson-publish-packaging spec (commit c815003, hardware-verified) intentionally added ONNX_ARCH_TO_TARGET/ONNX_COMPILED_TARGETS and package_compiled_onnx_component (verified diff contains only those additions; baseline catch-up).",
   "sibling_spec_files": {
     "edge-cv-portal/backend/functions/components.py": "1edaa4877553c9bd9bbd7c03c13659c7fe66abfb57f5312fc5f4ba62113101af",
     "edge-cv-portal/backend/functions/jwt_authorizer.py": "a6346ca76c243e2c9978ee757d770f0cf2a180756a05bfc99f8abf58dceef876",
     "edge-cv-portal/backend/functions/model_converter.py": "1acab7c119908377dc6d315685126492075be0165c8dea51b5594762b2dc2738",
-    "edge-cv-portal/backend/functions/packaging.py": "35a3b6b415b1df7fef1bde896921e7627f1a172f83e18c1a8fae6bb30f370c0d",
+    "edge-cv-portal/backend/functions/packaging.py": "f7a420314bd7f1779adaf3a75d8cf5499fcf81ad0339678eceb771031b9c67ec",
     "src/backend/app.py": "d697bafe32d514e79a2f703284b4843627c07ac297ab66ea6278b783f3fe6842",
     "src/backend/snapshot/Snapshotter.py": "a99ffc761450606da95ccea51ddd2e78dbe300997673a556b419ca3fdd8ffd2b",
     "src/backend/utils/camera_manager.py": "746e550302ee0edf5e51f67674262f27186bada164135b67b4ddf14fba061bcc",
