@@ -454,6 +454,20 @@ VLLM_ARCH_TO_TARGET = {
 }
 
 
+# Target_Architecture -> compiled-ONNX packaging target id. One compiled
+# ONNX artifact packages one entry per supported JetPack (per-JetPack
+# components: Greengrass ComponentDependencies is top-level, so each
+# JetPack needs its own component with its own LocalServer HARD dep).
+# KEEP IN SYNC with greengrass_publish.py TARGET_TO_LOCAL_SERVER /
+# TARGET_TO_PLATFORM and workflow_packaging.py's arm64_jp7 acceptance.
+ONNX_ARCH_TO_TARGET = {
+    'arm64_jp5': 'onnx-jetson-xavier-jp5',
+    'arm64_jp6': 'onnx-jetson-xavier-jp6',
+    'arm64_jp7': 'onnx-jetson-xavier-jp7',
+}
+ONNX_COMPILED_TARGETS = list(ONNX_ARCH_TO_TARGET.values())
+
+
 def package_vllm_component(record: Dict, s3_client, usecase: Dict) -> str:
     """Assemble and upload the vLLM_Model_Component ZIP for one record.
 
@@ -587,6 +601,111 @@ def package_component(training_id: str, target: str, compiled_model_s3: str,
         raise
     finally:
         # Cleanup temp directory
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def package_compiled_onnx_component(compiled_model_s3: str, dda_manifest: Dict,
+                                    s3_client, usecase: Dict) -> str:
+    """Build the Greengrass model-component ZIP for a compiled (torch.onnx.export)
+    ONNX artifact — ONE architecture-agnostic payload that packaging fans out
+    into per-JetPack `packaged_components` entries (ONNX_COMPILED_TARGETS).
+
+    Mirrors package_onnx_component's proven on-device payload shape:
+    `manifest.json` at the ZIP root with top-level `runtime: 'onnx'` and
+    `runtime_artifact`, and the .onnx artifact NESTED under the stage_type dir
+    so the OnnxRunner resolves <version_dir>/<stage_type>/<runtime_artifact>.
+    The manifest is derived from the Phase 1 create_dda_manifest output:
+    `model_graph` and `dataset` are kept, `compilable_models` is DROPPED (it
+    names the .pt input that is not in this ZIP; the device reader never
+    consults it).
+
+    Args:
+        compiled_model_s3: S3 URI of the export training job's model.tar.gz
+            (the export script writes model.onnx into /opt/ml/model, so the
+            archive holds it at the root — but scan recursively for tolerance)
+        dda_manifest: the Phase 1 create_dda_manifest output
+        s3_client: boto3 S3 client (already configured with credentials)
+        usecase: Use case details dict
+
+    Returns:
+        S3 URI of the uploaded component package ZIP
+    """
+    temp_dir = None
+    try:
+        parsed = urlparse(compiled_model_s3)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip('/')
+
+        temp_dir = tempfile.mkdtemp(prefix="dda_compiled_onnx_pkg_")
+        local_tar = os.path.join(temp_dir, 'model.tar.gz')
+        logger.info(f"Downloading compiled ONNX export from {compiled_model_s3}")
+        s3_client.download_file(bucket, key, local_tar)
+
+        extract_dir = os.path.join(temp_dir, 'extracted')
+        os.makedirs(extract_dir, exist_ok=True)
+        with tarfile.open(local_tar, 'r:gz') as tar:
+            tar.extractall(extract_dir)
+        os.remove(local_tar)
+
+        # Locate the .onnx artifact by recursive scan (same tolerance as the
+        # BYO-import path).
+        onnx_src = None
+        for root, _dirs, files in os.walk(extract_dir):
+            for f in files:
+                if f.endswith('.onnx'):
+                    onnx_src = os.path.join(root, f)
+                    break
+            if onnx_src:
+                break
+        if not onnx_src:
+            raise FileNotFoundError(
+                "No .onnx model file found in compiled ONNX export archive")
+        onnx_file = os.path.basename(onnx_src)
+
+        # Compiled_ONNX_Manifest: model_graph + dataset from the Phase 1
+        # manifest, plus the runtime keys the on-device __load_runtime_config
+        # needs to select the OnnxRunner (absent runtime defaults to DLR —
+        # wrong for ONNX artifacts, and JP7 ships no DLR at all).
+        manifest = {
+            'model_graph': dda_manifest['model_graph'],
+            'dataset': dda_manifest.get('dataset'),
+            'runtime': 'onnx',
+            'runtime_artifact': onnx_file,
+        }
+        if manifest['dataset'] is None:
+            del manifest['dataset']
+
+        # Assemble the payload: manifest.json at the root and the ONNX
+        # artifact nested under the stage_type dir.
+        payload_dir = os.path.join(temp_dir, 'payload')
+        os.makedirs(payload_dir, exist_ok=True)
+        with open(os.path.join(payload_dir, 'manifest.json'), 'w') as f:
+            json.dump(manifest, f, indent=2)
+
+        stage_type = dda_manifest['model_graph']['stages'][0]['type']
+        stage_dir = os.path.join(payload_dir, stage_type)
+        os.makedirs(stage_dir, exist_ok=True)
+        shutil.copy(onnx_src, os.path.join(stage_dir, onnx_file))
+
+        component_uuid = str(uuid.uuid4()).split('-')[-1]
+        zip_filename = f"{component_uuid}_greengrass_model_component.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _dirs, files in os.walk(payload_dir):
+                for file in files:
+                    fp = os.path.join(root, file)
+                    zipf.write(fp, os.path.relpath(fp, payload_dir))
+
+        s3_key = f"model_artifacts/model-{component_uuid}/{zip_filename}"
+        s3_uri = f"s3://{usecase['s3_bucket']}/{s3_key}"
+        logger.info(f"Uploading compiled ONNX component package to {s3_uri}")
+        s3_client.upload_file(zip_path, usecase['s3_bucket'], s3_key)
+        return s3_uri
+    except Exception as e:
+        logger.error(f"Error packaging compiled ONNX component: {str(e)}")
+        raise
+    finally:
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -754,7 +873,9 @@ def package_components(event: Dict, context: Any) -> Dict:
                 's3', usecase,
                 session_name=f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64])
 
-            onnx_targets = requested_targets or ['jetson-xavier-jp5', 'jetson-xavier-jp6', 'x86_64-cpu']
+            onnx_targets = requested_targets or [
+                'jetson-xavier-jp5', 'jetson-xavier-jp6', 'jetson-xavier-jp7',
+                'x86_64-cpu']
             logger.info(f"ONNX import: packaging one artifact for targets {onnx_targets}")
             try:
                 component_s3_uri = package_onnx_component(trained_model_s3, s3_usecase, usecase)
@@ -798,13 +919,24 @@ def package_components(event: Dict, context: Any) -> Dict:
         if not completed_jobs:
             return create_response(400, {'error': 'No completed compilation jobs found'})
         
-        # Filter by requested targets if specified
+        # Filter by requested targets if specified. The compiled-ONNX export
+        # entry keeps its 'onnx' compile-target id here (the id the UI
+        # requests); the per-JetPack fan-out below expands it.
         if requested_targets:
             completed_jobs = [j for j in completed_jobs if j['target'] in requested_targets]
             if not completed_jobs:
                 return create_response(400, {
                     'error': f"No completed compilation jobs for requested targets: {requested_targets}"
                 })
+
+        # Partition the compiled-ONNX export entry (torch.onnx.export) from
+        # the Neo-compiled jobs: the ONNX artifact is architecture-agnostic
+        # and fans out into per-JetPack entries (ONNX_COMPILED_TARGETS)
+        # instead of the generic per-device Neo Phase 2 packaging.
+        onnx_export_jobs = [j for j in completed_jobs
+                            if j.get('target') == 'onnx'
+                            or j.get('export_format') == 'onnx']
+        neo_jobs = [j for j in completed_jobs if j not in onnx_export_jobs]
         
         # Get use case details
         usecase = get_usecase(usecase_id)
@@ -831,7 +963,7 @@ def package_components(event: Dict, context: Any) -> Dict:
         # Phase 2: Package each compiled model
         packaged_components = []
         
-        for i, job in enumerate(completed_jobs):
+        for i, job in enumerate(neo_jobs):
             target = job['target']
             compiled_model_s3 = job.get('compiled_model_s3')
             
@@ -839,7 +971,7 @@ def package_components(event: Dict, context: Any) -> Dict:
                 logger.warning(f"No compiled model S3 URI for target {target}, skipping")
                 continue
             
-            logger.info(f"Phase 2: Packaging component for target {target} ({i+1}/{len(completed_jobs)})")
+            logger.info(f"Phase 2: Packaging component for target {target} ({i+1}/{len(neo_jobs)})")
             
             try:
                 component_s3_uri = package_component(
@@ -866,6 +998,40 @@ def package_components(event: Dict, context: Any) -> Dict:
                     'status': 'failed',
                     'error': str(e)
                 })
+
+        # Compiled-ONNX fan-out: package the ONE exported artifact once and
+        # emit one entry per per-JetPack ONNX target (at most one export
+        # entry per record — COMPILATION_TARGETS has one 'onnx' key).
+        for job in onnx_export_jobs:
+            compiled_model_s3 = job.get('compiled_model_s3')
+            if not compiled_model_s3:
+                logger.warning("No compiled model S3 URI for ONNX export entry, skipping")
+                continue
+
+            logger.info(
+                f"Phase 2: Packaging compiled ONNX component "
+                f"(fan-out targets: {ONNX_COMPILED_TARGETS})")
+            try:
+                component_s3_uri = package_compiled_onnx_component(
+                    compiled_model_s3,
+                    dda_manifest,
+                    s3_usecase,
+                    usecase
+                )
+                packaged_components += [
+                    {'target': t, 'component_package_s3': component_s3_uri,
+                     'status': 'packaged'}
+                    for t in ONNX_COMPILED_TARGETS
+                ]
+                logger.info(
+                    f"Successfully packaged compiled ONNX component for "
+                    f"{len(ONNX_COMPILED_TARGETS)} target(s)")
+            except Exception as e:
+                logger.error(f"Error packaging compiled ONNX component: {str(e)}")
+                packaged_components += [
+                    {'target': t, 'status': 'failed', 'error': str(e)}
+                    for t in ONNX_COMPILED_TARGETS
+                ]
         
         # Update training job with packaged components
         table = dynamodb.Table(TRAINING_JOBS_TABLE)

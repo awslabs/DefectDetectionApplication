@@ -26,6 +26,19 @@
  * needed here: `componentSupportedArchs` already keys `vllmArchs` by the
  * exact component name, and `inferComponentTargetArchs` already matches the
  * `jp5`/`jp6`/`jp7` token a suffixed name carries (Requirement 2.13).
+ *
+ * Compiled-ONNX per-JetPack note (onnx-jetson-publish-packaging design
+ * step 7, Requirements 2.11, 3.13): per-JetPack ONNX model components
+ * (`model-{safe}-onnx-jetson-xavier-jp{N}`, published from the
+ * `onnx-jetson-xavier-jp{N}` targets in `packaging.ONNX_ARCH_TO_TARGET`)
+ * are NON-gated components — `classifyGatedComponent` returns null for
+ * them (no `model-vllm-` prefix, not a plugin) — resolved by the
+ * JetPack-token inference below to their singleton arch
+ * (`arm64_jp{N}`). No production change was needed here: the
+ * `jp5`/`jp6`/`jp7` regex already covers the `-jp{N}` suffix these names
+ * carry. The contract is pinned by the fast-check property suite in
+ * `onnxComponentArch.property.test.ts` and the
+ * `CreateDeployment.archFilter.test.tsx` JP7 ONNX cases.
  */
 import { architectureLabel, isPluginComponent } from './pluginComponents';
 import { isVllmModelComponent } from './vllmArchGate';

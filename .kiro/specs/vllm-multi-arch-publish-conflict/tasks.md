@@ -290,7 +290,8 @@ graph TD
     - Run: `npx vitest run src/pages/CreateDeployment.archFilter.test.tsx` from `edge-cv-portal/frontend`
     - _Requirements: 2.13, 2.14_
 
-- [~] 6. Rebaseline the IAM security gate for the intentional DeleteComponent grant (design step 16)
+- [x] 6. Rebaseline the IAM security gate for the intentional DeleteComponent grant (design step 16)
+  - DONE: fixed baseline + `iam_baseline_cdk_i_changes.json` updated (sole drift = `greengrass:DeleteComponent`, commit 3734e88); live-synth fixture hermetically isolated from ambient EC2 instance creds (the CDK CLI was clobbering `CDK_DEFAULT_ACCOUNT` with the real account); gate 11 passed / 0 failed with live synth running
   - Follow the gate's documented protocol in `test/backend-test/security/preservation/README_iam.md` and `.kiro/steering/builds.md`
   - **Move `edge-cv-portal/infrastructure/cdk.out` aside FIRST** (the cdk.out drift guard), then re-synthesize
   - Update `test/backend-test/security/baselines/iam_baseline_EdgeCVPortalComputeStack.template.json` so `test_synth_iam_statements_match_fixed_baseline` in `test/backend-test/security/preservation/test_preservation_iam_cdk_synth.py` passes

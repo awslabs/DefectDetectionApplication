@@ -458,6 +458,17 @@ pending.
 > compilation, or none) by the shared `classify_poll_kind` in the
 > `compilation_status` layer module.
 
+> **Amendment note** (see `.kiro/specs/onnx-jetson-publish-packaging/`):
+> compiled ONNX exports (`target=onnx`) now package **per-JetPack** — one
+> upload fans out to `onnx-jetson-xavier-jp5/-jp6/-jp7` entries, each ZIP
+> carrying a `runtime: "onnx"` + `runtime_artifact` manifest — and publish as
+> per-JetPack components with `aarch64` recipes and the matching
+> `LocalServer.arm64JP{N}` HARD dependency, so the compile→package→publish
+> chain above is closed for Jetson (the auto-chaining caveat no longer blocks
+> Jetson delivery). BYO ONNX imports with no explicit target list now default
+> to JetPack 5/6/**7** plus x86. ONNX is the **only** vision runtime on JP7
+> (DLR/Neo is not carried there).
+
 ## 21. RF-DETR detection architecture (DETR-family decoder)
 
 YOLO is not the only object-detection export a user may bring. RF-DETR (and the

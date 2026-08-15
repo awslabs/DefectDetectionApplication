@@ -362,6 +362,15 @@ genuinely unknown target SHALL still fail closed.
 
 **Validates: Requirements 2.17, 2.18, 2.19, 3.18, 3.19**
 
+> **Amendment note** (see `.kiro/specs/onnx-jetson-publish-packaging/`): the
+> compiled-ONNX targets (`onnx-jetson-xavier-jp5/-jp6/-jp7`, producer map
+> `packaging.ONNX_ARCH_TO_TARGET`) have since joined `TARGET_TO_LOCAL_SERVER` /
+> `TARGET_TO_PLATFORM` under this same totality discipline — mapped in BOTH
+> maps, with unmapped targets still failing closed through
+> `resolve_target_platform`. The two specs compose in either landing order:
+> this spec's map-totality assertions are subset-shaped, and the referenced
+> spec's Property 3 re-runs them with the ONNX entries present.
+
 ## Fix Implementation
 
 ### Changes Required

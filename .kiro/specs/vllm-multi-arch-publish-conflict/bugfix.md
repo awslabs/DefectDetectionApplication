@@ -287,6 +287,12 @@ its platform to `amd64` and resolving the amd64 `LocalServer`, so a future
 aarch64 target added to `packaging.VLLM_ARCH_TO_TARGET` without these two map
 entries cannot repeat this defect.
 
+> **Amendment note** (see `.kiro/specs/onnx-jetson-publish-packaging/`): the
+> compiled-ONNX targets `onnx-jetson-xavier-jp5/-jp6/-jp7` (producer
+> `packaging.ONNX_ARCH_TO_TARGET`) were later added to BOTH maps under exactly
+> this discipline; unmapped targets still fail closed through
+> `resolve_target_platform`, composing with this spec in either landing order.
+
 ### Unchanged Behavior (Regression Prevention)
 
 **Vision (non-vLLM) publish**

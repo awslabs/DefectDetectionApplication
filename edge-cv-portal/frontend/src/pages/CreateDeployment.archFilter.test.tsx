@@ -276,6 +276,99 @@ describe('CreateDeployment — gated-component architecture filter', () => {
     ).toBeNull();
   });
 
+  // onnx-jetson-publish-packaging task 5.3 (Property 7, Requirement 2.12):
+  // a per-JetPack compiled-ONNX model component is offered for a device of
+  // exactly its architecture and filtered/labeled incompatible for a device
+  // of any other RECORDED architecture. A device with no recorded
+  // architecture gets the warning + fail-open contract instead (see the
+  // third case below).
+  describe('per-JetPack ONNX model components (onnx-jetson-publish-packaging Req 2.12)', () => {
+    const ONNX_JP7_COMPONENTS = [
+      {
+        arn: 'arn:model-onnx-jp7',
+        component_name: 'model-x-onnx-jetson-xavier-jp7',
+        model_name: 'x',
+        latest_version: { componentVersion: '1.0.0' },
+        platforms: [],
+      },
+    ];
+
+    beforeEach(() => {
+      apiMocks.listComponents.mockImplementation(
+        (params: { scope?: string }) =>
+          Promise.resolve({
+            components: params.scope === 'PUBLIC' ? [] : ONNX_JP7_COMPONENTS,
+          })
+      );
+      routerState.search = 'target_device=jp5-device';
+    });
+
+    it('offers a jp7 ONNX component for an arm64_jp7 thing', async () => {
+      apiMocks.listDevices.mockResolvedValue({
+        devices: [device({ target_architecture: 'arm64_jp7' })],
+        count: 1,
+      });
+      render(<CreateDeployment />);
+
+      // The component stays offered in Portal Components; nothing is
+      // filtered and no incompatible grouping appears.
+      await waitFor(() => {
+        expect(screen.getByText('Portal Components (1)')).toBeInTheDocument();
+      });
+      expect(
+        screen.queryByText(/model-x-onnx-jetson-xavier-jp7 is not supported/)
+      ).toBeNull();
+      expect(
+        screen.queryByText(/Incompatible with the selected device/)
+      ).toBeNull();
+    });
+
+    it('filters and labels a jp7 ONNX component incompatible for an arm64_jp6 thing', async () => {
+      apiMocks.listDevices.mockResolvedValue({
+        devices: [device({ target_architecture: 'arm64_jp6' })],
+        count: 1,
+      });
+      render(<CreateDeployment />);
+
+      // The jp7 build is excluded from the offer and explained.
+      await waitFor(() => {
+        expect(
+          screen.getByText(/model-x-onnx-jetson-xavier-jp7 is not supported by/)
+        ).toBeInTheDocument();
+      });
+      expect(screen.getByText('Portal Components (0)')).toBeInTheDocument();
+    });
+
+    it('shows the no-recorded-architecture warning and keeps the jp7 ONNX component offered (fail-open, Req 2.12 scope)', async () => {
+      // Requirement 2.12 scopes incompatibility labeling to devices with a
+      // RECORDED architecture. For a device with no recorded architecture,
+      // name-inferred (non-gated) components — the ONNX per-JetPack builds
+      // exactly like the Neo jp5/jp6 builds — deliberately fail OPEN: the
+      // arch gate cannot judge them, so the dedicated "Selected device(s)
+      // have no recorded architecture" warning is the user-facing guard
+      // (matching the archIncompatReason comment in CreateDeployment.tsx).
+      // This is pre-existing behavior shared by ALL name-inferred
+      // components; only gated components (plugins/vLLM) fail closed here.
+      apiMocks.listDevices.mockResolvedValue({
+        devices: [device({ target_architecture: null })],
+        count: 1,
+      });
+      render(<CreateDeployment />);
+
+      // The no-arch warning shows...
+      await waitFor(() => {
+        expect(
+          screen.getByText('Selected device(s) have no recorded architecture')
+        ).toBeInTheDocument();
+      });
+      // ...and the ONNX component remains offered, not labeled incompatible.
+      expect(screen.getByText('Portal Components (1)')).toBeInTheDocument();
+      expect(
+        screen.queryByText(/model-x-onnx-jetson-xavier-jp7 is not supported/)
+      ).toBeNull();
+    });
+  });
+
   it('surfaces a now-incompatible pre-loaded component in revise mode without dropping it (Req 4.1-4.3)', async () => {
     // Revise an existing deployment on the jp5 device whose components
     // include the vLLM component that now supports only arm64_jp6.

@@ -267,16 +267,36 @@ ARCH_TO_PUBLISH_TARGET = {
     ARCH_ARM64_JP5: 'jetson-xavier-jp5',
     ARCH_ARM64_JP6: 'jetson-xavier-jp6',
     # JP7 publish-target id, following the jp5/jp6 'jetson-xavier-jpN'
-    # convention. greengrass_publish.py deliberately gains no JP7 vision
-    # compile target yet, so no published_components entry can match this
-    # id — a workflow selecting arm64_jp7 with a vision model_ref fails
-    # closed with the uncovered-architecture error instead of guessing a
-    # JetPack variant. When a JP7 vision compile target is added to
-    # greengrass_publish.py it must use this exact id.
+    # convention. 'jetson-xavier-jp7' is now producible: BYO ONNX imports
+    # publish it (packaging.py's defaulted import target list includes
+    # JP7). Compiled-ONNX coverage for arm64_jp7 arrives via the
+    # additional 'onnx-jetson-xavier-jp7' id accepted through
+    # ARCH_TO_EXTRA_PUBLISH_TARGETS below — ONNX is the delivered JP7
+    # vision route (Neo cannot target CUDA 13).
     ARCH_ARM64_JP7: 'jetson-xavier-jp7',
     ARCH_X86_64: 'x86_64-cpu',
     ARCH_X86_64_NVIDIA: 'x86_64-cuda',
 }
+
+# Additional publish-target ids accepted per arch when resolving VISION
+# published_components. arm64_jp7's vision route is ONNX (Neo cannot
+# target CUDA 13): compiled-ONNX publishes 'onnx-jetson-xavier-jp7'
+# (packaging.ONNX_ARCH_TO_TARGET — keep in sync) and BYO ONNX imports
+# publish 'jetson-xavier-jp7' (already the primary id above). JP5/JP6
+# deliberately get NO onnx acceptance here: Neo remains their primary
+# vision route and their coverage semantics are unchanged.
+ARCH_TO_EXTRA_PUBLISH_TARGETS = {
+    ARCH_ARM64_JP7: ('onnx-jetson-xavier-jp7',),
+}
+
+
+def publish_targets_for_arch(arch):
+    """Accepted published_components target ids for one arch, or ()
+    when the arch has no known publish target (caller fails closed)."""
+    primary = ARCH_TO_PUBLISH_TARGET.get(arch)
+    if not primary:
+        return ()
+    return (primary,) + ARCH_TO_EXTRA_PUBLISH_TARGETS.get(arch, ())
 
 # Where the LocalServer workflow engine discovers artifacts (13.3)
 DEVICE_WORKFLOWS_ROOT = '/aws_dda/workflows'
@@ -1343,37 +1363,47 @@ def resolve_model_components(model_names: List[str], usecase_id: str,
                 f"Model '{name}' referenced by the workflow has no "
                 f"published Greengrass component; publish the model before "
                 f"packaging workflows that use it")
-        target_of_arch = {}
+        targets_of_arch = {}
         for arch in archs:
-            target = ARCH_TO_PUBLISH_TARGET.get(arch)
-            if not target:
+            accepted = publish_targets_for_arch(arch)
+            if not accepted:
                 raise PackagingError(
                     label,
                     f"Cannot resolve published model components for "
                     f"architecture '{arch}': no known publish target. "
                     f"Supported architectures: "
                     f"{', '.join(sorted(ARCH_TO_PUBLISH_TARGET))}")
-            target_of_arch[arch] = target
+            targets_of_arch[arch] = accepted
         published_targets = {entry.get('target')
                              for entry in published_entries}
-        uncovered = sorted(arch for arch, target in target_of_arch.items()
-                           if target not in published_targets)
+        uncovered = sorted(
+            arch for arch, accepted in targets_of_arch.items()
+            if not any(t in published_targets for t in accepted))
         if uncovered:
             # Fail closed naming the model AND the uncovered arch(s)
             # (edge-deploy-reliability Defect G, 2.19): an accurate
             # coverage error — re-publishing for the missing targets can
             # fix it, unlike the misleading 'publish the model' message.
+            # Singleton archs render exactly as before ('(target X)');
+            # arm64_jp7's multi-id acceptance renders as
+            # '(targets X or Y)'.
+            def _accepted_phrase(accepted):
+                if len(accepted) == 1:
+                    return f"target {accepted[0]}"
+                return f"targets {' or '.join(accepted)}"
             raise PackagingError(
                 label,
                 f"Model '{name}' has no published Greengrass component "
                 f"for the selected architecture(s) "
-                f"{', '.join(f'{a} (target {target_of_arch[a]})' for a in uncovered)}; "
+                f"{', '.join(f'{a} ({_accepted_phrase(targets_of_arch[a])})' for a in uncovered)}; "
                 f"it is published for targets "
                 f"[{', '.join(sorted(str(t) for t in published_targets))}]. "
                 f"Publish the model for every selected architecture "
                 f"before packaging workflows that use it")
+        accepted_union = {t for accepted in targets_of_arch.values()
+                          for t in accepted}
         names = {entry['component_name'] for entry in published_entries
-                 if entry.get('target') in set(target_of_arch.values())}
+                 if entry.get('target') in accepted_union}
         resolved[name] = names
     return resolved
 

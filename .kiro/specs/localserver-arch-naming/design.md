@@ -114,6 +114,16 @@ def resolve_local_server_component(target, platform):
 - Both `generate_component_recipe` and `generate_vllm_component_recipe` call the same resolver, so the vLLM path inherits the guarantee (Requirement 2.5). The publish handler surfaces the raised error as a publish failure with the offending target.
 - x86 resolution is unchanged (Requirement 2.4).
 
+> **Amendment note** (see `.kiro/specs/onnx-jetson-publish-packaging/`): the
+> `TARGET_TO_LOCAL_SERVER` key list above predates the compiled-ONNX targets.
+> Three entries have since joined it: `onnx-jetson-xavier-jp5` → `…arm64JP5`,
+> `onnx-jetson-xavier-jp6` → `…arm64JP6`, `onnx-jetson-xavier-jp7` →
+> `…arm64JP7` — added under the both-maps-or-fail-closed rule established by
+> `.kiro/specs/vllm-multi-arch-publish-conflict/` (every target mapped in BOTH
+> `TARGET_TO_LOCAL_SERVER` and `TARGET_TO_PLATFORM`, unmapped targets raising
+> `PublishError` via `resolve_target_platform`), so the fail-closed guarantee
+> this spec introduced is preserved.
+
 ### 3. Variant_Arch_Parser (`deployments.py`)
 
 `local_server_component_arch(component_name)` gains the explicit JP4 tag while keeping the legacy alias:

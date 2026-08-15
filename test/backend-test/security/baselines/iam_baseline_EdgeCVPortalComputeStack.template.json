@@ -9,13 +9,13 @@
     ],
     "Content": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "124a4309fef16d621850e55167a9f46c3bf69c14660bca509f75e9c0456630e9.zip"
+     "S3Key": "c46614b91ed9c488af0fc03e808084f835b93ce8fbecc30656d9c843cdb5a8c4.zip"
     },
     "Description": "Shared utilities for Edge CV Portal Lambda functions - v2024-12-12-fixed-syntax"
    },
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/SharedLayer/Resource",
-    "aws:asset:path": "asset.124a4309fef16d621850e55167a9f46c3bf69c14660bca509f75e9c0456630e9",
+    "aws:asset:path": "asset.c46614b91ed9c488af0fc03e808084f835b93ce8fbecc30656d9c843cdb5a8c4",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Content"
    }
@@ -47,13 +47,13 @@
     ],
     "Content": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "2c74a5a3f2297226bffb712f22197fd9c4fcca2a57812ff5cffb3ad336c8585c.zip"
+     "S3Key": "761d83bf154dadbb8afde500ac1a3e22bcbd009ed31edee2855a88f209aa51bb.zip"
     },
     "Description": "workflow_core shared package (catalog, serializer, validator, compiler) for Workflow Manager"
    },
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowCoreLayer/Resource",
-    "aws:asset:path": "asset.2c74a5a3f2297226bffb712f22197fd9c4fcca2a57812ff5cffb3ad336c8585c",
+    "aws:asset:path": "asset.761d83bf154dadbb8afde500ac1a3e22bcbd009ed31edee2855a88f209aa51bb",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Content"
    }
@@ -87,7 +87,7 @@
      "cdk-hnb659fds-assets-111111111111-us-east-1"
     ],
     "SourceObjectKeys": [
-     "00ec2bad745a10fff861c3d748297daeba9f567d2c70a276bcef904dae877b6d.zip"
+     "817124992dcb833da392a364cadab026ddd1fca445ccd0c2b7bdbf8f535293d6.zip"
     ],
     "DestinationBucketName": {
      "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefPortalArtifactsBucket31E9D39212014EED"
@@ -929,6 +929,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -1148,7 +1149,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -1247,7 +1248,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceRegistrationsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -1466,7 +1467,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -1541,7 +1542,7 @@
        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputRefDeviceRegistrationsTableA5AE63AF9541290C"
       },
       "QUICK_SETUP_BUNDLE_KEY": "quick-setup/current/setup-bundle.tar.gz",
-      "QUICK_SETUP_BUNDLE_SHA256": "a6211a321d651106c1451753c462a4f5d6ac79e91ace34cc49c53012f31f68aa",
+      "QUICK_SETUP_BUNDLE_SHA256": "c7422f34bab70f0363998c335fa066feefb8c6e92e9c2200a144602524e0109c",
       "QUICK_SETUP_BOOTSTRAP_KEY": "quick-setup/current/bootstrap.sh",
       "QUICK_SETUP_BOOTSTRAP_SHA256": "1cb1c136bcadfe112074f11d0d4bf83610aaf3093f65146b616835aaf55e5804",
       "QUICK_SETUP_PROVISIONING_ROLE_ARN": {
@@ -1581,7 +1582,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/QuickSetupHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -2440,6 +2441,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -2693,7 +2695,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -2789,7 +2791,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/UseCasesHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -3485,6 +3487,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -3683,7 +3686,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -3779,7 +3782,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DevicesHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -4475,6 +4478,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -4661,7 +4665,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -4757,7 +4761,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceLogsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -5453,6 +5457,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -5639,7 +5644,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -5735,7 +5740,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeviceLogsAnalyzerHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -6431,6 +6436,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -6720,7 +6726,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -6819,7 +6825,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DeploymentsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -7561,6 +7567,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -7759,7 +7766,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -7854,7 +7861,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/AuthHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -8550,6 +8557,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -8736,7 +8744,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -8832,7 +8840,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/UserManagementHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -9528,6 +9536,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -9714,7 +9723,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -9750,7 +9759,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/JwtAuthorizerHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -10446,6 +10455,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -10632,7 +10642,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -10727,7 +10737,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DatasetsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -11423,6 +11433,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -11609,7 +11620,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -11704,7 +11715,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CapturesHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -12400,6 +12411,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -12586,7 +12598,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -12681,7 +12693,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/PreLabeledDatasetsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -13377,6 +13389,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -13563,7 +13576,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -13659,7 +13672,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/LabelingHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -14355,6 +14368,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -14541,7 +14555,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -14636,7 +14650,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/LabelingMonitorHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -15332,6 +15346,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -15518,7 +15533,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -15614,7 +15629,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/TrainingHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -16310,6 +16325,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -16496,7 +16512,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -16595,7 +16611,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CompilationHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -17291,6 +17307,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -17503,7 +17520,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -17609,7 +17626,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/PackagingHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -18305,6 +18322,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -18491,7 +18509,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -18586,7 +18604,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/GreengrassPublishHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -19282,6 +19300,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -19543,7 +19562,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -19640,7 +19659,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ComponentsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -20336,6 +20355,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -20522,7 +20542,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -20617,7 +20637,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DataManagementHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -21313,6 +21333,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -21601,7 +21622,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -21698,7 +21719,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/SharedComponentsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -22394,6 +22415,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -22588,7 +22610,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -22686,7 +22708,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/DataAccountsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -23382,6 +23404,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -23594,7 +23617,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -23697,7 +23720,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ModelImportHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -24393,6 +24416,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -24605,7 +24629,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -24708,7 +24732,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ModelConverterHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -25404,6 +25428,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -25590,7 +25615,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -25686,7 +25711,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/ModelsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -26382,6 +26407,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -26597,7 +26623,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -26693,7 +26719,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/AuditLogsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -27520,6 +27546,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -27736,7 +27763,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -27835,7 +27862,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CameraSyncHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -28634,6 +28661,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -28820,7 +28848,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -28916,7 +28944,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CameraRegistryHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -29879,6 +29907,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -30138,7 +30167,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -30241,7 +30270,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/AccountSyncHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -31003,6 +31032,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -31317,7 +31347,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -31426,7 +31456,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/UserAdminHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -32122,6 +32152,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -32383,7 +32414,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -32484,7 +32515,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -33180,6 +33211,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -33441,7 +33473,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -33542,7 +33574,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowValidationHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -34238,6 +34270,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -34547,7 +34580,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -34669,7 +34702,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowPackagingHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -35365,6 +35398,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -35668,7 +35702,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -35770,7 +35804,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowGeneratorHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -36466,6 +36500,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -36728,7 +36763,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -36832,7 +36867,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowTestingHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -37538,6 +37573,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -37757,7 +37793,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -37858,7 +37894,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/TrainingEventsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -38554,6 +38590,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -38819,7 +38856,7 @@
    "Properties": {
     "Code": {
      "S3Bucket": "cdk-hnb659fds-assets-111111111111-us-east-1",
-     "S3Key": "ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c.zip"
+     "S3Key": "f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7.zip"
     },
     "Environment": {
      "Variables": {
@@ -38924,7 +38961,7 @@
    ],
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CompilationEventsHandler/Resource",
-    "aws:asset:path": "asset.ea208df79dfc466eb2543291c1ed61009db04469bd44b3a437a9db082eeb471c",
+    "aws:asset:path": "asset.f40648aec438c221c3dc9a4607b36b46a43f27a5631aebc54538ead451a53de7",
     "aws:asset:is-bundled": false,
     "aws:asset:property": "Code"
    }
@@ -39178,7 +39215,7 @@
       "Arn"
      ]
     },
-    "Timestamp": "1786307973924"
+    "Timestamp": "1786770732169"
    },
    "UpdateReplacePolicy": "Delete",
    "DeletionPolicy": "Delete",
@@ -39376,7 +39413,7 @@
        {
         "Ref": "AWS::URLSuffix"
        },
-       "/cdk-hnb659fds-assets-111111111111-us-east-1/efd7561a9bf58304be7624d0ba363c22ec7817d10e1d1a18583d7ff868bfcfca.json"
+       "/cdk-hnb659fds-assets-111111111111-us-east-1/59e8e80a521b43842ec9a8d19dd54a1d5e95e738f19c0f35372f7f3b3e08b8d0.json"
       ]
      ]
     }
@@ -40085,6 +40122,7 @@
       {
        "Action": [
         "greengrass:CreateComponentVersion",
+        "greengrass:DeleteComponent",
         "greengrass:DescribeComponent",
         "greengrass:GetComponent",
         "greengrass:ListComponents",
@@ -40297,7 +40335,7 @@
        {
         "Ref": "AWS::URLSuffix"
        },
-       "/cdk-hnb659fds-assets-111111111111-us-east-1/a89915bf4d7ada57bfeebfb5f1cf188dda395851d9d8812ad3626ed60366bf49.json"
+       "/cdk-hnb659fds-assets-111111111111-us-east-1/7e36f3200e08b322dfd479d5b6a72c2230b8a677e741d8bb74e6e9deefc2f866.json"
       ]
      ]
     }
@@ -40344,7 +40382,7 @@
        {
         "Ref": "AWS::URLSuffix"
        },
-       "/cdk-hnb659fds-assets-111111111111-us-east-1/e6ec824101357f06ba0ddb12cd592bb7fdd5e5e4751c82c238c7440917245e1e.json"
+       "/cdk-hnb659fds-assets-111111111111-us-east-1/81d46680398dcffad2897389f65134f3f112214b829a84763e1ae8e5cace41e5.json"
       ]
      ]
     }
@@ -40398,7 +40436,7 @@
        {
         "Ref": "AWS::URLSuffix"
        },
-       "/cdk-hnb659fds-assets-111111111111-us-east-1/fd98d27fdd4fc6a68f8264cfb0bde385e89268dce2c2d6bf330f816c28f2f75c.json"
+       "/cdk-hnb659fds-assets-111111111111-us-east-1/26eb7107ac3bd6eff1c2dc8235fbe46ae5b0ec5ab33a415001532ea12b0b765b.json"
       ]
      ]
     }
@@ -40524,7 +40562,7 @@
       "Outputs.EdgeCVPortalComputeStackApiGatewayEdgeCVPortalAPI899B3E89Ref"
      ]
     },
-    "Timestamp": "1786307974043"
+    "Timestamp": "1786770732231"
    },
    "DependsOn": [
     "ApiGatewayNestedStackApiGatewayNestedStackResource85A55C6F",
@@ -40539,7 +40577,7 @@
   "CDKMetadata": {
    "Type": "AWS::CDK::Metadata",
    "Properties": {
-    "Analytics": "v2:deflate64:H4sIAAAAAAAA/2WRTU/DMAyGfwv3LEA5cdwKnJgY7cR1clO3ypaPUierqqj/HSXdp5Ci+PUj+5UTZzzLXvnzAwy0EPVhoWTFQ+lAHBgMtAsKdFUDD58wYv+DPUlrWN6Yu7yUplXorPnwRrhILiJvzK3eYK8lpab3IxpXWt8LXEPXSdPGgv90YvSyC0CEjvgyBlZjp+yo0Ti+8uKA7u0CYvUJroCQSdA8FFZhNE9xY5UUYxpmVmsw0GJ95XdgYhhHIh4Kf3LxCidGv8TDt0ef2CzSffW5SScmreN5Y7a2kyI51aMBbeuKhy1Us3MSEyNDPKRCdu6YJpaeXjpo40/Na9mpuIUdDCSU5MuBciXTYljuyVldIKWfTFOf9S3cQA8aXWxozJd3nXdRpf1PzNga+Z4ej9kTj+dhT1Iuem+c1MiLOf4B8Dr5lEECAAA="
+    "Analytics": "v2:deflate64:H4sIAAAAAAAA/2WRTW/CMAyGfwv34A2mHThCt52Gxlq0KzKtWwXy0dUJCEX971NSPrVL/PqR/cqxpzCdzmAywiOPy2o/VnILoXBY7gUeeRMU6m2FED7xRN0PdSytEVltHvJCmkaRs+bDm9JFchVZbe71ijotOTW9H8i4wvqupCW2rTRNLPhPe8Evm4DM5BjmMYiKWmVPmoyDhS/35N6uIFaf4QKZhEQNIbeKonmKK6tkeUrDDGqJBhuqbvwB9ILiSAwh92cXr6gX/MsQvj35xAaR3pvPXdoLaR1ktVnbVpbJqToZ1LbaQljjdnBOohdsGEIqFJeOvhfp64XDJm5qOMtGxSts8MilkjA/cqZkOozIPDurc+K0yTT1Rd/DFXaoycWG2nx513oXVbp/L4ytCHb8dJg+w2QGr6MdSznuvHFSE+RD/AN66+WXQQIAAA=="
    },
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CDKMetadata/Default"

@@ -45,6 +45,15 @@ Ubuntu 24.04 (noble) ships Python 3.12 as the distro python. The DDA stack is st
 > SageMaker Neo cannot target CUDA 13 (its `cuda-ver` ceiling is 11.x, per the
 > `jetson-xavier-jp6` comment in `COMPILATION_TARGETS`).
 
+> **Amendment note** (see `.kiro/specs/onnx-jetson-publish-packaging/`): the
+> JP7 vision route is now delivered. Compiled ONNX exports are published as
+> per-JetPack Greengrass components `model-{safe}-onnx-jetson-xavier-jp7`
+> (recipe platform `aarch64`, HARD dependency on
+> `aws.edgeml.dda.LocalServer.arm64JP7`), packaged from the `onnx` export
+> target and resolved by workflow packaging for `arm64_jp7`. The "DLR-only
+> models are not supported on JP7" limitation stands, but it no longer leaves
+> JP7 without a vision route — ONNX is that route (and JP7's only one).
+
 ### Research summary
 
 - JetPack 7.1 = Jetson Linux r38.4, Ubuntu 24.04, kernel 6.8, CUDA 13.0, SBSA-aligned aarch64 (Thor, compute capability `sm_110`). JetPack 7.2 is the follow-on release on the same r38.x/CUDA 13 userspace generation — one component artifact covers both (Requirement 8.1).

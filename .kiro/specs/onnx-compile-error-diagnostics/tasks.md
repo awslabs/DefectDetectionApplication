@@ -357,7 +357,7 @@ graph TD
   - Only pre-existing failures remain: the 4 known-acceptable local-only `cdk.out` drift failures under `test/backend-test/security/`
   - Ensure all tests pass, ask the user if questions arise
 
-- [ ] 10. USER ACTION - Deploy the portal (nothing takes effect until this runs)
+- [x] 10. USER ACTION - Deploy the portal (nothing takes effect until this runs)
   - **NOT AUTONOMOUS**: requires user execution/approval; nothing in this fix is active in the account until the portal is deployed
   - **Per `.kiro/steering/builds.md`: do NOT run a portal deploy while a component build is in flight**, and move `edge-cv-portal/infrastructure/cdk.out` aside before running the security guard suite - a portal deploy regenerates it and is the classic cause of drift-guard failures
   - Deploy scope: (1) the shared Lambda layer asset - the new `compilation_status.py`; (2) the Lambda functions asset - `compilation.py` and `models.py`; (3) the frontend - `types/index.ts`, `CompilationTab.tsx`, `ModelDetail.tsx`. **No infrastructure change is required** (no IAM change, and both handlers already mount the shared layer)

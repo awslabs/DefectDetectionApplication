@@ -111,6 +111,14 @@ vision support, does not change the Neo compile path for any target, does not
 change what `_start_onnx_export_job` submits to SageMaker, and does not attempt
 to make the reported training_id reproduce.
 
+> **Amendment note** (see `.kiro/specs/onnx-jetson-publish-packaging/`): the
+> JP7 vision route deferred here is now delivered by that sibling spec, which
+> changes `packaging.py`, `workflow_packaging.py`, and `greengrass_publish.py`
+> (per-JetPack compiled-ONNX components). This spec's diagnostics contracts —
+> the write-once `error` / `failure_reason` invariant, `classify_poll_kind`
+> routing, and case 9's no-JP7-Neo-compile-target guard — are preserved
+> untouched: `COMPILATION_TARGETS` still gains no `jetson-xavier-jp7` entry.
+
 ## Bug Analysis
 
 ### Current Behavior (Defect)

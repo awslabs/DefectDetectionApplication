@@ -246,6 +246,14 @@ END FUNCTION
 - The IAM policy: no change, therefore no drift in
   `iam_baseline_EdgeCVPortalComputeStack.template.json`
 
+> **Amendment note** (see `.kiro/specs/onnx-jetson-publish-packaging/`): the
+> "`packaging.py`, `workflow_packaging.py`, `greengrass_publish.py` …
+> untouched" bullet above is true of THIS spec's changes; the referenced
+> sibling spec has since changed those three modules to deliver the JP7 vision
+> route this spec deferred (per-JetPack compiled-ONNX components). The
+> diagnostics contracts and the `COMPILATION_TARGETS` preservation (exactly
+> seven targets, no `jetson-xavier-jp7` — case 9's guard) remain intact.
+
 **Scope:**
 All inputs that do NOT involve an ONNX start failure, a failed status poll, or a
 status value outside the modeled vocabulary are completely unaffected. This

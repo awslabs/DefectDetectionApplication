@@ -128,6 +128,25 @@ def _synth_template(stack, app):
         env = dict(os.environ)
         env["CDK_DEFAULT_ACCOUNT"] = "111111111111"
         env["CDK_DEFAULT_REGION"] = "us-east-1"
+        # Hermetic fixture: the CDK CLI resolves the *ambient* AWS credentials
+        # (env keys / profile / container creds / EC2 IMDS instance role) to
+        # look up the caller account and then OVERWRITES CDK_DEFAULT_ACCOUNT in
+        # the app subprocess with the REAL account id, silently clobbering the
+        # fixture value above (observed on an EC2 box with an instance role:
+        # every account-bearing statement synthesized with the live account and
+        # the identity diff exploded with false drift). Strip every ambient
+        # credential source so the lookup fails and the fixture account is the
+        # one the app sees — this is environment isolation, not a weakening of
+        # any assertion.
+        for key in (
+            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_CONFIG_FILE", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN",
+        ):
+            env.pop(key, None)
+        env["AWS_EC2_METADATA_DISABLED"] = "true"
         try:
             subprocess.run(
                 cmd, cwd=INFRA_DIR, env=env, timeout=600,

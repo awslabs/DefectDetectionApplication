@@ -82,6 +82,12 @@ TARGET_TO_LOCAL_SERVER = {
     'arm64-cpu': JP4_LOCAL_SERVER,                               # arm64 CPU -> JP4 baseline
     'x86_64-cpu': _AMD64_LOCAL_SERVER,
     'x86_64-cuda': _AMD64_LOCAL_SERVER,
+    # Compiled-ONNX per-JetPack targets (one Greengrass component per
+    # JetPack so each carries its own HARD LocalServer dep). KEEP IN SYNC
+    # with packaging.ONNX_ARCH_TO_TARGET.
+    'onnx-jetson-xavier-jp5': 'aws.edgeml.dda.LocalServer.arm64JP5',
+    'onnx-jetson-xavier-jp6': 'aws.edgeml.dda.LocalServer.arm64JP6',
+    'onnx-jetson-xavier-jp7': 'aws.edgeml.dda.LocalServer.arm64JP7',
 }
 
 # Target to platform mapping
@@ -92,7 +98,13 @@ TARGET_TO_PLATFORM = {
     'jetson-xavier-jp7': 'aarch64',
     'arm64-cpu': 'aarch64',
     'x86_64-cpu': 'amd64',
-    'x86_64-cuda': 'amd64'
+    'x86_64-cuda': 'amd64',
+    # Compiled-ONNX per-JetPack targets — KEEP IN SYNC with
+    # packaging.ONNX_ARCH_TO_TARGET (a target must be in BOTH maps or
+    # resolve_target_platform fails closed).
+    'onnx-jetson-xavier-jp5': 'aarch64',
+    'onnx-jetson-xavier-jp6': 'aarch64',
+    'onnx-jetson-xavier-jp7': 'aarch64',
 }
 
 
@@ -173,7 +185,9 @@ def resolve_local_server_component(target: str, platform: str) -> str:
         f"(platform '{platform}'): no known JetPack-tagged LocalServer "
         f"variant. The model must declare a supported compile target "
         f"(jetson-xavier, jetson-xavier-jp5, jetson-xavier-jp6, "
-        f"jetson-xavier-jp7, x86_64-cpu, x86_64-cuda, arm64-cpu)."
+        f"jetson-xavier-jp7, x86_64-cpu, x86_64-cuda, arm64-cpu, "
+        f"onnx-jetson-xavier-jp5, onnx-jetson-xavier-jp6, "
+        f"onnx-jetson-xavier-jp7)."
     )
 
 
