@@ -32,6 +32,19 @@ import type {
   SubmitBuildRequest,
   SubmitBuildResponse,
 } from '../pages/builds/types';
+import type {
+  CreateSyntheticSessionBody,
+  SyntheticApprovalBody,
+  SyntheticGenerateBody,
+  SyntheticGenerateResponse,
+  SyntheticIntegrateResponse,
+  SyntheticModelsResponse,
+  SyntheticPromptTemplateResponse,
+  SyntheticRetrainBody,
+  SyntheticSession,
+  SyntheticSessionDetailResponse,
+  SyntheticSessionSummary,
+} from '../pages/synthetic/types';
 import { beginRequest, endRequest } from './loadingBus';
 
 /**
@@ -3165,6 +3178,143 @@ class ApiService {
     return this.request(`/builds/${encodeURIComponent(buildJobId)}/retry`, {
       method: 'POST',
     });
+  }
+
+  // Synthetic defect data generation endpoints
+  // (synthetic-defect-data-generation, synthetic_data.py). All routes are
+  // RBAC-gated server-side to Data_Scientist_Access (Req 9.1, 9.2).
+
+  /**
+   * The Model_Catalog available in the portal region with capability
+   * flags (Req 1.1). When empty, `guidance` identifies the Bedrock
+   * model-access configuration needed (Req 1.3).
+   */
+  async listSyntheticModels(usecaseId: string): Promise<SyntheticModelsResponse> {
+    const query = new URLSearchParams({ usecase_id: usecaseId });
+    return this.request(`/synthetic/models?${query.toString()}`);
+  }
+
+  /**
+   * The stored Prompt_Template for the Use_Case/Object_Type/Defect_Type
+   * key, or the default template (with `is_default: true`) when none is
+   * stored (Req 2.2, 2.3).
+   */
+  async getSyntheticPromptTemplate(params: {
+    usecase_id: string;
+    object_type: string;
+    defect_type: string;
+  }): Promise<SyntheticPromptTemplateResponse> {
+    const query = new URLSearchParams(params);
+    return this.request(`/synthetic/prompt-templates?${query.toString()}`);
+  }
+
+  /** Persist an edited Prompt_Template for the key (Req 2.1, 2.4). */
+  async putSyntheticPromptTemplate(body: {
+    usecase_id: string;
+    object_type: string;
+    defect_type: string;
+    template_text: string;
+  }): Promise<SyntheticPromptTemplateResponse> {
+    return this.request('/synthetic/prompt-templates', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Create a Generation_Session (persisted + audited, Req 10.1, 9.4). */
+  async createSyntheticSession(
+    body: CreateSyntheticSessionBody
+  ): Promise<{ session: SyntheticSession }> {
+    return this.request('/synthetic/sessions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Generation_Sessions of a Use_Case with status + creation time (Req 10.4). */
+  async listSyntheticSessions(
+    usecaseId: string
+  ): Promise<{ sessions: SyntheticSessionSummary[]; count: number }> {
+    const query = new URLSearchParams({ usecase_id: usecaseId });
+    return this.request(`/synthetic/sessions?${query.toString()}`);
+  }
+
+  /**
+   * Full session state: META plus previews with presigned thumbnail URLs
+   * and per-preview resolved prompt text (Req 10.2, 5.2, 5.6).
+   */
+  async getSyntheticSession(
+    sessionId: string
+  ): Promise<SyntheticSessionDetailResponse> {
+    return this.request(`/synthetic/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  /** Update model selection, sources/classification, params (Req 1.2, 3.2-3.4). */
+  async patchSyntheticSession(
+    sessionId: string,
+    body: Partial<CreateSyntheticSessionBody>
+  ): Promise<{ session: SyntheticSession }> {
+    return this.request(`/synthetic/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Start (or re-start with an edited prompt) asynchronous preview
+   * generation; returns 202 with the task count (Req 5.1, 5.3). A 400
+   * carries `unresolved_placeholders` when the template has placeholder
+   * variables missing from the context (Req 2.6).
+   */
+  async generateSyntheticPreviews(
+    sessionId: string,
+    body: SyntheticGenerateBody = {}
+  ): Promise<SyntheticGenerateResponse> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/generate`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Set the approval state for listed preview ids or all (Req 6.1, 6.2). */
+  async setSyntheticPreviewApproval(
+    sessionId: string,
+    body: SyntheticApprovalBody
+  ): Promise<{ updated: number; approval_state: string }> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/previews/approval`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Integrate the approved previews: upload, auto-annotate, and append to
+   * the Data_Manifest; returns the manifest URI and appended record count
+   * (Req 6.3-6.6, 7.1-7.8). Any failure leaves the manifest untouched.
+   */
+  async integrateSyntheticSession(
+    sessionId: string,
+    body: { target_dataset_prefix?: string; target_manifest_key?: string } = {}
+  ): Promise<SyntheticIntegrateResponse> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/integrate`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Create a training job through the existing Training_Subsystem with
+   * dataset_manifest_s3 pre-populated from the integration result and the
+   * originating generation_session_id recorded (Req 8.1-8.3).
+   */
+  async retrainSyntheticSession(
+    sessionId: string,
+    body: SyntheticRetrainBody
+  ): Promise<{ training_job_id: string; message: string }> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/retrain`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
   }
 
   // Manifest Validator endpoints

@@ -38,6 +38,8 @@ import SimulatorView from './pages/node-designer/SimulatorView';
 import ImportView from './pages/node-designer/ImportView';
 import BuildsPage from './pages/builds/BuildsPage';
 import BuildDetail from './pages/builds/BuildDetail';
+import SyntheticData from './pages/synthetic/SyntheticData';
+import SyntheticSessionDetail from './pages/synthetic/SyntheticSessionDetail';
 import Settings from './pages/Settings';
 import AuditLogs from './pages/AuditLogs';
 import UserManager from './pages/admin/UserManager';
@@ -48,6 +50,7 @@ import ProtectedRoute from './components/ProtectedRoute';
 import RequireRole from './components/RequireRole';
 import GlobalLoadingBar from './components/GlobalLoadingBar';
 import { BUILDS_ACCESS_ROLES } from './utils/buildsAccess';
+import { SYNTHETIC_ACCESS_ROLES } from './utils/syntheticAccess';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -130,6 +133,26 @@ function App() {
                   element={
                     <RequireRole roles={BUILDS_ACCESS_ROLES}>
                       <BuildDetail />
+                    </RequireRole>
+                  }
+                />
+                {/* Synthetic data generation workspace is limited to
+                    Data_Scientist_Access roles (synthetic-defect-data-generation
+                    Req 9.3); server-side RBAC remains the ultimate authority
+                    (Req 9.1, 9.2). */}
+                <Route
+                  path="synthetic"
+                  element={
+                    <RequireRole roles={SYNTHETIC_ACCESS_ROLES}>
+                      <SyntheticData />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="synthetic/:sessionId"
+                  element={
+                    <RequireRole roles={SYNTHETIC_ACCESS_ROLES}>
+                      <SyntheticSessionDetail />
                     </RequireRole>
                   }
                 />

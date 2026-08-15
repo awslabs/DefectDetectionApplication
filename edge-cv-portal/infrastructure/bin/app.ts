@@ -8,6 +8,7 @@ import { ComputeStack } from '../lib/compute-stack';
 import { TestRunnerStack } from '../lib/test-runner-stack';
 import { NodeDesignerStack } from '../lib/node-designer-stack';
 import { BuildFleetStack } from '../lib/build-fleet-stack';
+import { SyntheticDataStack } from '../lib/synthetic-data-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 
 const app = new cdk.App();
@@ -185,6 +186,26 @@ const buildFleetStack = new BuildFleetStack(app, 'EdgeCVPortalBuildFleetStack', 
   userRolesTable: storageStack.userRolesTable,
   auditLogTable: storageStack.auditLogTable,
   settingsTable: storageStack.settingsTable,
+  userPool: authStack.userPool,
+  restApiId: computeStack.api.restApiId,
+  restApiRootResourceId: computeStack.api.restApiRootResourceId,
+  // Must match ApiGatewayStack deployOptions.stageName.
+  apiStageName: 'v1',
+});
+
+// Synthetic Data Stack (synthetic-defect-data-generation: SyntheticSessions/
+// PromptTemplates tables, the SyntheticDataHandler Lambda (API + async
+// generation worker) with the shared/JWT/imaging layers, and the
+// /synthetic/... routes registered against the ComputeStack API).
+const syntheticDataStack = new SyntheticDataStack(app, 'EdgeCVPortalSyntheticDataStack', {
+  env,
+  description: 'Synthetic defect data generation infrastructure (sessions, prompt templates, generation Lambda, API) for Edge CV Portal',
+  useCasesTable: storageStack.useCasesTable,
+  userRolesTable: storageStack.userRolesTable,
+  auditLogTable: storageStack.auditLogTable,
+  settingsTable: storageStack.settingsTable,
+  trainingJobsTable: storageStack.trainingJobsTable,
+  trustedUseCaseAccountIds,
   userPool: authStack.userPool,
   restApiId: computeStack.api.restApiId,
   restApiRootResourceId: computeStack.api.restApiRootResourceId,

@@ -18,6 +18,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { UserRole } from '../types';
 import { getConfig, getBuildInfo } from '../config';
 import { canAccessBuilds } from '../utils/buildsAccess';
+import { canAccessSyntheticData } from '../utils/syntheticAccess';
 
 /**
  * Builds the items for the top-navigation settings dropdown based on the
@@ -83,6 +84,13 @@ export function buildNavigationItems(
     { type: 'divider' as const },
     { type: 'link' as const, text: 'Data Management', href: '/data' },
     { type: 'link' as const, text: 'Labeling', href: '/labeling' },
+    // The synthetic data generation workspace is limited to the roles
+    // holding Data_Scientist_Access (DataScientist, UseCaseAdmin,
+    // PortalAdmin) — synthetic-defect-data-generation Req 9.3, following
+    // the Builds nav gating pattern below.
+    ...(canAccessSyntheticData(role)
+      ? [{ type: 'link' as const, text: 'Synthetic Data', href: '/synthetic' }]
+      : []),
     { type: 'link' as const, text: 'Training', href: '/training' },
     { type: 'link' as const, text: 'Models', href: '/models' },
     { type: 'divider' as const },
