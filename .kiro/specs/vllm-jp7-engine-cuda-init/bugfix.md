@@ -531,7 +531,8 @@ Named follow-ups OUTSIDE this spec:
 
 - (a) **NVIDIA bug report** for the Argus dmabuf-import poisoning (evidence chain
   complete except the deliberate reproduction: CSI capture loop → degraded →
-  nvargus restart → recovered).
+  nvargus restart → recovered). Draft ready for filing:
+  `nvidia-bug-report-draft.md` (this spec directory, 2026-08-15).
 - (b) **Silent ORT CPU-fallback visibility**: the DDA ORT provider chain `CUDA → CPU`
   lets vision models reach READY without GPU, so READY currently hides a device-wide
   GPU outage — candidate follow-up spec.
