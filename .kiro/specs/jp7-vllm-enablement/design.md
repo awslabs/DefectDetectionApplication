@@ -453,3 +453,7 @@ The image-build half of this feature is not property-testable (declarative Docke
 **On-hardware (documented manual procedure — repo convention):**
 
 - `test/on-hardware/jp7_vllm_validation.md` executed on a Jetson Thor JP7 device: opt-125m full-pipeline smoke (register → package → publish → deploy → READY → generate → SSE stream), Qwen2.5-7B-Instruct realistic run, `llm_inference` workflow node, vision-model coexistence, in-container `torch.cuda.is_available()` and engine-load checks (Requirements 2.8, 6.1–6.7).
+
+## Amendment Notes
+
+**2026-08-15 (from `.kiro/specs/vllm-jp7-engine-cuda-init/`)**: the JP7 image now declares `ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas` in `src/backend/Dockerfile.jp7` (added by `.kiro/specs/vllm-jp7-engine-cuda-init/`). Rationale: triton's BUNDLED ptxas (CUDA 12.8, V12.8.93) cannot codegen for Thor's `sm_110a` (``ptxas fatal : Value 'sm_110a' is not defined for option 'gpu-name'``) — without the ENV, any vLLM model whose execution path JIT-compiles a Triton kernel dies with `PTXASError` during the engine's profile run, so the model never reaches READY. The ENV points triton at the image's system CUDA 13.x ptxas, which accepts `sm_110a`. Validated on-device (jetson-thor1, 2026-08-15): qwen READY with 40.48 GiB KV cache, generate served, coexisting with the vision models on GPU. JP6/JP5 images gain no analogous env var.

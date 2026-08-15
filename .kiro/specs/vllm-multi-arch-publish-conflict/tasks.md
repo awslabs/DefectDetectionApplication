@@ -381,6 +381,7 @@ graph TD
   - Publish the affected record (training_id `1e05eb99-ca55-4325-9be0-15874979e6a3`, model `Qwen3-VL-8B-Instruct`, usecase `645504ce-a60a-4009-8349-7548c0025cd3`) and confirm TWO DEPLOYABLE components, one per JetPack, with two `published_components` entries and a `components` list on the record
   - On `https://d23v4ltibogb5x.cloudfront.net`, revise the deployment for thing `jetson-thor1` (`target_architecture` `arm64_jp7`) and confirm the JP7 component is selectable and the JP6 component is shown incompatible
   - _Requirements: 2.3, 2.14, 2.16_
+  - **AMENDMENT NOTE (2026-08-15, from `.kiro/specs/vllm-jp7-engine-cuda-init/`)**: the JP7 deploy test this task anticipated is fulfilled by `.kiro/specs/vllm-jp7-engine-cuda-init/`. Cloud publish/packaging is confirmed working — the JP7 component deployed and its lifecycle ran on jetson-thor1. The device-side EngineCore failure that deploy surfaced was investigated there: the original CUDA-init failure (`cudaErrorDevicesUnavailable`) was proven ENVIRONMENTAL (nvargus/Argus driver defect, not an image defect); the real image defect — triton's bundled ptxas rejecting Thor's `sm_110a` — is fixed by that spec's `TRITON_PTXAS_PATH` ENV in `src/backend/Dockerfile.jp7`.
 
 ## Notes
 

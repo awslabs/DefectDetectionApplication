@@ -331,6 +331,19 @@ RUN if [ "$VLLM_ENABLE" = "1" ]; then \
         echo "vLLM layer skipped (VLLM_ENABLE=${VLLM_ENABLE})"; \
     fi
 
+# Triton (the torch/vLLM JIT compiler, pinned triton==3.5.0 above) ships its
+# own BUNDLED ptxas, which is CUDA 12.8 (V12.8.93) and rejects Thor's
+# sm_110a ("ptxas fatal : Value 'sm_110a' is not defined for option
+# 'gpu-name'"): any vLLM model whose execution path JIT-compiles a Triton
+# kernel dies with PTXASError during the engine's profile_run
+# (spec: vllm-jp7-engine-cuda-init). Point triton at the image's system
+# CUDA 13.x ptxas instead, which accepts sm_110a. Validated on-device
+# (jetson-thor1, 2026-08-15): with this env the qwen3-vl-8b engine
+# profiles, sizes its KV cache, reaches READY, and serves, coexisting with
+# the vision models on GPU. JP6 (vllm 0.9.3 / V0, cu122 stack) and JP5
+# (no vLLM) take no analogous env var.
+ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+
 # Build aravis from source (apt deps already installed above)
 RUN pip install --no-cache-dir meson ninja
 # Downgrade setuptools so g-ir-scanner can find distutils.msvccompiler (removed in setuptools>=71)

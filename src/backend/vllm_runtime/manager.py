@@ -31,7 +31,7 @@ touches another engine (4.6, 8.9). The embedded vision Triton scans its
 own separate repository directory and is untouched by anything here (8.8).
 
 vLLM is **not** imported at module import time: the ``vllm`` package only
-exists on vLLM-capable images (JetPack 6), so the import happens lazily
+exists on vLLM-capable images (JetPack 6 / JetPack 7), so the import happens lazily
 inside the default engine/sampling-params factories. Both factories are
 injectable, which is also how tests drive the manager with a fake
 ``AsyncLLMEngine`` and no GPU.
@@ -345,14 +345,25 @@ class VllmRuntimeManager:
         shut-down engine: drop unreachable Python objects, then return
         cached CUDA blocks to the driver. ``torch`` is imported lazily
         (it only exists on vLLM-capable images) and every failure is
-        swallowed — reclaim must never break unload/fail handling."""
+        swallowed — reclaim must never break unload/fail handling.
+
+        Invariant: reclaim must never be the first CUDA touch in a
+        process. The gate is ``torch.cuda.is_initialized()`` — a pure
+        state read — never a driver-initializing probe like
+        ``torch.cuda.is_available()``: such a probe in the parent
+        backend process poisons every subsequently forked child
+        (defect 1.3, spec vllm-jp7-engine-cuda-init), and on JP7/V1 the
+        engine memory lives in the engine-core child anyway, so there
+        is nothing for the parent to reclaim. ``empty_cache()`` is only
+        meaningful when torch CUDA is already initialized in THIS
+        process — exactly the JP6/V0 in-process engine case."""
         gc.collect()
         try:
             import torch
         except ImportError:
             return
         try:
-            if torch.cuda.is_available():
+            if torch.cuda.is_initialized():
                 torch.cuda.empty_cache()
                 logger.info(
                     "Reclaimed cached CUDA memory after unload/failure of "
