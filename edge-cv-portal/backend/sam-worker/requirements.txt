@@ -1,0 +1,4 @@
+# dda_sam_worker container-image Lambda dependencies (CPU ONNX inference)
+onnxruntime==1.19.2
+numpy==1.26.4
+pillow==10.4.0

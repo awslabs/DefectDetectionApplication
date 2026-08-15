@@ -126,6 +126,8 @@ const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   auditLogTable: storageStack.auditLogTable,
   trainingJobsTable: storageStack.trainingJobsTable,
   labelingJobsTable: storageStack.labelingJobsTable,
+  labelingTeamsTable: storageStack.labelingTeamsTable,
+  labelingTasksTable: storageStack.labelingTasksTable,
   preLabeledDatasetsTable: storageStack.preLabeledDatasetsTable,
   modelsTable: storageStack.modelsTable,
   deploymentsTable: storageStack.deploymentsTable,

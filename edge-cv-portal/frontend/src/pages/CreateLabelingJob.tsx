@@ -13,11 +13,15 @@ import {
   Textarea,
   Button,
   Checkbox,
+  RadioGroup,
+  Toggle,
+  FileUpload,
 } from '@cloudscape-design/components';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { S3Dataset } from '../types';
-import { apiService } from '../services/api';
+import { apiService, LabelingTeam } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
+import { useAuth } from '../contexts/AuthContext';
 import S3Browser from '../components/S3Browser';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
@@ -26,13 +30,71 @@ interface LocationState {
   dataset?: S3Dataset;
 }
 
+// DDA Labeling_Backend constants (dda-data-labeling Requirements 1.1, 4.x).
+type LabelingBackend = 'DDA' | 'GroundTruth';
+
+/** Fixed Label_Set for Binary_Classification (Requirement 4.3). */
+export const FIXED_CLASSIFICATION_LABEL_SET = ['normal', 'anomaly'];
+const MAX_LABELS = 10;
+const MAX_LABEL_LENGTH = 64;
+const MAX_INSTRUCTIONS_LENGTH = 5000;
+const MAX_EXAMPLE_IMAGES = 10;
+const EXAMPLE_IMAGE_TYPES = ['image/jpeg', 'image/png'];
+const MAX_DDA_JOB_NAME_LENGTH = 63;
+
+/**
+ * Auto_Labeler model/modality compatibility matrix, enforced client-side
+ * at job creation (dda-data-labeling Requirement 8.8; the backend
+ * re-validates). SAM is class-agnostic geometry — Segmentation and
+ * ObjectDetection only; Bedrock vision models answer classification and
+ * detection prompts — Classification and ObjectDetection only.
+ */
+export const SAM_MODALITIES = ['Segmentation', 'ObjectDetection'];
+export const BEDROCK_MODALITIES = ['Classification', 'ObjectDetection'];
+
+/** True when the auto-label model value is usable with the modality. */
+export function isAutoLabelModelCompatible(
+  modelValue: string,
+  taskType: string
+): boolean {
+  if (modelValue === 'sam') return SAM_MODALITIES.includes(taskType);
+  if (modelValue.startsWith('bedrock:'))
+    return BEDROCK_MODALITIES.includes(taskType);
+  return false;
+}
+
+const fileUploadI18nStrings = {
+  uploadButtonText: (multiple: boolean) =>
+    multiple ? 'Choose files' : 'Choose file',
+  dropzoneText: (multiple: boolean) =>
+    multiple ? 'Drop files to upload' : 'Drop file to upload',
+  removeFileAriaLabel: (index: number) => `Remove file ${index + 1}`,
+  limitShowFewer: 'Show fewer files',
+  limitShowMore: 'Show more files',
+  errorIconAriaLabel: 'Error',
+};
+
+/** Per-file JPEG/PNG errors for an example uploader (Requirement 4.4). */
+function exampleFileErrors(files: File[]): (string | null)[] {
+  return files.map((file) =>
+    EXAMPLE_IMAGE_TYPES.includes(file.type)
+      ? null
+      : 'Example images must be JPEG or PNG'
+  );
+}
+
 export default function CreateLabelingJob() {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
+  const { user } = useAuth();
   const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   const useCaseIdFromUrl = searchParams.get('usecase_id');
   const preselectedDataset = (location.state as LocationState)?.dataset;
+
+  // Skip_Verification is admin-only (dda-data-labeling Requirement 9.1).
+  const isAdmin =
+    user?.role === 'UseCaseAdmin' || user?.role === 'PortalAdmin';
 
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [useCases, setUseCases] = useState<any[]>([]);
@@ -55,6 +117,25 @@ export default function CreateLabelingJob() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
   const [showBrowseModal, setShowBrowseModal] = useState(false);
+
+  // Labeling_Backend selection — required before submit (Requirement 1.1).
+  const [labelingBackend, setLabelingBackend] = useState<LabelingBackend | ''>('');
+
+  // DDA branch state (Requirements 4.1-4.4, 8.1, 9.2).
+  const [labelingTeams, setLabelingTeams] = useState<LabelingTeam[]>([]);
+  const [loadingTeams, setLoadingTeams] = useState(false);
+  const [selectedTeam, setSelectedTeam] = useState<SelectProps.Option | null>(null);
+  const [ddaLabels, setDdaLabels] = useState<string[]>(['']);
+  const [ddaInstructions, setDdaInstructions] = useState('');
+  const [goodExampleFiles, setGoodExampleFiles] = useState<File[]>([]);
+  const [badExampleFiles, setBadExampleFiles] = useState<File[]>([]);
+  const [autoLabelEnabled, setAutoLabelEnabled] = useState(false);
+  const [autoLabelModel, setAutoLabelModel] = useState('');
+  const [skipVerification, setSkipVerification] = useState(false);
+  const [skipVerificationModelId, setSkipVerificationModelId] = useState('');
+  const [perLabelPrompts, setPerLabelPrompts] = useState<Record<string, string>>({});
+  const [bedrockModels, setBedrockModels] = useState<{ id: string; label: string }[]>([]);
+  const [bedrockModelsUnavailable, setBedrockModelsUnavailable] = useState(false);
 
   // Load use cases on mount
   useEffect(() => {
@@ -100,7 +181,7 @@ export default function CreateLabelingJob() {
     loadUseCases();
   }, [useCaseIdFromUrl, selectedUsecaseId, setSelectedUsecaseId]);
 
-  // Load workteams when use case changes
+  // Load SageMaker workteams when use case changes (GroundTruth branch).
   useEffect(() => {
     const loadWorkteams = async () => {
       if (!selectedUseCase) return;
@@ -129,9 +210,103 @@ export default function CreateLabelingJob() {
     loadWorkteams();
   }, [selectedUseCase]);
 
+  // Load DDA Labeling_Teams for the use case (Requirement 4.1; teams come
+  // from GET /labeling-teams scoped to the Use_Case).
+  useEffect(() => {
+    if (labelingBackend !== 'DDA' || !selectedUseCase) return;
+    let cancelled = false;
+    setLoadingTeams(true);
+    setSelectedTeam(null);
+    apiService
+      .listLabelingTeams(selectedUseCase.usecase_id)
+      .then((data) => {
+        if (!cancelled) setLabelingTeams(data.teams || []);
+      })
+      .catch((err) => {
+        // Teams may not exist yet; the validation surfaces the requirement.
+        console.error('Failed to load labeling teams:', err);
+        if (!cancelled) setLabelingTeams([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingTeams(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [labelingBackend, selectedUseCase]);
+
+  // Load the Bedrock models available to the Portal for the auto-label
+  // model select and the Skip_Verification model select (Requirements
+  // 8.1, 9.2). On failure the UI degrades to free-text entry.
+  useEffect(() => {
+    if (labelingBackend !== 'DDA') return;
+    let cancelled = false;
+    apiService
+      .getBedrockModels()
+      .then((response) => {
+        if (cancelled) return;
+        setBedrockModels(response.models || []);
+        setBedrockModelsUnavailable((response.models || []).length === 0);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setBedrockModels([]);
+        setBedrockModelsUnavailable(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [labelingBackend]);
+
+  // Ground Truth supports only Classification/Segmentation; clear an
+  // ObjectDetection selection when switching back (Requirement 1.2 — the
+  // GroundTruth path submits exactly as before).
+  useEffect(() => {
+    if (labelingBackend === 'GroundTruth' && taskType?.value === 'ObjectDetection') {
+      setTaskType(null);
+    }
+  }, [labelingBackend, taskType]);
+
+  // Enforce the model/modality matrix client-side: drop an auto-label
+  // model selection that is incompatible with the chosen modality
+  // (Requirement 8.8).
+  useEffect(() => {
+    if (autoLabelModel && taskType?.value &&
+        !isAutoLabelModelCompatible(autoLabelModel, taskType.value as string)) {
+      setAutoLabelModel('');
+    }
+  }, [taskType, autoLabelModel]);
+
+  const isDda = labelingBackend === 'DDA';
+  const modality = (taskType?.value as string) || '';
+  const isClassification = modality === 'Classification';
+
+  // Effective Label_Set: fixed normal/anomaly for Binary_Classification
+  // (Requirement 4.3), otherwise the editor rows (Requirement 4.2).
+  const trimmedDdaLabels = ddaLabels.map((l) => l.trim()).filter((l) => l);
+  const effectiveLabelSet = isClassification
+    ? FIXED_CLASSIFICATION_LABEL_SET
+    : trimmedDdaLabels;
+
+  // Auto_Labeler options per the compatibility matrix (Requirements 8.1, 8.8).
+  const autoLabelOptions: SelectProps.Option[] = [
+    ...(SAM_MODALITIES.includes(modality)
+      ? [{ label: 'Segment Anything (SAM)', value: 'sam' }]
+      : []),
+    ...(BEDROCK_MODALITIES.includes(modality)
+      ? bedrockModels.map((m) => ({
+          label: `Bedrock: ${m.label}`,
+          value: `bedrock:${m.id}`,
+        }))
+      : []),
+  ];
+
   const taskTypeOptions = [
     { label: 'Image Classification', value: 'Classification' },
     { label: 'Semantic Segmentation', value: 'Segmentation' },
+    // Object detection is a DDA-only modality; the Ground Truth path is
+    // unchanged (Requirement 1.2).
+    ...(isDda ? [{ label: 'Object Detection', value: 'ObjectDetection' }] : []),
   ];
 
   const workforceOptions = [
@@ -140,11 +315,84 @@ export default function CreateLabelingJob() {
     { label: 'Vendor', value: 'vendor' },
   ];
 
+  /**
+   * Validate the DDA labeling-setup step (Requirements 4.1-4.4, 8.1, 8.8,
+   * 9.1, 9.2). Returns an error message, or null when valid.
+   */
+  const validateDdaSetup = (): string | null => {
+    if (skipVerification && !isAdmin) {
+      return 'Skip verification is restricted to administrators';
+    }
+    if (!skipVerification && !selectedTeam) {
+      return 'A labeling team is required';
+    }
+    if (!isClassification) {
+      if (trimmedDdaLabels.length === 0) {
+        return 'Provide at least one label (up to 10)';
+      }
+      if (trimmedDdaLabels.length > MAX_LABELS) {
+        return `The label set supports at most ${MAX_LABELS} labels`;
+      }
+      const tooLong = trimmedDdaLabels.find((l) => l.length > MAX_LABEL_LENGTH);
+      if (tooLong) {
+        return `Label "${tooLong.slice(0, 32)}…" exceeds ${MAX_LABEL_LENGTH} characters`;
+      }
+      if (new Set(trimmedDdaLabels).size !== trimmedDdaLabels.length) {
+        return 'Label names must be distinct';
+      }
+    }
+    if (ddaInstructions.length > MAX_INSTRUCTIONS_LENGTH) {
+      return `Instructions exceed ${MAX_INSTRUCTIONS_LENGTH.toLocaleString()} characters`;
+    }
+    if (goodExampleFiles.length > MAX_EXAMPLE_IMAGES) {
+      return `At most ${MAX_EXAMPLE_IMAGES} good example images are allowed`;
+    }
+    if (badExampleFiles.length > MAX_EXAMPLE_IMAGES) {
+      return `At most ${MAX_EXAMPLE_IMAGES} bad example images are allowed`;
+    }
+    const badTyped = [...goodExampleFiles, ...badExampleFiles].find(
+      (f) => !EXAMPLE_IMAGE_TYPES.includes(f.type)
+    );
+    if (badTyped) {
+      return `Example image "${badTyped.name}" must be JPEG or PNG`;
+    }
+    if (autoLabelEnabled) {
+      if (!autoLabelModel) {
+        return 'Select an auto-label model';
+      }
+      if (!isAutoLabelModelCompatible(autoLabelModel, modality)) {
+        return 'The selected auto-label model does not support this task type';
+      }
+    }
+    if (skipVerification) {
+      if (!skipVerificationModelId.trim()) {
+        return 'Skip verification requires a Bedrock model';
+      }
+      const missingPrompt = effectiveLabelSet.find(
+        (label) => !(perLabelPrompts[label] || '').trim()
+      );
+      if (missingPrompt !== undefined) {
+        return `Skip verification requires a prompt for label "${missingPrompt}"`;
+      }
+    }
+    return null;
+  };
+
   const validateStep = (stepIndex: number): boolean => {
     switch (stepIndex) {
-      case 0: // Job Configuration
+      case 0: // Labeling backend selection (Requirement 1.1)
+        if (!labelingBackend) {
+          setError('Select a labeling backend');
+          return false;
+        }
+        return true;
+      case 1: // Job Configuration
         if (!jobName.trim()) {
           setError('Job Name is required');
+          return false;
+        }
+        if (isDda && jobName.trim().length > MAX_DDA_JOB_NAME_LENGTH) {
+          setError(`Job Name must be at most ${MAX_DDA_JOB_NAME_LENGTH} characters`);
           return false;
         }
         if (!selectedUseCase) {
@@ -152,7 +400,7 @@ export default function CreateLabelingJob() {
           return false;
         }
         return true;
-      case 1: // Dataset Selection
+      case 2: // Dataset Selection
         if (!datasetS3Uri.trim()) {
           setError('S3 URI is required');
           return false;
@@ -162,18 +410,28 @@ export default function CreateLabelingJob() {
           return false;
         }
         return true;
-      case 2: // Task Configuration
+      case 3: // Task Configuration
         if (!taskType) {
           setError('Task Type is required');
           return false;
         }
-        const categories = labelCategories.split(',').map(c => c.trim()).filter(c => c);
-        if (categories.length === 0) {
-          setError('Please provide at least one label category');
-          return false;
+        if (!isDda) {
+          const categories = labelCategories.split(',').map(c => c.trim()).filter(c => c);
+          if (categories.length === 0) {
+            setError('Please provide at least one label category');
+            return false;
+          }
         }
         return true;
-      case 3: // Workforce Configuration
+      case 4: // Workforce (GroundTruth) or DDA labeling setup
+        if (isDda) {
+          const ddaError = validateDdaSetup();
+          if (ddaError) {
+            setError(ddaError);
+            return false;
+          }
+          return true;
+        }
         if (!workforceType) {
           setError('Workforce Type is required');
           return false;
@@ -193,13 +451,68 @@ export default function CreateLabelingJob() {
     setShowBrowseModal(false);
   };
 
+  /**
+   * Upload the good/bad example images through the portal's existing
+   * presigned-PUT pattern (batch upload URLs + browser PUT, as in
+   * DataManagement) before job submission, returning the stored S3 URIs
+   * (Requirement 4.4). Throws on any failed upload so no job is created
+   * with dangling example references.
+   */
+  const uploadExampleImages = async (): Promise<{ good: string[]; bad: string[] }> => {
+    if (goodExampleFiles.length === 0 && badExampleFiles.length === 0) {
+      return { good: [], bad: [] };
+    }
+    const jobSlug = jobName.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-') || 'job';
+    const basePrefix = `labeling-examples/${jobSlug}-${Date.now()}`;
+
+    const uploadKind = async (files: File[], kind: 'good' | 'bad'): Promise<string[]> => {
+      if (files.length === 0) return [];
+      const named = files.map((file, idx) => ({
+        file,
+        filename: `${idx}-${file.name.replace(/[^A-Za-z0-9._-]/g, '_')}`,
+      }));
+      const response = await apiService.getBatchUploadUrls(selectedUseCase.usecase_id, {
+        prefix: `${basePrefix}/${kind}`,
+        files: named.map(({ file, filename }) => ({
+          filename,
+          content_type: file.type || 'application/octet-stream',
+        })),
+      });
+      const uris: string[] = [];
+      for (const { file, filename } of named) {
+        const info = response.uploads.find((u) => u.filename === filename);
+        if (!info || info.error || !info.upload_url) {
+          throw new Error(
+            `Could not get an upload URL for example image "${file.name}"` +
+              (info?.error ? `: ${info.error}` : '')
+          );
+        }
+        const put = await fetch(info.upload_url, {
+          method: 'PUT',
+          body: file,
+          headers: { 'Content-Type': info.content_type },
+        });
+        if (!put.ok) {
+          throw new Error(`Uploading example image "${file.name}" failed (HTTP ${put.status})`);
+        }
+        uris.push(`s3://${response.bucket}/${info.key}`);
+      }
+      return uris;
+    };
+
+    return {
+      good: await uploadKind(goodExampleFiles, 'good'),
+      bad: await uploadKind(badExampleFiles, 'bad'),
+    };
+  };
+
   const handleSubmit = async () => {
     setCreating(true);
     setError('');
     try {
       // Validate all steps before submission; jump to the first invalid step
       // so the user sees the relevant fields alongside the error message.
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < 5; i++) {
         if (!validateStep(i)) {
           setActiveStepIndex(i);
           setCreating(false);
@@ -208,14 +521,64 @@ export default function CreateLabelingJob() {
         }
       }
 
-      // Parse label categories
-      const categories = labelCategories.split(',').map(c => c.trim()).filter(c => c);
-      
       if (!selectedUseCase) {
         setError('Please select a use case');
         setCreating(false);
         return;
       }
+
+      // Validate S3 URI format
+      if (!datasetS3Uri.match(/^s3:\/\/[^/]+\/.+$/)) {
+        setError('Invalid S3 URI format. Expected: s3://bucket/prefix');
+        setCreating(false);
+        return;
+      }
+
+      // Extract prefix from S3 URI (everything after bucket name)
+      const prefixMatch = datasetS3Uri.match(/^s3:\/\/[^/]+\/(.+)$/);
+      const prefix = prefixMatch ? prefixMatch[1] : '';
+
+      if (labelingBackend === 'DDA') {
+        // DDA branch (Requirements 1.3, 4.1-4.4, 8.1, 9.2): upload the
+        // example images first, then submit with labeling_backend='DDA'.
+        const exampleImages = await uploadExampleImages();
+        const promptsForLabels: Record<string, string> = {};
+        if (skipVerification) {
+          for (const label of effectiveLabelSet) {
+            promptsForLabels[label] = (perLabelPrompts[label] || '').trim();
+          }
+        }
+
+        await apiService.createLabelingJob({
+          usecase_id: selectedUseCase.usecase_id,
+          job_name: jobName.trim(),
+          dataset_prefix: prefix,
+          task_type: modality,
+          labeling_backend: 'DDA',
+          label_set: effectiveLabelSet,
+          instructions: ddaInstructions || undefined,
+          example_images: exampleImages,
+          ...(skipVerification
+            ? {
+                skip_verification: true,
+                bedrock_model_id: skipVerificationModelId.trim(),
+                per_label_prompts: promptsForLabels,
+              }
+            : { team_id: selectedTeam?.value as string }),
+          ...(autoLabelEnabled && autoLabelModel
+            ? { auto_label: { enabled: true, model: autoLabelModel } }
+            : {}),
+        });
+
+        navigate('/labeling');
+        return;
+      }
+
+      // Ground Truth branch — submits exactly as before (Requirement 1.2),
+      // now carrying the explicit labeling_backend discriminator.
+
+      // Parse label categories
+      const categories = labelCategories.split(',').map(c => c.trim()).filter(c => c);
 
       // Build workforce ARN from selected workteam
       if (workforceType?.value === 'private' && !selectedWorkteam) {
@@ -233,17 +596,6 @@ export default function CreateLabelingJob() {
         setCreating(false);
         return;
       }
-      
-      // Validate S3 URI format
-      if (!datasetS3Uri.match(/^s3:\/\/[^/]+\/.+$/)) {
-        setError('Invalid S3 URI format. Expected: s3://bucket/prefix');
-        setCreating(false);
-        return;
-      }
-
-      // Extract prefix from S3 URI (everything after bucket name)
-      const prefixMatch = datasetS3Uri.match(/^s3:\/\/[^/]+\/(.+)$/);
-      const prefix = prefixMatch ? prefixMatch[1] : '';
 
       // Extract mask prefix if provided
       let maskPrefixValue: string | undefined;
@@ -257,6 +609,7 @@ export default function CreateLabelingJob() {
         job_name: jobName,
         dataset_prefix: prefix,
         task_type: taskType?.value as string,
+        labeling_backend: 'GroundTruth',
         label_categories: categories,
         workforce_arn: workforceArn,
         instructions: instructions || undefined,
@@ -276,10 +629,720 @@ export default function CreateLabelingJob() {
     }
   };
 
+  // --- Step contents ------------------------------------------------------
+
+  // Required first step: Labeling_Backend choice with exactly two options
+  // (Requirement 1.1).
+  const backendStep = {
+    title: 'Labeling Backend',
+    description: 'Choose how this job is executed',
+    content: (
+      <FormField
+        label="Labeling backend"
+        description="The engine that executes this labeling job"
+        constraintText="Required"
+      >
+        <RadioGroup
+          value={labelingBackend || null}
+          onChange={({ detail }) =>
+            setLabelingBackend(detail.value as LabelingBackend)
+          }
+          items={[
+            {
+              value: 'DDA',
+              label: 'DDA Data Labeling System',
+              description:
+                'Portal-native labeling with private labeling teams, optional model-assisted pre-labeling, and direct DDA manifest output',
+            },
+            {
+              value: 'GroundTruth',
+              label: 'SageMaker Ground Truth',
+              description:
+                'The existing SageMaker workflow using Ground Truth work teams and the worker portal',
+            },
+          ]}
+        />
+      </FormField>
+    ),
+  };
+
+  const jobConfigStep = {
+    title: 'Job Configuration',
+    description: 'Basic job information',
+    content: (
+      <SpaceBetween size="l">
+        <FormField
+          label="Job Name"
+          description="A unique name for this labeling job"
+          constraintText={isDda ? 'Required, 1-63 characters' : 'Required'}
+        >
+          <Input
+            value={jobName}
+            onChange={({ detail }) => setJobName(detail.value)}
+            placeholder="e.g., Defect Detection - Batch 1"
+          />
+        </FormField>
+
+        <FormField
+          label="Description"
+          description="Optional description of this labeling job"
+        >
+          <Textarea
+            value={description}
+            onChange={({ detail }) => setDescription(detail.value)}
+            placeholder="Describe the purpose of this labeling job..."
+            rows={3}
+          />
+        </FormField>
+
+        {useCaseIdFromUrl ? (
+          <FormField
+            label="Use Case"
+            description="The use case this job belongs to"
+          >
+            <Input
+              value={selectedUseCase?.name || ''}
+              disabled
+              readOnly
+            />
+          </FormField>
+        ) : (
+          <FormField
+            label="Use Case"
+            description="The use case this job belongs to"
+            constraintText="Required"
+          >
+            <Select
+              selectedOption={
+                selectedUseCase
+                  ? {
+                      label: selectedUseCase.name,
+                      value: selectedUseCase.usecase_id,
+                    }
+                  : null
+              }
+              onChange={({ detail }) => {
+                const useCase = useCases.find(
+                  (uc) => uc.usecase_id === detail.selectedOption.value
+                );
+                setSelectedUseCase(useCase);
+              }}
+              options={useCases.map((uc) => ({
+                label: uc.name,
+                value: uc.usecase_id,
+              }))}
+              placeholder="Select a use case"
+              selectedAriaLabel="Selected"
+            />
+          </FormField>
+        )}
+      </SpaceBetween>
+    ),
+  };
+
+  const datasetStep = {
+    title: 'Dataset Selection',
+    description: 'Choose the dataset to label',
+    content: (
+      <SpaceBetween size="l">
+        <FormField
+          label="S3 URI"
+          description="The S3 location containing images to label"
+          constraintText="Required"
+          errorText={validateS3Uri(datasetS3Uri)}
+        >
+          <SpaceBetween direction="horizontal" size="xs">
+            <Input
+              value={datasetS3Uri}
+              onChange={({ detail }) => setDatasetS3Uri(detail.value)}
+              placeholder="e.g., s3://my-bucket/raw-images/production-line-1/"
+            />
+            <Button onClick={() => setShowBrowseModal(true)} disabled={!selectedUseCase}>
+              Browse S3
+            </Button>
+          </SpaceBetween>
+        </FormField>
+
+        {preselectedDataset && (
+          <Alert type="info">
+            Dataset preselected: {preselectedDataset.image_count.toLocaleString()} images
+          </Alert>
+        )}
+      </SpaceBetween>
+    ),
+  };
+
+  const taskConfigStep = {
+    title: 'Task Configuration',
+    description: 'Configure the labeling task',
+    content: (
+      <SpaceBetween size="l">
+        <FormField
+          label="Task Type"
+          description="The type of labeling task"
+          constraintText="Required"
+        >
+          <Select
+            selectedOption={taskType}
+            onChange={({ detail }) => setTaskType(detail.selectedOption)}
+            options={taskTypeOptions}
+            placeholder="Select task type"
+          />
+        </FormField>
+
+        {!isDda && (
+          <>
+            {taskType?.value === 'Segmentation' && (
+              <FormField
+                label="Mask Prefix (Optional)"
+                description="S3 location containing segmentation masks for this task"
+                errorText={validateS3Uri(maskPrefix)}
+              >
+                <Input
+                  value={maskPrefix}
+                  onChange={({ detail }) => setMaskPrefix(detail.value)}
+                  placeholder="e.g., s3://my-bucket/masks/production-line-1/"
+                />
+              </FormField>
+            )}
+
+            <FormField
+              label="Label Categories"
+              description="Comma-separated list of label categories"
+              constraintText="Required"
+              info={
+                <Box>
+                  For anomaly detection, the first category should be "normal" (non-defect) 
+                  and subsequent categories should be defect types. This ensures correct 
+                  label encoding where 0=normal, 1+=anomaly.
+                </Box>
+              }
+            >
+              <Input
+                value={labelCategories}
+                onChange={({ detail }) => setLabelCategories(detail.value)}
+                placeholder="e.g., normal, defect"
+              />
+            </FormField>
+            
+            {labelCategories && (
+              <Alert type="info">
+                <Box>
+                  <strong>Label Order Preview:</strong>
+                  <ul style={{ marginTop: '8px', marginBottom: 0 }}>
+                    {labelCategories.split(',').map((cat, idx) => (
+                      <li key={idx}>
+                        <strong>{idx}</strong> = {cat.trim()}
+                        {idx === 0 && ' (should be normal/non-defect)'}
+                        {idx > 0 && ' (anomaly/defect)'}
+                      </li>
+                    ))}
+                  </ul>
+                </Box>
+              </Alert>
+            )}
+
+            <FormField
+              label="Labeling Instructions"
+              description="Instructions for workers performing the labeling"
+            >
+              <Textarea
+                value={instructions}
+                onChange={({ detail }) => setInstructions(detail.value)}
+                placeholder="Provide clear instructions for labeling workers..."
+                rows={5}
+              />
+            </FormField>
+
+            <FormField
+              label="Automated labeling (optional)"
+              description="Use SageMaker Ground Truth active learning to auto-label a portion of your data and reduce human labeling effort. Only supported for built-in task types."
+            >
+              <Checkbox
+                checked={enableAutomatedLabeling}
+                onChange={({ detail }) => setEnableAutomatedLabeling(detail.checked)}
+              >
+                Enable automated data labeling (active learning)
+              </Checkbox>
+            </FormField>
+          </>
+        )}
+
+        {isDda && (
+          <Alert type="info">
+            Labels, instructions, example images, and auto-labeling for the
+            DDA Data Labeling System are configured in the next step.
+          </Alert>
+        )}
+      </SpaceBetween>
+    ),
+  };
+
+  // GroundTruth workforce step — unchanged (Requirement 1.2).
+  const workforceStep = {
+    title: 'Workforce Configuration',
+    description: 'Configure the labeling workforce',
+    content: (
+      <SpaceBetween size="l">
+        <FormField
+          label="Workforce Type"
+          description="The type of workforce to use for labeling"
+          constraintText="Required"
+        >
+          <Select
+            selectedOption={workforceType}
+            onChange={({ detail }) => setWorkforceType(detail.selectedOption)}
+            options={workforceOptions}
+          />
+        </FormField>
+
+        {workforceType?.value === 'private' && (
+          <>
+            <Alert type="info">
+              Private workforce requires a pre-configured work team in SageMaker Ground Truth.
+            </Alert>
+            
+            <FormField
+              label="Workteam"
+              description="Select the workteam to use for labeling"
+              constraintText="Required"
+            >
+              <Select
+                selectedOption={selectedWorkteam}
+                onChange={({ detail }) => setSelectedWorkteam(detail.selectedOption)}
+                options={workteams.map((wt) => ({
+                  label: wt.name,
+                  value: wt.name,
+                  description: wt.description || `${wt.member_count} members`,
+                }))}
+                placeholder={loadingWorkteams ? 'Loading workteams...' : 'Select a workteam'}
+                disabled={loadingWorkteams || workteams.length === 0}
+                empty={workteams.length === 0 ? 'No workteams found. Please create a workteam in SageMaker Ground Truth.' : undefined}
+                selectedAriaLabel="Selected"
+              />
+            </FormField>
+          </>
+        )}
+
+        {workforceType?.value === 'public' && (
+          <Alert type="warning">
+            Public workforce (Mechanical Turk) may incur additional costs and requires
+            careful review of labeled data.
+          </Alert>
+        )}
+      </SpaceBetween>
+    ),
+  };
+
+  // DDA labeling setup — replaces the Workforce step for the DDA backend
+  // (Requirements 4.1-4.4, 8.1, 9.1, 9.2).
+  const ddaSetupStep = {
+    title: 'Labeling Setup',
+    description: 'Team, labels, instructions, and auto-labeling',
+    content: (
+      <SpaceBetween size="l">
+        <FormField
+          label="Labeling team"
+          description="The private labeling team this job is assigned to"
+          constraintText={skipVerification ? 'Not required when skip verification is enabled' : 'Required'}
+        >
+          <Select
+            selectedOption={selectedTeam}
+            onChange={({ detail }) => setSelectedTeam(detail.selectedOption)}
+            options={labelingTeams.map((team) => ({
+              label: team.team_name,
+              value: team.team_id,
+              description: `${team.members.length} member${team.members.length === 1 ? '' : 's'}`,
+            }))}
+            placeholder={loadingTeams ? 'Loading teams...' : 'Select a labeling team'}
+            disabled={skipVerification || loadingTeams || labelingTeams.length === 0}
+            empty="No labeling teams found for this use case. Create one on the Labeling Teams page."
+            selectedAriaLabel="Selected"
+          />
+        </FormField>
+
+        {!taskType && (
+          <Alert type="info">
+            Select a task type in the previous step to configure labels and
+            auto-labeling.
+          </Alert>
+        )}
+
+        {isClassification ? (
+          <FormField
+            label="Label set"
+            description="Binary classification uses a fixed label set"
+          >
+            <Alert type="info">
+              Each image is labeled <strong>normal</strong> or <strong>anomaly</strong>.
+            </Alert>
+          </FormField>
+        ) : taskType ? (
+          <FormField
+            label="Label set"
+            description={`1-${MAX_LABELS} distinct class names, up to ${MAX_LABEL_LENGTH} characters each`}
+            constraintText="Required"
+          >
+            <SpaceBetween size="xs">
+              {ddaLabels.map((label, idx) => (
+                <SpaceBetween key={idx} direction="horizontal" size="xs">
+                  <Input
+                    value={label}
+                    onChange={({ detail }) =>
+                      setDdaLabels((current) =>
+                        current.map((l, i) => (i === idx ? detail.value : l))
+                      )
+                    }
+                    placeholder={`Label ${idx + 1}`}
+                    ariaLabel={`Label ${idx + 1}`}
+                  />
+                  <Button
+                    iconName="remove"
+                    variant="icon"
+                    ariaLabel={`Remove label ${idx + 1}`}
+                    disabled={ddaLabels.length === 1}
+                    onClick={() =>
+                      setDdaLabels((current) => current.filter((_, i) => i !== idx))
+                    }
+                  />
+                </SpaceBetween>
+              ))}
+              <Button
+                iconName="add-plus"
+                disabled={ddaLabels.length >= MAX_LABELS}
+                onClick={() => setDdaLabels((current) => [...current, ''])}
+              >
+                Add label
+              </Button>
+            </SpaceBetween>
+          </FormField>
+        ) : null}
+
+        <FormField
+          label="Labeling instructions"
+          description="Shown to labelers beside every image"
+          constraintText={`Up to ${MAX_INSTRUCTIONS_LENGTH.toLocaleString()} characters (${ddaInstructions.length.toLocaleString()} used)`}
+          errorText={
+            ddaInstructions.length > MAX_INSTRUCTIONS_LENGTH
+              ? `Instructions exceed ${MAX_INSTRUCTIONS_LENGTH.toLocaleString()} characters`
+              : undefined
+          }
+        >
+          <Textarea
+            value={ddaInstructions}
+            onChange={({ detail }) => setDdaInstructions(detail.value)}
+            placeholder="Explain exactly what to label and how..."
+            rows={5}
+          />
+        </FormField>
+
+        <FormField
+          label="Good examples (optional)"
+          description="Up to 10 JPEG/PNG images showing correct labeling"
+          errorText={
+            goodExampleFiles.length > MAX_EXAMPLE_IMAGES
+              ? `At most ${MAX_EXAMPLE_IMAGES} good example images are allowed`
+              : undefined
+          }
+        >
+          <FileUpload
+            value={goodExampleFiles}
+            onChange={({ detail }) => setGoodExampleFiles(detail.value)}
+            multiple
+            accept="image/jpeg,image/png"
+            showFileThumbnail
+            fileErrors={exampleFileErrors(goodExampleFiles)}
+            constraintText="JPEG or PNG"
+            i18nStrings={fileUploadI18nStrings}
+          />
+        </FormField>
+
+        <FormField
+          label="Bad examples (optional)"
+          description="Up to 10 JPEG/PNG images showing labeling mistakes to avoid"
+          errorText={
+            badExampleFiles.length > MAX_EXAMPLE_IMAGES
+              ? `At most ${MAX_EXAMPLE_IMAGES} bad example images are allowed`
+              : undefined
+          }
+        >
+          <FileUpload
+            value={badExampleFiles}
+            onChange={({ detail }) => setBadExampleFiles(detail.value)}
+            multiple
+            accept="image/jpeg,image/png"
+            showFileThumbnail
+            fileErrors={exampleFileErrors(badExampleFiles)}
+            constraintText="JPEG or PNG"
+            i18nStrings={fileUploadI18nStrings}
+          />
+        </FormField>
+
+        <FormField
+          label="Model-assisted pre-labeling"
+          description="Pre-label each image so labelers only approve or correct"
+        >
+          <Toggle
+            checked={autoLabelEnabled}
+            onChange={({ detail }) => setAutoLabelEnabled(detail.checked)}
+          >
+            Enable auto-labeling assist
+          </Toggle>
+        </FormField>
+
+        {autoLabelEnabled && (
+          <FormField
+            label="Auto-label model"
+            description="SAM supports segmentation and object detection; Bedrock models support classification and object detection"
+            constraintText="Required"
+          >
+            <Select
+              selectedOption={
+                autoLabelOptions.find((o) => o.value === autoLabelModel) || null
+              }
+              onChange={({ detail }) =>
+                setAutoLabelModel((detail.selectedOption.value as string) || '')
+              }
+              options={autoLabelOptions}
+              placeholder={
+                taskType
+                  ? 'Select an auto-label model'
+                  : 'Select a task type first'
+              }
+              disabled={!taskType || autoLabelOptions.length === 0}
+              empty="No compatible auto-label models for this task type"
+              selectedAriaLabel="Selected"
+            />
+            {bedrockModelsUnavailable && BEDROCK_MODALITIES.includes(modality) && (
+              <Box color="text-status-inactive" padding={{ top: 'xxs' }}>
+                Bedrock model options could not be loaded.
+              </Box>
+            )}
+          </FormField>
+        )}
+
+        {isAdmin && (
+          <SpaceBetween size="m">
+            <FormField
+              label="Skip verification (admin only)"
+              description="A Bedrock model labels every image with your per-label prompts; no labeler tasks are created and you review all results at the end"
+            >
+              <Toggle
+                checked={skipVerification}
+                onChange={({ detail }) => {
+                  setSkipVerification(detail.checked);
+                  if (detail.checked) setSelectedTeam(null);
+                }}
+              >
+                Enable skip verification
+              </Toggle>
+            </FormField>
+
+            {skipVerification && (
+              <>
+                <FormField
+                  label="Bedrock model"
+                  description="The Bedrock model that auto-labels the dataset"
+                  constraintText="Required"
+                >
+                  {bedrockModels.length > 0 ? (
+                    <Select
+                      selectedOption={
+                        bedrockModels
+                          .map((m) => ({ label: m.label, value: m.id }))
+                          .find((o) => o.value === skipVerificationModelId) ||
+                        (skipVerificationModelId
+                          ? { label: skipVerificationModelId, value: skipVerificationModelId }
+                          : null)
+                      }
+                      onChange={({ detail }) =>
+                        setSkipVerificationModelId((detail.selectedOption.value as string) || '')
+                      }
+                      options={bedrockModels.map((m) => ({ label: m.label, value: m.id }))}
+                      placeholder="Select a Bedrock model"
+                      selectedAriaLabel="Selected"
+                    />
+                  ) : (
+                    <Input
+                      value={skipVerificationModelId}
+                      onChange={({ detail }) => setSkipVerificationModelId(detail.value)}
+                      placeholder="e.g., anthropic.claude-3-5-sonnet-20241022-v2:0"
+                    />
+                  )}
+                </FormField>
+
+                {effectiveLabelSet.length === 0 ? (
+                  <Alert type="info">
+                    Define the label set above to enter per-label prompts.
+                  </Alert>
+                ) : (
+                  effectiveLabelSet.map((label) => (
+                    <FormField
+                      key={label}
+                      label={`Prompt for "${label}"`}
+                      description="Sent to the Bedrock model to guide auto-labeling for this label"
+                      constraintText="Required"
+                    >
+                      <Textarea
+                        value={perLabelPrompts[label] || ''}
+                        onChange={({ detail }) =>
+                          setPerLabelPrompts((current) => ({
+                            ...current,
+                            [label]: detail.value,
+                          }))
+                        }
+                        rows={2}
+                        placeholder={`Describe what qualifies an image region as "${label}"...`}
+                      />
+                    </FormField>
+                  ))
+                )}
+              </>
+            )}
+          </SpaceBetween>
+        )}
+      </SpaceBetween>
+    ),
+  };
+
+  const reviewStep = {
+    title: 'Review and Create',
+    description: 'Review your configuration',
+    content: (
+      <SpaceBetween size="l">
+        <Box variant="h3">Job Configuration</Box>
+        <Box>
+          <Box variant="awsui-key-label">Labeling Backend</Box>
+          <Box>
+            {labelingBackend === 'DDA'
+              ? 'DDA Data Labeling System'
+              : labelingBackend === 'GroundTruth'
+                ? 'SageMaker Ground Truth'
+                : '-'}
+          </Box>
+        </Box>
+        <Box>
+          <Box variant="awsui-key-label">Job Name</Box>
+          <Box>{jobName || '-'}</Box>
+        </Box>
+        <Box>
+          <Box variant="awsui-key-label">Description</Box>
+          <Box>{description || '-'}</Box>
+        </Box>
+
+        <Box variant="h3">Dataset</Box>
+        <Box>
+          <Box variant="awsui-key-label">Source Images</Box>
+          <Box>{datasetS3Uri}</Box>
+        </Box>
+        <Box>
+          <Box variant="awsui-key-label">Labeling Output</Box>
+          <Box>
+            {selectedUseCase?.s3_bucket 
+              ? `s3://${selectedUseCase.s3_bucket}/labeled/` 
+              : <Alert type="error">Output bucket not configured. Please update the UseCase settings to add an S3 bucket for labeling outputs.</Alert>
+            }
+          </Box>
+        </Box>
+
+        <Box variant="h3">Task Configuration</Box>
+        <Box>
+          <Box variant="awsui-key-label">Task Type</Box>
+          <Box>{taskType?.label || '-'}</Box>
+        </Box>
+        {isDda ? (
+          <Box>
+            <Box variant="awsui-key-label">Label Set</Box>
+            <Box>{effectiveLabelSet.length > 0 ? effectiveLabelSet.join(', ') : '-'}</Box>
+          </Box>
+        ) : (
+          <>
+            <Box>
+              <Box variant="awsui-key-label">Label Categories</Box>
+              <Box>{labelCategories || '-'}</Box>
+            </Box>
+            <Box>
+              <Box variant="awsui-key-label">Automated Labeling</Box>
+              <Box>{enableAutomatedLabeling ? 'Enabled' : 'Disabled'}</Box>
+            </Box>
+          </>
+        )}
+
+        {isDda ? (
+          <>
+            <Box variant="h3">Labeling Setup</Box>
+            <Box>
+              <Box variant="awsui-key-label">Labeling Team</Box>
+              <Box>
+                {skipVerification
+                  ? 'Not required (skip verification)'
+                  : selectedTeam?.label || '-'}
+              </Box>
+            </Box>
+            <Box>
+              <Box variant="awsui-key-label">Instructions</Box>
+              <Box>
+                {ddaInstructions
+                  ? `${ddaInstructions.length.toLocaleString()} characters`
+                  : '-'}
+              </Box>
+            </Box>
+            <Box>
+              <Box variant="awsui-key-label">Example Images</Box>
+              <Box>
+                {goodExampleFiles.length} good, {badExampleFiles.length} bad
+              </Box>
+            </Box>
+            <Box>
+              <Box variant="awsui-key-label">Auto-Labeling</Box>
+              <Box>
+                {autoLabelEnabled && autoLabelModel
+                  ? autoLabelModel === 'sam'
+                    ? 'Segment Anything (SAM)'
+                    : autoLabelModel.replace(/^bedrock:/, 'Bedrock: ')
+                  : 'Disabled'}
+              </Box>
+            </Box>
+            <Box>
+              <Box variant="awsui-key-label">Skip Verification</Box>
+              <Box>
+                {skipVerification
+                  ? `Enabled (${skipVerificationModelId || 'no model selected'})`
+                  : 'Disabled'}
+              </Box>
+            </Box>
+          </>
+        ) : (
+          <>
+            <Box variant="h3">Workforce</Box>
+            <Box>
+              <Box variant="awsui-key-label">Workforce Type</Box>
+              <Box>{workforceType?.label || '-'}</Box>
+            </Box>
+            {workforceType?.value === 'private' && (
+              <Box>
+                <Box variant="awsui-key-label">Workteam</Box>
+                <Box>{selectedWorkteam?.label || '-'}</Box>
+              </Box>
+            )}
+          </>
+        )}
+
+        {(!labelingBackend || !jobName || !datasetS3Uri || !taskType ||
+          (!isDda && !labelCategories)) && (
+          <Alert type="warning">
+            Please complete all required fields before creating the job.
+          </Alert>
+        )}
+      </SpaceBetween>
+    ),
+    isOptional: false,
+  };
+
   return (
     <Container
       header={
-        <Header variant="h1" description="Create a new Ground Truth labeling job">
+        <Header variant="h1" description="Create a new labeling job">
           Create Labeling Job
         </Header>
       }
@@ -324,323 +1387,15 @@ export default function CreateLabelingJob() {
         activeStepIndex={activeStepIndex}
         isLoadingNextStep={creating}
         steps={[
-          {
-            title: 'Job Configuration',
-            description: 'Basic job information',
-            content: (
-              <SpaceBetween size="l">
-                <FormField
-                  label="Job Name"
-                  description="A unique name for this labeling job"
-                  constraintText="Required"
-                >
-                  <Input
-                    value={jobName}
-                    onChange={({ detail }) => setJobName(detail.value)}
-                    placeholder="e.g., Defect Detection - Batch 1"
-                  />
-                </FormField>
-
-                <FormField
-                  label="Description"
-                  description="Optional description of this labeling job"
-                >
-                  <Textarea
-                    value={description}
-                    onChange={({ detail }) => setDescription(detail.value)}
-                    placeholder="Describe the purpose of this labeling job..."
-                    rows={3}
-                  />
-                </FormField>
-
-                {useCaseIdFromUrl ? (
-                  <FormField
-                    label="Use Case"
-                    description="The use case this job belongs to"
-                  >
-                    <Input
-                      value={selectedUseCase?.name || ''}
-                      disabled
-                      readOnly
-                    />
-                  </FormField>
-                ) : (
-                  <FormField
-                    label="Use Case"
-                    description="The use case this job belongs to"
-                    constraintText="Required"
-                  >
-                    <Select
-                      selectedOption={
-                        selectedUseCase
-                          ? {
-                              label: selectedUseCase.name,
-                              value: selectedUseCase.usecase_id,
-                            }
-                          : null
-                      }
-                      onChange={({ detail }) => {
-                        const useCase = useCases.find(
-                          (uc) => uc.usecase_id === detail.selectedOption.value
-                        );
-                        setSelectedUseCase(useCase);
-                      }}
-                      options={useCases.map((uc) => ({
-                        label: uc.name,
-                        value: uc.usecase_id,
-                      }))}
-                      placeholder="Select a use case"
-                      selectedAriaLabel="Selected"
-                    />
-                  </FormField>
-                )}
-              </SpaceBetween>
-            ),
-          },
-          {
-            title: 'Dataset Selection',
-            description: 'Choose the dataset to label',
-            content: (
-              <SpaceBetween size="l">
-                <FormField
-                  label="S3 URI"
-                  description="The S3 location containing images to label"
-                  constraintText="Required"
-                  errorText={validateS3Uri(datasetS3Uri)}
-                >
-                  <SpaceBetween direction="horizontal" size="xs">
-                    <Input
-                      value={datasetS3Uri}
-                      onChange={({ detail }) => setDatasetS3Uri(detail.value)}
-                      placeholder="e.g., s3://my-bucket/raw-images/production-line-1/"
-                    />
-                    <Button onClick={() => setShowBrowseModal(true)} disabled={!selectedUseCase}>
-                      Browse S3
-                    </Button>
-                  </SpaceBetween>
-                </FormField>
-
-                {preselectedDataset && (
-                  <Alert type="info">
-                    Dataset preselected: {preselectedDataset.image_count.toLocaleString()} images
-                  </Alert>
-                )}
-              </SpaceBetween>
-            ),
-          },
-          {
-            title: 'Task Configuration',
-            description: 'Configure the labeling task',
-            content: (
-              <SpaceBetween size="l">
-                <FormField
-                  label="Task Type"
-                  description="The type of labeling task"
-                  constraintText="Required"
-                >
-                  <Select
-                    selectedOption={taskType}
-                    onChange={({ detail }) => setTaskType(detail.selectedOption)}
-                    options={taskTypeOptions}
-                    placeholder="Select task type"
-                  />
-                </FormField>
-
-                {taskType?.value === 'Segmentation' && (
-                  <FormField
-                    label="Mask Prefix (Optional)"
-                    description="S3 location containing segmentation masks for this task"
-                    errorText={validateS3Uri(maskPrefix)}
-                  >
-                    <Input
-                      value={maskPrefix}
-                      onChange={({ detail }) => setMaskPrefix(detail.value)}
-                      placeholder="e.g., s3://my-bucket/masks/production-line-1/"
-                    />
-                  </FormField>
-                )}
-
-                <FormField
-                  label="Label Categories"
-                  description="Comma-separated list of label categories"
-                  constraintText="Required"
-                  info={
-                    <Box>
-                      For anomaly detection, the first category should be "normal" (non-defect) 
-                      and subsequent categories should be defect types. This ensures correct 
-                      label encoding where 0=normal, 1+=anomaly.
-                    </Box>
-                  }
-                >
-                  <Input
-                    value={labelCategories}
-                    onChange={({ detail }) => setLabelCategories(detail.value)}
-                    placeholder="e.g., normal, defect"
-                  />
-                </FormField>
-                
-                {labelCategories && (
-                  <Alert type="info">
-                    <Box>
-                      <strong>Label Order Preview:</strong>
-                      <ul style={{ marginTop: '8px', marginBottom: 0 }}>
-                        {labelCategories.split(',').map((cat, idx) => (
-                          <li key={idx}>
-                            <strong>{idx}</strong> = {cat.trim()}
-                            {idx === 0 && ' (should be normal/non-defect)'}
-                            {idx > 0 && ' (anomaly/defect)'}
-                          </li>
-                        ))}
-                      </ul>
-                    </Box>
-                  </Alert>
-                )}
-
-                <FormField
-                  label="Labeling Instructions"
-                  description="Instructions for workers performing the labeling"
-                >
-                  <Textarea
-                    value={instructions}
-                    onChange={({ detail }) => setInstructions(detail.value)}
-                    placeholder="Provide clear instructions for labeling workers..."
-                    rows={5}
-                  />
-                </FormField>
-
-                <FormField
-                  label="Automated labeling (optional)"
-                  description="Use SageMaker Ground Truth active learning to auto-label a portion of your data and reduce human labeling effort. Only supported for built-in task types."
-                >
-                  <Checkbox
-                    checked={enableAutomatedLabeling}
-                    onChange={({ detail }) => setEnableAutomatedLabeling(detail.checked)}
-                  >
-                    Enable automated data labeling (active learning)
-                  </Checkbox>
-                </FormField>
-              </SpaceBetween>
-            ),
-          },
-          {
-            title: 'Workforce Configuration',
-            description: 'Configure the labeling workforce',
-            content: (
-              <SpaceBetween size="l">
-                <FormField
-                  label="Workforce Type"
-                  description="The type of workforce to use for labeling"
-                  constraintText="Required"
-                >
-                  <Select
-                    selectedOption={workforceType}
-                    onChange={({ detail }) => setWorkforceType(detail.selectedOption)}
-                    options={workforceOptions}
-                  />
-                </FormField>
-
-                {workforceType?.value === 'private' && (
-                  <>
-                    <Alert type="info">
-                      Private workforce requires a pre-configured work team in SageMaker Ground Truth.
-                    </Alert>
-                    
-                    <FormField
-                      label="Workteam"
-                      description="Select the workteam to use for labeling"
-                      constraintText="Required"
-                    >
-                      <Select
-                        selectedOption={selectedWorkteam}
-                        onChange={({ detail }) => setSelectedWorkteam(detail.selectedOption)}
-                        options={workteams.map((wt) => ({
-                          label: wt.name,
-                          value: wt.name,
-                          description: wt.description || `${wt.member_count} members`,
-                        }))}
-                        placeholder={loadingWorkteams ? 'Loading workteams...' : 'Select a workteam'}
-                        disabled={loadingWorkteams || workteams.length === 0}
-                        empty={workteams.length === 0 ? 'No workteams found. Please create a workteam in SageMaker Ground Truth.' : undefined}
-                        selectedAriaLabel="Selected"
-                      />
-                    </FormField>
-                  </>
-                )}
-
-                {workforceType?.value === 'public' && (
-                  <Alert type="warning">
-                    Public workforce (Mechanical Turk) may incur additional costs and requires
-                    careful review of labeled data.
-                  </Alert>
-                )}
-              </SpaceBetween>
-            ),
-          },
-          {
-            title: 'Review and Create',
-            description: 'Review your configuration',
-            content: (
-              <SpaceBetween size="l">
-                <Box variant="h3">Job Configuration</Box>
-                <Box>
-                  <Box variant="awsui-key-label">Job Name</Box>
-                  <Box>{jobName || '-'}</Box>
-                </Box>
-                <Box>
-                  <Box variant="awsui-key-label">Description</Box>
-                  <Box>{description || '-'}</Box>
-                </Box>
-
-                <Box variant="h3">Dataset</Box>
-                <Box>
-                  <Box variant="awsui-key-label">Source Images</Box>
-                  <Box>{datasetS3Uri}</Box>
-                </Box>
-                <Box>
-                  <Box variant="awsui-key-label">Labeling Output</Box>
-                  <Box>
-                    {selectedUseCase?.s3_bucket 
-                      ? `s3://${selectedUseCase.s3_bucket}/labeled/` 
-                      : <Alert type="error">Output bucket not configured. Please update the UseCase settings to add an S3 bucket for labeling outputs.</Alert>
-                    }
-                  </Box>
-                </Box>
-
-                <Box variant="h3">Task Configuration</Box>
-                <Box>
-                  <Box variant="awsui-key-label">Task Type</Box>
-                  <Box>{taskType?.label || '-'}</Box>
-                </Box>
-                <Box>
-                  <Box variant="awsui-key-label">Label Categories</Box>
-                  <Box>{labelCategories || '-'}</Box>
-                </Box>
-                <Box>
-                  <Box variant="awsui-key-label">Automated Labeling</Box>
-                  <Box>{enableAutomatedLabeling ? 'Enabled' : 'Disabled'}</Box>
-                </Box>
-
-                <Box variant="h3">Workforce</Box>
-                <Box>
-                  <Box variant="awsui-key-label">Workforce Type</Box>
-                  <Box>{workforceType?.label || '-'}</Box>
-                </Box>
-                {workforceType?.value === 'private' && (
-                  <Box>
-                    <Box variant="awsui-key-label">Workteam</Box>
-                    <Box>{selectedWorkteam?.label || '-'}</Box>
-                  </Box>
-                )}
-
-                {(!jobName || !datasetS3Uri || !taskType || !labelCategories) && (
-                  <Alert type="warning">
-                    Please complete all required fields before creating the job.
-                  </Alert>
-                )}
-              </SpaceBetween>
-            ),
-            isOptional: false,
-          },
+          backendStep,
+          jobConfigStep,
+          datasetStep,
+          taskConfigStep,
+          // The DDA branch replaces the Workforce step with the labeling
+          // setup step (team, labels, instructions, examples, auto-label,
+          // skip verification).
+          isDda ? ddaSetupStep : workforceStep,
+          reviewStep,
         ]}
       />
 

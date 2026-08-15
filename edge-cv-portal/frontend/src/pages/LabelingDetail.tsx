@@ -14,19 +14,74 @@ import {
   Alert,
   Link,
   Modal,
+  Table,
 } from '@cloudscape-design/components';
 import { useParams, useNavigate } from 'react-router-dom';
 import { LabelingJob } from '../types';
-import { apiService } from '../services/api';
+import { apiService, LabelingMemberProgress } from '../services/api';
 import ManifestTransformer from '../components/ManifestTransformer';
+
+/** Raw `GET /labeling/{id}` job payload, including DDA-only fields. */
+type ApiLabelingJob = Awaited<
+  ReturnType<typeof apiService.getLabelingJob>
+>['job'];
+
+/**
+ * Progress display values for a DDA job (dda-data-labeling Requirements
+ * 11.1, 11.10). For Skip_Verification_Mode jobs the submitted count the
+ * backend reports is the count of completed auto-label attempts
+ * (succeeded or failed), so the description and substitution note change
+ * accordingly.
+ */
+export function getDdaProgress(job: {
+  submitted_count?: number;
+  image_count?: number;
+  progress_percent?: number;
+  skip_verification?: boolean;
+}): { percent: number; description: string; note?: string } {
+  const submitted = job.submitted_count ?? 0;
+  const total = job.image_count ?? 0;
+  const percent =
+    job.progress_percent ??
+    (total > 0 ? Math.round((submitted * 100) / total) : 0);
+  if (job.skip_verification) {
+    return {
+      percent,
+      description: `${submitted} of ${total} auto-label attempts completed`,
+      note:
+        'Skip-verification job: progress reflects auto-label completion ' +
+        '(succeeded or failed attempts), not labeler submissions.',
+    };
+  }
+  return {
+    percent,
+    description: `${submitted} of ${total} tasks submitted`,
+  };
+}
+
+/**
+ * The Stop action applies only to InProgress DDA jobs (dda-data-labeling
+ * Requirements 11.4, 11.9).
+ */
+export function canStopDdaJob(job: {
+  labeling_backend?: string;
+  status?: string;
+}): boolean {
+  return job.labeling_backend === 'DDA' && job.status === 'InProgress';
+}
 
 export default function LabelingDetail() {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
   const [job, setJob] = useState<LabelingJob | null>(null);
+  const [rawJob, setRawJob] = useState<ApiLabelingJob | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTabId, setActiveTabId] = useState('overview');
   const [showTransformModal, setShowTransformModal] = useState(false);
+  // DDA stop flow (dda-data-labeling Requirements 11.4, 11.5).
+  const [showStopModal, setShowStopModal] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
 
   useEffect(() => {
     loadJob();
@@ -39,6 +94,7 @@ export default function LabelingDetail() {
     try {
       const response = await apiService.getLabelingJob(jobId);
       const apiJob = response.job;
+      setRawJob(apiJob);
       
       // Map API response to LabelingJob type
       // Convert status from backend format (InProgress, Completed, Failed) to frontend format
@@ -88,6 +144,44 @@ export default function LabelingDetail() {
     return <StatusIndicator type={config.type}>{config.label}</StatusIndicator>;
   };
 
+  // DDA jobs use the portal-managed status values directly
+  // (InProgress | Completed | Failed | Stopped, Requirement 11.3).
+  const getDdaStatusIndicator = (status: string) => {
+    const statusMap: Record<
+      string,
+      { type: 'in-progress' | 'success' | 'error' | 'stopped'; label: string }
+    > = {
+      InProgress: { type: 'in-progress', label: 'In Progress' },
+      Completed: { type: 'success', label: 'Completed' },
+      Failed: { type: 'error', label: 'Failed' },
+      Stopped: { type: 'stopped', label: 'Stopped' },
+    };
+    const config = statusMap[status] || {
+      type: 'in-progress' as const,
+      label: status,
+    };
+    return <StatusIndicator type={config.type}>{config.label}</StatusIndicator>;
+  };
+
+  // Stop an InProgress DDA job (Requirements 11.4, 11.5): on failure the
+  // job stays InProgress and an explicit not-stopped error is shown.
+  const handleStopJob = async () => {
+    if (!jobId) return;
+    setStopping(true);
+    setStopError(null);
+    try {
+      await apiService.stopLabelingJob(jobId);
+      setShowStopModal(false);
+      await loadJob();
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : 'Unknown error';
+      setStopError(`The job was not stopped: ${reason}`);
+    } finally {
+      setStopping(false);
+    }
+  };
+
   const handleDownloadManifest = () => {
     if (job) {
       console.log('Downloading manifest from:', job.manifest_s3);
@@ -119,6 +213,303 @@ export default function LabelingDetail() {
       <Container>
         <Alert type="error">Labeling job not found</Alert>
       </Container>
+    );
+  }
+
+  // DDA jobs render a portal-native detail view (dda-data-labeling
+  // Requirements 5.4, 6.4, 6.6, 11.1, 11.2, 11.4, 11.5, 11.10). Ground
+  // Truth jobs fall through to the existing rendering unchanged.
+  if (rawJob && rawJob.labeling_backend === 'DDA') {
+    const progress = getDdaProgress(rawJob);
+    const memberProgress: LabelingMemberProgress[] =
+      rawJob.member_progress || [];
+    const notificationFailures = rawJob.notification_failures || [];
+    const unassignedCount = rawJob.unassigned_count || 0;
+
+    return (
+      <>
+        <SpaceBetween size="l">
+          <Container
+            header={
+              <Header
+                variant="h1"
+                actions={
+                  <SpaceBetween direction="horizontal" size="xs">
+                    <Button onClick={() => navigate('/labeling')}>
+                      Back to List
+                    </Button>
+                    {rawJob.skip_verification && rawJob.review_ready && (
+                      <Button
+                        onClick={() =>
+                          navigate(`/labeling/${rawJob.job_id}/review`)
+                        }
+                      >
+                        Review Auto-Labels
+                      </Button>
+                    )}
+                    {canStopDdaJob(rawJob) && (
+                      <Button
+                        variant="primary"
+                        onClick={() => {
+                          setStopError(null);
+                          setShowStopModal(true);
+                        }}
+                      >
+                        Stop Job
+                      </Button>
+                    )}
+                  </SpaceBetween>
+                }
+              >
+                {rawJob.job_name}
+              </Header>
+            }
+          >
+            <ColumnLayout columns={4} variant="text-grid">
+              <div>
+                <Box variant="awsui-key-label">Status</Box>
+                <div>{getDdaStatusIndicator(rawJob.status)}</div>
+              </div>
+              <div>
+                <Box variant="awsui-key-label">Task Type</Box>
+                <div>{rawJob.task_type}</div>
+              </div>
+              <div>
+                <Box variant="awsui-key-label">Labeling Backend</Box>
+                <div>DDA (portal-native)</div>
+              </div>
+              <div>
+                <Box variant="awsui-key-label">Created By</Box>
+                <div>{rawJob.created_by}</div>
+              </div>
+            </ColumnLayout>
+          </Container>
+
+          {stopError && (
+            <Alert
+              type="error"
+              header="Stop failed"
+              dismissible
+              onDismiss={() => setStopError(null)}
+            >
+              {stopError} The job remains In Progress.
+            </Alert>
+          )}
+
+          {rawJob.blocked && (
+            <Alert type="warning" header="Labeling blocked">
+              The last member was removed from this job's labeling team, so
+              its unsubmitted tasks are unassigned. Add a member to the team
+              to resume labeling.
+            </Alert>
+          )}
+
+          {rawJob.notifications_skipped && (
+            <Alert type="info" header="Notifications skipped">
+              Email notifications were skipped for this job because no SES
+              sender address is configured for the portal deployment.
+            </Alert>
+          )}
+
+          {notificationFailures.length > 0 && (
+            <Alert type="warning" header="Notification failures">
+              <SpaceBetween size="xxs">
+                <Box>
+                  Notification emails could not be delivered to the
+                  following recipients:
+                </Box>
+                <ul>
+                  {notificationFailures.map((failure, index) => (
+                    <li key={`${failure.email}-${index}`}>
+                      {failure.email}: {failure.reason}
+                    </li>
+                  ))}
+                </ul>
+              </SpaceBetween>
+            </Alert>
+          )}
+
+          {rawJob.status === 'Failed' && rawJob.failure_reason && (
+            <Alert type="error" header="Job failed">
+              {rawJob.failure_reason}
+            </Alert>
+          )}
+
+          <Container header={<Header variant="h2">Progress</Header>}>
+            <SpaceBetween size="l">
+              <ProgressBar
+                value={progress.percent}
+                label="Labeling Progress"
+                description={progress.description}
+                additionalInfo={`${progress.percent}% complete`}
+              />
+              {progress.note && (
+                <Box color="text-body-secondary" fontSize="body-s">
+                  {progress.note}
+                </Box>
+              )}
+
+              <ColumnLayout columns={3} variant="text-grid">
+                <div>
+                  <Box variant="awsui-key-label">Total Images</Box>
+                  <Box fontSize="heading-xl" fontWeight="bold">
+                    {(rawJob.image_count || 0).toLocaleString()}
+                  </Box>
+                </div>
+                <div>
+                  <Box variant="awsui-key-label">
+                    {rawJob.skip_verification
+                      ? 'Auto-Label Attempts Completed'
+                      : 'Submitted'}
+                  </Box>
+                  <Box
+                    fontSize="heading-xl"
+                    fontWeight="bold"
+                    color="text-status-success"
+                  >
+                    {(rawJob.submitted_count || 0).toLocaleString()}
+                  </Box>
+                </div>
+                <div>
+                  <Box variant="awsui-key-label">Remaining</Box>
+                  <Box
+                    fontSize="heading-xl"
+                    fontWeight="bold"
+                    color="text-status-info"
+                  >
+                    {Math.max(
+                      (rawJob.image_count || 0) -
+                        (rawJob.submitted_count || 0),
+                      0
+                    ).toLocaleString()}
+                  </Box>
+                </div>
+              </ColumnLayout>
+            </SpaceBetween>
+          </Container>
+
+          {rawJob.team_id && (
+            <Container
+              header={<Header variant="h2">Team Progress</Header>}
+            >
+              <SpaceBetween size="m">
+                <Table
+                  columnDefinitions={[
+                    {
+                      id: 'labeler',
+                      header: 'Labeler',
+                      cell: (item: LabelingMemberProgress) =>
+                        item.email || item.user_id,
+                    },
+                    {
+                      id: 'submitted',
+                      header: 'Submitted',
+                      cell: (item: LabelingMemberProgress) => item.submitted,
+                    },
+                    {
+                      id: 'remaining',
+                      header: 'Remaining',
+                      cell: (item: LabelingMemberProgress) => item.remaining,
+                    },
+                  ]}
+                  items={memberProgress}
+                  variant="embedded"
+                  empty={
+                    <Box textAlign="center" color="text-body-secondary">
+                      No team members currently hold tasks in this job.
+                    </Box>
+                  }
+                />
+                {unassignedCount > 0 && (
+                  <Alert type="warning">
+                    {unassignedCount.toLocaleString()} task
+                    {unassignedCount === 1 ? ' is' : 's are'} unassigned.
+                  </Alert>
+                )}
+              </SpaceBetween>
+            </Container>
+          )}
+
+          <Container header={<Header variant="h2">Details</Header>}>
+            <KeyValuePairs
+              columns={2}
+              items={[
+                { label: 'Job ID', value: rawJob.job_id },
+                {
+                  label: 'Label Set',
+                  value:
+                    rawJob.label_set && rawJob.label_set.length > 0
+                      ? rawJob.label_set.join(', ')
+                      : '-',
+                },
+                {
+                  label: 'Created',
+                  value: rawJob.created_at
+                    ? new Date(rawJob.created_at).toLocaleString()
+                    : '-',
+                },
+                {
+                  label: 'Completed',
+                  value: rawJob.completed_at
+                    ? new Date(rawJob.completed_at).toLocaleString()
+                    : '-',
+                },
+                {
+                  label: 'Stopped',
+                  value: rawJob.stopped_at
+                    ? new Date(rawJob.stopped_at).toLocaleString()
+                    : '-',
+                },
+                {
+                  label: 'Output Manifest',
+                  value: rawJob.output_manifest_s3_uri ? (
+                    <Box fontSize="body-s">
+                      {rawJob.output_manifest_s3_uri}
+                    </Box>
+                  ) : (
+                    '-'
+                  ),
+                },
+              ]}
+            />
+          </Container>
+        </SpaceBetween>
+
+        <Modal
+          visible={showStopModal}
+          onDismiss={() => setShowStopModal(false)}
+          header="Stop labeling job"
+          footer={
+            <Box float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button
+                  variant="link"
+                  onClick={() => setShowStopModal(false)}
+                  disabled={stopping}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  onClick={handleStopJob}
+                  loading={stopping}
+                >
+                  Stop Job
+                </Button>
+              </SpaceBetween>
+            </Box>
+          }
+        >
+          <SpaceBetween size="s">
+            <Box>
+              Are you sure you want to stop "{rawJob.job_name}"? Labelers
+              will no longer be able to submit annotations. Annotations
+              already submitted are retained.
+            </Box>
+            {stopError && <Alert type="error">{stopError}</Alert>}
+          </SpaceBetween>
+        </Modal>
+      </>
     );
   }
 

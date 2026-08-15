@@ -52,6 +52,13 @@ export class ApiGatewayStack extends cdk.NestedStack {
    * CloudFormation 500-resource limit.
    */
   public readonly deviceResourceId: string;
+  /**
+   * Resource id of /labeling/{id}. The DDA labeling /stop and /review*
+   * routes (dda-data-labeling) attach under this resource from their own
+   * nested stack (DdaLabelingApiStack) for the same 500-resource-limit
+   * reason.
+   */
+  public readonly labelingJobResourceId: string;
 
   constructor(scope: Construct, id: string, props: ApiGatewayStackProps) {
     super(scope, id, props);
@@ -397,6 +404,7 @@ export class ApiGatewayStack extends cdk.NestedStack {
     });
 
     const labelingJobResource = labelingResource.addResource('{id}');
+    this.labelingJobResourceId = labelingJobResource.resourceId;
     labelingJobResource.addMethod('GET', labelingIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,

@@ -68,9 +68,11 @@ VERIFIER_ITERATIONS = 210000
 VERIFIER_SALT_BYTES = 16
 VERIFIER_HASH_BYTES = 32
 
-# The five defined Portal_Role values (Requirement 5.2)
+# The defined Portal_Role values (Requirement 5.2), plus the restricted
+# DataLabeler role (dda-data-labeling, Req 2.1: assigned/revoked through
+# the existing user administration functions).
 PORTAL_ROLES = ('PortalAdmin', 'UseCaseAdmin', 'DataScientist',
-                'Operator', 'Viewer')
+                'Operator', 'Viewer', 'DataLabeler')
 
 
 def validate_create_request(body: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -83,7 +85,7 @@ def validate_create_request(body: Dict[str, Any]) -> Optional[Dict[str, str]]:
     - username, email, and role must all be present and non-empty (12.7)
     - the email must consist of a non-empty local part, an '@'
       separator, and a non-empty domain containing at least one dot (12.6)
-    - the role must be one of the five defined Portal_Role values (12.8)
+    - the role must be one of the defined Portal_Role values (12.8)
 
     Only a payload passing every check may reach admin_create_user; a
     rejection performs no User_Pool call (callers return before any
@@ -881,7 +883,7 @@ def change_role(event):
     """
     PUT /api/v1/admin/users/{username}/role
 
-    Body {role}. Flow (design): validate against the five defined
+    Body {role}. Flow (design): validate against the defined
     Portal_Role values (5.2) -> last-PortalAdmin guard (5.3, 5.5) ->
     audit-pending -> admin_update_user_attributes on custom:role (5.1)
     -> audit-final recording the previous and new role (5.4).

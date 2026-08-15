@@ -18,6 +18,9 @@ import SmartImport from './pages/SmartImport';
 import RegisterLlm from './pages/RegisterLlm';
 import Labeling from './pages/Labeling';
 import LabelingDetail from './pages/LabelingDetail';
+import LabelingTeams from './pages/labeling/LabelingTeams';
+import AdminReview from './pages/labeling/AdminReview';
+import LabelerWorkspace from './pages/labeler/LabelerWorkspace';
 import CreateLabelingJob from './pages/CreateLabelingJob';
 import DatasetBrowser from './pages/DatasetBrowser';
 import DataManagement from './pages/DataManagement';
@@ -48,6 +51,7 @@ import Login from './pages/Login';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
 import RequireRole from './components/RequireRole';
+import DataLabelerRedirect from './components/DataLabelerRedirect';
 import GlobalLoadingBar from './components/GlobalLoadingBar';
 import { BUILDS_ACCESS_ROLES } from './utils/buildsAccess';
 import { SYNTHETIC_ACCESS_ROLES } from './utils/syntheticAccess';
@@ -75,7 +79,14 @@ function App() {
                 path="/"
                 element={
                   <ProtectedRoute>
-                    <Layout />
+                    {/* DataLabeler-only users are confined to /labeler:
+                        every other route under the authenticated layout
+                        redirects there without rendering the page
+                        (dda-data-labeling Req 2.7; multi-role users are
+                        unaffected, Req 2.8). */}
+                    <DataLabelerRedirect>
+                      <Layout />
+                    </DataLabelerRedirect>
                   </ProtectedRoute>
                 }
               >
@@ -84,9 +95,35 @@ function App() {
                 <Route path="usecases" element={<UseCases />} />
                 <Route path="usecases/onboard" element={<UseCaseOnboarding />} />
                 <Route path="labeling" element={<Labeling />} />
+                {/* Labeler workspace — the only destination for
+                    DataLabeler-only users (dda-data-labeling Req 2.2, 2.7). */}
+                <Route path="labeler" element={<LabelerWorkspace />} />
                 <Route path="labeling/datasets" element={<DatasetBrowser />} />
                 <Route path="data" element={<DataManagement />} />
                 <Route path="labeling/create" element={<CreateLabelingJob />} />
+                {/* Labeling team management is admin-only UI gating
+                    (dda-data-labeling Req 3.7); server-side RBAC
+                    (labeling-teams:manage) remains the authority. */}
+                <Route
+                  path="labeling/teams"
+                  element={
+                    <RequireRole roles={['UseCaseAdmin', 'PortalAdmin']}>
+                      <LabelingTeams />
+                    </RequireRole>
+                  }
+                />
+                {/* Skip-verification Admin Review is admin-only UI gating
+                    (dda-data-labeling Req 9.1); server-side authorization on
+                    the review APIs remains the authority. Registered before
+                    labeling/:jobId so the review path wins the match. */}
+                <Route
+                  path="labeling/:jobId/review"
+                  element={
+                    <RequireRole roles={['UseCaseAdmin', 'PortalAdmin']}>
+                      <AdminReview />
+                    </RequireRole>
+                  }
+                />
                 <Route path="labeling/:jobId" element={<LabelingDetail />} />
                 <Route path="devices" element={<Devices />} />
                 <Route path="devices/:deviceId" element={<DeviceDetail />} />

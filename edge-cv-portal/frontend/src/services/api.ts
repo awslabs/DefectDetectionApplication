@@ -422,6 +422,154 @@ export interface ThingGroupsResponse {
   count: number;
 }
 
+// DDA labeling types (dda-data-labeling).
+
+/** One Labeling_Team member (dda-data-labeling Requirement 3.8). */
+export interface LabelingTeamMember {
+  user_id: string;
+  email: string;
+  added_at?: number;
+  added_by?: string;
+}
+
+/**
+ * One Labeling_Team as returned by `GET /labeling-teams?usecase_id=`,
+ * including the current member list with identities and emails
+ * (dda-data-labeling Requirement 3.8).
+ */
+export interface LabelingTeam {
+  team_id: string;
+  usecase_id: string;
+  team_name: string;
+  members: LabelingTeamMember[];
+  created_at?: number;
+  created_by?: string;
+}
+
+/**
+ * Per-member submitted/remaining counts on a DDA job detail
+ * (dda-data-labeling Requirement 11.2).
+ */
+export interface LabelingMemberProgress {
+  user_id: string;
+  email?: string;
+  submitted: number;
+  remaining: number;
+}
+
+/**
+ * A terminally failed notification recipient recorded on the job
+ * (dda-data-labeling Requirement 6.4).
+ */
+export interface LabelingNotificationFailure {
+  email: string;
+  reason: string;
+}
+
+/**
+ * One job row of `GET /labeler/jobs`: a job in which the caller holds at
+ * least one unsubmitted Task_Assignment, with submitted/remaining counts
+ * (dda-data-labeling Requirements 2.4, 7.10).
+ */
+export interface LabelerJobSummary {
+  job_id: string;
+  job_name: string;
+  task_type: string;
+  label_set: string[];
+  submitted_count: number;
+  remaining_count: number;
+  withheld_count?: number;
+  instructions?: string;
+}
+
+/** A classless-or-classed region/box of a Pre_Label or annotation. */
+export interface DdaBoundingBox {
+  /** Label_Set class; null for unclassified SAM proposals. */
+  class: string | null;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** RLE-encoded mask region keyed to a Label_Set class. */
+export interface DdaMaskRegion {
+  /** Label_Set class; null for unclassified SAM proposals. */
+  class: string | null;
+  /** Run-length-encoded bitmap of the region. */
+  rle: number[];
+}
+
+/**
+ * Modality-tagged annotation payload used for both Pre_Labels returned by
+ * the labeler APIs and submissions sent to `POST /labeler/tasks/{id}/submit`
+ * (dda-data-labeling Requirements 7.3–7.5, 7.7, 8.3).
+ */
+export interface DdaAnnotation {
+  /** Binary_Classification selection: 'normal' | 'anomaly'. */
+  label?: string;
+  /** Object_Detection boxes (pixel coordinates within image bounds). */
+  boxes?: DdaBoundingBox[];
+  /** Semantic_Segmentation regions (RLE-encoded, label-indexed). */
+  regions?: DdaMaskRegion[];
+  /** Image pixel dimensions the regions/boxes are expressed against. */
+  image_width?: number;
+  image_height?: number;
+}
+
+/**
+ * Response of `GET /labeler/jobs/{jobId}/next`: the next presentable
+ * unsubmitted Task_Assignment with a 15-minute presigned image URL,
+ * Pre_Label (when available), instructions and example-image URLs, or a
+ * completion payload when zero presentable tasks remain
+ * (dda-data-labeling Requirements 7.1, 7.2, 7.11, 8.3, 12.6).
+ */
+export interface LabelerNextTaskResponse {
+  /** True when the labeler has no presentable unsubmitted tasks left. */
+  complete: boolean;
+  task?: {
+    task_id: string;
+    job_id: string;
+    image_url: string;
+    /** Epoch seconds when the presigned image URL expires. */
+    image_url_expires_at?: number;
+    prelabel?: DdaAnnotation;
+    prelabel_status?: string;
+  };
+  task_type?: string;
+  label_set?: string[];
+  instructions?: string;
+  good_example_urls?: string[];
+  bad_example_urls?: string[];
+  submitted_count: number;
+  remaining_count: number;
+  withheld_count?: number;
+}
+
+/**
+ * One per-image row of `GET /labeling/{id}/review`: the auto-labeled
+ * result or failed status plus the current accept/reject decision
+ * (dda-data-labeling Requirements 9.5, 9.6, 9.10).
+ */
+export interface ReviewItem {
+  task_id: string;
+  image_key: string;
+  image_url?: string;
+  status: 'succeeded' | 'failed';
+  annotation?: DdaAnnotation;
+  autolabel_error?: string;
+  decision?: 'accepted' | 'rejected';
+}
+
+/** Response of `GET /labeling/{id}/review` (paginated). */
+export interface ReviewResponse {
+  job_id: string;
+  items: ReviewItem[];
+  count: number;
+  next_token?: string;
+  review_finalized?: boolean;
+}
+
 class ApiService {
   private get baseUrl(): string {
     return getConfig().apiUrl;
@@ -1392,16 +1540,32 @@ class ApiService {
     job_name: string;
     dataset_prefix: string;
     task_type: string;
-    label_categories: string[];
-    workforce_arn: string;
+    /**
+     * Mandatory Labeling_Backend discriminator (dda-data-labeling
+     * Requirement 1.1): 'GroundTruth' submits through the existing
+     * SageMaker flow unchanged; 'DDA' creates a portal-native job.
+     */
+    labeling_backend: 'DDA' | 'GroundTruth';
+    // Ground Truth fields (labeling_backend='GroundTruth').
+    label_categories?: string[];
+    workforce_arn?: string;
     instructions?: string;
     num_workers_per_object?: number;
     task_time_limit?: number;
     mask_prefix?: string;
     enable_automated_labeling?: boolean;
+    // DDA fields (labeling_backend='DDA', dda-data-labeling
+    // Requirements 4.1-4.4, 8.1, 9.2).
+    label_set?: string[];
+    team_id?: string;
+    example_images?: { good: string[]; bad: string[] };
+    auto_label?: { enabled: boolean; model: string };
+    skip_verification?: boolean;
+    bedrock_model_id?: string;
+    per_label_prompts?: Record<string, string>;
   }): Promise<{
     job_id: string;
-    sagemaker_job_name: string;
+    sagemaker_job_name?: string;
     status: string;
     message: string;
   }> {
@@ -1438,6 +1602,20 @@ class ApiService {
       failure_reason?: string;
       console_url?: string;
       worker_portal_url?: string;
+      // DDA job fields (labeling_backend='DDA', dda-data-labeling
+      // Requirements 5.4, 6.4, 6.6, 11.1, 11.2, 11.10).
+      labeling_backend?: 'DDA' | 'GroundTruth';
+      label_set?: string[];
+      team_id?: string;
+      submitted_count?: number;
+      member_progress?: LabelingMemberProgress[];
+      unassigned_count?: number;
+      blocked?: boolean;
+      notifications_skipped?: boolean;
+      notification_failures?: LabelingNotificationFailure[];
+      skip_verification?: boolean;
+      review_ready?: boolean;
+      stopped_at?: number;
     };
   }> {
     return this.request(`/labeling/${jobId}`);
@@ -1448,6 +1626,219 @@ class ApiService {
     job_id: string;
   }> {
     return this.request(`/labeling/${jobId}/manifest`);
+  }
+
+  // DDA labeling endpoints (dda-data-labeling).
+
+  /**
+   * List the Labeling_Teams scoped to a Use_Case with each team's member
+   * identities and emails (dda-data-labeling Requirement 3.8).
+   */
+  async listLabelingTeams(usecaseId: string): Promise<{
+    teams: LabelingTeam[];
+    count: number;
+  }> {
+    const queryParams = new URLSearchParams({ usecase_id: usecaseId });
+    return this.request(`/labeling-teams?${queryParams}`);
+  }
+
+  /**
+   * Create a Labeling_Team scoped to a Use_Case (dda-data-labeling
+   * Requirements 3.1, 3.2). A 4xx indicates a name validation failure.
+   */
+  async createLabelingTeam(data: {
+    usecase_id: string;
+    team_name: string;
+  }): Promise<{ team: LabelingTeam; message?: string }> {
+    return this.request('/labeling-teams', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * Add a Data_Labeler user to a Labeling_Team (dda-data-labeling
+   * Requirements 3.3–3.5). A 4xx indicates a missing Data_Labeler role or
+   * duplicate membership.
+   */
+  async addTeamMember(
+    teamId: string,
+    userId: string
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeling-teams/${encodeURIComponent(teamId)}/members`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ user_id: userId }),
+      }
+    );
+  }
+
+  /**
+   * Remove a member from a Labeling_Team; the member's unsubmitted
+   * Task_Assignments in InProgress jobs are reassigned server-side
+   * (dda-data-labeling Requirements 3.6, 5.3, 5.4).
+   */
+  async removeTeamMember(
+    teamId: string,
+    userId: string
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeling-teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * Delete a Labeling_Team (dda-data-labeling Requirement 3.1). A 409
+   * indicates the team is referenced by an InProgress labeling job and
+   * cannot be deleted yet.
+   */
+  async deleteLabelingTeam(teamId: string): Promise<{ message: string }> {
+    return this.request(`/labeling-teams/${encodeURIComponent(teamId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /**
+   * Stop an InProgress DDA Labeling_Job, retaining submitted annotations
+   * (dda-data-labeling Requirements 11.4, 11.5, 11.9). A 4xx indicates the
+   * job is not InProgress; a 5xx indicates the job was not stopped.
+   */
+  async stopLabelingJob(jobId: string): Promise<{
+    job_id: string;
+    status: string;
+    stopped_at?: number;
+    message?: string;
+  }> {
+    return this.request(`/labeling/${encodeURIComponent(jobId)}/stop`, {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * List the jobs in which the caller holds at least one unsubmitted
+   * Task_Assignment, with submitted/remaining counts (dda-data-labeling
+   * Requirements 2.4, 7.10). Empty list when none exist.
+   */
+  async getLabelerJobs(): Promise<{
+    jobs: LabelerJobSummary[];
+    count: number;
+  }> {
+    return this.request('/labeler/jobs');
+  }
+
+  /**
+   * Fetch the caller's next presentable unsubmitted Task_Assignment for a
+   * job — presigned image URL, Pre_Label when available, instructions and
+   * example-image URLs — or the completion payload when none remain
+   * (dda-data-labeling Requirements 7.1, 7.2, 8.3, 12.6).
+   */
+  async getNextTask(jobId: string): Promise<LabelerNextTaskResponse> {
+    return this.request(`/labeler/jobs/${encodeURIComponent(jobId)}/next`);
+  }
+
+  /**
+   * Submit the annotation for a Task_Assignment, marking it submitted
+   * (dda-data-labeling Requirements 7.7–7.9, 11.8). A 4xx indicates an
+   * incomplete annotation or a Stopped job; a 5xx means the annotation was
+   * not saved and the task remains unsubmitted.
+   */
+  async submitTask(
+    taskId: string,
+    annotation: DdaAnnotation
+  ): Promise<{
+    message: string;
+    submitted_count?: number;
+    remaining_count?: number;
+  }> {
+    return this.request(`/labeler/tasks/${encodeURIComponent(taskId)}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ annotation }),
+    });
+  }
+
+  /**
+   * Record that a Task_Assignment's image could not be retrieved or
+   * rendered; the task is withheld from labeling (dda-data-labeling
+   * Requirement 7.12).
+   */
+  async reportPresentationFailure(
+    taskId: string,
+    reason: string
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeler/tasks/${encodeURIComponent(taskId)}/presentation-failure`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }
+    );
+  }
+
+  /**
+   * Fetch a fresh 15-minute presigned URL for a task's image after the
+   * prior URL expires; client-side annotation state is untouched
+   * (dda-data-labeling Requirement 12.7).
+   */
+  async refreshTaskImageUrl(taskId: string): Promise<{
+    image_url: string;
+    image_url_expires_at?: number;
+  }> {
+    return this.request(
+      `/labeler/tasks/${encodeURIComponent(taskId)}/image-url`
+    );
+  }
+
+  /**
+   * Fetch the paginated Admin_Review results for a Skip_Verification_Mode
+   * job: every dataset image with its auto-labeled result or failed status
+   * and current decision (dda-data-labeling Requirement 9.5).
+   */
+  async getReview(
+    jobId: string,
+    nextToken?: string
+  ): Promise<ReviewResponse> {
+    const query = nextToken
+      ? `?next_token=${encodeURIComponent(nextToken)}`
+      : '';
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/review${query}`
+    );
+  }
+
+  /**
+   * Batch-save accept/reject decisions for Admin_Review results; decisions
+   * remain mutable until the review is finalized (dda-data-labeling
+   * Requirement 9.6).
+   */
+  async saveReviewDecisions(
+    jobId: string,
+    decisions: Record<string, 'accepted' | 'rejected'>
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/review/decisions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ decisions }),
+      }
+    );
+  }
+
+  /**
+   * Finalize the Admin_Review, triggering manifest generation over exactly
+   * the accepted results (dda-data-labeling Requirements 9.7–9.9). A 4xx
+   * indicates undecided results or zero accepted results.
+   */
+  async finalizeReview(jobId: string): Promise<{
+    job_id: string;
+    status?: string;
+    message?: string;
+  }> {
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/review/finalize`,
+      { method: 'POST' }
+    );
   }
 
   async transformManifest(data: {

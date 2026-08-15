@@ -18,8 +18,13 @@ export default function Login() {
   const navigate = useNavigate();
   const {
     login, completeNewPassword, forgotPassword, forgotPasswordSubmit,
-    isAuthenticated, needsNewPassword, error: authError,
+    isAuthenticated, needsNewPassword, error: authError, user,
   } = useAuth();
+
+  // DataLabeler-only users land on the labeler workspace instead of the
+  // dashboard (dda-data-labeling Req 2.2); every other role keeps the
+  // historical /dashboard landing (Req 2.8).
+  const postLoginLanding = user?.role === 'DataLabeler' ? '/labeler' : '/dashboard';
 
   const [view, setView] = useState<LoginView>('login');
   const [username, setUsername] = useState('');
@@ -33,8 +38,8 @@ export default function Login() {
   const [successMsg, setSuccessMsg] = useState('');
 
   useEffect(() => {
-    if (isAuthenticated) navigate('/dashboard');
-  }, [isAuthenticated, navigate]);
+    if (isAuthenticated) navigate(postLoginLanding);
+  }, [isAuthenticated, postLoginLanding, navigate]);
 
   useEffect(() => {
     if (needsNewPassword) setView('new-password');
@@ -60,7 +65,7 @@ export default function Login() {
       if (newPassword.length < 8) { setError('Password must be at least 8 characters'); return; }
       if (!givenName.trim()) { setError('Please enter your name'); return; }
       await completeNewPassword(newPassword, { given_name: givenName.trim() });
-      navigate('/dashboard');
+      navigate(postLoginLanding);
     } catch (err: any) { setError(err.message || 'Failed to set password.'); }
     finally { setLoading(false); }
   };

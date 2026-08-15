@@ -55,6 +55,8 @@ beforeAll(() => {
     auditLogTable: storage.auditLogTable,
     trainingJobsTable: storage.trainingJobsTable,
     labelingJobsTable: storage.labelingJobsTable,
+    labelingTeamsTable: storage.labelingTeamsTable,
+    labelingTasksTable: storage.labelingTasksTable,
     preLabeledDatasetsTable: storage.preLabeledDatasetsTable,
     modelsTable: storage.modelsTable,
     deploymentsTable: storage.deploymentsTable,

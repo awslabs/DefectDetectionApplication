@@ -31,6 +31,16 @@ import { canAccessSyntheticData } from '../utils/syntheticAccess';
 export function buildSettingsDropdownItems(
   role: UserRole | undefined
 ): ButtonDropdownProps.ItemOrGroup[] {
+  // A user whose resolved role is DataLabeler keeps only sign-out and
+  // account settings (the change-password action) in the dropdown
+  // (dda-data-labeling Requirement 2.2). Multi-role users resolve to a
+  // different role and keep the full dropdown (Requirement 2.8).
+  if (role === 'DataLabeler') {
+    return [
+      { id: 'change-password', text: 'Change Password' },
+      { id: 'logout', text: 'Sign out' },
+    ];
+  }
   const isPortalAdmin = role === 'PortalAdmin';
   return [
     {
@@ -77,6 +87,16 @@ export function buildSettingsDropdownItems(
 export function buildNavigationItems(
   role: UserRole | undefined
 ): SideNavigationProps.Item[] {
+  // A user whose resolved role is DataLabeler sees only the labeler
+  // workspace destination (dda-data-labeling Requirement 2.2). Users who
+  // hold DataLabeler alongside another role resolve to that other role and
+  // keep its navigation unchanged (Requirement 2.8).
+  if (role === 'DataLabeler') {
+    return [
+      { type: 'link' as const, text: 'My Labeling Tasks', href: '/labeler' },
+    ];
+  }
+
   // Base navigation items for all users
   const baseNavigationItems: SideNavigationProps.Item[] = [
     { type: 'link' as const, text: 'Dashboard', href: '/dashboard' },
