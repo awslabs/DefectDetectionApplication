@@ -120,6 +120,7 @@ describe('Deployments list default sort', () => {
           .date({
             min: new Date('2000-01-01T00:00:00Z'),
             max: new Date('2035-01-01T00:00:00Z'),
+            noInvalidDate: true,
           })
           .map((d) => d.toISOString()),
         fc.constant<string | null>(null),
