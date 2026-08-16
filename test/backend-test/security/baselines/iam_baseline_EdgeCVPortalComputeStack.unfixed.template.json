@@ -33218,6 +33218,4703 @@
    "Metadata": {
     "aws:cdk:path": "EdgeCVPortalComputeStack/CDKMetadata/Default"
    }
+  },
+  "IntegrationMergeFeatureGrowthMirrorPolicy": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": "lambda:InvokeFunction",
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::GetAtt": [
+          "DdaLabelingWorkerD5E96C2A",
+          "Arn"
+         ]
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::GetAtt": [
+             "DdaLabelingWorkerD5E96C2A",
+             "Arn"
+            ]
+           },
+           ":*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": "lambda:InvokeFunction",
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::GetAtt": [
+          "DdaLabelingWorkerD5E96C2A",
+          "Arn"
+         ]
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::GetAtt": [
+             "DdaLabelingWorkerD5E96C2A",
+             "Arn"
+            ]
+           },
+           ":*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": "lambda:InvokeFunction",
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:lambda:",
+          {
+           "Ref": "AWS::Region"
+          },
+          ":",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":function:dda-portal-workflow-generator"
+         ]
+        ]
+       }
+      },
+      {
+       "Action": "ses:SendEmail",
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:ses:",
+          {
+           "Ref": "AWS::Region"
+          },
+          ":",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":identity/*"
+         ]
+        ]
+       }
+      },
+      {
+       "Action": "tag:GetResources",
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": "tag:GetResources",
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": "tag:GetResources",
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:bedrock:*::foundation-model/*",
+        {
+         "Fn::Join": [
+          "",
+          [
+           "arn:aws:bedrock:*:",
+           {
+            "Ref": "AWS::AccountId"
+           },
+           ":inference-profile/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "cognito-idp:ListUsers",
+        "cognito-idp:AdminGetUser"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputFnGetAttDDAPortalUserPool51234D8CArnE83AD262"
+       }
+      },
+      {
+       "Action": [
+        "cognito-idp:ListUsers",
+        "cognito-idp:AdminGetUser"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalAuthStack:ExportsOutputFnGetAttDDAPortalUserPool51234D8CArnE83AD262"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttCameraRegistryTable4B0A3A5BArn646129F8"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttCameraRegistryTable4B0A3A5BArn646129F8"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttCameraRegistryTable4B0A3A5BArn646129F8"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttCameraRegistryTable4B0A3A5BArn646129F8"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttCameraRegistryTable4B0A3A5BArn646129F8"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttCameraRegistryTable4B0A3A5BArn646129F8"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttComponentsTableB16869EDArn06B80FA0"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttComponentsTableB16869EDArn06B80FA0"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttComponentsTableB16869EDArn06B80FA0"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttComponentsTableB16869EDArn06B80FA0"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttComponentsTableB16869EDArn06B80FA0"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttComponentsTableB16869EDArn06B80FA0"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDataAccountsTable07F2C569ArnA85502A4"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDataAccountsTable07F2C569ArnA85502A4"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDataAccountsTable07F2C569ArnA85502A4"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDataAccountsTable07F2C569ArnA85502A4"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDataAccountsTable07F2C569ArnA85502A4"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDataAccountsTable07F2C569ArnA85502A4"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeploymentsTable5D087E52Arn03A4CB49"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeploymentsTable5D087E52Arn03A4CB49"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeploymentsTable5D087E52Arn03A4CB49"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeploymentsTable5D087E52Arn03A4CB49"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeploymentsTable5D087E52Arn03A4CB49"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeploymentsTable5D087E52Arn03A4CB49"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDevicesTableD0A940EEArn7D39C15E"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDevicesTableD0A940EEArn7D39C15E"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDevicesTableD0A940EEArn7D39C15E"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDevicesTableD0A940EEArn7D39C15E"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDevicesTableD0A940EEArn7D39C15E"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttDevicesTableD0A940EEArn7D39C15E"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingJobsTable854C7EACArn5663FC7E"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingJobsTable854C7EACArn5663FC7E"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingJobsTable854C7EACArn5663FC7E"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingJobsTable854C7EACArn5663FC7E"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingJobsTable854C7EACArn5663FC7E"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingJobsTable854C7EACArn5663FC7E"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTasksTableF7E9FEF2Arn56945F26"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttLabelingTeamsTable9C35CC36Arn9A3DCD78"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttModelsTableC5E7E44AArnF38126E5"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttModelsTableC5E7E44AArnF38126E5"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttModelsTableC5E7E44AArnF38126E5"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttModelsTableC5E7E44AArnF38126E5"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttModelsTableC5E7E44AArnF38126E5"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttModelsTableC5E7E44AArnF38126E5"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPreLabeledDatasetsTable9AA407E3Arn16679B6C"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPreLabeledDatasetsTable9AA407E3Arn16679B6C"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPreLabeledDatasetsTable9AA407E3Arn16679B6C"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPreLabeledDatasetsTable9AA407E3Arn16679B6C"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPreLabeledDatasetsTable9AA407E3Arn16679B6C"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPreLabeledDatasetsTable9AA407E3Arn16679B6C"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestDatasetsTable14080134ArnB2E7B23D"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestDatasetsTable14080134ArnB2E7B23D"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestDatasetsTable14080134ArnB2E7B23D"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestDatasetsTable14080134ArnB2E7B23D"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestDatasetsTable14080134ArnB2E7B23D"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestDatasetsTable14080134ArnB2E7B23D"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestRunsTableEDF9E6D0Arn3B0FC3A7"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestRunsTableEDF9E6D0Arn3B0FC3A7"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestRunsTableEDF9E6D0Arn3B0FC3A7"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestRunsTableEDF9E6D0Arn3B0FC3A7"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestRunsTableEDF9E6D0Arn3B0FC3A7"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTestRunsTableEDF9E6D0Arn3B0FC3A7"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTrainingJobsTableB7EEC270Arn8F49D86F"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTrainingJobsTableB7EEC270Arn8F49D86F"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTrainingJobsTableB7EEC270Arn8F49D86F"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTrainingJobsTableB7EEC270Arn8F49D86F"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTrainingJobsTableB7EEC270Arn8F49D86F"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttTrainingJobsTableB7EEC270Arn8F49D86F"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUseCasesTable8AC05A74Arn8213834C"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUseCasesTable8AC05A74Arn8213834C"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUseCasesTable8AC05A74Arn8213834C"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUseCasesTable8AC05A74Arn8213834C"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUseCasesTable8AC05A74Arn8213834C"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUseCasesTable8AC05A74Arn8213834C"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUserRolesTable19FB5B19Arn84B216C4"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUserRolesTable19FB5B19Arn84B216C4"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUserRolesTable19FB5B19Arn84B216C4"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUserRolesTable19FB5B19Arn84B216C4"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUserRolesTable19FB5B19Arn84B216C4"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttUserRolesTable19FB5B19Arn84B216C4"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowsTable4E215008Arn0D44497B"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowsTable4E215008Arn0D44497B"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowsTable4E215008Arn0D44497B"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowsTable4E215008Arn0D44497B"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowsTable4E215008Arn0D44497B"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowsTable4E215008Arn0D44497B"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttSettingsTable4DB0CCD0Arn1D1BE79B"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttSettingsTable4DB0CCD0Arn1D1BE79B"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttSettingsTable4DB0CCD0Arn1D1BE79B"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttSharedComponentsTableF0FA3720ArnC8BFE71D"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttSharedComponentsTableF0FA3720ArnC8BFE71D"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttSharedComponentsTableF0FA3720ArnC8BFE71D"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowChatSessionsTable48204025Arn737D5C79"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowChatSessionsTable48204025Arn737D5C79"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowChatSessionsTable48204025Arn737D5C79"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowVersionsTable04CEE3A6Arn4F19C3B2"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowVersionsTable04CEE3A6Arn4F19C3B2"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchGetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:Scan",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttWorkflowVersionsTable04CEE3A6Arn4F19C3B2"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttAuditLogTable8B03E3C8Arn985A1088"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttAuditLogTable8B03E3C8Arn985A1088"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttAuditLogTable8B03E3C8Arn985A1088"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttAuditLogTable8B03E3C8Arn985A1088"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "dynamodb:BatchWriteItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttAuditLogTable8B03E3C8Arn985A1088"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttAuditLogTable8B03E3C8Arn985A1088"
+           },
+           "/index/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "s3:GetObject*",
+        "s3:GetBucket*",
+        "s3:List*",
+        "s3:DeleteObject*",
+        "s3:PutObject",
+        "s3:PutObjectLegalHold",
+        "s3:PutObjectRetention",
+        "s3:PutObjectTagging",
+        "s3:PutObjectVersionTagging",
+        "s3:Abort*"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+           },
+           "/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "s3:GetObject*",
+        "s3:GetBucket*",
+        "s3:List*",
+        "s3:DeleteObject*",
+        "s3:PutObject",
+        "s3:PutObjectLegalHold",
+        "s3:PutObjectRetention",
+        "s3:PutObjectTagging",
+        "s3:PutObjectVersionTagging",
+        "s3:Abort*"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+           },
+           "/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "s3:GetObject*",
+        "s3:GetBucket*",
+        "s3:List*",
+        "s3:DeleteObject*",
+        "s3:PutObject",
+        "s3:PutObjectLegalHold",
+        "s3:PutObjectRetention",
+        "s3:PutObjectTagging",
+        "s3:PutObjectVersionTagging",
+        "s3:Abort*"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           {
+            "Fn::ImportValue": "EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D"
+           },
+           "/*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:GetQueueUrl",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::GetAtt": [
+         "DdaAutolabelQueue5780A6F7",
+         "Arn"
+        ]
+       }
+      },
+      {
+       "Action": [
+        "sqs:SendMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::GetAtt": [
+         "DdaAutolabelQueue5780A6F7",
+         "Arn"
+        ]
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "IntegrationMergeFeatureGrowthMirrorPolicy",
+    "Roles": []
+   },
+   "Metadata": {
+    "dda:baseline-note": "NOT part of the historical pre-fix synth. Statement-level mirror of the post-fix feature growth (dda-data-labeling, workflow-manager-gaps, vlm-anomaly-reference-parity, synthetic defect data, jp7 integration merge) added so the fixed<->unfixed statement-multiset symmetric difference stays confined to the recorded I1-I4 rewrites, per the preservation test contract. Statement-level equivalent of the role-copy practice from commit 7add907."
+   }
   }
  },
  "Parameters": {
