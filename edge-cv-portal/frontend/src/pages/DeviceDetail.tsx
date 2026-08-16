@@ -20,7 +20,7 @@ import {
   Spinner,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
-import { Device, InstalledComponent, DeviceDeployment } from '../types';
+import { Device, InstalledComponent, DeviceDeployment, ModelProviderStatus } from '../types';
 import DeviceCamerasTab from '../components/DeviceCamerasTab';
 import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
 import RemoteAccessTab from '../components/RemoteAccessTab';
@@ -322,6 +322,24 @@ export default function DeviceDetail() {
     return new Date(timestamp).toLocaleString();
   };
 
+  /** Provider badge for a `dda-model-status` shadow model entry
+   *  (spec: model-gpu-fallback-visibility). No badge when provider info
+   *  is absent for the model (partial documents are expected). */
+  const getProviderBadge = (entry: ModelProviderStatus | null | undefined) => {
+    if (!entry) return null;
+    if (entry.gpuActive === true) {
+      return <Badge color="green">GPU</Badge>;
+    }
+    if (entry.gpuRequested === true) {
+      // GPU requested but not active — the silent-fallback signal.
+      return <Badge color="red">CPU fallback</Badge>;
+    }
+    if (entry.gpuRequested === false) {
+      return <Badge color="grey">CPU</Badge>;
+    }
+    return null;
+  };
+
   if (loading) {
     return <Box>Loading device details...</Box>;
   }
@@ -343,6 +361,16 @@ export default function DeviceDetail() {
       </Box>
     );
   }
+
+  // Deployed-models panel data from the additive `model_status` field (the
+  // reported `dda-model-status` shadow). Null/absent document or an empty
+  // `models` map means "no information" — the panel does not render and the
+  // rest of the page is untouched (spec: model-gpu-fallback-visibility,
+  // Decision 6).
+  const modelStatus = device.model_status;
+  const deployedModels = Object.entries(modelStatus?.models ?? {}).map(
+    ([name, entry]) => ({ name, entry })
+  );
 
   return (
     <SpaceBetween size="l">
@@ -489,6 +517,64 @@ export default function DeviceDetail() {
                     />
                   </ColumnLayout>
                 </Container>
+
+                {deployedModels.length > 0 && (
+                  <Container
+                    header={
+                      <Header
+                        variant="h2"
+                        counter={`(${deployedModels.length})`}
+                        description={
+                          modelStatus?.updatedAt
+                            ? `Reported by the device at ${formatTimestamp(modelStatus.updatedAt)}`
+                            : undefined
+                        }
+                      >
+                        Deployed models
+                      </Header>
+                    }
+                  >
+                    <SpaceBetween size="m">
+                      {modelStatus?.gpuDegraded && (
+                        <Alert type="warning" header="GPU inference degraded">
+                          GPU inference degraded — {modelStatus.gpuChainModels ?? 0}{' '}
+                          GPU-chain models loaded, none has an active GPU provider;
+                          models are serving on CPU fallback
+                          {modelStatus.updatedAt
+                            ? ` (reported ${formatTimestamp(modelStatus.updatedAt)})`
+                            : ''}
+                        </Alert>
+                      )}
+                      <Table
+                        resizableColumns
+                        items={deployedModels}
+                        columnDefinitions={[
+                          {
+                            id: 'name',
+                            header: 'Model',
+                            cell: (item) => item.name,
+                            sortingField: 'name',
+                          },
+                          {
+                            id: 'status',
+                            header: 'Status',
+                            cell: (item) => item.entry?.status || '-',
+                          },
+                          {
+                            id: 'provider',
+                            header: 'Execution provider',
+                            cell: (item) => getProviderBadge(item.entry) ?? '-',
+                          },
+                        ]}
+                        empty={
+                          <Box textAlign="center" color="inherit">
+                            No model status reported
+                          </Box>
+                        }
+                      />
+                    </SpaceBetween>
+                  </Container>
+                )}
 
                 {device.tags && Object.keys(device.tags).length > 0 && (
                   <Container header={<Header variant="h2">Tags</Header>}>

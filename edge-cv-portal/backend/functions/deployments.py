@@ -109,6 +109,14 @@ LOCAL_SERVER_COMPONENT_PREFIX = 'aws.edgeml.dda.LocalServer'
 CAMERA_REGISTRY_SHADOW_NAME = 'dda-camera-registry'
 CAMERA_BINDINGS_SHADOW_NAME = 'dda-camera-bindings'
 
+# Named shadow carrying the device's model GPU-fallback status snapshot
+# (per-model active execution providers + the device-level degraded-GPU
+# signal; spec: model-gpu-fallback-visibility). Reported-only telemetry
+# written by src/backend/utils/model_status_shadow.py on the device; the
+# single-device GET in devices.py reads it on demand. Must be in the
+# ShadowManager `synchronize` list below or it never mirrors to IoT Core.
+MODEL_STATUS_SHADOW_NAME = 'dda-model-status'
+
 # Minimum LocalServer component version a Workflow_Component requires
 # (Requirement 8.4). The Component_Packager writes this same value into each
 # packaged component's manifest.json (minLocalServerVersion) from the same
@@ -1138,7 +1146,8 @@ def create_deployment(body, user):
                         'classic': True,
                         'namedShadows': [
                             CAMERA_REGISTRY_SHADOW_NAME,
-                            CAMERA_BINDINGS_SHADOW_NAME
+                            CAMERA_BINDINGS_SHADOW_NAME,
+                            MODEL_STATUS_SHADOW_NAME
                         ]
                     }
                 }
@@ -1155,14 +1164,16 @@ def create_deployment(body, user):
             auto_included.append({
                 'component_name': 'aws.greengrass.ShadowManager',
                 'component_version': shadow_manager_version,
-                'reason': (f'Syncs the {CAMERA_REGISTRY_SHADOW_NAME} and '
-                           f'{CAMERA_BINDINGS_SHADOW_NAME} named shadows with '
-                           'IoT Core for camera registry synchronization')
+                'reason': (f'Syncs the {CAMERA_REGISTRY_SHADOW_NAME}, '
+                           f'{CAMERA_BINDINGS_SHADOW_NAME} and '
+                           f'{MODEL_STATUS_SHADOW_NAME} named shadows with '
+                           'IoT Core for camera registry synchronization '
+                           'and model GPU-fallback status visibility')
             })
             logger.info(
                 f"Auto-included aws.greengrass.ShadowManager {shadow_manager_version} with "
                 f"synchronization for named shadows: {CAMERA_REGISTRY_SHADOW_NAME}, "
-                f"{CAMERA_BINDINGS_SHADOW_NAME}")
+                f"{CAMERA_BINDINGS_SHADOW_NAME}, {MODEL_STATUS_SHADOW_NAME}")
         
         # Determine target ARN (iot_client and running_nucleus were resolved above)
         # Greengrass deployments must target thing groups, not individual things

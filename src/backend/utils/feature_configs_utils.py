@@ -36,6 +36,10 @@ from data_models.common import (
     ListFeatureConfigurationAPIModel
 )
 from dda_triton.constants import TRITON_MODEL_DIR
+from dda_triton.provider_visibility import (
+    execution_provider_info,
+    read_active_provider_record,
+)
 from functools import lru_cache
 
 TIME_OUT=10
@@ -211,6 +215,23 @@ def get_features_triton(triton_server=None):
             if model_id.startswith("base_") or model_id.startswith("marshal_"):
                 continue
             default_configs_dict = get_default_configs_lfv(model_id)
+            # Additive GPU-fallback visibility merge (requirement 2.2, design
+            # File 3; the vLLM failureReason precedent): expose the stub's
+            # Active_Provider_Record as executionProviderInfo. No record →
+            # no field (Decision 6), and a reader bug degrades to "no field",
+            # never a 500. Copy before adding: get_default_configs_lfv is
+            # lru_cached and its dict must never carry the merged field.
+            try:
+                record = read_active_provider_record(model_id)
+                if record:
+                    default_configs_dict = dict(default_configs_dict)
+                    default_configs_dict["executionProviderInfo"] = (
+                        execution_provider_info(record)
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"executionProviderInfo merge skipped for {model_id}: {e}"
+                )
             results.append(
                 ListFeatureConfigurationAPIModel(
                     type="TritonModel",

@@ -52,7 +52,8 @@ EXPECTED_SYNC_CONFIG = {
         "direction": "betweenDeviceAndCloud",
         "coreThing": {
             "classic": True,
-            "namedShadows": ["dda-camera-registry", "dda-camera-bindings"],
+            "namedShadows": ["dda-camera-registry", "dda-camera-bindings",
+                             "dda-model-status"],
         },
     }
 }
@@ -111,8 +112,8 @@ class TestShadowManagerAutoInclude:
     def test_local_server_deployment_auto_includes_shadow_manager(self, sm_env):
         """A deployment carrying a LocalServer component auto-includes
         aws.greengrass.ShadowManager, pinned to a concrete version, with the
-        synchronize merge config for the two camera-registry-sync named
-        shadows."""
+        synchronize merge config for the camera-registry-sync named shadows
+        plus the dda-model-status shadow (model-gpu-fallback-visibility)."""
         status, payload = sm_env.deploy_components(
             [LOCAL_SERVER_COMPONENT], target_devices=["line-a-camera-01"])
 
@@ -137,6 +138,7 @@ class TestShadowManagerAutoInclude:
         assert entry["component_version"] == shadow_manager["componentVersion"]
         assert "dda-camera-registry" in entry["reason"]
         assert "dda-camera-bindings" in entry["reason"]
+        assert "dda-model-status" in entry["reason"]
 
     def test_caller_supplied_shadow_manager_is_not_overridden(self, sm_env):
         """When the caller already includes aws.greengrass.ShadowManager the

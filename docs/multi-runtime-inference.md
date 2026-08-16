@@ -131,6 +131,81 @@ Unchanged behavior. Keeps bundled-`libdlr.so` loading, `dlr_device_type`,
 - Requires the NVIDIA Jetson PyTorch wheel matching the JetPack — heaviest
   dependency; gate behind a build arg so DLR/ONNX-only images stay smaller.
 
+### 5.4 ONNX execution-provider visibility (Active_Provider_Record)
+
+(Spec: `model-gpu-fallback-visibility`.) ONNX Runtime's CUDA→CPU fallback is
+by design and used to be **silent**: a model whose CUDA EP failed to
+initialize served READY on CPU with no DDA-visible signal (the jetson-thor1
+Aug 14–15 device-wide outage). The provider-selection **contract in §5.2 is
+unchanged** — fallback still serves — but every `OnnxRunner` load is now
+observable:
+
+- **Active_Provider_Record.** After creating the session, the runner calls
+  `session.get_providers()` and writes `dda_active_providers.json` into the
+  **model version dir** (`base_<model>/<v>/`, the parent of the stage dir).
+  The write is **atomic** (temp file + `os.replace` in the same dir — readers
+  never see a torn file) and failure-isolated (a bookkeeping failure logs a
+  warning and never fails the load). Shape: `modelId`, `runtime`, a
+  **per-stage** map (`requestedProviders`, `activeProviders`, `gpuRequested`,
+  `gpuActive` per stage), a **model-level aggregate** (`gpuRequested` = any
+  stage requested a GPU provider; `gpuActive` = every GPU-requesting stage
+  obtained one — a single fallen-back stage degrades the model; TRT-requested
+  with CUDA-active counts as active), and `updatedAt`. Each load rewrites the
+  record for the currently loaded instance.
+
+  ```json
+  {
+    "modelId": "yolo_test",
+    "runtime": "onnx",
+    "stages": {
+      "stage_model": {
+        "requestedProviders": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        "activeProviders": ["CPUExecutionProvider"],
+        "gpuRequested": true,
+        "gpuActive": false
+      }
+    },
+    "gpuRequested": true,
+    "gpuActive": false,
+    "updatedAt": "2026-08-15T20:23:13Z"
+  }
+  ```
+
+- **Logs.** The stub logs the ACTIVE providers at INFO on **every** load, and
+  a prominent WARNING on GPU fallback (requested chain + active providers +
+  "DEGRADED on CPU until the model is reloaded") only when a GPU provider was
+  requested and none is active. CPU-by-design models (`device: "cpu"`) never
+  warn and never count as degraded.
+
+- **Status surface.** The backend (`dda_triton/provider_visibility.py`) reads
+  the record (highest integer version dir) and merges it additively into each
+  Triton entry of `GET /feature-configurations` as
+  `defaultConfiguration.executionProviderInfo` (`requestedProviders`,
+  `activeProviders`, `gpuRequested`, `gpuActive`, derived `gpuFallback`,
+  `updatedAt`).
+
+- **Device-level signal.** `GET /feature-configurations/gpu-status` aggregates
+  the records: `gpuDegraded` is true iff at least one recorded GPU-chain model
+  is loaded and **none** of them holds an active GPU provider, plus
+  `gpuChainModels` / `gpuActiveModels` counts and a per-model map. Transitions
+  log (WARNING on entering degraded, INFO on recovery).
+
+- **Cloud mirror.** The same snapshot is reported (debounced, reported-state
+  only, failure-isolated) into the `dda-model-status` **named shadow**
+  (`utils/model_status_shadow.py`), which the portal reads to render per-model
+  GPU / CPU-fallback / CPU badges and the device-level degraded alert on the
+  device detail page.
+
+- **Propagation note (absence means "no information").** The runner code is a
+  **per-model copy** staged by `model_convertor.py`, so deploying a new
+  LocalServer does NOT refresh already-deployed models: the record first
+  appears after the model component's next restart (reboot, Nucleus restart,
+  or model redeploy). Until then there is simply no
+  `dda_active_providers.json`, and every consumer treats absence as "no
+  information" — no `executionProviderInfo` field, no contribution to
+  `gpu-status` in either direction, no badge in the portal. Absence is never a
+  false signal.
+
 ## 6. Packaging changes (`model_convertor.py`)
 
 - Read `manifest["runtime"]` (default `dlr`).

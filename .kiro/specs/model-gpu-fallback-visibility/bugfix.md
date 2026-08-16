@@ -103,6 +103,19 @@ degraded-GPU signal through the model-status surface (exact shape decided in des
 so a device-wide GPU outage is visible as such rather than only as N individually
 healthy-looking READY models
 
+2.5 WHEN the portal displays a device's deployed model status THEN the portal SHALL
+surface the device-reported per-model GPU-fallback signal and the device-level
+degraded-GPU signal for that device as an additive display, and WHEN a device reports
+no such signal (older device software, or the signal has not yet propagated) THEN the
+portal SHALL render that device exactly as it does today
+
+> **Design-phase amendment (2026-08-16):** clause 2.5 added per the binding user
+> decision that the portal-side display of the fallback signal is IN SCOPE ("run all
+> tasks and deploy portal"). This supersedes the Introduction's "stretch goal at most"
+> scope guardrail for the portal display specifically; the device-side truth signal
+> (log + queryable status payload, 2.1–2.4) remains the core, and the portal leg is
+> additive display of the device-reported signal only.
+
 ### Unchanged Behavior (Regression Prevention)
 
 3.1 WHEN the CUDA EP fails to initialize THEN the system SHALL CONTINUE TO fall back

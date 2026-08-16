@@ -57,6 +57,32 @@ export interface UseCase {
   };
 }
 
+/**
+ * Per-model entry of the `dda-model-status` reported shadow document
+ * (spec: model-gpu-fallback-visibility, design Decision 4). The document
+ * comes from a device and may be partial — every field is optional.
+ */
+export interface ModelProviderStatus {
+  status?: string | null;
+  runtime?: string | null;
+  gpuRequested?: boolean | null;
+  gpuActive?: boolean | null;
+}
+
+/**
+ * Reported `dda-model-status` shadow document, attached by the portal
+ * backend to the single-device GET as the additive `model_status` field.
+ * Null/absent means "no information" (Decision 6) — the portal renders
+ * exactly as before this field existed.
+ */
+export interface DeviceModelStatus {
+  models?: Record<string, ModelProviderStatus | null> | null;
+  gpuDegraded?: boolean | null;
+  gpuChainModels?: number | null;
+  gpuActiveModels?: number | null;
+  updatedAt?: string | null;
+}
+
 export interface Device {
   device_id: string;
   usecase_id: string;
@@ -74,6 +100,9 @@ export interface Device {
   /** Portal-recorded DDA Target_Architecture (Devices table), checked by
    *  the deployment architecture gates. Null/absent fails closed. */
   target_architecture?: string | null;
+  /** Reported `dda-model-status` shadow document (additive; null/absent =
+   *  no information — spec: model-gpu-fallback-visibility). */
+  model_status?: DeviceModelStatus | null;
   attributes?: Record<string, string>;
   tags?: Record<string, string>;
   installed_components?: InstalledComponent[];

@@ -12,7 +12,7 @@ from datetime import datetime
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, is_super_user, assume_cross_account_role, get_usecase,
-    create_boto3_client, rbac_manager, Permission
+    create_boto3_client, get_usecase_client, rbac_manager, Permission
 )
 
 logger = logging.getLogger()
@@ -31,6 +31,14 @@ DEVICES_TABLE = os.environ.get('DEVICES_TABLE')
 # the deployment architecture gate — x86_64 and x86_64_nvidia are distinct)
 TARGET_ARCHITECTURES = ('x86_64', 'x86_64_nvidia',
                         'arm64_jp4', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7')
+
+# Named shadow carrying the device's model GPU-fallback status snapshot
+# (spec: model-gpu-fallback-visibility). Reported-only telemetry mirrored to
+# IoT Core by ShadowManager (deployments.py auto-include); the single-device
+# GET reads it on demand as the additive `model_status` field. Must match
+# deployments.MODEL_STATUS_SHADOW_NAME and the edge-side constant in
+# src/backend/utils/model_status_shadow.py.
+MODEL_STATUS_SHADOW_NAME = 'dda-model-status'
 
 
 def get_device_record(device_id):
@@ -416,6 +424,13 @@ def get_device(device_id, user, query_params):
         # Get effective deployments
         deployments = get_device_deployments(greengrass_client, device_id)
         
+        # Additive model GPU-fallback status (spec:
+        # model-gpu-fallback-visibility): read the device's reported
+        # dda-model-status shadow on demand. Absence-tolerant — a missing
+        # shadow or ANY read error degrades to None (today's rendering),
+        # never an error response.
+        model_status = get_model_status(usecase, region, device_id)
+        
         # Convert datetime to ISO string
         last_status = gg_status.get('lastStatusUpdateTimestamp')
         if last_status:
@@ -442,6 +457,7 @@ def get_device(device_id, user, query_params):
             'target_architecture': device_record.get('target_architecture'),
             'installed_components': installed_components,
             'deployments': deployments,
+            'model_status': model_status,
             'usecase_id': usecase_id
         }
         
@@ -457,6 +473,35 @@ def get_device(device_id, user, query_params):
     except Exception as e:
         logger.error(f"Error getting device: {str(e)}")
         return create_response(500, {'error': 'Failed to get device'})
+
+
+def get_model_status(usecase, region, thing_name):
+    """The device's dda-model-status shadow reported document, or None.
+
+    Reads the reported-only model GPU-fallback status shadow through the
+    use-case-scoped iot-data client (the camera_registry.py refresh
+    pattern). Absence means "no information" (spec
+    model-gpu-fallback-visibility, Decision 6): ResourceNotFoundException
+    (no shadow — older device software) or ANY other error returns None so
+    the device renders exactly as today; never raises.
+    """
+    try:
+        iot_data = get_usecase_client('iot-data', usecase, region=region)
+        response = iot_data.get_thing_shadow(
+            thingName=thing_name, shadowName=MODEL_STATUS_SHADOW_NAME)
+        payload = json.loads(response['payload'].read())
+        return (payload.get('state') or {}).get('reported')
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'ResourceNotFoundException':
+            logger.warning(
+                f"Could not read {MODEL_STATUS_SHADOW_NAME} shadow for "
+                f"{thing_name}: {e}")
+        return None
+    except Exception as e:
+        logger.warning(
+            f"Could not read {MODEL_STATUS_SHADOW_NAME} shadow for "
+            f"{thing_name}: {e}")
+        return None
 
 
 def get_greengrass_status(greengrass_client, thing_name):

@@ -243,7 +243,8 @@ def create_default_policy(policy_name):
     Includes the IoT data-plane shadow actions (Get/Update/DeleteThingShadow,
     scoped to the connecting device's own thing): the Greengrass Shadow
     Manager syncs named shadows (dda-camera-registry, dda-user-accounts,
-    dda-camera-bindings) to the cloud over the HTTP data plane, which is
+    dda-camera-bindings, dda-model-status) to the cloud over the HTTP data
+    plane, which is
     authorized by these explicit actions rather than the MQTT
     Publish/Subscribe grants. Without them, cloud sync fails with
     ForbiddenException (403) and cloud shadow copies go stale, while local

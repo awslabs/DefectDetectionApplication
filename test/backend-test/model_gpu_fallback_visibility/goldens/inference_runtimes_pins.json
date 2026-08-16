@@ -1,0 +1,21 @@
+{
+  "_comment": "Task 2 preservation hash pins, captured from the UNFIXED tree (2026-08-16, spec model-gpu-fallback-visibility). These source segments are 'Explicitly NOT changed' per design.md: the fix edits OnnxRunner.__init__ (and adds module constants) ONLY. sha256 over inspect.getsource of each segment.",
+  "pins": {
+    "DlrRunner": {
+      "sha256": "2d7a4d7454b27c9d5ea45d995c707d678f5d88ff841ec4818e05df1674f0605b",
+      "lines": 30
+    },
+    "TorchRunner": {
+      "sha256": "c27cdd2de79829b46ea39751b41245a4fd46698e23fbddfeffd796d02293eab1",
+      "lines": 47
+    },
+    "make_runner": {
+      "sha256": "177bf0c8e7d04a37bfca2207781029834db6639fcc68a63d4e026982e1c61fe5",
+      "lines": 24
+    },
+    "OnnxRunner.__select_providers": {
+      "sha256": "b20572b63e4e998a75f53c9cf01b963c879d81f9cc7a1de9c1e3153aa634180e",
+      "lines": 55
+    }
+  }
+}

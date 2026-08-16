@@ -25,9 +25,12 @@ The engine is selected per-model by the manifest ``runtime`` field
 *inside* its runner so a DLR-only device never imports onnxruntime/torch and a
 missing optional dependency only fails models that actually request it.
 """
+import datetime
+import json
 import os
 import ctypes
 import logging
+import tempfile
 import typing
 from abc import ABC, abstractmethod
 
@@ -45,6 +48,84 @@ DLR_DEVICE_TYPE_MAP = {
 RUNTIME_DLR = "dlr"
 RUNTIME_ONNX = "onnx"
 RUNTIME_PYTORCH = "pytorch"
+
+# --- GPU-fallback visibility (spec: model-gpu-fallback-visibility) ----------
+# Keep in sync with dda_triton/provider_visibility.py (the backend-side
+# reader) — this per-model runner copy runs inside the Triton python-backend
+# stub process and cannot import backend modules.
+GPU_PROVIDERS = {"CUDAExecutionProvider", "TensorrtExecutionProvider"}
+
+#: Active_Provider_Record sidecar written into the model VERSION directory.
+ACTIVE_PROVIDER_RECORD = "dda_active_providers.json"
+
+
+def _provider_names(providers):
+    """Normalize an ORT provider chain to plain provider-name strings.
+
+    TensorRT rides in the chain as a ``(name, options)`` tuple (see
+    ``OnnxRunner.__select_providers``); every other entry is already a plain
+    provider-name string.
+    """
+    return [p[0] if isinstance(p, (tuple, list)) else p
+            for p in (providers or [])]
+
+
+def _write_active_provider_record(model_id, model_dir, stage_record):
+    """Atomically merge one stage's provider state into the model's
+    Active_Provider_Record sidecar (design Decision 1).
+
+    The runner's ``model_dir`` is the stage subdirectory (a symlink into the
+    deployed artifact dir), so the record lands in its parent — the real
+    model VERSION directory. Stages initialize sequentially inside one stub
+    process, so a plain read-merge-write per stage key is race-free; the
+    temp-file + ``os.replace`` write keeps readers from ever seeing a torn
+    file.
+    """
+    version_dir = os.path.dirname(model_dir)
+    stage = os.path.basename(model_dir)
+    record_path = os.path.join(version_dir, ACTIVE_PROVIDER_RECORD)
+
+    stages = {}
+    if os.path.exists(record_path):
+        try:
+            with open(record_path, encoding="utf-8") as fh:
+                existing = json.load(fh)
+            if isinstance(existing, dict) and isinstance(
+                    existing.get("stages"), dict):
+                stages = existing["stages"]
+        except (OSError, ValueError):
+            # Corrupt/unreadable prior record: start fresh rather than fail
+            # the load (the whole visibility block is failure-isolated).
+            stages = {}
+    stages[stage] = stage_record
+
+    # Model-level aggregate: gpuRequested if ANY stage requested a GPU
+    # provider; gpuActive only if EVERY GPU-requesting stage obtained one
+    # (a single fallen-back stage degrades the model).
+    gpu_stages = [s for s in stages.values() if s.get("gpuRequested")]
+    record = {
+        "modelId": model_id,
+        "runtime": RUNTIME_ONNX,
+        "stages": stages,
+        "gpuRequested": bool(gpu_stages),
+        "gpuActive": bool(gpu_stages) and all(
+            s.get("gpuActive") for s in gpu_stages),
+        "updatedAt": datetime.datetime.now(datetime.timezone.utc)
+                             .strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=version_dir, prefix=".dda_active_providers.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
+        os.replace(tmp_path, record_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def load_lib(lib_path):
@@ -190,6 +271,42 @@ class OnnxRunner(BaseInferenceRunner):
         self.__session = ort.InferenceSession(
             model_path, sess_options=sess_options, providers=providers
         )
+        # GPU-fallback visibility (spec: model-gpu-fallback-visibility).
+        # Introspection + logging + Active_Provider_Record sidecar, fully
+        # failure-isolated: a visibility problem must never fail the load
+        # (ORT's CUDA->CPU fallback is a feature; this only makes it VISIBLE).
+        try:
+            active = list(self.__session.get_providers())
+            requested_names = _provider_names(providers)
+            gpu_requested = bool(GPU_PROVIDERS & set(requested_names))
+            gpu_active = bool(GPU_PROVIDERS & set(active))
+            log.info(
+                f"{model_path}: ONNX session for {model_id} active "
+                f"providers {active}"
+            )
+            if gpu_requested and not gpu_active:
+                log.warning(
+                    f"{model_path}: GPU FALLBACK for {model_id} — requested "
+                    f"{requested_names} but session is running on {active}; "
+                    f"inference will run DEGRADED on CPU until the model is "
+                    f"reloaded with a working GPU "
+                    f"(spec: model-gpu-fallback-visibility)"
+                )
+            _write_active_provider_record(
+                model_id,
+                model_dir,
+                {
+                    "requestedProviders": requested_names,
+                    "activeProviders": active,
+                    "gpuRequested": gpu_requested,
+                    "gpuActive": gpu_active,
+                },
+            )
+        except Exception as e:
+            log.warning(
+                f"{model_path}: provider-visibility bookkeeping failed for "
+                f"{model_id} (load unaffected): {e}"
+            )
         self.__input_name = self.__session.get_inputs()[0].name
         self.__input_dtype = self.__numpy_dtype(self.__session.get_inputs()[0].type)
         log.info(
