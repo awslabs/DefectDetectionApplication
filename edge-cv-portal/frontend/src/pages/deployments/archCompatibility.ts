@@ -16,6 +16,16 @@
  *
  * Kept free of React/UI imports so the fast-check property test
  * (task 3.2) can exercise it directly.
+ *
+ * vLLM keying note (vllm-multi-arch-publish-conflict design step 13): a
+ * published vLLM model is now ONE Per_JetPack_Component per packaged
+ * target, so the `vllmArchs` entries this module reads are keyed by the
+ * SUFFIXED per-JetPack component name (`model-vllm-{safe}-jetson-xavier-jp7`)
+ * and each entry holds that component's own single architecture, resolved
+ * by `vllmArchsForComponent` in `vllmArchGate.ts`. No production change is
+ * needed here: `componentSupportedArchs` already keys `vllmArchs` by the
+ * exact component name, and `inferComponentTargetArchs` already matches the
+ * `jp5`/`jp6`/`jp7` token a suffixed name carries (Requirement 2.13).
  */
 import { architectureLabel, isPluginComponent } from './pluginComponents';
 import { isVllmModelComponent } from './vllmArchGate';
@@ -43,10 +53,11 @@ export type GatedKind = 'vllm' | 'plugin';
 export function inferComponentTargetArchs(componentName: string): string[] {
   const name = String(componentName).toLowerCase();
   const archs = new Set<string>();
-  // Match a jetpack major token: jp4/jp5/jp6 or jetpack4/5/6, where the
-  // digit is the major and is not immediately followed by another digit
-  // (so "jp6" and "jp6.2" match major 6; "arm64jp5" matches major 5).
-  const re = /(?:jp|jetpack)(4|5|6)(?![0-9])/g;
+  // Match a jetpack major token: jp4/jp5/jp6/jp7 or jetpack4/5/6/7, where
+  // the digit is the major and is not immediately followed by another digit
+  // (so "jp6" and "jp6.2" match major 6; "arm64jp5" matches major 5;
+  // "arm64JP7" matches major 7 — jetpack7-support Req 7.3).
+  const re = /(?:jp|jetpack)(4|5|6|7)(?![0-9])/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(name)) !== null) {
     archs.add(`arm64_jp${m[1]}`);

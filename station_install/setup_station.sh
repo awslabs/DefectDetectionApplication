@@ -1020,7 +1020,7 @@ thing_group_name="${DDA_THING_GROUP:-DDA_transition_EC2_Group}"
 
 # --- Nucleus platform variant override (device-arch-compatibility) -----------
 # LocalServer ships as independently-versioned per-JetPack aarch64 variants
-# (arm64_jp4 / arm64_jp5 / arm64_jp6) that ALL report architecture "aarch64" to
+# (arm64_jp4 / arm64_jp5 / arm64_jp6 / arm64_jp7) that ALL report architecture "aarch64" to
 # Greengrass. A Workflow_Component packaged for more than one arm variant
 # disambiguates its per-arch manifests with a custom Nucleus platform attribute
 # `variant` (== the workflow_core arch token). Unless the device declares that

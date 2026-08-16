@@ -89,6 +89,7 @@ from workflow_core.catalog import (
     ARCH_ARM64_JP4,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
+    ARCH_ARM64_JP7,
     DEVICE_ARCHITECTURES,
     VLLM_ARCHITECTURES,
 )
@@ -232,6 +233,7 @@ ARCH_TO_GG_PLATFORM = {
     'arm64_jp4': 'aarch64',
     'arm64_jp5': 'aarch64',
     'arm64_jp6': 'aarch64',
+    'arm64_jp7': 'aarch64',
 }
 
 # arch id (workflow_core) -> per-architecture LocalServer component variant
@@ -244,6 +246,7 @@ ARCH_TO_LOCAL_SERVER_COMPONENT = {
     ARCH_ARM64_JP4: 'aws.edgeml.dda.LocalServer.arm64JP4',
     ARCH_ARM64_JP5: 'aws.edgeml.dda.LocalServer.arm64JP5',
     ARCH_ARM64_JP6: 'aws.edgeml.dda.LocalServer.arm64JP6',
+    ARCH_ARM64_JP7: 'aws.edgeml.dda.LocalServer.arm64JP7',
     ARCH_X86_64: 'aws.edgeml.dda.LocalServer.amd64',
     ARCH_X86_64_NVIDIA: 'aws.edgeml.dda.LocalServer.amd64',
 }
@@ -263,6 +266,14 @@ ARCH_TO_PUBLISH_TARGET = {
     ARCH_ARM64_JP4: 'jetson-xavier',
     ARCH_ARM64_JP5: 'jetson-xavier-jp5',
     ARCH_ARM64_JP6: 'jetson-xavier-jp6',
+    # JP7 publish-target id, following the jp5/jp6 'jetson-xavier-jpN'
+    # convention. greengrass_publish.py deliberately gains no JP7 vision
+    # compile target yet, so no published_components entry can match this
+    # id — a workflow selecting arm64_jp7 with a vision model_ref fails
+    # closed with the uncovered-architecture error instead of guessing a
+    # JetPack variant. When a JP7 vision compile target is added to
+    # greengrass_publish.py it must use this exact id.
+    ARCH_ARM64_JP7: 'jetson-xavier-jp7',
     ARCH_X86_64: 'x86_64-cpu',
     ARCH_X86_64_NVIDIA: 'x86_64-cuda',
 }

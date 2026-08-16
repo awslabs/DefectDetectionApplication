@@ -64,25 +64,18 @@ IMAGE_VER=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
 # Export as environment variable
 export IMAGE_VER 
 
-# Determine the JetPack target from the component name.
-# JP5 components are named with "JP5" (e.g. aws.edgeml.dda.LocalServer.arm64JP5),
-# JP6 components with "JP6" (e.g. aws.edgeml.dda.LocalServer.arm64JP6).
-# x86 NVIDIA components are named with "Nvidia"
-# (e.g. aws.edgeml.dda.LocalServer.amd64Nvidia): x86_64 hosts with the NVIDIA
-# GPU runtime — CUDA-based backend image + GPU onnxruntime, no JetPack.
-IS_JP5=0
-IS_JP6=0
-IS_X86_NVIDIA=0
-JETPACK_ARG=""
-if echo "$COMPONENT_NAME" | grep -q "JP6"; then
-    IS_JP6=1
-    JETPACK_ARG="6"
-elif echo "$COMPONENT_NAME" | grep -q "JP5"; then
-    IS_JP5=1
-    JETPACK_ARG="5"
-elif echo "$COMPONENT_NAME" | grep -q "Nvidia"; then
-    IS_X86_NVIDIA=1
-fi
+# Determine the build target from the component name (JP5/JP6/JP7/Nvidia
+# tokens). The derivation lives in the sourceable helper
+# scripts/build-target-derivation.sh (spec: jetpack7-support) — the single
+# source of truth, property-testable without running a build.
+# derive_build_target sets IS_JP5/IS_JP6/IS_JP7/IS_X86_NVIDIA and JETPACK_ARG,
+# and exports BACKEND_DOCKERFILE per the derivation table (JP5 -> an L4T r35.x
+# base, JP6 -> r36.x, JP7 -> a CUDA 13.0 Ubuntu 24.04 arm64 base, Nvidia ->
+# Dockerfile.x86_64_nvidia, no token -> the default CPU-only Dockerfile).
+# resolve_onnxruntime_gpu (called below, after the derivation) sets
+# ONNXRUNTIME_GPU with the existing ONNXRUNTIME_GPU=0 opt-out semantics.
+. "$(dirname "$0")/scripts/build-target-derivation.sh"
+derive_build_target "$COMPONENT_NAME"
 
 # DDA backend interpreter: 3.10 on JP6 (the Jetson AI Lab vLLM wheels are
 # cp310-only), 3.11 elsewhere ($PYTHON_VERSION — JP5/x86 behavior unchanged).
@@ -100,6 +93,7 @@ echo "Ubuntu version: $IMAGE_VER"
 echo "Architecture: $ARCHITECTURE"
 echo "JetPack 5: $IS_JP5"
 echo "JetPack 6: $IS_JP6"
+echo "JetPack 7: $IS_JP7"
 echo "x86 NVIDIA: $IS_X86_NVIDIA"
 echo "Backend python: $BACKEND_PYTHON_VERSION (edgemlsdk/tooling python: $PYTHON_VERSION)"
 # copy recipe to greengrass-build
@@ -110,7 +104,29 @@ rm -rf ./custom-build
 mkdir -p ./custom-build/$COMPONENT_NAME
 
 # build Docker images
-# to save build time, remove "--no-cache" parameter
+#
+# Docker layer cache policy (DDA_BUILD_NO_CACHE). Historically both
+# docker-compose build invocations below hard-coded --no-cache, so every
+# build recompiled everything from source — on JP7 that is the ~1-2 h GPU
+# onnxruntime build PLUS the multi-hour from-source vLLM wheel compile, even
+# when the change under test was a single late layer. The cache is now reused
+# by default so iteration builds reuse those layers, and --no-cache is
+# opt-in for the cases that genuinely need a provably clean image:
+#
+#   DDA_BUILD_NO_CACHE=1 ./gdk-component-build-and-publish.sh ...
+#
+# Set it for release/publish builds where reproducibility from scratch
+# matters, or when a base image or apt pin changed in a way Docker cannot
+# see. Note the cache is only reused when the earlier Dockerfile layers are
+# byte-identical: editing a line invalidates that layer and everything after
+# it, which is why the expensive compiles sit early in Dockerfile.jp7.
+DOCKER_BUILD_CACHE_ARGS=""
+if [ "${DDA_BUILD_NO_CACHE:-0}" = "1" ]; then
+  DOCKER_BUILD_CACHE_ARGS="--no-cache"
+  echo "Docker layer cache: DISABLED (DDA_BUILD_NO_CACHE=1) — full rebuild"
+else
+  echo "Docker layer cache: ENABLED (set DDA_BUILD_NO_CACHE=1 for a clean rebuild)"
+fi
 cd src
 #edgemlsdk
 cd edgemlsdk/
@@ -154,33 +170,22 @@ docker cp $id:/tars/triton_installation_files.tar.gz  $(pwd)/backend/edgemlsdk/
 docker rm -v $id
 echo done copying binaries
 # rest of the application
-# Select the backend Dockerfile: JP5 uses an L4T r35.x base, JP6 an L4T r36.x
-# base, x86 NVIDIA a CUDA x86 base (Dockerfile.x86_64_nvidia).
-if [ "$IS_JP6" = "1" ]; then
-  export BACKEND_DOCKERFILE="Dockerfile.jp6"
-elif [ "$IS_JP5" = "1" ]; then
-  export BACKEND_DOCKERFILE="Dockerfile.jp5"
-elif [ "$IS_X86_NVIDIA" = "1" ]; then
-  export BACKEND_DOCKERFILE="Dockerfile.x86_64_nvidia"
-else
-  export BACKEND_DOCKERFILE="Dockerfile"
-fi
+# The backend Dockerfile was selected by derive_build_target above (helper
+# scripts/build-target-derivation.sh): JP5 uses an L4T r35.x base, JP6 an L4T
+# r36.x base, JP7 a CUDA 13.0 Ubuntu 24.04 arm64 base, x86 NVIDIA a CUDA x86
+# base (Dockerfile.x86_64_nvidia), everything else the default CPU-only
+# Dockerfile.
 echo "Backend Dockerfile: $BACKEND_DOCKERFILE"
 
-# ── GPU ONNX Runtime (JP5/JP6/x86 NVIDIA) ──────────────────────────────────
+# ── GPU ONNX Runtime (JP5/JP6/JP7/x86 NVIDIA) ───────────────────────────────
 # The OnnxRunner uses a GPU (CUDA/TensorRT) onnxruntime in the backend image.
-# GPU is enabled by default on JetPack 5 and 6 (built from source, ~1-2h, can
-# be turned off for a fast CPU-only build with ONNXRUNTIME_GPU=0) and on the
-# x86 NVIDIA target (Dockerfile.x86_64_nvidia installs the prebuilt x86_64
-# onnxruntime-gpu wheel — PyPI ships GPU wheels for x86_64 only, so no source
-# build is needed there). JetPack 4 stays CPU-only (its native python 3.6 has
-# no compatible build path) and plain x86 uses the CPU wheel.
-if [ "$IS_JP6" = "1" ] || [ "$IS_JP5" = "1" ] || [ "$IS_X86_NVIDIA" = "1" ]; then
-  export ONNXRUNTIME_GPU="${ONNXRUNTIME_GPU:-1}"
-else
-  export ONNXRUNTIME_GPU=0
-fi
-echo "ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU (1=GPU onnxruntime: source build on JP5/JP6, prebuilt wheel on x86 NVIDIA. Set 0 for fast CPU-only build)"
+# GPU is enabled by default on JetPack 5, 6 and 7 (built from source, ~1-2h,
+# can be turned off for a fast CPU-only build with ONNXRUNTIME_GPU=0) and on
+# the x86 NVIDIA target (prebuilt x86_64 onnxruntime-gpu wheel). The default
+# and the ONNXRUNTIME_GPU=0 opt-out live in resolve_onnxruntime_gpu (helper
+# sourced above); non-GPU targets are forced to 0 exactly as before.
+resolve_onnxruntime_gpu
+echo "ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU (1=GPU onnxruntime: source build on JP5/JP6/JP7, prebuilt wheel on x86 NVIDIA. Set 0 for fast CPU-only build)"
 
 echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 # Select profiles by architecture. The `tegra` service targets Jetson
@@ -191,12 +196,12 @@ if [ "$ARCHITECTURE" = "x86_64" ]; then
   # ONNXRUNTIME_GPU is passed explicitly (as on arm) so the x86 NVIDIA target's
   # Dockerfile.x86_64_nvidia installs the GPU onnxruntime wheel; plain x86
   # builds keep ONNXRUNTIME_GPU=0 (CPU wheel).
-  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU --no-cache \
+  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU $DOCKER_BUILD_CACHE_ARGS \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 else
   docker-compose --profile tegra --profile generic -f docker-compose.yaml build \
     --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" \
-    --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU --no-cache \
+    --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU $DOCKER_BUILD_CACHE_ARGS \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 fi
 cd ..

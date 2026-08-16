@@ -33,6 +33,7 @@ const TARGET_ARCHITECTURE_OPTIONS = [
   { label: 'arm64_jp4 (JetPack 4)', value: 'arm64_jp4' },
   { label: 'arm64_jp5 (JetPack 5)', value: 'arm64_jp5' },
   { label: 'arm64_jp6 (JetPack 6)', value: 'arm64_jp6' },
+  { label: 'arm64_jp7 (JetPack 7)', value: 'arm64_jp7' },
 ];
 
 interface LogGroup {
@@ -222,6 +223,7 @@ export default function DeviceDetail() {
     if (!localServer) return null;
     const suffix = localServer.componentName.split('.').pop() || '';
     const map: Record<string, string> = {
+      arm64JP7: 'arm64_jp7',
       arm64JP6: 'arm64_jp6',
       arm64JP5: 'arm64_jp5',
       arm64: 'arm64_jp4',

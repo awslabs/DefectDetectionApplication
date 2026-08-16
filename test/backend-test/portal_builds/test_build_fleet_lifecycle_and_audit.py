@@ -573,13 +573,13 @@ class TestLifecycleIntegration:
         assert "pending_action" not in _get_record("srv-h")
 
     def test_launch_provisions_and_registers_the_server(self):
-        # The Ubuntu 22.04 SSM public parameter / Canonical DescribeImages
+        # The Ubuntu SSM public parameter / Canonical DescribeImages
         # catalog is not part of the moto backend, so AMI resolution is
         # pinned to a moto-known AMI; RunInstances and the registration
         # run for real against moto (Req 6.5).
         ami_id = _moto_ami()
         with _as_admin() as patches, \
-                mock.patch.object(build_fleet, "resolve_ubuntu_2204_ami",
+                mock.patch.object(build_fleet, "resolve_ubuntu_ami",
                                   return_value=ami_id) as resolve:
             response = build_fleet.handler(
                 _event("/build-servers", "POST",
@@ -588,7 +588,8 @@ class TestLifecycleIntegration:
                 None)
 
         assert response["statusCode"] == 201, response["body"]
-        resolve.assert_called_once_with(build_domain.ARCH_ARM64)
+        # No ubuntu_version in the request: 22.04, the pre-JP7 behavior.
+        resolve.assert_called_once_with(build_domain.ARCH_ARM64, "22.04")
         server = json.loads(response["body"])["server"]
         server_id = server["server_id"]
 
@@ -598,6 +599,7 @@ class TestLifecycleIntegration:
         assert record["name"] == "arm-server-new"
         assert record["cpu_architecture"] == build_domain.ARCH_ARM64
         assert record["instance_type"] == "m6g.4xlarge"
+        assert record["ubuntu_version"] == "22.04"
         assert record["created_by"] == _ADMIN["user_id"]
         pending = record["pending_action"]
         assert pending["action"] == "launch"
@@ -622,9 +624,170 @@ class TestLifecycleIntegration:
                                        _ADMIN["user_id"])
         assert kwargs["details"]["name"] == "arm-server-new"
         assert kwargs["details"]["architecture"] == build_domain.ARCH_ARM64
+        assert kwargs["details"]["ubuntu_version"] == "22.04"
         assert kwargs["details"]["instance_id"] == record["instance_id"]
         assert kwargs["details"]["instance_type"] == "m6g.4xlarge"
         assert kwargs["details"]["ami_id"] == ami_id
 
         # The fleet list shows the launched server (Req 6.5).
         assert server_id in self._list_servers()
+
+    def test_launch_2404_arm64_registers_the_jp7_host(self):
+        # Ubuntu 24.04 (noble) is the JP7 build host (jetpack7-support
+        # design §10): an arm64 launch with ubuntu_version 24.04 resolves
+        # the noble AMI and records the release on the server.
+        ami_id = _moto_ami()
+        with _as_admin() as patches, \
+                mock.patch.object(build_fleet, "resolve_ubuntu_ami",
+                                  return_value=ami_id) as resolve:
+            response = build_fleet.handler(
+                _event("/build-servers", "POST",
+                       body={"name": "jp7-server",
+                             "architecture": build_domain.ARCH_ARM64,
+                             "ubuntu_version": "24.04"}),
+                None)
+
+        assert response["statusCode"] == 201, response["body"]
+        resolve.assert_called_once_with(build_domain.ARCH_ARM64, "24.04")
+        server = json.loads(response["body"])["server"]
+        server_id = server["server_id"]
+
+        record = _get_record(server_id)
+        assert record["cpu_architecture"] == build_domain.ARCH_ARM64
+        assert record["ubuntu_version"] == "24.04"
+
+        kwargs = _assert_success_audit(patches, "launch", server_id,
+                                       _ADMIN["user_id"])
+        assert kwargs["details"]["ubuntu_version"] == "24.04"
+
+    def test_launch_2404_x86_64_rejected_without_launching(self):
+        # 24.04 exists to host JP7 builds, which require an arm64 host:
+        # requesting it for x86_64 is rejected as an invalid request and
+        # launches nothing (fail closed).
+        reservations_before = len(
+            _EC2.describe_instances()["Reservations"])
+
+        with _as_admin() as patches:
+            response = build_fleet.handler(
+                _event("/build-servers", "POST",
+                       body={"name": "bad-server",
+                             "architecture": build_domain.ARCH_X86_64,
+                             "ubuntu_version": "24.04"}),
+                None)
+
+        assert response["statusCode"] == 400, response["body"]
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "LAUNCH_REQUEST_INVALID"
+        rules = [e["rule"] for e in body["error"]["details"]["errors"]]
+        assert "ubuntu_version_arch_unsupported" in rules
+
+        assert _SERVERS.scan().get("Items", []) == []
+        assert len(_EC2.describe_instances()["Reservations"]) == \
+            reservations_before
+        patches.handler_audit.assert_not_called()
+
+    def test_launch_unknown_ubuntu_version_rejected(self):
+        # Only the supported releases are accepted; anything else is an
+        # invalid request that launches nothing.
+        with _as_admin():
+            response = build_fleet.handler(
+                _event("/build-servers", "POST",
+                       body={"name": "bad-server",
+                             "architecture": build_domain.ARCH_ARM64,
+                             "ubuntu_version": "18.04"}),
+                None)
+
+        assert response["statusCode"] == 400, response["body"]
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "LAUNCH_REQUEST_INVALID"
+        rules = [e["rule"] for e in body["error"]["details"]["errors"]]
+        assert "ubuntu_version_invalid" in rules
+        assert _SERVERS.scan().get("Items", []) == []
+
+
+# ---------------------------------------------------------------------------
+# Ubuntu AMI resolution oracles (jetpack7-support design §10)
+# ---------------------------------------------------------------------------
+
+class TestUbuntuAmiResolution:
+    """resolve_ubuntu_ami consults the exact Canonical SSM public
+    parameter for the requested release/architecture, falls back to the
+    release's DescribeImages name filter, and fails closed on an
+    unmapped pairing. The 22.04 paths are the pre-JP7 oracles
+    byte-preserved; 24.04 (noble) uses the ebs-gp3 / hvm-ssd-gp3
+    canonical path shape."""
+
+    #: (arch, ubuntu_version) -> expected canonical SSM parameter path.
+    SSM_ORACLES = {
+        (build_domain.ARCH_ARM64, "22.04"):
+            "/aws/service/canonical/ubuntu/server/22.04/stable/current/"
+            "arm64/hvm/ebs-gp2/ami-id",
+        (build_domain.ARCH_X86_64, "22.04"):
+            "/aws/service/canonical/ubuntu/server/22.04/stable/current/"
+            "amd64/hvm/ebs-gp2/ami-id",
+        (build_domain.ARCH_ARM64, "24.04"):
+            "/aws/service/canonical/ubuntu/server/24.04/stable/current/"
+            "arm64/hvm/ebs-gp3/ami-id",
+    }
+
+    def test_ssm_parameter_paths(self):
+        for (arch, version), expected in self.SSM_ORACLES.items():
+            with mock.patch.object(build_fleet.ssm, "get_parameter",
+                                   return_value={
+                                       "Parameter": {"Value": "ami-oracle"},
+                                   }) as get_parameter:
+                assert build_fleet.resolve_ubuntu_ami(arch, version) == \
+                    "ami-oracle"
+            get_parameter.assert_called_once_with(Name=expected)
+
+    def test_default_version_is_2204(self):
+        # No version argument: the 22.04 parameter, i.e. the pre-JP7
+        # behavior byte-preserved.
+        with mock.patch.object(build_fleet.ssm, "get_parameter",
+                               return_value={
+                                   "Parameter": {"Value": "ami-default"},
+                               }) as get_parameter:
+            assert build_fleet.resolve_ubuntu_ami(
+                build_domain.ARCH_ARM64) == "ami-default"
+        get_parameter.assert_called_once_with(
+            Name=self.SSM_ORACLES[(build_domain.ARCH_ARM64, "22.04")])
+
+    def test_noble_describe_images_fallback(self):
+        # SSM lookup failure: the noble arm64 fallback filters on the
+        # hvm-ssd-gp3 noble name pattern and returns the newest image.
+        ssm_error = build_fleet.ClientError(
+            {"Error": {"Code": "ParameterNotFound", "Message": "missing"}},
+            "GetParameter")
+        images = {"Images": [
+            {"ImageId": "ami-older", "CreationDate": "2025-01-01T00:00:00Z"},
+            {"ImageId": "ami-newest", "CreationDate": "2025-06-01T00:00:00Z"},
+        ]}
+        with mock.patch.object(build_fleet.ssm, "get_parameter",
+                               side_effect=ssm_error), \
+                mock.patch.object(build_fleet.ec2, "describe_images",
+                                  return_value=images) as describe:
+            assert build_fleet.resolve_ubuntu_ami(
+                build_domain.ARCH_ARM64, "24.04") == "ami-newest"
+        filters = {f["Name"]: f["Values"]
+                   for f in describe.call_args.kwargs["Filters"]}
+        assert filters["name"] == \
+            ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*"]
+        assert filters["architecture"] == ["arm64"]
+
+    def test_unmapped_pairing_fails_closed_before_any_aws_call(self):
+        # 24.04 x86_64 (and unknown releases) have no AMI mapping: the
+        # resolver raises without consulting SSM or EC2.
+        with mock.patch.object(build_fleet.ssm, "get_parameter") as ssm_call, \
+                mock.patch.object(build_fleet.ec2,
+                                  "describe_images") as ec2_call:
+            for arch, version in ((build_domain.ARCH_X86_64, "24.04"),
+                                  (build_domain.ARCH_ARM64, "18.04")):
+                try:
+                    build_fleet.resolve_ubuntu_ami(arch, version)
+                    raise AssertionError(
+                        f"resolve_ubuntu_ami must fail closed for "
+                        f"({arch}, {version})")
+                except RuntimeError as e:
+                    assert "AMI mapping" in str(e)
+        ssm_call.assert_not_called()
+        ec2_call.assert_not_called()

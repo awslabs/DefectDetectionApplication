@@ -140,6 +140,94 @@ describe('FleetPage fleet list (Requirement 6.1)', () => {
   });
 });
 
+describe('FleetPage launch modal Ubuntu version (jetpack7-support design §10)', () => {
+  /** Opens the launch modal from the table header. */
+  async function openLaunchModal() {
+    await renderLoadedFleetPage();
+    fireEvent.click(screen.getByRole('button', { name: 'Launch server' }));
+    await waitFor(() => {
+      expect(screen.getByText('Launch build server')).toBeInTheDocument();
+    });
+  }
+
+  /** The modal footer submit (the header button shares the label). */
+  function submitButton() {
+    const buttons = screen.getAllByRole('button', { name: 'Launch server' });
+    return buttons[buttons.length - 1];
+  }
+
+  beforeEach(() => {
+    launchBuildServer.mockResolvedValue({ server: SERVERS[0] });
+  });
+
+  it('defaults ARM64 servers to Ubuntu 22.04', async () => {
+    await openLaunchModal();
+
+    fireEvent.change(screen.getByLabelText('Server name'), {
+      target: { value: 'new-arm' },
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'ARM64' }));
+
+    // The Ubuntu version choice appears for ARM64, defaulted to 22.04.
+    expect(
+      screen.getByRole('radio', { name: 'Ubuntu 22.04 (default)' })
+    ).toBeChecked();
+
+    fireEvent.click(submitButton());
+    await waitFor(() => {
+      expect(launchBuildServer).toHaveBeenCalledWith({
+        name: 'new-arm',
+        architecture: 'arm64',
+        ubuntu_version: '22.04',
+      });
+    });
+  });
+
+  it('launches an Ubuntu 24.04 (JP7) ARM64 server when selected', async () => {
+    await openLaunchModal();
+
+    fireEvent.change(screen.getByLabelText('Server name'), {
+      target: { value: 'jp7-builder' },
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'ARM64' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Ubuntu 24.04' }));
+
+    fireEvent.click(submitButton());
+    await waitFor(() => {
+      expect(launchBuildServer).toHaveBeenCalledWith({
+        name: 'jp7-builder',
+        architecture: 'arm64',
+        ubuntu_version: '24.04',
+      });
+    });
+  });
+
+  it('hides the Ubuntu choice for x86_64 and resets a 24.04 selection to 22.04', async () => {
+    await openLaunchModal();
+
+    fireEvent.change(screen.getByLabelText('Server name'), {
+      target: { value: 'x86-new' },
+    });
+    // Pick ARM64 + 24.04, then switch to x86_64: 24.04 is arm64-only.
+    fireEvent.click(screen.getByRole('radio', { name: 'ARM64' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Ubuntu 24.04' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'x86_64' }));
+
+    expect(
+      screen.queryByRole('radio', { name: 'Ubuntu 24.04' })
+    ).toBeNull();
+
+    fireEvent.click(submitButton());
+    await waitFor(() => {
+      expect(launchBuildServer).toHaveBeenCalledWith({
+        name: 'x86-new',
+        architecture: 'x86_64',
+        ubuntu_version: '22.04',
+      });
+    });
+  });
+});
+
 describe('FleetPage terminate confirmation (Requirements 6.6, 6.12)', () => {
   it('requires the exact typed server name before the terminate request can be sent (Requirement 6.6)', async () => {
     await openTerminateModal('x86-builder');

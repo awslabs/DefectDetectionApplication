@@ -1,0 +1,401 @@
+# ── JP7 base image selection (jetpack7-support, Requirements 2.1, 2.2, 2.5, 2.6) ─
+# CHECKED-AND-CHOSEN RATIONALE: NVIDIA NGC was re-checked at implementation
+# time (registry tag list for nvcr.io/nvidia/l4t-jetpack): the newest published
+# tag is r36.4.0 — there is NO l4t-jetpack tag for Jetson Linux r38.x, so the
+# Requirement 2.5 preferred option does not exist and the Requirement 2.2
+# fallback applies: a nvcr.io/nvidia/cuda CUDA 13.0.x Ubuntu 24.04 arm64 image,
+# the NVIDIA-developer-forum-recommended base for Jetson Thor (r38.x, CUDA 13,
+# SBSA-aligned aarch64) containers.
+#   Registry path : nvcr.io/nvidia/cuda
+#   Tag           : 13.0.2-devel-ubuntu24.04
+#   Digest        : sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6
+# The digest is the multi-arch manifest-list digest (linux/arm64 is published
+# under it), is character-identical to the digest in the FROM reference below,
+# and is IDENTICAL to the digest pinned by src/backend/Dockerfile.jp7
+# (Requirement 2.6 — both JP7 Dockerfiles reference the same base digest).
+# Unlike the l4t-jetpack bases used by Dockerfile.jp5/Dockerfile.jp6, this
+# image bundles only the CUDA 13.0 toolkit — NOT cuDNN or TensorRT — so this
+# Dockerfile installs the cuDNN 9.x and TensorRT 10.x dev packages itself at
+# EXACT pinned versions (the same pins as src/backend/Dockerfile.jp7) from the
+# NVIDIA CUDA apt repository already configured in the base image:
+#   CUDA     : 13.0 (bundled in base)
+#   cuDNN    : 9.14.0  (apt pin 9.14.0.64-1)
+#   TensorRT : 10.14.1 (apt pin 10.14.1.48-1+cuda13.0)
+# Triton server re-pin (Requirement 3.1 / design §2): tags/v2.63.0 — the
+# GitHub release corresponding to NGC container 25.11, which is based on
+# CUDA 13.0.2 (exactly matching this base image's CUDA 13.0.2) and built on
+# Ubuntu 24.04. The v2.45.0 pin used by Dockerfile.jp5/Dockerfile.jp6 targets
+# CUDA 12.4 / Ubuntu 22.04 and is not compatible with this base.
+# Interpreter: CPython 3.11 from the deadsnakes PPA — deadsnakes publishes
+# python3.11 binaries for noble/arm64 (verified against the PPA's
+# noble/binary-arm64 package index at implementation time), so the JP5-style
+# from-source CPython fallback documented in the design is NOT needed. The
+# Python3_* env pins below make the Triton Python-backend stub link
+# libpython3.11.
+# Toolchain: noble's default gcc-13 (via build-essential) replaces the jammy
+# toolchain — CUDA 13.0's nvcc supports gcc-13 as host compiler, so no
+# toolchain PPA or gcc override steps are needed.
+ARG OS
+ARG PLATFORM
+ARG PWSH_ARCH
+ARG PYTHON_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── Build environment (native only, no QEMU) ──────────────────────────────
+RUN NCPU=$(nproc) && \
+    printf "JOBS=$NCPU\nMAKE_CMD=\"make -j$NCPU\"\nNINJA_CMD=\"ninja -j$NCPU\"\nB2_CMD=\"./b2 -j$NCPU\"\nTRITON_PARALLEL=$NCPU\n" > /tmp/build-env.sh && \
+    echo "=== Build environment ===" && cat /tmp/build-env.sh
+
+# ── 0. GPU libraries: cuDNN 9.x + TensorRT 10.x dev, EXACT pins ────────────
+# The base image bundles the CUDA 13.0 toolkit but not cuDNN/TensorRT (unlike
+# the l4t-jetpack bases of Dockerfile.jp5/Dockerfile.jp6, which ship both).
+# Install them at exact pinned versions (no floating or range specifiers) from
+# the NVIDIA CUDA apt repository the base image ships pre-configured
+# (/etc/apt/sources.list.d/cuda*, ubuntu2404/sbsa), so any GPU-touching Triton
+# compile step resolves the SAME cuDNN/TensorRT versions the deployed JP7
+# backend image runs (identical pins to src/backend/Dockerfile.jp7).
+# tensorrt-dev's `=` Depends alone are NOT sufficient to pin its closure:
+# once the repo serves newer candidates (TensorRT 10.16.x under the same
+# package names, and 11.x for the unversioned dev/headers names) apt refuses
+# to auto-select a non-candidate version of an indirect dependency
+# ("Depends: libnvinfer-dev (= 10.14.1.48-1+cuda13.0) but 11.2.1.2-1+cuda13.3
+# is to be installed"). So the FULL tensorrt-dev dependency closure — dev,
+# headers, and the versioned runtime packages, verified against the repo's
+# Packages index at 10.14.1.48-1+cuda13.0 — is pinned explicitly below.
+ARG CUDNN_PKG_VERSION=9.14.0.64-1
+ARG TENSORRT_PKG_VERSION=10.14.1.48-1+cuda13.0
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libcudnn9-cuda-13=${CUDNN_PKG_VERSION} \
+    libcudnn9-dev-cuda-13=${CUDNN_PKG_VERSION} \
+    libcudnn9-headers-cuda-13=${CUDNN_PKG_VERSION} \
+    tensorrt-dev=${TENSORRT_PKG_VERSION} \
+    libnvinfer-dev=${TENSORRT_PKG_VERSION} \
+    libnvinfer-lean-dev=${TENSORRT_PKG_VERSION} \
+    libnvinfer-dispatch-dev=${TENSORRT_PKG_VERSION} \
+    libnvinfer-plugin-dev=${TENSORRT_PKG_VERSION} \
+    libnvinfer-vc-plugin-dev=${TENSORRT_PKG_VERSION} \
+    libnvonnxparsers-dev=${TENSORRT_PKG_VERSION} \
+    libnvinfer-headers-python-plugin-dev=${TENSORRT_PKG_VERSION} \
+    libnvinfer-headers-dev=${TENSORRT_PKG_VERSION} \
+    libnvinfer-headers-plugin-dev=${TENSORRT_PKG_VERSION} \
+    libnvinfer10=${TENSORRT_PKG_VERSION} \
+    libnvinfer-lean10=${TENSORRT_PKG_VERSION} \
+    libnvinfer-dispatch10=${TENSORRT_PKG_VERSION} \
+    libnvinfer-plugin10=${TENSORRT_PKG_VERSION} \
+    libnvinfer-vc-plugin10=${TENSORRT_PKG_VERSION} \
+    libnvonnxparsers10=${TENSORRT_PKG_VERSION} && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── 1. System packages ─────────────────────────────────────────────────────
+# Same set as Dockerfile.jp6 with the noble 64-bit time_t rename applied:
+# libcurl4 -> libcurl4t64 (every other name verified present on noble/arm64).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential software-properties-common lsb-release git curl wget gpg unzip rsync \
+    clang \
+    libcurl4t64 libcurl4-openssl-dev libsqlite3-dev gnupg pkg-config libudev-dev libssl-dev \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x \
+    gstreamer1.0-alsa gstreamer1.0-gl gstreamer1.0-gtk3 gstreamer1.0-qt5 \
+    libgstrtspserver-1.0-dev libgstreamer-plugins-good1.0-dev \
+    libgirepository1.0-dev gobject-introspection \
+    libxml2-dev libglib2.0-dev libusb-1.0-0-dev libgtk-3-dev libjpeg-dev \
+    gtk-doc-tools xsltproc gettext \
+    libcairo2 libcairo2-dev libexif-dev libarchive-dev libnuma-dev libb64-dev \
+    rapidjson-dev libre2-dev python3-dev \
+    ninja-build checkinstall ffmpeg swig lcov \
+    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LD_LIBRARY_PATH=/usr/local/lib/
+
+# ── 2. CMake 3.x (JP7 / Ubuntu 24.04 base) ────────────────────────────────
+# Install CMake 3.x from the official upstream binary tarball rather than the
+# Kitware apt repo. The latest Kitware cmake is now 4.x (which removed support
+# for `cmake_minimum_required(VERSION < 3.5)` and breaks Triton's transitively
+# fetched dependencies), and pinning the apt packages to a 3.x version fails
+# with "cmake : Breaks: cmake-data (< 4.3)" dependency conflicts. The upstream
+# tarball is self-contained (no apt resolution) and gives a clean, pinned 3.x.
+RUN CMAKE_VER=3.31.8 && \
+    ARCH_TAG=$(uname -m) && \
+    if [ "$ARCH_TAG" = "x86_64" ]; then CM_ARCH=x86_64; else CM_ARCH=aarch64; fi && \
+    wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CM_ARCH}.sh" -O /tmp/cmake.sh && \
+    sh /tmp/cmake.sh --skip-license --prefix=/usr/local && \
+    rm -f /tmp/cmake.sh && \
+    cmake --version
+
+# ── 3. Python 3.11 + pip tooling ──────────────────────────────────────────
+# The JP7 base is Ubuntu 24.04 (noble), whose default repos ship Python 3.12,
+# not 3.11. The DDA stack is pinned to 3.11, so add the deadsnakes PPA (which
+# publishes python3.11 binaries for noble/arm64 — verified at implementation
+# time) before installing. No kitware-source cleanup is needed on this base
+# (the l4t-jetpack bases carried a kitware apt entry; nvcr.io/nvidia/cuda does
+# not). The deadsnakes noble python3.11 carries no PEP 668 EXTERNALLY-MANAGED
+# marker, so the bare pip3 layers below work exactly as on jp5/jp6.
+RUN apt-get update && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y python${PYTHON_VERSION}-dev libpython${PYTHON_VERSION} \
+    python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-distutils python3-pip && \
+    rm -rf /var/lib/apt/lists/* && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
+    rm -f /usr/bin/python && ln -s /usr/bin/python${PYTHON_VERSION} /usr/bin/python && \
+    python${PYTHON_VERSION} -m pip install --user --upgrade pip && \
+    python${PYTHON_VERSION} -m pip install --upgrade build
+
+# Python3_* env pins to the deadsnakes 3.11 so the Triton Python-backend stub
+# links libpython3.11 (same layout as Dockerfile.jp6 — deadsnakes installs to
+# the identical paths on noble/arm64).
+ENV PYTHON_EXECUTABLE=/usr/bin/python3.11
+ENV Python3_EXECUTABLE=/usr/bin/python3.11
+ENV Python3_INCLUDE_DIR=/usr/include/python3.11
+ENV Python3_LIBRARY=/usr/lib/aarch64-linux-gnu/libpython3.11.so
+
+# ── 4. Python packages ────────────────────────────────────────────────────
+# Several of the bootstrap packages (wheel, packaging, PyYAML, ...) are
+# Debian-managed in the noble image (apt's python3-pip pulls them in) with
+# no pip RECORD file, so pip cannot uninstall them for an upgrade
+# ("error: uninstall-no-record-file"). Install the whole bootstrap set with
+# --ignore-installed so the pip copies shadow the distro copies.
+RUN pip3 install --ignore-installed pip setuptools==64.0.3 wheel build hatchling packaging==24.2 && \
+    pip3 install --ignore-installed PyYAML && \
+    pip3 install conan && conan profile detect && \
+    pip3 install --upgrade pydantic setuptools==64.0.3 meson && \
+    pip3 install Cython boto3 awscrt multiprocess coverage pylint && \
+    pip3 install --ignore-installed pygobject==3.44.1
+
+# ── 5. AWS CLI ─────────────────────────────────────────────────────────────
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-${PLATFORM}.zip" -o awscliv2.zip && \
+    unzip -q awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
+
+# ── 6. PowerShell ─────────────────────────────────────────────────────────
+RUN curl -L -o /tmp/powershell.tar.gz https://github.com/PowerShell/PowerShell/releases/download/v7.2.3/powershell-7.2.3-linux-$PWSH_ARCH.tar.gz && \
+    mkdir -p /opt/microsoft/powershell/7 && \
+    tar zxf /tmp/powershell.tar.gz -C /opt/microsoft/powershell/7 && \
+    chmod +x /opt/microsoft/powershell/7/pwsh && \
+    ln -s /opt/microsoft/powershell/7/pwsh /usr/bin/pwsh && \
+    rm /tmp/powershell.tar.gz
+
+# ── 7. OpenSSL 3.x (cached or built from source) ──────────────────────────
+RUN mkdir -p /dependencies/debs
+COPY cached-debs/ /dependencies/cached-debs/
+RUN . /tmp/build-env.sh && \
+    if ls /dependencies/cached-debs/openssl*.deb 1>/dev/null 2>&1; then \
+        echo "=== Using cached OpenSSL deb ===" && \
+        cp /dependencies/cached-debs/openssl*.deb /dependencies/debs/ && \
+        dpkg -i /dependencies/debs/openssl*.deb; \
+    else \
+        echo "=== Building OpenSSL from source ===" && \
+        cd /dependencies && \
+        git clone --depth 1 -b openssl-3.3.0 https://github.com/openssl/openssl.git && \
+        cd openssl && \
+        ./Configure --prefix=/usr/local/ssl --openssldir=/usr/local/ssl \
+            shared zlib no-docs no-tests && \
+        $MAKE_CMD && \
+        test -f libssl.so || (echo "OpenSSL build failed" && exit 1) && \
+        checkinstall -y --fstrans=no && \
+        mv /dependencies/openssl/openssl*.deb /dependencies/debs && \
+        rm -rf /dependencies/openssl; \
+    fi
+RUN rm -rf /usr/local/include/openssl
+
+# ── 8. aws-crt-cpp ────────────────────────────────────────────────────────
+COPY patches/aws-crt-cpp-s2n.diff /tmp/aws-crt-cpp-s2n.diff
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    git clone https://github.com/awslabs/aws-crt-cpp.git && \
+    cd aws-crt-cpp && \
+    git checkout 6158ecefd0e0d53b2cf5e9d09f8c42f57e741e35 && \
+    git submodule update --init --recursive && \
+    cp /tmp/aws-crt-cpp-s2n.diff crt/s2n/aws-crt-cpp-s2n.diff && \
+    cd crt/s2n && git apply aws-crt-cpp-s2n.diff && \
+    mkdir /dependencies/aws-crt-cpp/build && \
+    cd /dependencies/aws-crt-cpp/build && \
+    cmake -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/ \
+        -DCMAKE_INSTALL_PREFIX=/usr/ -DUSE_OPENSSL=ON -DBUILD_SHARED_LIBS=ON ../ && \
+    $NINJA_CMD install
+
+# ── 9. aws-sdk-cpp ────────────────────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    PLATFORM=$(uname -m) && \
+    git clone https://github.com/aws/aws-sdk-cpp && \
+    cd aws-sdk-cpp && \
+    git checkout c63eb9e5f059ae2595cae8c79732c6938ca36b7d && \
+    git submodule update --init --recursive && \
+    mkdir build && cd build && \
+    cmake -GNinja -DBUILD_TESTING=OFF \
+        -DCMAKE_MODULE_PATH=/usr/lib/$PLATFORM-linux-gnu/cmake \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/usr/ -DCMAKE_INSTALL_PREFIX=/usr/ \
+        -DBUILD_DEPS=OFF -DBUILD_ONLY="s3;sts;transfer;iot;iot-data;sagemaker-edge;secretsmanager" ../ && \
+    $NINJA_CMD install
+
+# ── 10. aws-c-iot ─────────────────────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    git clone https://github.com/awslabs/aws-c-iot.git && \
+    cd aws-c-iot && \
+    git checkout 6e59b4660fecbc20c74493aee7da8a7b486b2966 && \
+    git submodule update --init --recursive && \
+    mkdir build && cd build && \
+    cmake -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_PREFIX_PATH=/usr/ \
+        -DCMAKE_INSTALL_PREFIX=/usr/ -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_BUILD_TYPE="Release" -DBUILD_TESTING=OFF \
+        -DCMAKE_HAVE_THREADS_LIBRARY=1 -DCMAKE_USE_PTHREADS_INIT=1 -DTHREADS_PREFER_PTHREAD_FLAG=ON ../ && \
+    $NINJA_CMD install
+
+# ── 11. Aravis SDK ────────────────────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    git clone https://github.com/AravisProject/aravis.git && \
+    cd aravis && \
+    git checkout 96cea9835ce1535547d8680c8b0be33e97f6cb30 && \
+    git submodule update --init --recursive && \
+    meson setup build -Dtests=false -Dintrospection=disabled && \
+    cd build && \
+    $NINJA_CMD && \
+    ninja install
+
+# ── 12. aws-iot-device-sdk-cpp-v2 ─────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    PLATFORM=$(uname -m) && \
+    git clone https://github.com/aws/aws-iot-device-sdk-cpp-v2.git && \
+    cd aws-iot-device-sdk-cpp-v2 && \
+    git checkout f7cbf0982d2f23902406a0ba696a1a900b732a7e && \
+    git submodule update --init --recursive && \
+    mkdir build && cd build && \
+    cmake -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_MODULE_PATH=/usr/lib/$PLATFORM-linux-gnu/cmake \
+        -DCMAKE_INSTALL_PREFIX=/usr/ -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_DEPS=OFF -DCMAKE_BUILD_TYPE="Release" -DBUILD_TESTING=OFF ../ && \
+    $NINJA_CMD install
+
+# ── 13. Boost 1.81 ────────────────────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    wget --no-check-certificate https://github.com/boostorg/boost/releases/download/boost-1.81.0/boost-1.81.0.tar.gz && \
+    tar -xzf boost-1.81.0.tar.gz && rm boost-1.81.0.tar.gz && \
+    cd boost-1.81.0 && ./bootstrap.sh && \
+    $B2_CMD install && \
+    cd / && rm -rf /dependencies/boost-1.81.0
+
+# ── 14. Triton Inference Server ────────────────────────────────────────────
+# Re-pinned for JP7 (see header): tags/v2.63.0 = NGC container 25.11, based on
+# CUDA 13.0.2 (matching this base image exactly) and Ubuntu 24.04. The
+# v2.45.0 pin used by Dockerfile.jp5/Dockerfile.jp6 targets CUDA 12.x /
+# Ubuntu 22.04 and does not support this base. Build flags and the
+# python-backend staging steps are unchanged from jp5/jp6; the Python3_* env
+# pins above make the Python-backend stub link libpython3.11.
+COPY patches/edgeml-triton-server.diff /tmp/edgeml-triton-server.diff
+COPY patches/edgeml-triton-core.diff /tmp/edgeml-triton-core.diff
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    git clone https://github.com/triton-inference-server/server.git && \
+    cd server && git checkout tags/v2.63.0 && \
+    cp /tmp/edgeml-triton-server.diff . && \
+    cp /tmp/edgeml-triton-core.diff . && \
+    export PYBIND11_FINDPYTHON=ON && \
+    export MAKEFLAGS="-j$JOBS" && \
+    git apply edgeml-triton-server.diff && \
+    # v2.63.0's tritonfrontend py-bindings miss the libevhtp interface
+    # include dirs the main server target gets (src/CMakeLists.txt wires
+    # them via $<TARGET_PROPERTY:libevhtp::evhtp,...>; src/python does
+    # not), so http_server.h fails on evhtp/evhtp.h in the non-container
+    # build. Mirror the same generator expression into the bindings.
+    sed -i 's|^  ${repo-common_SOURCE_DIR}/include$|  ${repo-common_SOURCE_DIR}/include\n  $<TARGET_PROPERTY:libevhtp::evhtp,INTERFACE_INCLUDE_DIRECTORIES>|' src/python/tritonfrontend/CMakeLists.txt && \
+    grep -q 'libevhtp::evhtp' src/python/tritonfrontend/CMakeLists.txt && \
+    python3.11 build.py --enable-logging --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
+        --build-parallel $TRITON_PARALLEL \
+        --extra-core-cmake-arg=TRITON_ENABLE_ENSEMBLE=ON \
+        --extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON \
+        --extra-core-cmake-arg=-DPYBIND11_FINDPYTHON=ON \
+        --extra-core-cmake-arg=CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        --extra-core-cmake-arg=TRITON_CORE_ENABLE_TESTS=OFF \
+        --extra-core-cmake-arg=PYTHON_EXECUTABLE=/usr/bin/python3.11 \
+        --extra-core-cmake-arg=-DPYTHON_EXECUTABLE=/usr/bin/python3.11 \
+        --extra-core-cmake-arg=PYTHON_INCLUDE_DIR=/usr/include/python3.11 \
+        --extra-core-cmake-arg=PYTHON_LIBRARY=/usr/lib/aarch64-linux-gnu/libpython3.11.so \
+        --extra-core-cmake-arg=PYTHON_LIBRARIES=/usr/lib/aarch64-linux-gnu/libpython3.11.so \
+        --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/include/python3.11 \
+        --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.11 \
+        --backend python --build-dir=$(pwd)/build && \
+    mv build/python/install/backends/python build/tritonserver/install/backends && \
+    cp -a build/tritonserver/install/backends/python build/python/install/backends/python && \
+    cd build/opt/ && \
+    tar cvzf triton_installation_files.tar.gz tritonserver/ && \
+    mkdir -p /dependencies/tars/ && \
+    cp triton_installation_files.tar.gz /dependencies/tars/
+
+# ── 15. c-periphery (GPIO) ────────────────────────────────────────────────
+RUN . /tmp/build-env.sh && \
+    cd /dependencies && \
+    git clone https://github.com/vsergeev/c-periphery && \
+    cd c-periphery && \
+    git checkout 91f9678d2a35a3af3c633f20165bdde8bea32209 && \
+    mkdir build && cd build && cmake ../ && \
+    $MAKE_CMD && \
+    make install
+
+# ── 16. EdgeML SDK build + package all debs ────────────────────────────────
+COPY src ./src
+COPY create_aws_triton_deps_pkg.sh /dependencies/debs/
+RUN cd /dependencies/debs && chmod +x create_aws_triton_deps_pkg.sh && ./create_aws_triton_deps_pkg.sh
+
+# Download system packages needed by backend. Non-exact names fall back to
+# apt regex matching (libgstreamer1.0 -> libgstreamer1.0-0), but liborc-0.4-0
+# IS a known package name on noble with no candidate (renamed in the 64-bit
+# time_t transition), so the t64 name must be spelled out explicitly.
+RUN cd /dependencies/debs && \
+    apt-get update && \
+    apt-get download libgstreamer1.0-dev && \
+    apt-get download libgstreamer1.0 && \
+    apt-get download libgstreamer-plugins-base1.0 && \
+    apt-get download libgstreamer-plugins-base1.0-dev && \
+    apt-get download liborc-0.4-0t64 && \
+    apt-get download libstdc++6
+
+# Build EdgeML SDK (conan + cmake)
+# civetweb SSL disabled — the SDK uses mg_init_library(0) so SSL is not needed.
+RUN . /tmp/build-env.sh && \
+    cd src/ && \
+    MAKEFLAGS="-j$JOBS" CONAN_CPU_COUNT=$JOBS \
+    conan build . --build=missing \
+      -o civetweb/*:with_ssl=False && \
+    cd build/Release && \
+    export LD_LIBRARY_PATH=$(pwd)/lib && \
+    $MAKE_CMD install && \
+    cd ./install/ && \
+    chmod a+x create_debian.sh && \
+    ./create_debian.sh && \
+    pwsh ./create_whl.ps1 -InstallDirectory ./lib -Version 1.0
+
+# ── 17. Collect all output artifacts ───────────────────────────────────────
+# Same /debs and /tars artifact set as jp5/jp6 (the build.sh extraction flow
+# and install_edgemlsdk.sh read these exact names). The liborc glob matches
+# the noble t64-renamed deb (liborc-0.4-0t64_*.deb) and lands it at the
+# expected /debs/liborc-0.4-0.deb name.
+RUN mkdir -p /debs/ /tars/ && \
+    cp src/build/Release/install/Panorama*.deb /debs/PanoramaSDK.deb && \
+    cp src/build/Release/install/lib/python_package/dist/*.whl /debs/panorama.whl && \
+    cp /dependencies/debs/aws-c-iot.deb /debs/aws-c-iot.deb && \
+    cp /dependencies/debs/aws-crt-cpp.deb /debs/aws-crt-cpp.deb && \
+    cp /dependencies/debs/libgstreamer1.0-0_*.deb /debs/libgstreamer1.0.deb && \
+    cp /dependencies/debs/libgstreamer1.0-dev*.deb /debs/libgstreamer1.0-dev.deb && \
+    cp /dependencies/debs/aws-iot-device-sdk-cpp-v2.deb /debs/aws-iot-device-sdk-cpp-v2.deb && \
+    cp /dependencies/debs/liborc-0.4-0*.deb /debs/liborc-0.4-0.deb && \
+    cp /dependencies/debs/aws-sdk-cpp.deb /debs/aws-sdk-cpp.deb && \
+    cp /dependencies/debs/libstdc++6*.deb /debs/libstdc++6.deb && \
+    cp /dependencies/debs/libgstreamer-plugins-base1.0-0*.deb /debs/libgstreamer-plugins-base1.0.deb && \
+    cp /dependencies/debs/openssl*.deb /debs/openssl.deb && \
+    cp /dependencies/debs/libgstreamer-plugins-base1.0-dev*.deb /debs/libgstreamer-plugins-base1.0-dev.deb && \
+    cp /dependencies/debs/triton-core.deb /debs/triton-core.deb && \
+    cp /dependencies/debs/triton-python-backend.deb /debs/triton-python-backend.deb && \
+    cp /dependencies/tars/triton_installation_files.tar.gz /tars/
+
+RUN apt-get clean
+
+### End of EdgeML SDK

@@ -57,18 +57,50 @@ def _load_publish_module():
 # Fake Greengrass client (moto has no greengrassv2)
 # ---------------------------------------------------------------------------
 
+class _FakePaginator:
+    """Serves list_components / list_component_versions from the fake's own
+    registered state — the surface the vLLM version derivation now uses
+    (existing_component_versions)."""
+
+    def __init__(self, fake, operation):
+        self.fake = fake
+        self.operation = operation
+
+    def paginate(self, **kwargs):
+        if self.operation == "list_components":
+            yield {"components": [
+                {"componentName": name,
+                 "arn": (f"arn:aws:greengrass:{REGION}:123456789012:"
+                         f"components:{name}")}
+                for name in sorted(self.fake.registered)
+            ]}
+        elif self.operation == "list_component_versions":
+            name = str(kwargs["arn"]).split(":components:")[1].split(":")[0]
+            yield {"componentVersions": [
+                {"componentVersion": version}
+                for version in sorted(self.fake.registered.get(name, ()))
+            ]}
+        else:  # pragma: no cover - unexpected paginator in the publish path
+            raise AssertionError(f"unexpected paginator: {self.operation}")
+
+
 class FakeGreengrass:
     def __init__(self, create_error=None, final_state="DEPLOYABLE"):
         self.created = []          # parsed recipes, in creation order
         self.deleted = []          # ARNs passed to delete_component
         self.create_error = create_error
         self.final_state = final_state
+        # component name -> registered version strings, so the cloud-side
+        # version derivation observes what this fake has accepted.
+        self.registered = {}
 
     def create_component_version(self, inlineRecipe, tags=None):
         if self.create_error is not None:
             raise self.create_error
         recipe = json.loads(inlineRecipe)
         self.created.append(recipe)
+        self.registered.setdefault(recipe["ComponentName"], set()).add(
+            recipe["ComponentVersion"])
         arn = (f"arn:aws:greengrass:{REGION}:123456789012:components:"
                f"{recipe['ComponentName']}:versions:"
                f"{recipe['ComponentVersion']}")
@@ -80,6 +112,9 @@ class FakeGreengrass:
 
     def delete_component(self, arn):
         self.deleted.append(arn)
+
+    def get_paginator(self, operation):
+        return _FakePaginator(self, operation)
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +253,10 @@ def test_publish_success_writes_metadata_and_marks_published(
     assert body["component_name"] == "model-vllm-my-llm"
     assert body["component_version"] == "1.0.0"
 
-    # Recipe DefaultConfiguration carries the informational metadata.
+    # Recipe DefaultConfiguration carries the informational metadata. Each
+    # Per_JetPack_Component advertises exactly the ONE architecture its
+    # target serves, not the record-wide union (vllm-multi-arch-publish-
+    # conflict Requirement 2.3).
     assert len(gg.created) == 1
     default_config = gg.created[0]["ComponentConfiguration"][
         "DefaultConfiguration"]
@@ -227,23 +265,41 @@ def test_publish_success_writes_metadata_and_marks_published(
 
     stored = stored_record(pub_env, record["training_id"])
 
-    # published_component map: name/version + supported archs + runtime.
+    # published_component map: the record-level keys stay the unsuffixed
+    # base name / shared version / record-wide arch union for legacy
+    # readers (Requirement 2.5).
     published = stored["published_component"]
     assert published["component_name"] == "model-vllm-my-llm"
     assert published["component_version"] == "1.0.0"
-    assert published["supported_architectures"] == ["arm64_jp6"]
+    assert published["supported_architectures"] == ["arm64_jp6", "arm64_jp7"]
     assert published["runtime"] == "vllm"
     assert published["component_arns"]["jetson-xavier-jp6"].endswith(
-        "components:model-vllm-my-llm:versions:1.0.0")
+        "components:model-vllm-my-llm-jetson-xavier-jp6:versions:1.0.0")
 
-    # Top-level component_name materialized for the GSI lookup (task 5.2).
+    # ...and the new components list carries one entry per
+    # Per_JetPack_Component, each with its own suffixed name and its own
+    # single architecture (Requirement 2.5).
+    assert published["components"] == [{
+        "component_name": "model-vllm-my-llm-jetson-xavier-jp6",
+        "component_version": "1.0.0",
+        "target": "jetson-xavier-jp6",
+        "architecture": "arm64_jp6",
+        "supported_architectures": ["arm64_jp6"],
+        "component_arn": published["component_arns"]["jetson-xavier-jp6"],
+    }]
+
+    # Top-level component_name stays the unsuffixed base name so the
+    # component_name-index GSI keeps resolving ONE record (task 5.2).
     assert stored["component_name"] == "model-vllm-my-llm"
 
-    # Record marked published; per-target entries retained.
+    # Record marked published; per-target entries retained, each carrying
+    # its per-target name and its own architecture.
     assert stored["published"] is True
     assert stored["published_components"][0]["status"] == "published"
     assert stored["published_components"][0]["component_name"] == \
-        "model-vllm-my-llm"
+        "model-vllm-my-llm-jetson-xavier-jp6"
+    assert stored["published_components"][0]["supported_architectures"] == \
+        ["arm64_jp6"]
 
     # Component version made available for deployments (models table).
     model_item = pub_env.models.get_item(
@@ -308,4 +364,4 @@ def test_non_deployable_component_is_rolled_back(pub_env, seeded, monkeypatch):
     # retry can re-register the same derived 1.0.0.
     assert len(gg.deleted) == 1
     assert gg.deleted[0].endswith(
-        "components:model-vllm-my-llm:versions:1.0.0")
+        "components:model-vllm-my-llm-jetson-xavier-jp6:versions:1.0.0")

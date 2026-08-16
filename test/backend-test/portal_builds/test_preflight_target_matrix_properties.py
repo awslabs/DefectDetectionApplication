@@ -101,6 +101,7 @@ import build_reconciliation as br  # noqa: E402
 FROZEN_MATRIX = {
     "JP5": ("arm64", "aws.edgeml.dda.LocalServer.arm64JP5"),
     "JP6": ("arm64", "aws.edgeml.dda.LocalServer.arm64JP6"),
+    "JP7": ("arm64", "aws.edgeml.dda.LocalServer.arm64JP7"),
     "AMD64": ("x86_64", "aws.edgeml.dda.LocalServer.amd64"),
     "AMD64_NVIDIA": ("x86_64", "aws.edgeml.dda.LocalServer.amd64Nvidia"),
 }

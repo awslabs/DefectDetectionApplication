@@ -22,7 +22,10 @@ injection / deserialization), ``secrets_audit.py`` (Group 3 -- secrets / JWT),
 external, non-ECR registry ``nvcr.io`` and are not both registry-parameterized
 via a ``${BASE_REGISTRY...}`` ARG AND digest-pinned with ``@sha256:``) and a
 different in-scope file set, so it is deliberately a separate module rather than
-an edit to the siblings' already-green gates. To avoid duplication it REUSES the
+an edit to the siblings' already-green gates. (The jetpack7-support spec later
+added the two JP7 Dockerfiles -- ``src/backend/Dockerfile.jp7`` and
+``src/edgemlsdk/Dockerfile.jp7`` -- to the in-scope set; both were created
+already compliant, so the per-FROM gate covers them without new findings.) To avoid duplication it REUSES the
 siblings' proven low-level primitives (``REPO_ROOT``, ``EXCLUDED_PATH_SUBSTRING``,
 ``Hit``) via the SAME try/except fallback re-implementation the siblings use when
 ``repo_audit`` is not importable, and defines only its OWN constants, the
@@ -89,26 +92,42 @@ except Exception:  # pragma: no cover - fallback when repo_audit is not importab
 VENDORED_DUP_SUBSTRING = os.path.join("edgemlsdk", "edgemlsdk")
 
 # ---------------------------------------------------------------------------
-# In-scope files (relative to REPO_ROOT, normpath'd) -- the four maintained
-# Jetson Dockerfiles this spec owns. The vendored duplicate and the
-# already-compliant public.ecr.aws/* Dockerfiles are NOT in scope.
+# In-scope files (relative to REPO_ROOT, normpath'd) -- the maintained Jetson
+# Dockerfiles this gate owns. The vendored duplicate and the already-compliant
+# public.ecr.aws/* Dockerfiles are NOT in scope. The JP7 pair was added by the
+# jetpack7-support spec (Req 9.3): both are compliant from creation
+# (${BASE_REGISTRY}-parameterized + @sha256-pinned FROMs), so the per-FROM
+# enforcement covers them without ever having produced a disallowed hit.
 # ---------------------------------------------------------------------------
 BACKEND_JP5_REL = os.path.normpath(os.path.join("src", "backend", "Dockerfile.jp5"))
 EDGEMLSDK_JP5_REL = os.path.normpath(os.path.join("src", "edgemlsdk", "Dockerfile.jp5"))
 BACKEND_JP6_REL = os.path.normpath(os.path.join("src", "backend", "Dockerfile.jp6"))
 EDGEMLSDK_JP6_REL = os.path.normpath(os.path.join("src", "edgemlsdk", "Dockerfile.jp6"))
+BACKEND_JP7_REL = os.path.normpath(os.path.join("src", "backend", "Dockerfile.jp7"))
+EDGEMLSDK_JP7_REL = os.path.normpath(os.path.join("src", "edgemlsdk", "Dockerfile.jp7"))
 
 IN_SCOPE_FILES = frozenset(
-    (BACKEND_JP5_REL, EDGEMLSDK_JP5_REL, BACKEND_JP6_REL, EDGEMLSDK_JP6_REL)
+    (
+        BACKEND_JP5_REL,
+        EDGEMLSDK_JP5_REL,
+        BACKEND_JP6_REL,
+        EDGEMLSDK_JP6_REL,
+        BACKEND_JP7_REL,
+        EDGEMLSDK_JP7_REL,
+    )
 )
 
 # The five in-scope findings -> the real source file that carries them (NOT the
 # vendored edgemlsdk/edgemlsdk/... copies). D3 and D4 both live in jp6 backend.
+# The JP7 sites are NOT findings -- they were created compliant
+# (jetpack7-support) and are listed so the __main__ report covers them.
 IN_SCOPE_SITES = {
     "D1 backend jp5 l4t-jetpack:r35.4.1": BACKEND_JP5_REL,
     "D2 edgemlsdk jp5 l4t-jetpack:r35.4.1 AS builder": EDGEMLSDK_JP5_REL,
     "D3+D4 backend jp6 l4t-cuda AS cuda114 + l4t-jetpack:r36.3.0": BACKEND_JP6_REL,
     "D5 edgemlsdk jp6 l4t-jetpack:r36.3.0 AS builder": EDGEMLSDK_JP6_REL,
+    "JP7 backend cuda:13.0.2 (compliant from creation)": BACKEND_JP7_REL,
+    "JP7 edgemlsdk cuda:13.0.2 AS builder (compliant from creation)": EDGEMLSDK_JP7_REL,
 }
 
 # ---------------------------------------------------------------------------
@@ -224,7 +243,7 @@ def is_disallowed_from(line):
 # Layer 1 -- raw, broad, line-based enumeration of every in-scope FROM.
 # ---------------------------------------------------------------------------
 def run_audit():
-    """Return a Hit per non-comment FROM line across the four in-scope
+    """Return a Hit per non-comment FROM line across the in-scope Jetson
     Dockerfiles (the vendored duplicate and cdk.out are never scanned). No
     classification / exception filtering is applied -- this is the raw
     bug-condition enumeration used by the exploration test. Non-empty on the

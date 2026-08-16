@@ -40,9 +40,12 @@ export function isVllmModelComponent(
 /**
  * One vLLM-bearing component's gate manifest: its version and the
  * supported Target_Architecture set. For model-vllm-* components the
- * set is the backing record's published_component.supported_architectures;
- * an unresolvable record contributes an empty set so every device fails
- * closed — mirroring the backend's `collect_vllm_component_manifests`.
+ * set is resolved per component from the backing record's
+ * `published_component` map by `vllmArchsForComponent` below (a
+ * Per_JetPack_Component gates on its OWN architecture, a legacy
+ * unsuffixed name on the record-wide set); an unresolvable record
+ * contributes an empty set so every device fails closed — mirroring the
+ * backend's `collect_vllm_component_manifests`.
  */
 export interface VllmComponentManifest {
   version: string | null;
@@ -164,4 +167,123 @@ export function parseVllmGateRejection(
             : VLLM_GATE_REASON_ARCH,
       })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Per_JetPack_Component name / architecture resolution
+// (vllm-multi-arch-publish-conflict design steps 12-14, Requirements 2.13,
+// 2.14, 3.4, 3.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per_JetPack_Component naming: greengrass_publish.py suffixes the
+ * Base_Component_Name with `target.replace('_', '-')` for one component
+ * per packaged target, so `model-vllm-{safe}-jetson-xavier-jp7` serves
+ * exactly `arm64_jp7`.
+ *
+ * KEEP IN SYNC with deployments.py `VLLM_TARGET_SUFFIX_TO_ARCH` (itself
+ * the reverse of `packaging.VLLM_ARCH_TO_TARGET`). The vocabulary is
+ * closed, so a model name that merely happens to end in a `-jetson-…`
+ * fragment cannot be misread as a target suffix.
+ */
+export const VLLM_TARGET_SUFFIX_TO_ARCH: Record<string, string> = {
+  'jetson-xavier-jp5': 'arm64_jp5',
+  'jetson-xavier-jp6': 'arm64_jp6',
+  'jetson-xavier-jp7': 'arm64_jp7',
+};
+
+/**
+ * One Per_JetPack_Component entry of the publish write-back's
+ * `published_component.components` list (greengrass_publish.py design
+ * step 7). Only the two fields the resolution rules read are required;
+ * the rest are carried for callers that display them.
+ */
+export interface VllmPerJetPackComponent {
+  component_name?: string | null;
+  component_version?: string | null;
+  target?: string | null;
+  architecture?: string | null;
+  supported_architectures?: string[] | null;
+  component_arn?: string | null;
+}
+
+/**
+ * The subset of a vLLM_Model_Record's `published_component` map the
+ * architecture resolution reads: the record-wide union kept for legacy
+ * readers, and the per-JetPack `components` list. Structurally a subset
+ * of `VllmPublishedComponent` in services/api.ts, so the model detail
+ * response can be passed straight through.
+ */
+export interface VllmPublishedComponentArchSource {
+  supported_architectures?: string[] | null;
+  components?: VllmPerJetPackComponent[] | null;
+}
+
+/**
+ * Split a vLLM component name into its Base_Component_Name and the
+ * Target_Architecture its per-JetPack target suffix names. `arch` is
+ * null when the name carries no known suffix (a legacy unsuffixed
+ * component), in which case `baseName` is the name verbatim.
+ *
+ * Pure TS twin of `split_vllm_component_name` in
+ * edge-cv-portal/backend/functions/deployments.py.
+ */
+export function splitVllmComponentName(
+  componentName: string | null | undefined
+): { baseName: string; arch: string | null } {
+  const name = componentName == null ? '' : String(componentName);
+  for (const [suffix, arch] of Object.entries(VLLM_TARGET_SUFFIX_TO_ARCH)) {
+    const marker = `-${suffix}`;
+    if (name.endsWith(marker) && name.length > marker.length) {
+      return { baseName: name.slice(0, -marker.length), arch };
+    }
+  }
+  return { baseName: name, arch: null };
+}
+
+/**
+ * The supported Target_Architecture set of ONE published vLLM component,
+ * resolved from its backing record's `published_component` map.
+ *
+ * Pure TS twin of `vllm_component_architectures` in
+ * edge-cv-portal/backend/functions/deployments.py — the same three-rule
+ * order (design step 11):
+ *
+ * 1. a `published_component.components` entry whose `component_name`
+ *    matches → that entry's `supported_architectures` (the per-JetPack
+ *    write-back the publish produced);
+ * 2. elif the name carries a known target suffix → `[arch]` when that
+ *    arch is in the record-wide set, else `[]` (fail closed on an
+ *    out-of-set suffix);
+ * 3. else (no name, or an unsuffixed legacy name) → the record-wide
+ *    `published_component.supported_architectures`, exactly as before
+ *    (Requirements 3.4, 3.5).
+ *
+ * Empty when unresolvable, so the gate twin fails closed for every
+ * device (Requirement 3.7). Kept UI-free so fast-check can exercise it.
+ */
+export function vllmArchsForComponent(
+  componentName: string | null | undefined,
+  publishedComponent: VllmPublishedComponentArchSource | null | undefined
+): string[] {
+  const published = publishedComponent ?? null;
+  const recordWide = (published?.supported_architectures ?? []).map(String);
+
+  const name = componentName == null ? '' : String(componentName);
+  if (name) {
+    for (const entry of published?.components ?? []) {
+      if (!entry || typeof entry !== 'object') {
+        continue;
+      }
+      if (String(entry.component_name ?? '') === name) {
+        return (entry.supported_architectures ?? []).map(String);
+      }
+    }
+    const { arch } = splitVllmComponentName(name);
+    if (arch !== null) {
+      return recordWide.includes(arch) ? [arch] : [];
+    }
+  }
+
+  return recordWide;
 }

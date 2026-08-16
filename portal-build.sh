@@ -19,7 +19,7 @@ set -o pipefail
 #
 # Usage: ./portal-build.sh [ARCH] [JETPACK]
 #   ARCH:    x86_64, x86_64_nvidia, or aarch64 (default: auto-detect from host)
-#   JETPACK: 4, 5, or 6 (required for aarch64 builds)
+#   JETPACK: 4, 5, 6, or 7 (required for aarch64 builds)
 #
 # Supported configurations:
 #   x86_64           -> aws.edgeml.dda.LocalServer.amd64        (Ubuntu 20.04)
@@ -27,6 +27,7 @@ set -o pipefail
 #   aarch64 + JP4    -> aws.edgeml.dda.LocalServer.arm64        (Ubuntu 18.04, L4T r32.x)
 #   aarch64 + JP5    -> aws.edgeml.dda.LocalServer.arm64JP5     (Ubuntu 20.04, L4T r35.x)
 #   aarch64 + JP6    -> aws.edgeml.dda.LocalServer.arm64JP6     (Ubuntu 22.04, L4T r36.x)
+#   aarch64 + JP7    -> aws.edgeml.dda.LocalServer.arm64JP7     (Ubuntu 24.04, L4T r38.x)
 #
 # Environment:
 #   EVENT_BUS                 EventBridge bus name/ARN for phase events (optional)
@@ -42,6 +43,7 @@ set -o pipefail
 #   ./portal-build.sh x86_64_nvidia       # x86_64 + NVIDIA GPU runtime
 #   ./portal-build.sh aarch64 5           # ARM64 JetPack 5
 #   ./portal-build.sh aarch64 6           # ARM64 JetPack 6
+#   ./portal-build.sh aarch64 7           # ARM64 JetPack 7
 
 # ── Phase event emission (source dda.portal.builds) ─────────────────────────
 # Non-fatal by design: a missing EVENT_BUS, missing python3, or a PutEvents
@@ -136,7 +138,7 @@ print_step() {
 }
 
 # Argument parsing is order-independent and accepts both the positional JetPack
-# number (4|5|6) and the --jp4/--jp5/--jp6 flags (kept as backward-compatible aliases).
+# number (4|5|6|7) and the --jp4/--jp5/--jp6/--jp7 flags (kept as backward-compatible aliases).
 ARCH=""
 JETPACK=""
 for arg in "$@"; do
@@ -147,9 +149,10 @@ for arg in "$@"; do
         4|jp4|JP4|--jp4)     JETPACK="4" ;;
         5|jp5|JP5|--jp5)     JETPACK="5" ;;
         6|jp6|JP6|--jp6)     JETPACK="6" ;;
+        7|jp7|JP7|--jp7)     JETPACK="7" ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: $0 [x86_64|x86_64_nvidia|aarch64] [4|5|6]"
+            echo "Usage: $0 [x86_64|x86_64_nvidia|aarch64] [4|5|6|7]"
             exit 1
             ;;
     esac
@@ -176,13 +179,17 @@ case $ARCH in
         # produced aws.edgeml.dda.LocalServer.arm64 even when JP5 was intended).
         if [ -z "$JETPACK" ]; then
             echo "ERROR: JetPack version is required for aarch64 builds."
-            echo "Usage: $0 aarch64 <4|5|6>"
+            echo "Usage: $0 aarch64 <4|5|6|7>"
             echo "  4 = JetPack 4.6 (Ubuntu 18.04, L4T r32.x)  -> aws.edgeml.dda.LocalServer.arm64"
             echo "  5 = JetPack 5   (Ubuntu 20.04, L4T r35.x)  -> aws.edgeml.dda.LocalServer.arm64JP5"
             echo "  6 = JetPack 6   (Ubuntu 22.04, L4T r36.x)  -> aws.edgeml.dda.LocalServer.arm64JP6"
+            echo "  7 = JetPack 7   (Ubuntu 24.04, L4T r38.x)  -> aws.edgeml.dda.LocalServer.arm64JP7"
             exit 1
         fi
-        if [ "$JETPACK" = "6" ]; then
+        if [ "$JETPACK" = "7" ]; then
+            RECIPE_FILE="recipe-arm64-jp7.yaml"
+            COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64JP7"
+        elif [ "$JETPACK" = "6" ]; then
             RECIPE_FILE="recipe-arm64-jp6.yaml"
             COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64JP6"
         elif [ "$JETPACK" = "5" ]; then
@@ -525,11 +532,18 @@ if [ -z "$REGION" ]; then
     REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 fi
 
-COMPONENT_ARN=$(aws greengrassv2 list-components \
-    --scope PRIVATE \
-    --region "$REGION" \
-    --query "components[?componentName=='${COMPONENT_NAME}'].arn | [0]" \
-    --output text 2>/dev/null || true)
+# Construct the component ARN directly instead of searching
+# list-components: the CLI auto-paginates that call and applies the
+# --query JMESPath PER PAGE, so once the account exceeds one page of
+# components the output becomes "None\n<arn>" (one line per page) and
+# the subsequent tag-resource call fails on the mangled multi-line ARN.
+# That silent failure left aws.edgeml.dda.LocalServer.arm64JP7 untagged
+# and therefore invisible to the portal's component discovery.
+TAG_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
+COMPONENT_ARN=""
+if [ -n "$TAG_ACCOUNT_ID" ] && [ "$TAG_ACCOUNT_ID" != "None" ] && [ -n "$REGION" ]; then
+    COMPONENT_ARN="arn:aws:greengrass:${REGION}:${TAG_ACCOUNT_ID}:components:${COMPONENT_NAME}"
+fi
 
 if [ -n "$COMPONENT_ARN" ] && [ "$COMPONENT_ARN" != "None" ]; then
     echo "Found component ARN: $COMPONENT_ARN"

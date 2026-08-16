@@ -160,6 +160,29 @@ X86_64_AMI_SSM_PARAMETER = os.environ.get(
     'X86_64_AMI_SSM_PARAMETER',
     '/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/'
     'hvm/ebs-gp2/ami-id')
+#: Ubuntu 24.04 (noble) arm64 AMI resolution for JP7 ephemeral runners,
+#: following build_fleet.resolve_ubuntu_ami's verified conventions. Note
+#: the canonical parameter's volume-type segment is ebs-gp3 for noble,
+#: not the jammy ebs-gp2 (verified against the published canonical
+#: parameter tree by build_fleet).
+ARM64_NOBLE_AMI_SSM_PARAMETER = os.environ.get(
+    'ARM64_NOBLE_AMI_SSM_PARAMETER',
+    '/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/'
+    'hvm/ebs-gp3/ami-id')
+#: Optional explicit noble arm64 AMI pin. Scoped to noble ONLY: the
+#: existing BUILD_ARM64_AMI_ID/BUILD_X86_64_AMI_ID overrides above remain
+#: scoped to 22.04 because they are jammy pins today — letting one
+#: silently override a noble runner would reintroduce the wrong-OS JP7
+#: provisioning bug through configuration. Noble pinning uses only this
+#: variable, and this variable never applies to jammy resolution.
+BUILD_ARM64_NOBLE_AMI_ID = os.environ.get('BUILD_ARM64_NOBLE_AMI_ID', '')
+#: DescribeImages fallback for noble (Canonical owner id). Noble server
+#: images publish under the hvm-ssd-gp3 path segment, not the jammy
+#: hvm-ssd (the same segment shift build_fleet encodes for its 24.04
+#: name filter).
+CANONICAL_OWNER_ID = '099720109477'
+ARM64_NOBLE_AMI_NAME_FILTER = \
+    'ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*'
 #: Window within which a synchronous SSM command (pre-dispatch pgrep
 #: verification, serialization count, pkill) is polled to completion.
 SSM_COMMAND_TIMEOUT_SECONDS = int(os.environ.get(
@@ -1572,34 +1595,98 @@ def send_agent(job: Dict[str, Any], instance_id: str,
 _AMI_CACHE: Dict[str, str] = {}
 
 
-def resolve_ami(arch: str) -> str:
-    """Ubuntu 22.04 AMI id for a runner architecture: explicit env AMI id
-    when set, otherwise the public canonical SSM parameter (cached per
-    invocation container)."""
-    explicit = BUILD_ARM64_AMI_ID if arch == build_domain.ARCH_ARM64 \
-        else BUILD_X86_64_AMI_ID
-    if explicit:
-        return explicit
-    if arch in _AMI_CACHE:
-        return _AMI_CACHE[arch]
-    parameter = ARM64_AMI_SSM_PARAMETER if arch == build_domain.ARCH_ARM64 \
-        else X86_64_AMI_SSM_PARAMETER
-    value = ssm.get_parameter(Name=parameter)['Parameter']['Value']
-    _AMI_CACHE[arch] = value
-    return value
+def resolve_ami(arch: str, os_release: str = '22.04') -> str:
+    """Ubuntu AMI id for a runner architecture and OS release
+    (jp7-ephemeral-runner-provisioning Req 2.1, 2.3).
+
+    22.04 (jammy): today's resolution unchanged — explicit env AMI id
+    (BUILD_ARM64_AMI_ID/BUILD_X86_64_AMI_ID) when set, otherwise the
+    public canonical SSM parameter (cached per invocation container,
+    keyed by bare architecture exactly as before).
+
+    24.04 (noble), arm64 only: the BUILD_ARM64_NOBLE_AMI_ID pin when
+    set, otherwise a noble-keyed cache entry, otherwise the canonical
+    noble SSM parameter with a Canonical-owner DescribeImages fallback
+    (newest available image by CreationDate) — mirroring
+    build_fleet.resolve_ubuntu_ami's conventions. Jammy env overrides
+    never apply to noble resolution and vice versa.
+
+    Any other release/architecture pairing fails closed with a
+    ValueError BEFORE any AWS call. ValueError (not build_fleet's
+    RuntimeError) is deliberate: provision_ephemeral catches
+    (ClientError, ValueError) and routes to fail_provisioning, so an
+    unmapped pairing fails the one job with ERROR_PROVISIONING_FAILED
+    instead of crashing the dispatcher tick."""
+    if os_release == build_domain.OS_RELEASE_JAMMY and \
+            arch in (build_domain.ARCH_ARM64, build_domain.ARCH_X86_64):
+        explicit = BUILD_ARM64_AMI_ID if arch == build_domain.ARCH_ARM64 \
+            else BUILD_X86_64_AMI_ID
+        if explicit:
+            return explicit
+        if arch in _AMI_CACHE:
+            return _AMI_CACHE[arch]
+        parameter = ARM64_AMI_SSM_PARAMETER \
+            if arch == build_domain.ARCH_ARM64 else X86_64_AMI_SSM_PARAMETER
+        value = ssm.get_parameter(Name=parameter)['Parameter']['Value']
+        _AMI_CACHE[arch] = value
+        return value
+
+    if os_release == build_domain.OS_RELEASE_NOBLE and \
+            arch == build_domain.ARCH_ARM64:
+        if BUILD_ARM64_NOBLE_AMI_ID:
+            return BUILD_ARM64_NOBLE_AMI_ID
+        # Release-qualified cache key: the jammy entries are keyed by
+        # bare architecture ('arm64'/'x86_64'), so '24.04/arm64' can
+        # never collide with them.
+        cache_key = f'{os_release}/{arch}'
+        if cache_key in _AMI_CACHE:
+            return _AMI_CACHE[cache_key]
+        ami_id = ''
+        try:
+            response = ssm.get_parameter(Name=ARM64_NOBLE_AMI_SSM_PARAMETER)
+            ami_id = response.get('Parameter', {}).get('Value')
+        except ClientError as e:
+            logger.warning(f"Ubuntu {os_release} SSM parameter lookup "
+                           f"failed for {arch}; falling back to "
+                           f"DescribeImages: {e}")
+        if not ami_id:
+            response = ec2.describe_images(
+                Owners=[CANONICAL_OWNER_ID],
+                Filters=[
+                    {'Name': 'name',
+                     'Values': [ARM64_NOBLE_AMI_NAME_FILTER]},
+                    {'Name': 'architecture', 'Values': ['arm64']},
+                    {'Name': 'state', 'Values': ['available']},
+                ],
+            )
+            images = sorted(response.get('Images', []),
+                            key=lambda i: i.get('CreationDate', ''))
+            if not images:
+                raise ValueError(
+                    f'No Ubuntu {os_release} AMI found for architecture '
+                    f'{arch}')
+            ami_id = images[-1]['ImageId']
+        _AMI_CACHE[cache_key] = ami_id
+        return ami_id
+
+    raise ValueError(
+        f"No Ubuntu {os_release} AMI mapping for architecture {arch} "
+        f"on the ephemeral runner path")
 
 
 def run_runner_instance(plan: 'build_planner.RunnerPlan',
                         repo_dir: Optional[str] = None,
                         job: Optional[Dict[str, Any]] = None) -> str:
     """RunInstances for exactly one Ephemeral_Build_Runner serving exactly
-    one Build_Job (Req 2.3, 7.4): arch-selected Ubuntu 22.04 AMI, sizing
-    from the job's config_snapshot (Req 3.1, 9.3), hardened profile (SSM
-    instance profile, no key pair, IMDSv2 required), dda-build tags. The
-    bootstrap clones into ``repo_dir`` (the resolved repository directory,
-    Req 5.1) and syncs it to the ref ``job`` selected (Req 4.1)."""
+    one Build_Job (Req 2.3, 7.4): Ubuntu AMI selected by the plan's
+    architecture AND OS release (jp7-ephemeral-runner-provisioning
+    Req 2.1, 2.3), sizing from the job's config_snapshot (Req 3.1, 9.3),
+    hardened profile (SSM instance profile, no key pair, IMDSv2
+    required), dda-build tags. The bootstrap clones into ``repo_dir``
+    (the resolved repository directory, Req 5.1) and syncs it to the ref
+    ``job`` selected (Req 4.1)."""
     kwargs: Dict[str, Any] = {
-        'ImageId': resolve_ami(plan.arch),
+        'ImageId': resolve_ami(plan.arch, plan.os_release),
         'InstanceType': plan.instance_type,
         'MinCount': 1,
         'MaxCount': 1,
@@ -2085,6 +2172,9 @@ def provision_ephemeral(jobs: List[Dict[str, Any]], now: int) -> None:
                 'instance_id': instance_id,
                 'instance_type': plan.instance_type,
                 'arch': plan.arch,
+                # Additive diagnostic: the OS release the AMI was resolved
+                # for (jp7-ephemeral-runner-provisioning Req 2.4).
+                'os_release': plan.os_release,
                 'spot': plan.spot,
                 'repo_dir': repo_dir,
                 'terminate_attempts': 0,

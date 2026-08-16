@@ -207,13 +207,15 @@ def test_stage_name_preserved_on_reverted_and_fixed_cuda114():
 # Two-layer contract on the current fixed tree (Req 2.6 / Preservation 3.7).
 # --------------------------------------------------------------------------- #
 def test_run_audit_non_empty_but_disallowed_hits_empty_on_fixed_tree():
-    """``run_audit()`` still enumerates the five raw in-scope ``FROM``s
+    """``run_audit()`` still enumerates the raw in-scope ``FROM``s
     (non-empty) while the precise ``disallowed_hits()`` gate is empty after
-    D1-D5."""
+    D1-D5 (the two JP7 FROMs added by jetpack7-support were created
+    compliant, so they enumerate raw but never flag)."""
     raw = audit.run_audit()
-    assert len(raw) == 6, (
-        "run_audit() must enumerate the six in-scope FROMs (D1-D5 + the "
-        "Dockerfile.jp6 trt8 TensorRT 8 provider stage); got "
+    assert len(raw) == 8, (
+        "run_audit() must enumerate the eight in-scope FROMs (D1-D5 + the "
+        "Dockerfile.jp6 trt8 TensorRT 8 provider stage + the two JP7 "
+        "Dockerfile FROMs); got "
         + "; ".join(f"{audit._rel(h.path)}:{h.lineno}" for h in raw)
     )
 

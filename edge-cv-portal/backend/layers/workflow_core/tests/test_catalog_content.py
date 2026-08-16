@@ -203,7 +203,8 @@ class TestAravisCameraSourceNodeType:
         # videoconvertscale plugin dependencies. The appsrc name embeds
         # the {nodeId} token so multi-camera documents stay addressable.
         descriptor = get_node_type("aravis_camera_source")
-        assert {m.arch for m in descriptor.mappings} == set(ARCHITECTURES)
+        assert {m.arch for m in descriptor.mappings} == (
+            set(DEVICE_ARCHITECTURES) | {"sim"})
         for arch in DEVICE_ARCHITECTURES:
             mapping = descriptor.mapping_for(arch)
             assert mapping is not None, arch
@@ -310,7 +311,8 @@ class TestIcamSourceNodeType:
 
     def test_device_arch_mappings_are_the_v4l2src_chain(self):
         descriptor = get_node_type("icam_source")
-        assert {m.arch for m in descriptor.mappings} == set(ARCHITECTURES)
+        assert {m.arch for m in descriptor.mappings} == (
+            set(DEVICE_ARCHITECTURES) | {"sim"})
         # Every physical device architecture: v4l2src device={device} !
         # videoconvert (Requirement 2.3), with exactly one {device}
         # placeholder (Requirement 2.4).
@@ -546,7 +548,8 @@ class TestModelInferenceNodeType:
         descriptor = get_node_type("model_inference")
         device_mappings = [m for m in descriptor.mappings if m.arch != "sim"]
         assert sorted(m.arch for m in device_mappings) == sorted(
-            ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"])
+            ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6",
+             "arm64_jp7"])
         for mapping in device_mappings:
             factories = [entry["factory"] for entry in mapping.element_chain]
             assert factories == ["capsfilter", "emltriton"]
@@ -638,7 +641,8 @@ class TestBedrockInferenceNodeType:
         assert descriptor.hardware_dependent is True
         device_mappings = [m for m in descriptor.mappings if m.arch != "sim"]
         assert sorted(m.arch for m in device_mappings) == sorted(
-            ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"])
+            ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6",
+             "arm64_jp7"])
         for mapping in device_mappings:
             assert mapping.element_chain == []
             assert mapping.executor_binding == "bedrock_inference"

@@ -546,3 +546,53 @@ Caveat: the RF-DETR decoder is verified against synthetic two-tensor outputs
 vary by exporter — the shape-based tensor ID handles order, but a real
 end-to-end export/device run is still pending. RF-DETR normalized-cxcywh and
 sigmoid scoring are the documented DETR-family conventions.
+
+## 22. vLLM Hugging Face weight cache (persistence & disk cleanup)
+
+HF-sourced vLLM model components cache their downloaded weights on the
+device under `HF_HOME=/aws_dda/hf_cache` (set in the `environment` of all
+three backend services in `src/docker-compose.yaml`). Because `/aws_dda`
+is a persistent read-write bind mount, the cache survives backend
+container recreation: after the first download, a recreated container
+reloads the model from the local cache in seconds, with no re-download
+and no dependency on huggingface.co being reachable.
+
+### 22.1 Caches accumulate — undeployment does NOT remove them
+
+Each HF model's weights live under:
+
+```
+/aws_dda/hf_cache/hub/models--{org}--{name}
+```
+
+(e.g. `/aws_dda/hf_cache/hub/models--Qwen--Qwen2.5-VL-7B-Instruct-AWQ`,
+~6 GB for a 7B AWQ model).
+
+Component undeployment does **not** delete these caches. The model
+component's Shutdown script (`vllm_model_prep.py --cleanup`) removes only
+the staged Triton model repository under `/aws_dda/dda_triton/`, never
+the HF cache — deliberately, so a redeploy of the same model does not pay
+the full re-download again, and because safe automatic eviction would
+require cross-component reference counting (another deployed component
+may use the same HF model ID). Caches from undeployed models therefore
+accumulate under `/aws_dda/hf_cache/hub/` until removed manually.
+
+### 22.2 Manual cleanup (small-disk devices)
+
+To reclaim disk space, remove a model's cache tree **while that model is
+not deployed** (and no other deployed vLLM component references the same
+HF model ID):
+
+```bash
+rm -rf /aws_dda/hf_cache/hub/models--{org}--{name}
+```
+
+For example:
+
+```bash
+rm -rf "/aws_dda/hf_cache/hub/models--Qwen--Qwen2.5-VL-7B-Instruct-AWQ"
+```
+
+If the model is deployed again later, the first load simply re-downloads
+the weights (requires huggingface.co reachability, same as any first
+download). To see what is using space: `du -sh /aws_dda/hf_cache/hub/*`.

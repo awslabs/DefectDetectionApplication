@@ -32,7 +32,8 @@
         "LD_LIBRARY_PATH=$LD_LIBRARY_PATH",
         "GRPC_POLL_STRATEGY=poll",
         "GRPC_ENABLE_FORK_SUPPORT=1",
-        "PYTHONPATH=/opt/tritonserver/backends/python:/"
+        "PYTHONPATH=/opt/tritonserver/backends/python:/",
+        "HF_HOME=/aws_dda/hf_cache"
       ],
       "expose": [
         "5000",
@@ -92,7 +93,8 @@
         "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64",
         "GRPC_POLL_STRATEGY=poll",
         "GRPC_ENABLE_FORK_SUPPORT=1",
-        "PYTHONPATH=/opt/tritonserver/backends/python:/"
+        "PYTHONPATH=/opt/tritonserver/backends/python:/",
+        "HF_HOME=/aws_dda/hf_cache"
       ],
       "expose": [
         "5000",
@@ -151,7 +153,8 @@
         "GRPC_ENABLE_FORK_SUPPORT=1",
         "PYTHONPATH=/opt/tritonserver/backends/python:/",
         "ARGUS_HEADLESS=1",
-        "NVARGUS_ENABLE_HEADLESS=1"
+        "NVARGUS_ENABLE_HEADLESS=1",
+        "HF_HOME=/aws_dda/hf_cache"
       ],
       "expose": [
         "5000",

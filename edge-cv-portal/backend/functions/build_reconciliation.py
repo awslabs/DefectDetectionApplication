@@ -121,11 +121,30 @@ _REDACTION_PATTERNS: List[Tuple[re.Pattern, str]] = [
                 r"\.[A-Za-z0-9_\-]+\b"), REDACTED),
     # Assignment-style secrets: KEY=value, KEY: value, KEY value,
     # quoted or bare. The key name is retained; the value is redacted.
-    # The lookahead keeps this pass from re-consuming values an earlier
-    # pattern already redacted (e.g. signed-URL parameters).
+    # The first lookahead keeps this pass from re-consuming values an
+    # earlier pattern already redacted (e.g. signed-URL parameters).
+    # The second lookahead keeps a bare secret-key WORD (e.g. a lone
+    # "secret" on the previous line) from consuming a FOLLOWING key's
+    # name as its "value": without it, "secret\nPASSWORD: <val>" matched
+    # key="secret", separator="\n", value="PASSWORD:", leaving <val>
+    # unredacted (found by the Property 3 redaction canary test). A
+    # candidate value that is itself a secret key introducing its own
+    # assignment is refused here so the engine re-anchors on that inner
+    # key and redacts its real value instead. Two refusal shapes:
+    #   1. the candidate introduces an explicit ":"/"=" assignment
+    #      ("secret\nPASSWORD: v"), or
+    #   2. the candidate is followed by a SAME-LINE bare-space token
+    #      ("secret\nPASSWORD v") — horizontal whitespace only, so a
+    #      genuine value that merely LOOKS secret-ish and ends its line
+    #      (e.g. "KEY=verysecretvalue\n...") is still redacted, not
+    #      mistaken for an inner key. A broader refusal (any value
+    #      containing a secret-ish word) would itself cause leaks.
     (re.compile(r"(?i)\b(" + _SECRET_KEY_FRAGMENT + r")"
                 r"(\s*[:=]\s*|\s+)"
-                r"(?!\[REDACTED\])(\"[^\"]*\"|'[^']*'|\S+)"),
+                r"(?!\[REDACTED\])"
+                r"(?!(?:" + _SECRET_KEY_FRAGMENT + r")\s*[:=])"
+                r"(?!(?:" + _SECRET_KEY_FRAGMENT + r")[^\S\n]+\S)"
+                r"(\"[^\"]*\"|'[^']*'|\S+)"),
      r"\1\2" + REDACTED),
 ]
 

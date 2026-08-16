@@ -30,33 +30,51 @@ import build_source
 ARCH_ARM64 = 'arm64'
 ARCH_X86_64 = 'x86_64'
 
+# Ubuntu OS releases required by Build_Targets on the build host
+# (jp7-ephemeral-runner-provisioning Req 2.1, 2.2). JP7 builds require an
+# Ubuntu 24.04 (noble) arm64 host; every other target builds on 22.04.
+OS_RELEASE_JAMMY = '22.04'
+OS_RELEASE_NOBLE = '24.04'
+
 # Build_Target names
 TARGET_JP5 = 'JP5'
 TARGET_JP6 = 'JP6'
+TARGET_JP7 = 'JP7'
 TARGET_AMD64 = 'AMD64'
 TARGET_AMD64_NVIDIA = 'AMD64_NVIDIA'
 
-# Target -> component name / recipe / required build-compute architecture
+# Target -> component name / recipe / required build-compute architecture /
+# required build-host OS release
 BUILD_TARGETS: Dict[str, Dict[str, str]] = {
     TARGET_JP5: {
         'component_name': 'aws.edgeml.dda.LocalServer.arm64JP5',
         'recipe': 'recipe-arm64-jp5.yaml',
         'required_arch': ARCH_ARM64,
+        'required_os_release': OS_RELEASE_JAMMY,
     },
     TARGET_JP6: {
         'component_name': 'aws.edgeml.dda.LocalServer.arm64JP6',
         'recipe': 'recipe-arm64-jp6.yaml',
         'required_arch': ARCH_ARM64,
+        'required_os_release': OS_RELEASE_JAMMY,
+    },
+    TARGET_JP7: {
+        'component_name': 'aws.edgeml.dda.LocalServer.arm64JP7',
+        'recipe': 'recipe-arm64-jp7.yaml',
+        'required_arch': ARCH_ARM64,
+        'required_os_release': OS_RELEASE_NOBLE,
     },
     TARGET_AMD64: {
         'component_name': 'aws.edgeml.dda.LocalServer.amd64',
         'recipe': 'recipe-amd64.yaml',
         'required_arch': ARCH_X86_64,
+        'required_os_release': OS_RELEASE_JAMMY,
     },
     TARGET_AMD64_NVIDIA: {
         'component_name': 'aws.edgeml.dda.LocalServer.amd64Nvidia',
         'recipe': 'recipe-amd64-nvidia.yaml',
         'required_arch': ARCH_X86_64,
+        'required_os_release': OS_RELEASE_JAMMY,
     },
 }
 
@@ -83,6 +101,15 @@ def target_definition(target: str) -> Dict[str, str]:
 def required_arch_for_target(target: str) -> str:
     """CPU architecture required by a Build_Target (arm64 or x86_64)."""
     return target_definition(target)['required_arch']
+
+
+def required_os_release_for_target(target: str) -> str:
+    """Ubuntu OS release required by a Build_Target's build host
+    ('24.04' for JP7, '22.04' for every other supported target).
+
+    Delegates to target_definition so unsupported targets keep raising
+    ValueError (jp7-ephemeral-runner-provisioning Req 2.1, 2.2, 2.7)."""
+    return target_definition(target)['required_os_release']
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +335,10 @@ RULE_SERVER_ID_MISSING = 'server_id_missing'            # Req 2.6
 RULE_SERVER_NOT_FOUND = 'server_not_found'              # Req 2.4
 RULE_SERVER_NOT_RUNNING = 'server_not_running'          # Req 2.4
 RULE_SERVER_ARCH_MISMATCH = 'server_arch_mismatch'      # Req 2.8
+# JP7 dedicated capability gate (jp7-ephemeral-runner-provisioning Req 2.7):
+# the selected server's recorded Ubuntu release must match the required
+# build-host release of every noble-requiring selected target.
+RULE_SERVER_OS_RELEASE_MISMATCH = 'server_os_release_mismatch'
 # Per-submission source selection (build-source-selection Req 1.4, 2.7).
 # Re-exported from build_source — the one definition of the accepted
 # repository/ref shapes — rather than spelled a second time here.
@@ -381,6 +412,12 @@ def validate_build_request(
       - the server's CPU architecture matches the required architecture of
         every selected target; the error names the server architecture, the
         mismatched Build_Target, and the architecture it requires (Req 2.8)
+      - the server's recorded Ubuntu release satisfies every selected
+        target that requires a 24.04 build host (JP7); the error names the
+        missing Ubuntu 24.04 arm64 capability and the server's actual
+        release. A record with no ``ubuntu_version`` field predates the
+        field's introduction and is treated as the 22.04 host it is
+        (jp7-ephemeral-runner-provisioning Req 2.7)
       - a supplied ``repository`` is a well-formed HTTPS GitHub remote
         (RULE_REPOSITORY_INVALID, build-source-selection Req 1.4)
       - a supplied ``source_ref`` is a valid branch/tag/SHA ref
@@ -474,6 +511,34 @@ def validate_build_request(
                                 f"CPU architecture '{server_arch}', but "
                                 f"Build_Target {target} requires "
                                 f"'{required}'."
+                            ),
+                        })
+                # JP7 dedicated capability gate (jp7-ephemeral-runner-
+                # provisioning Req 2.7): every selected target that requires
+                # a 24.04 build host needs the server's RECORDED Ubuntu
+                # release to be exactly 24.04. A record with no
+                # ubuntu_version field predates the field's introduction
+                # (ec1dc38) and is therefore the 22.04 host it was launched
+                # as. Targets requiring 22.04 impose NO release constraint,
+                # and this gate composes with (never masks) the not-found,
+                # not-running, and arch-mismatch rules above.
+                server_release = (
+                    server.get('ubuntu_version') or OS_RELEASE_JAMMY)
+                for target in targets:
+                    if not is_supported_target(target):
+                        continue
+                    required_release = required_os_release_for_target(target)
+                    if required_release != OS_RELEASE_NOBLE:
+                        continue
+                    if server_release != required_release:
+                        errors.append({
+                            'rule': RULE_SERVER_OS_RELEASE_MISMATCH,
+                            'message': (
+                                f"Dedicated_Build_Server '{server_id}' runs "
+                                f"Ubuntu {server_release}, but Build_Target "
+                                f"{target} requires an Ubuntu 24.04 arm64 "
+                                f"build host. Select a 24.04 arm64 server "
+                                f"(or use the ephemeral execution mode)."
                             ),
                         })
 

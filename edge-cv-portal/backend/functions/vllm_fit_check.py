@@ -24,6 +24,7 @@ GIB = 1024 ** 3
 DEVICE_MEMORY_PROFILE_BYTES = {
     'arm64_jp6': 30 * GIB,   # 32 GB Orin class, ~30 GiB usable
     'arm64_jp5': 30 * GIB,   # only reachable when JP5_VLLM_ENABLED
+    'arm64_jp7': 120 * GIB,  # 128 GB Thor class, ~120 GiB usable
 }
 
 # Floor for vLLM KV-cache blocks beyond weights + activation overhead.

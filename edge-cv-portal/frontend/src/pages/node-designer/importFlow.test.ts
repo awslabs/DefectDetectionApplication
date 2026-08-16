@@ -80,13 +80,14 @@ describe('selectableArchitectures', () => {
     ]);
   });
 
-  it('offers all five Target_Architectures otherwise', () => {
+  it('offers all six Target_Architectures otherwise', () => {
     expect(selectableArchitectures(false)).toEqual([
       'x86_64',
       'x86_64_nvidia',
       'arm64_jp4',
       'arm64_jp5',
       'arm64_jp6',
+      'arm64_jp7',
     ]);
   });
 });
@@ -706,6 +707,7 @@ const ALL_ARCHS = [
   'arm64_jp4',
   'arm64_jp5',
   'arm64_jp6',
+  'arm64_jp7',
 ] as const;
 
 const versionArb = fc.constantFrom('1.14', '1.16', '1.18', '1.20', '1.24.0');

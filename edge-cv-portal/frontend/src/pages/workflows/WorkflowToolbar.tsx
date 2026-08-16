@@ -83,6 +83,7 @@ export const PACKAGE_ARCH_OPTIONS: readonly MultiselectProps.Option[] = [
   { value: 'arm64_jp4', label: 'ARM64 · JetPack 4' },
   { value: 'arm64_jp5', label: 'ARM64 · JetPack 5' },
   { value: 'arm64_jp6', label: 'ARM64 · JetPack 6' },
+  { value: 'arm64_jp7', label: 'ARM64 · JetPack 7' },
 ];
 
 // --------------------------------------------------------------------------

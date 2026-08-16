@@ -245,3 +245,10 @@ must pass before AND after the fix.
 
 - Existing packaging suites (`test_workflow_packaging_*.py`, `test_vllm_packaging_dispatch.py`, `test_greengrass_publish_localserver.py`) still pass — regression net over recipe, dependency, and publish paths
 - Post-deploy manual validation (delivery path, not CI): deploy via `edge-cv-portal/deploy-infrastructure.sh`, repackage the workflow (v7), deploy to the JP6 device, confirm LLM inference returns 200
+
+## Amendment (vllm-multi-arch-publish-conflict)
+
+Amended by `.kiro/specs/vllm-multi-arch-publish-conflict/` (branch `spec/jetpack7-support`), which introduced per-JetPack component name suffixes (e.g. `model-vllm-{safe}-jetson-xavier-jp7`). This spec's intent is not regressed:
+
+- The Triton model identity travels on `--model_name`, which is still `_safe_model_name(model_name)`, unchanged. `--component_name` is logging-only in `src/backend/dda_triton/vllm_model_prep.py` (its argparse help says "(logging)"; `prepare()` binds it to `component` and only logs it), so suffixing the component name has zero device-side runtime impact.
+- `derive_vllm_component_name` still returns `model-vllm-{safe_model_name}` verbatim; the per-target suffixing appends to that base name. This spec's transform-equality property test (`test_property_llm_model_name_preservation.py`) passes unmodified.

@@ -266,6 +266,10 @@ class RunnerPlan(NamedTuple):
       (``use_spot_for_ephemeral`` in the snapshot; default False)
     - ``status``: the Build_Job status the dispatch implies — provisioning
       (Req 3.1)
+    - ``os_release``: Ubuntu release required by the job's Build_Target's
+      build host ('24.04' for JP7, '22.04' otherwise; jp7-ephemeral-
+      runner-provisioning Req 2.2). Appended LAST with the jammy default
+      so existing positional constructions and field access are unaffected.
     """
     build_job_id: str
     arch: str
@@ -273,6 +277,7 @@ class RunnerPlan(NamedTuple):
     volume_size_gb: Any
     spot: bool
     status: str
+    os_release: str = '22.04'
 
 
 def plan_runner(job: Dict[str, Any]) -> RunnerPlan:
@@ -309,6 +314,8 @@ def plan_runner(job: Dict[str, Any]) -> RunnerPlan:
         volume_size_gb=volume_size_gb,
         spot=bool(snapshot.get('use_spot_for_ephemeral', False)),
         status=build_domain.STATUS_PROVISIONING,
+        os_release=build_domain.required_os_release_for_target(
+            job['build_target']),
     )
 
 

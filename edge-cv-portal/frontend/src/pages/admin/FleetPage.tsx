@@ -50,6 +50,7 @@ import { apiService } from '../../services/api';
 import type {
   BuildServer,
   BuildServerArchitecture,
+  BuildServerUbuntuVersion,
 } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { getErrorMessage } from '../../utils/errorHandling';
@@ -113,13 +114,18 @@ interface LaunchModalProps {
 /**
  * Launch modal: server name field plus a CPU architecture radio
  * selection with no default — the admin must pick ARM64 or x86_64
- * before submission is possible (Requirement 6.5).
+ * before submission is possible (Requirement 6.5). ARM64 additionally
+ * offers the Ubuntu version: 22.04 (default) or 24.04, the JetPack 7
+ * (JP7) build host (jetpack7-support design §10); the choice is
+ * arm64-only, so switching to x86_64 resets it to 22.04.
  */
 export function LaunchServerModal({ onSuccess, onDismiss }: LaunchModalProps) {
   const [name, setName] = useState('');
   const [architecture, setArchitecture] = useState<
     '' | BuildServerArchitecture
   >('');
+  const [ubuntuVersion, setUbuntuVersion] =
+    useState<BuildServerUbuntuVersion>('22.04');
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState('');
 
@@ -135,6 +141,7 @@ export function LaunchServerModal({ onSuccess, onDismiss }: LaunchModalProps) {
       await apiService.launchBuildServer({
         name: name.trim(),
         architecture: architecture as BuildServerArchitecture,
+        ubuntu_version: ubuntuVersion,
       });
       onSuccess(
         `Build server ${name.trim()} is launching. The build environment ` +
@@ -192,15 +199,23 @@ export function LaunchServerModal({ onSuccess, onDismiss }: LaunchModalProps) {
         >
           <RadioGroup
             value={architecture || null}
-            onChange={({ detail }) =>
-              setArchitecture(detail.value as BuildServerArchitecture)
-            }
+            onChange={({ detail }) => {
+              const nextArchitecture =
+                detail.value as BuildServerArchitecture;
+              setArchitecture(nextArchitecture);
+              if (nextArchitecture !== 'arm64') {
+                // 24.04 is arm64-only (JP7): leaving ARM64 restores the
+                // 22.04 default the backend applies for every other
+                // architecture.
+                setUbuntuVersion('22.04');
+              }
+            }}
             items={[
               {
                 value: 'arm64',
                 label: 'ARM64',
                 description:
-                  'For ARM64 edge component builds (e.g. JP5, JP6).',
+                  'For ARM64 edge component builds (e.g. JP5, JP6, JP7).',
               },
               {
                 value: 'x86_64',
@@ -211,6 +226,31 @@ export function LaunchServerModal({ onSuccess, onDismiss }: LaunchModalProps) {
             ]}
           />
         </FormField>
+        {architecture === 'arm64' && (
+          <FormField
+            label="Ubuntu version"
+            description="JetPack 7 (JP7) builds require an Ubuntu 24.04 host."
+          >
+            <RadioGroup
+              value={ubuntuVersion}
+              onChange={({ detail }) =>
+                setUbuntuVersion(detail.value as BuildServerUbuntuVersion)
+              }
+              items={[
+                {
+                  value: '22.04',
+                  label: 'Ubuntu 22.04 (default)',
+                  description: 'For JP5 and JP6 builds.',
+                },
+                {
+                  value: '24.04',
+                  label: 'Ubuntu 24.04',
+                  description: 'For JetPack 7 (JP7) builds.',
+                },
+              ]}
+            />
+          </FormField>
+        )}
       </SpaceBetween>
     </Modal>
   );

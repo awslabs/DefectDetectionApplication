@@ -14,9 +14,11 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
   - [Step 2: Build and Deploy Frontend](#step-2-build-and-deploy-frontend)
   - [Step 3: Post-Deployment Setup](#step-3-post-deployment-setup)
   - [Step 4: Build DDA Application](#step-4-build-dda-application-build-server)
+    - [JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
   - [Step 5: Set Up Accounts](#step-5-set-up-accounts)
   - [Step 6: Create UseCase](#step-6-create-usecase)
   - [Step 7: Setting Up Edge Servers](#step-7-setting-up-edge-servers)
+    - [JetPack 7 (JP7) Devices](#jetpack-7-jp7-devices-jetson-thor-jetpack-71--72)
 - [Deploy DDA Application to Edge Device](#deploy-dda-application-to-edge-device)
 - [Deployments](#deployments)
 - [Devices](#devices)
@@ -259,14 +261,20 @@ and JetPack version so the correct base image, recipe, and component name are us
 ./gdk-component-build-and-publish.sh aarch64 4   # JetPack 4.6 (L4T r32.x) -> aws.edgeml.dda.LocalServer.arm64
 ./gdk-component-build-and-publish.sh aarch64 5   # JetPack 5   (L4T r35.x) -> aws.edgeml.dda.LocalServer.arm64JP5
 ./gdk-component-build-and-publish.sh aarch64 6   # JetPack 6   (L4T r36.x) -> aws.edgeml.dda.LocalServer.arm64JP6
+./gdk-component-build-and-publish.sh aarch64 7   # JetPack 7   (L4T r38.x) -> aws.edgeml.dda.LocalServer.arm64JP7
 ./gdk-component-build-and-publish.sh x86_64      # x86_64                  -> aws.edgeml.dda.LocalServer.amd64
 ```
 
-Each JetPack target builds against its matching L4T base image (JP5:
-`l4t-jetpack:r35.4.1`, JP6: `l4t-jetpack:r36.3.0`) and is published as a
-distinct component. Deploy the component that matches the device's JetPack
-version, and compile models for the matching compilation target (Jetson JetPack
-4.x / 5.x / 6.x).
+Each JetPack target builds against its matching base image (JP5:
+`l4t-jetpack:r35.4.1`, JP6: `l4t-jetpack:r36.3.0`, JP7: digest-pinned
+`nvcr.io/nvidia/cuda` CUDA 13.0.x Ubuntu 24.04 arm64 — NGC publishes no
+`l4t-jetpack` r38.x tag) and is published as a distinct component. Deploy the
+component that matches the device's JetPack version, and compile models for
+the matching compilation target (Jetson JetPack 4.x / 5.x / 6.x).
+
+> **JetPack 7 builds require an Ubuntu 24.04 arm64 build server.** See
+> [JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
+> below for provisioning steps.
 
 **Launch script options:**
 - `--key-name KEY` (required) - SSH key pair name
@@ -301,6 +309,110 @@ It reuses the locally-built `flask-app:latest` / `react-webapp:latest` images an
 If you prefer manual IAM role and EC2 setup, create a role with trust policy for `ec2.amazonaws.com` and attach permissions for Greengrass, IoT, S3, EC2, CloudWatch Logs, CloudWatch Metrics, and ECR. See the inline policy in the collapsed section of the original documentation.
 
 </details>
+
+#### 4.2 JetPack 7 (JP7) Build Server (Ubuntu 24.04 arm64)
+
+The JP7 target (`aws.edgeml.dda.LocalServer.arm64JP7`, JetPack 7.1/7.2, Jetson
+Linux r38.x) is built on an **Ubuntu 24.04 LTS (noble) arm64** host. The
+JP4/JP5/JP6 build-server flow above applies, with the noble-specific deltas
+documented here. Following this section end-to-end produces a host that builds
+the JP7 component and that the portal accepts as capable of JP7 dispatched
+builds.
+
+**1. Host: Ubuntu 24.04 LTS on arm64.** An AWS Graviton instance (e.g.
+`m6g.4xlarge`, the launcher default) or Jetson Thor-class hardware. The launch
+script accepts a Ubuntu version parameter:
+
+```bash
+cd edge-cv-portal
+./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME --region REGION --ubuntu-version 24.04
+```
+
+`--ubuntu-version 24.04` resolves the latest Ubuntu 24.04 arm64 AMI (Ubuntu
+Pro preferred, standard fallback). All other launcher options are unchanged;
+`--ami-id` still overrides the lookup entirely.
+
+**2. Docker Engine + buildx + `docker-compose` shim.** Connect as `ubuntu`
+(`ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@<PUBLIC_IP>`) and install Docker
+Engine with the buildx and compose v2 plugins from Ubuntu's repositories:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-buildx docker-compose-v2
+sudo usermod -aG docker ubuntu   # re-login (or `newgrp docker`) to pick up the group
+```
+
+Ubuntu 24.04 ships only the `docker compose` **plugin** — there is no legacy
+`docker-compose` command — while `build-custom.sh` invokes `docker-compose`.
+Provide a `docker-compose` shim that delegates to the plugin:
+
+```bash
+printf '#!/bin/sh\nexec docker compose "$@"\n' | sudo tee /usr/local/bin/docker-compose >/dev/null
+sudo chmod +x /usr/local/bin/docker-compose
+docker-compose version   # must print the compose v2 version
+```
+
+(Installing the standalone compose v2 binary as `/usr/local/bin/docker-compose`
+is an equivalent alternative.)
+
+**3. Build tooling: zip, python3, GDK CLI.**
+
+```bash
+sudo apt-get install -y zip python3 python3-pip git curl
+# noble's python is PEP 668 "externally managed" — user-level installs need the flag
+pip3 install --user --break-system-packages 'botocore[crt]'
+pip3 install --user --break-system-packages git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git@v1.6.2
+export PATH="$HOME/.local/bin:$PATH"   # persist via ~/.bashrc
+gdk --help                             # verify the CLI resolves
+```
+
+**4. Repository clone as the `ubuntu` user.** Portal-dispatched builds run as
+`ubuntu` from the repository directory recorded on the server (default
+`/home/ubuntu/DefectDetectionApplication`), so clone the tree there, owned by
+that user:
+
+```bash
+cd ~   # /home/ubuntu
+git clone https://github.com/awslabs/DefectDetectionApplication.git
+cd DefectDetectionApplication
+```
+
+**5. Build the JP7 component.**
+
+```bash
+./gdk-component-build-and-publish.sh aarch64 7   # -> aws.edgeml.dda.LocalServer.arm64JP7
+```
+
+The target derivation, recipe (`recipe-arm64-jp7.yaml`), and packaging follow
+the same flow as JP5/JP6. Builds must run **one at a time** per host (see
+`.kiro/steering/builds.md`); a JP7 build with the default GPU onnxruntime
+compile takes ~1–2 h, and the default from-source vLLM build (`VLLM_ENABLE=1`,
+see [Using LLMs (vLLM)](#using-llms-vllm)) adds **~N–M h** on top of that.
+<!-- TODO(jp7-vllm-enablement): replace ~N–M h with the bounded range measured
+     on the build server during the VLLM_ENABLE=1 validation build -->
+To skip the from-source vLLM compile entirely, build with
+`--build-arg VLLM_ENABLE=0`: the resulting image carries no vLLM or torch
+install, the backend's capability probe runs the pre-feature (vision-only)
+startup sequence, and vLLM model features are unavailable on devices running
+that image.
+
+**6. Portal registration (dispatched builds).** Portal-dispatched JP7 builds
+use the existing dedicated-server registration flow: the **Build Server
+Fleet** page (PortalAdmin only, `admin/fleet`). A fleet server launched with
+the arm64 CPU architecture is recorded with `arch=arm64` — that recorded
+architecture (plus the server being in the `running` state) is exactly what
+makes the portal accept it as capable of the JP7 target. The portal dispatch
+maps `BUILD_TARGET=JP7` to `./portal-build.sh aarch64 7` on the registered
+server. If no running arm64 server is registered, JP7 dispatches fail with a
+missing-capability diagnostic before any build work starts.
+
+> **Note**: The fleet page's own launcher clones the repository to the
+> location recorded on the server (default
+> `/home/ubuntu/DefectDetectionApplication`, owned by `ubuntu`) and
+> bootstraps with `setup-build-server.sh`. For a JP7-capable host on Ubuntu
+> 24.04, additionally apply steps 2–3 above on the launched server (the
+> `docker-compose` shim in particular). The dispatcher runs
+> `scripts/portal-build-agent.sh` from that recorded repository directory.
 
 ### Step 5: Set Up Accounts
 
@@ -385,6 +497,70 @@ sudo ./setup_station.sh <region> <device-name>
 ```
 
 The setup script installs system dependencies (Java, Python 3.11, Docker, GStreamer), installs Greengrass Core, provisions the device as an IoT Thing, configures IAM roles, and sets up directory structure.
+
+#### JetPack 7 (JP7) Devices (Jetson Thor, JetPack 7.1 / 7.2)
+
+The JP7 component (`aws.edgeml.dda.LocalServer.arm64JP7`) supports devices
+running **JetPack 7.1 (Jetson Linux r38.4)** and **JetPack 7.2** on Ubuntu
+24.04 LTS. One component artifact covers both releases — no release-specific
+configuration, rebuild, or manual step differs between 7.1 and 7.2. Device
+setup follows the standard Jetson flow above (`station_install/setup_station.sh`);
+the device is recorded with architecture `arm64_jp7`, and the portal deploys
+the JP7 component only to devices recorded with that exact architecture
+(JP5/JP6 devices are incompatible with the JP7 component and vice versa).
+
+**Host-side prerequisites (JetPack 7.1 and 7.2)**
+
+- **NVIDIA Container Runtime registered with Docker.** The DDA backend
+  container gets GPU access via `runtime: nvidia` in docker-compose, which
+  requires the `nvidia` runtime wired into `/etc/docker/daemon.json`.
+  `setup_station.sh` (and `station_install/patch_docker_host_prereqs.sh` for
+  already-provisioned hosts) registers it idempotently via `nvidia-ctk` or a
+  direct `daemon.json` merge. JetPack 7 ships the NVIDIA Container Toolkit
+  with the OS image; if `nvidia-ctk`/`nvidia-container-runtime` is missing,
+  install `nvidia-container-toolkit` from the JetPack apt repositories before
+  deploying.
+- **Docker Engine with the `docker compose` plugin.** Ubuntu 24.04 ships the
+  compose v2 plugin; the JP7 recipe lifecycle invokes `docker compose` (not
+  the legacy `docker-compose` v1 binary), which `setup_station.sh` installs
+  where absent.
+- **systemd.** The recipe's Install step runs
+  `host_scripts/install_nvidia_csi_service.sh`, which installs, enables, and
+  starts the `nvidia-csi-capture` systemd service (the CSI camera capture
+  bridge) and installs `jq` where missing — standard on JetPack 7 OS images,
+  listed here for completeness.
+- **JetPack 7 host driver stack (CUDA 13.0 userspace).** The JP7 image is
+  built against CUDA 13.0 / TensorRT 10.x; the host must be flashed with
+  JetPack 7.1 or 7.2 so the r38.x driver interfaces the container runtime
+  injects are present. Deploying the JP7 component to an r35/r36
+  (JetPack 5/6) host is not supported — use the matching JP5/JP6 component.
+- Additional host packages or driver interfaces discovered during on-hardware
+  verification are recorded here per release as they are found (see
+  Requirement 8.5 of the jetpack7-support spec); if the backend container
+  fails to start because of a missing host library or driver interface, the
+  container logs retain the startup error for inspection (the component
+  reports the deployment failed rather than RUNNING if the backend does not
+  pass its healthcheck within the 300-second start budget).
+
+**Known limitations on JP7**
+
+- **DLR-only (Neo-compiled) models are not supported.** The JP7 image does
+  not carry the JP5/JP6 CUDA 11.4 cudart + TensorRT 8 compatibility stages
+  that r35-era `libdlr.so` binaries require; those libraries' transitive L4T
+  driver dependencies do not exist on Thor. Model engines are imported lazily
+  per runner, so this degrades **per model**, not at startup: the LocalServer
+  starts and serves other model types normally, and only a DLR-only model
+  fails at its first load on a JP7 device. Use ONNX (GPU onnxruntime with
+  CUDA and TensorRT execution providers is built in) or Triton-served models
+  instead.
+- **vLLM is enabled by default via a from-source build.** No prebuilt vLLM
+  wheel exists for Jetson Thor / CUDA 13.0 (cu130), so the JP7 image compiles
+  vLLM from source during the image build (`install_vllm_gpu.sh`, vLLM
+  `v0.11.2`, Thor `sm_110`, against `torch==2.9.0+cu130`), and the portal
+  offers `arm64_jp7` as a vLLM-supported architecture. The from-source
+  compile adds build time on the JP7 build server — see
+  [JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
+  for the expected duration and the `VLLM_ENABLE=0` opt-out.
 
 #### Edge Device IAM Permissions
 
@@ -530,9 +706,13 @@ Each model package's `manifest.json` declares which engine loads it via a
 | `pytorch` | Native PyTorch (TorchScript) | `model.pt` |
 
 GPU acceleration for ONNX (CUDA + TensorRT execution providers) is available on
-**JetPack 5 and 6**; **JetPack 4 runs ONNX on CPU only**. GPU requires a
+**JetPack 5, 6, and 7**; **JetPack 4 runs ONNX on CPU only**. GPU requires a
 LocalServer backend image built with the ONNX GPU runtime (see
 [Build requirement for GPU](#build-requirement-for-gpu) below).
+
+> **Note**: `dlr` (Neo-compiled) models are not supported on **JetPack 7** —
+> migrate those models to `runtime: onnx`. See
+> [JetPack 7 (JP7) Devices](#jetpack-7-jp7-devices-jetson-thor-jetpack-71--72).
 
 ### Object detection (YOLO)
 
@@ -646,14 +826,15 @@ index to drop when using softmax). NMS-only keys (`iou_threshold`) are ignored.
 
 The default LocalServer backend image installs the **CPU** ONNX Runtime. GPU
 (CUDA/TensorRT) needs the from-source GPU runtime, which is built **by default**
-for JetPack 5 and 6 by `gdk-component-build-and-publish.sh`:
+for JetPack 5, 6, and 7 by `gdk-component-build-and-publish.sh`:
 
 ```bash
+./gdk-component-build-and-publish.sh aarch64 7   # JP7: onnxruntime-gpu (CUDA 13.0 / TRT 10.14)
 ./gdk-component-build-and-publish.sh aarch64 6   # JP6: onnxruntime-gpu (CUDA 12.6 / TRT 10.3)
 ./gdk-component-build-and-publish.sh aarch64 5   # JP5: onnxruntime-gpu (CUDA 11.4 / TRT 8.5)
 ```
 
-`build-custom.sh` defaults `ONNXRUNTIME_GPU=1` for JP5/JP6 (the source build adds
+`build-custom.sh` defaults `ONNXRUNTIME_GPU=1` for JP5/JP6/JP7 (the source build adds
 ~1–2 h and is memory-heavy). For a fast CPU-only image, set `ONNXRUNTIME_GPU=0`.
 JetPack 4 is CPU-only regardless. The engine auto-selects TensorRT → CUDA → CPU
 providers at load, so the same package runs on either a GPU or CPU image.
@@ -667,24 +848,36 @@ compilation), packaged and published as a Greengrass model component, and
 served through device text-generation APIs and the `llm_inference` workflow
 node.
 
-**Hardware requirement**: vLLM runs on **JetPack 6 devices only**
-(`arm64_jp6`, e.g. AGX Orin). The JP6 LocalServer image installs
-`vllm==0.10.2+cu126` from the Jetson AI Lab index **by default**; the
-deployment architecture gate rejects vLLM components targeted at JP4/JP5
+**Hardware requirement**: vLLM runs on **JetPack 6 and JetPack 7 devices**
+(`arm64_jp6`, e.g. AGX Orin; `arm64_jp7`, e.g. Jetson Thor). The JP6
+LocalServer image installs `vllm==0.10.2+cu126` from the Jetson AI Lab index
+**by default**; the JP7 image builds vLLM **`v0.11.2` from source by
+default** (`install_vllm_gpu.sh`, Thor `sm_110`, against
+`torch==2.9.0+cu130`) since no prebuilt Thor/cu130 wheel exists — see
+[JetPack 7 (JP7) Devices](#jetpack-7-jp7-devices-jetson-thor-jetpack-71--72).
+The deployment architecture gate rejects vLLM components targeted at JP4/JP5
 devices. The full stage-by-stage validation procedure lives in
 [test/on-hardware/jp6_vllm_validation.md](test/on-hardware/jp6_vllm_validation.md).
 
 ### Build requirement
 
-The default JP6 build includes vLLM — nothing extra to enable:
+The default JP6 and JP7 builds include vLLM — nothing extra to enable:
 
 ```bash
 ./gdk-component-build-and-publish.sh aarch64 6   # vLLM layer on by default (VLLM_ENABLE=1)
+./gdk-component-build-and-publish.sh aarch64 7   # vLLM built from source by default (VLLM_ENABLE=1)
 ```
 
-To build an explicitly vLLM-free JP6 image, pass `--build-arg VLLM_ENABLE=0`;
-the app's capability probe then runs the pre-feature (vision-only) startup
-sequence and the text-generation routes are absent.
+The JP7 build compiles vLLM from source (no prebuilt Thor/cu130 wheel exists),
+which adds substantial build time on the JP7 build server — see
+[JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
+for the expected duration; JP7 builds run on the build server one at a time.
+
+To build an explicitly vLLM-free JP6 or JP7 image, pass
+`--build-arg VLLM_ENABLE=0`; the image then carries no vLLM install (on JP7
+the torch/vLLM layers are skipped entirely), the app's capability probe runs
+the pre-feature (vision-only) startup sequence, and the text-generation
+routes are absent.
 
 ### Example: install the smoke-test model (`facebook/opt-125m`)
 

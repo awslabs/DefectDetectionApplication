@@ -8,8 +8,8 @@
  * Spec: .kiro/specs/portal-build-fleet-and-workflow-gates
  */
 
-/** The four supported Build_Targets (Req 1.1). */
-export type BuildTarget = 'JP5' | 'JP6' | 'AMD64' | 'AMD64_NVIDIA';
+/** The five supported Build_Targets (Req 1.1; JP7 added by jetpack7-support). */
+export type BuildTarget = 'JP5' | 'JP6' | 'JP7' | 'AMD64' | 'AMD64_NVIDIA';
 
 /** Build_Job execution modes (Req 2.1). */
 export type BuildExecutionMode = 'ephemeral' | 'dedicated';

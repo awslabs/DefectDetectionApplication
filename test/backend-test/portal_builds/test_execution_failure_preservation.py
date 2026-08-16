@@ -247,13 +247,16 @@ import build_dispatcher  # noqa: E402
 # ---------------------------------------------------------------------------
 
 #: Target -> (component identity, recipe, required architecture)
-#: (Req 3.7): JP5/JP6 are arm64, AMD64/AMD64_NVIDIA are x86_64, and the
-#: component identities are exactly these.
+#: (Req 3.7): JP5/JP6/JP7 are arm64, AMD64/AMD64_NVIDIA are x86_64, and
+#: the component identities are exactly these (JP7 added by the
+#: jetpack7-support spec's target-matrix extension).
 TARGET_ORACLE = {
     "JP5": ("aws.edgeml.dda.LocalServer.arm64JP5",
             "recipe-arm64-jp5.yaml", "arm64"),
     "JP6": ("aws.edgeml.dda.LocalServer.arm64JP6",
             "recipe-arm64-jp6.yaml", "arm64"),
+    "JP7": ("aws.edgeml.dda.LocalServer.arm64JP7",
+            "recipe-arm64-jp7.yaml", "arm64"),
     "AMD64": ("aws.edgeml.dda.LocalServer.amd64",
               "recipe-amd64.yaml", "x86_64"),
     "AMD64_NVIDIA": ("aws.edgeml.dda.LocalServer.amd64Nvidia",
@@ -942,7 +945,7 @@ class TestBuildJobsApiEnvelopes:
 # ===========================================================================
 
 class TestTargetAndModeMappings:
-    """**Property 2: Preservation** — `JP5`/`JP6 -> arm64`,
+    """**Property 2: Preservation** — `JP5`/`JP6`/`JP7 -> arm64`,
     `AMD64`/`AMD64_NVIDIA -> x86_64`, the exact component identities and
     recipes, the dedicated/ephemeral mode set, and the intentional
     dedicated arch-mismatch validation.

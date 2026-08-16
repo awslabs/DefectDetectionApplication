@@ -65,7 +65,7 @@ install_cmake()
             # current cmake is 4.x (Triton-incompatible).
             CMAKE_VER=3.31.6
             if [ $(uname -m) = "x86_64" ]; then CM_ARCH=x86_64; else CM_ARCH=aarch64; fi
-            wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CM_ARCH}.sh" -O /tmp/cmake.sh
+            wget -q --tries=5 --waitretry=30 --retry-on-http-error=429,500,502,503 "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CM_ARCH}.sh" -O /tmp/cmake.sh
             $do_sudo sh /tmp/cmake.sh --skip-license --prefix=/usr/local
             rm -f /tmp/cmake.sh
             cmake --version

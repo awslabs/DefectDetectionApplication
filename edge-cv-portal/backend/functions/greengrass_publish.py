@@ -7,7 +7,7 @@ import json
 import os
 import logging
 from dataclasses import asdict
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError
@@ -78,6 +78,7 @@ TARGET_TO_LOCAL_SERVER = {
     'jetson-xavier': JP4_LOCAL_SERVER,                           # JetPack 4
     'jetson-xavier-jp5': 'aws.edgeml.dda.LocalServer.arm64JP5',  # JetPack 5
     'jetson-xavier-jp6': 'aws.edgeml.dda.LocalServer.arm64JP6',  # JetPack 6
+    'jetson-xavier-jp7': 'aws.edgeml.dda.LocalServer.arm64JP7',  # JetPack 7
     'arm64-cpu': JP4_LOCAL_SERVER,                               # arm64 CPU -> JP4 baseline
     'x86_64-cpu': _AMD64_LOCAL_SERVER,
     'x86_64-cuda': _AMD64_LOCAL_SERVER,
@@ -88,10 +89,66 @@ TARGET_TO_PLATFORM = {
     'jetson-xavier': 'aarch64',
     'jetson-xavier-jp5': 'aarch64',
     'jetson-xavier-jp6': 'aarch64',
+    'jetson-xavier-jp7': 'aarch64',
     'arm64-cpu': 'aarch64',
     'x86_64-cpu': 'amd64',
     'x86_64-cuda': 'amd64'
 }
+
+
+# Greengrass component-name constraints (Requirement 2.6). A per-JetPack vLLM
+# name is `Base_Component_Name` + '-' + Target_Suffix, so a long model name can
+# push the derived name past the service limit. Validating here turns that into
+# a recorded failed target with a clear message BEFORE recipe generation,
+# instead of an opaque API error at create_component_version time.
+GREENGRASS_COMPONENT_NAME_MAX = 128
+GREENGRASS_COMPONENT_NAME_RE = re.compile(r'^[a-zA-Z0-9._-]+$')
+
+
+def validate_greengrass_component_name(name: str) -> None:
+    """Fail closed on a component name Greengrass would reject.
+
+    Raises PublishError when the name is empty, exceeds
+    GREENGRASS_COMPONENT_NAME_MAX characters, or contains a character outside
+    the Greengrass charset `^[a-zA-Z0-9._-]+$`. A no-op for vision component
+    names (already sanitized and short) and for every in-range vLLM
+    Per_JetPack_Component name.
+    """
+    if not name:
+        raise PublishError("Component name must not be empty")
+    if len(name) > GREENGRASS_COMPONENT_NAME_MAX:
+        raise PublishError(
+            f"Component name '{name}' is {len(name)} characters, which "
+            f"exceeds the Greengrass limit of "
+            f"{GREENGRASS_COMPONENT_NAME_MAX}; shorten the model name so the "
+            f"per-target component name fits"
+        )
+    if not GREENGRASS_COMPONENT_NAME_RE.match(name):
+        raise PublishError(
+            f"Component name '{name}' contains characters Greengrass does "
+            f"not allow (permitted: letters, digits, '.', '_', '-')"
+        )
+
+
+def parse_component_arn(arn: str) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort (component_name, component_version) from a component ARN.
+
+    Used only for log detail during the atomicity rollback (design step 8):
+    when a delete is denied or fails, the warning must name the component and
+    version that survives cloud-side so it is identifiable straight from the
+    logs. Never raises — an unparseable ARN yields (None, None) so the rollback
+    stays best-effort.
+    """
+    if not isinstance(arn, str):
+        return None, None
+    name, version = None, None
+    if ':versions:' in arn:
+        head, version = arn.rsplit(':versions:', 1)
+    else:
+        head = arn
+    if ':components:' in head:
+        name = head.rsplit(':components:', 1)[-1]
+    return (name or None), (version or None)
 
 
 def resolve_local_server_component(target: str, platform: str) -> str:
@@ -116,8 +173,34 @@ def resolve_local_server_component(target: str, platform: str) -> str:
         f"(platform '{platform}'): no known JetPack-tagged LocalServer "
         f"variant. The model must declare a supported compile target "
         f"(jetson-xavier, jetson-xavier-jp5, jetson-xavier-jp6, "
-        f"x86_64-cpu, x86_64-cuda, arm64-cpu)."
+        f"jetson-xavier-jp7, x86_64-cpu, x86_64-cuda, arm64-cpu)."
     )
+
+
+def resolve_target_platform(target: str) -> str:
+    """Resolve a compile target's manifest platform, failing closed.
+
+    Replaces the old `TARGET_TO_PLATFORM.get(target, 'amd64')` default. That
+    default silently stamped an unmapped aarch64 target (classically
+    `jetson-xavier-jp7`) with platform `amd64`, which then satisfied
+    resolve_local_server_component's amd64 branch and handed back the amd64
+    LocalServer instead of failing closed — the fail-closed guarantee of
+    `localserver-arch-naming` was bypassed by the platform default, and the
+    defect was only observable on the device.
+
+    A target must therefore be mapped in BOTH module-level maps or it fails
+    closed here with a PublishError, before any recipe is generated, so a
+    future target added to `packaging.VLLM_ARCH_TO_TARGET` without both map
+    entries cannot repeat the defect (Requirement 2.19).
+    """
+    if target not in TARGET_TO_PLATFORM or target not in TARGET_TO_LOCAL_SERVER:
+        supported = sorted(set(TARGET_TO_PLATFORM) & set(TARGET_TO_LOCAL_SERVER))
+        raise PublishError(
+            f"Unsupported compile target '{target}': it has no platform and "
+            f"LocalServer mapping (TARGET_TO_PLATFORM / "
+            f"TARGET_TO_LOCAL_SERVER) (supported: {supported})"
+        )
+    return TARGET_TO_PLATFORM[target]
 
 
 def get_training_job_details(training_id: str) -> Dict:
@@ -283,12 +366,47 @@ JP5_VLLM_ENABLED = os.environ.get('JP5_VLLM_ENABLED', 'false').lower() == 'true'
 
 def vllm_supported_architectures() -> list:
     """Supported Target_Architecture set for vLLM_Model_Components:
-    always arm64_jp6, arm64_jp5 only when JP5 support is flagged on,
-    never arm64_jp4 (2.5). Mirrors packaging.vllm_supported_architectures."""
-    archs = ['arm64_jp6']
+    always arm64_jp6 and arm64_jp7, arm64_jp5 only when JP5 support is
+    flagged on, never arm64_jp4 (2.5). Mirrors
+    packaging.vllm_supported_architectures."""
+    archs = ['arm64_jp6', 'arm64_jp7']
     if JP5_VLLM_ENABLED:
         archs.append('arm64_jp5')
     return archs
+
+
+# Reverse of packaging.VLLM_ARCH_TO_TARGET: packaging target -> the single
+# Target_Architecture that target serves. KEEP IN SYNC with
+# packaging.VLLM_ARCH_TO_TARGET (same mirrored-pure-helper convention as
+# vllm_supported_architectures / _safe_model_name above — this Lambda is
+# bundled with the shared layer only, so packaging cannot be imported).
+#
+# Each Per_JetPack_Component advertises exactly ONE architecture, so its
+# recipe's supported_architectures comes from here rather than from the
+# record-wide set (design step 3). A target absent from this map fails closed
+# with PublishError rather than advertising a guess.
+VLLM_TARGET_TO_ARCH = {
+    'jetson-xavier-jp5': 'arm64_jp5',
+    'jetson-xavier-jp6': 'arm64_jp6',
+    'jetson-xavier-jp7': 'arm64_jp7',
+}
+
+
+def resolve_vllm_target_architecture(target: str) -> str:
+    """The single Target_Architecture a vLLM packaging target serves.
+
+    Fails closed with PublishError for an unmapped target: a Per_JetPack
+    component must never advertise an architecture guessed from the
+    record-wide set (design step 3, Requirement 2.3).
+    """
+    arch = VLLM_TARGET_TO_ARCH.get(target)
+    if not arch:
+        raise PublishError(
+            f"Cannot resolve a vLLM target architecture for compile target "
+            f"'{target}': not mapped in VLLM_TARGET_TO_ARCH (supported: "
+            f"{sorted(VLLM_TARGET_TO_ARCH)})"
+        )
+    return arch
 
 
 def is_vllm_record(training_job: Dict) -> bool:
@@ -316,32 +434,77 @@ def derive_vllm_component_name(model_name: str) -> str:
     return f"model-vllm-{_safe_model_name(model_name)}"
 
 
-def next_vllm_component_version(training_job: Dict) -> str:
-    """Next vLLM component version for a record: `N.0.0` with N = 1 + the
-    highest previously published N for this record (Requirement 2.4).
+def existing_component_versions(greengrass, component_name: str) -> set:
+    """Every registered version string of ``component_name`` in the Use_Case
+    account, or an empty set when the component does not exist yet.
 
-    Scans every version recorded on the record's publish history
-    (`published_components` entries and, once task 4.2 lands, the
-    `published_component` map), so the derived version is strictly greater
-    than everything already sent to Greengrass — including versions from
-    failed attempts that may still exist as component versions cloud-side.
+    Mirrors ``workflow_packaging._existing_component_versions``: resolve the
+    component ARN via ``list_components(scope='PRIVATE')`` paging (no account
+    id needed), then page ``list_component_versions``. A ``ClientError`` at
+    either step warns and degrades to an empty set — identical degradation to
+    the workflow packager, so a transient listing failure never blocks a
+    publish (Requirement 2.9).
     """
+    arn = None
+    try:
+        for page in greengrass.get_paginator('list_components').paginate(
+                scope='PRIVATE'):
+            for comp in page.get('components', []):
+                if comp.get('componentName') == component_name:
+                    arn = comp.get('arn')
+                    break
+            if arn:
+                break
+    except ClientError as e:
+        logger.warning('Could not list components while resolving next '
+                       'version for %s: %s', component_name, e)
+        return set()
+    if not arn:
+        return set()
+    versions = set()
+    try:
+        for page in greengrass.get_paginator(
+                'list_component_versions').paginate(arn=arn):
+            for v in page.get('componentVersions', []):
+                if v.get('componentVersion'):
+                    versions.add(v['componentVersion'])
+    except ClientError as e:
+        logger.warning('Could not list versions of %s: %s', component_name, e)
+    return versions
+
+
+def next_major_from_versions(versions) -> str:
+    """Pure: the next free MAJOR-only version over ``versions``.
+
+    ``f"{1 + max major}.0.0"``, i.e. ``1.0.0`` when nothing exists and
+    ``N+1.0.0`` otherwise. Unparseable entries are ignored (Requirement
+    2.10)."""
     highest = 0
-    candidates = []
-    published_list = training_job.get('published_components') or []
-    if isinstance(published_list, list):
-        candidates.extend(
-            entry.get('component_version')
-            for entry in published_list if isinstance(entry, dict)
-        )
-    published_map = training_job.get('published_component') or {}
-    if isinstance(published_map, dict):
-        candidates.append(published_map.get('component_version'))
-    for version in candidates:
-        match = re.match(r'^(\d+)\.', str(version or ''))
+    for version in versions or ():
+        match = re.match(r'^(\d+)\.', str(version))
         if match:
             highest = max(highest, int(match.group(1)))
     return f"{highest + 1}.0.0"
+
+
+def next_vllm_component_version(greengrass, component_names) -> str:
+    """Next vLLM component version: ONE shared `N.0.0` strictly above every
+    version that actually EXISTS in Greengrass for the Per_JetPack_Component
+    names this publish will register (Requirements 2.9, 2.10).
+
+    The record's own publish history is deliberately NOT consulted. A failed
+    attempt writes no publish state (the atomicity gate keeps the record
+    retryable), so history-derived versions were a constant `1.0.0` and any
+    orphan version left cloud-side by a denied rollback wedged every retry.
+    Deriving from Greengrass itself — the same
+    ``_existing_component_versions`` / ``next_component_version`` pattern
+    ``workflow_packaging.py`` uses — makes the derived version dominate
+    everything registered, whatever the record remembers.
+    """
+    versions = set()
+    for name in component_names or ():
+        versions |= existing_component_versions(greengrass, name)
+    return next_major_from_versions(versions)
 
 
 def _artifact_unarchive_stem(artifact_uri: str) -> str:
@@ -589,11 +752,32 @@ def publish_component(event: Dict, context: Any) -> Dict:
                     'error': f"No packaged components for requested targets: {requested_targets}"
                 })
         
+        # Get use case details
+        usecase = get_usecase(usecase_id)
+
+        # Create Greengrass client (handles both single-account and
+        # multi-account scenarios).
+        #
+        # Created HERE — above the vLLM version derivation and the preflight
+        # fit-check block (design step 6) — because the derived version is now
+        # read from the versions that actually exist cloud-side, and the
+        # derived name/version must still be available to the fit gate's 422 /
+        # skip_fit_check / unverified branches exactly as before. It needs only
+        # `usecase`, already fetched. No create_component_version call moves:
+        # the fit gate remains the first fail-closed point before any component
+        # registration (Requirement 3.12).
+        greengrass = get_usecase_client(
+            'greengrassv2',
+            usecase,
+            session_name=f"gg-pub-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
+        )
+
         # ── vLLM branch: naming and versioning are convention-derived ──────
         # For vLLM_Model_Records the component name and version are not
-        # caller-chosen: the name is model-vllm-{safe_model_name} and the
-        # version is N.0.0 with N = 1 + the highest previously published N
-        # for this record (Requirement 2.4).
+        # caller-chosen: the base name is model-vllm-{safe_model_name} and the
+        # version is the next free N.0.0 over the versions that already exist
+        # in Greengrass for the Per_JetPack_Component names this attempt will
+        # register (Requirements 2.9, 2.10).
         vllm_record = is_vllm_record(training_job)
         vllm_model_name = None
         vllm_s3_model_artifact = None
@@ -606,7 +790,17 @@ def publish_component(event: Dict, context: Any) -> Dict:
         if vllm_record:
             record_model_name = training_job.get('model_name') or component_name
             component_name = derive_vllm_component_name(record_model_name)
-            component_version = next_vllm_component_version(training_job)
+            # The Per_JetPack_Component names this attempt will register — the
+            # same `f"{base}-{target_suffix}"` composition the target loop
+            # derives (design step 2). ONE shared N.0.0 covers all of them, so
+            # `model_id = f"{training_id}-{component_version}"`, the record's
+            # single `component_version`, and the response shape are preserved.
+            vllm_target_component_names = [
+                f"{component_name}-{c['target'].replace('_', '-')}"
+                for c in packaged
+            ]
+            component_version = next_vllm_component_version(
+                greengrass, vllm_target_component_names)
             vllm_model_name = _safe_model_name(record_model_name)
             model_source = training_job.get('model_source') or {}
             vllm_s3_model_artifact = model_source.get('s3_model_artifact')
@@ -615,9 +809,6 @@ def publish_component(event: Dict, context: Any) -> Dict:
                 f"vLLM record: publishing as {component_name} "
                 f"v{component_version}"
             )
-
-        # Get use case details
-        usecase = get_usecase(usecase_id)
 
         # ── vLLM preflight Fit_Check gate (Requirements 3.4, 3.6, 3.7) ──────
         # Runs BEFORE any component registration: publish is the moment the
@@ -723,13 +914,6 @@ def publish_component(event: Dict, context: Any) -> Dict:
                         'findings': findings_payload,
                     }
 
-        # Create Greengrass client (handles both single-account and multi-account scenarios)
-        greengrass = get_usecase_client(
-            'greengrassv2',
-            usecase,
-            session_name=f"gg-pub-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
-        )
-        
         # Publish component for each target
         # Each target gets its own component with target suffix in the name
         published_components = []
@@ -742,19 +926,35 @@ def publish_component(event: Dict, context: Any) -> Dict:
                 logger.warning(f"No artifact S3 URI for target {target}, skipping")
                 continue
             
-            # Determine platform
-            platform = TARGET_TO_PLATFORM.get(target, 'amd64')
+            # Determine platform. The authoritative resolution happens inside
+            # the try below via resolve_target_platform, which fails closed for
+            # a target absent from either module-level map instead of silently
+            # defaulting to amd64 (Requirement 2.19). This lookup only seeds
+            # the failed-target record's 'platform' field for that case (None
+            # when the target is unmapped) — it never feeds a recipe.
+            platform = TARGET_TO_PLATFORM.get(target)
             
             # Create unique component name per target
             # e.g., model-defect-classifier-jetson-xavier, model-defect-classifier-x86-64-cpu
-            # vLLM components keep the convention-fixed name with no target
-            # suffix: model-vllm-{safe_model_name} is the deployment gate's
-            # discriminator and (task 4.2) the GSI lookup key.
+            # vLLM records follow the SAME convention (design step 2): the
+            # base name model-vllm-{safe_model_name} stays the record's
+            # top-level component_name / GSI key and display name, while each
+            # packaged target publishes as its own Per_JetPack_Component, so
+            # every create_component_version call carries a distinct identity
+            # and each component can depend HARD on exactly one JetPack's
+            # LocalServer variant (Requirements 2.1, 2.2).
             target_suffix = target.replace('_', '-')
-            if vllm_record:
-                target_component_name = component_name
-            else:
-                target_component_name = f"{component_name}-{target_suffix}"
+            target_component_name = f"{component_name}-{target_suffix}"
+
+            # Best-effort arch for the per-target record (design step 7): the
+            # authoritative resolution stays resolve_vllm_target_architecture
+            # inside the try below, which fails closed. A None here only means
+            # the entry carries no supported_architectures (an unmapped target
+            # is recorded as a failed target anyway). Vision entries never
+            # carry an architecture — their write-back shape is unchanged.
+            target_arch = VLLM_TARGET_TO_ARCH.get(target) if vllm_record else None
+            arch_fields = ({'supported_architectures': [target_arch]}
+                           if target_arch else {})
             
             # Extract model unarchived path from S3 URI
             # Format: s3://bucket/model_artifacts/model-uuid/uuid_greengrass_model_component.zip
@@ -765,13 +965,25 @@ def publish_component(event: Dict, context: Any) -> Dict:
             try:
                 # Fail closed BEFORE creating any component version: an
                 # unresolved aarch64 target must never be stamped with a
-                # bare/ambiguous LocalServer dependency. resolve_local_server_
-                # component (called inside the recipe generators) raises
-                # PublishError, which is caught below and recorded as a failed
-                # target so no component version is created for it.
+                # bare/ambiguous LocalServer dependency. resolve_target_platform
+                # (here) and resolve_local_server_component (called inside the
+                # recipe generators) raise PublishError, which is caught below
+                # and recorded as a failed target so no component version is
+                # created for it.
+                platform = resolve_target_platform(target)
+                # The derived per-target name must satisfy the Greengrass
+                # component-name constraints before anything is generated for
+                # it, so an over-long or malformed name is a recorded failed
+                # target rather than an opaque API error (Requirement 2.6).
+                validate_greengrass_component_name(target_component_name)
                 #
                 # Generate component recipe with target-specific name
                 if vllm_record:
+                    # Per_JetPack_Component advertises exactly the ONE
+                    # architecture this target serves — not the record-wide
+                    # set, which would advertise architectures its single HARD
+                    # LocalServer dependency cannot satisfy (Requirement 2.3).
+                    target_arch = resolve_vllm_target_architecture(target)
                     recipe = generate_vllm_component_recipe(
                         component_name=target_component_name,
                         component_version=component_version,
@@ -782,7 +994,7 @@ def publish_component(event: Dict, context: Any) -> Dict:
                         model_name=vllm_model_name,
                         target=target,
                         s3_model_artifact=vllm_s3_model_artifact,
-                        supported_architectures=vllm_archs
+                        supported_architectures=[target_arch]
                     )
                 else:
                     recipe = generate_component_recipe(
@@ -836,7 +1048,8 @@ def publish_component(event: Dict, context: Any) -> Dict:
                         'component_name': target_component_name,
                         'component_version': component_version,
                         'component_arn': component_arn,
-                        'status': 'published'
+                        'status': 'published',
+                        **arch_fields
                     })
                     logger.info(f"Component {target_component_name} published successfully for {target}")
                 else:
@@ -847,7 +1060,8 @@ def publish_component(event: Dict, context: Any) -> Dict:
                         'component_name': target_component_name,
                         'component_version': component_version,
                         'status': 'failed',
-                        'error': f"Component status: {component_status}. {error_msg}"
+                        'error': f"Component status: {component_status}. {error_msg}",
+                        **arch_fields
                     })
                     logger.error(f"Component {target_component_name} failed to become DEPLOYABLE: {component_status}")
                 
@@ -866,7 +1080,8 @@ def publish_component(event: Dict, context: Any) -> Dict:
                     'component_name': target_component_name,
                     'component_version': component_version,
                     'status': 'failed',
-                    'error': error_msg
+                    'error': error_msg,
+                    **arch_fields
                 })
             except ClientError as e:
                 error_msg = str(e)
@@ -877,7 +1092,8 @@ def publish_component(event: Dict, context: Any) -> Dict:
                     'component_name': target_component_name,
                     'component_version': component_version,
                     'status': 'failed',
-                    'error': error_msg
+                    'error': error_msg,
+                    **arch_fields
                 })
         
         # ── vLLM atomicity gate (Requirements 2.6, 2.9) ─────────────────────
@@ -890,13 +1106,24 @@ def publish_component(event: Dict, context: Any) -> Dict:
                        if c.get('status') != 'published']
         if vllm_record and (vllm_failed or not published_components):
             for arn in vllm_created_arns:
+                # Name/version parsed from the ARN so a version that survives
+                # a denied or failed delete is identifiable straight from the
+                # log line, without correlating against the record (design
+                # step 8, Requirement 2.8). Rollback stays best-effort: the
+                # try/except-warning shape is unchanged and nothing is raised,
+                # so the reported error remains the publish failure.
+                rollback_name, rollback_version = parse_component_arn(arn)
                 try:
                     greengrass.delete_component(arn=arn)
-                    logger.info(f"Rolled back component version: {arn}")
+                    logger.info(
+                        f"Rolled back component version "
+                        f"{rollback_name} v{rollback_version} ({arn})")
                 except Exception as cleanup_error:
                     logger.warning(
-                        f"Rollback of component version {arn} failed "
-                        f"(may need manual cleanup): {cleanup_error}")
+                        f"Rollback of component version "
+                        f"{rollback_name} v{rollback_version} ({arn}) failed; "
+                        f"it may still exist cloud-side and need manual "
+                        f"cleanup: {cleanup_error}")
 
             failure_audit_details = {
                 'component_name': component_name,
@@ -972,23 +1199,48 @@ def publish_component(event: Dict, context: Any) -> Dict:
         timestamp = int(datetime.utcnow().timestamp() * 1000)
 
         if vllm_record:
-            # Publish metadata write-back (Requirements 2.4, 2.9): the
+            # Publish metadata write-back (Requirements 2.4, 2.9, 2.5): the
             # record's published_component map carries the component
-            # name/version, the supported Target_Architecture set, and the
-            # vLLM runtime discriminator; the top-level component_name
-            # attribute is the key the deployment gate's
-            # component_name-index GSI resolves the record by (task 5.2).
+            # name/version, the record-wide supported Target_Architecture
+            # union, and the vLLM runtime discriminator — every one of those
+            # keys is retained for legacy readers — PLUS a `components` list
+            # with one entry per Per_JetPack_Component. The top-level
+            # component_name attribute stays the UNSUFFIXED base name, which
+            # is the key the deployment gate's component_name-index GSI
+            # resolves the record by (task 5.2), so N components still resolve
+            # to ONE record from ONE string and no index change is needed.
             component_arns = {
                 comp['target']: comp['component_arn']
                 for comp in published_components
                 if comp['status'] == 'published'
             }
+            # One entry per Per_JetPack_Component (design step 7,
+            # Requirement 2.5): each carries its OWN suffixed component name
+            # and the single architecture it serves, so the deployment gate can
+            # resolve a per-JetPack component to exactly [arch] instead of the
+            # record-wide union. The record-level keys above/below are all
+            # retained unchanged for legacy readers.
+            published_component_entries = [
+                {
+                    'component_name': comp['component_name'],
+                    'component_version': comp['component_version'],
+                    'target': comp['target'],
+                    'architecture': comp['supported_architectures'][0],
+                    'supported_architectures': list(
+                        comp['supported_architectures']),
+                    'component_arn': comp['component_arn'],
+                }
+                for comp in published_components
+                if comp['status'] == 'published'
+                and comp.get('supported_architectures')
+            ]
             published_component_map = {
                 'component_name': component_name,
                 'component_version': component_version,
                 'supported_architectures': vllm_archs,
                 'runtime': 'vllm',
                 'component_arns': component_arns,
+                'components': published_component_entries,
                 'published_at': timestamp
             }
             table.update_item(

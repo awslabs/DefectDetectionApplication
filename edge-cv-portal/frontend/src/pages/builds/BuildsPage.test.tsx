@@ -2,7 +2,7 @@
  * Render tests for the Builds page submit form
  * (portal-build-fleet-and-workflow-gates Requirements 1.1, 2.1, 2.5):
  *
- * - the four supported Build_Targets are selectable and the submit
+ * - the five supported Build_Targets are selectable and the submit
  *   control posts the selection in order (Req 1.1),
  * - the execution-mode RadioGroup offers ephemeral and dedicated, with
  *   the dedicated option listing only running fleet servers (Req 2.1),
@@ -117,18 +117,18 @@ async function renderPage() {
 }
 
 describe('BuildsPage submit form', () => {
-  it('offers the four supported Build_Targets and submits the selection in order (Requirement 1.1)', async () => {
+  it('offers the five supported Build_Targets and submits the selection in order (Requirement 1.1; JP7 added by jetpack7-support)', async () => {
     const { container } = await renderPage();
 
     const targets = createWrapper(container).findMultiselect()!;
     targets.openDropdown();
 
-    // All four supported Build_Targets are selectable (Req 1.1).
+    // All five supported Build_Targets are selectable (Req 1.1).
     const optionLabels = targets
       .findDropdown()
       .findOptions()
       .map((o) => o.findLabel().getElement().textContent);
-    expect(optionLabels).toEqual(['JP5', 'JP6', 'AMD64', 'AMD64_NVIDIA']);
+    expect(optionLabels).toEqual(['JP5', 'JP6', 'JP7', 'AMD64', 'AMD64_NVIDIA']);
 
     // Select two targets; selection order defines the request order.
     targets.selectOptionByValue('JP6');

@@ -531,7 +531,7 @@ export default function BuildInfrastructureSettings() {
           </Header>
           {volumeRows.map((row, index) => (
             <SpaceBetween key={`volume-row-${index}`} size="xs" direction="horizontal">
-              <FormField label="Build target" constraintText="JP5, JP6, AMD64, or AMD64_NVIDIA">
+              <FormField label="Build target" constraintText="JP5, JP6, JP7, AMD64, or AMD64_NVIDIA">
                 <Input
                   value={row.target}
                   onChange={({ detail }) => setVolumeRow(index, 'target', detail.value)}
@@ -570,7 +570,7 @@ export default function BuildInfrastructureSettings() {
           </Header>
           {budgetRows.map((row, index) => (
             <SpaceBetween key={`budget-row-${index}`} size="xs" direction="horizontal">
-              <FormField label="Build target" constraintText="JP5, JP6, AMD64, or AMD64_NVIDIA">
+              <FormField label="Build target" constraintText="JP5, JP6, JP7, AMD64, or AMD64_NVIDIA">
                 <Input
                   value={row.target}
                   onChange={({ detail }) => setBudgetRow(index, 'target', detail.value)}

@@ -14,6 +14,7 @@ from .models import (
     ARCH_ARM64_JP4,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
+    ARCH_ARM64_JP7,
     ARCH_SIM,
     ARCH_X86_64,
     ARCH_X86_64_NVIDIA,
@@ -67,6 +68,15 @@ LOCALSERVER_BUNDLED_PLUGINS = {
     ARCH_ARM64_JP4: _COMMON | frozenset({"nvvideo4linux2"}),
     ARCH_ARM64_JP5: _COMMON | frozenset({"nvvideo4linux2"}),
     ARCH_ARM64_JP6: _COMMON | frozenset({"nvvideo4linux2"}),
+    # arm64_jp7 (Jetson Thor) does NOT get nvvideo4linux2: unlike the
+    # l4t-jetpack-based JP4/JP5/JP6 images, Dockerfile.jp7 builds on the
+    # nvcr CUDA 13 Ubuntu 24.04 base and installs only the upstream
+    # gstreamer1.0-plugins-good/bad sets — no L4T GStreamer package that
+    # would provide nvvideo4linux2. No catalog node type declares that
+    # plugin today, so this choice is inert for dependency computation;
+    # it is recorded here so a future JP7 node mapping that needs the
+    # NVIDIA v4l2 elements is forced to confirm the image ships them.
+    ARCH_ARM64_JP7: _COMMON,
     ARCH_SIM: _COMMON,
 }
 

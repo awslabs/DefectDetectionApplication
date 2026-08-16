@@ -373,10 +373,22 @@ export class ComputeStack extends cdk.Stack {
       // conditions on the Greengrass v2 API are limited, so no tag Condition is
       // applied here — the grant is bounded to the components / coreDevices /
       // deployments resource types the portal operates on.
+      //
+      // greengrass:DeleteComponent backs the all-or-nothing rollback in
+      // greengrass_publish.py: when a multi-target vLLM publish fails part way
+      // through, the handler deletes only the component versions it created
+      // itself seconds earlier in that same failed attempt, so no orphaned
+      // version survives with no backing publish state. The action is confined
+      // to the Greengrass components resource ARN (never a wildcard resource),
+      // and the cross-account DDAPortalAccessRole in usecase-account-stack.ts
+      // already grants exactly this action — adding it here closes an
+      // inconsistency that only bit single-account setups rather than widening
+      // the trust boundary (2.7, 2.8, 3.15).
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
           'greengrass:CreateComponentVersion',
+          'greengrass:DeleteComponent',
           'greengrass:DescribeComponent',
           'greengrass:GetComponent',
           'greengrass:ListComponents',

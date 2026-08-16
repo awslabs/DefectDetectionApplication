@@ -217,6 +217,13 @@ export type BuildServerLifecycleState =
 export type BuildServerArchitecture = 'arm64' | 'x86_64';
 
 /**
+ * Ubuntu LTS release of a Dedicated_Build_Server host: 22.04 is the
+ * default (existing behavior); 24.04 (noble) is the JetPack 7 (JP7)
+ * build host and is arm64 only (jetpack7-support design §10).
+ */
+export type BuildServerUbuntuVersion = '22.04' | '24.04';
+
+/**
  * Marker of an accepted fleet action that has not yet reached its
  * expected lifecycle state (build_fleet.py, Requirement 6.11). The
  * dispatcher reports the action failed when `deadline` (epoch ms)
@@ -245,6 +252,12 @@ export interface BuildServer {
   instance_id: string;
   instance_type: string;
   cpu_architecture: BuildServerArchitecture;
+  /**
+   * Ubuntu release the server was launched with; absent on servers
+   * launched before the JP7 (24.04) option existed — those are 22.04
+   * hosts.
+   */
+  ubuntu_version?: BuildServerUbuntuVersion;
   lifecycle_state: BuildServerLifecycleState;
   /** Present iff a Build_Job is currently running on the server. */
   running_build_job_id?: string | null;
@@ -870,11 +883,14 @@ class ApiService {
   /**
    * Launch a new Dedicated_Build_Server of the selected CPU architecture
    * (`build_fleet.py`, Requirement 6.5). PortalAdmin only (6.7); a 400
-   * identifies the missing name or invalid architecture.
+   * identifies the missing name or invalid architecture. An omitted
+   * `ubuntu_version` means 22.04; 24.04 (the JP7 build host) is
+   * accepted for arm64 only (jetpack7-support design §10).
    */
   async launchBuildServer(body: {
     name: string;
     architecture: BuildServerArchitecture;
+    ubuntu_version?: BuildServerUbuntuVersion;
   }): Promise<{ server: BuildServer }> {
     return this.request<{ server: BuildServer }>('/build-servers', {
       method: 'POST',

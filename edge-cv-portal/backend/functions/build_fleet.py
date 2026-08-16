@@ -14,8 +14,11 @@ Routes (API Gateway REST):
                                       reconciliation (DescribeInstances)
                                       (Req 6.1)
     POST   /build-servers             Launch: RunInstances with the
-                                      arch-selected Ubuntu 22.04 AMI, the
-                                      configured instance type/volume,
+                                      arch-selected Ubuntu AMI (22.04
+                                      default; 24.04/noble for arm64 JP7
+                                      hosts, jetpack7-support design
+                                      §10), the configured instance
+                                      type/volume,
                                       hardened profile (extended
                                       dda-build-role, no key pair, no
                                       inbound rules, IMDSv2), user-data
@@ -138,6 +141,19 @@ UBUNTU_2204_SSM_PARAMETER = {
         'amd64/hvm/ebs-gp2/ami-id',
 }
 
+#: SSM public parameter path for the latest Ubuntu 24.04 (noble) AMI.
+#: JP7 builds require a noble arm64 build host (jetpack7-support design
+#: §10), so only arm64 is mapped: a 24.04 launch on any other
+#: architecture fails closed (request validation below, and
+#: resolve_ubuntu_ami raises on an unmapped pairing). Note the canonical
+#: parameter's volume-type segment is ebs-gp3 for noble, not the jammy
+#: ebs-gp2 (verified against the published canonical parameter tree).
+UBUNTU_2404_SSM_PARAMETER = {
+    build_domain.ARCH_ARM64:
+        '/aws/service/canonical/ubuntu/server/24.04/stable/current/'
+        'arm64/hvm/ebs-gp3/ami-id',
+}
+
 #: DescribeImages fallback (Canonical owner id, jammy server images).
 CANONICAL_OWNER_ID = '099720109477'
 UBUNTU_2204_NAME_FILTER = {
@@ -146,6 +162,31 @@ UBUNTU_2204_NAME_FILTER = {
     build_domain.ARCH_X86_64:
         'ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*',
 }
+
+#: DescribeImages fallback for noble (Canonical owner id). Noble server
+#: images publish under the hvm-ssd-gp3 path segment, not the jammy
+#: hvm-ssd (the same segment shift the CLI launcher
+#: launch-arm64-build-server.sh encodes for --ubuntu-version 24.04).
+UBUNTU_2404_NAME_FILTER = {
+    build_domain.ARCH_ARM64:
+        'ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*',
+}
+
+#: Supported Ubuntu LTS releases for launched Dedicated_Build_Servers,
+#: keyed to their per-architecture AMI lookup tables. 22.04 (jammy) is
+#: the default and preserves existing behavior byte-for-byte; 24.04
+#: (noble, arm64 only) is the JetPack 7 (JP7) build host
+#: (jetpack7-support design §10).
+DEFAULT_UBUNTU_VERSION = '22.04'
+UBUNTU_SSM_PARAMETER = {
+    '22.04': UBUNTU_2204_SSM_PARAMETER,
+    '24.04': UBUNTU_2404_SSM_PARAMETER,
+}
+UBUNTU_NAME_FILTER = {
+    '22.04': UBUNTU_2204_NAME_FILTER,
+    '24.04': UBUNTU_2404_NAME_FILTER,
+}
+
 EC2_ARCHITECTURE = {
     build_domain.ARCH_ARM64: 'arm64',
     build_domain.ARCH_X86_64: 'x86_64',
@@ -547,23 +588,35 @@ def list_build_servers(event: Dict, context: Any) -> Dict:
 
 # ------------------------------------------------------ POST /build-servers
 
-def resolve_ubuntu_2204_ami(arch: str) -> str:
-    """Latest Ubuntu 22.04 AMI id for the requested CPU architecture:
-    the Canonical-maintained SSM public parameter, with a DescribeImages
-    fallback (design §2)."""
+def resolve_ubuntu_ami(arch: str,
+                       ubuntu_version: str = DEFAULT_UBUNTU_VERSION) -> str:
+    """Latest Ubuntu AMI id for the requested release and CPU
+    architecture: the Canonical-maintained SSM public parameter, with a
+    DescribeImages fallback (design §2). 24.04 (noble) is the JP7 build
+    host and is mapped for arm64 only (jetpack7-support design §10); an
+    unmapped release/architecture pairing fails closed with a
+    RuntimeError before any AWS call."""
+    ssm_parameter = UBUNTU_SSM_PARAMETER.get(ubuntu_version, {}).get(arch)
+    name_filter = UBUNTU_NAME_FILTER.get(ubuntu_version, {}).get(arch)
+    if not ssm_parameter or not name_filter:
+        raise RuntimeError(
+            f'No Ubuntu {ubuntu_version} AMI mapping for architecture '
+            f'{arch}')
+
     try:
-        response = ssm.get_parameter(Name=UBUNTU_2204_SSM_PARAMETER[arch])
+        response = ssm.get_parameter(Name=ssm_parameter)
         ami_id = response.get('Parameter', {}).get('Value')
         if ami_id:
             return ami_id
     except ClientError as e:
-        logger.warning(f"Ubuntu 22.04 SSM parameter lookup failed for "
-                       f"{arch}; falling back to DescribeImages: {e}")
+        logger.warning(f"Ubuntu {ubuntu_version} SSM parameter lookup "
+                       f"failed for {arch}; falling back to "
+                       f"DescribeImages: {e}")
 
     response = ec2.describe_images(
         Owners=[CANONICAL_OWNER_ID],
         Filters=[
-            {'Name': 'name', 'Values': [UBUNTU_2204_NAME_FILTER[arch]]},
+            {'Name': 'name', 'Values': [name_filter]},
             {'Name': 'architecture', 'Values': [EC2_ARCHITECTURE[arch]]},
             {'Name': 'state', 'Values': ['available']},
         ],
@@ -572,7 +625,7 @@ def resolve_ubuntu_2204_ami(arch: str) -> str:
                     key=lambda i: i.get('CreationDate', ''))
     if not images:
         raise RuntimeError(
-            f'No Ubuntu 22.04 AMI found for architecture {arch}')
+            f'No Ubuntu {ubuntu_version} AMI found for architecture {arch}')
     return images[-1]['ImageId']
 
 
@@ -638,8 +691,11 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
     instance of the selected CPU architecture with the configured
     instance type and volume size, the build environment installed via
     the user-data bootstrap, registered in the fleet list under the
-    provided name with its CPU architecture (Req 6.5). PortalAdmin only
-    (Req 6.7, enforced by the decorator)."""
+    provided name with its CPU architecture (Req 6.5). An optional
+    ubuntu_version selects the host release: 22.04 (default, existing
+    behavior) or 24.04 — the JP7 build host, arm64 only
+    (jetpack7-support design §10). PortalAdmin only (Req 6.7, enforced
+    by the decorator)."""
     body, err = parse_body(event)
     if err:
         return err
@@ -647,6 +703,11 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
 
     name = body.get('name')
     arch = body.get('architecture')
+    # Ubuntu release selection (jetpack7-support design §10): absent
+    # means 22.04, the existing behavior byte-preserved.
+    ubuntu_version = body.get('ubuntu_version')
+    if ubuntu_version is None:
+        ubuntu_version = DEFAULT_UBUNTU_VERSION
     validation_errors = []
     if not isinstance(name, str) or not name.strip():
         validation_errors.append({
@@ -659,6 +720,27 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
             'message': (
                 f"The CPU architecture must be one of: "
                 f"{', '.join(sorted(INSTANCE_TYPE_CONFIG_KEY))}."
+            ),
+        })
+    if ubuntu_version not in UBUNTU_SSM_PARAMETER:
+        validation_errors.append({
+            'rule': 'ubuntu_version_invalid',
+            'message': (
+                f"The Ubuntu version must be one of: "
+                f"{', '.join(sorted(UBUNTU_SSM_PARAMETER))}."
+            ),
+        })
+    elif arch in INSTANCE_TYPE_CONFIG_KEY and \
+            arch not in UBUNTU_SSM_PARAMETER[ubuntu_version]:
+        # 24.04 (noble) is mapped for arm64 only: it exists to host JP7
+        # builds, which require an arm64 host (jetpack7-support design
+        # §10). Fail closed here rather than in AMI resolution so the
+        # request is rejected as invalid, not as a launch failure.
+        validation_errors.append({
+            'rule': 'ubuntu_version_arch_unsupported',
+            'message': (
+                f"Ubuntu {ubuntu_version} build servers support only: "
+                f"{', '.join(sorted(UBUNTU_SSM_PARAMETER[ubuntu_version]))}."
             ),
         })
     if validation_errors:
@@ -682,7 +764,7 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
     source_ref = config.get('source_ref')
 
     try:
-        ami_id = resolve_ubuntu_2204_ami(arch)
+        ami_id = resolve_ubuntu_ami(arch, ubuntu_version)
         instance_id = run_fleet_instance(
             server_id=server_id,
             name=name,
@@ -698,6 +780,7 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
         audit_fleet_action(
             user['user_id'], 'launch', server_id, 'failure',
             {'name': name, 'architecture': arch,
+             'ubuntu_version': ubuntu_version,
              'instance_type': instance_type, 'error': str(e)})
         return error_response(
             502, 'LAUNCH_FAILED',
@@ -710,6 +793,11 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
         'instance_id': instance_id,
         'instance_type': instance_type,
         'cpu_architecture': arch,
+        # The Ubuntu release this server was launched with (22.04
+        # default; 24.04 = JP7 build host, jetpack7-support design §10).
+        # Servers launched before this change carry no such field and
+        # are 22.04 hosts.
+        'ubuntu_version': ubuntu_version,
         # The exact directory this server's bootstrap cloned into, so the
         # dispatcher invokes the build agent from that tree instead of
         # assuming a directory of its own (Req 5.1, 5.2). Servers
@@ -735,6 +823,7 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
     audit_fleet_action(
         user['user_id'], 'launch', server_id, 'success',
         {'name': name, 'architecture': arch,
+         'ubuntu_version': ubuntu_version,
          'instance_id': instance_id, 'instance_type': instance_type,
          'volume_size_gb': volume_size_gb, 'ami_id': ami_id})
 

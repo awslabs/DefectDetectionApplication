@@ -56,16 +56,48 @@ def _load_publish_module():
     return module
 
 
+class _FakePaginator:
+    """Serves list_components / list_component_versions from the fake's own
+    registered state — the surface the vLLM version derivation now uses
+    (existing_component_versions)."""
+
+    def __init__(self, fake, operation):
+        self.fake = fake
+        self.operation = operation
+
+    def paginate(self, **kwargs):
+        if self.operation == "list_components":
+            yield {"components": [
+                {"componentName": name,
+                 "arn": (f"arn:aws:greengrass:{REGION}:123456789012:"
+                         f"components:{name}")}
+                for name in sorted(self.fake.registered)
+            ]}
+        elif self.operation == "list_component_versions":
+            name = str(kwargs["arn"]).split(":components:")[1].split(":")[0]
+            yield {"componentVersions": [
+                {"componentVersion": version}
+                for version in sorted(self.fake.registered.get(name, ()))
+            ]}
+        else:  # pragma: no cover - unexpected paginator in the publish path
+            raise AssertionError(f"unexpected paginator: {self.operation}")
+
+
 class FakeGreengrass:
     """Fake greengrassv2 client (moto has no greengrassv2)."""
 
     def __init__(self):
         self.created = []
         self.deleted = []
+        # component name -> registered version strings, so the cloud-side
+        # version derivation observes what this fake has accepted.
+        self.registered = {}
 
     def create_component_version(self, inlineRecipe, tags=None):
         recipe = json.loads(inlineRecipe)
         self.created.append(recipe)
+        self.registered.setdefault(recipe["ComponentName"], set()).add(
+            recipe["ComponentVersion"])
         arn = (f"arn:aws:greengrass:{REGION}:123456789012:components:"
                f"{recipe['ComponentName']}:versions:"
                f"{recipe['ComponentVersion']}")
@@ -76,6 +108,9 @@ class FakeGreengrass:
 
     def delete_component(self, arn):
         self.deleted.append(arn)
+
+    def get_paginator(self, operation):
+        return _FakePaginator(self, operation)
 
 
 @pytest.fixture(scope="module")

@@ -19,8 +19,10 @@ import {
   isCompatibleWithAllDevices,
 } from './archCompatibility';
 import {
+  VLLM_TARGET_SUFFIX_TO_ARCH,
   VllmComponentManifest,
   evaluateVllmArchGate,
+  vllmArchsForComponent,
 } from './vllmArchGate';
 
 const RUNS = { numRuns: 100 };
@@ -33,6 +35,7 @@ const FIXED_ARCHS = [
   'arm64_jp4',
   'arm64_jp5',
   'arm64_jp6',
+  'arm64_jp7',
 ];
 const archArb = fc.constantFrom(...FIXED_ARCHS, 'arm64', 'aarch64', 'amd64', '');
 const supportedArb = fc.uniqueArray(archArb, { maxLength: 5 });
@@ -175,6 +178,11 @@ describe('archCompatibility twin', () => {
       expect(inferComponentTargetArchs('aws.edgeml.dda.LocalServer.arm64JP6'))
         .toEqual(['arm64_jp6']);
       expect(inferComponentTargetArchs('jp4mic730ai')).toEqual(['arm64_jp4']);
+      // jetpack7-support Req 7.3: the JP7 token requires arm64_jp7.
+      expect(inferComponentTargetArchs('aws.edgeml.dda.LocalServer.arm64JP7'))
+        .toEqual(['arm64_jp7']);
+      expect(inferComponentTargetArchs('model-x-jetson-thor-jp7'))
+        .toEqual(['arm64_jp7']);
     });
 
     it('returns [] for names with no JetPack token (kept, not hidden)', () => {
@@ -193,8 +201,21 @@ describe('archCompatibility twin', () => {
       expect(isArchCompatible('arm64_jp5', inferred)).toBe(true);
     });
 
+    it('a jp7 build only matches a jp7 device by exact name (Req 7.3)', () => {
+      const inferred = inferComponentTargetArchs(
+        'aws.edgeml.dda.LocalServer.arm64JP7'
+      );
+      expect(isArchCompatible('arm64_jp7', inferred)).toBe(true);
+      expect(isArchCompatible('arm64_jp5', inferred)).toBe(false);
+      expect(isArchCompatible('arm64_jp6', inferred)).toBe(false);
+      // And jp5/jp6 builds are incompatible with a jp7 device.
+      expect(
+        isArchCompatible('arm64_jp7', inferComponentTargetArchs('model-x-jp6'))
+      ).toBe(false);
+    });
+
     it('only ever returns fixed-set arm64_jpN values', () => {
-      const majorArb = fc.constantFrom('4', '5', '6');
+      const majorArb = fc.constantFrom('4', '5', '6', '7');
       const prefixArb = fc.constantFrom('jp', 'JP', 'jetpack', 'JetPack');
       fc.assert(
         fc.property(
@@ -211,6 +232,139 @@ describe('archCompatibility twin', () => {
         ),
         RUNS
       );
+    });
+  });
+
+  // Suffixed Per_JetPack_Component keying
+  // (vllm-multi-arch-publish-conflict design step 13, task 8.2).
+  // A published vLLM record now contributes one `vllmArchs` entry per
+  // packaged target, keyed by the SUFFIXED per-JetPack name with a
+  // disjoint single-arch set each. The exact-name membership and
+  // fail-closed rules above apply to those keys unchanged.
+  // Validates: Requirements 2.13, 2.14, 3.4, 3.5, 3.6, 3.7, 3.9
+  describe('suffixed per-JetPack vllmArchs keys', () => {
+    const SUFFIXES = Object.keys(VLLM_TARGET_SUFFIX_TO_ARCH);
+    const baseNameArb = fc
+      .string({ minLength: 1, maxLength: 8 })
+      .map((s) => `model-vllm-${s.replace(/[^a-zA-Z0-9._-]/g, 'x')}`)
+      // A generated base name must not itself end in a target suffix,
+      // or the suffixed keys built from it would nest suffixes.
+      .filter((n) => SUFFIXES.every((suf) => !n.endsWith(`-${suf}`)));
+    // Non-empty subset of the closed per-JetPack suffix vocabulary.
+    const suffixSubsetArb = fc.uniqueArray(fc.constantFrom(...SUFFIXES), {
+      minLength: 1,
+      maxLength: SUFFIXES.length,
+    });
+
+    it('each suffixed key resolves to its own disjoint single-arch set', () => {
+      fc.assert(
+        fc.property(baseNameArb, suffixSubsetArb, (baseName, suffixes) => {
+          // The record's published_component write-back: a components
+          // list with one per-JetPack entry per packaged target, plus
+          // the record-wide union retained for legacy readers.
+          const publishedComponent = {
+            supported_architectures: suffixes.map(
+              (s) => VLLM_TARGET_SUFFIX_TO_ARCH[s]
+            ),
+            components: suffixes.map((s) => ({
+              component_name: `${baseName}-${s}`,
+              supported_architectures: [VLLM_TARGET_SUFFIX_TO_ARCH[s]],
+            })),
+          };
+          // vllmArchs as CreateDeployment.tsx builds it: keyed by the
+          // exact suffixed name, resolved via vllmArchsForComponent.
+          const vllmArchs: Record<string, string[]> = {};
+          for (const s of suffixes) {
+            const name = `${baseName}-${s}`;
+            vllmArchs[name] = vllmArchsForComponent(name, publishedComponent);
+          }
+
+          for (const s of suffixes) {
+            const name = `${baseName}-${s}`;
+            const ownArch = VLLM_TARGET_SUFFIX_TO_ARCH[s];
+            // Suffixed names are still classified/resolved as vLLM.
+            expect(classifyGatedComponent(name)).toBe('vllm');
+            const resolved = componentSupportedArchs(
+              { component_name: name },
+              vllmArchs
+            );
+            // Disjoint single-arch set: exactly the component's own arch.
+            expect(resolved).toEqual([ownArch]);
+            // Compatible with its own arch and no other fixed-set arch.
+            expect(isArchCompatible(ownArch, resolved)).toBe(true);
+            for (const other of FIXED_ARCHS) {
+              if (other !== ownArch) {
+                expect(isArchCompatible(other, resolved)).toBe(false);
+              }
+            }
+            // Fail-closed rules apply to suffixed keys unchanged.
+            expect(isArchCompatible(null, resolved)).toBe(false);
+          }
+        }),
+        RUNS
+      );
+    });
+
+    it('a suffixed key absent from vllmArchs fails closed (empty set)', () => {
+      fc.assert(
+        fc.property(
+          baseNameArb,
+          fc.constantFrom(...SUFFIXES),
+          (baseName, suffix) => {
+            const name = `${baseName}-${suffix}`;
+            // Still-resolving / unresolvable record: no entry under the
+            // exact suffixed key — no fallback to any other key.
+            const resolved = componentSupportedArchs(
+              { component_name: name },
+              {}
+            );
+            expect(resolved).toEqual([]);
+            expect(
+              isArchCompatible(VLLM_TARGET_SUFFIX_TO_ARCH[suffix], resolved)
+            ).toBe(false);
+          }
+        ),
+        RUNS
+      );
+    });
+
+    it('JP7 component is offered and JP6 rejected for an arm64_jp7 device', () => {
+      const base = 'model-vllm-qwen3-vl-8b-instruct';
+      const publishedComponent = {
+        supported_architectures: ['arm64_jp6', 'arm64_jp7'],
+        components: [
+          {
+            component_name: `${base}-jetson-xavier-jp6`,
+            supported_architectures: ['arm64_jp6'],
+          },
+          {
+            component_name: `${base}-jetson-xavier-jp7`,
+            supported_architectures: ['arm64_jp7'],
+          },
+        ],
+      };
+      const vllmArchs: Record<string, string[]> = {
+        [`${base}-jetson-xavier-jp6`]: vllmArchsForComponent(
+          `${base}-jetson-xavier-jp6`,
+          publishedComponent
+        ),
+        [`${base}-jetson-xavier-jp7`]: vllmArchsForComponent(
+          `${base}-jetson-xavier-jp7`,
+          publishedComponent
+        ),
+      };
+      const jp7 = componentSupportedArchs(
+        { component_name: `${base}-jetson-xavier-jp7` },
+        vllmArchs
+      );
+      const jp6 = componentSupportedArchs(
+        { component_name: `${base}-jetson-xavier-jp6` },
+        vllmArchs
+      );
+      expect(isArchCompatible('arm64_jp7', jp7)).toBe(true);
+      expect(isArchCompatible('arm64_jp7', jp6)).toBe(false);
+      expect(isArchCompatible('arm64_jp6', jp6)).toBe(true);
+      expect(isArchCompatible('arm64_jp6', jp7)).toBe(false);
     });
   });
 
