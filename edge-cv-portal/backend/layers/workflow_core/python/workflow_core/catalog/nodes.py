@@ -1759,6 +1759,65 @@ CUSTOM_PYTHON_SOURCE = NodeTypeDescriptor(
 )
 
 # --------------------------------------------------------------------------
+# Metadata node (workflow-manager-gaps Requirement 6.1) — a
+# POST_PROCESSING-category node that maps fields from the trigger
+# payload (dotted field paths against the parsed payload) and attaches
+# them, together with optional static JSON, to the data flowing to
+# output nodes. Both structured values are carried as JSON-string
+# parameters (ParameterDescriptor supports scalar types only); the
+# shared validity rules live in catalog/metadata_config.py, consumed by
+# the validator, the compiler, and (mirrored in TypeScript) the
+# designer.
+# --------------------------------------------------------------------------
+
+METADATA = NodeTypeDescriptor(
+    type_id="metadata",
+    category=CATEGORY_POST_PROCESSING,
+    display_name="Metadata",
+    # InferenceMeta in/out ports let it sit between inference /
+    # post-processing nodes and output nodes exactly like
+    # inference_filter.
+    inputs=[PortDescriptor("in", PORT_TYPE_INFERENCE_META)],
+    outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
+    parameters=[
+        # JSON array of {"path": "...", "key": "..."} objects (0..50):
+        # each entry maps a dotted field path in the trigger payload to
+        # an output metadata key attached to downstream output results.
+        ParameterDescriptor("mappings", "string", required=False, default="[]",
+                            constraints={},
+                            description="Metadata mappings as a JSON array "
+                                        "of objects with 'path' (dotted "
+                                        "field path resolved against the "
+                                        "parsed trigger payload, e.g. "
+                                        "job_id or order.id) and 'key' "
+                                        "(output metadata key the resolved "
+                                        "value is attached under). Up to 50 "
+                                        "mappings; paths and keys must be "
+                                        "non-empty and keys unique.",
+                            examples=['[{"path": "job_id", "key": "job_id"}]',
+                                      '[{"path": "order.id", "key": "order_id"},'
+                                      ' {"path": "file_path", "key": "source_file"}]']),
+        # Optional static JSON object, <= 10240 characters, whose
+        # top-level entries are attached alongside resolved mappings.
+        ParameterDescriptor("static_json", "string", required=False, default="",
+                            constraints={"max_length": 10240},
+                            description="Optional static JSON object (at "
+                                        "most 10240 characters) whose "
+                                        "top-level entries are attached to "
+                                        "the output metadata alongside the "
+                                        "resolved mappings; a resolved "
+                                        "mapping wins on a key collision.",
+                            examples=['{"station": "line-1"}']),
+    ],
+    # Executor-level metadata attachment (no GStreamer element): the
+    # compiler emits a 'metadata' executor binding carrying the parsed
+    # mappings, static JSON, and reachable output nodes; the stream
+    # topology looks through it like inference_filter.
+    mappings=_same_on_all_archs(executor_binding="metadata"),
+    hardware_dependent=False,
+)
+
+# --------------------------------------------------------------------------
 # Catalog access
 # --------------------------------------------------------------------------
 
@@ -1798,6 +1857,9 @@ NODE_CATALOG = (
     # Appended (additive — custom-python-source Requirement 11.4): every
     # pre-existing descriptor keeps its position and content.
     CUSTOM_PYTHON_SOURCE,
+    # Appended (additive — workflow-manager-gaps Requirement 6.1): every
+    # pre-existing descriptor keeps its position and content.
+    METADATA,
 )
 
 _CATALOG_BY_ID = {descriptor.type_id: descriptor for descriptor in NODE_CATALOG}

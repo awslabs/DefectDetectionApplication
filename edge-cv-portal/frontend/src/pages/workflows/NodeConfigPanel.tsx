@@ -91,6 +91,13 @@ import {
   parseRequirements,
   reconcileRequirements,
 } from './importAnalyzer';
+import {
+  ERROR_MAPPINGS_INVALID,
+  MAX_MAPPINGS,
+  parseMappings,
+  parseStaticJson,
+  type MetadataConfigError,
+} from './metadataConfig';
 import { checkParameterValue } from './parameters';
 import { canEditWorkflows } from './WorkflowToolbar';
 import {
@@ -245,6 +252,9 @@ const PARAMETER_DISPLAY_LABELS: Record<string, string> = {
   iot_ca_cert_path: 'Root CA certificate path (on device)',
   iot_client_cert_path: 'Client certificate path (on device)',
   iot_private_key_path: 'Private key path (on device)',
+  // Metadata node (workflow-manager-gaps Requirement 6.2)
+  mappings: 'Metadata mappings',
+  static_json: 'Static JSON',
 };
 
 /** The label shown for a parameter's form control. */
@@ -1289,6 +1299,262 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
 }
 
 // --------------------------------------------------------------------------
+// Metadata node configuration (workflow-manager-gaps Requirements 6.2,
+// 6.3, 6.7)
+// --------------------------------------------------------------------------
+
+/**
+ * The metadata node type whose `mappings` and `static_json` parameters
+ * render as the mapping rows editor and the static JSON textarea. The
+ * palette entry itself appears automatically from the served catalog.
+ */
+export const METADATA_TYPE_ID = 'metadata';
+
+/** The metadata node's JSON-array mappings parameter. */
+const MAPPINGS_PARAMETER = 'mappings';
+
+/** The metadata node's static JSON object parameter. */
+const STATIC_JSON_PARAMETER = 'static_json';
+
+/** One editable mapping row: raw (untrimmed) field path and output key. */
+export interface MetadataMappingRow {
+  path: string;
+  key: string;
+}
+
+/**
+ * The raw mapping rows in a `mappings` parameter value, untrimmed for
+ * editing (`parseMappings` trims for validation, which would fight a
+ * user typing leading/trailing spaces). Returns null when the value is
+ * not parseable as a JSON array of `{path, key}` string pairs
+ * (ERROR_MAPPINGS_INVALID) — the editor then falls back to a raw JSON
+ * textarea so the invalid text stays visible and repairable.
+ */
+export function metadataMappingRows(
+  raw: JsonValue | null | undefined
+): MetadataMappingRow[] | null {
+  if (raw === null || raw === undefined) {
+    return [];
+  }
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  if (raw.trim() === '') {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) {
+    return null;
+  }
+  const rows: MetadataMappingRow[] = [];
+  for (const entry of parsed) {
+    const isObject = typeof entry === 'object' && entry !== null && !Array.isArray(entry);
+    const path = isObject ? (entry as Record<string, unknown>).path : undefined;
+    const key = isObject ? (entry as Record<string, unknown>).key : undefined;
+    if (typeof path !== 'string' || typeof key !== 'string') {
+      return null;
+    }
+    rows.push({ path, key });
+  }
+  return rows;
+}
+
+/** Serialize mapping rows to the `mappings` JSON-array parameter value. */
+export function serializeMetadataMappingRows(rows: MetadataMappingRow[]): string {
+  return JSON.stringify(rows.map(({ path, key }) => ({ path, key })));
+}
+
+/** The FormField errorText for a list of metadataConfig errors. */
+function metadataErrorText(errors: MetadataConfigError[]): string | undefined {
+  if (errors.length === 0) {
+    return undefined;
+  }
+  return errors.map((error) => error.message).join('; ');
+}
+
+/** The optional-marker FormField label used by every parameter field. */
+function optionalLabel(descriptor: ParameterDescriptor) {
+  const label = parameterLabel(descriptor);
+  return descriptor.required ? (
+    label
+  ) : (
+    <span>
+      {label} <i>- optional</i>
+    </span>
+  );
+}
+
+interface MetadataFieldProps {
+  /** The `mappings` or `static_json` parameter descriptor. */
+  descriptor: ParameterDescriptor;
+  /** The node's full parameters record. */
+  parameters: Record<string, JsonValue>;
+  /** Edits: the full updated parameters record. */
+  onParametersChange: (parameters: Record<string, JsonValue>) => void;
+}
+
+/**
+ * The mapping rows editor for the metadata node's `mappings` parameter
+ * (Requirement 6.2): add/edit/remove up to MAX_MAPPINGS rows of
+ * *trigger payload field path* → *output metadata key*, each edit
+ * serializing to the JSON-array parameter value. Validation errors from
+ * the shared `metadataConfig` rules (empty paths/keys, duplicate keys,
+ * row limit — Requirement 6.7) surface as the field error and, through
+ * the node's parameters, as the canvas V10 inline marker
+ * (`inlineChecks.ts`) that blocks the configuration from validating.
+ * A `mappings` value that is not parseable as an array of `{path, key}`
+ * string pairs (e.g. from a generated definition) renders as a raw JSON
+ * textarea with the parse error so the text stays repairable
+ * (Requirement 6.3).
+ */
+function MetadataMappingsField({ descriptor, parameters, onParametersChange }: MetadataFieldProps) {
+  const raw = effectiveParameterValue(parameters, descriptor);
+  const [, errors] = parseMappings(raw);
+  const errorText = metadataErrorText(errors);
+  const rows = metadataMappingRows(raw);
+
+  const commit = (value: JsonValue | null) =>
+    onParametersChange({ ...parameters, [descriptor.name]: value });
+
+  // Unparseable/mis-shaped mappings: raw JSON textarea fallback.
+  if (rows === null || errors.some((error) => error.code === ERROR_MAPPINGS_INVALID)) {
+    return (
+      <FormField
+        label={optionalLabel(descriptor)}
+        description={descriptor.description ?? undefined}
+        errorText={errorText}
+        stretch
+      >
+        <Textarea
+          rows={4}
+          value={textValue(raw)}
+          onChange={({ detail }) => commit(detail.value)}
+          spellcheck={false}
+          placeholder='[{"path": "job_id", "key": "job_id"}]'
+          ariaLabel={descriptor.name}
+        />
+        <ExampleChips descriptor={descriptor} onChange={commit} />
+      </FormField>
+    );
+  }
+
+  const commitRows = (next: MetadataMappingRow[]) => commit(serializeMetadataMappingRows(next));
+
+  const updateRow = (index: number, patch: Partial<MetadataMappingRow>) =>
+    commitRows(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+
+  const removeRow = (index: number) => commitRows(rows.filter((_, i) => i !== index));
+
+  const addRow = () => commitRows([...rows, { path: '', key: '' }]);
+
+  return (
+    <FormField
+      label={optionalLabel(descriptor)}
+      description={descriptor.description ?? undefined}
+      errorText={errorText}
+      stretch
+    >
+      <SpaceBetween size="xxs">
+        {rows.length === 0 && (
+          <Box fontSize="body-s" color="text-body-secondary">
+            No mappings configured.
+          </Box>
+        )}
+        {rows.map((row, index) => (
+          <div
+            // Rows are positional (no stable identity beyond index).
+            // eslint-disable-next-line react/no-array-index-key
+            key={index}
+            style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+          >
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <Input
+                value={row.path}
+                onChange={({ detail }) => updateRow(index, { path: detail.value })}
+                placeholder="field path (e.g. job_id)"
+                ariaLabel={`Mapping ${index + 1} field path`}
+              />
+            </div>
+            <span aria-hidden="true" style={{ color: '#5f6b7a' }}>
+              {'\u2192'}
+            </span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <Input
+                value={row.key}
+                onChange={({ detail }) => updateRow(index, { key: detail.value })}
+                placeholder="output key"
+                ariaLabel={`Mapping ${index + 1} output key`}
+              />
+            </div>
+            <Button
+              iconName="remove"
+              variant="icon"
+              ariaLabel={`Remove mapping ${index + 1}`}
+              onClick={() => removeRow(index)}
+            />
+          </div>
+        ))}
+        <Button
+          iconName="add-plus"
+          disabled={rows.length >= MAX_MAPPINGS}
+          onClick={addRow}
+          ariaLabel="Add mapping"
+        >
+          Add mapping
+        </Button>
+        {rows.length >= MAX_MAPPINGS && (
+          <Box fontSize="body-s" color="text-body-secondary">
+            {`At most ${MAX_MAPPINGS} mappings are allowed.`}
+          </Box>
+        )}
+      </SpaceBetween>
+    </FormField>
+  );
+}
+
+/**
+ * The static JSON textarea for the metadata node's `static_json`
+ * parameter (Requirement 6.2). Unparseable or non-object JSON and
+ * over-length values surface the shared `metadataConfig` error as the
+ * field error (Requirement 6.3) and, through the node's parameters, as
+ * the canvas V10 inline marker that blocks the configuration from
+ * validating.
+ */
+function MetadataStaticJsonField({
+  descriptor,
+  parameters,
+  onParametersChange,
+}: MetadataFieldProps) {
+  const raw = effectiveParameterValue(parameters, descriptor);
+  const [, errors] = parseStaticJson(raw);
+  const commit = (value: JsonValue | null) =>
+    onParametersChange({ ...parameters, [descriptor.name]: value });
+  return (
+    <FormField
+      label={optionalLabel(descriptor)}
+      description={descriptor.description ?? undefined}
+      errorText={metadataErrorText(errors)}
+      stretch
+    >
+      <Textarea
+        rows={5}
+        value={textValue(raw)}
+        onChange={({ detail }) => commit(detail.value)}
+        spellcheck={false}
+        placeholder='{"station": "line-1"}'
+        ariaLabel={descriptor.name}
+      />
+      <ExampleChips descriptor={descriptor} onChange={commit} />
+    </FormField>
+  );
+}
+
+// --------------------------------------------------------------------------
 // Panel
 // --------------------------------------------------------------------------
 
@@ -1413,7 +1679,29 @@ export default function NodeConfigPanel({
                 (unifiedVisibleNames === null || unifiedVisibleNames.has(parameter.name))
             )
             .map((parameter) =>
-              isCameraReferenceParameter(descriptor.typeId, parameter.name) ? (
+              descriptor.typeId === METADATA_TYPE_ID &&
+              parameter.name === MAPPINGS_PARAMETER ? (
+                // The metadata node's mapping rows editor
+                // (workflow-manager-gaps Requirement 6.2), the
+                // custom_python/unified_input type-specific pattern;
+                // keyed by node id so switching nodes resets its state.
+                <MetadataMappingsField
+                  key={`${node.id}:${parameter.name}`}
+                  descriptor={parameter}
+                  parameters={parameters}
+                  onParametersChange={(updated) => onParametersChange(node.id, updated)}
+                />
+              ) : descriptor.typeId === METADATA_TYPE_ID &&
+                parameter.name === STATIC_JSON_PARAMETER ? (
+                // The metadata node's static JSON textarea with the
+                // shared metadataConfig validation (Requirements 6.2, 6.3).
+                <MetadataStaticJsonField
+                  key={`${node.id}:${parameter.name}`}
+                  descriptor={parameter}
+                  parameters={parameters}
+                  onParametersChange={(updated) => onParametersChange(node.id, updated)}
+                />
+              ) : isCameraReferenceParameter(descriptor.typeId, parameter.name) ? (
                 // The icam_source device parameter and the
                 // aravis_camera_source camera_id parameter render as the
                 // camera reference control (camera-registry-sync

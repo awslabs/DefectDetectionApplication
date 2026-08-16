@@ -58,7 +58,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from workflow_engine.llm_inference import (
     UnresolvedPlaceholderError,
@@ -85,6 +85,14 @@ BINDING_BEDROCK_INFERENCE = "bedrock_inference"
 #: ``sim_llm_inference`` never appears in device documents and falls
 #: through the unknown-binding skip (a no-op on device).
 BINDING_LLM_INFERENCE = "llm_inference"
+#: Metadata_Node passthrough (workflow-manager-gaps Requirement 7): the
+#: compiled entry carries ``metadataMappings`` (trigger-payload field
+#: paths -> output metadata keys), ``staticJson`` (a user-supplied JSON
+#: object), and ``attachTo`` (the output-category node ids transitively
+#: reachable from the Metadata_Node). Resolved by the pure helpers below
+#: (``resolve_metadata_binding`` / ``attached_metadata_by_output``); the
+#: binding itself performs no action in the output loop.
+BINDING_METADATA = "metadata"
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +309,174 @@ def _preview(text: str, limit: int = DETAIL_PREVIEW_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "\u2026"
+
+
+# ---------------------------------------------------------------------------
+# Metadata passthrough resolution (metadata bindings)
+#
+# workflow-manager-gaps Requirements 7.2-7.6, 7.9. Pure functions: the
+# compiled document's ``metadata`` executor bindings carry the mappings
+# (trigger-payload field path -> output metadata key), the static JSON
+# object, and the ``attachTo`` output-node fan-out; the run's
+# Trigger_Context (as loaded by ``pipeline_executor.load_trigger_context``,
+# with a pre-parsed ``payload_json``) supplies the resolution source.
+# Resolution NEVER raises — a metadata problem degrades (static-only /
+# omitted keys) and is logged, and the run always continues.
+# ---------------------------------------------------------------------------
+
+
+def resolve_field_path(document: Any, dotted_path: Any) -> Tuple[bool, Any]:
+    """Resolve a dotted field path (``a.b.c``) against a parsed JSON
+    document, segment by segment (Requirements 7.2, 7.3).
+
+    - a dict is traversed by key;
+    - a list is traversed by a numeric segment used as an index
+      (``items.0.id``);
+    - any other intermediate value, a missing key, a non-numeric or
+      out-of-range index, or an empty path fails the resolution.
+
+    Returns ``(found, value)`` so a resolved JSON ``null`` (``None``) is
+    distinguishable from "not found" (Requirement 7.2 attaches resolved
+    nulls; Requirement 7.3 omits unresolved keys).
+    """
+    if not isinstance(dotted_path, str):
+        return False, None
+    path = dotted_path.strip()
+    if not path:
+        return False, None
+    current = document
+    for segment in path.split("."):
+        if isinstance(current, dict):
+            if segment not in current:
+                return False, None
+            current = current[segment]
+        elif isinstance(current, list):
+            try:
+                index = int(segment)
+            except ValueError:
+                return False, None
+            if not 0 <= index < len(current):
+                return False, None
+            current = current[index]
+        else:
+            return False, None
+    return True, current
+
+
+def resolve_metadata_binding(
+    binding: dict, trigger: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Build one metadata binding's attached map (Requirements 7.2-7.6,
+    7.9). Never raises — the run always continues.
+
+    Static JSON entries are attached first (Requirement 7.5). Mappings
+    are resolved against ``trigger["payload_json"]`` only when it is a
+    dict: a non-JSON trigger payload (``payload_json`` is ``None``), a
+    non-object JSON payload, or an absent Trigger_Context (manual run)
+    degrades to static-only with one log line (Requirements 7.4, 7.9).
+    A resolved mapping (including a resolved ``null``) overrides a
+    colliding static entry with a logged collision (Requirement 7.6);
+    an unresolved field path omits its key and is logged (Requirement
+    7.3).
+    """
+    attached: Dict[str, Any] = {}
+    node_id = None
+    try:
+        if not isinstance(binding, dict):
+            return attached
+        node_id = binding.get("nodeId")
+        static = binding.get("staticJson")
+        static_keys = set()
+        if isinstance(static, dict):
+            attached.update(static)
+            static_keys = set(static)
+        mappings = binding.get("metadataMappings")
+        if not isinstance(mappings, list) or not mappings:
+            return attached
+        payload = (
+            trigger.get("payload_json") if isinstance(trigger, dict) else None
+        )
+        if not isinstance(payload, dict):
+            # One log line for the whole binding: no JSON-object payload
+            # to resolve against (non-JSON payload, non-object JSON, or a
+            # run without a Trigger_Context) — static-only attachment.
+            logger.info(
+                "Metadata node %s: no JSON-object trigger payload to "
+                "resolve %d mapping(s) against (non-JSON payload or run "
+                "without a trigger context); attaching static JSON "
+                "metadata only", node_id, len(mappings),
+            )
+            return attached
+        for mapping in mappings:
+            if not isinstance(mapping, dict):
+                continue
+            field_path = mapping.get("fieldPath")
+            key = mapping.get("key")
+            if not isinstance(key, str) or not key:
+                continue
+            found, value = resolve_field_path(payload, field_path)
+            if not found:
+                logger.info(
+                    "Metadata node %s: field path %r did not resolve in "
+                    "the trigger payload; omitting metadata key %r",
+                    node_id, field_path, key,
+                )
+                continue
+            if key in static_keys:
+                logger.info(
+                    "Metadata node %s: metadata key %r collision — the "
+                    "resolved mapping value overrides the static JSON "
+                    "entry", node_id, key,
+                )
+            attached[key] = value
+        return attached
+    except Exception:  # noqa: BLE001 - resolution never fails the run
+        logger.exception(
+            "Metadata node %s: metadata resolution failed; attaching "
+            "what was resolved so far", node_id,
+        )
+        return attached
+
+
+def attached_metadata_by_output(
+    bindings: Optional[List[dict]], trigger: Optional[Dict[str, Any]]
+) -> Dict[Any, Dict[str, Any]]:
+    """Fan every ``metadata`` binding's attached map out to its
+    ``attachTo`` output nodes (Requirements 7.7 scoping input).
+
+    Each metadata binding is evaluated exactly once (via
+    :func:`resolve_metadata_binding`) and its map is attached to every
+    output node id in its ``attachTo`` list. When several Metadata_Nodes
+    attach to the same output, the maps merge in ``executorBindings``
+    emission order — a later binding wins a colliding key, logged.
+    Never raises.
+    """
+    attached_by_output: Dict[Any, Dict[str, Any]] = {}
+    for binding in bindings or []:
+        if not isinstance(binding, dict):
+            continue
+        if binding.get("binding") != BINDING_METADATA:
+            continue
+        attached = resolve_metadata_binding(binding, trigger)
+        attach_to = binding.get("attachTo")
+        if not isinstance(attach_to, list):
+            continue
+        node_id = binding.get("nodeId")
+        for output_node_id in attach_to:
+            existing = attached_by_output.get(output_node_id)
+            if existing is None:
+                attached_by_output[output_node_id] = dict(attached)
+                continue
+            for key, value in attached.items():
+                if key in existing:
+                    logger.info(
+                        "Metadata node %s: metadata key %r for output "
+                        "node %s already attached by an earlier metadata "
+                        "binding; the later binding wins",
+                        node_id, key, output_node_id,
+                    )
+                existing[key] = value
+    return attached_by_output
 
 
 # ---------------------------------------------------------------------------
@@ -1310,6 +1486,14 @@ class OutputBindingProcessor:
         metadata = {
             key: _coerce(value) for key, value in dict(tag_values or {}).items()
         }
+        # Metadata_Node passthrough (workflow-manager-gaps Requirements
+        # 7.1, 7.7, 7.8): resolve every ``metadata`` binding once against
+        # the run's Trigger_Context and fan the attached maps out to
+        # their ``attachTo`` output nodes. Outputs absent from this map
+        # take the exact pre-feature code path (byte-identical payloads).
+        attached_by_output = attached_metadata_by_output(
+            bindings, metadata.get("trigger") or {}
+        )
         filter_outcomes = self._evaluate_filters(bindings, metadata)
         conditional_allowed = self._evaluate_conditionals(bindings, metadata)
 
@@ -1331,6 +1515,8 @@ class OutputBindingProcessor:
                     continue  # ran before this processor; fields merged
                 if kind == BINDING_LLM_INFERENCE:
                     continue  # ran before this processor; fields merged
+                if kind == BINDING_METADATA:
+                    continue  # resolved before the loop; attaches, no action
                 if kind == BINDING_DIGITAL_OUTPUT:
                     runner = self._run_digital_output
                 elif kind == BINDING_MQTT_PUBLISH:
@@ -1357,7 +1543,19 @@ class OutputBindingProcessor:
                         "filter or conditional",
                     )
                     continue
-                allowed, skip_detail = self._condition_result(binding, metadata)
+                # workflow-manager-gaps Requirements 7.7, 7.8: an output
+                # node listed in a metadata binding's ``attachTo`` gets an
+                # effective metadata dict (attached entries visible to
+                # ``payload_template`` placeholders and ``condition``
+                # expressions, plus a ``metadata_json`` placeholder); every
+                # other output sees the unmodified metadata — the exact
+                # pre-feature code path.
+                attached = attached_by_output.get(node_id)
+                effective = (
+                    metadata if attached is None
+                    else self._effective_metadata(node_id, metadata, attached)
+                )
+                allowed, skip_detail = self._condition_result(binding, effective)
                 if not allowed:
                     if skip_detail is not None:
                         self._emit_detail(detail_sink, node_id, skip_detail)
@@ -1367,7 +1565,15 @@ class OutputBindingProcessor:
                 # successfully; on a runner exception nothing new is recorded
                 # (mark_failure already captured the error and set_detail
                 # refuses to overwrite failure details, Requirement 3.3).
-                detail = runner(dict(binding.get("parameters") or {}), metadata)
+                parameters = dict(binding.get("parameters") or {})
+                if kind == BINDING_MQTT_PUBLISH:
+                    # Only mqtt_publish embeds the attached map into its
+                    # emitted payload (Requirement 7.7); opcua_write /
+                    # modbus_write / digital_output write scalars and gain
+                    # no automatic embedding.
+                    detail = runner(parameters, effective, attached)
+                else:
+                    detail = runner(parameters, effective)
                 logger.info(
                     "Output binding %s (node %s) processed", kind, node_id
                 )
@@ -1468,6 +1674,34 @@ class OutputBindingProcessor:
         return False
 
     @staticmethod
+    def _effective_metadata(
+        node_id: Any, metadata: Dict[str, Any], attached: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Build the effective metadata dict for an output binding with
+        an attached metadata map (workflow-manager-gaps Requirement 7.7).
+
+        The attached entries extend the run's tag values so
+        ``payload_template`` placeholders and ``condition`` expressions
+        can reference them; an attached key colliding with an existing
+        tag key keeps the tag value (logged). ``metadata_json`` — the
+        attached map serialized as JSON — is added as a placeholder for
+        templates and conditions."""
+        effective = dict(metadata)
+        for key, value in attached.items():
+            if key in effective:
+                logger.info(
+                    "Output node %s: attached metadata key %r collides "
+                    "with an existing tag value; the existing tag value "
+                    "wins", node_id, key,
+                )
+                continue
+            effective[key] = value
+        effective["metadata_json"] = json.dumps(
+            attached, sort_keys=True, default=str
+        )
+        return effective
+
+    @staticmethod
     def _condition_result(
         binding: dict, metadata: Dict[str, Any]
     ) -> tuple:
@@ -1524,9 +1758,21 @@ class OutputBindingProcessor:
         return "set pin {0} {1}".format(pin, signal_type)
 
     def _run_mqtt_publish(
-        self, parameters: Dict[str, Any], metadata: Dict[str, Any]
+        self,
+        parameters: Dict[str, Any],
+        metadata: Dict[str, Any],
+        attached: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """Publish the rendered payload to the configured broker (9.5).
+
+        ``attached`` (workflow-manager-gaps Requirement 7.7) is the
+        metadata map attached to this output node by upstream
+        Metadata_Node bindings; when present the rendered payload embeds
+        it — a JSON-object payload merges the entries top-level
+        (workflow-result keys win, logged), any other payload is wrapped
+        as ``{"payload": <rendered>, "metadata": {...}}``. ``None``
+        (no Metadata_Node attaches here) keeps the pre-feature payload
+        byte-identical (Requirement 7.8).
 
         With ``greengrass`` enabled the publish is zero-config: it goes
         through the device's Greengrass-managed MQTT (the on-device
@@ -1549,6 +1795,9 @@ class OutputBindingProcessor:
             payload if isinstance(payload, str)
             else json.dumps(payload, default=str)
         )
+        if attached is not None:
+            payload_text = self._embed_attached_metadata(
+                payload_text, attached)
         topic = str(parameters["topic"])
         qos = int(parameters.get("qos", 0))
 
@@ -1587,6 +1836,43 @@ class OutputBindingProcessor:
             str(parameters["iot_thing_name"]), tls,
         )
         return self._mqtt_detail(topic, qos, "aws_iot", payload_text)
+
+    @staticmethod
+    def _embed_attached_metadata(
+        payload_text: str, attached: Dict[str, Any]
+    ) -> str:
+        """Embed an attached metadata map into a rendered MQTT payload
+        (workflow-manager-gaps Requirement 7.7).
+
+        A payload that parses as a JSON object gets the attached entries
+        merged top-level — a workflow-result key wins a collision
+        (logged) so result values are never altered or replaced — and is
+        re-serialized. Any other payload (non-JSON text, or JSON that is
+        not an object) is wrapped as
+        ``{"payload": <rendered text>, "metadata": {...attached}}``. A
+        merge re-serialization failure falls back to the wrapped form."""
+        try:
+            parsed = json.loads(payload_text)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            for key in attached:
+                if key in parsed:
+                    logger.info(
+                        "MQTT payload key %r present in both the workflow "
+                        "result and the attached metadata; the workflow "
+                        "result value wins", key,
+                    )
+            merged = dict(attached)
+            merged.update(parsed)
+            try:
+                return json.dumps(merged, default=str)
+            except (TypeError, ValueError):
+                logger.exception(
+                    "Re-serializing the metadata-merged MQTT payload "
+                    "failed; falling back to the wrapped payload form")
+        return json.dumps(
+            {"payload": payload_text, "metadata": attached}, default=str)
 
     @staticmethod
     def _mqtt_detail(topic: str, qos: int, path: str, payload_text: str) -> str:

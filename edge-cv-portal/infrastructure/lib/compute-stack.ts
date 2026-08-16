@@ -23,6 +23,7 @@ import { CameraRegistryApiStack } from './camera-registry-api-stack';
 import { UserAdminApiStack } from './user-admin-api-stack';
 import { QuickSetupApiStack } from './quick-setup-api-stack';
 import { DdaLabelingApiStack } from './dda-labeling-api-stack';
+import { WorkflowManagerGapsApiStack } from './workflow-manager-gaps-api-stack';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
@@ -1953,7 +1954,19 @@ export class ComputeStack extends cdk.Stack {
     });
 
     // Workflow Generator Lambda Handler (Bedrock prompt-based generation)
+    //
+    // Fixed function name so the Lambda's environment can carry its own
+    // function name (async submit/worker self-invocation,
+    // workflow-manager-gaps) and the role can scope lambda:InvokeFunction to
+    // exactly this function — a CloudFormation resource cannot Ref itself
+    // from its own Environment, so the name must be a synth-time constant.
+    // Same fixed-name pattern as the SyntheticDataStack handler.
+    const WORKFLOW_GENERATOR_FUNCTION_NAME = 'dda-portal-workflow-generator';
+    const workflowGeneratorFunctionArn =
+      `arn:aws:lambda:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}` +
+      `:function:${WORKFLOW_GENERATOR_FUNCTION_NAME}`;
     const workflowGeneratorHandler = new lambda.Function(this, 'WorkflowGeneratorHandler', {
+      functionName: WORKFLOW_GENERATOR_FUNCTION_NAME,
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'workflow_generator.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
@@ -1961,10 +1974,38 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2025-01-25-workflow-generator',
+        // Self-invocation target for the async generation worker
+        // (submit_generation Event-invokes this same function with a
+        // workflow_gen_worker payload; the handler falls back to
+        // AWS_LAMBDA_FUNCTION_NAME when unset).
+        WORKFLOW_GENERATOR_FUNCTION_NAME,
       },
       layers: [sharedLayer, workflowCoreLayer],
       // Bedrock invocation timeout is configurable up to 240s; leave headroom
       timeout: cdk.Duration.seconds(270),
+    });
+
+    // Async submit/poll generation (workflow-manager-gaps): grant the
+    // generator role lambda:InvokeFunction on its own function so
+    // submit_generation can Event-invoke the background worker (the
+    // ddaLabelingWorker.grantInvoke pattern, self-directed). The grant uses
+    // the fixed-name ARN rather than grantInvoke(self) because the Function
+    // resource depends on its role's default policy — referencing the
+    // function ARN token from there would be a dependency cycle (see
+    // NodeGeneratorSelfInvokePolicy in node-designer-stack.ts).
+    workflowGeneratorHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [workflowGeneratorFunctionArn],
+    }));
+
+    // Never retry the async generation worker: an abnormally terminated
+    // worker must surface as failed via the status endpoint's reaper
+    // (GENERATION_ABNORMAL_TERMINATION) rather than being silently re-run
+    // after the reaper already fired (Req 3.6). Synthesizes an
+    // AWS::Lambda::EventInvokeConfig with MaximumRetryAttempts: 0.
+    workflowGeneratorHandler.configureAsyncInvoke({
+      retryAttempts: 0,
     });
 
     // Grant the generator permission to invoke the configured Bedrock model via
@@ -2496,6 +2537,35 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     ddaLabelingApiStack.addDependency(cameraRegistryApiStack);
     ddaLabelingApiStack.addDependency(userAdminApiStack);
     ddaLabelingApiStack.addDependency(quickSetupApiStack);
+
+    // Workflow Manager gaps routes (workflow-manager-gaps, task 10.3) in
+    // their own nested stack for the same 500-resource-limit reason.
+    // GET /workflows/generate/{job_id} (generation job status) attaches
+    // under the ApiGatewayStack-owned /workflows/generate resource and
+    // PATCH /workflows/{id}/name (metadata-only rename) under
+    // /workflows/{id}, both via their exported resource ids.
+    const workflowManagerGapsApiStack = new WorkflowManagerGapsApiStack(
+      this,
+      'WorkflowManagerGapsApi',
+      {
+        restApiId: apiGatewayStack.api.restApiId,
+        restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+        workflowGenerateResourceId: apiGatewayStack.workflowGenerateResourceId,
+        workflowResourceId: apiGatewayStack.workflowResourceId,
+        // Must match ApiGatewayStack deployOptions.stageName.
+        stageName: 'v1',
+        userPool: props.userPool,
+        workflowGeneratorHandler,
+        workflowsHandler,
+      },
+    );
+    workflowManagerGapsApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (all nested API stacks
+    // deploy against the same 'v1' stage).
+    workflowManagerGapsApiStack.addDependency(cameraRegistryApiStack);
+    workflowManagerGapsApiStack.addDependency(userAdminApiStack);
+    workflowManagerGapsApiStack.addDependency(quickSetupApiStack);
+    workflowManagerGapsApiStack.addDependency(ddaLabelingApiStack);
 
     // Custom Resource to update UseCases Lambda environment variable with API Gateway ID
     // This avoids circular dependency by updating the Lambda AFTER both resources are created

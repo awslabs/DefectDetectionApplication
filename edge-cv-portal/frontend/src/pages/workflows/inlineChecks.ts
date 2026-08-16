@@ -13,8 +13,19 @@
  * | V7-co | frame-feed source coexistence (one fed source per run) |
  * | V8    | mqtt_subscribe declares a connection target            |
  * | V9    | one activation model per workflow (mixed-model rule)   |
+ * | V10   | metadata node mappings/static_json configuration valid |
  */
 
+import {
+  ERROR_DUPLICATE_KEY,
+  ERROR_EMPTY_FIELD_PATH,
+  ERROR_EMPTY_KEY,
+  ERROR_MAPPINGS_INVALID,
+  ERROR_STATIC_JSON_INVALID,
+  ERROR_TOO_MANY_MAPPINGS,
+  parseMappings,
+  parseStaticJson,
+} from './metadataConfig';
 import { checkParameterValue, VIOLATION_REQUIRED } from './parameters';
 import {
   CATEGORY_INPUT,
@@ -40,6 +51,12 @@ export const CODE_V7_STAGE_ORDER = 'V7_STAGE_ORDER';
 export const CODE_V7_COEXISTENCE_CONFLICT = 'V7_COEXISTENCE_CONFLICT';
 export const CODE_V8_MQTT_SUB_NO_TARGET = 'V8_MQTT_SUB_NO_TARGET';
 export const CODE_V9_MIXED_ACTIVATION_MODEL = 'V9_MIXED_ACTIVATION_MODEL';
+export const CODE_V10_METADATA_MAPPINGS_INVALID = 'V10_METADATA_MAPPINGS_INVALID';
+export const CODE_V10_METADATA_EMPTY_FIELD_PATH = 'V10_METADATA_EMPTY_FIELD_PATH';
+export const CODE_V10_METADATA_EMPTY_KEY = 'V10_METADATA_EMPTY_KEY';
+export const CODE_V10_METADATA_DUPLICATE_KEY = 'V10_METADATA_DUPLICATE_KEY';
+export const CODE_V10_METADATA_TOO_MANY_MAPPINGS = 'V10_METADATA_TOO_MANY_MAPPINGS';
+export const CODE_V10_METADATA_STATIC_JSON_INVALID = 'V10_METADATA_STATIC_JSON_INVALID';
 
 /** The graph slice the inline checks operate on. */
 export interface GraphLike {
@@ -473,12 +490,77 @@ export function checkV9(graph: GraphLike, catalog: NodeTypeDescriptor[]): Valida
   return findings;
 }
 
+// --------------------------------------------------------------------------
+// V10: Metadata_Node configuration validity
+// (workflow-manager-gaps Requirements 6.3, 6.7, mirrors backend V10)
+// --------------------------------------------------------------------------
+
+/** The node type carrying the `mappings`/`static_json` parameters. */
+export const TYPE_METADATA = 'metadata';
+
 /**
- * Run the inline mirror checks (V4 + V5 + V7 + V7-coexistence + V8 + V9)
- * and return every
+ * Shared metadata_config error class -> V10 finding code, the
+ * TypeScript mirror of the backend's `_METADATA_ERROR_CODES` table in
+ * `workflow_core.validator.checks` (keep in sync).
+ */
+const METADATA_ERROR_CODES: Record<string, string> = {
+  [ERROR_MAPPINGS_INVALID]: CODE_V10_METADATA_MAPPINGS_INVALID,
+  [ERROR_EMPTY_FIELD_PATH]: CODE_V10_METADATA_EMPTY_FIELD_PATH,
+  [ERROR_EMPTY_KEY]: CODE_V10_METADATA_EMPTY_KEY,
+  [ERROR_DUPLICATE_KEY]: CODE_V10_METADATA_DUPLICATE_KEY,
+  [ERROR_TOO_MANY_MAPPINGS]: CODE_V10_METADATA_TOO_MANY_MAPPINGS,
+  [ERROR_STATIC_JSON_INVALID]: CODE_V10_METADATA_STATIC_JSON_INVALID,
+};
+
+/**
+ * Mirror of validator check V10 (`_check_v10_metadata`): every
+ * `metadata`-typed node's `mappings` and `static_json` parameters are
+ * parsed through the shared `metadataConfig` helpers, and each reported
+ * error class becomes one SEVERITY_ERROR finding under its dedicated
+ * V10 code (workflow-manager-gaps Requirements 6.3, 6.7). A valid
+ * configuration produces zero findings, and the check fires only on
+ * `metadata`-typed nodes so metadata-free graphs produce identical
+ * findings (Requirement 8.1). Like the backend, the raw parameter
+ * values are parsed (absent values fall back to the descriptor
+ * defaults inside the shared parsers).
+ */
+export function checkV10Metadata(
+  graph: GraphLike,
+  catalog: NodeTypeDescriptor[]
+): ValidationFinding[] {
+  const typed = typedNodes(graph, catalog);
+  const findings: ValidationFinding[] = [];
+
+  for (const node of graph.nodes) {
+    if (node.type !== TYPE_METADATA) {
+      continue;
+    }
+    const descriptor = typed.get(node.id);
+    if (descriptor === undefined) {
+      continue;
+    }
+    const [, mappingErrors] = parseMappings(node.parameters['mappings']);
+    const [, staticErrors] = parseStaticJson(node.parameters['static_json']);
+    for (const configError of [...mappingErrors, ...staticErrors]) {
+      findings.push({
+        severity: SEVERITY_ERROR,
+        code: METADATA_ERROR_CODES[configError.code] ?? CODE_V10_METADATA_MAPPINGS_INVALID,
+        message: `Node '${node.id}': ${configError.message}`,
+        nodeId: node.id,
+        connectionId: null,
+      });
+    }
+  }
+  return findings;
+}
+
+/**
+ * Run the inline mirror checks (V4 + V5 + V7 + V7-coexistence + V8 + V9
+ * + V10) and return every
  * finding, each with the associated node or connection identifier. The
  * canvas turns these into inline validation markers (Requirements 1.9,
- * 1.10, 5.5; trigger-activation-runtime Requirement 4.5).
+ * 1.10, 5.5; trigger-activation-runtime Requirement 4.5;
+ * workflow-manager-gaps Requirements 6.3, 6.7).
  */
 export function runInlineChecks(
   graph: GraphLike,
@@ -491,5 +573,6 @@ export function runInlineChecks(
     ...checkV7Coexistence(graph),
     ...checkV8(graph, catalog),
     ...checkV9(graph, catalog),
+    ...checkV10Metadata(graph, catalog),
   ];
 }

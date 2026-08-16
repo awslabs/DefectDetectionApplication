@@ -2,9 +2,14 @@ import { describe, it, expect } from 'vitest';
 import {
   checkV4,
   checkV5,
+  checkV10Metadata,
   CODE_V4_INVALID_PARAMETER_VALUE,
   CODE_V4_MISSING_REQUIRED_PARAMETER,
   CODE_V5_UNREACHABLE_NODE,
+  CODE_V10_METADATA_DUPLICATE_KEY,
+  CODE_V10_METADATA_EMPTY_FIELD_PATH,
+  CODE_V10_METADATA_MAPPINGS_INVALID,
+  CODE_V10_METADATA_STATIC_JSON_INVALID,
   resolvedPorts,
   runInlineChecks,
 } from './inlineChecks';
@@ -16,6 +21,7 @@ import {
   PORT_TYPE_EVENT_SIGNAL,
   PORT_TYPE_INFERENCE_META,
   PORT_TYPE_VIDEO_FRAMES,
+  SEVERITY_ERROR,
   type NodeTypeDescriptor,
   type WorkflowConnection,
   type WorkflowNode,
@@ -309,5 +315,107 @@ describe('runInlineChecks', () => {
       connections: [conn('c1', 'n1', 'n2')],
     };
     expect(runInlineChecks(fixed, CATALOG)).toEqual([]);
+  });
+});
+
+// --------------------------------------------------------------------------
+// V10: metadata node configuration validity
+// (workflow-manager-gaps Requirements 6.3, 6.7)
+// --------------------------------------------------------------------------
+
+const METADATA: NodeTypeDescriptor = {
+  typeId: 'metadata',
+  category: CATEGORY_POST_PROCESSING,
+  displayName: 'Metadata',
+  inputs: [{ name: 'in', portType: PORT_TYPE_INFERENCE_META }],
+  outputs: [{ name: 'out', portType: PORT_TYPE_INFERENCE_META }],
+  parameters: [
+    { name: 'mappings', paramType: 'string', required: false, default: '[]', constraints: {} },
+    {
+      name: 'static_json',
+      paramType: 'string',
+      required: false,
+      default: '',
+      constraints: { maxLength: 10240 },
+    },
+  ],
+  mappings: [],
+  hardwareDependent: false,
+};
+
+const METADATA_CATALOG = [...CATALOG, METADATA];
+
+describe('checkV10Metadata', () => {
+  it('returns no findings for a valid metadata configuration', () => {
+    const graph = {
+      nodes: [
+        node('m1', 'metadata', {
+          mappings: '[{"path": "job_id", "key": "job_id"}]',
+          static_json: '{"station": "line-1"}',
+        }),
+      ],
+      connections: [],
+    };
+    expect(checkV10Metadata(graph, METADATA_CATALOG)).toEqual([]);
+  });
+
+  it('returns no findings for the descriptor defaults (parameters unset)', () => {
+    const graph = { nodes: [node('m1', 'metadata')], connections: [] };
+    expect(checkV10Metadata(graph, METADATA_CATALOG)).toEqual([]);
+  });
+
+  it('reports one SEVERITY_ERROR per violated rule with the V10 codes', () => {
+    const graph = {
+      nodes: [
+        node('m1', 'metadata', {
+          // duplicate key + one empty path
+          mappings: '[{"path": "a", "key": "k"}, {"path": "b", "key": "k"}, {"path": " ", "key": "x"}]',
+          static_json: 'not json',
+        }),
+      ],
+      connections: [],
+    };
+    const findings = checkV10Metadata(graph, METADATA_CATALOG);
+    expect(findings.map((f) => f.code).sort()).toEqual([
+      CODE_V10_METADATA_DUPLICATE_KEY,
+      CODE_V10_METADATA_EMPTY_FIELD_PATH,
+      CODE_V10_METADATA_STATIC_JSON_INVALID,
+    ]);
+    for (const finding of findings) {
+      expect(finding.severity).toBe(SEVERITY_ERROR);
+      expect(finding.nodeId).toBe('m1');
+      expect(finding.message).toContain("Node 'm1':");
+    }
+  });
+
+  it('reports V10_METADATA_MAPPINGS_INVALID for unparseable mappings', () => {
+    const graph = {
+      nodes: [node('m1', 'metadata', { mappings: '{"not": "an array"}' })],
+      connections: [],
+    };
+    const findings = checkV10Metadata(graph, METADATA_CATALOG);
+    expect(findings.map((f) => f.code)).toEqual([CODE_V10_METADATA_MAPPINGS_INVALID]);
+  });
+
+  it('fires only on metadata-typed nodes (metadata-free graphs unchanged)', () => {
+    const graph = {
+      nodes: [
+        node('cam', 'camera_source', { device: '/dev/video0', mappings: 'not json' }),
+      ],
+      connections: [],
+    };
+    expect(checkV10Metadata(graph, METADATA_CATALOG)).toEqual([]);
+  });
+
+  it('is composed into runInlineChecks', () => {
+    const graph = {
+      nodes: [
+        node('cam', 'camera_source', { device: '/dev/video0' }),
+        node('m1', 'metadata', { static_json: '[1, 2]' }),
+      ],
+      connections: [conn('c1', 'cam', 'm1')],
+    };
+    const codes = runInlineChecks(graph, METADATA_CATALOG).map((f) => f.code);
+    expect(codes).toContain(CODE_V10_METADATA_STATIC_JSON_INVALID);
   });
 });

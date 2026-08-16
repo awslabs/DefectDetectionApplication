@@ -60,6 +60,22 @@ export class ApiGatewayStack extends cdk.NestedStack {
    */
   public readonly labelingJobResourceId: string;
 
+  /**
+   * Resource id of /workflows/generate. The workflow-manager-gaps
+   * generation status route (GET /workflows/generate/{job_id}) attaches
+   * under this resource from its own nested stack
+   * (WorkflowManagerGapsApiStack) for the same 500-resource-limit reason.
+   */
+  public readonly workflowGenerateResourceId: string;
+
+  /**
+   * Resource id of /workflows/{id}. The workflow-manager-gaps rename route
+   * (PATCH /workflows/{id}/name) attaches under this resource from its own
+   * nested stack (WorkflowManagerGapsApiStack) for the same
+   * 500-resource-limit reason.
+   */
+  public readonly workflowResourceId: string;
+
   constructor(scope: Construct, id: string, props: ApiGatewayStackProps) {
     super(scope, id, props);
 
@@ -793,12 +809,14 @@ export class ApiGatewayStack extends cdk.NestedStack {
 
     // Prompt-based workflow generation (Bedrock chat sessions)
     const workflowGenerateResource = workflowsResource.addResource('generate');
+    this.workflowGenerateResourceId = workflowGenerateResource.resourceId;
     workflowGenerateResource.addMethod('POST', workflowGeneratorIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
     const workflowResource = workflowsResource.addResource('{id}');
+    this.workflowResourceId = workflowResource.resourceId;
     workflowResource.addMethod('GET', workflowsIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,

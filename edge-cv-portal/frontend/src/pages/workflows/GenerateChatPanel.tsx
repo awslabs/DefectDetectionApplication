@@ -4,7 +4,17 @@
  *
  * Rendered inside the builder's right-hand side drawer (the "Generate"
  * tab), the panel accepts natural-language workflow requests and sends
- * them to POST /workflows/generate (10.1). The panel:
+ * them to POST /workflows/generate (10.1). Generation is asynchronous
+ * (workflow-manager-gaps Requirement 4): the submit call returns a 202
+ * with a Generation_Job id, and the panel polls
+ * GET /workflows/generate/{job_id} every {@link POLL_INTERVAL_MS} via
+ * the pure {@link pollReducer} until the job reaches a terminal state.
+ * The in-progress indicator shows immediately on submit and the prompt
+ * input stays disabled while the job is non-terminal (Req 4.1, 4.4);
+ * the returned `session_id` is adopted for follow-ups (Req 4.5). Three
+ * consecutive poll transport failures or 300 seconds without a terminal
+ * state stop the loop with an error message, retaining the prompt
+ * (Req 4.6, 4.7). The panel:
  *
  *   - Maintains the chat `session_id` across turns and sends the current
  *     canvas definition with every prompt, so follow-up prompts modify
@@ -45,9 +55,21 @@ import Input from '@cloudscape-design/components/input';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import Textarea from '@cloudscape-design/components/textarea';
-import { ApiError, apiService } from '../../services/api';
+import {
+  ApiError,
+  apiService,
+  type WorkflowGenerationJobSucceeded,
+} from '../../services/api';
 import type { UserRole } from '../../types';
 import { fromWorkflowDefinition, type BuilderNode } from './builderGraph';
+import {
+  DEADLINE_MESSAGE,
+  TRANSPORT_FAILURE_MESSAGE,
+  initialPollState,
+  isStopped,
+  pollReducer,
+  type PollState,
+} from './generationPollReducer';
 import { canEditWorkflows } from './WorkflowToolbar';
 import type {
   GenerationStructuralError,
@@ -98,6 +120,91 @@ const GATE_REJECTION_CODES = new Set([
 interface GateRejection {
   message: string;
   structuralErrors: GenerationStructuralError[];
+}
+
+/**
+ * Envelope codes the status endpoint returns that are NOT a
+ * Generation_Job failure Error_Envelope: the uniform 404 for
+ * unknown/removed/inaccessible jobs and the RBAC 403. Per
+ * workflow-manager-gaps Requirement 4.6 these count as poll transport
+ * failures (retried up to the consecutive-failure stop) rather than
+ * terminal job failures.
+ */
+const NON_FAILURE_POLL_CODES = new Set(['JOB_NOT_FOUND', 'FORBIDDEN']);
+
+/**
+ * True when a rejected status poll carries a replayed Generation_Job
+ * failure Error_Envelope (workflow-manager-gaps Requirement 2.3):
+ * a structured envelope (has a `code`) that is not one of the status
+ * endpoint's own non-failure responses. Network errors, unparseable
+ * responses, and non-failure envelopes are transport failures (Req 4.6).
+ */
+function isJobFailureEnvelope(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError &&
+    error.code !== undefined &&
+    !NON_FAILURE_POLL_CODES.has(error.code)
+  );
+}
+
+/** Resolve after `ms` milliseconds (poll scheduling; clamped at 0). */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+/**
+ * The failure Alert body already appends "Your prompt is preserved
+ * below - you can retry.", so the canonical stop messages from the
+ * reducer are displayed with that shared suffix stripped (the rendered
+ * text equals the canonical message exactly).
+ */
+const PROMPT_RETAINED_SUFFIX = ' Your prompt is preserved below - you can retry.';
+function stopMessageBody(message: string): string {
+  return message.endsWith(PROMPT_RETAINED_SUFFIX)
+    ? message.slice(0, -PROMPT_RETAINED_SUFFIX.length)
+    : message;
+}
+
+/**
+ * Drive the poll loop for one submitted Generation_Job to a stopped
+ * state using the pure reducer for every decision: 3-second scheduling
+ * via `nextPollAt`, terminal transitions, the consecutive
+ * transport-failure counter, and the 300-second deadline
+ * (workflow-manager-gaps Requirements 4.1, 4.6, 4.7).
+ */
+async function pollGenerationJob(
+  jobId: string
+): Promise<PollState<WorkflowGenerationJobSucceeded, unknown>> {
+  let state = pollReducer(initialPollState<WorkflowGenerationJobSucceeded, unknown>(), {
+    type: 'submitted',
+    jobId,
+    at: Date.now(),
+  });
+  while (!isStopped(state)) {
+    if (state.nextPollAt !== null) {
+      await delay(state.nextPollAt - Date.now());
+    }
+    // Deadline enforcement before issuing the request (Req 4.7); the
+    // reducer also applies it to every poll-response timestamp.
+    state = pollReducer(state, { type: 'tick', at: Date.now() });
+    if (isStopped(state)) {
+      break;
+    }
+    try {
+      const job = await apiService.getWorkflowGenerationJob(jobId);
+      state =
+        job.status === 'succeeded'
+          ? pollReducer(state, { type: 'poll-succeeded', result: job, at: Date.now() })
+          : pollReducer(state, { type: 'poll-in-progress', at: Date.now() });
+    } catch (pollError) {
+      // A failed job replays its Error_Envelope as a thrown ApiError
+      // (Req 2.3); anything else is a transport failure (Req 4.6).
+      state = isJobFailureEnvelope(pollError)
+        ? pollReducer(state, { type: 'poll-failed', failure: pollError, at: Date.now() })
+        : pollReducer(state, { type: 'poll-transport-failure', at: Date.now() });
+    }
+  }
+  return state;
 }
 
 /**
@@ -187,7 +294,11 @@ export default function GenerateChatPanel({
     setCorrectedErrors(null);
     try {
       const definition = getDefinition();
-      const result = await apiService.generateWorkflow({
+      // Submit: accepted requests return 202 with the Generation_Job id
+      // and the effective Chat_Session id; synchronous rejections
+      // (missing fields, INVALID_TEMPERATURE, RBAC, USECASE_NOT_FOUND)
+      // throw ApiError into the catch below, exactly as before.
+      const submission = await apiService.generateWorkflow({
         usecase_id: usecaseId,
         prompt: trimmed,
         ...(sessionId !== null ? { session_id: sessionId } : {}),
@@ -198,6 +309,38 @@ export default function GenerateChatPanel({
         // Per-request temperature override; blank uses the configured value.
         ...(parsedTemperature !== null ? { temperature: parsedTemperature } : {}),
       });
+
+      // Adopt the returned session id immediately (Req 4.5): the backend
+      // mints a fresh one when the request carried none or an
+      // unresolvable one, and follow-ups must continue that session.
+      setSessionId(submission.session_id);
+
+      // Poll every 3 seconds until the job stops (Req 4.1, 4.4, 4.6,
+      // 4.7); `busy` keeps the in-progress indicator visible and the
+      // prompt input disabled for the whole non-terminal window.
+      const stopped = await pollGenerationJob(submission.job_id);
+
+      if (stopped.phase === 'failed') {
+        // Terminal failure: the replayed Error_Envelope renders through
+        // the existing error/gate-rejection classification below, with
+        // the prompt retained (Req 4.3).
+        throw stopped.failure;
+      }
+      if (stopped.phase === 'transport-error') {
+        // 3 consecutive status polls failed in transport (Req 4.6).
+        setError(stopMessageBody(TRANSPORT_FAILURE_MESSAGE));
+        return;
+      }
+      if (stopped.phase === 'timed-out') {
+        // No terminal state within 300 s of submission (Req 4.7).
+        setError(stopMessageBody(DEADLINE_MESSAGE));
+        return;
+      }
+      const result = stopped.result;
+      if (result === null) {
+        // Unreachable: `succeeded` always carries its result.
+        return;
+      }
 
       // Client-side parse against the catalog: a definition referencing
       // unknown node types cannot be rendered; the canvas stays

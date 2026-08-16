@@ -6,9 +6,21 @@ Prompt-based Workflow_Definition generation via Amazon Bedrock
 
 Routes (API Gateway REST):
     POST /workflows/generate    Submit a natural-language prompt (optionally
-                                within an existing chat session) and receive a
-                                generated Workflow_Definition plus the complete
-                                Workflow_Validator findings list.
+                                within an existing chat session). Returns
+                                202 {job_id, session_id, usecase_id, status}
+                                immediately; the generation itself runs in an
+                                asynchronous self-invocation of this Lambda
+                                and its result is retrieved via the status
+                                endpoint (workflow-manager-gaps Requirement 1).
+    GET /workflows/generate/{job_id}
+                                Poll a Generation_Job's state. pending/running
+                                return 200 {job_id, status}; succeeded embeds
+                                the stored sync-endpoint payload; failed
+                                replays the stored Error_Envelope verbatim.
+                                Non-terminal jobs past their deadline are
+                                lazily reaped to failed with 504
+                                GENERATION_ABNORMAL_TERMINATION
+                                (workflow-manager-gaps Requirement 2, 3.6).
 
 Design (design.md section 9):
 - Chat sessions live in the WorkflowChatSessions DynamoDB table (TTL'd),
@@ -141,6 +153,7 @@ logger.setLevel(logging.INFO)
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
 s3 = boto3.client('s3')
+lambda_client = boto3.client('lambda')
 
 # Environment variables (SETTINGS_TABLE moved to bedrock_common)
 WORKFLOW_CHAT_SESSIONS_TABLE = os.environ.get('WORKFLOW_CHAT_SESSIONS_TABLE')
@@ -154,6 +167,23 @@ WORKFLOWS_S3_PREFIX = os.environ.get('WORKFLOWS_S3_PREFIX', 'workflows')
 # Chat sessions expire after 24 hours (DynamoDB TTL attribute 'ttl');
 # the TTL is refreshed on every message.
 SESSION_TTL_SECONDS = 24 * 60 * 60
+
+# Generation_Job records (asynchronous submit/poll, workflow-manager-gaps
+# Requirement 1): job items live in the WorkflowChatSessions table under a
+# 'genjob#' key prefix that can never collide with UUIDv4 session ids. A
+# non-terminal job is treated as abnormally terminated once
+# now > dispatched_at + JOB_MAX_EXECUTION_MS + JOB_DEADLINE_GRACE_MS
+# (Req 3.6: 60 s past the Lambda's 270 s maximum execution duration, past
+# the point where any worker could still write - async retries disabled).
+JOB_RECORD_PREFIX = 'genjob#'
+JOB_MAX_EXECUTION_MS = 270 * 1000
+JOB_DEADLINE_GRACE_MS = 60 * 1000
+
+# Generation_Job lifecycle states (design: Generation_Job state machine).
+JOB_PENDING = 'pending'
+JOB_RUNNING = 'running'
+JOB_SUCCEEDED = 'succeeded'
+JOB_FAILED = 'failed'
 
 # Cap of prior conversation turns replayed to the model per invocation.
 MAX_HISTORY_MESSAGES = 20
@@ -499,51 +529,126 @@ def gate_metadata(decision, repaired: bool = False,
 
 def generation_rejected_response(structural_errors: List[Dict],
                                  definition: Dict,
-                                 repair_attempted: bool) -> Dict:
+                                 repair_attempted: bool,
+                                 timeout_details: Optional[Dict] = None
+                                 ) -> Dict:
     """The 422 GENERATION_REJECTED envelope (Req 8.5, 8.7, 8.8).
 
     Returned strictly before any session mutation, so the session canvas
     snapshot and chat message history keep their prior state (8.9) and
     the client retries with the preserved prompt.
+
+    ``timeout_details`` carries the combined-failure indication
+    (workflow-manager-gaps Req 2.9, 3.5): when the Repair_Pass invocation
+    timed out after a first-pass gate rejection, the single terminal
+    envelope's details include both the structural errors and a
+    ``timeout`` object ({timeout_seconds, model_id}).
     """
+    details = {
+        'structural_errors': user_readable_errors(structural_errors,
+                                                  definition),
+        'repair_attempted': repair_attempted,
+        'prompt_preserved': True,
+    }
+    if timeout_details is not None:
+        details['timeout'] = timeout_details
     return error_response(
         422, 'GENERATION_REJECTED',
         'The generated workflow has structural errors that prevent it from '
         'working, so it was not applied. The canvas was left unchanged - '
         'please retry or rephrase the prompt.',
-        {
-            'structural_errors': user_readable_errors(structural_errors,
-                                                      definition),
-            'repair_attempted': repair_attempted,
-            'prompt_preserved': True,
-        }
+        details
     )
 
 
 # --------------------------------------------------------------------------
-# Generate endpoint
+# Asynchronous generation submit (workflow-manager-gaps Requirement 1)
 # --------------------------------------------------------------------------
 
-def generate_workflow(event: Dict, user: Dict) -> Dict:
+def job_record_key(job_id: str) -> str:
+    """Table key of a Generation_Job item (namespaced, collision-free)"""
+    return f'{JOB_RECORD_PREFIX}{job_id}'
+
+
+def dispatch_generation_worker(job_id: str, user: Dict) -> None:
     """
-    POST /workflows/generate
-    Body: {usecase_id, prompt, session_id?, current_definition?}
+    Asynchronously self-invoke this Lambda (InvocationType='Event') with the
+    worker payload: the generation run executes outside the API Gateway 29 s
+    integration cap while the submit route returns 202 immediately (Req 1.2;
+    mirrors node_generator.dispatch_generation_worker).
+    """
+    function_name = (os.environ.get('WORKFLOW_GENERATOR_FUNCTION_NAME')
+                     or os.environ.get('AWS_LAMBDA_FUNCTION_NAME'))
+    lambda_client.invoke(
+        FunctionName=function_name,
+        InvocationType='Event',
+        Payload=json.dumps({
+            'workflow_gen_worker': True,
+            'job_id': job_id,
+            'user': user,
+        }).encode('utf-8'),
+    )
 
-    Invokes the configured Bedrock model with the prompt and the node type
-    catalog and returns a Workflow_Definition (10.2) together with the
-    complete Workflow_Validator findings list for user review on the canvas.
-    The result is never auto-saved or deployed (10.3). Follow-up prompts in
-    the same session modify the current canvas definition (10.5). Parse and
-    invocation failures return descriptive errors and persist no session
-    changes, so the canvas stays untouched and the prompt can be retried
-    (10.4, 10.7).
 
-    Every generated definition passes the Generation_Gate before it is
-    returned or persisted (Req 8.1): structural rejections return 422
-    GENERATION_REJECTED, validator failures return 422
-    GENERATION_VALIDATION_INCOMPLETE, and both leave the chat session and
-    canvas snapshot untouched (8.5, 8.9, 8.11). Session persistence
-    (put_snapshot + save_session) executes only on accept paths.
+def record_job_failure(job_id: str, http_status: int, error: Dict) -> bool:
+    """
+    Conditionally transition a Generation_Job to failed, storing the error
+    envelope contents verbatim for the status endpoint to replay (Req 2.3).
+
+    Every terminal write is conditional on a non-terminal stored state
+    (status IN pending, running) so the first terminal write wins and
+    terminal states stay immutable (Req 2.6); a loser logs and stops.
+    Terminal writes set terminal_at and refresh the TTL to
+    terminal + SESSION_TTL_SECONDS (Req 2.6, 2.7 - a zero-configured TTL
+    yields immediate removability). Returns True when this write bound.
+    """
+    timestamp = now_ms()
+    try:
+        dynamodb.Table(WORKFLOW_CHAT_SESSIONS_TABLE).update_item(
+            Key={'session_id': job_record_key(job_id)},
+            UpdateExpression=('SET #status = :failed, #failure = :failure, '
+                              'terminal_at = :now, updated_at = :now, '
+                              '#ttl = :ttl'),
+            ConditionExpression='#status IN (:pending, :running)',
+            ExpressionAttributeNames={'#status': 'status', '#ttl': 'ttl',
+                                      '#failure': 'failure'},
+            ExpressionAttributeValues={
+                ':failed': JOB_FAILED,
+                ':failure': {'http_status': http_status, 'error': error},
+                ':now': timestamp,
+                ':ttl': int(timestamp / 1000) + SESSION_TTL_SECONDS,
+                ':pending': JOB_PENDING,
+                ':running': JOB_RUNNING,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            logger.info(f"Generation job {job_id} already terminal; "
+                        f"failure write skipped")
+            return False
+        raise
+
+
+def submit_generation(event: Dict, user: Dict) -> Dict:
+    """
+    POST /workflows/generate (asynchronous submit, Req 1.1)
+    Body: {usecase_id, prompt, session_id?, current_definition?, temperature?}
+
+    Runs exactly the old synchronous endpoint's validation prefix -
+    parse_body, MISSING_FIELDS/INVALID_PROMPT, INVALID_TEMPERATURE, RBAC
+    (WORKFLOW_CREATE or WORKFLOW_EDIT), USECASE_NOT_FOUND, and
+    INVALID_CURRENT_DEFINITION parsing. Any failure returns the existing
+    Error_Envelope synchronously and creates no Generation_Job (Req 1.3,
+    1.4). On acceptance it writes the Generation_Job item (status=pending)
+    to the WorkflowChatSessions table, dispatches the background worker via
+    an asynchronous Lambda self-invocation, and returns
+    202 {job_id, session_id, usecase_id, status} (Req 1.1, 1.8).
+
+    The generation itself - Bedrock invocation, Generation_Gate evaluation,
+    and accept-only session persistence - runs in run_generation_core inside
+    the background worker, decoupled from this HTTP request (Req 1.2). This
+    path never invokes Bedrock (Req 8.5).
     """
     body, err = parse_body(event)
     if err:
@@ -585,17 +690,26 @@ def generate_workflow(event: Dict, user: Dict) -> Dict:
         return error_response(404, 'USECASE_NOT_FOUND', 'Use case not found')
 
     # ---------------------------------------------------------------- session
-    session_id = body.get('session_id')
+    # Session resolution (behavior delta, Req 1.5-1.7): a session_id that
+    # resolves to a live session owned by the same user and Use_Case keeps
+    # today's follow-up semantics. A session_id that does not resolve
+    # (expired, unknown, or another user's/Use_Case's - indistinguishable
+    # by design) no longer returns 404 SESSION_NOT_FOUND; instead a fresh
+    # session id is minted and the prompt proceeds with follow-up semantics
+    # over the client-provided current_definition (or an empty canvas when
+    # absent). No session_id likewise mints a fresh session. The effective
+    # session id is returned in the 202 body.
+    requested_session_id = body.get('session_id')
     session: Optional[Dict] = None
-    if session_id:
-        session = get_session(str(session_id))
-        # Expired/unknown sessions and sessions of other users or Use_Cases
-        # all yield the same 404, so existence is never leaked.
-        if not session or session.get('user_id') != user['user_id'] \
-                or session.get('usecase_id') != usecase_id:
-            return error_response(404, 'SESSION_NOT_FOUND',
-                                  'Chat session not found or expired')
-    else:
+    session_existed = False
+    if requested_session_id:
+        existing = get_session(str(requested_session_id))
+        if existing and existing.get('user_id') == user['user_id'] \
+                and existing.get('usecase_id') == usecase_id:
+            session_id = str(requested_session_id)
+            session = existing
+            session_existed = True
+    if session is None:
         session_id = str(uuid.uuid4())
         session = {
             'session_id': session_id,
@@ -630,6 +744,123 @@ def generate_workflow(event: Dict, user: Dict) -> Dict:
         if snapshot is not None:
             current_definition_json = json.dumps(snapshot, sort_keys=True)
 
+    # ------------------------------------------------ Generation_Job (Req 1.8)
+    # The job item exists in the pending state before the 202 is produced,
+    # so an immediately following status request returns the job's state
+    # rather than a 404. The request snapshot is resolved at submit time so
+    # the worker replays exactly what the old synchronous path would have.
+    job_id = str(uuid.uuid4())
+    dispatched_at = now_ms()
+    request_record: Dict[str, Any] = {
+        'prompt': prompt,
+        'session_existed': session_existed,
+    }
+    if temperature_override is not None:
+        # Stored as a string, not a DynamoDB number: valid overrides span
+        # the full float range of [0, 1] while DynamoDB numbers underflow
+        # below 1e-130. repr round-trips every float exactly; the worker
+        # converts back with float() before run_generation_core.
+        request_record['temperature'] = repr(float(temperature_override))
+    if current_definition_json is not None:
+        request_record['current_definition_json'] = current_definition_json
+    job_item = {
+        'session_id': job_record_key(job_id),
+        'record_type': 'generation_job',
+        'job_id': job_id,
+        'usecase_id': usecase_id,
+        'user_id': user['user_id'],
+        'chat_session_id': session_id,
+        'status': JOB_PENDING,
+        'request': request_record,
+        'created_at': dispatched_at,
+        'dispatched_at': dispatched_at,
+        'deadline_at': dispatched_at + JOB_MAX_EXECUTION_MS + JOB_DEADLINE_GRACE_MS,
+        'updated_at': dispatched_at,
+        'ttl': int(dispatched_at / 1000) + SESSION_TTL_SECONDS,
+    }
+    dynamodb.Table(WORKFLOW_CHAT_SESSIONS_TABLE).put_item(Item=job_item)
+
+    # ------------------------------------------------------ worker dispatch
+    # A failed dispatch means the background execution will never run, so
+    # the job is conditionally marked failed with the same envelope the
+    # client receives synchronously (502 GENERATION_NOT_STARTED).
+    try:
+        dispatch_generation_worker(job_id, user)
+    except Exception as exc:
+        logger.error(f"Generation worker dispatch failed for job {job_id}: "
+                     f"{str(exc)}", exc_info=True)
+        not_started = {
+            'code': 'GENERATION_NOT_STARTED',
+            'message': 'Workflow generation could not be started. '
+                       'Your prompt was not lost - please retry.',
+            'details': {'job_id': job_id},
+        }
+        try:
+            record_job_failure(job_id, 502, not_started)
+        except Exception as mark_exc:
+            logger.error(f"Could not mark job {job_id} failed after dispatch "
+                         f"failure: {str(mark_exc)}", exc_info=True)
+        return create_response(502, {'error': not_started})
+
+    return create_response(202, {
+        'job_id': job_id,
+        'session_id': session_id,
+        'usecase_id': usecase_id,
+        'status': JOB_PENDING,
+    })
+
+
+# --------------------------------------------------------------------------
+# Generation core (the old synchronous endpoint body, transport-free)
+# --------------------------------------------------------------------------
+
+def run_generation_core(usecase_id: str, session_id: str, session: Dict,
+                        prompt: str,
+                        current_definition_json: Optional[str],
+                        temperature_override: Optional[float]
+                        ) -> Tuple[int, Dict]:
+    """
+    Execute one generation run and return ``(status_code, payload_dict)``.
+
+    This is the old synchronous generate_workflow body from Bedrock
+    configuration resolution onward, with zero semantic changes: Converse
+    message assembly over the session history, invoke_generation, parse +
+    serialize, the Generation_Gate accept/repair/reject flow (at most one
+    Repair_Pass, always re-gated, fail-closed on validator exceptions), and
+    accept-only session persistence (put_snapshot + save_session execute
+    only on the gate's accept path; every failure leaves the Chat_Session
+    and canvas snapshot untouched). Callers (the background worker) turn
+    the tuple into a stored Generation_Result or a recorded failure.
+    """
+    response = _generation_core_response(
+        usecase_id, session_id, session, prompt,
+        current_definition_json, temperature_override)
+    return response['statusCode'], json.loads(response['body'])
+
+
+def _generation_core_response(usecase_id: str, session_id: str, session: Dict,
+                              prompt: str,
+                              current_definition_json: Optional[str],
+                              temperature_override: Optional[float]) -> Dict:
+    """
+    The extracted generation body, verbatim (workflow-manager Requirements
+    10.2, 10.3, 10.5, 10.7 and Generation_Gate Requirement 8): invokes the
+    configured Bedrock model with the prompt and the node type catalog and
+    returns a Workflow_Definition (10.2) together with the complete
+    Workflow_Validator findings list for user review on the canvas. The
+    result is never auto-saved or deployed (10.3). Follow-up prompts in
+    the same session modify the current canvas definition (10.5). Parse and
+    invocation failures return descriptive errors and persist no session
+    changes, so the canvas stays untouched and the prompt can be retried
+    (10.4, 10.7).
+
+    Every generated definition passes the Generation_Gate before it is
+    returned or persisted (Req 8.1): structural rejections return 422
+    GENERATION_REJECTED, validator failures return 422
+    GENERATION_VALIDATION_INCOMPLETE, and both leave the chat session and
+    canvas snapshot untouched (8.5, 8.9, 8.11). Session persistence
+    (put_snapshot + save_session) executes only on accept paths.
+    """
     # ------------------------------------------------------------ invocation
     config = get_bedrock_configuration()
     if temperature_override is not None:
@@ -713,8 +944,18 @@ def generate_workflow(event: Dict, user: Dict) -> Dict:
         if repair_err:
             # Repair invocation failed: reject with the ORIGINAL
             # Structural_Errors (the Repair_Pass did not complete, 8.7).
+            # A Repair_Pass GENERATION_TIMEOUT after the first-pass
+            # rejection yields ONE terminal envelope whose details carry
+            # both the structural errors and the timeout indication
+            # (workflow-manager-gaps Req 2.9, 3.5).
+            repair_error = (json.loads(repair_err.get('body') or '{}')
+                            .get('error') or {})
+            timeout_details = (repair_error.get('details')
+                               if repair_error.get('code') == 'GENERATION_TIMEOUT'
+                               else None)
             return generation_rejected_response(
-                original_errors, original_definition, repair_attempted=True)
+                original_errors, original_definition, repair_attempted=True,
+                timeout_details=timeout_details)
 
         repaired_result = parse_definition(json.dumps(repaired_input))
         if not repaired_result.ok:
@@ -807,8 +1048,327 @@ def generate_workflow(event: Dict, user: Dict) -> Dict:
     })
 
 
+# --------------------------------------------------------------------------
+# Asynchronous generation worker (workflow-manager-gaps Requirements 1.2, 3)
+# --------------------------------------------------------------------------
+
+def job_result_s3_key(usecase_id: str, chat_session_id: str,
+                      job_id: str) -> str:
+    """S3 key of a succeeded Generation_Job's stored Generation_Result"""
+    return (f"{WORKFLOWS_S3_PREFIX}/{usecase_id}/chat-sessions/"
+            f"{chat_session_id}/jobs/{job_id}/result.json")
+
+
+def get_job(job_id: str) -> Optional[Dict]:
+    """Fetch a Generation_Job item, or None (absent or TTL-removed)"""
+    table = dynamodb.Table(WORKFLOW_CHAT_SESSIONS_TABLE)
+    response = table.get_item(Key={'session_id': job_record_key(job_id)})
+    item = response.get('Item')
+    return decimal_to_native(item) if item else None
+
+
+def mark_job_running(job_id: str) -> bool:
+    """
+    Conditionally transition a Generation_Job pending -> running (the only
+    legal entry into running per the job state machine). Returns True when
+    this write bound; a conditional failure means the job is no longer
+    pending (already terminal via a dispatch-failure race or the reaper),
+    so the worker logs and stops without running the generation (Req 2.6).
+    """
+    try:
+        dynamodb.Table(WORKFLOW_CHAT_SESSIONS_TABLE).update_item(
+            Key={'session_id': job_record_key(job_id)},
+            UpdateExpression='SET #status = :running, updated_at = :now',
+            ConditionExpression='#status = :pending',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={
+                ':running': JOB_RUNNING,
+                ':pending': JOB_PENDING,
+                ':now': now_ms(),
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            logger.info(f"Generation job {job_id} is not pending; "
+                        f"worker start skipped")
+            return False
+        raise
+
+
+def record_job_success(job_id: str, result_s3_key: str) -> bool:
+    """
+    Conditionally transition a Generation_Job to succeeded, storing the
+    S3 reference of the full sync-endpoint payload (Req 2.2).
+
+    Like record_job_failure, the write is conditional on a non-terminal
+    stored state (status IN pending, running) so the first terminal write
+    wins and terminal states stay immutable (Req 2.6); a loser logs and
+    stops. Terminal writes set terminal_at and refresh the TTL to
+    terminal + SESSION_TTL_SECONDS (Req 2.6, 2.7 - a zero-configured TTL
+    yields immediate removability). Returns True when this write bound.
+    """
+    timestamp = now_ms()
+    try:
+        dynamodb.Table(WORKFLOW_CHAT_SESSIONS_TABLE).update_item(
+            Key={'session_id': job_record_key(job_id)},
+            UpdateExpression=('SET #status = :succeeded, '
+                              'result_s3_key = :result_key, '
+                              'terminal_at = :now, updated_at = :now, '
+                              '#ttl = :ttl'),
+            ConditionExpression='#status IN (:pending, :running)',
+            ExpressionAttributeNames={'#status': 'status', '#ttl': 'ttl'},
+            ExpressionAttributeValues={
+                ':succeeded': JOB_SUCCEEDED,
+                ':result_key': result_s3_key,
+                ':now': timestamp,
+                ':ttl': int(timestamp / 1000) + SESSION_TTL_SECONDS,
+                ':pending': JOB_PENDING,
+                ':running': JOB_RUNNING,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            logger.info(f"Generation job {job_id} already terminal; "
+                        f"success write skipped")
+            return False
+        raise
+
+
+def run_generation_worker(event: Dict) -> Dict:
+    """
+    Worker entry (async self-invocation, Req 1.2): execute one dispatched
+    generation run to a terminal Generation_Job state.
+
+    Flow: conditional pending -> running, then run_generation_core with
+    the request snapshot resolved at submit time (all generation semantics
+    unchanged - Req 3.1-3.5, 3.7, 3.8). A 200 outcome writes the full
+    sync-endpoint payload to S3 and conditionally transitions the job to
+    succeeded with the result reference; any error outcome conditionally
+    transitions it to failed storing {http_status, error} for the status
+    endpoint to replay verbatim (Req 2.3). The outermost try/except
+    records a 500 INTERNAL_ERROR terminal failure so no exception path
+    leaves the job non-terminal; only a Lambda timeout/crash escapes it,
+    which the poll-time reaper covers (Req 3.6).
+    """
+    job_id = str(event.get('job_id') or '')
+    try:
+        job = get_job(job_id) if job_id else None
+        if not job:
+            logger.error(f"Generation worker: job {job_id!r} not found")
+            return {'ok': False}
+
+        if not mark_job_running(job_id):
+            # First-terminal-write-wins: the job is no longer pending
+            # (dispatch-failure race or reaped) - log and stop (Req 2.6).
+            return {'ok': False}
+
+        usecase_id = job['usecase_id']
+        chat_session_id = job['chat_session_id']
+        request = job.get('request') or {}
+
+        # Session reconstruction: a live session that still resolves to
+        # the same user and Use_Case keeps its history (Req 1.5). Otherwise
+        # (expired between submit and worker, or it never existed) a fresh
+        # session shell is used - the request record already carries the
+        # canvas snapshot resolved at submit time, so follow-up semantics
+        # over the client definition are preserved (Req 1.6).
+        session: Optional[Dict] = None
+        if request.get('session_existed'):
+            existing = get_session(chat_session_id)
+            if existing and existing.get('user_id') == job.get('user_id') \
+                    and existing.get('usecase_id') == usecase_id:
+                session = existing
+        if session is None:
+            session = {
+                'session_id': chat_session_id,
+                'usecase_id': usecase_id,
+                'user_id': job.get('user_id'),
+                'messages': [],
+                'current_definition_key': None,
+                'created_at': now_ms(),
+            }
+
+        temperature = request.get('temperature')
+        status_code, payload = run_generation_core(
+            usecase_id, chat_session_id, session,
+            request.get('prompt') or '',
+            request.get('current_definition_json'),
+            float(temperature) if temperature is not None else None,
+        )
+
+        if status_code == 200:
+            # The stored Generation_Result IS the sync endpoint's payload,
+            # replayed field-for-field by the status endpoint (Req 2.2).
+            result_key = job_result_s3_key(usecase_id, chat_session_id,
+                                           job_id)
+            s3.put_object(
+                Bucket=PORTAL_ARTIFACTS_BUCKET,
+                Key=result_key,
+                Body=json.dumps(payload).encode('utf-8'),
+                ContentType='application/json',
+            )
+            record_job_success(job_id, result_key)
+            return {'ok': True}
+
+        error = payload.get('error') if isinstance(payload, dict) else None
+        record_job_failure(job_id, status_code, error or {
+            'code': 'GENERATION_FAILED',
+            'message': 'Workflow generation failed. '
+                       'Your prompt was not lost - please retry.',
+            'details': {},
+        })
+        return {'ok': False}
+
+    except Exception as exc:
+        logger.error(f"Generation worker failed unexpectedly for job "
+                     f"{job_id!r}: {str(exc)}", exc_info=True)
+        try:
+            record_job_failure(job_id, 500, {
+                'code': 'INTERNAL_ERROR',
+                'message': 'Workflow generation failed unexpectedly. '
+                           'Your prompt was not lost - please retry.',
+                'details': {},
+            })
+        except Exception as mark_exc:
+            logger.error(f"Could not mark job {job_id!r} failed after "
+                         f"worker error: {str(mark_exc)}", exc_info=True)
+        return {'ok': False}
+
+
+# --------------------------------------------------------------------------
+# Generation job status endpoint (workflow-manager-gaps Requirement 2)
+# --------------------------------------------------------------------------
+
+def job_not_found_response() -> Dict:
+    """
+    Fixed 404 for a Generation_Job the caller may not see: never existed,
+    TTL-removed after its retention window, or belonging to a Use_Case the
+    requesting user cannot access - byte-identical in every case so the
+    response never reveals whether the Job_ID exists (Req 2.4, 2.10).
+    """
+    return error_response(404, 'JOB_NOT_FOUND', 'Generation job not found')
+
+
+def abnormal_termination_error(job_id: str) -> Dict:
+    """The 504 GENERATION_ABNORMAL_TERMINATION envelope contents recorded
+    by the poll-time reaper (Req 3.6)."""
+    return {
+        'code': 'GENERATION_ABNORMAL_TERMINATION',
+        'message': 'Workflow generation terminated abnormally without '
+                   'recording a result. Your prompt was not lost - '
+                   'please retry.',
+        'details': {'job_id': job_id},
+    }
+
+
+def get_generation_job(event: Dict, user: Dict, job_id: str) -> Dict:
+    """
+    GET /workflows/generate/{job_id} (Req 2.1)
+
+    Returns the state of a Generation_Job: pending/running -> 200
+    {job_id, status} with neither result nor failure envelope (Req 2.8);
+    succeeded -> 200 embedding the stored result.json field-for-field -
+    the sync endpoint's exact payload (Req 2.2); failed -> the stored
+    http_status with the stored envelope verbatim (Req 2.3). Reads never
+    mutate terminal jobs, so repeated polls are identical (Req 2.6).
+
+    Absent jobs (never existed or TTL-removed) and jobs in a Use_Case the
+    user cannot access return the same fixed 404 (Req 2.4, 2.10); Use_Case
+    access without WORKFLOW_CREATE/WORKFLOW_EDIT returns the existing 403
+    RBAC envelope (Req 2.5).
+
+    Lazy reaping (Req 3.6): a non-terminal job past its deadline_at
+    (dispatched_at + 270 s + 60 s - past the point where any worker could
+    still write, async retries disabled) is conditionally transitioned to
+    failed with 504 GENERATION_ABNORMAL_TERMINATION; when the conditional
+    write loses (the worker won the race) the stored terminal state is
+    re-read and served.
+    """
+    job = get_job(job_id)
+    if not job:
+        return job_not_found_response()
+
+    usecase_id = job.get('usecase_id')
+
+    # No Use_Case access -> the same fixed 404: no cross-tenant existence
+    # leak (Req 2.4). WORKFLOW_READ is the repo-wide Use_Case-access proxy
+    # (workflows.authorize_workflow_access uses the same gate).
+    if not has_workflow_permission(user, usecase_id, Permission.WORKFLOW_READ):
+        return job_not_found_response()
+
+    # Use_Case access without the generation permission -> the existing
+    # 403 RBAC envelope (Req 2.5; same gate as submit_generation).
+    if not (has_workflow_permission(user, usecase_id, Permission.WORKFLOW_CREATE)
+            or has_workflow_permission(user, usecase_id, Permission.WORKFLOW_EDIT)):
+        return forbidden_response(user, event, usecase_id,
+                                  [Permission.WORKFLOW_CREATE, Permission.WORKFLOW_EDIT])
+
+    # ------------------------------------------------- lazy reap (Req 3.6)
+    if job.get('status') in (JOB_PENDING, JOB_RUNNING) \
+            and now_ms() > int(job.get('deadline_at') or 0):
+        bound = record_job_failure(job_id, 504,
+                                   abnormal_termination_error(job_id))
+        if not bound:
+            logger.info(f"Generation job {job_id} reached a terminal state "
+                        f"concurrently; serving the stored state")
+        # Re-read in either case and serve the stored terminal state -
+        # first-terminal-write-wins keeps repeated polls identical.
+        job = get_job(job_id)
+        if not job:
+            return job_not_found_response()
+
+    status = job.get('status')
+
+    if status in (JOB_PENDING, JOB_RUNNING):
+        # Neither a Generation_Result nor a failure envelope (Req 2.8).
+        return create_response(200, {'job_id': job_id, 'status': status})
+
+    if status == JOB_SUCCEEDED:
+        try:
+            response = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET,
+                                     Key=job['result_s3_key'])
+            result = json.loads(response['Body'].read().decode('utf-8'))
+        except Exception as exc:
+            # The job record is left untouched so a later poll can succeed.
+            logger.error(f"Could not read stored result for generation job "
+                         f"{job_id}: {str(exc)}", exc_info=True)
+            return error_response(
+                500, 'INTERNAL_ERROR',
+                'The generation result could not be read. Please retry.',
+                {'job_id': job_id})
+        # The embedded fields are the sync endpoint's exact payload
+        # (session_id, usecase_id, definition, findings, error_count,
+        # warning_count, validation_passed, assistant_text, model_id,
+        # gate), field-for-field (Req 2.2).
+        payload = {'job_id': job_id, 'status': JOB_SUCCEEDED}
+        payload.update(result)
+        return create_response(200, payload)
+
+    # failed: the stored http_status with the stored envelope verbatim,
+    # including a combined rejection+timeout details object when one was
+    # recorded (Req 2.3, 2.9).
+    failure = job.get('failure') or {}
+    error = failure.get('error') or {
+        'code': 'GENERATION_FAILED',
+        'message': 'Workflow generation failed. '
+                   'Your prompt was not lost - please retry.',
+        'details': {},
+    }
+    return create_response(int(failure.get('http_status') or 500),
+                           {'error': error})
+
+
 def handler(event: Dict, context: Any) -> Dict:
     """Main Lambda handler - routes to the appropriate operation"""
+    # Asynchronous worker invocation (self Event-invoke from
+    # submit_generation): not an API Gateway event, so it is dispatched
+    # before any HTTP routing or user extraction (Req 1.2; the
+    # node_generator.py pattern).
+    if event.get('workflow_gen_worker'):
+        return run_generation_worker(event)
+
     try:
         http_method = event.get('httpMethod')
 
@@ -829,7 +1389,12 @@ def handler(event: Dict, context: Any) -> Dict:
         resource = event.get('resource', '')
 
         if resource == '/workflows/generate' and http_method == 'POST':
-            return generate_workflow(event, user)
+            return submit_generation(event, user)
+
+        # Generation_Job status poll (workflow-manager-gaps Requirement 2).
+        if resource == '/workflows/generate/{job_id}' and http_method == 'GET':
+            job_id = (event.get('pathParameters') or {}).get('job_id') or ''
+            return get_generation_job(event, user, job_id)
 
         # Code assistance for custom Python node modules
         # (custom-node-code-assist Requirement 2.1). Unexpected exceptions

@@ -373,17 +373,44 @@ def _seed_existing_session(session_id):
 
 
 def _generate(session_id=None, prompt="Camera to capture"):
-    """Run generate_workflow directly with a synthetic event and user."""
-    request = {"usecase_id": _USECASE_ID, "prompt": prompt}
+    """Run the preserved synchronous generation body directly.
+
+    The workflow-manager-gaps async split moved the old generate_workflow
+    body (invoke -> parse -> validate -> gate -> repair -> accept-only
+    persistence) verbatim into run_generation_core, which the background
+    worker executes; the HTTP submit path only queues the job. This helper
+    replicates the old endpoint's session-resolution prefix (resolve the
+    provided session_id through the REAL get_session, fall back to a fresh
+    session; feed the stored snapshot through the REAL load_snapshot as
+    the current canvas definition) and then drives the core, so the
+    persistence-iff-accept property still asserts the preserved semantics
+    over the real moto-backed table and bucket (Req 3/8 of that spec)."""
+    session = None
     if session_id is not None:
-        request["session_id"] = session_id
-    event = {
-        "httpMethod": "POST",
-        "resource": "/workflows/generate",
-        "path": "/workflows/generate",
-        "body": json.dumps(request),
-    }
-    return workflow_generator.generate_workflow(event, dict(_USER))
+        existing = workflow_generator.get_session(str(session_id))
+        if existing and existing.get("user_id") == _USER["user_id"] \
+                and existing.get("usecase_id") == _USECASE_ID:
+            session = existing
+    if session is None:
+        session_id = "session-fresh"
+        session = {
+            "session_id": session_id,
+            "usecase_id": _USECASE_ID,
+            "user_id": _USER["user_id"],
+            "messages": [],
+            "current_definition_key": None,
+            "created_at": 1,
+        }
+    current_definition_json = None
+    if session.get("current_definition_key"):
+        snapshot = workflow_generator.load_snapshot(
+            session["current_definition_key"])
+        if snapshot is not None:
+            current_definition_json = json.dumps(snapshot, sort_keys=True)
+    status_code, body = workflow_generator.run_generation_core(
+        _USECASE_ID, str(session_id), session, prompt,
+        current_definition_json, None)
+    return {"statusCode": status_code, "body": json.dumps(body)}
 
 
 # Feature: portal-build-fleet-and-workflow-gates, Property 21: Session persistence if and only if the gate accepts

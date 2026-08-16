@@ -830,6 +830,9 @@ class TestCatalogCoverage:
         # custom-python-source: the Custom Python frame source appended
         # last (Requirements 1.1, 11.4).
         "custom_python_source",
+        # workflow-manager-gaps: the Metadata passthrough node appended
+        # last (Requirement 6.1).
+        "metadata",
     }
 
     def test_catalog_contains_exactly_the_expected_types(self):

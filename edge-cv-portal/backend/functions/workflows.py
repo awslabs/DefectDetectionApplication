@@ -9,6 +9,7 @@ Routes (API Gateway REST):
     POST   /workflows                    Create a workflow (version 1)          (5.1)
     GET    /workflows/{id}               Open/load a stored definition          (5.4)
     PUT    /workflows/{id}               Save changes as a new version          (5.2)
+    PATCH  /workflows/{id}/name          Metadata-only Display_Name rename      (gaps 5.1-5.6)
     DELETE /workflows/{id}               Delete workflow + versions             (5.5, 5.6)
     POST   /workflows/{id}/duplicate     Duplicate under a new name             (5.7)
     GET    /workflows/{id}/versions      List version history                   (5.2)
@@ -558,6 +559,68 @@ def update_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     return create_response(200, {'workflow': workflow_summary(new_item), 'version': new_version})
 
 
+def rename_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
+    """
+    PATCH /workflows/{id}/name
+    Body: {name}
+    Metadata-only Display_Name rename (workflow-manager-gaps 5.1-5.6, 8.2):
+    updates exactly `name` and `updated_at` on the Workflows-table record.
+    No writes to WorkflowVersions, stored S3 definitions, or
+    `latest_version` — the workflow_id (and thus the packaged component
+    name and all deployment references) stays stable.
+    """
+    item = get_workflow_item(workflow_id)
+    if not item:
+        return not_found_response()
+    err = authorize_workflow_access(user, event, item, Permission.WORKFLOW_SAVE)
+    if err:
+        return err
+
+    body, err = parse_body(event)
+    if err:
+        return err
+    name = body.get('name')
+    if not isinstance(name, str) or not name.strip():
+        return error_response(400, 'INVALID_NAME',
+                              'name must be a non-empty string')
+    new_name = name.strip()
+    if len(new_name) > 128:
+        return error_response(400, 'INVALID_NAME',
+                              'name must be at most 128 characters',
+                              {'max_length': 128, 'length': len(new_name)})
+
+    previous_name = item.get('name')
+    usecase_id = item['usecase_id']
+
+    try:
+        updated = dynamodb.Table(WORKFLOWS_TABLE).update_item(
+            Key={'workflow_id': workflow_id},
+            UpdateExpression='SET #name = :name, updated_at = :updated',
+            ExpressionAttributeNames={'#name': 'name'},
+            ExpressionAttributeValues={':name': new_name, ':updated': now_ms()},
+            ConditionExpression='attribute_exists(workflow_id)',
+            ReturnValues='ALL_NEW'
+        )
+    except ClientError as e:
+        # Record deleted concurrently: same uniform 404 as a missing workflow
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            return not_found_response()
+        raise
+    new_item = decimal_to_native(updated['Attributes'])
+
+    log_audit_event(
+        user_id=user['user_id'],
+        action='rename_workflow',
+        resource_type='workflow',
+        resource_id=workflow_id,
+        result='success',
+        details={'usecase_id': usecase_id, 'previous_name': previous_name,
+                 'new_name': new_name}
+    )
+
+    return create_response(200, {'workflow': workflow_summary(new_item)})
+
+
 def delete_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     """
     DELETE /workflows/{id}
@@ -797,6 +860,9 @@ def handler(event: Dict, context: Any) -> Dict:
                 return update_workflow(event, user, workflow_id)
             if http_method == 'DELETE':
                 return delete_workflow(event, user, workflow_id)
+        elif resource == '/workflows/{id}/name' and workflow_id:
+            if http_method == 'PATCH':
+                return rename_workflow(event, user, workflow_id)
         elif resource == '/workflows/{id}/duplicate' and workflow_id:
             if http_method == 'POST':
                 return duplicate_workflow(event, user, workflow_id)

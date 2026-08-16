@@ -2887,6 +2887,91 @@
     ],
     "type_id": "llm_inference"
   },
+  "metadata": {
+    "category": "post_processing",
+    "display_name": "Metadata",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp4",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {},
+        "default": "[]",
+        "depends_on": null,
+        "description": "Metadata mappings as a JSON array of objects with 'path' (dotted field path resolved against the parsed trigger payload, e.g. job_id or order.id) and 'key' (output metadata key the resolved value is attached under). Up to 50 mappings; paths and keys must be non-empty and keys unique.",
+        "examples": [
+          "[{\"path\": \"job_id\", \"key\": \"job_id\"}]",
+          "[{\"path\": \"order.id\", \"key\": \"order_id\"}, {\"path\": \"file_path\", \"key\": \"source_file\"}]"
+        ],
+        "name": "mappings",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max_length": 10240
+        },
+        "default": "",
+        "depends_on": null,
+        "description": "Optional static JSON object (at most 10240 characters) whose top-level entries are attached to the output metadata alongside the resolved mappings; a resolved mapping wins on a key collision.",
+        "examples": [
+          "{\"station\": \"line-1\"}"
+        ],
+        "name": "static_json",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "metadata"
+  },
   "modbus_write": {
     "category": "output",
     "display_name": "Modbus TCP Write",

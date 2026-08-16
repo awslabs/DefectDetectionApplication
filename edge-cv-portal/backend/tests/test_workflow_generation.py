@@ -7,7 +7,16 @@ Task 10.4 (spec: workflow-manager).
 POST /workflows/generate (functions/workflow_generator.py) is exercised
 against the shared moto stack from conftest.py with the Bedrock Converse
 API mocked (design.md "Integration tests": Bedrock invocation with mocked
-Converse API). Covered:
+Converse API).
+
+Generation is now asynchronous (workflow-manager-gaps Requirement 1):
+POST returns 202 {job_id, session_id} and the generation itself runs in
+a worker self-invocation. The `generate` helper drives that transport
+end to end - submit, in-process worker execution, terminal
+Generation_Job outcome - so every semantic assertion below exercises
+the exact production code path while keeping the old (status, payload)
+call shape. TestGenerationWorkerLifecycle covers the worker's job state
+transitions (task 6.2). Covered:
 
 1. Prompt/catalog assembly (10.2): the Converse call carries a system
    prompt embedding the serialized node catalog, a toolConfig whose
@@ -158,9 +167,9 @@ def ctx(env):
     return SimpleNamespace(usecase_id=usecase_id, user=user)
 
 
-def generate(gen_env, ctx, prompt, session_id=None, current_definition=None,
-             temperature=None):
-    """POST /workflows/generate; returns (status_code, parsed_body)."""
+def generation_event(ctx, prompt, session_id=None, current_definition=None,
+                     temperature=None):
+    """An API Gateway POST /workflows/generate event."""
     body = {"usecase_id": ctx.usecase_id, "prompt": prompt}
     if session_id is not None:
         body["session_id"] = session_id
@@ -168,7 +177,7 @@ def generate(gen_env, ctx, prompt, session_id=None, current_definition=None,
         body["current_definition"] = current_definition
     if temperature is not None:
         body["temperature"] = temperature
-    event = {
+    return {
         "httpMethod": "POST",
         "resource": "/workflows/generate",
         "path": "/workflows/generate",
@@ -184,8 +193,73 @@ def generate(gen_env, ctx, prompt, session_id=None, current_definition=None,
             }
         },
     }
-    response = gen_env.module.handler(event, None)
-    return response["statusCode"], json.loads(response["body"])
+
+
+def submit(gen_env, ctx, prompt, session_id=None, current_definition=None,
+           temperature=None):
+    """POST /workflows/generate (asynchronous submit) with the worker
+    dispatch captured instead of Lambda-invoked; returns
+    (status_code, parsed_body, worker_events)."""
+    event = generation_event(ctx, prompt, session_id=session_id,
+                             current_definition=current_definition,
+                             temperature=temperature)
+    dispatched = []
+
+    def capture_dispatch(job_id, user):
+        dispatched.append({"workflow_gen_worker": True, "job_id": job_id,
+                           "user": user})
+
+    original = gen_env.module.dispatch_generation_worker
+    gen_env.module.dispatch_generation_worker = capture_dispatch
+    try:
+        response = gen_env.module.handler(event, None)
+    finally:
+        gen_env.module.dispatch_generation_worker = original
+    return response["statusCode"], json.loads(response["body"]), dispatched
+
+
+def job_record(gen_env, job_id):
+    """The stored Generation_Job item (Decimal-free), or None."""
+    item = gen_env.sessions_table.get_item(
+        Key={"session_id": f"genjob#{job_id}"}).get("Item")
+    return gen_env.module.decimal_to_native(item) if item else None
+
+
+def job_outcome(gen_env, job_id):
+    """A terminal Generation_Job's outcome as (status_code, payload):
+    succeeded -> (200, stored result.json), failed -> the stored
+    http_status and error envelope."""
+    item = job_record(gen_env, job_id)
+    assert item is not None, f"job {job_id} record missing"
+    if item["status"] == "succeeded":
+        obj = gen_env.s3.get_object(Bucket=gen_env.bucket,
+                                    Key=item["result_s3_key"])
+        return 200, json.loads(obj["Body"].read().decode("utf-8"))
+    assert item["status"] == "failed", \
+        f"job {job_id} is not terminal: {item['status']}"
+    failure = item["failure"]
+    return int(failure["http_status"]), {"error": failure["error"]}
+
+
+def generate(gen_env, ctx, prompt, session_id=None, current_definition=None,
+             temperature=None):
+    """One full generation through the asynchronous submit/worker
+    transport; returns (status_code, parsed_body) with the same semantics
+    the old synchronous endpoint had.
+
+    Synchronous submit rejections return directly. On 202 the captured
+    worker payload is executed in-process (the async self-invocation runs
+    this same handler) and the terminal Generation_Job outcome is read
+    back from the job record / stored result.
+    """
+    status, payload, dispatched = submit(
+        gen_env, ctx, prompt, session_id=session_id,
+        current_definition=current_definition, temperature=temperature)
+    if status != 202:
+        return status, payload
+    (worker_event,) = dispatched
+    gen_env.module.handler(worker_event, None)
+    return job_outcome(gen_env, payload["job_id"])
 
 
 def put_bedrock_config(gen_env, **values):
@@ -199,9 +273,16 @@ def put_bedrock_config(gen_env, **values):
 
 
 def sessions_for(gen_env, usecase_id):
-    """Chat session items belonging to a Use_Case (fresh per test)."""
+    """Chat session items belonging to a Use_Case (fresh per test).
+
+    Generation_Job records (record_type=generation_job, key-prefixed
+    'genjob#') live in the same table and are excluded: these helpers
+    assert Chat_Session persistence semantics only.
+    """
     items = gen_env.sessions_table.scan()["Items"]
-    return [i for i in items if i.get("usecase_id") == usecase_id]
+    return [i for i in items
+            if i.get("usecase_id") == usecase_id
+            and i.get("record_type") != "generation_job"]
 
 
 def s3_keys_for(gen_env, usecase_id):
@@ -564,3 +645,344 @@ class TestTimeoutAndFailure:
 
         assert sessions_for(gen_env, ctx.usecase_id) == []
         assert s3_keys_for(gen_env, ctx.usecase_id) == []
+
+
+# ===========================================================================
+# 5. Generation worker job lifecycle (workflow-manager-gaps task 6.2;
+#    Requirements 1.2, 2.6, 2.7, 2.9, 3.5)
+# ===========================================================================
+
+# VALID_DEFINITION plus one unconnected capture node: exactly one
+# repairable Structural_Error (V5 unreachable node), so the gate decides
+# repair and a second Converse invocation (the Repair_Pass) runs.
+REPAIRABLE_DEFINITION = {
+    "schemaVersion": 1,
+    "nodes": VALID_DEFINITION["nodes"] + [
+        {"id": "n3", "type": "capture",
+         "position": {"x": 600, "y": 100},
+         "parameters": {"output_path": "/data/other"}},
+    ],
+    "connections": VALID_DEFINITION["connections"],
+}
+
+
+class TestGenerationWorkerLifecycle:
+    """run_generation_worker: pending -> running -> terminal transitions,
+    first-terminal-write-wins immutability, combined rejection+timeout
+    failure recording, and the internal-error backstop."""
+
+    def test_success_records_succeeded_job_with_stored_result(self, gen_env,
+                                                              bedrock, ctx):
+        """A 200 generation outcome stores the full sync-endpoint payload
+        in S3 under jobs/{job_id}/result.json and conditionally
+        transitions the job to succeeded with the result reference,
+        terminal_at, and a refreshed TTL (Req 2.6, 2.7)."""
+        status, body, dispatched = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+
+        job = job_record(gen_env, body["job_id"])
+        assert job["status"] == "pending"
+
+        (worker_event,) = dispatched
+        result = gen_env.module.handler(worker_event, None)
+        assert result == {"ok": True}
+
+        job = job_record(gen_env, body["job_id"])
+        assert job["status"] == "succeeded"
+        assert job["result_s3_key"] == (
+            f"workflows/{ctx.usecase_id}/chat-sessions/"
+            f"{body['session_id']}/jobs/{body['job_id']}/result.json")
+        assert job["terminal_at"] >= job["dispatched_at"]
+        assert job["ttl"] == int(job["terminal_at"] / 1000) + \
+            gen_env.module.SESSION_TTL_SECONDS
+
+        # The stored result IS the sync endpoint's payload (Req 2.2).
+        obj = gen_env.s3.get_object(Bucket=gen_env.bucket,
+                                    Key=job["result_s3_key"])
+        payload = json.loads(obj["Body"].read().decode("utf-8"))
+        assert payload["session_id"] == body["session_id"]
+        assert payload["usecase_id"] == ctx.usecase_id
+        assert set(payload) >= {"definition", "findings", "error_count",
+                                "warning_count", "validation_passed",
+                                "assistant_text", "model_id", "gate"}
+
+    def test_terminal_job_is_not_regenerated_and_stays_immutable(
+            self, gen_env, bedrock, ctx):
+        """A worker arriving after a terminal write (here: a
+        dispatch-failure 502) loses the conditional pending -> running
+        transition, runs no generation, and leaves the stored terminal
+        state untouched (first terminal write wins, Req 2.6)."""
+        status, body, dispatched = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+
+        stored = {"code": "GENERATION_NOT_STARTED",
+                  "message": "Workflow generation could not be started.",
+                  "details": {"job_id": body["job_id"]}}
+        assert gen_env.module.record_job_failure(body["job_id"], 502, stored)
+
+        (worker_event,) = dispatched
+        result = gen_env.module.handler(worker_event, None)
+        assert result == {"ok": False}
+
+        assert bedrock.client.converse.call_count == 0
+        job = job_record(gen_env, body["job_id"])
+        assert job["status"] == "failed"
+        assert job["failure"]["http_status"] == 502
+        assert job["failure"]["error"] == stored
+        assert "result_s3_key" not in job
+
+    def test_repair_timeout_after_rejection_records_combined_failure(
+            self, gen_env, bedrock, ctx):
+        """A Repair_Pass GENERATION_TIMEOUT after a first-pass gate
+        rejection records exactly one terminal failed state whose
+        GENERATION_REJECTED envelope details carry both the structural
+        errors and the timeout indication (Req 2.9, 3.5)."""
+        put_bedrock_config(gen_env, timeout_seconds=45)
+        bedrock.client.converse.side_effect = [
+            converse_tool_response(REPAIRABLE_DEFINITION),
+            ReadTimeoutError(
+                endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com"),
+        ]
+
+        status, payload = generate(gen_env, ctx, "Camera to capture")
+        assert bedrock.client.converse.call_count == 2  # first pass + repair
+
+        assert status == 422
+        error = payload["error"]
+        assert error["code"] == "GENERATION_REJECTED"
+        assert error["details"]["repair_attempted"] is True
+        codes = {e["code"] for e in error["details"]["structural_errors"]}
+        assert codes == {"V5_UNREACHABLE_NODE"}
+        assert error["details"]["timeout"]["timeout_seconds"] == 45
+
+        # One terminal failed state; session and snapshot untouched.
+        job_id = job_record_id_for(gen_env, ctx.usecase_id)
+        job = job_record(gen_env, job_id)
+        assert job["status"] == "failed"
+        assert job["failure"]["http_status"] == 422
+        assert sessions_for(gen_env, ctx.usecase_id) == []
+        assert s3_keys_for(gen_env, ctx.usecase_id) == []
+
+    def test_worker_exception_records_500_internal_error(self, gen_env,
+                                                         bedrock, ctx,
+                                                         monkeypatch):
+        """An unexpected exception inside the worker still ends the job
+        terminal: failed with a 500 INTERNAL_ERROR envelope, so no
+        exception path leaves the job pending/running."""
+        status, body, dispatched = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(gen_env.module, "run_generation_core", explode)
+
+        (worker_event,) = dispatched
+        result = gen_env.module.handler(worker_event, None)
+        assert result == {"ok": False}
+
+        job = job_record(gen_env, body["job_id"])
+        assert job["status"] == "failed"
+        assert job["failure"]["http_status"] == 500
+        assert job["failure"]["error"]["code"] == "INTERNAL_ERROR"
+        assert job["terminal_at"] >= job["dispatched_at"]
+
+
+def job_record_id_for(gen_env, usecase_id):
+    """The single Generation_Job id recorded for a Use_Case."""
+    items = gen_env.sessions_table.scan()["Items"]
+    jobs = [i for i in items
+            if i.get("usecase_id") == usecase_id
+            and i.get("record_type") == "generation_job"]
+    (job,) = jobs
+    return job["job_id"]
+
+
+# ===========================================================================
+# 6. Generation job status endpoint (workflow-manager-gaps task 7.1;
+#    Requirements 2.1, 2.2, 2.3, 2.4, 2.5, 2.8, 2.10, 3.6)
+# ===========================================================================
+
+def status_event(user, job_id):
+    """An API Gateway GET /workflows/generate/{job_id} event."""
+    return {
+        "httpMethod": "GET",
+        "resource": "/workflows/generate/{job_id}",
+        "path": f"/workflows/generate/{job_id}",
+        "pathParameters": {"job_id": job_id},
+        "requestContext": {
+            "authorizer": {
+                "claims": {
+                    "sub": user["user_id"],
+                    "email": user["email"],
+                    "cognito:username": user["username"],
+                    "custom:role": user["role"],
+                }
+            }
+        },
+    }
+
+
+def poll(gen_env, user, job_id):
+    """GET /workflows/generate/{job_id}; returns (status_code, body)."""
+    response = gen_env.module.handler(status_event(user, job_id), None)
+    return response["statusCode"], json.loads(response["body"])
+
+
+class TestGenerationJobStatus:
+    """GET /workflows/generate/{job_id}: state-appropriate payloads,
+    uniform 404, RBAC 403, and lazy poll-time reaping."""
+
+    def test_unknown_job_id_returns_fixed_404(self, gen_env, ctx):
+        """A Job_ID that never existed (or was TTL-removed) returns the
+        fixed 404 JOB_NOT_FOUND envelope (Req 2.4, 2.10)."""
+        status, payload = poll(gen_env, ctx.user, "no-such-job")
+        assert status == 404
+        assert payload["error"]["code"] == "JOB_NOT_FOUND"
+
+    def test_pending_job_returns_status_only(self, gen_env, bedrock, ctx):
+        """A pending job polls 200 {job_id, status} with neither a result
+        nor a failure envelope (Req 2.1, 2.8), and an immediate poll after
+        the 202 never 404s (Req 1.8)."""
+        status, body, _ = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+
+        status, payload = poll(gen_env, ctx.user, body["job_id"])
+        assert status == 200
+        assert payload == {"job_id": body["job_id"], "status": "pending"}
+
+    def test_succeeded_job_embeds_result_field_for_field(self, gen_env,
+                                                         bedrock, ctx):
+        """A succeeded job returns 200 embedding the stored result.json
+        field-for-field - the sync endpoint's exact payload (Req 2.2) -
+        and repeated polls are identical (Req 2.6)."""
+        status, body, dispatched = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+        (worker_event,) = dispatched
+        gen_env.module.handler(worker_event, None)
+
+        job = job_record(gen_env, body["job_id"])
+        obj = gen_env.s3.get_object(Bucket=gen_env.bucket,
+                                    Key=job["result_s3_key"])
+        stored_result = json.loads(obj["Body"].read().decode("utf-8"))
+
+        status, payload = poll(gen_env, ctx.user, body["job_id"])
+        assert status == 200
+        assert payload["job_id"] == body["job_id"]
+        assert payload["status"] == "succeeded"
+        for field in ("session_id", "usecase_id", "definition", "findings",
+                      "error_count", "warning_count", "validation_passed",
+                      "assistant_text", "model_id", "gate"):
+            assert payload[field] == stored_result[field]
+
+        # Reads never mutate terminal jobs: a repeated poll is identical.
+        assert poll(gen_env, ctx.user, body["job_id"]) == (status, payload)
+        assert job_record(gen_env, body["job_id"]) == job
+
+    def test_failed_job_replays_stored_envelope_verbatim(self, gen_env,
+                                                         bedrock, ctx):
+        """A failed job returns the stored http_status and the stored
+        envelope verbatim (Req 2.3)."""
+        bedrock.client.converse.side_effect = ReadTimeoutError(
+            endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com")
+        status, body, dispatched = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+        (worker_event,) = dispatched
+        gen_env.module.handler(worker_event, None)
+
+        job = job_record(gen_env, body["job_id"])
+        assert job["status"] == "failed"
+
+        status, payload = poll(gen_env, ctx.user, body["job_id"])
+        assert status == job["failure"]["http_status"] == 504
+        assert payload["error"] == job["failure"]["error"]
+        assert payload["error"]["code"] == "GENERATION_TIMEOUT"
+
+    def test_no_usecase_access_returns_the_same_404(self, gen_env, bedrock,
+                                                    ctx, env):
+        """A user with no access to the job's Use_Case gets a 404
+        byte-identical to the unknown-job 404 - no cross-tenant existence
+        leak (Req 2.4)."""
+        status, body, _ = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+
+        # DataLabeler has no workflow permissions at all (no Use_Case
+        # access through the WORKFLOW_READ gate).
+        outsider = env.make_user(role="DataLabeler")
+        unknown = gen_env.module.handler(
+            status_event(outsider, "no-such-job"), None)
+        cross = gen_env.module.handler(
+            status_event(outsider, body["job_id"]), None)
+        assert cross["statusCode"] == unknown["statusCode"] == 404
+        assert cross["body"] == unknown["body"]
+
+    def test_access_without_generation_permission_returns_403(self, gen_env,
+                                                              bedrock, ctx,
+                                                              env):
+        """Use_Case access (WORKFLOW_READ) without WORKFLOW_CREATE or
+        WORKFLOW_EDIT gets the existing 403 RBAC envelope (Req 2.5)."""
+        status, body, _ = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+
+        viewer = env.make_user(role="Viewer")
+        env.assign_role(viewer, ctx.usecase_id, "Viewer")
+        status, payload = poll(gen_env, viewer, body["job_id"])
+        assert status == 403
+        assert payload["error"]["code"] == "FORBIDDEN"
+
+    def test_overdue_nonterminal_job_is_reaped_to_504(self, gen_env, bedrock,
+                                                      ctx):
+        """A non-terminal job past its deadline_at is lazily transitioned
+        to failed with 504 GENERATION_ABNORMAL_TERMINATION on poll
+        (Req 3.6), and repeated polls serve the same terminal state."""
+        status, body, _ = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+
+        gen_env.sessions_table.update_item(
+            Key={"session_id": f"genjob#{body['job_id']}"},
+            UpdateExpression="SET deadline_at = :past",
+            ExpressionAttributeValues={":past": 1},
+        )
+
+        status, payload = poll(gen_env, ctx.user, body["job_id"])
+        assert status == 504
+        assert payload["error"]["code"] == "GENERATION_ABNORMAL_TERMINATION"
+
+        job = job_record(gen_env, body["job_id"])
+        assert job["status"] == "failed"
+        assert job["failure"]["http_status"] == 504
+        assert job["terminal_at"] is not None
+        assert job["ttl"] == int(job["terminal_at"] / 1000) + \
+            gen_env.module.SESSION_TTL_SECONDS
+
+        assert poll(gen_env, ctx.user, body["job_id"]) == (status, payload)
+
+    def test_in_deadline_job_is_not_reaped(self, gen_env, bedrock, ctx):
+        """A non-terminal job still inside its deadline polls its stored
+        state unchanged - the reaper fires only past deadline_at."""
+        status, body, _ = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+
+        status, payload = poll(gen_env, ctx.user, body["job_id"])
+        assert (status, payload["status"]) == (200, "pending")
+        assert job_record(gen_env, body["job_id"])["status"] == "pending"
+
+    def test_s3_read_failure_returns_500_leaving_record_untouched(
+            self, gen_env, bedrock, ctx):
+        """An unreadable stored result for a succeeded job returns 500
+        INTERNAL_ERROR and leaves the job record untouched so a later
+        poll can succeed (design: error handling table)."""
+        status, body, dispatched = submit(gen_env, ctx, "Camera to capture")
+        assert status == 202
+        (worker_event,) = dispatched
+        gen_env.module.handler(worker_event, None)
+
+        job = job_record(gen_env, body["job_id"])
+        assert job["status"] == "succeeded"
+        gen_env.s3.delete_object(Bucket=gen_env.bucket,
+                                 Key=job["result_s3_key"])
+
+        status, payload = poll(gen_env, ctx.user, body["job_id"])
+        assert status == 500
+        assert payload["error"]["code"] == "INTERNAL_ERROR"
+        assert job_record(gen_env, body["job_id"]) == job

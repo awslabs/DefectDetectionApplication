@@ -264,16 +264,28 @@ def _build_scripts(first_shape, repair_shape, repairable_count,
 
 
 def _generate(prompt="Camera to capture"):
-    """Run generate_workflow directly with a synthetic event and user."""
-    event = {
-        "httpMethod": "POST",
-        "resource": "/workflows/generate",
-        "path": "/workflows/generate",
-        "body": json.dumps({"usecase_id": "uc-1", "prompt": prompt}),
+    """Run the preserved synchronous generation body directly.
+
+    The workflow-manager-gaps async split moved the old generate_workflow
+    body (the entire Bedrock invocation flow, including the single
+    Repair_Pass) verbatim into run_generation_core, which the background
+    worker executes; the HTTP submit path only queues the job and never
+    invokes Bedrock. Driving the core with a fresh session replicates
+    exactly what a fresh-session POST /workflows/generate produced before
+    the split, so the invocation-count property still asserts the
+    preserved semantics (Req 3/8 of that spec)."""
+    session_id = "session-under-test"
+    session = {
+        "session_id": session_id,
+        "usecase_id": "uc-1",
+        "user_id": "user-1",
+        "messages": [],
+        "current_definition_key": None,
+        "created_at": 1,
     }
-    user = {"user_id": "user-1", "email": "user-1@example.com",
-            "username": "user-1", "role": "DataScientist"}
-    return workflow_generator.generate_workflow(event, user)
+    status_code, body = workflow_generator.run_generation_core(
+        "uc-1", session_id, session, prompt, None, None)
+    return {"statusCode": status_code, "body": json.dumps(body)}
 
 
 # Feature: portal-build-fleet-and-workflow-gates, Property 19: At most one Repair_Pass per generation request

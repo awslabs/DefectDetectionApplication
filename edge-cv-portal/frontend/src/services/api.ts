@@ -570,6 +570,56 @@ export interface ReviewResponse {
   review_finalized?: boolean;
 }
 
+// Asynchronous workflow generation types (workflow-manager-gaps).
+
+/**
+ * 202 response of `POST /workflows/generate`
+ * (workflow_generator.submit_generation, workflow-manager-gaps
+ * Requirements 1.1, 1.7, 1.8): the accepted Generation_Job and the
+ * effective Chat_Session identifier. `session_id` is freshly minted when
+ * the request carried none or an unresolvable one, so callers adopt it
+ * for follow-up prompts.
+ */
+export interface WorkflowGenerationSubmission {
+  job_id: string;
+  session_id: string;
+  usecase_id: string;
+  status: 'pending';
+}
+
+/**
+ * A Generation_Job that has not reached a terminal state: the status
+ * endpoint returns only the job identity and state, never a partial
+ * result (workflow-manager-gaps Requirement 2.8).
+ */
+export interface WorkflowGenerationJobInProgress {
+  job_id: string;
+  status: 'pending' | 'running';
+}
+
+/**
+ * A succeeded Generation_Job: the synchronous endpoint's exact payload
+ * (`WorkflowGenerationResult`) embedded field-for-field beside the job
+ * identity (workflow-manager-gaps Requirement 2.2).
+ */
+export interface WorkflowGenerationJobSucceeded extends WorkflowGenerationResult {
+  job_id: string;
+  status: 'succeeded';
+}
+
+/**
+ * Resolved states of `GET /workflows/generate/{job_id}`, discriminated
+ * on `status`. The third state — a failed Generation_Job — never
+ * resolves: the backend replays the originating Error_Envelope with its
+ * original non-2xx HTTP status (workflow-manager-gaps Requirement 2.3),
+ * so it surfaces as a thrown `ApiError` carrying that status, code,
+ * message, and details (e.g. GENERATION_TIMEOUT, GENERATION_REJECTED,
+ * GENERATION_VALIDATION_INCOMPLETE, GENERATION_ABNORMAL_TERMINATION).
+ */
+export type WorkflowGenerationJobStatus =
+  | WorkflowGenerationJobInProgress
+  | WorkflowGenerationJobSucceeded;
+
 class ApiService {
   private get baseUrl(): string {
     return getConfig().apiUrl;
@@ -3309,6 +3359,23 @@ class ApiService {
     });
   }
 
+  // Metadata-only rename of a workflow's display name (workflows.py
+  // rename_workflow, workflow-manager-gaps Requirements 5.1, 5.2, 5.7).
+  // No definition is sent and no new version is allocated: only `name`
+  // and `updated_at` change on the workflow record. Rejections raise
+  // ApiError with the structured envelope: 400 INVALID_NAME
+  // (empty/whitespace-only or > 128 characters), the existing 403 RBAC
+  // envelope, or the uniform 404 (Requirements 5.3-5.5).
+  async renameWorkflow(
+    workflowId: string,
+    name: string
+  ): Promise<{ workflow: WorkflowSummary }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/name`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    });
+  }
+
   // Delete a workflow and its versions; rejected with 409 and the
   // referencing deployment ids when active deployments exist (5.5, 5.6).
   async deleteWorkflow(workflowId: string): Promise<{ workflow_id: string; message: string }> {
@@ -3383,12 +3450,18 @@ class ApiService {
     });
   }
 
-  // Prompt-based workflow generation via the configured Bedrock model
-  // (workflow_generator.py, Requirements 10.2, 10.3, 10.5, 10.7).
-  // `session_id` continues an existing chat session; `current_definition`
-  // is the canvas snapshot so follow-up prompts modify rather than
-  // regenerate. Failures raise ApiError with the structured envelope
-  // codes (e.g. GENERATION_TIMEOUT, BEDROCK_*, GENERATED_DEFINITION_INVALID).
+  // Prompt-based workflow generation via the configured Bedrock model,
+  // asynchronous submit/poll transport (workflow_generator.py
+  // submit_generation, workflow-manager-gaps Requirements 1.1, 1.7, 1.8).
+  // Accepted submissions return 202 with the Generation_Job id to poll
+  // via getWorkflowGenerationJob; the generation itself (Bedrock
+  // invocation, Generation_Gate, session persistence) runs in a
+  // background worker. `session_id` continues an existing chat session;
+  // `current_definition` is the canvas snapshot so follow-up prompts
+  // modify rather than regenerate. Synchronous rejections (missing
+  // fields, INVALID_TEMPERATURE, RBAC, USECASE_NOT_FOUND,
+  // GENERATION_NOT_STARTED) raise ApiError with the structured envelope
+  // and create no job (Requirements 1.3, 1.4).
   // `temperature` (0..1) overrides the configured model temperature for
   // this invocation only; omitted = use the configured value.
   async generateWorkflow(data: {
@@ -3397,11 +3470,23 @@ class ApiService {
     session_id?: string;
     current_definition?: WorkflowDefinition;
     temperature?: number;
-  }): Promise<WorkflowGenerationResult> {
+  }): Promise<WorkflowGenerationSubmission> {
     return this.request('/workflows/generate', {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // Poll one Generation_Job (workflow_generator.get_generation_job,
+  // workflow-manager-gaps Requirements 2.1, 2.2, 2.8). Resolves with the
+  // in-progress state ({job_id, status}) or, on success, the job identity
+  // plus the synchronous endpoint's exact WorkflowGenerationResult
+  // payload. A failed job rejects with an ApiError replaying the
+  // originating Error_Envelope and HTTP status verbatim (Requirement
+  // 2.3); an unknown, removed, or inaccessible job id rejects with the
+  // uniform 404 JOB_NOT_FOUND envelope (Requirements 2.4, 2.10).
+  async getWorkflowGenerationJob(jobId: string): Promise<WorkflowGenerationJobStatus> {
+    return this.request(`/workflows/generate/${encodeURIComponent(jobId)}`);
   }
 
   // Code_Assistant endpoint (custom-node-code-assist): synchronous,
