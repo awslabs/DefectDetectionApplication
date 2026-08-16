@@ -1,0 +1,10 @@
+# nvargus Error(89) degraded-state watchdog (oneshot journal scan).
+# Docs: .kiro/specs/csi-nvargus-optional (design Files 4-6, Decision 2).
+# Installed on ALL Jetson targets by install_nvidia_csi_service.sh and
+# driven by nvargus-error89-watchdog.timer.
+[Unit]
+Description=DDA nvargus Error(89) degraded-state watchdog scan
+
+[Service]
+Type=oneshot
+ExecStart=/aws_dda/system/nvargus_error89_watchdog.sh

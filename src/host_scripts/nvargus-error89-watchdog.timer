@@ -1,0 +1,12 @@
+# Timer for the nvargus Error(89) degraded-state watchdog scan.
+# Docs: .kiro/specs/csi-nvargus-optional (design Files 4-6, Decision 2).
+[Unit]
+Description=Run the DDA nvargus Error(89) watchdog scan every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

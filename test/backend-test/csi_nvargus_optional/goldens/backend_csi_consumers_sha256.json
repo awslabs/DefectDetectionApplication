@@ -1,0 +1,6 @@
+{
+  "src/backend/gstreamer/pipeline_builder.py": "9255c3a7beb1a4650a880c955bb6a92f197ca3f09b7048d5383a250d2073d301",
+  "src/backend/workflow_engine/csi_capture.py": "193cdfcd558f2fc569ea99cdd45d89a3a9da9ca13058410a65eec88fdd7b32ee",
+  "src/backend/workflow_engine/pipeline_executor.py": "2648051f0960c73dd8c8edfa90ff0f558de7d6a8d8cb39d1ce4b689b6f7d2443",
+  "src/backend/workflow_engine/vendor/workflow_core/catalog/nodes.py": "67c5d21e8e28352f250719b04e40928cf25c3de7e3005cfc9488c1816735d42f"
+}

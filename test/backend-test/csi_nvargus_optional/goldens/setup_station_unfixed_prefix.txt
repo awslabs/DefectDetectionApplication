@@ -1623,32 +1623,3 @@ else
     echo "✓ GreengrassV2TokenExchangeRole updated successfully"
 fi
 echo ""
-echo "=========================================="
-echo "▶ Configuring CSI camera exposure (opt-in)"
-echo "=========================================="
-# CSI/nvargus is OPT-IN (spec: csi-nvargus-optional). nvargus/CSI ISP activity
-# can poison nvargus-daemon on JP7/Thor (driver 595.78) into a state where ALL
-# new CUDA context creation fails device-wide (kernel: "Can't map dma
-# attachment!" + NVRM osCreateOsDescriptorFromFileHandle Error (89)). Most
-# fleet devices have NO CSI camera, so the daemon is disabled unless the
-# operator provisions with ENABLE_CSI_CAMERA=1. The opt-in marker gates the
-# nvidia-csi-capture.service install at every component deployment.
-CSI_OPTIN_MARKER="/aws_dda/system/csi_camera_optin"
-if systemctl list-unit-files nvargus-daemon.service >/dev/null 2>&1; then
-    mkdir -p /aws_dda/system
-    if [ "${ENABLE_CSI_CAMERA:-0}" = "1" ]; then
-        echo "ENABLE_CSI_CAMERA=1 — enabling nvargus-daemon and recording CSI opt-in"
-        run_cmd "systemctl enable --now nvargus-daemon" || add_warning "Failed to enable nvargus-daemon"
-        printf 'enabled_by=setup_station.sh\nenabled_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$CSI_OPTIN_MARKER" \
-            || add_warning "Failed to write CSI opt-in marker $CSI_OPTIN_MARKER"
-        echo "✓ CSI camera opt-in recorded at $CSI_OPTIN_MARKER"
-    else
-        echo "No CSI opt-in (default) — disabling nvargus-daemon and clearing any opt-in marker"
-        run_cmd "systemctl disable --now nvargus-daemon" || add_warning "Failed to disable nvargus-daemon"
-        rm -f "$CSI_OPTIN_MARKER"
-        echo "✓ nvargus-daemon disabled (re-run with ENABLE_CSI_CAMERA=1 to opt in)"
-    fi
-else
-    echo "✓ nvargus-daemon not present on this device — no CSI configuration needed"
-fi
-echo ""
