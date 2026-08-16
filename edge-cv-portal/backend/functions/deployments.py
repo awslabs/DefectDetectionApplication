@@ -136,7 +136,10 @@ WORKFLOW_MIN_LOCAL_SERVER_VERSION = os.environ.get(
 # "1.0.63"). WORKFLOW_MIN_LOCAL_SERVER_VERSIONS is a JSON object keyed by
 # workflow_core arch id ({"arm64_jp6": "1.0.0", ...}), mirroring the same env
 # the Component_Packager reads so this pre-submit check matches the packaged
-# manifests. Archs absent from the map fall back to the scalar default above.
+# manifests. A configured (non-empty) map is completed at derivation by
+# _fill_missing_arch_floors below so every known arch resolves a per-lineage
+# floor; only an empty/unconfigured map (or an arch-undetermined device)
+# falls back to the scalar default above.
 def _parse_min_versions_map():
     """Per-arch minimum LocalServer versions from WORKFLOW_MIN_LOCAL_SERVER_
     VERSIONS (JSON object). Malformed or non-object values yield {}."""
@@ -155,7 +158,53 @@ def _parse_min_versions_map():
     return {str(k): str(v) for k, v in data.items()}
 
 
-WORKFLOW_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map()
+# Arch ids the pre-submit gate can resolve from installed LocalServer
+# components — mirrors local_server_component_arch's codomain. Pinned in
+# lockstep with workflow_packaging.ARCH_TO_LOCAL_SERVER_COMPONENT and the
+# compute-stack.ts floor-map literal by the coverage test
+# (tests/test_workflow_min_localserver_floor_coverage.py). Kept as a local
+# constant because this module cannot import workflow_packaging (Lambda
+# bundling constraint documented above).
+LOCAL_SERVER_ARCH_IDS = (
+    'arm64_jp4', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7', 'x86_64')
+
+# Safe per-lineage floor: satisfiable in EVERY LocalServer variant lineage
+# (all variants version from 1.0.x and workflow support ships in current
+# field builds) — the same value every explicit floor-map entry uses. Never
+# substitute the cross-lineage scalar above for a known arch: the variant
+# lineages are not comparable and a scalar-derived constraint can be
+# unsatisfiable in the arch's own lineage.
+SAFE_LINEAGE_FLOOR = '1.0.0'
+
+
+def _fill_missing_arch_floors(by_arch):
+    """Complete a configured per-arch floor map so the pre-submit gate never
+    silently falls back to the cross-lineage scalar for a known arch.
+
+    An empty map is returned as-is (the scalar fallback chain is the
+    documented contract when no map is configured). A non-empty map is
+    copied with every LOCAL_SERVER_ARCH_IDS key it is missing set to
+    SAFE_LINEAGE_FLOOR, with one loud warning naming the filled archs.
+    """
+    if not by_arch:
+        return by_arch
+    missing = [arch for arch in LOCAL_SERVER_ARCH_IDS if arch not in by_arch]
+    if not missing:
+        return by_arch
+    completed = dict(by_arch)
+    for arch in missing:
+        completed[arch] = SAFE_LINEAGE_FLOOR
+    logger.warning(
+        'WORKFLOW_MIN_LOCAL_SERVER_VERSIONS is configured but missing known '
+        'arch(s) %s; filling each with the safe per-lineage floor %s instead '
+        'of the cross-lineage scalar. Complete the map in compute-stack.ts — '
+        'tests/test_workflow_min_localserver_floor_coverage.py should have '
+        'caught this.', ', '.join(missing), SAFE_LINEAGE_FLOOR)
+    return completed
+
+
+WORKFLOW_MIN_LOCAL_SERVER_VERSIONS = _fill_missing_arch_floors(
+    _parse_min_versions_map())
 
 # Minimum Greengrass Nucleus version required for DDA components
 # Nucleus is already installed on the device — we don't pin versions in deployments.

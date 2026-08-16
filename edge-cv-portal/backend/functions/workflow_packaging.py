@@ -146,11 +146,26 @@ MODELS_TABLE = os.environ.get('MODELS_TABLE')
 # minimum therefore falsely blocks the JetPack variants (a JP6 device running
 # 1.0.35 can never satisfy an arm64-derived "1.0.63"). WORKFLOW_MIN_LOCAL_
 # SERVER_VERSIONS is a JSON object keyed by workflow_core arch id
-# ({"arm64_jp6": "1.0.0", ...}) giving each variant lineage its own floor;
-# archs absent from the map fall back to the scalar default below.
+# ({"arm64_jp6": "1.0.0", ...}) giving each variant lineage its own floor.
+# Hardened contract (jp7-workflow-min-localserver-floor): when a map IS
+# configured (non-empty), every arch known to ARCH_TO_LOCAL_SERVER_COMPONENT
+# must have its own entry (test_workflow_min_localserver_floor_coverage.py
+# pins the deployed CDK literal to that key set); a known arch missing from a
+# configured map resolves the safe per-lineage floor SAFE_LINEAGE_FLOOR with
+# a loud warning — NEVER the cross-lineage scalar below. The scalar remains
+# the last-resort default only for an empty/unconfigured map, a None arch,
+# or an arch unknown to ARCH_TO_LOCAL_SERVER_COMPONENT.
 MIN_LOCAL_SERVER_VERSION = os.environ.get(
     'WORKFLOW_MIN_LOCAL_SERVER_VERSION',
     os.environ.get('DDA_LOCAL_SERVER_VERSION', '1.0.0'))
+
+# Safe per-lineage floor substituted when a KNOWN arch is missing from a
+# configured floor map: '1.0.0' is satisfiable in EVERY LocalServer variant
+# lineage (all variants version from 1.0.x and workflow support ships in
+# current field builds) — the same reasoning behind every existing map
+# entry, so the hardened path can never emit an unsatisfiable constraint
+# (design Decision 1, jp7-workflow-min-localserver-floor).
+SAFE_LINEAGE_FLOOR = '1.0.0'
 
 
 def _parse_min_versions_map():
@@ -177,12 +192,27 @@ MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map()
 
 def min_local_server_version_for(arch):
     """The minimum LocalServer version for a Workflow_Component targeting
-    ``arch``: the per-arch override when configured, else the scalar
-    default. Keeps each independently-versioned LocalServer variant
-    lineage self-consistent (a JP6 package is gated against JP6 builds,
-    not the arm64 lineage)."""
+    ``arch``: the per-arch entry when mapped; for a KNOWN arch missing
+    from a configured (non-empty) map, the safe per-lineage floor
+    SAFE_LINEAGE_FLOOR with a loud warning — never the cross-lineage
+    scalar (design Decision 2, jp7-workflow-min-localserver-floor); else
+    the scalar default (empty map, None, or unknown arch). Keeps each
+    independently-versioned LocalServer variant lineage self-consistent
+    (a JP6 package is gated against JP6 builds, not the arm64 lineage)."""
     if arch and arch in MIN_LOCAL_SERVER_VERSIONS:
         return MIN_LOCAL_SERVER_VERSIONS[arch]
+    # ARCH_TO_LOCAL_SERVER_COMPONENT is defined below; module-level name
+    # resolution at call time makes this forward reference valid.
+    if MIN_LOCAL_SERVER_VERSIONS and arch in ARCH_TO_LOCAL_SERVER_COMPONENT:
+        logging.warning(
+            'WORKFLOW_MIN_LOCAL_SERVER_VERSIONS is configured but has no '
+            'entry for known arch %r; substituting the safe per-lineage '
+            'floor %s instead of the cross-lineage scalar. The deployed '
+            'floor map must cover every ARCH_TO_LOCAL_SERVER_COMPONENT key '
+            '(pinned by test_workflow_min_localserver_floor_coverage.py) - '
+            'add the missing key to compute-stack.ts.',
+            arch, SAFE_LINEAGE_FLOOR)
+        return SAFE_LINEAGE_FLOOR
     return MIN_LOCAL_SERVER_VERSION
 
 # Greengrass component naming (design section 6)

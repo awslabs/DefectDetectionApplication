@@ -640,14 +640,21 @@ export class ComputeStack extends cdk.Stack {
       // ships as independently-versioned per-architecture variants whose lineages
       // are NOT comparable (the arm64 variant is ~1.0.124 while arm64JP6 is
       // ~1.0.35), so the single DDA_LOCAL_SERVER_VERSION=1.0.63 baseline falsely
-      // blocks the JetPack variants. This map gives the arm64 JetPack lineages
-      // their own floor (workflow support ships in current field builds, which
-      // sit well below the arm64/x86 lineage numbers); archs absent here fall
-      // back to DDA_LOCAL_SERVER_VERSION. Keys are workflow_core arch ids.
+      // blocks the JetPack variants. This map gives every lineage its own floor
+      // (workflow support ships in current field builds, which sit well below
+      // the legacy lineage numbers). This map MUST cover every
+      // ARCH_TO_LOCAL_SERVER_COMPONENT key in workflow_packaging.py — the
+      // backend coverage test (test_workflow_min_localserver_floor_coverage.py)
+      // enforces it. Archs missing from the map resolve the safe '1.0.0'
+      // per-lineage floor with a loud warning, never the cross-lineage scalar.
+      // Keys are workflow_core arch ids.
       WORKFLOW_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({
         arm64_jp4: '1.0.0',
         arm64_jp5: '1.0.0',
         arm64_jp6: '1.0.0',
+        arm64_jp7: '1.0.0',
+        x86_64: '1.0.0',
+        x86_64_nvidia: '1.0.0',
       }),
       COMPONENT_BUCKET_PREFIX: 'dda-component',
     };
