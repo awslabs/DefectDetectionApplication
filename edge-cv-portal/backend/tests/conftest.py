@@ -82,6 +82,10 @@ TEST_ENV = {
     }),
     # PLUGIN_SIGNING_KEY_ARN is set inside the aws_stack fixture (the
     # moto KMS key only exists once the mock is active).
+    # dda_labeling.py (dda-data-labeling)
+    "LABELING_TEAMS_TABLE": "test-labeling-teams",
+    "LABELING_JOBS_TABLE": "test-labeling-jobs",
+    "LABELING_TASKS_TABLE": "test-labeling-tasks",
 }
 
 # Environment must be in place before shared_utils / workflows are
@@ -259,6 +263,73 @@ def _create_tables(dynamodb):
         }],
         BillingMode="PAY_PER_REQUEST",
     )
+    # dda-data-labeling: single-table teams store (META / MEMBER#<user_id>
+    # sort keys; usecase-teams-index holds META items only).
+    dynamodb.create_table(
+        TableName=TEST_ENV["LABELING_TEAMS_TABLE"],
+        KeySchema=[
+            {"AttributeName": "team_id", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "team_id", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+            {"AttributeName": "usecase_id", "AttributeType": "S"},
+            {"AttributeName": "created_at", "AttributeType": "N"},
+        ],
+        GlobalSecondaryIndexes=[{
+            "IndexName": "usecase-teams-index",
+            "KeySchema": [
+                {"AttributeName": "usecase_id", "KeyType": "HASH"},
+                {"AttributeName": "created_at", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        }],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    # dda-data-labeling: labeling jobs table (existing dda-portal-labeling-jobs
+    # shape — PK job_id, usecase-jobs-index for use-case-scoped listings).
+    dynamodb.create_table(
+        TableName=TEST_ENV["LABELING_JOBS_TABLE"],
+        KeySchema=[{"AttributeName": "job_id", "KeyType": "HASH"}],
+        AttributeDefinitions=[
+            {"AttributeName": "job_id", "AttributeType": "S"},
+            {"AttributeName": "usecase_id", "AttributeType": "S"},
+            {"AttributeName": "created_at", "AttributeType": "N"},
+        ],
+        GlobalSecondaryIndexes=[{
+            "IndexName": "usecase-jobs-index",
+            "KeySchema": [
+                {"AttributeName": "usecase_id", "KeyType": "HASH"},
+                {"AttributeName": "created_at", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        }],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    # dda-data-labeling: Task_Assignments (PK job_id, SK task_id;
+    # assignee-index backs the labeler-facing "my jobs" queries).
+    dynamodb.create_table(
+        TableName=TEST_ENV["LABELING_TASKS_TABLE"],
+        KeySchema=[
+            {"AttributeName": "job_id", "KeyType": "HASH"},
+            {"AttributeName": "task_id", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "job_id", "AttributeType": "S"},
+            {"AttributeName": "task_id", "AttributeType": "S"},
+            {"AttributeName": "assignee_user_id", "AttributeType": "S"},
+        ],
+        GlobalSecondaryIndexes=[{
+            "IndexName": "assignee-index",
+            "KeySchema": [
+                {"AttributeName": "assignee_user_id", "KeyType": "HASH"},
+                {"AttributeName": "job_id", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        }],
+        BillingMode="PAY_PER_REQUEST",
+    )
     dynamodb.create_table(
         TableName=TEST_ENV["AUDIT_LOG_TABLE"],
         KeySchema=[
@@ -372,6 +443,9 @@ def aws_stack():
                 simulation_runs=resource.Table(TEST_ENV["SIMULATION_RUNS_TABLE"]),
                 test_datasets=resource.Table(TEST_ENV["TEST_DATASETS_TABLE"]),
                 audit_log=resource.Table(TEST_ENV["AUDIT_LOG_TABLE"]),
+                labeling_teams=resource.Table(TEST_ENV["LABELING_TEAMS_TABLE"]),
+                labeling_jobs=resource.Table(TEST_ENV["LABELING_JOBS_TABLE"]),
+                labeling_tasks=resource.Table(TEST_ENV["LABELING_TASKS_TABLE"]),
             ),
         )
 

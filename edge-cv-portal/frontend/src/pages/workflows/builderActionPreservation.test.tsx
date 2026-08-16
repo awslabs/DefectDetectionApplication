@@ -28,9 +28,10 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import WorkflowBuilder from './WorkflowBuilder';
+import { POLL_INTERVAL_MS } from './generationPollReducer';
 import type {
   NodeTypeDescriptor,
   ValidationFinding,
@@ -53,6 +54,7 @@ const {
   validateWorkflow,
   packageWorkflow,
   generateWorkflow,
+  getWorkflowGenerationJob,
   listTestDatasets,
   startTestRun,
   getTestRun,
@@ -70,6 +72,7 @@ const {
   validateWorkflow: vi.fn(),
   packageWorkflow: vi.fn(),
   generateWorkflow: vi.fn(),
+  getWorkflowGenerationJob: vi.fn(),
   listTestDatasets: vi.fn(),
   startTestRun: vi.fn(),
   getTestRun: vi.fn(),
@@ -103,6 +106,7 @@ vi.mock('../../services/api', () => {
       validateWorkflow,
       packageWorkflow,
       generateWorkflow,
+      getWorkflowGenerationJob,
       listTestDatasets,
       startTestRun,
       getTestRun,
@@ -558,7 +562,17 @@ describe('Builder action preservation: Package (Requirement 3.6)', () => {
 
 describe('Builder action preservation: Generate (Requirement 3.6)', () => {
   it('sends the prompt and renders the generated workflow with its findings', async () => {
+    // Asynchronous transport (workflow-manager-gaps Req 4): the submit
+    // returns a 202 submission and the panel polls the job to success.
     generateWorkflow.mockResolvedValue({
+      job_id: 'job-1',
+      session_id: 'sess-1',
+      usecase_id: 'uc-1',
+      status: 'pending',
+    });
+    getWorkflowGenerationJob.mockResolvedValue({
+      job_id: 'job-1',
+      status: 'succeeded',
       session_id: 'sess-1',
       usecase_id: 'uc-1',
       definition: {
@@ -595,21 +609,32 @@ describe('Builder action preservation: Generate (Requirement 3.6)', () => {
       'textarea[aria-label="Workflow generation prompt"]'
     ) as HTMLTextAreaElement;
     expect(promptInput).not.toBeNull();
-    fireEvent.change(promptInput, { target: { value: 'Read the camera and publish results' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
-    await waitFor(() =>
+    // Fake timers drive the 3-second poll deterministically; activated
+    // only after the initial page load settled on real timers.
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(promptInput, { target: { value: 'Read the camera and publish results' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+      // Flush the submit round-trip, then one poll cycle to success.
+      await act(async () => {});
       expect(generateWorkflow).toHaveBeenCalledWith(
         expect.objectContaining({
           usecase_id: 'uc-1',
           prompt: 'Read the camera and publish results',
         })
-      )
-    );
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      });
+      await act(async () => {});
+    } finally {
+      vi.useRealTimers();
+    }
+
     // Backend validation summary is displayed for review before saving (10.3).
-    expect(
-      await screen.findByText('Validation passed (0 warnings)')
-    ).toBeInTheDocument();
+    expect(screen.getByText('Validation passed (0 warnings)')).toBeInTheDocument();
   });
 });
 

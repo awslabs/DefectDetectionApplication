@@ -11,7 +11,7 @@ export interface User {
   use_cases?: UseCase[];
 }
 
-export type UserRole = 'PortalAdmin' | 'UseCaseAdmin' | 'DataScientist' | 'Operator' | 'Viewer';
+export type UserRole = 'PortalAdmin' | 'UseCaseAdmin' | 'DataScientist' | 'Operator' | 'Viewer' | 'DataLabeler';
 
 export interface S3Bucket {
   name: string;

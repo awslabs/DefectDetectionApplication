@@ -141,10 +141,21 @@ function PRE_FIX_NAV_ORACLE(role: UserRole | undefined): NavItem[] {
   return [...PRE_FIX_BASE_ITEMS];
 }
 
-/** Drops any "Builds" entry — the one item the fix is allowed to change. */
+/**
+ * Drops any "Builds" entry — the one item the fix is allowed to change —
+ * plus nav entries added by features that landed after this oracle was
+ * transcribed (they are outside this preservation property's scope):
+ * - "Synthetic Data" (synthetic-defect-data-generation, role-gated to
+ *   DataScientist/UseCaseAdmin/PortalAdmin; covered by its own
+ *   `syntheticNavVisibility.property.test.tsx`).
+ */
 function withoutBuildsEntry(items: readonly NavItem[]): NavItem[] {
   return items.filter(
-    (item) => !(item.type === 'link' && item.text === 'Builds')
+    (item) =>
+      !(
+        item.type === 'link' &&
+        (item.text === 'Builds' || item.text === 'Synthetic Data')
+      )
   );
 }
 

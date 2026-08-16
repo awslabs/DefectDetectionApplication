@@ -18,6 +18,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { UserRole } from '../types';
 import { getConfig, getBuildInfo } from '../config';
 import { canAccessBuilds } from '../utils/buildsAccess';
+import { canAccessSyntheticData } from '../utils/syntheticAccess';
 
 /**
  * Builds the items for the top-navigation settings dropdown based on the
@@ -30,6 +31,16 @@ import { canAccessBuilds } from '../utils/buildsAccess';
 export function buildSettingsDropdownItems(
   role: UserRole | undefined
 ): ButtonDropdownProps.ItemOrGroup[] {
+  // A user whose resolved role is DataLabeler keeps only sign-out and
+  // account settings (the change-password action) in the dropdown
+  // (dda-data-labeling Requirement 2.2). Multi-role users resolve to a
+  // different role and keep the full dropdown (Requirement 2.8).
+  if (role === 'DataLabeler') {
+    return [
+      { id: 'change-password', text: 'Change Password' },
+      { id: 'logout', text: 'Sign out' },
+    ];
+  }
   const isPortalAdmin = role === 'PortalAdmin';
   return [
     {
@@ -76,6 +87,16 @@ export function buildSettingsDropdownItems(
 export function buildNavigationItems(
   role: UserRole | undefined
 ): SideNavigationProps.Item[] {
+  // A user whose resolved role is DataLabeler sees only the labeler
+  // workspace destination (dda-data-labeling Requirement 2.2). Users who
+  // hold DataLabeler alongside another role resolve to that other role and
+  // keep its navigation unchanged (Requirement 2.8).
+  if (role === 'DataLabeler') {
+    return [
+      { type: 'link' as const, text: 'My Labeling Tasks', href: '/labeler' },
+    ];
+  }
+
   // Base navigation items for all users
   const baseNavigationItems: SideNavigationProps.Item[] = [
     { type: 'link' as const, text: 'Dashboard', href: '/dashboard' },
@@ -83,6 +104,13 @@ export function buildNavigationItems(
     { type: 'divider' as const },
     { type: 'link' as const, text: 'Data Management', href: '/data' },
     { type: 'link' as const, text: 'Labeling', href: '/labeling' },
+    // The synthetic data generation workspace is limited to the roles
+    // holding Data_Scientist_Access (DataScientist, UseCaseAdmin,
+    // PortalAdmin) — synthetic-defect-data-generation Req 9.3, following
+    // the Builds nav gating pattern below.
+    ...(canAccessSyntheticData(role)
+      ? [{ type: 'link' as const, text: 'Synthetic Data', href: '/synthetic' }]
+      : []),
     { type: 'link' as const, text: 'Training', href: '/training' },
     { type: 'link' as const, text: 'Models', href: '/models' },
     { type: 'divider' as const },

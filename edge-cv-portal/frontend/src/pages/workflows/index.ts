@@ -10,6 +10,7 @@ export * from './cameraReference';
 export * from './compatibility';
 export * from './parameters';
 export * from './inlineChecks';
+export * from './metadataConfig';
 export * from './builderGraph';
 export * from './validationMarkers';
 export * from './importAnalyzer';

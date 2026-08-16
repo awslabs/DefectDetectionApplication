@@ -52,6 +52,29 @@ export class ApiGatewayStack extends cdk.NestedStack {
    * CloudFormation 500-resource limit.
    */
   public readonly deviceResourceId: string;
+  /**
+   * Resource id of /labeling/{id}. The DDA labeling /stop and /review*
+   * routes (dda-data-labeling) attach under this resource from their own
+   * nested stack (DdaLabelingApiStack) for the same 500-resource-limit
+   * reason.
+   */
+  public readonly labelingJobResourceId: string;
+
+  /**
+   * Resource id of /workflows/generate. The workflow-manager-gaps
+   * generation status route (GET /workflows/generate/{job_id}) attaches
+   * under this resource from its own nested stack
+   * (WorkflowManagerGapsApiStack) for the same 500-resource-limit reason.
+   */
+  public readonly workflowGenerateResourceId: string;
+
+  /**
+   * Resource id of /workflows/{id}. The workflow-manager-gaps rename route
+   * (PATCH /workflows/{id}/name) attaches under this resource from its own
+   * nested stack (WorkflowManagerGapsApiStack) for the same
+   * 500-resource-limit reason.
+   */
+  public readonly workflowResourceId: string;
 
   constructor(scope: Construct, id: string, props: ApiGatewayStackProps) {
     super(scope, id, props);
@@ -397,6 +420,7 @@ export class ApiGatewayStack extends cdk.NestedStack {
     });
 
     const labelingJobResource = labelingResource.addResource('{id}');
+    this.labelingJobResourceId = labelingJobResource.resourceId;
     labelingJobResource.addMethod('GET', labelingIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
@@ -785,12 +809,14 @@ export class ApiGatewayStack extends cdk.NestedStack {
 
     // Prompt-based workflow generation (Bedrock chat sessions)
     const workflowGenerateResource = workflowsResource.addResource('generate');
+    this.workflowGenerateResourceId = workflowGenerateResource.resourceId;
     workflowGenerateResource.addMethod('POST', workflowGeneratorIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
     const workflowResource = workflowsResource.addResource('{id}');
+    this.workflowResourceId = workflowResource.resourceId;
     workflowResource.addMethod('GET', workflowsIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,

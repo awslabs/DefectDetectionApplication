@@ -23,6 +23,11 @@ class Role(Enum):
     DATA_SCIENTIST = "DataScientist"
     OPERATOR = "Operator"
     VIEWER = "Viewer"
+    # Restricted labeler role (dda-data-labeling, Req 2.1). Accepted as a
+    # valid role value for user/usecase assignments (user_roles.py); its
+    # API access is enforced by the shared_utils/@rbac_check RBAC path
+    # (labeling:tasks-self only).
+    DATA_LABELER = "DataLabeler"
 
 class Permission(Enum):
     """Permissions for different actions in the system."""
@@ -177,6 +182,11 @@ ROLE_PERMISSIONS = {
         Permission.VIEW_DEPLOYMENT,
         Permission.VIEW_DEVICE,
     },
+    Role.DATA_LABELER: set(
+        # Data Labelers hold none of these legacy permissions; their only
+        # capability (labeling:tasks-self) lives in the shared_utils RBAC
+        # system enforced via @rbac_check (dda-data-labeling, Req 2.3).
+    ),
 }
 
 class RBACManager:

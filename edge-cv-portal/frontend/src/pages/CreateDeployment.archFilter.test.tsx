@@ -14,7 +14,11 @@
  * - no device selected / a thing-group target applies no gated filtering
  *   (Req 3.7, 5.4);
  * - revise mode surfaces a now-incompatible pre-loaded component without
- *   dropping it from the selected set (Req 4.1-4.3).
+ *   dropping it from the selected set (Req 4.1-4.3);
+ * - a record published as per-JetPack suffixed vLLM components
+ *   (published_component.components) offers only the twin matching the
+ *   device's architecture (vllm-multi-arch-publish-conflict Req 2.13,
+ *   2.14).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -403,5 +407,101 @@ describe('CreateDeployment — gated-component architecture filter', () => {
     expect(technicalNameCells.length).toBeGreaterThan(0);
     // A Remove action is available — the user retains control.
     expect(screen.getAllByText('Remove').length).toBeGreaterThan(0);
+  });
+
+  it('offers the suffixed JP7 per-JetPack vLLM component and filters out the JP6 twin on an arm64_jp7 device (Req 2.13, 2.14)', async () => {
+    // vllm-multi-arch-publish-conflict: one publish now registers ONE
+    // Per_JetPack_Component per packaged target and writes back a
+    // `published_component.components` list alongside the record-wide
+    // union. The deploy screen must resolve each suffixed component to
+    // its OWN architecture via vllmArchsForComponent — not the
+    // record-wide union that previously hid nothing (or everything).
+    apiMocks.listComponents.mockImplementation((params: { scope?: string }) =>
+      Promise.resolve({
+        components:
+          params.scope === 'PUBLIC'
+            ? []
+            : [
+                {
+                  arn: 'arn:vllm-jp6',
+                  component_name: 'model-vllm-llama-jetson-xavier-jp6',
+                  model_name: 'Llama Model JP6',
+                  training_job_id: 'tj-1',
+                  latest_version: { componentVersion: '2.0.0' },
+                  platforms: [],
+                },
+                {
+                  arn: 'arn:vllm-jp7',
+                  component_name: 'model-vllm-llama-jetson-xavier-jp7',
+                  model_name: 'Llama Model JP7',
+                  training_job_id: 'tj-1',
+                  latest_version: { componentVersion: '2.0.0' },
+                  platforms: [],
+                },
+              ],
+      })
+    );
+    // The backing record's publish write-back: the record-wide
+    // supported_architectures union kept for legacy readers, plus one
+    // `components` entry per Per_JetPack_Component (design step 7).
+    apiMocks.getModel.mockResolvedValue({
+      model: {
+        published_component: {
+          component_name: 'model-vllm-llama',
+          component_version: '2.0.0',
+          supported_architectures: ['arm64_jp6', 'arm64_jp7'],
+          components: [
+            {
+              component_name: 'model-vllm-llama-jetson-xavier-jp6',
+              component_version: '2.0.0',
+              target: 'jetson-xavier-jp6',
+              architecture: 'arm64_jp6',
+              supported_architectures: ['arm64_jp6'],
+              component_arn:
+                'arn:aws:greengrass:us-east-1:123456789012:components:model-vllm-llama-jetson-xavier-jp6:versions:2.0.0',
+            },
+            {
+              component_name: 'model-vllm-llama-jetson-xavier-jp7',
+              component_version: '2.0.0',
+              target: 'jetson-xavier-jp7',
+              architecture: 'arm64_jp7',
+              supported_architectures: ['arm64_jp7'],
+              component_arn:
+                'arn:aws:greengrass:us-east-1:123456789012:components:model-vllm-llama-jetson-xavier-jp7:versions:2.0.0',
+            },
+          ],
+        },
+      },
+    });
+    // An arm64_jp7 device (e.g. jetson-thor1).
+    apiMocks.listDevices.mockResolvedValue({
+      devices: [
+        device({ device_id: 'jp7-device', target_architecture: 'arm64_jp7' }),
+      ],
+      count: 1,
+    });
+    routerState.search = 'target_device=jp7-device';
+    render(<CreateDeployment />);
+
+    // The JP6 twin resolves to its own ['arm64_jp6'] (rule 1: matching
+    // components[] entry) and is filtered out with a reason.
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          /model-vllm-llama-jetson-xavier-jp6 is not supported by/
+        )
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(/Incompatible with the selected device\(s\) \(1\)/)
+    ).toBeInTheDocument();
+    // The JP7 twin resolves to ['arm64_jp7'] and stays offered — it is
+    // NOT in the incompatible grouping and its model remains available.
+    expect(
+      screen.queryByText(/model-vllm-llama-jetson-xavier-jp7 is not supported/)
+    ).toBeNull();
+    expect(screen.getByText('Portal Components (1)')).toBeInTheDocument();
+    expect(screen.getAllByText('Llama Model JP7').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Llama Model JP6')).toBeNull();
   });
 });

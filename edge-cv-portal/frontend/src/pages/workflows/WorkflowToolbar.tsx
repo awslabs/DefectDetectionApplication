@@ -17,6 +17,13 @@
  *     is the current canvas definition; the complete findings list
  *     (severity/code/message/node/connection) is displayed (4.9).
  *   - Duplicate: copies the workflow under a new name (5.7).
+ *   - Rename: metadata-only display-name change via
+ *     PATCH /workflows/{id}/name (workflow-manager-gaps 5.7-5.9). The
+ *     modal is pre-filled with the current name and client-validates the
+ *     backend rules (non-empty after trim, at most 128 characters). On
+ *     success the loaded-workflow name and the open-picker cache update
+ *     in place — no reload, no new version. On failure the envelope
+ *     message is shown and the previous name is kept.
  *   - Delete: confirm dialog, then DELETE /workflows/{id}; a rejection
  *     for active deployments identifies the referencing deployments (5.6).
  *
@@ -104,6 +111,10 @@ export interface WorkflowToolbarProps {
   getDefinition: () => WorkflowDefinition;
   /** Called after every successful save with the new identity/version. */
   onSaved: (meta: WorkflowMeta) => void;
+  /** Called after a successful rename with the updated identity so the
+   * parent can refresh the displayed name without a reload and without
+   * touching the canvas dirty state (workflow-manager-gaps 5.7). */
+  onRenamed?: (meta: WorkflowMeta) => void;
   /** Called to load a saved workflow onto the canvas (5.4). */
   onOpenWorkflow: (workflowId: string) => Promise<void> | void;
   /** Called after a successful delete so the parent can reset the canvas. */
@@ -133,6 +144,7 @@ export default function WorkflowToolbar({
   dirty,
   getDefinition,
   onSaved,
+  onRenamed,
   onOpenWorkflow,
   onDeleted,
   onNew,
@@ -155,6 +167,13 @@ export default function WorkflowToolbar({
   const [openOptions, setOpenOptions] = useState<SelectProps.Option[] | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
   const [openSelection, setOpenSelection] = useState<SelectProps.Option | null>(null);
+
+  // Rename modal (workflow-manager-gaps 5.7-5.9): pre-filled with the
+  // current name; the API failure envelope is shown inside the modal so
+  // the previous name stays displayed everywhere else (5.9).
+  const [renameModalVisible, setRenameModalVisible] = useState(false);
+  const [renameName, setRenameName] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   // Delete confirmation modal (5.5, 5.6)
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
@@ -415,6 +434,68 @@ export default function WorkflowToolbar({
   }, [workflow, failNotice]);
 
   // ------------------------------------------------------------------
+  // Rename (workflow-manager-gaps 5.7, 5.8, 5.9)
+  // ------------------------------------------------------------------
+
+  // Client-side validation mirroring the backend INVALID_NAME rules
+  // (workflows.rename_workflow): non-empty after trimming, and at most
+  // 128 characters after trimming. The trimmed value is what is sent.
+  const renameTrimmed = renameName.trim();
+  const renameValidationError =
+    renameTrimmed === ''
+      ? 'Name must not be empty or whitespace-only'
+      : renameTrimmed.length > 128
+        ? `Name must be at most 128 characters (currently ${renameTrimmed.length})`
+        : null;
+
+  const openRenameModal = useCallback(() => {
+    if (workflow === null) {
+      return;
+    }
+    setNotice(null);
+    setRenameName(workflow.name); // pre-filled with the current name (5.7)
+    setRenameError(null);
+    setRenameModalVisible(true);
+  }, [workflow]);
+
+  const handleRename = useCallback(async () => {
+    if (workflow === null) {
+      return;
+    }
+    const newName = renameName.trim();
+    if (newName === '' || newName.length > 128) {
+      return; // blocked client-side; the field error is already visible
+    }
+    setBusy(true);
+    setRenameError(null);
+    try {
+      const response = await apiService.renameWorkflow(workflow.workflowId, newName);
+      setRenameModalVisible(false);
+      // Update the loaded-workflow name in component state without a
+      // reload and without touching the canvas dirty state (5.7).
+      onRenamed?.({ ...workflow, name: response.workflow.name });
+      // Update the open-picker cache in place so a re-opened picker
+      // shows the new name even before the next refetch (5.7).
+      setOpenOptions((options) =>
+        options === null
+          ? options
+          : options.map((option) =>
+              option.value === workflow.workflowId
+                ? { ...option, label: response.workflow.name }
+                : option
+            )
+      );
+      setNotice({ type: 'success', header: `Renamed to '${response.workflow.name}'` });
+    } catch (err) {
+      // Failure (400/403/404/network): show the envelope message inside
+      // the modal and keep the previous name displayed (5.9).
+      setRenameError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [workflow, renameName, onRenamed]);
+
+  // ------------------------------------------------------------------
   // Delete (5.5, 5.6)
   // ------------------------------------------------------------------
 
@@ -544,6 +625,13 @@ export default function WorkflowToolbar({
             disabledReason={editDisabledReason ?? needsSaveReason}
           >
             Duplicate
+          </Button>
+          <Button
+            onClick={openRenameModal}
+            disabled={busy || !canEdit || workflow === null}
+            disabledReason={editDisabledReason ?? needsSaveReason}
+          >
+            Rename
           </Button>
           <Button
             onClick={() => setDeleteModalVisible(true)}
@@ -767,6 +855,51 @@ export default function WorkflowToolbar({
         }
       >
         The canvas has unsaved changes. Start a new workflow and discard them?
+      </Modal>
+
+      {/* Rename (workflow-manager-gaps 5.7-5.9): metadata-only display-name
+          change — no new version, no reload. */}
+      <Modal
+        visible={renameModalVisible}
+        onDismiss={() => setRenameModalVisible(false)}
+        header="Rename workflow"
+        footer={
+          <Box float="right">
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button variant="link" onClick={() => setRenameModalVisible(false)} disabled={busy}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={handleRename}
+                disabled={busy || renameValidationError !== null}
+                loading={busy}
+              >
+                Rename workflow
+              </Button>
+            </SpaceBetween>
+          </Box>
+        }
+      >
+        <SpaceBetween size="m">
+          {renameError !== null && (
+            <Alert type="error" header="Rename failed">
+              {renameError}
+            </Alert>
+          )}
+          <FormField
+            label="Name"
+            description="Renames the display name only — the workflow id, versions, packaged components, and deployments are unchanged."
+            errorText={renameValidationError ?? undefined}
+          >
+            <Input
+              value={renameName}
+              onChange={({ detail }) => setRenameName(detail.value)}
+              ariaLabel="New workflow name"
+              autoFocus
+            />
+          </FormField>
+        </SpaceBetween>
       </Modal>
 
       {/* Delete confirmation (5.5) */}

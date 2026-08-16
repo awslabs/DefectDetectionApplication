@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from ..catalog import NODE_CATALOG
+from ..catalog import metadata_config
 from ..catalog.compatibility import incompatibility_reason
 from ..catalog.models import (
     CATEGORY_INPUT,
@@ -151,9 +152,41 @@ COEXISTENCE_SINGLETON_TYPES: Dict[str, str] = {
 #: graph is double-reported.
 FRAME_FEED_SOURCE_TYPES = frozenset({"aravis_camera_source", "custom_python_source"})
 
+# V10 (workflow-manager-gaps Requirement 6.4): Metadata_Node
+# configuration validity. One SEVERITY_ERROR finding per violation
+# reported by the shared ``catalog.metadata_config`` parsers, so the
+# validator, the compiler, and the designer's TypeScript mirror agree
+# on what a valid ``metadata`` node configuration is. These codes are
+# deliberately NOT in ``generation_gate.STRUCTURAL_ERROR_CODES`` —
+# like parameter violations they flow to the client inside the
+# findings list without changing gate decisions.
+CODE_V10_METADATA_MAPPINGS_INVALID = "V10_METADATA_MAPPINGS_INVALID"
+CODE_V10_METADATA_EMPTY_FIELD_PATH = "V10_METADATA_EMPTY_FIELD_PATH"
+CODE_V10_METADATA_EMPTY_KEY = "V10_METADATA_EMPTY_KEY"
+CODE_V10_METADATA_DUPLICATE_KEY = "V10_METADATA_DUPLICATE_KEY"
+CODE_V10_METADATA_TOO_MANY_MAPPINGS = "V10_METADATA_TOO_MANY_MAPPINGS"
+CODE_V10_METADATA_STATIC_JSON_INVALID = "V10_METADATA_STATIC_JSON_INVALID"
+
+#: Shared metadata_config error class -> V10 finding code.
+_METADATA_ERROR_CODES: Dict[str, str] = {
+    metadata_config.ERROR_MAPPINGS_INVALID: CODE_V10_METADATA_MAPPINGS_INVALID,
+    metadata_config.ERROR_EMPTY_FIELD_PATH: CODE_V10_METADATA_EMPTY_FIELD_PATH,
+    metadata_config.ERROR_EMPTY_KEY: CODE_V10_METADATA_EMPTY_KEY,
+    metadata_config.ERROR_DUPLICATE_KEY: CODE_V10_METADATA_DUPLICATE_KEY,
+    metadata_config.ERROR_TOO_MANY_MAPPINGS: CODE_V10_METADATA_TOO_MANY_MAPPINGS,
+    metadata_config.ERROR_STATIC_JSON_INVALID: CODE_V10_METADATA_STATIC_JSON_INVALID,
+}
+
 # W1 warnings (Requirement 4.6)
 CODE_W1_OUTPUT_NODE_NO_INPUT = "W1_OUTPUT_NODE_NO_INPUT"
 CODE_W1_UNUSED_OUTPUT_PORT = "W1_UNUSED_OUTPUT_PORT"
+
+# W2 (workflow-manager-gaps Requirement 6.5): in a graph with no
+# CATEGORY_TRIGGER node, a Metadata_Node with at least one
+# Metadata_Mapping has no trigger payload to resolve its field paths
+# against at runtime — exactly one warning per such node; a node
+# configured with only static JSON gets none.
+CODE_W2_METADATA_NO_TRIGGER = "W2_METADATA_NO_TRIGGER"
 
 # Model-reference resolution against a registry snapshot
 # (vllm-triton-inference Requirements 6.5, 6.12): the reference names no
@@ -179,6 +212,12 @@ TYPE_MQTT_SUBSCRIBE = "mqtt_subscribe"
 
 #: Trigger node type that subscribes to an OPC UA monitored node.
 TYPE_OPCUA_SUBSCRIBE = "opcua_subscribe"
+
+#: Post-processing node type that attaches trigger-payload mappings and
+#: static JSON to downstream output results (workflow-manager-gaps
+#: Requirement 6). V10 and W2 fire only on nodes of this type, so
+#: metadata-free graphs produce identical findings (Requirement 8.1).
+TYPE_METADATA = "metadata"
 
 #: The subscription trigger node types whose presence engages the V9
 #: mixed-activation-model rule (``digital_input`` is deliberately absent:
@@ -264,6 +303,8 @@ def validate(
     findings.extend(_check_v7(graph, typed_nodes))
     findings.extend(_check_v8(graph, typed_nodes))
     findings.extend(_check_v9(graph, typed_nodes))
+    findings.extend(_check_v10_metadata(graph, typed_nodes))
+    findings.extend(_check_w2_metadata_no_trigger(graph, typed_nodes))
     if model_registry is not None:
         findings.extend(_check_model_references(graph, typed_nodes, model_registry))
 
@@ -937,4 +978,93 @@ def _check_w1(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) 
                     ),
                     node_id=node.id,
                 ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# V10: Metadata_Node configuration validity
+# (workflow-manager-gaps Requirements 6.4, 8.1)
+# --------------------------------------------------------------------------
+
+def _check_v10_metadata(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """Validate every ``metadata`` node's configuration parameters.
+
+    The node's ``mappings`` and ``static_json`` string parameters are
+    parsed through the shared ``catalog.metadata_config`` helpers — the
+    single source of truth for Metadata_Node validity, also consumed by
+    the compiler and mirrored in the designer's TypeScript — and every
+    reported error class becomes one SEVERITY_ERROR finding under its
+    dedicated V10 code (Requirement 6.4): unparseable mappings, an
+    empty field path or output key per offending mapping, a duplicated
+    output key, more than 50 mappings, and static JSON that is too
+    long, unparseable, or not a JSON object. A valid configuration
+    produces zero findings, and the check fires only on
+    ``metadata``-typed nodes so graphs without them produce identical
+    findings (Requirement 8.1)."""
+    findings = []
+    for node in graph.nodes:
+        if node.type != TYPE_METADATA:
+            continue
+        descriptor = typed_nodes.get(node.id)
+        if descriptor is None:
+            continue
+        _, mapping_errors = metadata_config.parse_mappings(
+            node.parameters.get("mappings"))
+        _, static_errors = metadata_config.parse_static_json(
+            node.parameters.get("static_json"))
+        for error in mapping_errors + static_errors:
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                _METADATA_ERROR_CODES[error["code"]],
+                "Node '{0}': {1}".format(node.id, error["message"]),
+                node_id=node.id,
+            ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# W2: Metadata_Node mappings without a trigger node
+# (workflow-manager-gaps Requirements 6.5, 8.1)
+# --------------------------------------------------------------------------
+
+def _check_w2_metadata_no_trigger(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """Warn on trigger-payload mappings that can never resolve.
+
+    When the graph contains no ``CATEGORY_TRIGGER`` node, a
+    Metadata_Mapping's field path has no trigger payload to resolve
+    against at runtime, so every ``metadata`` node carrying at least
+    one mapping gets exactly one SEVERITY_WARNING finding
+    (Requirement 6.5). Nodes configured with only static JSON (zero
+    mappings) get none — static entries attach regardless of a
+    trigger. Graphs with a trigger node produce zero W2 findings, and
+    the check fires only on ``metadata``-typed nodes so metadata-free
+    graphs produce identical findings (Requirement 8.1). An
+    unparseable ``mappings`` value contributes zero mappings here (its
+    error is V10's concern)."""
+    has_trigger = any(
+        descriptor.category == CATEGORY_TRIGGER
+        for descriptor in typed_nodes.values()
+    )
+    if has_trigger:
+        return []
+
+    findings = []
+    for node in graph.nodes:
+        if node.type != TYPE_METADATA:
+            continue
+        descriptor = typed_nodes.get(node.id)
+        if descriptor is None:
+            continue
+        mappings, _ = metadata_config.parse_mappings(
+            node.parameters.get("mappings"))
+        if not mappings:
+            continue
+        findings.append(ValidationFinding(
+            SEVERITY_WARNING,
+            CODE_W2_METADATA_NO_TRIGGER,
+            "Node '{0}': the workflow has no trigger node, so its {1} "
+            "trigger-payload metadata mapping(s) will have no source at "
+            "runtime".format(node.id, len(mappings)),
+            node_id=node.id,
+        ))
     return findings

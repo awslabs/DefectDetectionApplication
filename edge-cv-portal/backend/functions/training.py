@@ -320,6 +320,9 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         hyperparameters = body.get('hyperparameters', {})
         auto_compile = body.get('auto_compile', False)
         compilation_targets = body.get('compilation_targets', [])
+        # Optional: originating synthetic Generation_Session
+        # (synthetic-defect-data-generation, Req 8.3). Additive only.
+        generation_session_id = body.get('generation_session_id')
         
         # Validate model type
         valid_model_types = ['classification', 'segmentation', 'classification-robust', 'segmentation-robust']
@@ -508,6 +511,10 @@ def create_training_job(event: Dict, context: Any) -> Dict:
             'auto_compile': auto_compile,
             'compilation_targets': compilation_targets
         }
+        if generation_session_id:
+            # Record the originating Generation_Session
+            # (synthetic-defect-data-generation, Req 8.3).
+            training_item['generation_session_id'] = generation_session_id
         
         table.put_item(Item=training_item)
         

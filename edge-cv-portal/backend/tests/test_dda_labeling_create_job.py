@@ -1,0 +1,645 @@
+"""
+create_dda_job validation, enumeration, and persistence in
+dda_labeling.py (dda-data-labeling, task 5.3).
+
+Feature: dda-data-labeling
+
+Covers, against the moto-backed stack from conftest.py (real
+shared_utils / rbac path, moto DynamoDB + S3, fake Cognito for member
+role resolution — the test_dda_labeling_teams.py convention),
+calling `create_dda_job(body, user)` directly (as labeling.py's
+backend switch, task 5.1, will):
+
+- Parameter validation before enumeration, each rejection identifying
+  its offending elements and persisting nothing (Req 4.1, 4.2, 4.4,
+  4.8, 4.9, 4.10): name length/uniqueness, modality, Label_Set,
+  missing/empty team, instructions length, example image count/format
+- Fixed ['normal','anomaly'] Label_Set for Classification (Req 4.3)
+- Dataset enumeration with nested prefixes via get_s3_client_for_bucket
+  (single-account direct fallback); empty prefix and non-image objects
+  rejected identifying each offending object (Req 4.5, 4.6, 4.7,
+  12.1-12.3)
+- Auto-label model/modality compatibility matrix (Req 8.1, 8.8)
+- Skip-verification: admin-only (403 + audit for non-admins, Req 9.1),
+  Bedrock model + per-label prompts covering every label (Req 9.2, 9.3)
+- Success: job persisted with status=InProgress, labeling_backend=DDA,
+  image_count, submitted fields, submitted_count=0, blocked=false
+  (Req 4.11, 11.3, 12.8); job_created audit event (Req 11.7);
+  async worker invoke {action: distribute, job_id} guarded on the
+  DDA_LABELING_WORKER_FUNCTION_NAME env var
+"""
+import json
+import os
+import re
+import sys
+import uuid
+from types import SimpleNamespace
+
+import boto3
+import pytest
+from botocore.exceptions import ClientError
+
+REGION = "us-east-1"
+POOL_ID = "us-east-1_dda-create-test-pool"
+DATASET_BUCKET = "test-usecase-data"
+
+
+# ----------------------------------------------------- fake Cognito client
+
+class FakeCognitoClient:
+    """Fake for the cognito-idp APIs dda_labeling uses (moto's
+    cognito-idp backend is not available here)."""
+
+    def __init__(self):
+        self.users = {}  # username -> {attr name: value}
+
+    def add_user(self, username, email, role=None):
+        sub = str(uuid.uuid4())
+        attrs = {"sub": sub, "email": email}
+        if role:
+            attrs["custom:role"] = role
+        self.users[username] = attrs
+        return sub
+
+    def set_role(self, username, role):
+        if role is None:
+            self.users[username].pop("custom:role", None)
+        else:
+            self.users[username]["custom:role"] = role
+
+    @staticmethod
+    def _shape(username, attrs, key):
+        return {
+            "Username": username,
+            key: [{"Name": name, "Value": value}
+                  for name, value in attrs.items()],
+        }
+
+    def list_users(self, UserPoolId=None, Filter=None, Limit=None):
+        match = re.match(r'sub = "(.+)"', Filter or "")
+        users = []
+        if match:
+            for username, attrs in self.users.items():
+                if attrs["sub"] == match.group(1):
+                    users.append(self._shape(username, attrs, "Attributes"))
+        return {"Users": users[:Limit] if Limit else users}
+
+    def admin_get_user(self, UserPoolId=None, Username=None):
+        if Username not in self.users:
+            raise ClientError(
+                {"Error": {"Code": "UserNotFoundException",
+                           "Message": "User does not exist."}},
+                "AdminGetUser")
+        return self._shape(Username, self.users[Username], "UserAttributes")
+
+
+class FakeLambdaClient:
+    """Records async invocations of dda_labeling_worker."""
+
+    def __init__(self):
+        self.invocations = []
+
+    def invoke(self, **kwargs):
+        self.invocations.append(kwargs)
+        return {"StatusCode": 202}
+
+
+# --------------------------------------------------------------- fixtures
+
+@pytest.fixture(scope="module")
+def dda(aws_stack):
+    """The real dda_labeling module imported inside the moto mock, with
+    fake Cognito and Lambda clients, plus the dataset bucket."""
+    sys.modules.pop("dda_labeling", None)
+    import dda_labeling
+
+    fake_cognito = FakeCognitoClient()
+    dda_labeling.cognito_client = fake_cognito
+    dda_labeling.USER_POOL_ID = POOL_ID
+
+    fake_lambda = FakeLambdaClient()
+    dda_labeling.lambda_client = fake_lambda
+
+    boto3.client("s3", region_name=REGION).create_bucket(
+        Bucket=DATASET_BUCKET)
+
+    return SimpleNamespace(module=dda_labeling, cognito=fake_cognito,
+                           lambda_client=fake_lambda)
+
+
+@pytest.fixture
+def env(aws_stack, dda):
+    """Per-test helper facade with a fresh Use_Case, dataset prefix, and
+    a labeling team with one Data_Labeler member."""
+    return CreateJobEnv(aws_stack, dda)
+
+
+class CreateJobEnv:
+    def __init__(self, stack, dda):
+        self.stack = stack
+        self.dda = dda
+        self.s3 = boto3.client("s3", region_name=REGION)
+        self.usecase_id = f"uc-{uuid.uuid4()}"
+        self.prefix = f"datasets/{uuid.uuid4()}/"
+        # Single-account use case: root cross_account_role_arn makes
+        # get_s3_client_for_bucket fall back to default (moto) creds.
+        stack.tables.usecases.put_item(Item={
+            "usecase_id": self.usecase_id,
+            "name": "Create Job Test",
+            "account_id": "123456789012",
+            "cross_account_role_arn": "arn:aws:iam::123456789012:root",
+            "s3_bucket": DATASET_BUCKET,
+        })
+        self.creator = self.make_user(role="DataScientist")
+        self.team_id = self.make_team(with_labeler=True)
+
+    # ------------------------------------------------------------ setup
+    def make_user(self, role="DataScientist"):
+        user_id = f"user-{uuid.uuid4()}"
+        return {
+            "user_id": user_id,
+            "email": f"{user_id}@example.com",
+            "username": user_id,
+            "role": role,
+        }
+
+    def make_team(self, with_labeler=True, usecase_id=None):
+        team_id = f"team-{uuid.uuid4()}"
+        self.stack.tables.labeling_teams.put_item(Item={
+            "team_id": team_id,
+            "sk": "META",
+            "usecase_id": usecase_id or self.usecase_id,
+            "team_name": f"Team {team_id[:13]}",
+            "created_at": 1,
+            "created_by": self.creator["user_id"],
+        })
+        if with_labeler:
+            self.add_labeler(team_id)
+        return team_id
+
+    def add_labeler(self, team_id, role="DataLabeler"):
+        username = f"labeler-{uuid.uuid4()}"
+        email = f"{username}@example.com"
+        sub = self.dda.cognito.add_user(username, email, role=role)
+        self.stack.tables.labeling_teams.put_item(Item={
+            "team_id": team_id,
+            "sk": f"MEMBER#{sub}",
+            "user_id": sub,
+            "email": email,
+            "added_at": 1,
+            "added_by": self.creator["user_id"],
+        })
+        return SimpleNamespace(username=username, sub=sub, email=email)
+
+    def put_images(self, keys):
+        for key in keys:
+            self.s3.put_object(Bucket=DATASET_BUCKET,
+                               Key=f"{self.prefix}{key}", Body=b"fakeimage")
+
+    # ------------------------------------------------------------ invoke
+    def body(self, **overrides):
+        base = {
+            "usecase_id": self.usecase_id,
+            "job_name": f"job-{uuid.uuid4().hex[:12]}",
+            "dataset_prefix": self.prefix,
+            "task_type": "Classification",
+            "team_id": self.team_id,
+        }
+        base.update(overrides)
+        return {k: v for k, v in base.items() if v is not None}
+
+    def create(self, user=None, **overrides):
+        response = self.dda.module.create_dda_job(
+            self.body(**overrides), user or self.creator)
+        return response["statusCode"], json.loads(response["body"])
+
+    # ------------------------------------------------------------- store
+    def usecase_jobs(self):
+        response = self.stack.tables.labeling_jobs.query(
+            IndexName="usecase-jobs-index",
+            KeyConditionExpression=boto3.dynamodb.conditions.Key(
+                "usecase_id").eq(self.usecase_id))
+        return response.get("Items", [])
+
+    def get_job(self, job_id):
+        return self.stack.tables.labeling_jobs.get_item(
+            Key={"job_id": job_id}).get("Item")
+
+    def audit_events(self, action):
+        response = self.stack.tables.audit_log.scan()
+        return [item for item in response.get("Items", [])
+                if item.get("action") == action
+                and item.get("details", {}).get("usecase_id")
+                == self.usecase_id]
+
+    def assert_nothing_persisted(self):
+        assert self.usecase_jobs() == []
+
+
+def messages(body):
+    return " | ".join(err["message"] for err in body["validation_errors"])
+
+
+# ------------------------------------------------------- successful create
+
+class TestSuccessfulCreation:
+    def test_creates_in_progress_job_with_all_fields(self, env):
+        """Req 4.4, 4.5, 4.11, 11.3, 12.8: complete job record with
+        status InProgress, image_count over nested prefixes, and every
+        submitted field persisted."""
+        env.put_images(["a.jpg", "b.PNG", "nested/deep/c.jpeg"])
+        status, body = env.create(
+            instructions="Label carefully",
+            example_images={"good": ["ex/good1.jpg"],
+                            "bad": ["ex/bad1.png"]},
+        )
+        assert status == 201
+        assert body["status"] == "InProgress"
+        assert body["labeling_backend"] == "DDA"
+        assert body["image_count"] == 3
+
+        job = env.get_job(body["job_id"])
+        assert job["status"] == "InProgress"
+        assert job["labeling_backend"] == "DDA"
+        assert job["task_type"] == "Classification"
+        assert job["label_set"] == ["normal", "anomaly"]
+        assert job["image_count"] == 3
+        assert job["dataset_prefix"] == env.prefix
+        assert job["dataset_bucket"] == DATASET_BUCKET
+        assert job["team_id"] == env.team_id
+        assert job["instructions"] == "Label carefully"
+        assert job["example_images"] == {"good": ["ex/good1.jpg"],
+                                         "bad": ["ex/bad1.png"]}
+        assert job["submitted_count"] == 0
+        assert job["blocked"] is False
+        assert job["skip_verification"] is False
+        assert job["auto_label"] == {"enabled": False}
+        assert job["created_by"] == env.creator["user_id"]
+
+    def test_job_created_audit_event_written(self, env):
+        """Req 11.7: a job_created audit event with the acting user."""
+        env.put_images(["a.jpg"])
+        status, body = env.create()
+        assert status == 201
+        events = env.audit_events("job_created")
+        assert len(events) == 1
+        assert events[0]["user_id"] == env.creator["user_id"]
+        assert events[0]["resource_id"] == body["job_id"]
+
+    def test_worker_invoked_async_with_distribute_action(
+            self, env, monkeypatch):
+        """The worker is async-invoked with {action: distribute, job_id}
+        when DDA_LABELING_WORKER_FUNCTION_NAME is configured."""
+        monkeypatch.setenv("DDA_LABELING_WORKER_FUNCTION_NAME",
+                           "test-dda-worker")
+        env.dda.lambda_client.invocations.clear()
+        env.put_images(["a.jpg"])
+        status, body = env.create()
+        assert status == 201
+
+        invocations = env.dda.lambda_client.invocations
+        assert len(invocations) == 1
+        assert invocations[0]["FunctionName"] == "test-dda-worker"
+        assert invocations[0]["InvocationType"] == "Event"
+        assert json.loads(invocations[0]["Payload"]) == {
+            "action": "distribute", "job_id": body["job_id"]}
+
+    def test_worker_env_unset_still_creates_job(self, env, monkeypatch):
+        """Guard: without the worker env var the job is still created
+        and no invoke is attempted."""
+        monkeypatch.delenv("DDA_LABELING_WORKER_FUNCTION_NAME",
+                           raising=False)
+        env.dda.lambda_client.invocations.clear()
+        env.put_images(["a.jpg"])
+        status, _ = env.create()
+        assert status == 201
+        assert env.dda.lambda_client.invocations == []
+
+    def test_segmentation_label_set_persisted(self, env):
+        """Req 4.2: a valid Segmentation Label_Set is persisted in
+        submitted order."""
+        env.put_images(["a.png"])
+        status, body = env.create(task_type="Segmentation",
+                                  label_set=["scratch", "dent"])
+        assert status == 201
+        assert env.get_job(body["job_id"])["label_set"] == [
+            "scratch", "dent"]
+
+    def test_classification_label_set_fixed(self, env):
+        """Req 4.3: Classification always uses ['normal','anomaly'],
+        overriding any submitted label set."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(task_type="Classification",
+                                  label_set=["cat", "dog"])
+        assert status == 201
+        assert env.get_job(body["job_id"])["label_set"] == [
+            "normal", "anomaly"]
+
+
+# ------------------------------------------------------- validation errors
+
+class TestParameterValidation:
+    @pytest.mark.parametrize("bad_name", ["", "   ", "x" * 64, None])
+    def test_bad_job_name_rejected(self, env, bad_name):
+        """Req 4.1: name must be 1-63 characters."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(job_name=bad_name)
+        assert status == 400
+        assert "between 1 and 63" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_job_name_63_chars_accepted(self, env):
+        env.put_images(["a.jpg"])
+        status, _ = env.create(job_name="x" * 63)
+        assert status == 201
+
+    def test_duplicate_job_name_in_usecase_rejected(self, env):
+        """Req 4.1: job name unique among the Use_Case's jobs (both
+        backends live in the same table)."""
+        env.put_images(["a.jpg"])
+        status, _ = env.create(job_name="dup-name")
+        assert status == 201
+        status, body = env.create(job_name="dup-name")
+        assert status == 400
+        assert "already exists" in messages(body)
+        assert len(env.usecase_jobs()) == 1
+
+    def test_invalid_modality_rejected(self, env):
+        env.put_images(["a.jpg"])
+        status, body = env.create(task_type="Pose")
+        assert status == 400
+        assert "modality" in messages(body).lower()
+        env.assert_nothing_persisted()
+
+    @pytest.mark.parametrize("bad_set,fragment", [
+        (None, "required"),
+        ([], "required"),
+        (["a"] * 11, "at most 10"),
+        (["ok", ""], "non-empty"),
+        (["ok", "x" * 65], "exceeds 64"),
+        (["dup", "dup"], "duplicated"),
+    ])
+    def test_bad_label_set_rejected(self, env, bad_set, fragment):
+        """Req 4.2: 1-10 distinct non-empty names of at most 64 chars,
+        each offense identified."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(task_type="ObjectDetection",
+                                  label_set=bad_set)
+        assert status == 400
+        assert fragment in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_missing_team_rejected(self, env):
+        """Req 4.1: team required when skip-verification is disabled."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(team_id=None)
+        assert status == 400
+        assert "team is required" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_unknown_team_rejected(self, env):
+        env.put_images(["a.jpg"])
+        status, body = env.create(team_id=f"team-{uuid.uuid4()}")
+        assert status == 400
+        assert "not found" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_team_with_zero_members_rejected(self, env):
+        """Req 4.8: empty team identified."""
+        env.put_images(["a.jpg"])
+        empty_team = env.make_team(with_labeler=False)
+        status, body = env.create(team_id=empty_team)
+        assert status == 400
+        assert "no members with the Data_Labeler role" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_team_whose_member_lost_the_role_rejected(self, env):
+        """Req 4.8: the Data_Labeler role is re-resolved at creation —
+        a member whose role was revoked does not count."""
+        env.put_images(["a.jpg"])
+        team = env.make_team(with_labeler=False)
+        member = env.add_labeler(team)
+        env.dda.cognito.set_role(member.username, "Viewer")
+        status, body = env.create(team_id=team)
+        assert status == 400
+        assert "no members with the Data_Labeler role" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_instructions_over_5000_chars_rejected(self, env):
+        """Req 4.4: instructions capped at 5,000 characters."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(instructions="x" * 5001)
+        assert status == 400
+        assert "5000" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_more_than_10_examples_rejected(self, env):
+        """Req 4.4: at most 10 good and 10 bad example images."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(example_images={
+            "good": [f"g{i}.jpg" for i in range(11)], "bad": []})
+        assert status == 400
+        assert "At most 10 good example images" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_non_jpeg_png_example_ref_identified(self, env):
+        """Req 4.4: each non-JPEG/PNG example reference identified."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(example_images={
+            "good": ["ok.png", "bad.gif"], "bad": ["worse.bmp"]})
+        assert status == 400
+        offenders = {err.get("example_ref")
+                     for err in body["validation_errors"]}
+        assert offenders == {"bad.gif", "worse.bmp"}
+        env.assert_nothing_persisted()
+
+    def test_all_invalid_parameters_enumerated_together(self, env):
+        """Req 4.9: a rejection identifies each missing or invalid
+        parameter, not just the first."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(
+            job_name="", task_type="Pose", team_id=None,
+            instructions="x" * 5001)
+        assert status == 400
+        parameters = {err["parameter"] for err in body["validation_errors"]}
+        assert {"job_name", "task_type", "team_id",
+                "instructions"} <= parameters
+        env.assert_nothing_persisted()
+
+    def test_unknown_usecase_rejected(self, env):
+        env.put_images(["a.jpg"])
+        status, body = env.create(usecase_id=f"uc-{uuid.uuid4()}")
+        assert status == 400
+        assert "Use case not found" in messages(body)
+
+
+# ------------------------------------------------------------- enumeration
+
+class TestDatasetEnumeration:
+    def test_empty_prefix_rejected_identifying_prefix(self, env):
+        """Req 4.6: zero image objects -> error identifying the empty
+        prefix, nothing persisted."""
+        status, body = env.create()
+        assert status == 400
+        assert env.prefix in body["error"]
+        assert body["dataset_prefix"] == env.prefix
+        env.assert_nothing_persisted()
+
+    def test_non_image_objects_rejected_identifying_each(self, env):
+        """Req 4.7: unsupported objects rejected, each offender
+        identified; nothing persisted."""
+        env.put_images(["a.jpg", "notes.txt", "nested/video.mp4"])
+        status, body = env.create()
+        assert status == 400
+        offending = {obj["key"] for obj in body["invalid_objects"]}
+        assert offending == {f"{env.prefix}notes.txt",
+                             f"{env.prefix}nested/video.mp4"}
+        assert all(obj["reason"] == "unsupported_format"
+                   for obj in body["invalid_objects"])
+        env.assert_nothing_persisted()
+
+    def test_folder_placeholders_ignored(self, env):
+        """Zero-byte folder marker keys are not offending objects."""
+        env.put_images(["a.jpg"])
+        env.s3.put_object(Bucket=DATASET_BUCKET,
+                          Key=f"{env.prefix}nested/", Body=b"")
+        status, body = env.create()
+        assert status == 201
+        assert body["image_count"] == 1
+
+    def test_validation_precedes_enumeration(self, env):
+        """Req 4.5: parameter errors are reported even when the dataset
+        prefix is empty — validation runs first."""
+        status, body = env.create(job_name="")
+        assert status == 400
+        assert "validation_errors" in body  # not the empty-prefix error
+        env.assert_nothing_persisted()
+
+
+# --------------------------------------------------- auto-label matrix
+
+class TestAutoLabelMatrix:
+    @pytest.mark.parametrize("model,task_type,ok", [
+        ("sam", "Segmentation", True),
+        ("sam", "ObjectDetection", True),
+        ("sam", "Classification", False),
+        ("bedrock:anthropic.claude-3-haiku", "Classification", True),
+        ("bedrock:anthropic.claude-3-haiku", "ObjectDetection", True),
+        ("bedrock:anthropic.claude-3-haiku", "Segmentation", False),
+    ])
+    def test_model_modality_matrix(self, env, model, task_type, ok):
+        """Req 8.8: SAM -> Segmentation/ObjectDetection; Bedrock ->
+        Classification/ObjectDetection."""
+        env.put_images(["a.jpg"])
+        label_set = (["scratch"] if task_type != "Classification" else None)
+        status, body = env.create(
+            task_type=task_type, label_set=label_set,
+            auto_label={"enabled": True, "model": model})
+        if ok:
+            assert status == 201
+            job = env.get_job(body["job_id"])
+            assert job["auto_label"] == {"enabled": True, "model": model}
+        else:
+            assert status == 400
+            assert "does not support" in messages(body)
+            env.assert_nothing_persisted()
+
+    def test_unknown_model_rejected(self, env):
+        """Req 8.1: the model must come from the supported options."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(
+            auto_label={"enabled": True, "model": "yolo"})
+        assert status == 400
+        assert "'sam' or 'bedrock:<model_id>'" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_auto_label_disabled_model_not_required(self, env):
+        env.put_images(["a.jpg"])
+        status, _ = env.create(auto_label={"enabled": False})
+        assert status == 201
+
+
+# ------------------------------------------------------- skip-verification
+
+class TestSkipVerification:
+    def valid_skip_body(self):
+        return dict(
+            team_id=None,
+            skip_verification=True,
+            bedrock_model_id="anthropic.claude-3-haiku",
+            per_label_prompts={"normal": "Is it normal?",
+                               "anomaly": "Is it anomalous?"},
+        )
+
+    def test_non_admin_rejected_with_authorization_error(self, env):
+        """Req 9.1: skip-verification is admin-only; non-admins get an
+        authorization error, nothing persisted, audit event written."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(user=env.make_user(role="DataScientist"),
+                                  **self.valid_skip_body())
+        assert status == 403
+        assert "administrator" in body["error"]
+        env.assert_nothing_persisted()
+        assert len(env.audit_events("unauthorized_access")) == 1
+
+    @pytest.mark.parametrize("role", ["UseCaseAdmin", "PortalAdmin"])
+    def test_admin_creates_skip_job_without_team(self, env, role):
+        """Req 4.1, 9.1, 9.2: admins may create a skip-verification job
+        with no team; the skip fields are persisted."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(user=env.make_user(role=role),
+                                  **self.valid_skip_body())
+        assert status == 201
+        job = env.get_job(body["job_id"])
+        assert job["skip_verification"] is True
+        assert job["bedrock_model_id"] == "anthropic.claude-3-haiku"
+        assert job["per_label_prompts"] == {
+            "normal": "Is it normal?", "anomaly": "Is it anomalous?"}
+        assert "team_id" not in job
+
+    def test_usecase_scoped_admin_role_authorizes_skip(self, env):
+        """Req 9.1: a per-usecase UseCaseAdmin row (UserRoles table)
+        also authorizes skip-verification."""
+        env.put_images(["a.jpg"])
+        user = env.make_user(role="Viewer")
+        env.stack.tables.user_roles.put_item(Item={
+            "user_id": user["user_id"],
+            "usecase_id": env.usecase_id,
+            "role": "UseCaseAdmin",
+        })
+        status, _ = env.create(user=user, **self.valid_skip_body())
+        assert status == 201
+
+    def test_missing_bedrock_model_rejected(self, env):
+        """Req 9.3: missing Bedrock model selection identified."""
+        env.put_images(["a.jpg"])
+        overrides = self.valid_skip_body()
+        overrides["bedrock_model_id"] = None
+        status, body = env.create(user=env.make_user(role="PortalAdmin"),
+                                  **overrides)
+        assert status == 400
+        assert "Bedrock model" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_missing_and_empty_prompts_identified_per_label(self, env):
+        """Req 9.2, 9.3: every label needs a non-empty prompt; each
+        missing/empty label identified."""
+        env.put_images(["a.jpg"])
+        overrides = self.valid_skip_body()
+        overrides["task_type"] = "ObjectDetection"
+        overrides["label_set"] = ["scratch", "dent", "crack"]
+        overrides["per_label_prompts"] = {"scratch": "Find scratches",
+                                          "dent": "   "}
+        status, body = env.create(user=env.make_user(role="PortalAdmin"),
+                                  **overrides)
+        assert status == 400
+        offending = {err.get("label") for err in body["validation_errors"]}
+        assert offending == {"dent", "crack"}
+        env.assert_nothing_persisted()
+
+    def test_empty_team_not_required_for_skip(self, env):
+        """Req 4.8 applies only when skip-verification is disabled."""
+        env.put_images(["a.jpg"])
+        status, _ = env.create(user=env.make_user(role="PortalAdmin"),
+                               **self.valid_skip_body())
+        assert status == 201

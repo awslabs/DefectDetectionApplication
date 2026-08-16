@@ -660,6 +660,56 @@ class TestBedrockInferenceNodeType:
         assert sim == get_node_type("model_inference").mapping_for("sim")
 
 
+class TestLlmInferenceNodeType:
+    """vlm-anomaly-reference-parity Requirements 1.1, 1.2, 2.1: the
+    VLM/LLM node mirrors the Bedrock node's authoring surface — the
+    ``anomaly_mode`` checkbox (default False, unlike Bedrock's True) and
+    the optional ``reference`` VideoFrames input port."""
+
+    def test_llm_inference_present_with_two_video_inputs(self):
+        # Same port names and types as bedrock_inference: the frame
+        # under inspection plus the optional reference image
+        # (Requirement 2.1).
+        descriptor = get_node_type("llm_inference")
+        assert descriptor is not None
+        assert descriptor.category == CATEGORY_INFERENCE
+        assert [(port.name, port.port_type) for port in descriptor.inputs] == [
+            ("in", PORT_TYPE_VIDEO_FRAMES),
+            ("reference", PORT_TYPE_VIDEO_FRAMES),
+        ]
+        assert _port_types(descriptor.outputs) == [PORT_TYPE_INFERENCE_META]
+
+    def test_llm_inference_port_list_matches_bedrock(self):
+        # Byte-equal port lists across the two parity nodes
+        # (Requirement 2.1).
+        llm = get_node_type("llm_inference")
+        bedrock = get_node_type("bedrock_inference")
+        assert [(p.name, p.port_type) for p in llm.inputs] == \
+            [(p.name, p.port_type) for p in bedrock.inputs]
+
+    def test_llm_inference_anomaly_mode_parameterization(self):
+        # Response-mode toggle mirroring Bedrock's, with the
+        # llm-specific default FALSE (matching the shipped executor
+        # default: absent => freeform, so existing packaged workflows
+        # keep behavior without repackage) and the contained
+        # verdict-parse failure note (Requirement 1.1).
+        params = _params_by_name(get_node_type("llm_inference"))
+        assert params["anomaly_mode"].param_type == "bool"
+        assert params["anomaly_mode"].required is False
+        assert params["anomaly_mode"].default is False
+        assert "anomaly" in params["anomaly_mode"].description
+        assert "generated_text" in params["anomaly_mode"].description
+        assert "without failing the run" in params["anomaly_mode"].description
+
+    def test_llm_inference_prompt_template_documents_anomaly_mode(self):
+        # The prompt_template description states the anomaly-mode
+        # auto-append and the freeform pass-through (Requirement 1.2).
+        params = _params_by_name(get_node_type("llm_inference"))
+        assert "appends" in params["prompt_template"].description
+        assert '"is_anomalous"' in params["prompt_template"].description
+        assert "as-is" in params["prompt_template"].description
+
+
 # --------------------------------------------------------------------------
 # Requirement 2.4: post-processing node types
 # --------------------------------------------------------------------------
@@ -834,6 +884,9 @@ class TestCatalogCoverage:
         # custom-python-source: the Custom Python frame source appended
         # last (Requirements 1.1, 11.4).
         "custom_python_source",
+        # workflow-manager-gaps: the Metadata passthrough node appended
+        # last (Requirement 6.1).
+        "metadata",
     }
 
     def test_catalog_contains_exactly_the_expected_types(self):

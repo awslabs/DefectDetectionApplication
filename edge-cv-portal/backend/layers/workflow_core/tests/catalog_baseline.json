@@ -3082,12 +3082,16 @@
   },
   "llm_inference": {
     "category": "inference",
-    "display_name": "LLM Inference",
+    "display_name": "VLM/LLM Inference",
     "hardware_dependent": true,
     "inputs": [
       {
         "name": "in",
-        "port_type": "InferenceMeta"
+        "port_type": "VideoFrames"
+      },
+      {
+        "name": "reference",
+        "port_type": "VideoFrames"
       }
     ],
     "mappings": [
@@ -3137,13 +3141,26 @@
         },
         "default": null,
         "depends_on": null,
-        "description": "Prompt sent to the model. {field} placeholders are replaced with values from the upstream inference metadata at execution time.",
+        "description": "Prompt sent to the model. {field} placeholders are replaced with values from the upstream inference metadata at execution time. In anomaly mode the executor automatically appends the JSON-format instruction ({\"is_anomalous\": true|false, \"confidence\": 0..1}) and the parsed verdict becomes the inference metadata; in freeform mode the rendered prompt is sent as-is.",
         "examples": [
           "Summarize this inspection result: anomalous={is_anomalous}, confidence={confidence}"
         ],
         "name": "prompt_template",
         "param_type": "string",
         "required": true
+      },
+      {
+        "constraints": {},
+        "default": false,
+        "depends_on": null,
+        "description": "Checked: anomaly mode \u2014 the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs; an unparseable answer is recorded as the node's error without failing the run. Unchecked (default): freeform mode \u2014 the prompt is sent as-is and the raw model text is recorded in the run metadata at llm.{nodeId}.generated_text, with no JSON parsing.",
+        "examples": [
+          true,
+          false
+        ],
+        "name": "anomaly_mode",
+        "param_type": "bool",
+        "required": false
       },
       {
         "constraints": {
@@ -3194,6 +3211,97 @@
       }
     ],
     "type_id": "llm_inference"
+  },
+  "metadata": {
+    "category": "post_processing",
+    "display_name": "Metadata",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp4",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {},
+        "default": "[]",
+        "depends_on": null,
+        "description": "Metadata mappings as a JSON array of objects with 'path' (dotted field path resolved against the parsed trigger payload, e.g. job_id or order.id) and 'key' (output metadata key the resolved value is attached under). Up to 50 mappings; paths and keys must be non-empty and keys unique.",
+        "examples": [
+          "[{\"path\": \"job_id\", \"key\": \"job_id\"}]",
+          "[{\"path\": \"order.id\", \"key\": \"order_id\"}, {\"path\": \"file_path\", \"key\": \"source_file\"}]"
+        ],
+        "name": "mappings",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max_length": 10240
+        },
+        "default": "",
+        "depends_on": null,
+        "description": "Optional static JSON object (at most 10240 characters) whose top-level entries are attached to the output metadata alongside the resolved mappings; a resolved mapping wins on a key collision.",
+        "examples": [
+          "{\"station\": \"line-1\"}"
+        ],
+        "name": "static_json",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "metadata"
   },
   "modbus_write": {
     "category": "output",

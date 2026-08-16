@@ -295,6 +295,10 @@ class Role(Enum):
     DATA_SCIENTIST = "DataScientist"
     USECASE_ADMIN = "UseCaseAdmin"
     PORTAL_ADMIN = "PortalAdmin"
+    # Restricted labeler role (dda-data-labeling, Req 2.1): grants only
+    # the labeler APIs (labeling:tasks-self) and nothing else, so every
+    # other endpoint 403s through the standard @rbac_check path.
+    DATA_LABELER = "DataLabeler"
 
 
 class Permission(Enum):
@@ -310,6 +314,13 @@ class Permission(Enum):
     VIEW_LABELING_JOBS = "view_labeling_jobs"
     CREATE_LABELING_JOBS = "create_labeling_jobs"
     MANAGE_LABELING_JOBS = "manage_labeling_jobs"
+    # DDA Data Labeling (dda-data-labeling, Req 2.3, 3.7)
+    # labeling:tasks-self: the labeler APIs — a Data_Labeler may access
+    # only their own Task_Assignments (handlers additionally filter by
+    # assignment ownership).
+    LABELING_TASKS_SELF = "labeling:tasks-self"
+    # labeling-teams:manage: create/modify Labeling_Teams and membership.
+    MANAGE_LABELING_TEAMS = "labeling-teams:manage"
     
     # Dataset Management
     VIEW_DATASETS = "view_datasets"
@@ -456,6 +467,9 @@ class RBACManager:
                 # Add DataScientist-specific permissions
                 Permission.CREATE_LABELING_JOBS,
                 Permission.MANAGE_LABELING_JOBS,
+                # DDA Data Labeling: labeler APIs (harmless for
+                # non-labelers; handlers filter by assignment ownership)
+                Permission.LABELING_TASKS_SELF,
                 Permission.UPLOAD_DATASETS,
                 Permission.MANAGE_DATASETS,
                 Permission.CREATE_TRAINING_JOBS,
@@ -492,6 +506,10 @@ class RBACManager:
                 Permission.VIEW_DEVICE_LOGS,
                 Permission.CREATE_LABELING_JOBS,
                 Permission.MANAGE_LABELING_JOBS,
+                # DDA Data Labeling: labeler APIs plus Labeling_Team
+                # management (dda-data-labeling, Req 3.7)
+                Permission.LABELING_TASKS_SELF,
+                Permission.MANAGE_LABELING_TEAMS,
                 Permission.UPLOAD_DATASETS,
                 Permission.MANAGE_DATASETS,
                 Permission.CREATE_TRAINING_JOBS,
@@ -548,7 +566,16 @@ class RBACManager:
             Role.PORTAL_ADMIN: {
                 # All permissions
                 *[permission for permission in Permission],
-            }
+            },
+            
+            Role.DATA_LABELER: {
+                # DDA Data Labeling (dda-data-labeling, Req 2.3): the
+                # labeler APIs ONLY — no other permission, so every
+                # non-labeler endpoint 403s through the standard
+                # @rbac_check path with an unauthorized_access audit
+                # event (user, resource, timestamp).
+                Permission.LABELING_TASKS_SELF,
+            },
         }
     
     def get_user_role(self, user_id: str, usecase_id: str, user_info: Optional[Dict] = None) -> Optional[Role]:

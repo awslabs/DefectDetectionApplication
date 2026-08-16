@@ -32,6 +32,19 @@ import type {
   SubmitBuildRequest,
   SubmitBuildResponse,
 } from '../pages/builds/types';
+import type {
+  CreateSyntheticSessionBody,
+  SyntheticApprovalBody,
+  SyntheticGenerateBody,
+  SyntheticGenerateResponse,
+  SyntheticIntegrateResponse,
+  SyntheticModelsResponse,
+  SyntheticPromptTemplateResponse,
+  SyntheticRetrainBody,
+  SyntheticSession,
+  SyntheticSessionDetailResponse,
+  SyntheticSessionSummary,
+} from '../pages/synthetic/types';
 import { beginRequest, endRequest } from './loadingBus';
 
 /**
@@ -421,6 +434,204 @@ export interface ThingGroupsResponse {
   thing_groups: string[];
   count: number;
 }
+
+// DDA labeling types (dda-data-labeling).
+
+/** One Labeling_Team member (dda-data-labeling Requirement 3.8). */
+export interface LabelingTeamMember {
+  user_id: string;
+  email: string;
+  added_at?: number;
+  added_by?: string;
+}
+
+/**
+ * One Labeling_Team as returned by `GET /labeling-teams?usecase_id=`,
+ * including the current member list with identities and emails
+ * (dda-data-labeling Requirement 3.8).
+ */
+export interface LabelingTeam {
+  team_id: string;
+  usecase_id: string;
+  team_name: string;
+  members: LabelingTeamMember[];
+  created_at?: number;
+  created_by?: string;
+}
+
+/**
+ * Per-member submitted/remaining counts on a DDA job detail
+ * (dda-data-labeling Requirement 11.2).
+ */
+export interface LabelingMemberProgress {
+  user_id: string;
+  email?: string;
+  submitted: number;
+  remaining: number;
+}
+
+/**
+ * A terminally failed notification recipient recorded on the job
+ * (dda-data-labeling Requirement 6.4).
+ */
+export interface LabelingNotificationFailure {
+  email: string;
+  reason: string;
+}
+
+/**
+ * One job row of `GET /labeler/jobs`: a job in which the caller holds at
+ * least one unsubmitted Task_Assignment, with submitted/remaining counts
+ * (dda-data-labeling Requirements 2.4, 7.10).
+ */
+export interface LabelerJobSummary {
+  job_id: string;
+  job_name: string;
+  task_type: string;
+  label_set: string[];
+  submitted_count: number;
+  remaining_count: number;
+  withheld_count?: number;
+  instructions?: string;
+}
+
+/** A classless-or-classed region/box of a Pre_Label or annotation. */
+export interface DdaBoundingBox {
+  /** Label_Set class; null for unclassified SAM proposals. */
+  class: string | null;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** RLE-encoded mask region keyed to a Label_Set class. */
+export interface DdaMaskRegion {
+  /** Label_Set class; null for unclassified SAM proposals. */
+  class: string | null;
+  /** Run-length-encoded bitmap of the region. */
+  rle: number[];
+}
+
+/**
+ * Modality-tagged annotation payload used for both Pre_Labels returned by
+ * the labeler APIs and submissions sent to `POST /labeler/tasks/{id}/submit`
+ * (dda-data-labeling Requirements 7.3–7.5, 7.7, 8.3).
+ */
+export interface DdaAnnotation {
+  /** Binary_Classification selection: 'normal' | 'anomaly'. */
+  label?: string;
+  /** Object_Detection boxes (pixel coordinates within image bounds). */
+  boxes?: DdaBoundingBox[];
+  /** Semantic_Segmentation regions (RLE-encoded, label-indexed). */
+  regions?: DdaMaskRegion[];
+  /** Image pixel dimensions the regions/boxes are expressed against. */
+  image_width?: number;
+  image_height?: number;
+}
+
+/**
+ * Response of `GET /labeler/jobs/{jobId}/next`: the next presentable
+ * unsubmitted Task_Assignment with a 15-minute presigned image URL,
+ * Pre_Label (when available), instructions and example-image URLs, or a
+ * completion payload when zero presentable tasks remain
+ * (dda-data-labeling Requirements 7.1, 7.2, 7.11, 8.3, 12.6).
+ */
+export interface LabelerNextTaskResponse {
+  /** True when the labeler has no presentable unsubmitted tasks left. */
+  complete: boolean;
+  task?: {
+    task_id: string;
+    job_id: string;
+    image_url: string;
+    /** Epoch seconds when the presigned image URL expires. */
+    image_url_expires_at?: number;
+    prelabel?: DdaAnnotation;
+    prelabel_status?: string;
+  };
+  task_type?: string;
+  label_set?: string[];
+  instructions?: string;
+  good_example_urls?: string[];
+  bad_example_urls?: string[];
+  submitted_count: number;
+  remaining_count: number;
+  withheld_count?: number;
+}
+
+/**
+ * One per-image row of `GET /labeling/{id}/review`: the auto-labeled
+ * result or failed status plus the current accept/reject decision
+ * (dda-data-labeling Requirements 9.5, 9.6, 9.10).
+ */
+export interface ReviewItem {
+  task_id: string;
+  image_key: string;
+  image_url?: string;
+  status: 'succeeded' | 'failed';
+  annotation?: DdaAnnotation;
+  autolabel_error?: string;
+  decision?: 'accepted' | 'rejected';
+}
+
+/** Response of `GET /labeling/{id}/review` (paginated). */
+export interface ReviewResponse {
+  job_id: string;
+  items: ReviewItem[];
+  count: number;
+  next_token?: string;
+  review_finalized?: boolean;
+}
+
+// Asynchronous workflow generation types (workflow-manager-gaps).
+
+/**
+ * 202 response of `POST /workflows/generate`
+ * (workflow_generator.submit_generation, workflow-manager-gaps
+ * Requirements 1.1, 1.7, 1.8): the accepted Generation_Job and the
+ * effective Chat_Session identifier. `session_id` is freshly minted when
+ * the request carried none or an unresolvable one, so callers adopt it
+ * for follow-up prompts.
+ */
+export interface WorkflowGenerationSubmission {
+  job_id: string;
+  session_id: string;
+  usecase_id: string;
+  status: 'pending';
+}
+
+/**
+ * A Generation_Job that has not reached a terminal state: the status
+ * endpoint returns only the job identity and state, never a partial
+ * result (workflow-manager-gaps Requirement 2.8).
+ */
+export interface WorkflowGenerationJobInProgress {
+  job_id: string;
+  status: 'pending' | 'running';
+}
+
+/**
+ * A succeeded Generation_Job: the synchronous endpoint's exact payload
+ * (`WorkflowGenerationResult`) embedded field-for-field beside the job
+ * identity (workflow-manager-gaps Requirement 2.2).
+ */
+export interface WorkflowGenerationJobSucceeded extends WorkflowGenerationResult {
+  job_id: string;
+  status: 'succeeded';
+}
+
+/**
+ * Resolved states of `GET /workflows/generate/{job_id}`, discriminated
+ * on `status`. The third state — a failed Generation_Job — never
+ * resolves: the backend replays the originating Error_Envelope with its
+ * original non-2xx HTTP status (workflow-manager-gaps Requirement 2.3),
+ * so it surfaces as a thrown `ApiError` carrying that status, code,
+ * message, and details (e.g. GENERATION_TIMEOUT, GENERATION_REJECTED,
+ * GENERATION_VALIDATION_INCOMPLETE, GENERATION_ABNORMAL_TERMINATION).
+ */
+export type WorkflowGenerationJobStatus =
+  | WorkflowGenerationJobInProgress
+  | WorkflowGenerationJobSucceeded;
 
 class ApiService {
   private get baseUrl(): string {
@@ -1395,16 +1606,32 @@ class ApiService {
     job_name: string;
     dataset_prefix: string;
     task_type: string;
-    label_categories: string[];
-    workforce_arn: string;
+    /**
+     * Mandatory Labeling_Backend discriminator (dda-data-labeling
+     * Requirement 1.1): 'GroundTruth' submits through the existing
+     * SageMaker flow unchanged; 'DDA' creates a portal-native job.
+     */
+    labeling_backend: 'DDA' | 'GroundTruth';
+    // Ground Truth fields (labeling_backend='GroundTruth').
+    label_categories?: string[];
+    workforce_arn?: string;
     instructions?: string;
     num_workers_per_object?: number;
     task_time_limit?: number;
     mask_prefix?: string;
     enable_automated_labeling?: boolean;
+    // DDA fields (labeling_backend='DDA', dda-data-labeling
+    // Requirements 4.1-4.4, 8.1, 9.2).
+    label_set?: string[];
+    team_id?: string;
+    example_images?: { good: string[]; bad: string[] };
+    auto_label?: { enabled: boolean; model: string };
+    skip_verification?: boolean;
+    bedrock_model_id?: string;
+    per_label_prompts?: Record<string, string>;
   }): Promise<{
     job_id: string;
-    sagemaker_job_name: string;
+    sagemaker_job_name?: string;
     status: string;
     message: string;
   }> {
@@ -1441,6 +1668,20 @@ class ApiService {
       failure_reason?: string;
       console_url?: string;
       worker_portal_url?: string;
+      // DDA job fields (labeling_backend='DDA', dda-data-labeling
+      // Requirements 5.4, 6.4, 6.6, 11.1, 11.2, 11.10).
+      labeling_backend?: 'DDA' | 'GroundTruth';
+      label_set?: string[];
+      team_id?: string;
+      submitted_count?: number;
+      member_progress?: LabelingMemberProgress[];
+      unassigned_count?: number;
+      blocked?: boolean;
+      notifications_skipped?: boolean;
+      notification_failures?: LabelingNotificationFailure[];
+      skip_verification?: boolean;
+      review_ready?: boolean;
+      stopped_at?: number;
     };
   }> {
     return this.request(`/labeling/${jobId}`);
@@ -1451,6 +1692,219 @@ class ApiService {
     job_id: string;
   }> {
     return this.request(`/labeling/${jobId}/manifest`);
+  }
+
+  // DDA labeling endpoints (dda-data-labeling).
+
+  /**
+   * List the Labeling_Teams scoped to a Use_Case with each team's member
+   * identities and emails (dda-data-labeling Requirement 3.8).
+   */
+  async listLabelingTeams(usecaseId: string): Promise<{
+    teams: LabelingTeam[];
+    count: number;
+  }> {
+    const queryParams = new URLSearchParams({ usecase_id: usecaseId });
+    return this.request(`/labeling-teams?${queryParams}`);
+  }
+
+  /**
+   * Create a Labeling_Team scoped to a Use_Case (dda-data-labeling
+   * Requirements 3.1, 3.2). A 4xx indicates a name validation failure.
+   */
+  async createLabelingTeam(data: {
+    usecase_id: string;
+    team_name: string;
+  }): Promise<{ team: LabelingTeam; message?: string }> {
+    return this.request('/labeling-teams', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * Add a Data_Labeler user to a Labeling_Team (dda-data-labeling
+   * Requirements 3.3–3.5). A 4xx indicates a missing Data_Labeler role or
+   * duplicate membership.
+   */
+  async addTeamMember(
+    teamId: string,
+    userId: string
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeling-teams/${encodeURIComponent(teamId)}/members`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ user_id: userId }),
+      }
+    );
+  }
+
+  /**
+   * Remove a member from a Labeling_Team; the member's unsubmitted
+   * Task_Assignments in InProgress jobs are reassigned server-side
+   * (dda-data-labeling Requirements 3.6, 5.3, 5.4).
+   */
+  async removeTeamMember(
+    teamId: string,
+    userId: string
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeling-teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * Delete a Labeling_Team (dda-data-labeling Requirement 3.1). A 409
+   * indicates the team is referenced by an InProgress labeling job and
+   * cannot be deleted yet.
+   */
+  async deleteLabelingTeam(teamId: string): Promise<{ message: string }> {
+    return this.request(`/labeling-teams/${encodeURIComponent(teamId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /**
+   * Stop an InProgress DDA Labeling_Job, retaining submitted annotations
+   * (dda-data-labeling Requirements 11.4, 11.5, 11.9). A 4xx indicates the
+   * job is not InProgress; a 5xx indicates the job was not stopped.
+   */
+  async stopLabelingJob(jobId: string): Promise<{
+    job_id: string;
+    status: string;
+    stopped_at?: number;
+    message?: string;
+  }> {
+    return this.request(`/labeling/${encodeURIComponent(jobId)}/stop`, {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * List the jobs in which the caller holds at least one unsubmitted
+   * Task_Assignment, with submitted/remaining counts (dda-data-labeling
+   * Requirements 2.4, 7.10). Empty list when none exist.
+   */
+  async getLabelerJobs(): Promise<{
+    jobs: LabelerJobSummary[];
+    count: number;
+  }> {
+    return this.request('/labeler/jobs');
+  }
+
+  /**
+   * Fetch the caller's next presentable unsubmitted Task_Assignment for a
+   * job — presigned image URL, Pre_Label when available, instructions and
+   * example-image URLs — or the completion payload when none remain
+   * (dda-data-labeling Requirements 7.1, 7.2, 8.3, 12.6).
+   */
+  async getNextTask(jobId: string): Promise<LabelerNextTaskResponse> {
+    return this.request(`/labeler/jobs/${encodeURIComponent(jobId)}/next`);
+  }
+
+  /**
+   * Submit the annotation for a Task_Assignment, marking it submitted
+   * (dda-data-labeling Requirements 7.7–7.9, 11.8). A 4xx indicates an
+   * incomplete annotation or a Stopped job; a 5xx means the annotation was
+   * not saved and the task remains unsubmitted.
+   */
+  async submitTask(
+    taskId: string,
+    annotation: DdaAnnotation
+  ): Promise<{
+    message: string;
+    submitted_count?: number;
+    remaining_count?: number;
+  }> {
+    return this.request(`/labeler/tasks/${encodeURIComponent(taskId)}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ annotation }),
+    });
+  }
+
+  /**
+   * Record that a Task_Assignment's image could not be retrieved or
+   * rendered; the task is withheld from labeling (dda-data-labeling
+   * Requirement 7.12).
+   */
+  async reportPresentationFailure(
+    taskId: string,
+    reason: string
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeler/tasks/${encodeURIComponent(taskId)}/presentation-failure`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }
+    );
+  }
+
+  /**
+   * Fetch a fresh 15-minute presigned URL for a task's image after the
+   * prior URL expires; client-side annotation state is untouched
+   * (dda-data-labeling Requirement 12.7).
+   */
+  async refreshTaskImageUrl(taskId: string): Promise<{
+    image_url: string;
+    image_url_expires_at?: number;
+  }> {
+    return this.request(
+      `/labeler/tasks/${encodeURIComponent(taskId)}/image-url`
+    );
+  }
+
+  /**
+   * Fetch the paginated Admin_Review results for a Skip_Verification_Mode
+   * job: every dataset image with its auto-labeled result or failed status
+   * and current decision (dda-data-labeling Requirement 9.5).
+   */
+  async getReview(
+    jobId: string,
+    nextToken?: string
+  ): Promise<ReviewResponse> {
+    const query = nextToken
+      ? `?next_token=${encodeURIComponent(nextToken)}`
+      : '';
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/review${query}`
+    );
+  }
+
+  /**
+   * Batch-save accept/reject decisions for Admin_Review results; decisions
+   * remain mutable until the review is finalized (dda-data-labeling
+   * Requirement 9.6).
+   */
+  async saveReviewDecisions(
+    jobId: string,
+    decisions: Record<string, 'accepted' | 'rejected'>
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/review/decisions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ decisions }),
+      }
+    );
+  }
+
+  /**
+   * Finalize the Admin_Review, triggering manifest generation over exactly
+   * the accepted results (dda-data-labeling Requirements 9.7–9.9). A 4xx
+   * indicates undecided results or zero accepted results.
+   */
+  async finalizeReview(jobId: string): Promise<{
+    job_id: string;
+    status?: string;
+    message?: string;
+  }> {
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/review/finalize`,
+      { method: 'POST' }
+    );
   }
 
   async transformManifest(data: {
@@ -2921,6 +3375,23 @@ class ApiService {
     });
   }
 
+  // Metadata-only rename of a workflow's display name (workflows.py
+  // rename_workflow, workflow-manager-gaps Requirements 5.1, 5.2, 5.7).
+  // No definition is sent and no new version is allocated: only `name`
+  // and `updated_at` change on the workflow record. Rejections raise
+  // ApiError with the structured envelope: 400 INVALID_NAME
+  // (empty/whitespace-only or > 128 characters), the existing 403 RBAC
+  // envelope, or the uniform 404 (Requirements 5.3-5.5).
+  async renameWorkflow(
+    workflowId: string,
+    name: string
+  ): Promise<{ workflow: WorkflowSummary }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/name`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    });
+  }
+
   // Delete a workflow and its versions; rejected with 409 and the
   // referencing deployment ids when active deployments exist (5.5, 5.6).
   async deleteWorkflow(workflowId: string): Promise<{ workflow_id: string; message: string }> {
@@ -2995,12 +3466,18 @@ class ApiService {
     });
   }
 
-  // Prompt-based workflow generation via the configured Bedrock model
-  // (workflow_generator.py, Requirements 10.2, 10.3, 10.5, 10.7).
-  // `session_id` continues an existing chat session; `current_definition`
-  // is the canvas snapshot so follow-up prompts modify rather than
-  // regenerate. Failures raise ApiError with the structured envelope
-  // codes (e.g. GENERATION_TIMEOUT, BEDROCK_*, GENERATED_DEFINITION_INVALID).
+  // Prompt-based workflow generation via the configured Bedrock model,
+  // asynchronous submit/poll transport (workflow_generator.py
+  // submit_generation, workflow-manager-gaps Requirements 1.1, 1.7, 1.8).
+  // Accepted submissions return 202 with the Generation_Job id to poll
+  // via getWorkflowGenerationJob; the generation itself (Bedrock
+  // invocation, Generation_Gate, session persistence) runs in a
+  // background worker. `session_id` continues an existing chat session;
+  // `current_definition` is the canvas snapshot so follow-up prompts
+  // modify rather than regenerate. Synchronous rejections (missing
+  // fields, INVALID_TEMPERATURE, RBAC, USECASE_NOT_FOUND,
+  // GENERATION_NOT_STARTED) raise ApiError with the structured envelope
+  // and create no job (Requirements 1.3, 1.4).
   // `temperature` (0..1) overrides the configured model temperature for
   // this invocation only; omitted = use the configured value.
   async generateWorkflow(data: {
@@ -3009,11 +3486,23 @@ class ApiService {
     session_id?: string;
     current_definition?: WorkflowDefinition;
     temperature?: number;
-  }): Promise<WorkflowGenerationResult> {
+  }): Promise<WorkflowGenerationSubmission> {
     return this.request('/workflows/generate', {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // Poll one Generation_Job (workflow_generator.get_generation_job,
+  // workflow-manager-gaps Requirements 2.1, 2.2, 2.8). Resolves with the
+  // in-progress state ({job_id, status}) or, on success, the job identity
+  // plus the synchronous endpoint's exact WorkflowGenerationResult
+  // payload. A failed job rejects with an ApiError replaying the
+  // originating Error_Envelope and HTTP status verbatim (Requirement
+  // 2.3); an unknown, removed, or inaccessible job id rejects with the
+  // uniform 404 JOB_NOT_FOUND envelope (Requirements 2.4, 2.10).
+  async getWorkflowGenerationJob(jobId: string): Promise<WorkflowGenerationJobStatus> {
+    return this.request(`/workflows/generate/${encodeURIComponent(jobId)}`);
   }
 
   // Code_Assistant endpoint (custom-node-code-assist): synchronous,
@@ -3181,6 +3670,143 @@ class ApiService {
     return this.request(`/builds/${encodeURIComponent(buildJobId)}/retry`, {
       method: 'POST',
     });
+  }
+
+  // Synthetic defect data generation endpoints
+  // (synthetic-defect-data-generation, synthetic_data.py). All routes are
+  // RBAC-gated server-side to Data_Scientist_Access (Req 9.1, 9.2).
+
+  /**
+   * The Model_Catalog available in the portal region with capability
+   * flags (Req 1.1). When empty, `guidance` identifies the Bedrock
+   * model-access configuration needed (Req 1.3).
+   */
+  async listSyntheticModels(usecaseId: string): Promise<SyntheticModelsResponse> {
+    const query = new URLSearchParams({ usecase_id: usecaseId });
+    return this.request(`/synthetic/models?${query.toString()}`);
+  }
+
+  /**
+   * The stored Prompt_Template for the Use_Case/Object_Type/Defect_Type
+   * key, or the default template (with `is_default: true`) when none is
+   * stored (Req 2.2, 2.3).
+   */
+  async getSyntheticPromptTemplate(params: {
+    usecase_id: string;
+    object_type: string;
+    defect_type: string;
+  }): Promise<SyntheticPromptTemplateResponse> {
+    const query = new URLSearchParams(params);
+    return this.request(`/synthetic/prompt-templates?${query.toString()}`);
+  }
+
+  /** Persist an edited Prompt_Template for the key (Req 2.1, 2.4). */
+  async putSyntheticPromptTemplate(body: {
+    usecase_id: string;
+    object_type: string;
+    defect_type: string;
+    template_text: string;
+  }): Promise<SyntheticPromptTemplateResponse> {
+    return this.request('/synthetic/prompt-templates', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Create a Generation_Session (persisted + audited, Req 10.1, 9.4). */
+  async createSyntheticSession(
+    body: CreateSyntheticSessionBody
+  ): Promise<{ session: SyntheticSession }> {
+    return this.request('/synthetic/sessions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Generation_Sessions of a Use_Case with status + creation time (Req 10.4). */
+  async listSyntheticSessions(
+    usecaseId: string
+  ): Promise<{ sessions: SyntheticSessionSummary[]; count: number }> {
+    const query = new URLSearchParams({ usecase_id: usecaseId });
+    return this.request(`/synthetic/sessions?${query.toString()}`);
+  }
+
+  /**
+   * Full session state: META plus previews with presigned thumbnail URLs
+   * and per-preview resolved prompt text (Req 10.2, 5.2, 5.6).
+   */
+  async getSyntheticSession(
+    sessionId: string
+  ): Promise<SyntheticSessionDetailResponse> {
+    return this.request(`/synthetic/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  /** Update model selection, sources/classification, params (Req 1.2, 3.2-3.4). */
+  async patchSyntheticSession(
+    sessionId: string,
+    body: Partial<CreateSyntheticSessionBody>
+  ): Promise<{ session: SyntheticSession }> {
+    return this.request(`/synthetic/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Start (or re-start with an edited prompt) asynchronous preview
+   * generation; returns 202 with the task count (Req 5.1, 5.3). A 400
+   * carries `unresolved_placeholders` when the template has placeholder
+   * variables missing from the context (Req 2.6).
+   */
+  async generateSyntheticPreviews(
+    sessionId: string,
+    body: SyntheticGenerateBody = {}
+  ): Promise<SyntheticGenerateResponse> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/generate`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Set the approval state for listed preview ids or all (Req 6.1, 6.2). */
+  async setSyntheticPreviewApproval(
+    sessionId: string,
+    body: SyntheticApprovalBody
+  ): Promise<{ updated: number; approval_state: string }> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/previews/approval`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Integrate the approved previews: upload, auto-annotate, and append to
+   * the Data_Manifest; returns the manifest URI and appended record count
+   * (Req 6.3-6.6, 7.1-7.8). Any failure leaves the manifest untouched.
+   */
+  async integrateSyntheticSession(
+    sessionId: string,
+    body: { target_dataset_prefix?: string; target_manifest_key?: string } = {}
+  ): Promise<SyntheticIntegrateResponse> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/integrate`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Create a training job through the existing Training_Subsystem with
+   * dataset_manifest_s3 pre-populated from the integration result and the
+   * originating generation_session_id recorded (Req 8.1-8.3).
+   */
+  async retrainSyntheticSession(
+    sessionId: string,
+    body: SyntheticRetrainBody
+  ): Promise<{ training_job_id: string; message: string }> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/retrain`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
   }
 
   // Manifest Validator endpoints

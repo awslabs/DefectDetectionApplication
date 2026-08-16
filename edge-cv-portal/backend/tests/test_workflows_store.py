@@ -410,3 +410,126 @@ class TestAuthorization:
             "GET", "/workflows/{id}", viewer, workflow_id=workflow_id
         )
         assert status == 200
+
+
+# ------------------------------------------------- workflow-manager-gaps 5.x
+class TestRename:
+    """PATCH /workflows/{id}/name — metadata-only Display_Name rename
+    (spec workflow-manager-gaps, Req 5.1-5.6, 8.2)."""
+
+    def test_rename_updates_name_only_without_new_version(self, env):
+        """A rename changes name and updated_at, keeps latest_version and
+        stored versions untouched, and allocates no new version (5.1, 5.2)."""
+        user = env.make_user(role="DataScientist")
+        usecase_id = env.create_usecase()
+        workflow = create_workflow(env, user, usecase_id)
+        workflow_id = workflow["workflow_id"]
+
+        status, payload = env.invoke(
+            "PATCH", "/workflows/{id}/name", user, workflow_id=workflow_id,
+            body={"name": "  Renamed line inspection  "},
+        )
+        assert status == 200, payload
+        renamed = payload["workflow"]
+        assert renamed["name"] == "Renamed line inspection"  # trimmed
+        assert renamed["workflow_id"] == workflow_id
+        assert renamed["latest_version"] == 1
+        assert renamed["updated_at"] >= workflow["updated_at"]
+
+        # Version history and the stored definition are unchanged.
+        status, payload = env.invoke(
+            "GET", "/workflows/{id}/versions", user, workflow_id=workflow_id
+        )
+        assert status == 200
+        assert payload["count"] == 1
+        status, payload = env.invoke(
+            "GET", "/workflows/{id}", user, workflow_id=workflow_id
+        )
+        assert status == 200
+        assert payload["version"] == 1
+        assert payload["definition"] == make_definition()
+        assert payload["workflow"]["name"] == "Renamed line inspection"
+
+    @pytest.mark.parametrize("body", [
+        {},                        # name missing
+        {"name": 42},              # not a string
+        {"name": ""},              # empty
+        {"name": "   \t "},        # whitespace-only
+        {"name": "x" * 129},       # longer than 128 after trim
+    ])
+    def test_rename_invalid_name_rejected(self, env, body):
+        """Invalid names return 400 INVALID_NAME and leave the record
+        unchanged (5.3)."""
+        user = env.make_user(role="DataScientist")
+        usecase_id = env.create_usecase()
+        workflow = create_workflow(env, user, usecase_id)
+
+        status, payload = env.invoke(
+            "PATCH", "/workflows/{id}/name", user,
+            workflow_id=workflow["workflow_id"], body=body,
+        )
+        assert status == 400
+        assert payload["error"]["code"] == "INVALID_NAME"
+
+        status, payload = env.invoke(
+            "GET", "/workflows/{id}", user, workflow_id=workflow["workflow_id"]
+        )
+        assert payload["workflow"]["name"] == "Line inspection"
+        assert payload["workflow"]["updated_at"] == workflow["updated_at"]
+
+    def test_rename_viewer_forbidden(self, env):
+        """A user without modify permission gets the existing 403 envelope
+        and the name stays unchanged (5.4)."""
+        creator = env.make_user(role="DataScientist")
+        usecase_id = env.create_usecase()
+        workflow = create_workflow(env, creator, usecase_id)
+
+        viewer = env.make_user(role="Viewer")
+        status, payload = env.invoke(
+            "PATCH", "/workflows/{id}/name", viewer,
+            workflow_id=workflow["workflow_id"], body={"name": "hijack"},
+        )
+        assert status == 403
+        assert payload["error"]["code"] == "FORBIDDEN"
+
+        status, payload = env.invoke(
+            "GET", "/workflows/{id}", creator, workflow_id=workflow["workflow_id"]
+        )
+        assert payload["workflow"]["name"] == "Line inspection"
+
+    def test_rename_unknown_workflow_uniform_404(self, env):
+        """A nonexistent workflow_id returns the uniform 404 (5.5)."""
+        user = env.make_user(role="DataScientist")
+        status, payload = env.invoke(
+            "PATCH", "/workflows/{id}/name", user,
+            workflow_id="does-not-exist", body={"name": "anything"},
+        )
+        assert status == 404
+        assert payload["error"]["code"] == "WORKFLOW_NOT_FOUND"
+
+    def test_rename_records_audit_event(self, env):
+        """A successful rename records an audit event with both names and
+        the acting user (5.6)."""
+        user = env.make_user(role="DataScientist")
+        usecase_id = env.create_usecase()
+        workflow = create_workflow(env, user, usecase_id)
+        workflow_id = workflow["workflow_id"]
+
+        status, _ = env.invoke(
+            "PATCH", "/workflows/{id}/name", user, workflow_id=workflow_id,
+            body={"name": "Audited name"},
+        )
+        assert status == 200
+
+        events = env.stack.tables.audit_log.scan()["Items"]
+        rename_events = [
+            e for e in events
+            if e.get("action") == "rename_workflow"
+            and e.get("resource_id") == workflow_id
+        ]
+        assert len(rename_events) == 1
+        details = rename_events[0]["details"]
+        assert details["previous_name"] == "Line inspection"
+        assert details["new_name"] == "Audited name"
+        assert details["usecase_id"] == usecase_id
+        assert rename_events[0]["user_id"] == user["user_id"]

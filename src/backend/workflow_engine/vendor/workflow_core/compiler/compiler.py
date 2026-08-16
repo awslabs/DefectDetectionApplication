@@ -37,7 +37,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Sequence, Union
 
-from ..catalog import ARCH_SIM, ARCHITECTURES, NODE_CATALOG, bundled_plugins_for
+from ..catalog import ARCH_SIM, ARCHITECTURES, CATEGORY_OUTPUT, NODE_CATALOG, bundled_plugins_for
+from ..catalog.metadata_config import parse_mappings, parse_static_json
 from ..catalog.models import GstMapping, NodeTypeDescriptor
 from ..catalog.nodes import SOURCE_KIND_TO_SOURCE_TYPE
 from ..serializer.models import Connection, Node, WorkflowGraph
@@ -114,6 +115,20 @@ BINDING_BEDROCK_INFERENCE = "bedrock_inference"
 #: tee'd sink beside the downstream continuation, planned by
 #: ``_build_segments``'s existing feeder-capture fan-out.
 BINDING_LLM_INFERENCE = "llm_inference"
+
+#: The metadata-attachment executor binding (the metadata node,
+#: workflow-manager-gaps Requirement 6.6). The node has an empty
+#: element_chain, so it flows through the existing executor-level
+#: collapse (like inference_filter) — GStreamer stream topology looks
+#: through it. Its emitted binding carries the parsed Metadata_Mappings
+#: (``metadataMappings``: trigger-payload field path -> output metadata
+#: key), the parsed static JSON object (``staticJson``), and
+#: ``attachTo``: the output-category node ids transitively reachable
+#: from the node over the full node-level adjacency — the "input data
+#: flowed through a Metadata_Node" relation (Requirements 7.7/7.8)
+#: computed where the whole graph is available; the device only sees
+#: direct adjacency.
+BINDING_METADATA = "metadata"
 
 
 def expand_unified_inputs(
@@ -409,6 +424,9 @@ def compile(
     # Executor bindings, one entry per executor-level node (Requirement 6.6).
     predecessors = _node_predecessors(graph)
     port_successors = _node_port_successors(graph)
+    typed_nodes = {
+        node.id: descriptors_by_id[node.type] for node in graph.nodes
+    }
     executor_bindings = []
     for node_id in executor_node_ids:
         node = nodes_by_id[node_id]
@@ -457,6 +475,23 @@ def compile(
         # design D2).
         if mappings[node_id].executor_binding in TRIGGER_EXECUTOR_TYPES:
             entry["activates"] = activation_plan.get(node_id, [])
+        # Metadata bindings carry the parsed Metadata_Mappings, the
+        # static JSON object, and the transitively-reachable
+        # output-category node ids the attached metadata fans out to
+        # (workflow-manager-gaps Requirement 6.6). Compilation refuses
+        # on validation errors above, so only valid configs reach here;
+        # the parse error lists are therefore empty by construction.
+        if mappings[node_id].executor_binding == BINDING_METADATA:
+            parsed_mappings, _ = parse_mappings(parameters.get("mappings"))
+            parsed_static, _ = parse_static_json(parameters.get("static_json"))
+            entry["metadataMappings"] = [
+                {"fieldPath": m["path"], "key": m["key"]}
+                for m in parsed_mappings
+            ]
+            entry["staticJson"] = parsed_static or {}
+            entry["attachTo"] = _reachable_output_nodes(
+                node_id, successors, typed_nodes
+            )
         executor_bindings.append(entry)
 
     # 6. Plugin dependencies beyond the LocalServer-bundled set
@@ -516,6 +551,36 @@ def _node_predecessors(graph: WorkflowGraph) -> Dict[str, List[str]]:
             if source not in predecessors[target]:
                 predecessors[target].append(source)
     return predecessors
+
+
+def _reachable_output_nodes(
+    node_id: str,
+    successors: Dict[str, List[str]],
+    typed_nodes: Dict[str, NodeTypeDescriptor],
+) -> List[str]:
+    """The ``CATEGORY_OUTPUT`` node ids transitively reachable from
+    ``node_id`` over the full node-level ``successors`` adjacency
+    (BFS, stable discovery order — Requirement 6.6).
+
+    This computes the "input data flowed through a Metadata_Node"
+    relation of Requirements 7.7/7.8 at compile time, where the whole
+    graph is available: the emitted ``metadata`` executor binding's
+    ``attachTo`` list names exactly the output nodes the attached
+    metadata fans out to on the device.
+    """
+    result: List[str] = []
+    seen = {node_id}
+    frontier = list(successors.get(node_id, []))
+    while frontier:
+        current = frontier.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        descriptor = typed_nodes.get(current)
+        if descriptor is not None and descriptor.category == CATEGORY_OUTPUT:
+            result.append(current)
+        frontier.extend(successors.get(current, []))
+    return result
 
 
 def _stream_successors(

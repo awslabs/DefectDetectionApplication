@@ -755,8 +755,14 @@ LLM_INFERENCE = NodeTypeDescriptor(
     # As a vision-language node it takes video frames as input (a
     # video-frame source connects directly into it) and emits the
     # generated text as inference metadata for downstream consumers
-    # (Requirements 6.3, 6.4).
-    inputs=[PortDescriptor("in", PORT_TYPE_VIDEO_FRAMES)],
+    # (Requirements 6.3, 6.4). Like bedrock_inference it carries a
+    # second, optional VideoFrames input: a reference image the model
+    # compares the inspected frame against per the configured prompt
+    # (vlm-anomaly-reference-parity Requirement 2.1).
+    inputs=[
+        PortDescriptor("in", PORT_TYPE_VIDEO_FRAMES),
+        PortDescriptor("reference", PORT_TYPE_VIDEO_FRAMES),
+    ],
     outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
     parameters=[
         # Populated from the Use_Case's registered vLLM_Model_Records
@@ -774,10 +780,47 @@ LLM_INFERENCE = NodeTypeDescriptor(
                             description="Prompt sent to the model. {field} "
                                         "placeholders are replaced with values "
                                         "from the upstream inference metadata "
-                                        "at execution time.",
+                                        "at execution time. In anomaly mode "
+                                        "the executor automatically appends "
+                                        "the JSON-format instruction "
+                                        '({"is_anomalous": true|false, '
+                                        '"confidence": 0..1}) and the parsed '
+                                        "verdict becomes the inference "
+                                        "metadata; in freeform mode the "
+                                        "rendered prompt is sent as-is.",
                             examples=["Summarize this inspection result: "
                                       "anomalous={is_anomalous}, "
                                       "confidence={confidence}"]),
+        # Response mode toggle, mirroring bedrock_inference's. UNLIKE
+        # Bedrock (default True) this defaults FALSE — matching the
+        # already-shipped executor default (absent => freeform), so
+        # existing packaged llm workflows keep today's freeform behavior
+        # without repackage (vlm-anomaly-reference-parity Requirement
+        # 1.1). Checked: the executor appends the canonical JSON
+        # instruction to the rendered prompt and merges the parsed
+        # {is_anomalous, confidence} verdict into the run metadata; an
+        # unparseable answer is recorded as the node's error without
+        # failing the run. Unchecked: the rendered prompt is sent as-is
+        # and the raw text is recorded at llm.{nodeId}.generated_text.
+        ParameterDescriptor("anomaly_mode", "bool", required=False,
+                            default=False,
+                            constraints={},
+                            description="Checked: anomaly mode — the "
+                                        "executor auto-appends the JSON "
+                                        "instruction and the model's "
+                                        "verdict (is_anomalous, "
+                                        "confidence) drives downstream "
+                                        "filters, conditionals, and "
+                                        "outputs; an unparseable answer "
+                                        "is recorded as the node's error "
+                                        "without failing the run. "
+                                        "Unchecked (default): freeform "
+                                        "mode — the prompt is sent as-is "
+                                        "and the raw model text is "
+                                        "recorded in the run metadata at "
+                                        "llm.{nodeId}.generated_text, "
+                                        "with no JSON parsing.",
+                            examples=[True, False]),
         ParameterDescriptor("max_tokens", "int", required=False, default=256,
                             constraints={"min": 1},
                             description="Maximum tokens the model may "
@@ -800,7 +843,15 @@ LLM_INFERENCE = NodeTypeDescriptor(
     # emits an ``llm_inference`` executor binding carrying the bound
     # model name, prompt template, and generation parameters; the
     # LocalServer workflow engine renders the prompt from upstream
-    # metadata and calls the device Text_Generation_API. Mappings exist
+    # metadata and calls the device Text_Generation_API. Like
+    # bedrock_inference, each VideoFrames input branch gains a synthetic
+    # frame-capture sink chain (videoconvert ! jpegenc ! multifilesink
+    # location={work_dir}/...) and the binding carries the per-port
+    # capture file paths (``capturePaths``: ``in`` plus ``reference``,
+    # ``None`` when a port is unfed) so the executor can attach the
+    # captured frame(s) to the generate request — UNLIKE
+    # bedrock_inference the node stays NON-opaque: frames keep flowing
+    # through to downstream pipeline elements. Mappings exist
     # only for vLLM-capable architectures plus the simulation stub —
     # ``sim_llm_inference`` injects the configured simulated inference
     # outcome and never invokes any model (Requirement 6.9).
@@ -1779,6 +1830,65 @@ CUSTOM_PYTHON_SOURCE = NodeTypeDescriptor(
 )
 
 # --------------------------------------------------------------------------
+# Metadata node (workflow-manager-gaps Requirement 6.1) — a
+# POST_PROCESSING-category node that maps fields from the trigger
+# payload (dotted field paths against the parsed payload) and attaches
+# them, together with optional static JSON, to the data flowing to
+# output nodes. Both structured values are carried as JSON-string
+# parameters (ParameterDescriptor supports scalar types only); the
+# shared validity rules live in catalog/metadata_config.py, consumed by
+# the validator, the compiler, and (mirrored in TypeScript) the
+# designer.
+# --------------------------------------------------------------------------
+
+METADATA = NodeTypeDescriptor(
+    type_id="metadata",
+    category=CATEGORY_POST_PROCESSING,
+    display_name="Metadata",
+    # InferenceMeta in/out ports let it sit between inference /
+    # post-processing nodes and output nodes exactly like
+    # inference_filter.
+    inputs=[PortDescriptor("in", PORT_TYPE_INFERENCE_META)],
+    outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
+    parameters=[
+        # JSON array of {"path": "...", "key": "..."} objects (0..50):
+        # each entry maps a dotted field path in the trigger payload to
+        # an output metadata key attached to downstream output results.
+        ParameterDescriptor("mappings", "string", required=False, default="[]",
+                            constraints={},
+                            description="Metadata mappings as a JSON array "
+                                        "of objects with 'path' (dotted "
+                                        "field path resolved against the "
+                                        "parsed trigger payload, e.g. "
+                                        "job_id or order.id) and 'key' "
+                                        "(output metadata key the resolved "
+                                        "value is attached under). Up to 50 "
+                                        "mappings; paths and keys must be "
+                                        "non-empty and keys unique.",
+                            examples=['[{"path": "job_id", "key": "job_id"}]',
+                                      '[{"path": "order.id", "key": "order_id"},'
+                                      ' {"path": "file_path", "key": "source_file"}]']),
+        # Optional static JSON object, <= 10240 characters, whose
+        # top-level entries are attached alongside resolved mappings.
+        ParameterDescriptor("static_json", "string", required=False, default="",
+                            constraints={"max_length": 10240},
+                            description="Optional static JSON object (at "
+                                        "most 10240 characters) whose "
+                                        "top-level entries are attached to "
+                                        "the output metadata alongside the "
+                                        "resolved mappings; a resolved "
+                                        "mapping wins on a key collision.",
+                            examples=['{"station": "line-1"}']),
+    ],
+    # Executor-level metadata attachment (no GStreamer element): the
+    # compiler emits a 'metadata' executor binding carrying the parsed
+    # mappings, static JSON, and reachable output nodes; the stream
+    # topology looks through it like inference_filter.
+    mappings=_same_on_all_archs(executor_binding="metadata"),
+    hardware_dependent=False,
+)
+
+# --------------------------------------------------------------------------
 # Catalog access
 # --------------------------------------------------------------------------
 
@@ -1818,6 +1928,9 @@ NODE_CATALOG = (
     # Appended (additive — custom-python-source Requirement 11.4): every
     # pre-existing descriptor keeps its position and content.
     CUSTOM_PYTHON_SOURCE,
+    # Appended (additive — workflow-manager-gaps Requirement 6.1): every
+    # pre-existing descriptor keeps its position and content.
+    METADATA,
 )
 
 _CATALOG_BY_ID = {descriptor.type_id: descriptor for descriptor in NODE_CATALOG}

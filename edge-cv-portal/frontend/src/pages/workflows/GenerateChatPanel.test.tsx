@@ -7,12 +7,22 @@
  * across turns with the canvas snapshot sent for follow-ups, and failures
  * (API error or client-side parse failure) leaving the canvas untouched
  * with the error displayed and the prompt preserved for retry (10.4, 10.7).
+ *
+ * Generation is asynchronous (workflow-manager-gaps Requirement 4):
+ * `generateWorkflow` resolves with a 202 submission `{job_id,
+ * session_id, ...}` and the panel polls `getWorkflowGenerationJob`
+ * every POLL_INTERVAL_MS until the Generation_Job stops. Tests run on
+ * fake timers: `settle()` flushes the submit round-trip and
+ * `advancePoll()` advances one 3-second poll cycle. A failed job
+ * surfaces as a rejected poll replaying the Error_Envelope (Req 2.3),
+ * so failure fixtures reject from `getWorkflowGenerationJob`.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import GenerateChatPanel, { type GenerateChatPanelProps } from './GenerateChatPanel';
 import type { UserRole } from '../../types';
+import { POLL_INTERVAL_MS } from './generationPollReducer';
 import type {
   GenerationStructuralError,
   NodeTypeDescriptor,
@@ -20,8 +30,9 @@ import type {
   WorkflowGenerationResult,
 } from './types';
 
-const { generateWorkflow } = vi.hoisted(() => ({
+const { generateWorkflow, getWorkflowGenerationJob } = vi.hoisted(() => ({
   generateWorkflow: vi.fn(),
+  getWorkflowGenerationJob: vi.fn(),
 }));
 
 vi.mock('../../services/api', () => {
@@ -38,7 +49,7 @@ vi.mock('../../services/api', () => {
   }
   return {
     ApiError,
-    apiService: { generateWorkflow },
+    apiService: { generateWorkflow, getWorkflowGenerationJob },
   };
 });
 
@@ -113,6 +124,26 @@ function generationResult(
   };
 }
 
+/** The 202 submission envelope returned by POST /workflows/generate. */
+function submission(overrides: Partial<{ job_id: string; session_id: string }> = {}) {
+  return {
+    job_id: 'job-1',
+    session_id: 'session-1',
+    usecase_id: 'uc-1',
+    status: 'pending' as const,
+    ...overrides,
+  };
+}
+
+/** A succeeded Generation_Job: the sync payload beside the job identity. */
+function succeededJob(overrides: Partial<WorkflowGenerationResult> = {}) {
+  return {
+    job_id: 'job-1',
+    status: 'succeeded' as const,
+    ...generationResult(overrides),
+  };
+}
+
 type ApplyGeneratedMock = ReturnType<typeof vi.fn<GenerateChatPanelProps['onApplyGenerated']>>;
 
 function renderPanel(overrides: {
@@ -148,8 +179,33 @@ function send(prompt: string) {
   fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 }
 
+/** Flush the submit round-trip (202 + first poll scheduling). */
+async function settle() {
+  await act(async () => {});
+}
+
+/** Advance one (or more) 3-second poll cycles and flush the outcome. */
+async function advancePoll(cycles = 1) {
+  for (let i = 0; i < cycles; i += 1) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    });
+  }
+  await act(async () => {});
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  // Fake timers drive the 3-second poll interval deterministically;
+  // Date.now() is faked consistently with the timer clock.
+  vi.useFakeTimers();
+  // Default happy path: one submission whose first poll succeeds.
+  generateWorkflow.mockResolvedValue(submission());
+  getWorkflowGenerationJob.mockResolvedValue(succeededJob());
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 // --------------------------------------------------------------------------
@@ -179,18 +235,20 @@ describe('GenerateChatPanel chrome', () => {
 
 describe('GenerateChatPanel successful generation', () => {
   it('renders the generated workflow onto the canvas after parse and validation (10.3)', async () => {
-    generateWorkflow.mockResolvedValue(generationResult());
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
+    await settle();
 
-    await waitFor(() =>
-      expect(generateWorkflow).toHaveBeenCalledWith({
-        usecase_id: 'uc-1',
-        prompt: 'Camera to capture pipeline',
-      })
-    );
-    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    expect(generateWorkflow).toHaveBeenCalledWith({
+      usecase_id: 'uc-1',
+      prompt: 'Camera to capture pipeline',
+    });
+
+    // The job is polled to its terminal success (workflow-manager-gaps 4.1, 4.2).
+    await advancePoll();
+    expect(getWorkflowGenerationJob).toHaveBeenCalledWith('job-1');
+    expect(onApplyGenerated).toHaveBeenCalledTimes(1);
 
     // The parsed canvas state matches the generated definition.
     const generated = onApplyGenerated.mock.calls[0][0];
@@ -209,9 +267,31 @@ describe('GenerateChatPanel successful generation', () => {
     expect(promptInput().value).toBe('');
   });
 
+  it('keeps polling while the job is pending or running, then renders (4.1)', async () => {
+    getWorkflowGenerationJob
+      .mockResolvedValueOnce({ job_id: 'job-1', status: 'pending' })
+      .mockResolvedValueOnce({ job_id: 'job-1', status: 'running' })
+      .mockResolvedValueOnce(succeededJob());
+    const { onApplyGenerated } = renderPanel();
+
+    send('Camera to capture pipeline');
+    await settle();
+
+    // Two non-terminal polls: still in progress, canvas untouched.
+    await advancePoll(2);
+    expect(getWorkflowGenerationJob).toHaveBeenCalledTimes(2);
+    expect(onApplyGenerated).not.toHaveBeenCalled();
+    expect(screen.getByText('Generating...')).toBeInTheDocument();
+
+    // Third poll reaches the terminal success.
+    await advancePoll();
+    expect(onApplyGenerated).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('Generating...')).not.toBeInTheDocument();
+  });
+
   it('displays the backend validation findings with the rendered result (10.3)', async () => {
-    generateWorkflow.mockResolvedValue(
-      generationResult({
+    getWorkflowGenerationJob.mockResolvedValue(
+      succeededJob({
         findings: [
           {
             severity: 'error',
@@ -229,8 +309,10 @@ describe('GenerateChatPanel successful generation', () => {
     const { onApplyGenerated } = renderPanel();
 
     send('Add a model');
+    await settle();
+    await advancePoll();
 
-    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    expect(onApplyGenerated).toHaveBeenCalledTimes(1);
     expect(
       screen.getByText('Validation found 1 error and 0 warnings')
     ).toBeInTheDocument();
@@ -242,8 +324,8 @@ describe('GenerateChatPanel successful generation', () => {
 
   it('maintains the session id across turns and sends the canvas snapshot (10.5 wiring)', async () => {
     generateWorkflow
-      .mockResolvedValueOnce(generationResult({ session_id: 'session-1' }))
-      .mockResolvedValueOnce(generationResult({ session_id: 'session-1' }));
+      .mockResolvedValueOnce(submission({ session_id: 'session-1' }))
+      .mockResolvedValueOnce(submission({ session_id: 'session-1' }));
     // After the first turn the canvas carries the generated definition.
     let currentDefinition: WorkflowDefinition = EMPTY_DEFINITION;
     const onApplyGenerated = vi.fn<GenerateChatPanelProps['onApplyGenerated']>(() => {
@@ -252,7 +334,9 @@ describe('GenerateChatPanel successful generation', () => {
     renderPanel({ getDefinition: () => currentDefinition, onApplyGenerated });
 
     send('Camera to capture pipeline');
-    await waitFor(() => expect(generateWorkflow).toHaveBeenCalledTimes(1));
+    await settle();
+    await advancePoll();
+    expect(generateWorkflow).toHaveBeenCalledTimes(1);
     // First turn: no session yet and an empty canvas sends no snapshot.
     expect(generateWorkflow.mock.calls[0][0]).toEqual({
       usecase_id: 'uc-1',
@@ -260,8 +344,11 @@ describe('GenerateChatPanel successful generation', () => {
     });
 
     send('Now add a crop before the capture');
-    await waitFor(() => expect(generateWorkflow).toHaveBeenCalledTimes(2));
-    // Follow-up: continues the session and sends the current canvas.
+    await settle();
+    await advancePoll();
+    expect(generateWorkflow).toHaveBeenCalledTimes(2);
+    // Follow-up: continues the session (the id adopted from the 202
+    // submission, workflow-manager-gaps 4.5) and sends the current canvas.
     expect(generateWorkflow.mock.calls[1][0]).toEqual({
       usecase_id: 'uc-1',
       prompt: 'Now add a crop before the capture',
@@ -276,9 +363,11 @@ describe('GenerateChatPanel successful generation', () => {
 // --------------------------------------------------------------------------
 
 describe('GenerateChatPanel failures', () => {
-  it('shows the API error, keeps the canvas untouched, and preserves the prompt (10.4, 10.7)', async () => {
+  it('shows a failed job Error_Envelope, keeps the canvas untouched, and preserves the prompt (10.4, 10.7)', async () => {
     const { ApiError } = await import('../../services/api');
-    generateWorkflow.mockRejectedValue(
+    // A failed Generation_Job replays its envelope from the status
+    // endpoint (workflow-manager-gaps Requirements 2.3, 4.3).
+    getWorkflowGenerationJob.mockRejectedValue(
       new ApiError(
         'Workflow generation timed out after 45 seconds. Your prompt was not lost - please retry.',
         504,
@@ -288,8 +377,10 @@ describe('GenerateChatPanel failures', () => {
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
+    await settle();
+    await advancePoll();
 
-    expect(await screen.findByText('Generation failed')).toBeInTheDocument();
+    expect(screen.getByText('Generation failed')).toBeInTheDocument();
     expect(
       screen.getByText(/Workflow generation timed out after 45 seconds/)
     ).toBeInTheDocument();
@@ -298,9 +389,26 @@ describe('GenerateChatPanel failures', () => {
     expect(promptInput().value).toBe('Camera to capture pipeline');
   });
 
+  it('shows a synchronous submit rejection without creating a poll loop (1.3 wiring)', async () => {
+    const { ApiError } = await import('../../services/api');
+    generateWorkflow.mockRejectedValue(
+      new ApiError('Temperature must be a number between 0 and 1', 400, 'INVALID_TEMPERATURE')
+    );
+    const { onApplyGenerated } = renderPanel();
+
+    send('Camera to capture pipeline');
+    await settle();
+
+    expect(screen.getByText('Generation failed')).toBeInTheDocument();
+    expect(screen.getByText(/Temperature must be a number/)).toBeInTheDocument();
+    expect(getWorkflowGenerationJob).not.toHaveBeenCalled();
+    expect(onApplyGenerated).not.toHaveBeenCalled();
+    expect(promptInput().value).toBe('Camera to capture pipeline');
+  });
+
   it('shows a client-side parse failure without rendering, preserving the prompt (10.4)', async () => {
-    generateWorkflow.mockResolvedValue(
-      generationResult({
+    getWorkflowGenerationJob.mockResolvedValue(
+      succeededJob({
         definition: {
           schemaVersion: 1,
           nodes: [
@@ -313,8 +421,10 @@ describe('GenerateChatPanel failures', () => {
     const { onApplyGenerated } = renderPanel();
 
     send('Build something exotic');
+    await settle();
+    await advancePoll();
 
-    expect(await screen.findByText('Generation failed')).toBeInTheDocument();
+    expect(screen.getByText('Generation failed')).toBeInTheDocument();
     expect(
       screen.getByText(/unknown node type 'mystery_node'/)
     ).toBeInTheDocument();
@@ -334,6 +444,75 @@ describe('GenerateChatPanel failures', () => {
 });
 
 // --------------------------------------------------------------------------
+// Poll-loop stops (workflow-manager-gaps Requirements 4.6, 4.7)
+// --------------------------------------------------------------------------
+
+describe('GenerateChatPanel poll-loop stops (4.6, 4.7)', () => {
+  it('stops after 3 consecutive transport failures with the retrieval error, preserving the prompt (4.6)', async () => {
+    // Network errors are not Generation_Job failure envelopes.
+    getWorkflowGenerationJob.mockRejectedValue(new TypeError('Failed to fetch'));
+    const { onApplyGenerated } = renderPanel();
+
+    send('Camera to capture pipeline');
+    await settle();
+
+    // Two failures: still polling.
+    await advancePoll(2);
+    expect(screen.getByText('Generating...')).toBeInTheDocument();
+
+    // Third consecutive failure: stop with the retrieval message.
+    await advancePoll();
+    expect(getWorkflowGenerationJob).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText('Generating...')).not.toBeInTheDocument();
+    expect(screen.getByText('Generation failed')).toBeInTheDocument();
+    expect(
+      screen.getByText(/The generation status could not be retrieved\./)
+    ).toBeInTheDocument();
+    expect(onApplyGenerated).not.toHaveBeenCalled();
+    expect(promptInput().value).toBe('Camera to capture pipeline');
+  });
+
+  it('resets the transport-failure counter on a successful poll (4.6)', async () => {
+    const { ApiError } = await import('../../services/api');
+    getWorkflowGenerationJob
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      // The uniform 404 is a non-failure envelope: transport failure too,
+      // but the successful poll before it reset the counter.
+      .mockResolvedValueOnce({ job_id: 'job-1', status: 'running' })
+      .mockRejectedValueOnce(new ApiError('Job not found', 404, 'JOB_NOT_FOUND'))
+      .mockResolvedValueOnce(succeededJob());
+    const { onApplyGenerated } = renderPanel();
+
+    send('Camera to capture pipeline');
+    await settle();
+    await advancePoll(5);
+
+    // Never 3 consecutive failures: the loop survived to the success.
+    expect(onApplyGenerated).toHaveBeenCalledTimes(1);
+    expect(promptInput().value).toBe('');
+  });
+
+  it('stops at the 300-second deadline with the did-not-complete error, preserving the prompt (4.7)', async () => {
+    getWorkflowGenerationJob.mockResolvedValue({ job_id: 'job-1', status: 'running' });
+    const { onApplyGenerated } = renderPanel();
+
+    send('Camera to capture pipeline');
+    await settle();
+
+    // 100 polls x 3 s = 300 s: the deadline fires (Req 4.7).
+    await advancePoll(100);
+    expect(screen.queryByText('Generating...')).not.toBeInTheDocument();
+    expect(screen.getByText('Generation failed')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Generation did not complete in time\./)
+    ).toBeInTheDocument();
+    expect(onApplyGenerated).not.toHaveBeenCalled();
+    expect(promptInput().value).toBe('Camera to capture pipeline');
+  });
+});
+
+// --------------------------------------------------------------------------
 // Task 10.5 additions: render-after-validation evidence, repeated-failure
 // canvas safety, retry flow, busy-state gating, and snapshot rules
 // (Requirements 10.3, 10.4, 10.5, 10.7)
@@ -341,8 +520,8 @@ describe('GenerateChatPanel failures', () => {
 
 describe('GenerateChatPanel render-after-validation (10.3)', () => {
   it('renders a validated result with warnings and displays those findings (10.3)', async () => {
-    generateWorkflow.mockResolvedValue(
-      generationResult({
+    getWorkflowGenerationJob.mockResolvedValue(
+      succeededJob({
         findings: [
           {
             severity: 'warning',
@@ -360,10 +539,12 @@ describe('GenerateChatPanel render-after-validation (10.3)', () => {
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
+    await settle();
+    await advancePoll();
 
     // The applied result is always accompanied by the backend validation
     // outcome: findings are displayed alongside the render (10.3).
-    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    expect(onApplyGenerated).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Validation passed (1 warning)')).toBeInTheDocument();
     const list = screen.getByRole('list', { name: 'Generation validation findings' });
     expect(list.textContent).toContain(
@@ -375,7 +556,7 @@ describe('GenerateChatPanel render-after-validation (10.3)', () => {
 describe('GenerateChatPanel repeated failures and retry (10.4, 10.7)', () => {
   it('leaves the canvas untouched across multiple consecutive failures (10.4, 10.7)', async () => {
     const { ApiError } = await import('../../services/api');
-    generateWorkflow
+    getWorkflowGenerationJob
       .mockRejectedValueOnce(
         new ApiError('Bedrock invocation failed: throttled', 502, 'GENERATION_FAILED')
       )
@@ -389,16 +570,20 @@ describe('GenerateChatPanel repeated failures and retry (10.4, 10.7)', () => {
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
+    await settle();
+    await advancePoll();
     expect(
-      await screen.findByText(/Bedrock invocation failed: throttled/)
+      screen.getByText(/Bedrock invocation failed: throttled/)
     ).toBeInTheDocument();
     expect(promptInput().value).toBe('Camera to capture pipeline');
 
     // Retry hits a timeout: the timeout-specific error replaces the
     // previous one, and the canvas has still never been touched.
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await settle();
+    await advancePoll();
     expect(
-      await screen.findByText(/timed out after 45 seconds/)
+      screen.getByText(/timed out after 45 seconds/)
     ).toBeInTheDocument();
     expect(screen.queryByText(/throttled/)).not.toBeInTheDocument();
 
@@ -409,23 +594,30 @@ describe('GenerateChatPanel repeated failures and retry (10.4, 10.7)', () => {
 
   it('renders on a successful retry after a failure, clearing the error and prompt (10.4, 10.7)', async () => {
     const { ApiError } = await import('../../services/api');
-    generateWorkflow
+    getWorkflowGenerationJob
       .mockRejectedValueOnce(new ApiError('Bedrock invocation failed', 502, 'GENERATION_FAILED'))
-      .mockResolvedValueOnce(generationResult());
+      .mockResolvedValueOnce(succeededJob());
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
-    expect(await screen.findByText('Generation failed')).toBeInTheDocument();
+    await settle();
+    await advancePoll();
+    expect(screen.getByText('Generation failed')).toBeInTheDocument();
     expect(onApplyGenerated).not.toHaveBeenCalled();
 
     // The preserved prompt is resent unchanged; the retry succeeds.
+    // The session id from the first 202 was adopted at submit time
+    // (workflow-manager-gaps Req 4.5), so the retry continues it.
     expect(promptInput().value).toBe('Camera to capture pipeline');
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await settle();
+    await advancePoll();
 
-    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    expect(onApplyGenerated).toHaveBeenCalledTimes(1);
     expect(generateWorkflow).toHaveBeenLastCalledWith({
       usecase_id: 'uc-1',
       prompt: 'Camera to capture pipeline',
+      session_id: 'session-1',
     });
     // The failure alert is cleared and the prompt input is emptied.
     expect(screen.queryByText('Generation failed')).not.toBeInTheDocument();
@@ -433,21 +625,23 @@ describe('GenerateChatPanel repeated failures and retry (10.4, 10.7)', () => {
   });
 });
 
-describe('GenerateChatPanel busy state (10.7)', () => {
+describe('GenerateChatPanel busy state (10.7, workflow-manager-gaps 4.1, 4.4)', () => {
   it('disables input and prevents a second send while a request is in flight', async () => {
-    let resolveGenerate!: (result: WorkflowGenerationResult) => void;
+    let resolveGenerate!: (value: ReturnType<typeof submission>) => void;
     generateWorkflow.mockImplementation(
       () =>
-        new Promise<WorkflowGenerationResult>((resolve) => {
+        new Promise<ReturnType<typeof submission>>((resolve) => {
           resolveGenerate = resolve;
         })
     );
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
+    await settle();
 
-    // While generating: spinner shown, prompt input and Send disabled.
-    expect(await screen.findByText('Generating...')).toBeInTheDocument();
+    // While generating: spinner shown, prompt input and Send disabled
+    // (the indicator shows immediately on submit, Req 4.1).
+    expect(screen.getByText('Generating...')).toBeInTheDocument();
     expect(promptInput().disabled).toBe(true);
     const sendButton = screen.getByRole('button', { name: 'Send' });
     expect(
@@ -459,8 +653,18 @@ describe('GenerateChatPanel busy state (10.7)', () => {
     fireEvent.click(sendButton);
     expect(generateWorkflow).toHaveBeenCalledTimes(1);
 
-    resolveGenerate(generationResult());
-    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    resolveGenerate(submission());
+    await settle();
+
+    // Still polling after the 202: submission stays disabled while the
+    // job is non-terminal (Req 4.4).
+    expect(screen.getByText('Generating...')).toBeInTheDocument();
+    expect(promptInput().disabled).toBe(true);
+    fireEvent.click(sendButton);
+    expect(generateWorkflow).toHaveBeenCalledTimes(1);
+
+    await advancePoll();
+    expect(onApplyGenerated).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('Generating...')).not.toBeInTheDocument();
   });
 });
@@ -488,32 +692,32 @@ describe('GenerateChatPanel temperature control', () => {
   });
 
   it('sends the temperature with the request when set', async () => {
-    generateWorkflow.mockResolvedValue(generationResult());
     renderPanel();
 
     fireEvent.change(temperatureInput(), { target: { value: '0.1' } });
     send('Camera to capture pipeline');
+    await settle();
 
-    await waitFor(() =>
-      expect(generateWorkflow).toHaveBeenCalledWith({
-        usecase_id: 'uc-1',
-        prompt: 'Camera to capture pipeline',
-        temperature: 0.1,
-      })
-    );
+    expect(generateWorkflow).toHaveBeenCalledWith({
+      usecase_id: 'uc-1',
+      prompt: 'Camera to capture pipeline',
+      temperature: 0.1,
+    });
+    await advancePoll();
   });
 
   it('omits temperature from the payload when left blank', async () => {
-    generateWorkflow.mockResolvedValue(generationResult());
     renderPanel();
 
     send('Camera to capture pipeline');
+    await settle();
 
-    await waitFor(() => expect(generateWorkflow).toHaveBeenCalledTimes(1));
+    expect(generateWorkflow).toHaveBeenCalledTimes(1);
     expect(generateWorkflow.mock.calls[0][0]).toEqual({
       usecase_id: 'uc-1',
       prompt: 'Camera to capture pipeline',
     });
+    await advancePoll();
   });
 
   it('shows an error and blocks Send for out-of-range values', async () => {
@@ -533,38 +737,36 @@ describe('GenerateChatPanel temperature control', () => {
   });
 
   it('accepts the boundary values 0 and 1', async () => {
-    generateWorkflow.mockResolvedValue(generationResult());
     renderPanel();
 
     fireEvent.change(temperatureInput(), { target: { value: '0' } });
     send('Camera to capture pipeline');
+    await settle();
 
-    await waitFor(() =>
-      expect(generateWorkflow).toHaveBeenCalledWith({
-        usecase_id: 'uc-1',
-        prompt: 'Camera to capture pipeline',
-        temperature: 0,
-      })
-    );
+    expect(generateWorkflow).toHaveBeenCalledWith({
+      usecase_id: 'uc-1',
+      prompt: 'Camera to capture pipeline',
+      temperature: 0,
+    });
+    await advancePoll();
   });
 });
 
 describe('GenerateChatPanel canvas snapshot rules (10.5)', () => {
   it('sends the snapshot on a first prompt over a non-empty canvas, without a session id (10.5)', async () => {
-    generateWorkflow.mockResolvedValue(generationResult());
     renderPanel({ getDefinition: () => GENERATED_DEFINITION });
 
     send('Add a crop before the capture');
+    await settle();
 
     // A non-empty canvas is sent for modification even on the first
     // turn of a session; no session id exists yet.
-    await waitFor(() =>
-      expect(generateWorkflow).toHaveBeenCalledWith({
-        usecase_id: 'uc-1',
-        prompt: 'Add a crop before the capture',
-        current_definition: GENERATED_DEFINITION,
-      })
-    );
+    expect(generateWorkflow).toHaveBeenCalledWith({
+      usecase_id: 'uc-1',
+      prompt: 'Add a crop before the capture',
+      current_definition: GENERATED_DEFINITION,
+    });
+    await advancePoll();
   });
 });
 
@@ -599,7 +801,9 @@ const STRUCTURAL_ERRORS: GenerationStructuralError[] = [
 describe('GenerateChatPanel gate rejection (8.8)', () => {
   it('renders the rejection alert with display-name fallback labels and explanations, preserving the prompt (8.8)', async () => {
     const { ApiError } = await import('../../services/api');
-    generateWorkflow.mockRejectedValue(
+    // The gate rejection is recorded on the failed job and replayed by
+    // the status endpoint (workflow-manager-gaps Requirements 2.3, 4.3).
+    getWorkflowGenerationJob.mockRejectedValue(
       new ApiError(
         'The generated workflow has structural errors and was rejected.',
         422,
@@ -610,10 +814,12 @@ describe('GenerateChatPanel gate rejection (8.8)', () => {
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
+    await settle();
+    await advancePoll();
 
     // The rejection is rendered as an error Alert with its own header,
     // distinct from the generic failure alert.
-    expect(await screen.findByText('Generation rejected')).toBeInTheDocument();
+    expect(screen.getByText('Generation rejected')).toBeInTheDocument();
     expect(screen.queryByText('Generation failed')).not.toBeInTheDocument();
     expect(
       screen.getByText(/The generated workflow has structural errors and was rejected\./)
@@ -640,7 +846,7 @@ describe('GenerateChatPanel gate rejection (8.8)', () => {
 
   it('renders the rejection alert for the fail-closed GENERATION_VALIDATION_INCOMPLETE code (8.8)', async () => {
     const { ApiError } = await import('../../services/api');
-    generateWorkflow.mockRejectedValue(
+    getWorkflowGenerationJob.mockRejectedValue(
       new ApiError(
         'Validation could not be completed for the generated workflow.',
         422,
@@ -651,8 +857,10 @@ describe('GenerateChatPanel gate rejection (8.8)', () => {
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
+    await settle();
+    await advancePoll();
 
-    expect(await screen.findByText('Generation rejected')).toBeInTheDocument();
+    expect(screen.getByText('Generation rejected')).toBeInTheDocument();
     expect(
       screen.getByText(/Validation could not be completed for the generated workflow\./)
     ).toBeInTheDocument();
@@ -664,23 +872,27 @@ describe('GenerateChatPanel gate rejection (8.8)', () => {
 
   it('clears the rejection and the prompt only on a subsequent 200 (8.8)', async () => {
     const { ApiError } = await import('../../services/api');
-    generateWorkflow
+    getWorkflowGenerationJob
       .mockRejectedValueOnce(
         new ApiError('Rejected.', 422, 'GENERATION_REJECTED', {
           structural_errors: STRUCTURAL_ERRORS,
         })
       )
-      .mockResolvedValueOnce(generationResult());
+      .mockResolvedValueOnce(succeededJob());
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
-    expect(await screen.findByText('Generation rejected')).toBeInTheDocument();
+    await settle();
+    await advancePoll();
+    expect(screen.getByText('Generation rejected')).toBeInTheDocument();
     expect(promptInput().value).toBe('Camera to capture pipeline');
 
     // Retry with the preserved prompt succeeds: the rejection alert is
     // cleared and the prompt input empties (cleared only on 200).
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    await settle();
+    await advancePoll();
+    expect(onApplyGenerated).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('Generation rejected')).not.toBeInTheDocument();
     expect(promptInput().value).toBe('');
   });
@@ -688,8 +900,8 @@ describe('GenerateChatPanel gate rejection (8.8)', () => {
 
 describe('GenerateChatPanel repaired notice (8.6)', () => {
   it('renders the automatic-correction info alert listing the corrected errors on a repaired acceptance (8.6)', async () => {
-    generateWorkflow.mockResolvedValue(
-      generationResult({
+    getWorkflowGenerationJob.mockResolvedValue(
+      succeededJob({
         gate: {
           passed: true,
           repaired: true,
@@ -716,9 +928,11 @@ describe('GenerateChatPanel repaired notice (8.6)', () => {
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
+    await settle();
+    await advancePoll();
 
     // The repaired result is still applied to the canvas (accept path).
-    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    expect(onApplyGenerated).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Automatic correction applied')).toBeInTheDocument();
 
     // The corrected original Structural_Errors are listed (8.6).
@@ -737,16 +951,18 @@ describe('GenerateChatPanel repaired notice (8.6)', () => {
   });
 
   it('shows no correction notice when the gate accepted without repair (8.6)', async () => {
-    generateWorkflow.mockResolvedValue(
-      generationResult({
+    getWorkflowGenerationJob.mockResolvedValue(
+      succeededJob({
         gate: { passed: true, repaired: false, corrected_errors: [], structural_error_codes: [] },
       })
     );
     const { onApplyGenerated } = renderPanel();
 
     send('Camera to capture pipeline');
+    await settle();
+    await advancePoll();
 
-    await waitFor(() => expect(onApplyGenerated).toHaveBeenCalledTimes(1));
+    expect(onApplyGenerated).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('Automatic correction applied')).not.toBeInTheDocument();
   });
 });

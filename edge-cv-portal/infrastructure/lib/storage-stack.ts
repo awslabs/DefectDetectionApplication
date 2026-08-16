@@ -24,6 +24,8 @@ export class StorageStack extends cdk.Stack {
   public readonly workflowChatSessionsTable: dynamodb.Table;
   public readonly cameraRegistryTable: dynamodb.Table;
   public readonly deviceRegistrationsTable: dynamodb.Table;
+  public readonly labelingTeamsTable: dynamodb.Table;
+  public readonly labelingTasksTable: dynamodb.Table;
   public readonly portalArtifactsBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -646,6 +648,76 @@ export class StorageStack extends cdk.Stack {
       },
     });
 
+    // LabelingTeams Table - DDA labeling teams (dda-data-labeling). Single-table
+    // layout: one partition per team (team_id) with item-type-prefixed sort keys:
+    //   META             — team metadata (usecase_id, team_name, created_at, created_by)
+    //   MEMBER#{user_id} — team member entries (user_id, email, added_at, added_by)
+    this.labelingTeamsTable = new dynamodb.Table(this, 'LabelingTeamsTable', {
+      tableName: 'dda-portal-labeling-teams',
+      partitionKey: {
+        name: 'team_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'sk',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Use_Case-scoped team listings and per-use-case name uniqueness checks
+    // (only META items carry usecase_id/created_at, so the index holds META
+    // items only).
+    this.labelingTeamsTable.addGlobalSecondaryIndex({
+      indexName: 'usecase-teams-index',
+      partitionKey: {
+        name: 'usecase_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'created_at',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+    });
+
+    // LabelingTasks Table - DDA labeling task assignments (dda-data-labeling).
+    // One item per (job, image): task_id is 'task-<zero-padded index>';
+    // assignee_user_id is a Cognito sub, 'UNASSIGNED', or 'AUTO' (skip-verification).
+    this.labelingTasksTable = new dynamodb.Table(this, 'LabelingTasksTable', {
+      tableName: 'dda-portal-labeling-tasks',
+      partitionKey: {
+        name: 'job_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'task_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Labeler-scoped task lookups: a labeler's assignments across jobs
+    // (GET /labeler/jobs) and per-job unsubmitted counts.
+    this.labelingTasksTable.addGlobalSecondaryIndex({
+      indexName: 'assignee-index',
+      partitionKey: {
+        name: 'assignee_user_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'job_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+    });
+
     // Portal Artifacts Bucket - stores shared component artifacts (dda-LocalServer)
     // Note: For cross-account Greengrass component access, we use the GDK component bucket
     // (dda-component-{region}-{account}) which is configured with cross-account access
@@ -781,6 +853,16 @@ export class StorageStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DeviceRegistrationsTableName', {
       value: this.deviceRegistrationsTable.tableName,
       description: 'DeviceRegistrations DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'LabelingTeamsTableName', {
+      value: this.labelingTeamsTable.tableName,
+      description: 'LabelingTeams DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'LabelingTasksTableName', {
+      value: this.labelingTasksTable.tableName,
+      description: 'LabelingTasks DynamoDB Table Name',
     });
 
     new cdk.CfnOutput(this, 'PortalArtifactsBucketName', {

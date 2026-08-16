@@ -22,6 +22,8 @@ import { ApiGatewayStack } from './api-gateway-stack';
 import { CameraRegistryApiStack } from './camera-registry-api-stack';
 import { UserAdminApiStack } from './user-admin-api-stack';
 import { QuickSetupApiStack } from './quick-setup-api-stack';
+import { DdaLabelingApiStack } from './dda-labeling-api-stack';
+import { WorkflowManagerGapsApiStack } from './workflow-manager-gaps-api-stack';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
@@ -31,6 +33,13 @@ export interface ComputeStackProps extends cdk.StackProps {
   auditLogTable: dynamodb.Table;
   trainingJobsTable: dynamodb.Table;
   labelingJobsTable: dynamodb.Table;
+  /**
+   * DDA Data Labeling tables (dda-data-labeling): teams
+   * (dda-portal-labeling-teams) and per-image tasks
+   * (dda-portal-labeling-tasks), created by the StorageStack (task 3.1).
+   */
+  labelingTeamsTable: dynamodb.Table;
+  labelingTasksTable: dynamodb.Table;
   preLabeledDatasetsTable: dynamodb.Table;
   modelsTable: dynamodb.Table;
   deploymentsTable: dynamodb.Table;
@@ -96,6 +105,13 @@ export interface ComputeStackProps extends cdk.StackProps {
 export class ComputeStack extends cdk.Stack {
   public readonly api: apigateway.RestApi;
   public readonly apiUrl: string;
+  /**
+   * DDA Data Labeling API handler (dda_labeling.py). Exported so the
+   * DdaLabelingApiStack (task 14.2) can register the /labeling-teams*,
+   * /labeler*, /labeling/{id}/stop and /labeling/{id}/review* routes
+   * against it.
+   */
+  public readonly ddaLabelingHandler: lambda.Function;
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
@@ -285,6 +301,8 @@ export class ComputeStack extends cdk.Stack {
       props.auditLogTable.grantWriteData(role);
       props.trainingJobsTable.grantReadWriteData(role);
       props.labelingJobsTable.grantReadWriteData(role);
+      props.labelingTeamsTable.grantReadWriteData(role);
+      props.labelingTasksTable.grantReadWriteData(role);
       props.preLabeledDatasetsTable.grantReadWriteData(role);
       props.modelsTable.grantReadWriteData(role);
       props.deploymentsTable.grantReadWriteData(role);
@@ -615,6 +633,8 @@ export class ComputeStack extends cdk.Stack {
       AUDIT_LOG_TABLE: props.auditLogTable.tableName,
       TRAINING_JOBS_TABLE: props.trainingJobsTable.tableName,
       LABELING_JOBS_TABLE: props.labelingJobsTable.tableName,
+      LABELING_TEAMS_TABLE: props.labelingTeamsTable.tableName,
+      LABELING_TASKS_TABLE: props.labelingTasksTable.tableName,
       PRE_LABELED_DATASETS_TABLE: props.preLabeledDatasetsTable.tableName,
       MODELS_TABLE: props.modelsTable.tableName,
       DEPLOYMENTS_TABLE: props.deploymentsTable.tableName,
@@ -1703,6 +1723,204 @@ export class ComputeStack extends cdk.Stack {
     }));
 
     // ------------------------------------------------------------------
+    // DDA Data Labeling (dda-data-labeling, task 14.1)
+    // In-house labeling backend: dda_labeling.py (API), dda_labeling_worker.py
+    // (async distribution / notifications / manifest generation),
+    // dda_autolabel_worker.py (SQS consumer for Bedrock/SAM pre-labeling)
+    // and the optional dda_sam_worker container-image Lambda.
+    // Requirements: 6.5, 8.1, 12.8
+    // ------------------------------------------------------------------
+
+    // Pillow imaging layer for the labeling worker's segmentation mask
+    // rendering (dda_manifest.render_mask_png). Reuses the existing
+    // backend/layers/imaging asset (Pillow 10.4.0, built by
+    // backend/layers/imaging/build.sh — same convention as the jwt layer);
+    // the SyntheticDataStack bundles the same directory as its own
+    // LayerVersion, so no new layer source is introduced here.
+    const imagingLayer = new lambda.LayerVersion(this, 'ImagingLayer', {
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/imaging')),
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
+      description:
+        'Pillow imaging layer for DDA labeling mask rendering (built by ' +
+        'backend/layers/imaging/build.sh)',
+    });
+
+    // Auto-label queue + DLQ (camera-shadow queue pattern). The visibility
+    // timeout equals the consumer Lambda timeout (300 s) so a message is
+    // never redelivered while its Bedrock/SAM inference is still running;
+    // after 3 failed receives the message dead-letters.
+    const ddaAutolabelDlq = new sqs.Queue(this, 'DdaAutolabelDLQ', {
+      queueName: 'dda-portal-autolabel-queue-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+    });
+
+    const ddaAutolabelQueue = new sqs.Queue(this, 'DdaAutolabelQueue', {
+      queueName: 'dda-portal-autolabel-queue',
+      visibilityTimeout: cdk.Duration.seconds(300),
+      retentionPeriod: cdk.Duration.days(4),
+      enforceSSL: true,
+      deadLetterQueue: {
+        queue: ddaAutolabelDlq,
+        maxReceiveCount: 3,
+      },
+    });
+
+    // Async worker (dda_labeling_worker.py): task distribution/rebalancing,
+    // SES notifications, and manifest generation (segmentation mask
+    // rendering with Pillow is why it gets 2 GB / 900 s).
+    const ddaLabelingWorker = new lambda.Function(this, 'DdaLabelingWorker', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'dda_labeling_worker.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('DdaLabelingWorker'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-27-dda-labeling',
+        AUTOLABEL_QUEUE_URL: ddaAutolabelQueue.queueUrl,
+        // Same verified SES sender the User_Manager uses; unset => the
+        // worker records notifications_skipped=true and proceeds (Req 6.5).
+        SES_SENDER_ADDRESS: sesSenderAddress.valueAsString,
+        // Portal frontend domain for the labeler-workspace deep links in
+        // notification emails (https://{PORTAL_DOMAIN}/labeler?job={job_id}).
+        // Same optional cloudFrontDomain source the data-management handler
+        // uses for CLOUDFRONT_DOMAIN; absent until the frontend stack exists.
+        ...(props.cloudFrontDomain && { PORTAL_DOMAIN: props.cloudFrontDomain }),
+      },
+      layers: [sharedLayer, imagingLayer],
+      timeout: cdk.Duration.seconds(900),
+      memorySize: 2048,
+    });
+
+    // The distributor fans one auto-label message per image onto the queue.
+    ddaAutolabelQueue.grantSendMessages(ddaLabelingWorker);
+
+    // Assignment-notification emails (identity/* — the user_admin pattern:
+    // SES authorizes SendEmail against the address or covering domain
+    // identity of the Source address).
+    ddaLabelingWorker.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ses:SendEmail'],
+      resources: [
+        `arn:aws:ses:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:identity/*`,
+      ],
+    }));
+
+    // API handler (dda_labeling.py): team management, DDA job creation
+    // (delegated from labeling.py), labeler task APIs, admin review.
+    const ddaLabelingHandler = new lambda.Function(this, 'DdaLabelingHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'dda_labeling.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('DdaLabeling'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-27-dda-labeling',
+        DDA_LABELING_WORKER_FUNCTION_NAME: ddaLabelingWorker.functionName,
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+    this.ddaLabelingHandler = ddaLabelingHandler;
+
+    // Job creation / membership changes async-invoke the worker
+    // ({action: 'distribute'|'generate_manifest'}).
+    ddaLabelingWorker.grantInvoke(ddaLabelingHandler);
+
+    // labeling.py delegates DDA job creation in-process to
+    // dda_labeling.create_dda_job (import, same Lambda), which async-invokes
+    // the worker — so the existing LabelingHandler needs the same wiring.
+    labelingHandler.addEnvironment(
+      'DDA_LABELING_WORKER_FUNCTION_NAME',
+      ddaLabelingWorker.functionName,
+    );
+    ddaLabelingWorker.grantInvoke(labelingHandler);
+
+    // Team-member resolution (member identities/emails come from Cognito):
+    // the handler validates the Data_Labeler role on add-member and the
+    // worker resolves recipient emails for notifications.
+    for (const fn of [ddaLabelingHandler, ddaLabelingWorker]) {
+      fn.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'cognito-idp:ListUsers',
+          'cognito-idp:AdminGetUser',
+        ],
+        resources: [props.userPool.userPoolArn],
+      }));
+    }
+
+    // Auto-label SQS consumer (dda_autolabel_worker.py): Bedrock Converse /
+    // SAM pre-labeling per image. Returns partial batch responses, hence
+    // reportBatchItemFailures.
+    const ddaAutolabelWorker = new lambda.Function(this, 'DdaAutolabelWorker', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'dda_autolabel_worker.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('DdaAutolabelWorker'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-27-dda-labeling',
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(300),
+    });
+
+    ddaAutolabelWorker.addEventSource(new SqsEventSource(ddaAutolabelQueue, {
+      batchSize: 5,
+      reportBatchItemFailures: true,
+    }));
+
+    // Bedrock vision pre-labeling via the Converse API (authorized by
+    // bedrock:InvokeModel). The model id is runtime job configuration, so
+    // the grant covers foundation models and inference profiles rather than
+    // a fixed model ARN (workflow-generator pattern).
+    ddaAutolabelWorker.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        'arn:aws:bedrock:*::foundation-model/*',
+        `arn:aws:bedrock:*:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
+
+    // SAM worker (dda_sam_worker): container-image Lambda bundling a CPU
+    // ONNX SAM variant (backend/sam-worker/Dockerfile). Building the image
+    // downloads the model archive and produces a multi-GB Docker build, so
+    // it is gated behind the `deploySamWorker` CDK context flag
+    // (-c deploySamWorker=true; default OFF) — ordinary portal deployments
+    // must not require Docker or the model download. When disabled,
+    // SAM_WORKER_FUNCTION_NAME is simply absent from the autolabel worker
+    // environment and SAM-model jobs report pre-label failures instead.
+    const deploySamWorkerContext = this.node.tryGetContext('deploySamWorker');
+    const deploySamWorker =
+      deploySamWorkerContext === true || deploySamWorkerContext === 'true';
+    if (deploySamWorker) {
+      const ddaSamWorker = new lambda.DockerImageFunction(this, 'DdaSamWorker', {
+        code: lambda.DockerImageCode.fromImageAsset(
+          path.join(__dirname, '../../backend/sam-worker'),
+        ),
+        description:
+          'DDA labeling SAM pre-label worker (CPU ONNX SAM region proposals)',
+        memorySize: 10240,
+        timeout: cdk.Duration.seconds(300),
+      });
+
+      // Synchronous invoke from the autolabel worker (bounded at 120 s
+      // wall-clock in dda_autolabel_worker.py). The image is passed inline
+      // (base64) or as a presigned URL, so the SAM worker needs no S3/table
+      // grants of its own.
+      ddaAutolabelWorker.addEnvironment(
+        'SAM_WORKER_FUNCTION_NAME',
+        ddaSamWorker.functionName,
+      );
+      ddaSamWorker.grantInvoke(ddaAutolabelWorker);
+    }
+
+    // ------------------------------------------------------------------
     // Workflow Manager Lambda functions
     // Handler modules (workflows.py, workflow_validation.py,
     // workflow_packaging.py, workflow_generator.py, workflow_testing.py)
@@ -1755,7 +1973,19 @@ export class ComputeStack extends cdk.Stack {
     });
 
     // Workflow Generator Lambda Handler (Bedrock prompt-based generation)
+    //
+    // Fixed function name so the Lambda's environment can carry its own
+    // function name (async submit/worker self-invocation,
+    // workflow-manager-gaps) and the role can scope lambda:InvokeFunction to
+    // exactly this function — a CloudFormation resource cannot Ref itself
+    // from its own Environment, so the name must be a synth-time constant.
+    // Same fixed-name pattern as the SyntheticDataStack handler.
+    const WORKFLOW_GENERATOR_FUNCTION_NAME = 'dda-portal-workflow-generator';
+    const workflowGeneratorFunctionArn =
+      `arn:aws:lambda:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}` +
+      `:function:${WORKFLOW_GENERATOR_FUNCTION_NAME}`;
     const workflowGeneratorHandler = new lambda.Function(this, 'WorkflowGeneratorHandler', {
+      functionName: WORKFLOW_GENERATOR_FUNCTION_NAME,
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'workflow_generator.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
@@ -1763,10 +1993,38 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2025-01-25-workflow-generator',
+        // Self-invocation target for the async generation worker
+        // (submit_generation Event-invokes this same function with a
+        // workflow_gen_worker payload; the handler falls back to
+        // AWS_LAMBDA_FUNCTION_NAME when unset).
+        WORKFLOW_GENERATOR_FUNCTION_NAME,
       },
       layers: [sharedLayer, workflowCoreLayer],
       // Bedrock invocation timeout is configurable up to 240s; leave headroom
       timeout: cdk.Duration.seconds(270),
+    });
+
+    // Async submit/poll generation (workflow-manager-gaps): grant the
+    // generator role lambda:InvokeFunction on its own function so
+    // submit_generation can Event-invoke the background worker (the
+    // ddaLabelingWorker.grantInvoke pattern, self-directed). The grant uses
+    // the fixed-name ARN rather than grantInvoke(self) because the Function
+    // resource depends on its role's default policy — referencing the
+    // function ARN token from there would be a dependency cycle (see
+    // NodeGeneratorSelfInvokePolicy in node-designer-stack.ts).
+    workflowGeneratorHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [workflowGeneratorFunctionArn],
+    }));
+
+    // Never retry the async generation worker: an abnormally terminated
+    // worker must surface as failed via the status endpoint's reaper
+    // (GENERATION_ABNORMAL_TERMINATION) rather than being silently re-run
+    // after the reaper already fired (Req 3.6). Synthesizes an
+    // AWS::Lambda::EventInvokeConfig with MaximumRetryAttempts: 0.
+    workflowGeneratorHandler.configureAsyncInvoke({
+      retryAttempts: 0,
     });
 
     // Grant the generator permission to invoke the configured Bedrock model via
@@ -2274,6 +2532,59 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     // deploy against the same 'v1' stage).
     quickSetupApiStack.addDependency(cameraRegistryApiStack);
     quickSetupApiStack.addDependency(userAdminApiStack);
+
+    // DDA data labeling routes (dda-data-labeling, task 14.2) in their own
+    // nested stack for the same 500-resource-limit reason. /labeling-teams*
+    // and /labeler* attach at the imported API root; /labeling/{id}/stop and
+    // /labeling/{id}/review* attach under the ApiGatewayStack-owned
+    // /labeling/{id} resource via its exported resource id. Requests are
+    // JWT-authorized at the gateway; RBAC (Requirements 2.5, 3.7, 11.4) is
+    // enforced in dda_labeling.py / labeling.py.
+    const ddaLabelingApiStack = new DdaLabelingApiStack(this, 'DdaLabelingApi', {
+      restApiId: apiGatewayStack.api.restApiId,
+      restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+      labelingJobResourceId: apiGatewayStack.labelingJobResourceId,
+      // Must match ApiGatewayStack deployOptions.stageName.
+      stageName: 'v1',
+      userPool: props.userPool,
+      ddaLabelingHandler,
+      labelingHandler,
+    });
+    ddaLabelingApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (all nested API stacks
+    // deploy against the same 'v1' stage).
+    ddaLabelingApiStack.addDependency(cameraRegistryApiStack);
+    ddaLabelingApiStack.addDependency(userAdminApiStack);
+    ddaLabelingApiStack.addDependency(quickSetupApiStack);
+
+    // Workflow Manager gaps routes (workflow-manager-gaps, task 10.3) in
+    // their own nested stack for the same 500-resource-limit reason.
+    // GET /workflows/generate/{job_id} (generation job status) attaches
+    // under the ApiGatewayStack-owned /workflows/generate resource and
+    // PATCH /workflows/{id}/name (metadata-only rename) under
+    // /workflows/{id}, both via their exported resource ids.
+    const workflowManagerGapsApiStack = new WorkflowManagerGapsApiStack(
+      this,
+      'WorkflowManagerGapsApi',
+      {
+        restApiId: apiGatewayStack.api.restApiId,
+        restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+        workflowGenerateResourceId: apiGatewayStack.workflowGenerateResourceId,
+        workflowResourceId: apiGatewayStack.workflowResourceId,
+        // Must match ApiGatewayStack deployOptions.stageName.
+        stageName: 'v1',
+        userPool: props.userPool,
+        workflowGeneratorHandler,
+        workflowsHandler,
+      },
+    );
+    workflowManagerGapsApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (all nested API stacks
+    // deploy against the same 'v1' stage).
+    workflowManagerGapsApiStack.addDependency(cameraRegistryApiStack);
+    workflowManagerGapsApiStack.addDependency(userAdminApiStack);
+    workflowManagerGapsApiStack.addDependency(quickSetupApiStack);
+    workflowManagerGapsApiStack.addDependency(ddaLabelingApiStack);
 
     // Custom Resource to update UseCases Lambda environment variable with API Gateway ID
     // This avoids circular dependency by updating the Lambda AFTER both resources are created

@@ -144,6 +144,16 @@ def sampling_env(aws_stack):
         }, None)
     node_generator.dispatch_generation_worker = dispatch
 
+    # Same for the workflow-generation worker (workflow-manager-gaps
+    # async transport): the job is settled by the time submit returns.
+    def wf_dispatch(job_id, user):
+        workflow_generator.handler({
+            "workflow_gen_worker": True,
+            "job_id": job_id,
+            "user": user,
+        }, None)
+    workflow_generator.dispatch_generation_worker = wf_dispatch
+
     from workflow_core.scaffold import render_scaffold
     reference_files = render_scaffold(NODE_DECLARATION)
 
@@ -240,7 +250,24 @@ def generate_workflow(env):
         "requestContext": auth_context(env.wf_user),
     }
     response = env.workflow_generator.handler(event, None)
-    return response["statusCode"], json.loads(response["body"])
+    status, body = response["statusCode"], json.loads(response["body"])
+    if status != 202:
+        return status, body
+    return settled_workflow_job(env, body["job_id"])
+
+
+def settled_workflow_job(env, job_id):
+    """The terminal Generation_Job outcome in the old synchronous shape
+    (the fixture's wf_dispatch ran the worker in-process during submit)."""
+    import boto3
+    job = env.workflow_generator.get_job(job_id)
+    if job["status"] == "succeeded":
+        obj = boto3.client("s3", region_name=REGION).get_object(
+            Bucket=TEST_ENV["PORTAL_ARTIFACTS_BUCKET"],
+            Key=job["result_s3_key"])
+        return 200, json.loads(obj["Body"].read().decode("utf-8"))
+    failure = job["failure"]
+    return int(failure["http_status"]), {"error": failure["error"]}
 
 
 def generate_node(env):

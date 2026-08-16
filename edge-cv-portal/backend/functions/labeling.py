@@ -5,6 +5,7 @@ Handles job creation, monitoring, and manifest generation.
 
 import json
 import boto3
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 import os
 import uuid
@@ -25,11 +26,26 @@ from shared_utils import (
     create_response,
     handle_error,
     get_usecase_region,
-    create_boto3_client
+    create_boto3_client,
+    get_user_from_event,
+    log_audit_event,
+    Permission
 )
+from rbac_middleware import rbac_check
 
 dynamodb = boto3.resource('dynamodb')
 labeling_jobs_table = dynamodb.Table(os.environ.get('LABELING_JOBS_TABLE', 'LabelingJobs'))
+# dda-data-labeling: DDA-backend jobs keep their Task_Assignments in the
+# tasks table and their team membership in the single-table teams store.
+labeling_tasks_table = dynamodb.Table(
+    os.environ.get('LABELING_TASKS_TABLE', 'dda-portal-labeling-tasks'))
+labeling_teams_table = dynamodb.Table(
+    os.environ.get('LABELING_TEAMS_TABLE', 'dda-portal-labeling-teams'))
+
+# Labeling_Backend values accepted at job creation (Requirement 1.6).
+LABELING_BACKEND_GROUND_TRUTH = 'GroundTruth'
+LABELING_BACKEND_DDA = 'DDA'
+VALID_LABELING_BACKENDS = (LABELING_BACKEND_GROUND_TRUTH, LABELING_BACKEND_DDA)
 
 
 def handler(event, context):
@@ -61,6 +77,16 @@ def handler(event, context):
             return list_labeling_jobs(event)
         elif http_method == 'POST' and '/labeling' in path and '{id}' not in resource:
             return create_labeling_job(event)
+        elif (http_method == 'POST' and '{id}' in resource
+                and resource.rstrip('/').endswith('/stop')):
+            # POST /labeling/{id}/stop (dda-data-labeling, Requirements
+            # 11.4, 11.5, 11.9). The route carries no usecase_id of its
+            # own: resolve it from the job record and inject it into the
+            # event so @rbac_check authorizes MANAGE_LABELING_JOBS in the
+            # job's Use_Case scope.
+            job_id = (event.get('pathParameters') or {}).get('id', '')
+            _inject_job_usecase_scope(event, job_id)
+            return stop_labeling_job(event, context)
         elif http_method == 'GET' and '/labeling/' in path and '{id}' in resource:
             # Extract job_id from path parameters
             job_id = event.get('pathParameters', {}).get('id', '')
@@ -99,13 +125,23 @@ def list_labeling_jobs(event):
         
         jobs = response.get('Items', [])
         
+        # Single merged list across both Labeling_Backends (Requirement
+        # 1.5): each listed job carries its persisted labeling_backend
+        # value; jobs created before the backend switch existed are
+        # Ground Truth jobs.
+        for job in jobs:
+            job.setdefault('labeling_backend', LABELING_BACKEND_GROUND_TRUTH)
+        
         # Sync live status from SageMaker for any non-terminal jobs so the list
         # reflects current state without needing to open the detail page.
         # Terminal states (Completed/Failed/Stopped) are not re-queried.
+        # DDA-backend jobs are skipped: their status is portal-managed and
+        # never lives in SageMaker (Requirement 1.3/1.5).
         TERMINAL = {'Completed', 'Failed', 'Stopped'}
         jobs_to_sync = [
             j for j in jobs
-            if j.get('sagemaker_job_name') and j.get('status') not in TERMINAL
+            if j.get('labeling_backend') != LABELING_BACKEND_DDA
+            and j.get('sagemaker_job_name') and j.get('status') not in TERMINAL
         ]
         if jobs_to_sync:
             sagemaker = None
@@ -197,6 +233,39 @@ def list_labeling_jobs(event):
         return handle_error(e, 'Failed to list labeling jobs')
 
 
+def _delegate_dda_job_creation(body, event):
+    """Delegate DDA-backend job creation to dda_labeling.create_dda_job.
+
+    Delegation contract (the callee is implemented in dda_labeling.py):
+
+        dda_labeling.create_dda_job(body: dict, user: dict) -> dict
+
+    - ``body`` is the parsed request body (including
+      ``labeling_backend='DDA'``); the callee performs all DDA-specific
+      validation, dataset enumeration and persistence, writing
+      ``labeling_backend='DDA'`` on the job item (Requirement 1.4).
+    - ``user`` is the shared_utils.get_user_from_event shape:
+      ``{'user_id', 'email', 'username', 'role'}``.
+    - The return value is a complete API Gateway response
+      (shared_utils.create_response shape): 201 with the created job id
+      on success, 4xx with nothing persisted on validation failure.
+
+    The import is lazy so this module keeps loading (and the GroundTruth
+    path keeps working) in environments where the DDA handler module is
+    not deployed alongside it.
+    """
+    import dda_labeling  # lazy import; see contract above
+
+    create_dda_job = getattr(dda_labeling, 'create_dda_job', None)
+    if create_dda_job is None:
+        logger.error("dda_labeling.create_dda_job is not available")
+        return create_response(501, {
+            'error': ('The DDA labeling backend is not available in this '
+                      'deployment.')
+        })
+    return create_dda_job(body, get_user_from_event(event))
+
+
 def create_labeling_job(event):
     """
     Create a new Ground Truth labeling job.
@@ -215,6 +284,26 @@ def create_labeling_job(event):
     """
     try:
         body = json.loads(event.get('body', '{}'))
+        
+        # Backend switch (dda-data-labeling, Requirements 1.2/1.3/1.6):
+        # labeling_backend is mandatory and validated before anything else,
+        # so a rejected submission persists no job record and creates no
+        # backend resources.
+        labeling_backend = body.get('labeling_backend')
+        if labeling_backend not in VALID_LABELING_BACKENDS:
+            return create_response(400, {
+                'error': (
+                    f"Invalid labeling_backend '{labeling_backend}'. "
+                    f"labeling_backend is required and must be one of: "
+                    f"{', '.join(VALID_LABELING_BACKENDS)}."
+                ),
+                'labeling_backend': labeling_backend,
+            })
+        
+        if labeling_backend == LABELING_BACKEND_DDA:
+            # DDA jobs are created entirely within portal-managed AWS
+            # resources; no SageMaker API is called (Requirement 1.3).
+            return _delegate_dda_job_creation(body, event)
         
         # Validate required fields
         required_fields = ['usecase_id', 'job_name', 'dataset_prefix', 'task_type', 
@@ -481,6 +570,7 @@ def create_labeling_job(event):
             'job_id': job_id,
             'usecase_id': usecase_id,
             'job_name': job_name,
+            'labeling_backend': LABELING_BACKEND_GROUND_TRUTH,
             'sagemaker_job_name': sagemaker_job_name,
             'status': 'InProgress',
             'task_type': task_type,
@@ -583,6 +673,12 @@ def get_labeling_job(job_id: str):
             return create_response(404, {'error': 'Labeling job not found'})
         
         job = response['Item']
+        job.setdefault('labeling_backend', LABELING_BACKEND_GROUND_TRUTH)
+        
+        # DDA-backend jobs are portal-managed: no SageMaker status sync,
+        # console link, or worker-portal resolution applies to them.
+        if job.get('labeling_backend') == LABELING_BACKEND_DDA:
+            return _get_dda_labeling_job(job)
         
         # Region for building console / worker-portal links
         try:
@@ -702,6 +798,256 @@ def get_labeling_job(job_id: str):
         
     except Exception as e:
         return handle_error(e, 'Failed to get labeling job')
+
+
+def _query_dda_job_tasks(job_id: str) -> List[Dict]:
+    """All Task_Assignment / result items for a DDA job (paginated)."""
+    items = []
+    kwargs = {'KeyConditionExpression': Key('job_id').eq(job_id)}
+    while True:
+        response = labeling_tasks_table.query(**kwargs)
+        items.extend(response.get('Items', []))
+        last_key = response.get('LastEvaluatedKey')
+        if not last_key:
+            break
+        kwargs['ExclusiveStartKey'] = last_key
+    return items
+
+
+def _query_team_members(team_id: str) -> List[Dict]:
+    """Current member items of a Labeling_Team (sk = 'MEMBER#<user_id>')."""
+    items = []
+    kwargs = {
+        'KeyConditionExpression': (
+            Key('team_id').eq(team_id) & Key('sk').begins_with('MEMBER#')),
+    }
+    while True:
+        response = labeling_teams_table.query(**kwargs)
+        items.extend(response.get('Items', []))
+        last_key = response.get('LastEvaluatedKey')
+        if not last_key:
+            break
+        kwargs['ExclusiveStartKey'] = last_key
+    return items
+
+
+def _round_percent(numerator: int, denominator: int) -> int:
+    """Percentage rounded to the nearest whole number (halves round up)."""
+    if denominator <= 0:
+        return 0
+    return int((numerator * 100 / denominator) + 0.5)
+
+
+def _get_dda_labeling_job(job: Dict):
+    """DDA job detail (Requirements 11.1, 11.2, 11.10).
+
+    Adds to the persisted job item: the submitted Task_Assignment count,
+    the progress percentage rounded to the nearest whole number, the
+    per-member submitted/remaining counts, the unassigned count, the
+    blocked flag, and the notification state. For Skip_Verification_Mode
+    jobs the count of completed auto-label attempts (succeeded or failed)
+    substitutes for the submitted count in the progress computation
+    (Requirement 11.10).
+    """
+    tasks = _query_dda_job_tasks(job['job_id'])
+    # Inactive tasks (deactivated after a distribution shortfall) never
+    # count toward progress or member workloads.
+    active_tasks = [t for t in tasks if t.get('status') != 'Inactive']
+    image_count = int(job.get('image_count', 0) or 0)
+
+    if job.get('skip_verification'):
+        # Requirement 11.10: images whose auto-label attempts completed
+        # (succeeded or failed) stand in for the submitted count.
+        submitted_count = int(job.get('autolabel_completed_count', 0) or 0)
+    else:
+        submitted_count = sum(
+            1 for t in active_tasks if t.get('status') == 'Submitted')
+
+    job['submitted_count'] = submitted_count
+    job['progress_percent'] = _round_percent(submitted_count, image_count)
+    job['unassigned_count'] = sum(
+        1 for t in active_tasks
+        if t.get('assignee_user_id') == 'UNASSIGNED'
+        and t.get('status') != 'Submitted')
+    job['blocked'] = bool(job.get('blocked', False))
+    job.setdefault('notifications_skipped', False)
+    job.setdefault('notification_failures', [])
+
+    # Per-member submitted/remaining counts for team jobs (Req 11.2).
+    member_progress = []
+    if job.get('team_id'):
+        per_assignee: Dict[str, Dict[str, int]] = {}
+        for task in active_tasks:
+            assignee = task.get('assignee_user_id')
+            if not assignee or assignee in ('UNASSIGNED', 'AUTO'):
+                continue
+            counts = per_assignee.setdefault(
+                assignee, {'submitted': 0, 'remaining': 0})
+            if task.get('status') == 'Submitted':
+                counts['submitted'] += 1
+            else:
+                counts['remaining'] += 1
+        for member in _query_team_members(job['team_id']):
+            counts = per_assignee.get(
+                member['user_id'], {'submitted': 0, 'remaining': 0})
+            member_progress.append({
+                'user_id': member['user_id'],
+                'email': member.get('email'),
+                'submitted': counts['submitted'],
+                'remaining': counts['remaining'],
+            })
+    job['member_progress'] = member_progress
+
+    return create_response(200, {'job': job})
+
+
+def _inject_job_usecase_scope(event: Dict, job_id: str) -> None:
+    """Make the job's usecase_id visible to @rbac_check via the query
+    string, so job-scoped routes (e.g. /labeling/{id}/stop) are
+    authorized in the job's Use_Case scope rather than 'global'. When
+    the job does not exist the scope falls back to 'global'
+    (allow_global) and the handler answers 404 after authorization."""
+    try:
+        response = labeling_jobs_table.get_item(Key={'job_id': job_id})
+    except Exception as e:
+        logger.warning(f"Could not resolve usecase scope for job "
+                       f"{job_id}: {str(e)}")
+        return
+    job = response.get('Item')
+    if job and job.get('usecase_id'):
+        params = event.get('queryStringParameters') or {}
+        params.setdefault('usecase_id', job['usecase_id'])
+        event['queryStringParameters'] = params
+
+
+@rbac_check([Permission.MANAGE_LABELING_JOBS], allow_global=True)
+def stop_labeling_job(event, context):
+    """POST /labeling/{id}/stop — stop an InProgress DDA labeling job
+    (dda-data-labeling, Requirements 11.4, 11.5, 11.7, 11.9).
+
+    - DDA jobs only: Ground Truth jobs are rejected with a validation
+      error (their lifecycle is SageMaker-managed).
+    - InProgress -> Stopped with `stopped_at` recorded; all submitted
+      annotations are retained untouched (Req 11.4). The transition is
+      a conditional update (status = InProgress) so a concurrent status
+      change can never be overwritten.
+    - A stop request against a job whose status is not InProgress is a
+      validation error leaving the status unchanged (Req 11.9).
+    - If the stop cannot be completed in full the job stays InProgress
+      and the caller gets an explicit not-stopped error (Req 11.5).
+    - A successful stop writes a `job_stopped` audit event with the
+      acting user, job id, event type, and timestamp (Req 11.7).
+    """
+    job_id = (event.get('pathParameters') or {}).get('id', '')
+    try:
+        response = labeling_jobs_table.get_item(Key={'job_id': job_id})
+        job = response.get('Item')
+        if not job:
+            return create_response(404, {'error': 'Labeling job not found'})
+
+        backend = job.get('labeling_backend', LABELING_BACKEND_GROUND_TRUTH)
+        if backend != LABELING_BACKEND_DDA:
+            return create_response(400, {
+                'error': (
+                    'Only DDA labeling jobs can be stopped through this '
+                    'operation. This job uses the '
+                    f"'{backend}' backend, whose lifecycle is managed by "
+                    'SageMaker Ground Truth.'
+                ),
+                'labeling_backend': backend,
+            })
+
+        current_status = job.get('status')
+        if current_status != 'InProgress':
+            # Req 11.9: non-InProgress -> validation error, status
+            # unchanged (nothing has been written at this point).
+            return create_response(400, {
+                'error': (
+                    f"Labeling job {job_id} cannot be stopped: its status "
+                    f"is '{current_status}'. Only InProgress jobs can be "
+                    'stopped. The job status is unchanged.'
+                ),
+                'status': current_status,
+            })
+
+        now = int(datetime.utcnow().timestamp())
+        try:
+            # Conditional update so the InProgress -> Stopped transition
+            # is atomic: a concurrent completion/failure makes the write
+            # fail rather than clobbering the newer status. Task items
+            # (submitted annotations) are never touched (Req 11.4).
+            labeling_jobs_table.update_item(
+                Key={'job_id': job_id},
+                UpdateExpression=('SET #status = :stopped, '
+                                  'stopped_at = :now, updated_at = :now'),
+                ConditionExpression='#status = :in_progress',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={
+                    ':stopped': 'Stopped',
+                    ':in_progress': 'InProgress',
+                    ':now': now,
+                },
+            )
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', '')
+            if error_code == 'ConditionalCheckFailedException':
+                # The status changed between the read and the write:
+                # the job is no longer InProgress, so this is the
+                # Req 11.9 validation error — status left as the
+                # concurrent writer set it.
+                refreshed = labeling_jobs_table.get_item(
+                    Key={'job_id': job_id}).get('Item', {})
+                concurrent_status = refreshed.get('status', 'unknown')
+                return create_response(400, {
+                    'error': (
+                        f"Labeling job {job_id} cannot be stopped: its "
+                        f"status is '{concurrent_status}'. Only InProgress "
+                        'jobs can be stopped. The job status is unchanged.'
+                    ),
+                    'status': concurrent_status,
+                })
+            raise
+
+        # Req 11.7: job lifecycle audit event (job_created is written at
+        # creation in dda_labeling.create_dda_job; job_completed at
+        # manifest generation). log_audit_event records the event
+        # timestamp itself.
+        user = get_user_from_event(event)
+        log_audit_event(
+            user_id=user['user_id'],
+            action='job_stopped',
+            resource_type='labeling_job',
+            resource_id=job_id,
+            result='success',
+            details={
+                'usecase_id': job.get('usecase_id'),
+                'labeling_backend': LABELING_BACKEND_DDA,
+                'previous_status': 'InProgress',
+                'stopped_at': now,
+            },
+        )
+
+        return create_response(200, {
+            'job_id': job_id,
+            'status': 'Stopped',
+            'stopped_at': now,
+            'message': 'Labeling job stopped. Submitted annotations are '
+                       'retained.',
+        })
+
+    except Exception as e:
+        # Req 11.5: the stop did not complete — the job remains
+        # InProgress (the conditional write either failed or never ran)
+        # and the caller gets an explicit not-stopped error.
+        logger.error(f"Error stopping labeling job {job_id}: {str(e)}",
+                     exc_info=True)
+        return create_response(500, {
+            'error': (
+                f"Labeling job {job_id} was not stopped: an error occurred "
+                'while applying the stop. The job remains InProgress; '
+                'please retry.'
+            ),
+        })
 
 
 def get_manifest(job_id: str):

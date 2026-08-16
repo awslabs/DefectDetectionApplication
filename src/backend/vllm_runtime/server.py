@@ -91,17 +91,24 @@ def sampling_params_from(parameters: Optional[Dict[str, Any]]) -> Dict[str, Any]
 class GenerateRequest(BaseModel):
     """Body of ``/v2/models/{m}/generate[_stream]`` (Triton generate
     extension). ``image`` optionally carries one base64-encoded JPEG for
-    multimodal generation (Requirement 4.8)."""
+    multimodal generation (Requirement 4.8); ``reference_image``
+    optionally carries a second, reference JPEG for two-image comparison
+    prompts (vlm-anomaly-reference-parity Requirement 5.5 — schema
+    parity with the Text_Generation_API)."""
 
     text_input: str
     parameters: Dict[str, Any] = Field(default_factory=dict)
     image: Optional[str] = None
+    reference_image: Optional[str] = None
 
 
-def _decoded_image(image: Optional[str]) -> Optional[bytes]:
-    """The decoded bytes of an optional base64 ``image`` field, or None
+def _decoded_image(
+    image: Optional[str], field_name: str = "image"
+) -> Optional[bytes]:
+    """The decoded bytes of an optional base64 image field, or None
     when absent. Undecodable content is the caller's schema violation ->
-    422, matching FastAPI's validation status (Requirement 4.8)."""
+    422 naming the failing field, matching FastAPI's validation status
+    (Requirement 4.8)."""
     if image is None:
         return None
     try:
@@ -109,7 +116,7 @@ def _decoded_image(image: Optional[str]) -> Optional[bytes]:
     except (binascii.Error, ValueError) as err:
         raise HTTPException(
             status_code=422,
-            detail="image is not valid base64: {}".format(err),
+            detail="{} is not valid base64: {}".format(field_name, err),
         )
 
 
@@ -157,11 +164,19 @@ def create_app(manager: VllmRuntimeManager) -> FastAPI:
 
     @app.post("/v2/models/{model_name}/generate")
     async def generate(model_name: str, body: GenerateRequest):
+        # The reference kwarg rides only when supplied, so reference-less
+        # invocations stay identical to pre-feature behavior (7.5) and
+        # fakes without the parameter keep working.
+        kwargs: Dict[str, Any] = {}
+        reference = _decoded_image(body.reference_image, "reference_image")
+        if reference is not None:
+            kwargs["reference_image"] = reference
         text = await manager.generate(
             model_name,
             body.text_input,
             sampling_params_from(body.parameters),
             image=_decoded_image(body.image),
+            **kwargs,
         )
         return {"model_name": model_name, "text_output": text}
 
@@ -178,11 +193,15 @@ def create_app(manager: VllmRuntimeManager) -> FastAPI:
         # Decoded before the response starts so invalid base64 still gets
         # the 422 mapping rather than a mid-stream error event.
         image = _decoded_image(body.image)
+        reference = _decoded_image(body.reference_image, "reference_image")
+        kwargs: Dict[str, Any] = {}
+        if reference is not None:
+            kwargs["reference_image"] = reference
 
         async def events():
             try:
                 async for delta in manager.generate_stream(
-                    model_name, body.text_input, params, image=image
+                    model_name, body.text_input, params, image=image, **kwargs
                 ):
                     yield _sse_event(
                         {"model_name": model_name, "text_output": delta}

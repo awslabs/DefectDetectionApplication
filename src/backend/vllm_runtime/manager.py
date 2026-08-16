@@ -73,6 +73,16 @@ _QWEN_VL_PROMPT_FALLBACK = (
     "{prompt}<|im_end|>\n<|im_start|>assistant\n"
 )
 
+#: Two-image variant of the Qwen VL literal chat form: one image pad per
+#: image, labeled like the Bedrock content blocks so prompts written for
+#: Bedrock port over (vlm-anomaly-reference-parity Requirement 6.1).
+_QWEN_VL_TWO_IMAGE_PROMPT_FALLBACK = (
+    "<|im_start|>user\nInput image: "
+    "<|vision_start|><|image_pad|><|vision_end|>\n"
+    "Reference image: <|vision_start|><|image_pad|><|vision_end|>\n"
+    "{prompt}<|im_end|>\n<|im_start|>assistant\n"
+)
+
 
 class ModelState(str, Enum):
     """Per-model serving states (design: runtime model state machine)."""
@@ -261,6 +271,12 @@ class VllmRuntimeManager:
             engine_args = parse_repository(self.model_dir / model_name)
         except RepositoryValidationError as err:
             return self._fail(model_name, str(err))
+        # vLLM's default caps images per prompt at 1; two-image reference
+        # generation needs 2 (vlm-anomaly-reference-parity Requirement
+        # 6.6). setdefault: an explicit model.json value wins unchanged,
+        # and the arg is a standard EngineArgs field, harmless for
+        # text-only models.
+        engine_args.setdefault("limit_mm_per_prompt", {"image": 2})
 
         with self._lock:
             entry = self._models.get(model_name)
@@ -383,13 +399,16 @@ class VllmRuntimeManager:
         prompt: str,
         sampling_params: Optional[Mapping[str, Any]] = None,
         image: Optional[bytes] = None,
+        reference_image: Optional[bytes] = None,
     ) -> str:
         """Generate to completion and return the generated text.
 
         ``image`` optionally carries encoded image bytes for multimodal
         generation on vision-language models (edge-vlm-image-inference
-        Requirements 4.1, 4.3, 4.4); text-only invocations are byte-
-        identical to pre-feature behavior.
+        Requirements 4.1, 4.3, 4.4); ``reference_image`` optionally adds
+        a second, reference image to the same prompt
+        (vlm-anomaly-reference-parity Requirement 6.1). Text-only
+        invocations are byte-identical to pre-feature behavior.
 
         Raises :class:`ModelUnavailableError` when the model is not READY
         (carrying its actual status) and :class:`GenerationError` when the
@@ -398,7 +417,7 @@ class VllmRuntimeManager:
         """
         final = None
         async for output in self._request(
-            model_name, prompt, sampling_params, image
+            model_name, prompt, sampling_params, image, reference_image
         ):
             final = output
         text = self._output_text(final)
@@ -412,6 +431,7 @@ class VllmRuntimeManager:
         prompt: str,
         sampling_params: Optional[Mapping[str, Any]] = None,
         image: Optional[bytes] = None,
+        reference_image: Optional[bytes] = None,
     ) -> AsyncIterator[str]:
         """Async iterator of incremental token text, in generation order.
 
@@ -421,7 +441,7 @@ class VllmRuntimeManager:
         decides how to signal them in-stream)."""
         previous = ""
         async for output in self._request(
-            model_name, prompt, sampling_params, image
+            model_name, prompt, sampling_params, image, reference_image
         ):
             text = self._output_text(output)
             if text is None:
@@ -437,14 +457,18 @@ class VllmRuntimeManager:
         prompt: str,
         sampling_params: Optional[Mapping[str, Any]],
         image: Optional[bytes] = None,
+        reference_image: Optional[bytes] = None,
     ) -> AsyncIterator[Any]:
         """Shared generate/generate_stream core: READY-check, sampling
         params construction, engine invocation, failure isolation.
 
         Engine prompt trichotomy (edge-vlm-image-inference 4.1, 4.3, 4.4,
-        6.3): no image → the bare prompt string exactly as pre-feature;
-        image + multimodal model → a prompt dict carrying the chat-
-        templated text and ``multi_modal_data``; image + text-only model
+        6.3): no image → the bare prompt string exactly as pre-feature
+        (a reference cannot arrive alone — the API rejects it — but an
+        image-less request is defensively text-only); image + multimodal
+        model → a prompt dict carrying the chat-templated text and
+        ``multi_modal_data`` (one or two images,
+        vlm-anomaly-reference-parity 6.1, 6.2); image + text-only model
         → logged warning, bare prompt string.
         """
         engine = self._ready_engine(model_name)
@@ -452,7 +476,7 @@ class VllmRuntimeManager:
             engine_prompt: Any = prompt
         elif self._is_multimodal(model_name):
             engine_prompt = self._build_multimodal_prompt(
-                model_name, prompt, image
+                model_name, prompt, image, reference_image
             )
         else:
             logger.warning(
@@ -549,16 +573,29 @@ class VllmRuntimeManager:
         return any(arch in MULTIMODAL_ARCHITECTURES for arch in architectures)
 
     def _build_multimodal_prompt(
-        self, model_name: str, prompt: str, image_bytes: bytes
+        self,
+        model_name: str,
+        prompt: str,
+        image_bytes: bytes,
+        reference_bytes: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """Build the vLLM multimodal engine prompt: chat-templated text
         containing the model's image placeholder tokens plus
-        ``multi_modal_data`` carrying the decoded image (Requirement 4.1).
+        ``multi_modal_data`` carrying the decoded image(s) (Requirement
+        4.1; vlm-anomaly-reference-parity 6.1, 6.2).
+
+        Without ``reference_bytes`` the message and return value are
+        byte-identical to the pre-reference single-image form. With a
+        reference, the content labels and places the input image first
+        and the reference second — mirroring Bedrock's content blocks —
+        and ``multi_modal_data["image"]`` is the two-element list in
+        that order (vLLM's standard multi-image form).
 
         Undecodable image bytes raise :class:`GenerationError` naming the
-        image decoding failure, before the engine is ever invoked
-        (Requirement 4.7). PIL is imported lazily so the module keeps
-        importing on images without the vLLM wheel."""
+        image (input or reference) decoding failure, before the engine is
+        ever invoked (Requirement 4.7; vlm-anomaly-reference-parity 6.5).
+        PIL is imported lazily so the module keeps importing on images
+        without the vLLM wheel."""
         import io
 
         try:
@@ -577,16 +614,39 @@ class VllmRuntimeManager:
                 model_name,
                 "failed to decode the supplied image bytes: {}".format(err),
             ) from err
+        pil_reference = None
+        if reference_bytes is not None:
+            try:
+                pil_reference = Image.open(io.BytesIO(reference_bytes))
+                pil_reference.load()
+            except Exception as err:  # noqa: BLE001 - decode failure isolation (6.5)
+                raise GenerationError(
+                    model_name,
+                    "failed to decode the supplied reference image bytes: "
+                    "{}".format(err),
+                ) from err
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ]
+        if pil_reference is None:
+            content = [
+                {"type": "image"},
+                {"type": "text", "text": prompt},
+            ]
+            fallback = _QWEN_VL_PROMPT_FALLBACK.replace("{prompt}", prompt)
+            multi_modal_data: Dict[str, Any] = {"image": pil_image}
+        else:
+            content = [
+                {"type": "text", "text": "Input image:"},
+                {"type": "image"},
+                {"type": "text", "text": "Reference image:"},
+                {"type": "image"},
+                {"type": "text", "text": prompt},
+            ]
+            fallback = _QWEN_VL_TWO_IMAGE_PROMPT_FALLBACK.replace(
+                "{prompt}", prompt
+            )
+            multi_modal_data = {"image": [pil_image, pil_reference]}
+
+        messages = [{"role": "user", "content": content}]
         templated = None
         tokenizer = self._resolve_tokenizer(model_name)
         apply = getattr(tokenizer, "apply_chat_template", None)
@@ -604,10 +664,10 @@ class VllmRuntimeManager:
                 )
                 templated = None
         if not templated:
-            templated = _QWEN_VL_PROMPT_FALLBACK.replace("{prompt}", prompt)
+            templated = fallback
         return {
             "prompt": templated,
-            "multi_modal_data": {"image": pil_image},
+            "multi_modal_data": multi_modal_data,
         }
 
     def _resolve_tokenizer(self, model_name: str) -> Any:

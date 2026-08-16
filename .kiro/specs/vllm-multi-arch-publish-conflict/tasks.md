@@ -221,54 +221,54 @@ graph TD
     - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions in vision publish, legacy resolution, Triton identity, gate semantics, and already-mapped target resolution)
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.18, 3.19_
 
-- [ ] 4. Write the fix-checking property suites (Correctness Properties 1-8)
+- [x] 4. Write the fix-checking property suites (Correctness Properties 1-8)
 
-  - [~] 4.1 Target-map totality and fail-closed resolution property
+  - [x] 4.1 Target-map totality and fail-closed resolution property
     - **Property 8: Fix Checking** - Target maps are total and unmapped targets fail closed
     - Property-based test (Hypothesis) in `edge-cv-portal/backend/tests/test_vllm_multi_arch_publish_properties.py` with `# Validates: Requirements 2.17, 2.18, 2.19, 3.18, 3.19`
     - Over the full set of producible targets plus generated unmapped target names: every value of `packaging.VLLM_ARCH_TO_TARGET` is a key of BOTH `TARGET_TO_LOCAL_SERVER` and `TARGET_TO_PLATFORM` (totality in both directions); each generated recipe's manifest platform and HARD LocalServer dependency correspond to the same architecture (`aarch64` + `arm64JP{N}` for every Jetson target); every already-mapped target resolves to exactly today's variant and platform; any target absent from either map raises `PublishError` with no `create_component_version` call and never defaults to `amd64`
     - _Requirements: 2.17, 2.18, 2.19, 3.18, 3.19_
 
-  - [~] 4.2 One create per distinct per-JetPack identity property
+  - [x] 4.2 One create per distinct per-JetPack identity property
     - **Property 1: Fix Checking** - One create per distinct per-JetPack identity
     - Property-based test (Hypothesis) over model names × supported-arch subsets: exactly one `create_component_version` per arch, all `(name, version)` pairs distinct, name = `derive_vllm_component_name(record) + "-" + suffix(a)`, recipe `DefaultConfiguration.supported_architectures == [a]`, HARD `ComponentDependencies` entry on `a`'s LocalServer variant, manifest platform `linux/aarch64`
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.17, 2.18_
 
-  - [~] 4.3 Derived version domination property
+  - [x] 4.3 Derived version domination property
     - **Property 4: Fix Checking** - Derived version dominates every existing version
     - Property-based test (Hypothesis) over arbitrary sets of existing version strings and arbitrary record histories: the derived version matches `^\d+\.0\.0$`, its major is strictly greater than every existing major, and the result is independent of `published_components` / `published_component`
     - _Requirements: 2.9, 2.10_
 
-  - [~] 4.4 Suffixed-name round-trip property
+  - [x] 4.4 Suffixed-name round-trip property
     - **Property 5: Fix Checking** - Suffixed names round-trip to record and architecture
     - Property-based test (Hypothesis, moto-backed GSI) over model names × arch subsets: the per-JetPack name resolves through `load_vllm_model_record'` back to the record and `vllm_component_architectures'(record, name)` returns exactly `[a]`, matching the write-back the publish produced
     - _Requirements: 2.5, 2.11, 2.12_
 
-  - [~] 4.5 Per-JetPack arch gate exactness property
+  - [x] 4.5 Per-JetPack arch gate exactness property
     - **Property 6: Fix Checking** - The per-JetPack arch gate is exact and fail-closed
     - Property-based test (Hypothesis) over (component arch, device arch) pairs including null device arch and empty supported sets: no findings when `b == a`, at least one finding when `b != a` (including `arm64_jp4` with reason `JP4_UNSUPPORTED` and the JetPack-4 message), at least one finding on null device arch, at least one finding on an empty supported set
     - _Requirements: 2.13, 2.14, 3.6, 3.7, 3.8, 3.9_
 
-  - [~] 4.6 Derived-name downstream-consumer property
+  - [x] 4.6 Derived-name downstream-consumer property
     - **Property 7: Fix Checking** - Derived names satisfy every downstream consumer
     - Property-based test (Hypothesis) over arbitrary model names × architectures: the derived name starts with `model-` (backend publish validation) and `model-vllm-` (`isVllmModelComponent` / `VLLM_MODEL_COMPONENT_PREFIX`), contains a JetPack token matching `/(?:jp|jetpack)(4|5|6|7)(?![0-9])/` whose major equals that architecture's major, matches `^[a-zA-Z0-9._-]+$`, and fails closed with `PublishError` and no create above 128 characters
     - _Requirements: 2.6_
 
-  - [~] 4.7 Authorized-rollback property
+  - [x] 4.7 Authorized-rollback property
     - **Property 3: Fix Checking** - Rollback is authorized and attempted for every ARN
     - Property-based test (Hypothesis) at source/synth level over the loaded policy and over generated created-ARN sets: `greengrass:DeleteComponent` is granted on the Greengrass components resource ARN and on nothing wider, a `delete_component` call is attempted for every ARN created during the attempt, and the rollback raises nothing (the reported error stays the publish failure)
     - _Requirements: 2.7, 2.8, 3.13, 3.15_
 
-  - [~] 4.8 Frontend suffix-arch resolution property suite
+  - [x] 4.8 Frontend suffix-arch resolution property suite
     - **Property 6: Fix Checking** - Frontend twin of the per-JetPack gate and resolution rules
     - Property-based test (fast-check, `numRuns: 100`) in the new file `edge-cv-portal/frontend/src/pages/deployments/vllmSuffixArch.property.test.ts`, following `edge-cv-portal/frontend/src/components/vllm-publish/publishState.gating.property.test.ts`
     - `vllmArchsForComponent` is the exact twin of the backend resolution (same three-rule order) over generated `published_component` maps; a per-JetPack component is compatible with its own arch and no other, including null-arch and empty-set fail-closed cases (Property 6 twin); legacy unsuffixed names still resolve to the record-wide set (Property 2 twin)
     - Run: `npx vitest run src/pages/deployments/vllmSuffixArch.property.test.ts` from `edge-cv-portal/frontend`
     - _Requirements: 2.13, 2.14, 3.4, 3.5, 3.6, 3.7, 3.9_
 
-- [ ] 5. Write the unit and integration tests from the design Testing Strategy
+- [x] 5. Write the unit and integration tests from the design Testing Strategy
 
-  - [~] 5.1 Unit tests
+  - [x] 5.1 Unit tests
     - `derive_vllm_component_name` unchanged; per-target name composition for each target in the closed suffix vocabulary
     - `validate_greengrass_component_name`: accepts valid names, raises `PublishError` on over-length and illegal characters
     - `VLLM_TARGET_TO_ARCH` / `VLLM_TARGET_SUFFIX_TO_ARCH` mirror `packaging.VLLM_ARCH_TO_TARGET` exactly (totality both ways)
@@ -280,12 +280,12 @@ graph TD
     - Publish write-back: `components` list shape, one entry per architecture, top-level `component_name` still the base name, `published_components` entries carrying `[arch]`; rollback: `delete_component` attempted per created ARN and a raising delete does not propagate
     - _Requirements: 2.5, 2.6, 2.8, 2.9, 2.10, 2.11, 2.12, 2.17, 2.18, 2.19_
 
-  - [~] 5.2 Backend integration tests
+  - [x] 5.2 Backend integration tests
     - Moto + fake Greengrass end-to-end publish: a two-target vLLM record publishes two DEPLOYABLE components, returns 200 with two `published_components` entries, and writes the `components` list; a forced failure on the second target rolls BOTH back, writes no publish state, and returns the retryable 502 with `failed_step: greengrass_registration`
     - Deploy-gate round trip: publish, then run `check_vllm_deployment_gate` for an `arm64_jp7` device against both component names - the JP7 component passes and the JP6 component is rejected with `ARCH_UNSUPPORTED`
     - _Requirements: 2.3, 2.5, 2.12, 2.14, 3.13, 3.14_
 
-  - [~] 5.3 Frontend integration test
+  - [x] 5.3 Frontend integration test
     - Extend `edge-cv-portal/frontend/src/pages/CreateDeployment.archFilter.test.tsx` so the mocked model record returns a `published_component.components` list and the suffixed JP7 component is offered while the JP6 one is filtered out for an `arm64_jp7` device
     - Run: `npx vitest run src/pages/CreateDeployment.archFilter.test.tsx` from `edge-cv-portal/frontend`
     - _Requirements: 2.13, 2.14_
@@ -302,40 +302,40 @@ graph TD
   - Run: `PYTHONPATH=src/backend:test/backend-test python3 -m pytest test/backend-test/security/preservation/test_preservation_iam_cdk_synth.py -q -p no:cacheprovider --noconftest`
   - _Requirements: 3.15, 3.16, 3.17_
 
-- [ ] 7. Append the six cross-spec documentation consistency amendment notes
+- [x] 7. Append the six cross-spec documentation consistency amendment notes
   - These are deliverables, not silent drift: a short amendment note appended to each sibling spec, referencing `.kiro/specs/vllm-multi-arch-publish-conflict/`, NOT a rewrite. No new branch - all on `spec/jetpack7-support`.
 
-  - [~] 7.1 Amend `.kiro/specs/jp7-vllm-enablement/`
+  - [x] 7.1 Amend `.kiro/specs/jp7-vllm-enablement/`
     - Note that JP7 support is now delivered as its own component `model-vllm-{safe}-jetson-xavier-jp7` advertising exactly `['arm64_jp7']` with a HARD dependency on `aws.edgeml.dda.LocalServer.arm64JP7`, and that the two missing target maps (`TARGET_TO_LOCAL_SERVER` / `TARGET_TO_PLATFORM`) omitted by task 6.2 were completed here
     - State that Requirement 4.4 and the manual-validation row "Publish → component `model-vllm-*` published, architectures include `arm64_jp7`" are now satisfied per-component rather than record-wide - there is no longer ONE component advertising both JetPacks
     - _Requirements: 2.1, 2.3, 2.4, 2.17, 2.18_
 
-  - [~] 7.2 Amend `.kiro/specs/vllm-model-name-mismatch/`
+  - [x] 7.2 Amend `.kiro/specs/vllm-model-name-mismatch/`
     - Note explicitly why that spec's intent is not regressed: the Triton identity travels on `--model_name` (`_safe_model_name(model_name)`, unchanged), while `--component_name` is logging-only in `src/backend/dda_triton/vllm_model_prep.py` (argparse help "(logging)"; `prepare()` binds it to `component` and only logs it)
     - State that `derive_vllm_component_name` still returns `model-vllm-{safe_model_name}` verbatim - per-target suffixing appends to that base name - and that the spec's transform-equality property test passes unmodified
     - _Requirements: 3.3_
 
-  - [~] 7.3 Amend `.kiro/specs/vllm-triton-inference/`
+  - [x] 7.3 Amend `.kiro/specs/vllm-triton-inference/`
     - Note that `evaluate_vllm_arch_gate`, the 409 `VLLM_ARCH_UNSUPPORTED` contract, the fail-closed rules, and the JP4 reason are all unchanged; only the *source* of a `model-vllm-*` component's supported set changed - a per-component entry, with the record-wide set retained for legacy unsuffixed components
     - _Requirements: 2.12, 3.6, 3.7, 3.8, 3.9_
 
-  - [~] 7.4 Amend `.kiro/specs/device-arch-compatibility/`
+  - [x] 7.4 Amend `.kiro/specs/device-arch-compatibility/`
     - Note that `vllmComponentArchs` entries in `archCompatibility.ts` / `vllmArchGate.ts` / `CreateDeployment.tsx` are now keyed by the exact suffixed component name and resolved with `vllmArchsForComponent`, so one record can contribute several keys with disjoint single-arch sets
     - State that the exact-name, no-fallback matching contract and the fail-closed rules (null device arch, empty supported set, still-resolving `undefined`) are unchanged
     - _Requirements: 2.13, 3.6, 3.7, 3.9_
 
-  - [~] 7.5 Amend `.kiro/specs/jetpack7-support/` (umbrella)
+  - [x] 7.5 Amend `.kiro/specs/jetpack7-support/` (umbrella)
     - One-paragraph pointer to this spec in the JP7 vLLM section: a vLLM model on JP7 now means a JP7-specific model component, not a shared one
     - _Requirements: 2.3_
 
-  - [~] 7.6 Amend `.kiro/specs/localserver-arch-naming/`
+  - [x] 7.6 Amend `.kiro/specs/localserver-arch-naming/`
     - Note the added `jetson-xavier-jp7` → `aws.edgeml.dda.LocalServer.arm64JP7` / `aarch64` entries, and that the `platform == 'amd64'` fallback had silently covered the unmapped JP7 target because `TARGET_TO_PLATFORM.get(target, 'amd64')` defaulted to amd64
     - State that any future aarch64 target must be added to BOTH maps or the amd64 default defeats fail-closed resolution - which is why `resolve_target_platform` now raises instead of defaulting
     - _Requirements: 2.17, 2.19, 3.18, 3.19_
 
-- [ ] 8. Re-run the preservation gates
+- [x] 8. Re-run the preservation gates
 
-  - [~] 8.1 Backend preservation gates (each suite separately)
+  - [x] 8.1 Backend preservation gates (each suite separately)
     - `PYTHONPATH=src/backend:test/backend-test python3 -m pytest <suite> -q -p no:cacheprovider --noconftest` for each of:
     - `edge-cv-portal/backend/tests/test_vllm_publish_fit_gate.py` - **expected to need updates**: the created-`ComponentName` assertion moves to the suffixed name and the fake Greengrass client needs `get_paginator`; every status-code, fit-status, and record-state assertion MUST pass unchanged
     - `edge-cv-portal/backend/tests/test_vllm_publish_writeback.py` - **expected to need updates**: per-target `component_name` / ARN assertions move to suffixed names, new `components`-list assertions are added, and the fake Greengrass client needs `get_paginator`; record-level `component_name`, `published_component.component_name`, version, `published`, models-table item, and rollback assertions MUST pass unchanged
@@ -346,7 +346,7 @@ graph TD
     - `test/backend-test/security/preservation/` - after the task 6 rebaseline; the only permitted drift is the `DeleteComponent` grant, and the 4 known-acceptable local-only `cdk.out` drift failures stay untouched
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.10, 3.11, 3.12, 3.13, 3.14, 3.15, 3.16, 3.17_
 
-  - [~] 8.2 Frontend preservation gates (vitest, single run from `edge-cv-portal/frontend`)
+  - [x] 8.2 Frontend preservation gates (vitest, single run from `edge-cv-portal/frontend`)
     - `npx vitest run src/pages/deployments/archCompatibility.property.test.ts` - add suffixed-name cases; the exact-name and fail-closed assertions MUST pass unchanged
     - `npx vitest run src/components/vllm-publish` (the `*.property.test.ts` suites) - MUST pass unchanged
     - `npx vitest run src/pages/CreateDeployment.archFilter.test.tsx` - with the task 5.3 extension
@@ -354,7 +354,7 @@ graph TD
     - `npm run build` clean
     - _Requirements: 2.13, 2.14, 3.4, 3.5, 3.6, 3.7, 3.9_
 
-- [~] 9. Checkpoint - Ensure all tests pass
+- [x] 9. Checkpoint - Ensure all tests pass
   - All new suites pass: exploration (task 1, now inverted), properties (tasks 2 and 4), unit and integration (task 5), frontend property suite (task 4.8)
   - All preservation gates from task 8 pass, with only the documented assertion updates in `test_vllm_publish_fit_gate.py` and `test_vllm_publish_writeback.py`
   - Only pre-existing failures remain: the 4 known-acceptable local-only `cdk.out` drift failures under `test/backend-test/security/`

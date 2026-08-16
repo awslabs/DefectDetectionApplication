@@ -177,6 +177,17 @@ function BuilderCanvas({
     [applyWorkflowMeta, definitionJson]
   );
 
+  // Metadata-only rename (workflow-manager-gaps 5.7): refresh the loaded
+  // workflow's display name (toolbar and page header) without a reload.
+  // Unlike onSaved this leaves savedJson untouched — a rename changes no
+  // definition, so the canvas dirty state must not change.
+  const onRenamed = useCallback(
+    (meta: WorkflowMeta) => {
+      applyWorkflowMeta(meta);
+    },
+    [applyWorkflowMeta]
+  );
+
   // Reset to a fresh, unsaved canvas: used after a delete and for the
   // toolbar's "New" action.
   const resetCanvas = useCallback(() => {
@@ -394,6 +405,7 @@ function BuilderCanvas({
           dirty={dirty}
           getDefinition={getDefinition}
           onSaved={onSaved}
+          onRenamed={onRenamed}
           onOpenWorkflow={loadWorkflow}
           onDeleted={resetCanvas}
           onNew={resetCanvas}

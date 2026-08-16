@@ -457,3 +457,11 @@ The image-build half of this feature is not property-testable (declarative Docke
 ## Amendment Notes
 
 **2026-08-15 (from `.kiro/specs/vllm-jp7-engine-cuda-init/`)**: the JP7 image now declares `ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas` in `src/backend/Dockerfile.jp7` (added by `.kiro/specs/vllm-jp7-engine-cuda-init/`). Rationale: triton's BUNDLED ptxas (CUDA 12.8, V12.8.93) cannot codegen for Thor's `sm_110a` (``ptxas fatal : Value 'sm_110a' is not defined for option 'gpu-name'``) — without the ENV, any vLLM model whose execution path JIT-compiles a Triton kernel dies with `PTXASError` during the engine's profile run, so the model never reaches READY. The ENV points triton at the image's system CUDA 13.x ptxas, which accepts `sm_110a`. Validated on-device (jetson-thor1, 2026-08-15): qwen READY with 40.48 GiB KV cache, generate served, coexisting with the vision models on GPU. JP6/JP5 images gain no analogous env var.
+
+## Amendment (vllm-multi-arch-publish-conflict)
+
+Amended by `.kiro/specs/vllm-multi-arch-publish-conflict/` (branch `spec/jetpack7-support`):
+
+- JP7 vLLM support is now delivered as its own per-JetPack component `model-vllm-{safe}-jetson-xavier-jp7`, advertising exactly `['arm64_jp7']` in `DefaultConfiguration.supported_architectures` and carrying a HARD dependency on `aws.edgeml.dda.LocalServer.arm64JP7`.
+- Task 6.2 of this spec added `arm64_jp7` to `vllm_supported_architectures()` and `packaging.VLLM_ARCH_TO_TARGET` but omitted the two module-level maps in `greengrass_publish.py`; the missing `jetson-xavier-jp7` entries in `TARGET_TO_LOCAL_SERVER` and `TARGET_TO_PLATFORM` were completed by the amending spec (which also made platform resolution fail closed instead of defaulting to `amd64`).
+- Requirement 4.4 and the manual-validation row "Publish → component `model-vllm-*` published, architectures include `arm64_jp7`" are now satisfied per-component rather than record-wide: there is no longer ONE component advertising both JetPacks — the record publishes one component per architecture, and the JP7 one is the component that advertises `arm64_jp7`.

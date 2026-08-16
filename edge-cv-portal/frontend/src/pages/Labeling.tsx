@@ -23,6 +23,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { LabelingJob, UseCase } from '../types';
 import { apiService } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 import { useTableSort } from '../hooks/useTableSort';
@@ -56,6 +57,12 @@ interface ManifestValidation {
 
 export default function Labeling() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  // Labeling team management is admin-only (dda-data-labeling Req 3.7):
+  // the link renders only for UseCaseAdmin/PortalAdmin, mirroring the
+  // /labeling/teams route gate in App.tsx.
+  const canManageTeams =
+    user?.role === 'UseCaseAdmin' || user?.role === 'PortalAdmin';
   const [dataSourceType, setDataSourceType] = useState<'labeling' | 'pre-labeled'>('labeling');
   const [jobs, setJobs] = useState<LabelingJob[]>([]);
   const [datasets, setDatasets] = useState<PreLabeledDataset[]>([]);
@@ -272,13 +279,20 @@ export default function Labeling() {
   const getPrimaryAction = () => {
     if (dataSourceType === 'labeling') {
       return (
-        <Button 
-          variant="primary" 
-          onClick={() => navigate(`/labeling/create?usecase_id=${selectedUseCase?.value || ''}`)}
-          disabled={!selectedUseCase}
-        >
-          Create Labeling Job
-        </Button>
+        <SpaceBetween direction="horizontal" size="xs">
+          {canManageTeams && (
+            <Button onClick={() => navigate('/labeling/teams')}>
+              Manage Teams
+            </Button>
+          )}
+          <Button 
+            variant="primary" 
+            onClick={() => navigate(`/labeling/create?usecase_id=${selectedUseCase?.value || ''}`)}
+            disabled={!selectedUseCase}
+          >
+            Create Labeling Job
+          </Button>
+        </SpaceBetween>
       );
     } else {
       return (
