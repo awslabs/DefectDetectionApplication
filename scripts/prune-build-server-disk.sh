@@ -152,9 +152,18 @@ EOF
     fi
 
     # ECR confirmation: the exact digest is retrievable from ECR right now.
+    # The region is derived from the ECR registry hostname (the candidate
+    # pattern guarantees *.dkr.ecr.<region>.amazonaws.com/dda/*) and passed
+    # explicitly: the SSM agent environment on the build server configures
+    # NO default AWS region, so a region-less call exits 255 ("You must
+    # specify a region") and every candidate is retained as
+    # ECR_UNVERIFIABLE (live-acceptance finding, job ea52801f).
+    ecr_region="${img_repo#*.dkr.ecr.}"
+    ecr_region="${ecr_region%%.amazonaws.com*}"
     aws_stderr="$(aws ecr describe-images \
         --repository-name "$ecr_repo_name" \
-        --image-ids imageDigest="$local_digest" 2>&1 >/dev/null)"
+        --image-ids imageDigest="$local_digest" \
+        --region "$ecr_region" 2>&1 >/dev/null)"
     aws_rc=$?
     if [ "$aws_rc" -ne 0 ]; then
         if printf '%s' "$aws_stderr" | grep -qiE 'ImageNotFound|RepositoryNotFound'; then
