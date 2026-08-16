@@ -406,10 +406,14 @@ if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ]; then
     docker tag flask-app:latest "${ECR_REPO_BACKEND}:${COMPONENT_VERSION}"
     docker push "${ECR_REPO_BACKEND}:${COMPONENT_VERSION}"
     PUSHED_IMAGE_REFS+=("${ECR_REPO_BACKEND}:${COMPONENT_VERSION}")
+    docker rmi "${ECR_REPO_BACKEND}:${COMPONENT_VERSION}" >/dev/null 2>&1 || true
+    echo "✓ Untagged local ${ECR_REPO_BACKEND}:${COMPONENT_VERSION} (image remains as flask-app:latest and in ECR)"
     echo "Pushing react-webapp to ECR..."
     docker tag react-webapp:latest "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}"
     docker push "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}"
     PUSHED_IMAGE_REFS+=("${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}")
+    docker rmi "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}" >/dev/null 2>&1 || true
+    echo "✓ Untagged local ${ECR_REPO_FRONTEND}:${COMPONENT_VERSION} (image remains as react-webapp:latest and in ECR)"
 
     # Repackage a scripts-only zip with the SAME name/layout as the full zip
     # (minus the image tars) so the recipe's decompressedPath references stay valid.

@@ -404,6 +404,23 @@ else
     echo "ℹ SOURCE_REF not set — building the currently checked-out tree ($(git rev-parse --short HEAD 2>/dev/null || echo 'unknown'))"
 fi
 
+# ── Step 2.5: prune stale disk state from previous builds ────────────────
+PRUNE_SCRIPT="${REPO_DIR}/scripts/prune-build-server-disk.sh"
+if [ -f "$PRUNE_SCRIPT" ]; then
+    echo "Running pre-build disk prune (${PRUNE_SCRIPT})..."
+    bash "$PRUNE_SCRIPT" BUILD_JOB_ID="$BUILD_JOB_ID"
+    PRUNE_EXIT_CODE=$?
+    if [ "$PRUNE_EXIT_CODE" -eq 3 ]; then
+        # Below the minimum AFTER pruning: fail BEFORE the expensive build.
+        emit_failed "disk" "Insufficient disk space before build: free space below BUILD_MIN_FREE_DISK_GB after pruning (see prune log above for measured capacity)"
+        exit 1
+    elif [ "$PRUNE_EXIT_CODE" -ne 0 ]; then
+        echo "⚠ Warning: disk prune exited ${PRUNE_EXIT_CODE} — continuing (fail-open); disk state may be unpruned"
+    fi
+else
+    echo "ℹ No prune script at ${PRUNE_SCRIPT} — skipping pre-build disk prune"
+fi
+
 # ── Step 3: report the build start (queued/provisioning → building) ─────────
 # The resolved commit SHA that will be built (build-source-selection
 # Req 4.5): recorded on the phase=building event so the Build_Job is
