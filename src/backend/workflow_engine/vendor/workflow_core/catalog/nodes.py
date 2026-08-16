@@ -735,8 +735,14 @@ LLM_INFERENCE = NodeTypeDescriptor(
     # As a vision-language node it takes video frames as input (a
     # video-frame source connects directly into it) and emits the
     # generated text as inference metadata for downstream consumers
-    # (Requirements 6.3, 6.4).
-    inputs=[PortDescriptor("in", PORT_TYPE_VIDEO_FRAMES)],
+    # (Requirements 6.3, 6.4). Like bedrock_inference it carries a
+    # second, optional VideoFrames input: a reference image the model
+    # compares the inspected frame against per the configured prompt
+    # (vlm-anomaly-reference-parity Requirement 2.1).
+    inputs=[
+        PortDescriptor("in", PORT_TYPE_VIDEO_FRAMES),
+        PortDescriptor("reference", PORT_TYPE_VIDEO_FRAMES),
+    ],
     outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
     parameters=[
         # Populated from the Use_Case's registered vLLM_Model_Records
@@ -754,10 +760,47 @@ LLM_INFERENCE = NodeTypeDescriptor(
                             description="Prompt sent to the model. {field} "
                                         "placeholders are replaced with values "
                                         "from the upstream inference metadata "
-                                        "at execution time.",
+                                        "at execution time. In anomaly mode "
+                                        "the executor automatically appends "
+                                        "the JSON-format instruction "
+                                        '({"is_anomalous": true|false, '
+                                        '"confidence": 0..1}) and the parsed '
+                                        "verdict becomes the inference "
+                                        "metadata; in freeform mode the "
+                                        "rendered prompt is sent as-is.",
                             examples=["Summarize this inspection result: "
                                       "anomalous={is_anomalous}, "
                                       "confidence={confidence}"]),
+        # Response mode toggle, mirroring bedrock_inference's. UNLIKE
+        # Bedrock (default True) this defaults FALSE — matching the
+        # already-shipped executor default (absent => freeform), so
+        # existing packaged llm workflows keep today's freeform behavior
+        # without repackage (vlm-anomaly-reference-parity Requirement
+        # 1.1). Checked: the executor appends the canonical JSON
+        # instruction to the rendered prompt and merges the parsed
+        # {is_anomalous, confidence} verdict into the run metadata; an
+        # unparseable answer is recorded as the node's error without
+        # failing the run. Unchecked: the rendered prompt is sent as-is
+        # and the raw text is recorded at llm.{nodeId}.generated_text.
+        ParameterDescriptor("anomaly_mode", "bool", required=False,
+                            default=False,
+                            constraints={},
+                            description="Checked: anomaly mode — the "
+                                        "executor auto-appends the JSON "
+                                        "instruction and the model's "
+                                        "verdict (is_anomalous, "
+                                        "confidence) drives downstream "
+                                        "filters, conditionals, and "
+                                        "outputs; an unparseable answer "
+                                        "is recorded as the node's error "
+                                        "without failing the run. "
+                                        "Unchecked (default): freeform "
+                                        "mode — the prompt is sent as-is "
+                                        "and the raw model text is "
+                                        "recorded in the run metadata at "
+                                        "llm.{nodeId}.generated_text, "
+                                        "with no JSON parsing.",
+                            examples=[True, False]),
         ParameterDescriptor("max_tokens", "int", required=False, default=256,
                             constraints={"min": 1},
                             description="Maximum tokens the model may "
@@ -780,7 +823,15 @@ LLM_INFERENCE = NodeTypeDescriptor(
     # emits an ``llm_inference`` executor binding carrying the bound
     # model name, prompt template, and generation parameters; the
     # LocalServer workflow engine renders the prompt from upstream
-    # metadata and calls the device Text_Generation_API. Mappings exist
+    # metadata and calls the device Text_Generation_API. Like
+    # bedrock_inference, each VideoFrames input branch gains a synthetic
+    # frame-capture sink chain (videoconvert ! jpegenc ! multifilesink
+    # location={work_dir}/...) and the binding carries the per-port
+    # capture file paths (``capturePaths``: ``in`` plus ``reference``,
+    # ``None`` when a port is unfed) so the executor can attach the
+    # captured frame(s) to the generate request — UNLIKE
+    # bedrock_inference the node stays NON-opaque: frames keep flowing
+    # through to downstream pipeline elements. Mappings exist
     # only for vLLM-capable architectures plus the simulation stub —
     # ``sim_llm_inference`` injects the configured simulated inference
     # outcome and never invokes any model (Requirement 6.9).

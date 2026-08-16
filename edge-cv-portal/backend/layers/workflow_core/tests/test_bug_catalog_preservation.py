@@ -82,10 +82,15 @@ _MQTT_ADDED_PARAMETER = "greengrass"
 _MQTT_RELAXED_PARAMETER = "broker_host"
 
 #: Parameters of ``llm_inference`` that must survive the label/input fixes
-#: unchanged (Requirement 3.1).
+#: unchanged (Requirement 3.1). ``anomaly_mode`` joined the list (and
+#: ``prompt_template``'s description gained the anomaly-mode note, plus a
+#: second ``reference`` input port) with the vlm-anomaly-reference-parity
+#: feature; the recorded baseline was regenerated per the documented
+#: maintenance path to cover those intentional additions.
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",
+    "anomaly_mode",
     "max_tokens",
     "temperature",
     "top_p",

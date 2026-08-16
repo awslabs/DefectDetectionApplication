@@ -2780,12 +2780,16 @@
   },
   "llm_inference": {
     "category": "inference",
-    "display_name": "LLM Inference",
+    "display_name": "VLM/LLM Inference",
     "hardware_dependent": true,
     "inputs": [
       {
         "name": "in",
-        "port_type": "InferenceMeta"
+        "port_type": "VideoFrames"
+      },
+      {
+        "name": "reference",
+        "port_type": "VideoFrames"
       }
     ],
     "mappings": [
@@ -2829,13 +2833,26 @@
         },
         "default": null,
         "depends_on": null,
-        "description": "Prompt sent to the model. {field} placeholders are replaced with values from the upstream inference metadata at execution time.",
+        "description": "Prompt sent to the model. {field} placeholders are replaced with values from the upstream inference metadata at execution time. In anomaly mode the executor automatically appends the JSON-format instruction ({\"is_anomalous\": true|false, \"confidence\": 0..1}) and the parsed verdict becomes the inference metadata; in freeform mode the rendered prompt is sent as-is.",
         "examples": [
           "Summarize this inspection result: anomalous={is_anomalous}, confidence={confidence}"
         ],
         "name": "prompt_template",
         "param_type": "string",
         "required": true
+      },
+      {
+        "constraints": {},
+        "default": false,
+        "depends_on": null,
+        "description": "Checked: anomaly mode \u2014 the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs; an unparseable answer is recorded as the node's error without failing the run. Unchecked (default): freeform mode \u2014 the prompt is sent as-is and the raw model text is recorded in the run metadata at llm.{nodeId}.generated_text, with no JSON parsing.",
+        "examples": [
+          true,
+          false
+        ],
+        "name": "anomaly_mode",
+        "param_type": "bool",
+        "required": false
       },
       {
         "constraints": {

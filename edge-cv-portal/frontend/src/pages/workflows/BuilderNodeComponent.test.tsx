@@ -215,3 +215,63 @@ describe('BuilderNodeComponent multi-input rendering (bedrock_inference node)', 
     expect(screen.getByText('reference')).toBeInTheDocument();
   });
 });
+
+describe('BuilderNodeComponent multi-input rendering (llm_inference node)', () => {
+  // Mirrors the catalog descriptor after vlm-anomaly-reference-parity:
+  // the VLM/LLM node carries `in` + `reference` VideoFrames inputs and
+  // renders both handles via the same catalog-driven generic path as
+  // bedrock_inference (Requirement 2.3 — no type-specific frontend code).
+  const LLM: NodeTypeDescriptor = {
+    typeId: 'llm_inference',
+    category: 'inference',
+    displayName: 'VLM/LLM Inference',
+    inputs: [
+      { name: 'in', portType: 'VideoFrames' },
+      { name: 'reference', portType: 'VideoFrames' },
+    ],
+    outputs: [{ name: 'out', portType: 'InferenceMeta' }],
+    parameters: [
+      {
+        name: 'modelName',
+        paramType: 'model_ref',
+        required: true,
+        default: null,
+        constraints: { min_length: 1 },
+      },
+      {
+        name: 'prompt_template',
+        paramType: 'string',
+        required: true,
+        default: null,
+        constraints: { min_length: 1 },
+      },
+      {
+        name: 'anomaly_mode',
+        paramType: 'bool',
+        required: false,
+        default: false,
+        constraints: {},
+      },
+    ],
+    mappings: [],
+    hardwareDependent: true,
+  };
+
+  it('renders both input handles labeled with their port names and types (Requirement 2.3)', () => {
+    const { container } = renderNode([], LLM, 'vlm');
+
+    const inHandle = container.querySelector('[data-handleid="in"]');
+    const referenceHandle = container.querySelector('[data-handleid="reference"]');
+    expect(inHandle).not.toBeNull();
+    expect(referenceHandle).not.toBeNull();
+    expect(inHandle!.getAttribute('aria-label')).toBe('vlm input port in (VideoFrames)');
+    expect(referenceHandle!.getAttribute('aria-label')).toBe(
+      'vlm input port reference (VideoFrames)'
+    );
+    expect(screen.getByLabelText('vlm output port out (InferenceMeta)')).toBeInTheDocument();
+
+    // Both port names render as visible row labels beside the handles.
+    expect(screen.getByText('in')).toBeInTheDocument();
+    expect(screen.getByText('reference')).toBeInTheDocument();
+  });
+});

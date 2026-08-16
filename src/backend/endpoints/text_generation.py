@@ -78,6 +78,56 @@ def _is_number(value: Any) -> bool:
             and not isinstance(value, bool))
 
 
+def _validate_image_field(
+    body: Dict[str, Any],
+    field_name: str,
+    findings: List[Dict[str, str]],
+) -> Optional[bytes]:
+    """Validate one optional base64 image field of a generate request.
+
+    One rule set for both ``image`` and ``reference_image``
+    (vlm-anomaly-reference-parity Requirement 5.1): the field must be a
+    string of valid base64 decoding to 1..MAX_IMAGE_BYTES bytes. Returns
+    the decoded bytes when the field is present and valid; ``None`` when
+    the field is absent or invalid — an invalid value appends a finding
+    naming ``field_name``.
+    """
+    if field_name not in body:
+        return None
+    value = body[field_name]
+    if not isinstance(value, str):
+        findings.append({
+            "field": field_name,
+            "reason": "{} must be a base64-encoded string".format(
+                field_name),
+        })
+        return None
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, TypeError):
+        findings.append({
+            "field": field_name,
+            "reason": "{} is not valid base64".format(field_name),
+        })
+        return None
+    max_image_bytes = get_max_image_bytes()
+    if len(decoded) == 0:
+        findings.append({
+            "field": field_name,
+            "reason": "{} decodes to zero bytes".format(field_name),
+        })
+        return None
+    if len(decoded) > max_image_bytes:
+        findings.append({
+            "field": field_name,
+            "reason": "{} decodes to {} bytes, exceeding "
+                      "the maximum of {} bytes".format(
+                          field_name, len(decoded), max_image_bytes),
+        })
+        return None
+    return decoded
+
+
 def normalize_generation_request(
     model_name: Any,
     body: Dict[str, Any],
@@ -100,13 +150,19 @@ def normalize_generation_request(
       - supplied image not a string, not valid base64, decoding to zero
         bytes, or decoding to more than the configured maximum image
         size (edge-vlm-image-inference Requirements 3.4, 3.5)
+      - supplied reference_image failing the same image rules
+        (vlm-anomaly-reference-parity Requirement 5.1), or supplied
+        without a valid image (Requirement 5.4)
 
     Omitted generation parameters are never findings: their defaults are
     applied and the request is processed (Requirement 5.8). An omitted
     ``image`` leaves the normalized result identical to pre-feature
     behavior (Requirements 3.3, 6.2); a valid ``image`` is decoded once
     here, at the validation boundary, and stored as
-    ``effective["image_bytes"]`` (Requirement 3.1).
+    ``effective["image_bytes"]`` (Requirement 3.1). Likewise an omitted
+    ``reference_image`` leaves the result identical to pre-feature
+    behavior and a valid one is stored as
+    ``effective["reference_image_bytes"]`` (Requirements 5.2, 5.3).
 
     Callers distinguish the outcomes with isinstance(result, list).
     """
@@ -169,38 +225,20 @@ def normalize_generation_request(
                           "than 1.0",
             })
 
-    image_bytes: Optional[bytes] = None
-    if "image" in body:
-        image = body["image"]
-        if not isinstance(image, str):
-            findings.append({
-                "field": "image",
-                "reason": "image must be a base64-encoded string",
-            })
-        else:
-            try:
-                decoded = base64.b64decode(image, validate=True)
-            except (ValueError, TypeError):
-                findings.append({
-                    "field": "image",
-                    "reason": "image is not valid base64",
-                })
-            else:
-                max_image_bytes = get_max_image_bytes()
-                if len(decoded) == 0:
-                    findings.append({
-                        "field": "image",
-                        "reason": "image decodes to zero bytes",
-                    })
-                elif len(decoded) > max_image_bytes:
-                    findings.append({
-                        "field": "image",
-                        "reason": "image decodes to {} bytes, exceeding "
-                                  "the maximum of {} bytes".format(
-                                      len(decoded), max_image_bytes),
-                    })
-                else:
-                    image_bytes = decoded
+    image_bytes = _validate_image_field(body, "image", findings)
+    reference_image_bytes = _validate_image_field(
+        body, "reference_image", findings)
+
+    # A reference image only makes sense beside a primary image
+    # (vlm-anomaly-reference-parity Requirement 5.4): reject a valid
+    # reference_image whose request carries no valid image.
+    if reference_image_bytes is not None and image_bytes is None:
+        findings.append({
+            "field": "reference_image",
+            "reason": "reference_image requires a valid image field; a "
+                      "reference image cannot be sent without the "
+                      "primary image",
+        })
 
     if findings:
         return findings
@@ -213,6 +251,8 @@ def normalize_generation_request(
     effective["prompt"] = prompt
     if image_bytes is not None:
         effective["image_bytes"] = image_bytes
+    if reference_image_bytes is not None:
+        effective["reference_image_bytes"] = reference_image_bytes
     return effective
 
 
@@ -430,14 +470,21 @@ def _sse_event(payload: Dict[str, Any]) -> str:
 def _generate_kwargs(effective: Dict[str, Any]) -> Dict[str, Any]:
     """Extra keyword arguments for the runtime generate invocation:
     ``image=`` only when the normalized request carries decoded image
-    bytes (edge-vlm-image-inference Requirement 3.2). Imageless requests
-    produce an empty dict so the runtime invocation stays byte-identical
-    to pre-feature behavior — and fakes without an ``image`` parameter
-    keep working for text-only tests (Requirement 3.3)."""
+    bytes (edge-vlm-image-inference Requirement 3.2), and
+    ``reference_image=`` only when it additionally carries decoded
+    reference bytes (vlm-anomaly-reference-parity Requirement 5.2).
+    Imageless requests produce an empty dict so the runtime invocation
+    stays byte-identical to pre-feature behavior — and fakes without an
+    ``image``/``reference_image`` parameter keep working for tests that
+    do not exercise those fields (Requirements 3.3, 5.3)."""
+    kwargs: Dict[str, Any] = {}
     image_bytes = effective.get("image_bytes")
     if image_bytes is not None:
-        return {"image": image_bytes}
-    return {}
+        kwargs["image"] = image_bytes
+    reference_image_bytes = effective.get("reference_image_bytes")
+    if reference_image_bytes is not None:
+        kwargs["reference_image"] = reference_image_bytes
+    return kwargs
 
 
 def _image_used(runtime: Any, model_name: str) -> bool:

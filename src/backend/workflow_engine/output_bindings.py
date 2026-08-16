@@ -1165,6 +1165,7 @@ def _default_llm_invoker(
     prompt: str,
     parameters: Dict[str, Any],
     image_b64: Optional[str] = None,
+    reference_b64: Optional[str] = None,
 ) -> str:
     """POST the rendered prompt to the local Text_Generation_API and
     return the generated text. ``requests`` is imported lazily so this
@@ -1175,6 +1176,12 @@ def _default_llm_invoker(
     captured frame as a base64-encoded JPEG; when set it rides the POST
     body as the API's optional ``image`` field. When ``None`` the body
     is byte-identical to the pre-feature request (Requirement 2.2).
+
+    ``reference_b64`` (vlm-anomaly-reference-parity Requirement 4.3)
+    carries the captured reference frame the same way; when set it rides
+    the POST body as the API's optional ``reference_image`` field beside
+    ``image``. When ``None`` the body is byte-identical to the
+    reference-less request.
 
     A ``409 {'state': 'loading'}`` response (transient model warm-up) is
     re-POSTed every :data:`LLM_LOADING_POLL_INTERVAL_SEC` seconds until
@@ -1191,6 +1198,8 @@ def _default_llm_invoker(
             body[key] = parameters[key]
     if image_b64 is not None:
         body["image"] = image_b64
+    if reference_b64 is not None:
+        body["reference_image"] = reference_b64
     url = TEXT_GENERATION_URL.format(model_name=model_name)
     deadline = time.monotonic() + LLM_LOADING_BUDGET_SEC
     while True:
@@ -1346,9 +1355,49 @@ class LlmInferenceProcessor:
                             node_id, port, path, e)
                     )
                 }
+        # Reference-frame attachment (vlm-anomaly-reference-parity
+        # Requirements 4.1, 4.2) with Bedrock's OPTIONAL semantics —
+        # unlike the 'in' frame above, a missing/unreadable reference is
+        # NEVER a node error: the compiler emits
+        # capturePaths.reference = None when the port is not fed, and
+        # pre-feature packages omit the key entirely; both proceed with
+        # single-image inference on the input frame alone.
+        reference_b64: Optional[str] = None
+        reference_path = capture_paths.get("reference")
+        if not reference_path:
+            logger.warning(
+                "LLM inference node '%s': no captured reference frame "
+                "(reference port unfed or pre-feature package); "
+                "performing single-image inference", node_id)
+        else:
+            if work_dir:
+                reference_path = reference_path.replace(
+                    "{work_dir}", work_dir)
+            try:
+                with open(reference_path, "rb") as f:
+                    reference_b64 = base64.b64encode(
+                        f.read()).decode("ascii")
+            except OSError as e:
+                logger.warning(
+                    "LLM inference node '%s': could not read the "
+                    "captured 'reference' frame from %s (%s); performing "
+                    "single-image inference", node_id, reference_path, e)
         try:
             model_name = str(parameters.get("modelName") or "")
-            if image_b64 is not None:
+            if image_b64 is not None and reference_b64 is not None:
+                # Both frames: the extended 5-argument invocation
+                # (Requirement 4.1). A reference can only ride beside
+                # the input image — the 'in' error path above returns
+                # before the reference is read, matching the API's
+                # reference-requires-image rule.
+                text = self._invoker(
+                    model_name, prompt, parameters, image_b64,
+                    reference_b64,
+                )
+            elif image_b64 is not None:
+                # Input frame only: the shipped 4-argument form stays
+                # byte-identical so pre-feature injected invokers keep
+                # working unchanged (Requirements 4.2, 7.1).
                 text = self._invoker(
                     model_name, prompt, parameters, image_b64
                 )
