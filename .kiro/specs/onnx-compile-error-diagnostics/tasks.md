@@ -364,12 +364,13 @@ graph TD
   - Use the repo's portal deploy path: `edge-cv-portal/deploy-portal.sh`, or `edge-cv-portal/deploy-frontend.sh` for the frontend alone plus the Lambda/layer deploy for the backend
   - _Requirements: 2.14, 3.21_
 
-- [ ] 11. USER ACTION - Post-deploy manual verification
+- [x] 11. USER ACTION - Post-deploy manual verification
   - **NOT AUTONOMOUS**: requires the deployed portal and the live account
   - On `https://d23v4ltibogb5x.cloudfront.net`, compile a vision model to the `onnx` target. If the export fails to start, confirm the portal shows the ACTUAL reason (role, image, or whatever `create_training_job` raised) and that refreshing repeatedly never replaces it with a "compilation job not found" message or a bare status token
   - Revisit the reported record (`/models/f182a10d-0da7-420a-943c-c370da7ee623`): its stored `error` was already destroyed by earlier polls and CANNOT be recovered - a fresh compile attempt is required to see the real reason. Record the newly surfaced reason and, if it implicates the hardcoded `DDASageMakerExecutionRole` or the region-pinned `ONNX_EXPORT_IMAGE`, open a follow-up spec for it (task 6.3 keeps that out of scope here)
   - Confirm a Neo compile (e.g. `jetson-xavier-jp6`) still starts, polls, and reports exactly as before, and that a Neo `FAILED` now shows its `failure_reason` instead of a bare `FAILED` token
   - _Requirements: 2.14, 2.20, 3.1, 3.2_
+  - **Verified 2026-08-15**: fresh compile on the reported model surfaced and preserved the real reason — `DDASageMakerExecutionRole` "not authorized to perform: s3:ListBucket on resource: arn:aws:s3:::ryvan-cookies" (it implicates the role, not `ONNX_EXPORT_IMAGE`); follow-up spec opened: `.kiro/specs/sagemaker-role-usecase-bucket-access/`
 
 ## Notes
 

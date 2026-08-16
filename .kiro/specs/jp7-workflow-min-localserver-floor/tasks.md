@@ -268,6 +268,7 @@ graph TD
   - Deploy the portal (deploy-portal.sh / deploy-infrastructure.sh) so the Lambdas pick up the completed `WORKFLOW_MIN_LOCAL_SERVER_VERSIONS` env and the hardened backend code
   - After the deploy fully finishes: move `cdk.out` aside (`mv cdk.out cdk.out.bak-$(date +%Y%m%dT%H%M%SZ)`) per builds.md BEFORE any next component build
   - Verify: the deployed workflow-packaging / deployments Lambda environment shows the 6-key map (console or `aws lambda get-function-configuration`)
+  - **NOTE (2026-08-17)**: The spec's code is committed and pushed — commit `f42f5819e5d5a372ab7d8991ddc25edca5883797` (`fix(portal): add per-arch LocalServer floor-map keys for JP7 workflow packaging`) on `spec/jetpack7-support`, pushed successfully (`1b45632..7e1bfe7`). The build gate is clear (fleet job `8dfd1c6c` succeeded; both `pgrep` checks empty). The **portal deploy is the next step** — this task stays unchecked until the deploy itself has run and the Lambda env verification passes.
   - _Requirements: 2.1, 2.2, 2.6, 3.7_
 
 - [ ] 8. USER ACTION: re-package workflow 421f8233 and deploy to jetson-thor1 (acceptance)

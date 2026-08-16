@@ -310,7 +310,7 @@ graph TD
   - Confirm NO IAM/security-baseline drift was introduced (no new actions were designed; if any test or synth surfaces one, STOP and flag it for the reviewed rebaseline protocol instead of proceeding) (3.14)
   - _Requirements: 3.14_
 
-- [ ] 9. USER ACTION: Deploy the portal
+- [x] 9. USER ACTION: Deploy the portal
   - Nothing takes effect until deployed. Lambda code: `packaging.py`, `greengrass_publish.py`, `workflow_packaging.py` (functions asset); frontend bundle (CompilationTab copy + comment). No infrastructure change.
   - Use `deploy-portal.sh` (or `deploy-infrastructure.sh` + `deploy-frontend.sh`). Per `.kiro/steering/builds.md`: do NOT deploy while a component build is in flight, and move `edge-cv-portal/infrastructure/cdk.out` aside before running the security guard suite afterwards.
   - _Requirements: 2.14 (docs deployed with the tree), plus activation of every 2.x fix_

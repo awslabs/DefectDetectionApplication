@@ -541,3 +541,14 @@ Named follow-ups OUTSIDE this spec:
   pre-existing, separate issue.
 - (d) **Deployment rollback blast radius** (defect 1.4, `failureHandlingPolicy`
   exposure) — already-deferred cloud-side spec.
+
+**Acceptance result (task 10, 2026-08-16, jetson-thor1)**: PASSED — built component
+LocalServer.arm64JP7 1.0.5 (commit 2e69581) deployed via ea52d05a in the original
+aebc9d9a shape; deployment SUCCEEDED on-device (no rollback); qwen STAGED→LOADING→READY
+with load HTTP 200 (repeatedly, ~47–48 s from HF cache) and generate HTTP 200 with real
+text_output; ZERO ptxas errors across every profile run (system ptxas via the baked-in
+TRITON_PTXAS_PATH); all three vision models READY concurrently on GPU (EngineCore
+~59 GB + three triton stubs in nvidia-smi); 41-min uninterrupted healthy window; the
+only crashes were the known out-of-scope awscrt aborts (RestartCount 3→6 during the
+extended watch — follow-up (c), tempo increasing, and each restart silently drops all
+loaded models until the next lazy request). Requirement 2.4 closed on hardware.
