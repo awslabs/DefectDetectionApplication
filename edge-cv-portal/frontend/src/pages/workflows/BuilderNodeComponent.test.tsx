@@ -236,14 +236,14 @@ describe('BuilderNodeComponent multi-input rendering (llm_inference node)', () =
         paramType: 'model_ref',
         required: true,
         default: null,
-        constraints: { min_length: 1 },
+        constraints: { minLength: 1 },
       },
       {
         name: 'prompt_template',
         paramType: 'string',
         required: true,
         default: null,
-        constraints: { min_length: 1 },
+        constraints: { minLength: 1 },
       },
       {
         name: 'anomaly_mode',
