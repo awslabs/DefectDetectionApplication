@@ -48,8 +48,11 @@ from shared_utils import (
 from synthetic_core import (
     MODEL_CATALOG, DEFAULT_PROMPT_TEMPLATE,
     UnresolvedPlaceholderError, ValidationError,
-    filter_available_models, resolve_prompt,
+    filter_available_models, invocation_model_id, resolve_prompt,
     validate_generation_request, build_generation_plan,
+    select_generation_method, derive_mask_rect,
+    build_amazon_request_body, build_stability_inpaint_request_body,
+    extract_stability_result, classify_bedrock_invocation_error,
     select_approved, bbox_from_diff,
     build_manifest_record, append_manifest_lines,
 )
@@ -71,9 +74,10 @@ DIFF_THRESHOLD = 10
 
 MODELS_EMPTY_GUIDANCE = (
     "No image generation models are available. Enable model access for "
-    "Amazon Nova Canvas (amazon.nova-canvas-v1:0) or Amazon Titan Image "
-    "Generator v2 (amazon.titan-image-generator-v2:0) in the Amazon "
-    "Bedrock console (Model access) for the portal region."
+    "Amazon Nova Canvas (amazon.nova-canvas-v1:0), Amazon Titan Image "
+    "Generator v2 (amazon.titan-image-generator-v2:0), or Stability "
+    "Stable Image Inpaint (stability.stable-image-inpaint-v1:0) in the "
+    "Amazon Bedrock console (Model access) for the portal region."
 )
 
 VALID_SESSION_STATUSES = (
@@ -143,12 +147,17 @@ def _bedrock_runtime_client():
     return _bedrock_runtime
 
 
-def _list_available_model_ids() -> List[str]:
-    """Model ids with IMAGE output modality available in the portal region."""
+def _list_available_models() -> List[Dict]:
+    """IMAGE-modality model summaries in the portal region with
+    lifecycle status (Req 5.1, 6.2). A missing ``modelLifecycle``
+    defaults to ACTIVE (fails open rather than emptying the dropdown)."""
     response = _bedrock_client().list_foundation_models(
         byOutputModality='IMAGE')
-    return [summary['modelId']
-            for summary in response.get('modelSummaries', [])]
+    return [{
+        'model_id': summary['modelId'],
+        'lifecycle_status': summary.get('modelLifecycle', {}).get(
+            'status', 'ACTIVE'),
+    } for summary in response.get('modelSummaries', [])]
 
 
 def _model_entry(model_id: str) -> Optional[Dict]:
@@ -306,12 +315,12 @@ def get_models(event: Dict) -> Dict:
         return denial
 
     try:
-        available_ids = _list_available_model_ids()
+        available_models = _list_available_models()
     except Exception as exc:  # Bedrock unavailable -> treat as empty catalog
         logger.error('ListFoundationModels failed: %s', exc)
-        available_ids = []
+        available_models = []
 
-    models = filter_available_models(MODEL_CATALOG, available_ids)
+    models = filter_available_models(MODEL_CATALOG, available_models)
     body: Dict[str, Any] = {'models': models}
     if not models:
         body['guidance'] = MODELS_EMPTY_GUIDANCE
@@ -646,10 +655,14 @@ def generate(event: Dict) -> Dict:
         or (meta.get('generation_params') or {}).get('variation_count'))
 
     # Validate sources / classification / count (Req 3.2, 3.3, 3.6,
-    # 4.1, 4.4).
+    # 4.1, 4.4) and the model's support for the required generation
+    # method (Req 3.1, 3.5) -- both rejected with 400 before any plan
+    # persists.
     try:
         validated = validate_generation_request(
             sources, source_class, defect_type, variation_count)
+        select_generation_method(
+            source_class, _model_entry(model_id).get('capabilities', {}))
     except ValidationError as exc:
         return create_response(400, {'error': str(exc)})
 
@@ -708,48 +721,36 @@ def generate(event: Dict) -> Dict:
 # Async generation worker (Req 1.4, 4.2, 4.5, 5.2, 5.4)
 # ---------------------------------------------------------------------------
 
-def _build_image_request(model_entry: Dict, method: str, prompt: str,
-                         source_b64: str, seed, params: Dict,
-                         mask_prompt: Optional[str]) -> Dict:
-    """Bedrock invoke_model JSON body for one task (numberOfImages: 1)."""
-    capabilities = model_entry.get('capabilities', {})
-    config: Dict[str, Any] = {'numberOfImages': 1}
-    if seed is not None and capabilities.get('seed'):
-        config['seed'] = int(seed)
-    cfg_scale = params.get('cfg_scale')
-    if cfg_scale is None:
-        cfg_scale = model_entry.get('randomization_defaults', {}).get(
-            'cfg_scale')
-    if cfg_scale is not None and capabilities.get('cfg_scale'):
-        config['cfgScale'] = float(cfg_scale)
-
-    if method == 'inpainting':
-        return {
-            'taskType': 'INPAINTING',
-            'inPaintingParams': {
-                'image': source_b64,
-                'maskPrompt': mask_prompt or 'the defect region',
-                'text': prompt,
-            },
-            'imageGenerationConfig': config,
-        }
-    return {
-        'taskType': 'IMAGE_VARIATION',
-        'imageVariationParams': {
-            'images': [source_b64],
-            'text': prompt,
-        },
-        'imageGenerationConfig': config,
-    }
+def _render_mask_png(rect: Dict, width: int, height: int) -> bytes:
+    """Binary mask PNG matching the source dimensions (Req 3.2): white
+    (255) inside ``rect`` (the region to inpaint), black (0) elsewhere."""
+    from PIL import Image, ImageDraw
+    mask = Image.new('L', (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    # ImageDraw.rectangle is inclusive of both corners.
+    draw.rectangle(
+        [rect['left'], rect['top'],
+         rect['left'] + rect['width'] - 1,
+         rect['top'] + rect['height'] - 1],
+        fill=255,
+    )
+    buffer = io.BytesIO()
+    mask.save(buffer, format='PNG')
+    return buffer.getvalue()
 
 
-def _select_generation_method(source_class: str, model_entry: Dict) -> str:
-    """normal sources -> inpainting when the model supports it, else image
-    variation; defect sources -> image variation (design worker rules)."""
-    if source_class == 'normal' and model_entry.get(
-            'capabilities', {}).get('inpainting'):
-        return 'inpainting'
-    return 'image_variation'
+def _source_image_dimensions(image_bytes: bytes,
+                             source_key: str = '') -> Tuple[int, int]:
+    """(width, height) of a source image via Pillow; raises naming the
+    unreadable source image on decode failure."""
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            return img.size
+    except Exception as exc:
+        raise RuntimeError(
+            f"Source image {source_key or '<unknown>'} could not be "
+            f"decoded to determine its dimensions: {exc}") from exc
 
 
 def _invoke_image_model(model_id: str, request_body: Dict) -> bytes:
@@ -766,6 +767,20 @@ def _invoke_image_model(model_id: str, request_body: Dict) -> bytes:
         raise RuntimeError(
             payload.get('error') or 'Model returned no images')
     return base64.b64decode(images[0])
+
+
+def _invoke_stability_model(model_id: str, request_body: Dict) -> bytes:
+    """One Bedrock invoke_model call against the Stability inference
+    profile, returning the generated image bytes (Req 2.5, 4.2). Response
+    parsing is delegated to synthetic_core.extract_stability_result."""
+    response = _bedrock_runtime_client().invoke_model(
+        modelId=model_id,
+        contentType='application/json',
+        accept='application/json',
+        body=json.dumps(request_body),
+    )
+    payload = json.loads(response['body'].read())
+    return base64.b64decode(extract_stability_result(payload))
 
 
 def execute_generation_tasks(tasks: List[Dict], invoke_task,
@@ -823,7 +838,8 @@ def run_generation_worker(event: Dict) -> Dict:
     s3_client, bucket = _data_s3_client(usecase)
     model_entry = _model_entry(meta.get('generation_model_id')) or {}
     source_class = meta.get('source_class') or 'defect'
-    method = _select_generation_method(source_class, model_entry)
+    method = select_generation_method(source_class,
+                                      model_entry.get('capabilities', {}))
     mask_prompt = None
     if method == 'inpainting':
         mask_prompt = (
@@ -833,12 +849,42 @@ def run_generation_worker(event: Dict) -> Dict:
     def invoke_task(task):
         source_key = _source_key(task.get('source_image'))
         source_obj = s3_client.get_object(Bucket=bucket, Key=source_key)
-        source_b64 = base64.b64encode(source_obj['Body'].read()).decode()
-        request_body = _build_image_request(
-            model_entry, method, task.get('resolved_prompt', ''),
-            source_b64, task.get('seed'), task.get('params') or {},
-            mask_prompt)
-        image_bytes = _invoke_image_model(task['model_id'], request_body)
+        source_bytes = source_obj['Body'].read()
+        source_b64 = base64.b64encode(source_bytes).decode()
+        invoke_id = (invocation_model_id(model_entry) if model_entry
+                     else task['model_id'])
+
+        # Provider dispatch on the model-id prefix (Req 2.1).
+        if task['model_id'].split('.', 1)[0] == 'stability':
+            width, height = _source_image_dimensions(source_bytes,
+                                                     source_key)
+            rect = derive_mask_rect(task.get('seed'), width, height)
+            mask_b64 = base64.b64encode(
+                _render_mask_png(rect, width, height)).decode()
+            request_body = build_stability_inpaint_request_body(
+                task.get('resolved_prompt', ''), source_b64, mask_b64,
+                task.get('seed'))
+            extra_fields = {'generation_method': 'inpainting',
+                            'mask_region': rect}
+            invoke = _invoke_stability_model
+        else:
+            request_body = build_amazon_request_body(
+                model_entry, method, task.get('resolved_prompt', ''),
+                source_b64, task.get('seed'), task.get('params') or {},
+                mask_prompt)
+            extra_fields = {'generation_method': method}
+            if mask_prompt:
+                extra_fields['mask_prompt'] = mask_prompt
+            invoke = _invoke_image_model
+
+        try:
+            image_bytes = invoke(invoke_id, request_body)
+        except ClientError as exc:
+            error = exc.response.get('Error', {})
+            raise RuntimeError(classify_bedrock_invocation_error(
+                error.get('Code', ''), error.get('Message', ''),
+                invoke_id)) from exc
+
         preview_id = str(uuid.uuid4())
         staging_key = f"{STAGING_PREFIX}/{session_id}/{preview_id}.png"
         s3_client.put_object(Bucket=bucket, Key=staging_key,
@@ -846,10 +892,8 @@ def run_generation_worker(event: Dict) -> Dict:
         extra = {
             'preview_id': preview_id,
             'staging_key': staging_key,
-            'generation_method': method,
         }
-        if mask_prompt:
-            extra['mask_prompt'] = mask_prompt
+        extra.update(extra_fields)
         return extra
 
     def on_result(preview):

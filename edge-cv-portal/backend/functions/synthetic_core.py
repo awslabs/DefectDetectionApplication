@@ -13,6 +13,7 @@ S3 manifest write that gives `append_manifest_lines` its atomicity.
 import json
 import re
 from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +27,11 @@ class SyntheticCoreError(Exception):
 class ValidationError(SyntheticCoreError):
     """A user-facing validation failure; the message identifies the
     violated condition."""
+
+
+class StabilityGenerationError(SyntheticCoreError):
+    """Stability response carried no usable image; the message includes
+    the finish reason reported by the model (Req 2.6)."""
 
 
 class UnresolvedPlaceholderError(SyntheticCoreError):
@@ -74,14 +80,42 @@ MODEL_CATALOG = [
         "max_images_per_call": 1,
         "randomization_defaults": {"seed": None, "cfg_scale": 8.0},
     },
+    {
+        "model_id": "stability.stable-image-inpaint-v1:0",
+        "invocation_id": "us.stability.stable-image-inpaint-v1:0",
+        "display_name": "Stability Stable Image Inpaint",
+        "capabilities": {
+            "text_to_image": False,
+            "inpainting": True,
+            "image_variation": False,
+            "seed": True,
+            "cfg_scale": False,
+        },
+        "max_images_per_call": 1,
+        "randomization_defaults": {"seed": None},
+    },
 ]
 
 
-def filter_available_models(catalog, available_model_ids):
-    """Catalog entries whose model_id is in the region's available set,
-    preserving catalog order (Req 1.1, 1.3)."""
-    available = set(available_model_ids)
-    return [entry for entry in catalog if entry["model_id"] in available]
+def invocation_model_id(entry):
+    """The identifier to pass to Bedrock InvokeModel (Req 4.2, 4.4):
+    the entry's inference-profile ``invocation_id`` when present,
+    otherwise the bare ``model_id``."""
+    return entry.get("invocation_id") or entry["model_id"]
+
+
+def filter_available_models(catalog, available_models):
+    """Catalog entries whose bare model_id appears in available_models
+    with lifecycle status ACTIVE, preserving catalog order (Req 1.3,
+    5.1, 5.2, 6.2).
+
+    ``available_models``: iterable of ``{"model_id", "lifecycle_status"}``
+    summaries. Matching uses the entry's bare ``model_id``, never
+    ``invocation_id`` (Req 4.3).
+    """
+    active = {m["model_id"] for m in available_models
+              if m.get("lifecycle_status") == "ACTIVE"}
+    return [entry for entry in catalog if entry["model_id"] in active]
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +267,190 @@ def build_generation_plan(session_meta, source_images, variation_count,
             })
             task_index += 1
     return tasks
+
+
+# ---------------------------------------------------------------------------
+# Generation method selection (Req 3.1, 3.5)
+# ---------------------------------------------------------------------------
+
+def select_generation_method(source_class, capabilities):
+    """'inpainting' for normal sources on inpainting-capable models
+    (Req 3.1); 'image_variation' otherwise -- but raises
+    :class:`ValidationError` naming the missing capability when the
+    required method is unsupported (Req 3.5)."""
+    if source_class == "normal" and capabilities.get("inpainting"):
+        return "inpainting"
+    if capabilities.get("image_variation"):
+        return "image_variation"
+    raise ValidationError(
+        "The selected model does not support image variation, which is "
+        "required for this source classification"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mask rectangle derivation (Req 3.2, 3.3)
+# ---------------------------------------------------------------------------
+
+_MASK_SIDE_FRACTION_MIN = 0.15
+_MASK_SIDE_FRACTION_MAX = 0.40
+_MASK_MARGIN_FRACTION = 0.10
+
+_UINT64_MASK = 0xFFFFFFFFFFFFFFFF
+_SPLITMIX64_GAMMA = 0x9E3779B97F4A7C15
+
+
+def _mix64(seed, salt):
+    """Splitmix64-style integer mixer: deterministic across Python
+    versions and processes (no ``random`` module)."""
+    z = (int(seed) + (int(salt) + 1) * _SPLITMIX64_GAMMA) & _UINT64_MASK
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
+    return (z ^ (z >> 31)) & _UINT64_MASK
+
+
+def _mask_side(mixed, dimension):
+    """Side length in the clamped 15-40% band of ``dimension``
+    (min 1 px, max the full dimension)."""
+    fraction = _MASK_SIDE_FRACTION_MIN + (mixed % 10_000) / 10_000 * (
+        _MASK_SIDE_FRACTION_MAX - _MASK_SIDE_FRACTION_MIN)
+    return min(max(int(round(dimension * fraction)), 1), dimension)
+
+
+def _mask_offset(mixed, dimension, side):
+    """Center-biased placement offset: uniform within a 10% margin band
+    when the rectangle fits inside it, otherwise uniform over the full
+    valid placement range."""
+    margin = int(round(dimension * _MASK_MARGIN_FRACTION))
+    low, high = margin, dimension - side - margin
+    if low > high:
+        low, high = 0, dimension - side
+    return low + mixed % (high - low + 1)
+
+
+def derive_mask_rect(task_seed, image_width, image_height):
+    """Deterministic inpainting rectangle ``{left, top, width, height}``
+    derived from the Task_Seed (Req 3.3).
+
+    - width is 15-40% of image_width (min 1 px); height likewise.
+    - Placement is center-biased: a 10% margin is kept on each side when
+      the rectangle fits inside it, otherwise the full valid placement
+      range is used.
+    - The rectangle always lies fully within the image; degenerate 1x1
+      images produce the 1x1 rectangle at the origin.
+    """
+    width = _mask_side(_mix64(task_seed, 0), image_width)
+    height = _mask_side(_mix64(task_seed, 1), image_height)
+    left = _mask_offset(_mix64(task_seed, 2), image_width, width)
+    top = _mask_offset(_mix64(task_seed, 3), image_height, height)
+    return {"left": left, "top": top, "width": width, "height": height}
+
+
+# ---------------------------------------------------------------------------
+# Bedrock request adapters (Req 2.1-2.4, 7.2, 8.1)
+# ---------------------------------------------------------------------------
+
+def build_amazon_request_body(model_entry: Dict, method: str, prompt: str,
+                              source_b64: str, seed, params: Dict,
+                              mask_prompt: Optional[str]) -> Dict:
+    """Bedrock invoke_model JSON body for one task (numberOfImages: 1)."""
+    capabilities = model_entry.get('capabilities', {})
+    config: Dict[str, Any] = {'numberOfImages': 1}
+    if seed is not None and capabilities.get('seed'):
+        config['seed'] = int(seed)
+    cfg_scale = params.get('cfg_scale')
+    if cfg_scale is None:
+        cfg_scale = model_entry.get('randomization_defaults', {}).get(
+            'cfg_scale')
+    if cfg_scale is not None and capabilities.get('cfg_scale'):
+        config['cfgScale'] = float(cfg_scale)
+
+    if method == 'inpainting':
+        return {
+            'taskType': 'INPAINTING',
+            'inPaintingParams': {
+                'image': source_b64,
+                'maskPrompt': mask_prompt or 'the defect region',
+                'text': prompt,
+            },
+            'imageGenerationConfig': config,
+        }
+    return {
+        'taskType': 'IMAGE_VARIATION',
+        'imageVariationParams': {
+            'images': [source_b64],
+            'text': prompt,
+        },
+        'imageGenerationConfig': config,
+    }
+
+
+def build_stability_inpaint_request_body(prompt, source_image_b64,
+                                         mask_image_b64, seed,
+                                         output_format="png"):
+    """Bedrock Stability inpaint request body (Req 2.3, 7.2).
+
+    Exactly the fields ``{image, mask, prompt, seed, output_format}``;
+    seed passed unmodified (Task_Seed range 0..858,993,459 is inside
+    Stability's 0..4,294,967,294). ``seed=None`` omits the field.
+    negative_prompt and guidance parameters are omitted: the entry's
+    capability flags exclude them (Req 2.4).
+    """
+    body = {
+        "image": source_image_b64,
+        "mask": mask_image_b64,
+        "prompt": prompt,
+        "output_format": output_format,
+    }
+    if seed is not None:
+        body["seed"] = int(seed)
+    return body
+
+
+def extract_stability_result(payload):
+    """First generated image (base64 string) from a Stability response
+    ``{images, seeds, finish_reasons}`` (Req 2.5).
+
+    Raises :class:`StabilityGenerationError` when ``finish_reasons[0]``
+    is non-null (content filtered / inference error) or ``images`` is
+    empty, with the reported reason in the message (Req 2.6).
+    """
+    finish_reasons = payload.get("finish_reasons") or []
+    reason = finish_reasons[0] if finish_reasons else None
+    images = payload.get("images") or []
+    if reason is not None:
+        raise StabilityGenerationError(
+            f"Stability generation did not return a usable image: {reason}")
+    if not images:
+        raise StabilityGenerationError(
+            "Stability generation did not return a usable image: "
+            "the response contained no images")
+    return images[0]
+
+
+# ---------------------------------------------------------------------------
+# Bedrock invocation failure classification (Req 9.1, 9.2)
+# ---------------------------------------------------------------------------
+
+def classify_bedrock_invocation_error(error_code, error_message, model_id):
+    """User-facing per-task failure reason for a Bedrock InvokeModel
+    ClientError (Req 9.1, 9.2). Total: always returns a non-empty string.
+
+    - AccessDeniedException -> Bedrock model access not granted for
+      ``model_id``.
+    - ResourceNotFoundException whose message marks the model as Legacy
+      -> the model's lifecycle status is the cause.
+    - anything else -> ``"<code>: <message>"`` passthrough.
+    """
+    code = str(error_code or "")
+    message = str(error_message or "")
+    if code == "AccessDeniedException":
+        return (f"Bedrock model access is not granted for {model_id}: "
+                f"{message}")
+    if code == "ResourceNotFoundException" and "legacy" in message.lower():
+        return (f"Model {model_id} is marked Legacy by the provider "
+                f"(lifecycle status): {message}")
+    return f"{code}: {message}"
 
 
 # ---------------------------------------------------------------------------

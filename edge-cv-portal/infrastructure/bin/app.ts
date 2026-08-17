@@ -208,6 +208,7 @@ const syntheticDataStack = new SyntheticDataStack(app, 'EdgeCVPortalSyntheticDat
   settingsTable: storageStack.settingsTable,
   trainingJobsTable: storageStack.trainingJobsTable,
   trustedUseCaseAccountIds,
+  dataBucketAllowlist,
   userPool: authStack.userPool,
   restApiId: computeStack.api.restApiId,
   restApiRootResourceId: computeStack.api.restApiRootResourceId,

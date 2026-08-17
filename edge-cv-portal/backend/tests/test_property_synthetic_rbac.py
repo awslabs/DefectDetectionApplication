@@ -68,13 +68,14 @@ def senv(aws_stack):
     # The catalog and worker seams are stubbed for the whole module so no
     # route ever reaches Bedrock / Lambda self-invocation.
     sd = env.synthetic_data
-    original_list = sd._list_available_model_ids
+    original_list = sd._list_available_models
     original_invoke = sd._invoke_worker_async
-    sd._list_available_model_ids = lambda: [
-        m["model_id"] for m in sd.MODEL_CATALOG]
+    sd._list_available_models = lambda: [
+        {"model_id": m["model_id"], "lifecycle_status": "ACTIVE"}
+        for m in sd.MODEL_CATALOG]
     sd._invoke_worker_async = lambda payload: None
     yield env
-    sd._list_available_model_ids = original_list
+    sd._list_available_models = original_list
     sd._invoke_worker_async = original_invoke
 
 

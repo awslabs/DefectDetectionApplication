@@ -22,6 +22,24 @@ export interface SyntheticDataStackProps extends cdk.StackProps {
    * non-empty synth-time requirement as the ComputeStack.
    */
   trustedUseCaseAccountIds: string[];
+  /**
+   * Optional allowlist of data buckets the handler role may access on the
+   * S3 DATA PLANE (s3:ListBucket "see", plus s3:GetObject/PutObject
+   * "access"). Each entry may be a bare bucket name (`my-data-bucket`) or a
+   * full bucket ARN (`arn:aws:s3:::my-data-bucket`). Sourced from CDK context
+   * `-c dataBucketAllowlist=bucket-a,bucket-b` (same value as the
+   * ComputeStack's prop).
+   *
+   * Default (empty/unset): all buckets (`arn:aws:s3:::*`) on the data plane —
+   * required for browsing arbitrary user-named data buckets, since data buckets
+   * are resolved at runtime and cannot be scoped by ARN at synth time, and S3
+   * does not honor aws:ResourceTag for s3:ListBucket. Control-plane actions
+   * (bucket policy/ACL/delete/tagging) are never granted here regardless.
+   *
+   * When non-empty, the data-plane grant is restricted to exactly these
+   * buckets.
+   */
+  dataBucketAllowlist?: string[];
   /** Portal Cognito user pool (route authorizer). */
   userPool: cognito.IUserPool;
   /** Rest API id of the existing portal API (ComputeStack.api). */
@@ -259,6 +277,60 @@ export class SyntheticDataStack extends cdk.Stack {
           'iam:PassedToService': 'sagemaker.amazonaws.com',
         },
       },
+    }));
+
+    // Data-plane access to portal-managed data buckets (read source images,
+    // write generated/annotation objects) for SINGLE-ACCOUNT setups, where
+    // the generation worker uses the Lambda's own credentials (cross-account
+    // setups go through the assumed DDAPortalAccessRole instead). Data
+    // buckets are arbitrary user-named and resolved at RUNTIME, so they
+    // cannot be scoped by ARN at synth time.
+    //
+    // IMPORTANT: an earlier attempt (on the ComputeStack's equivalent grant)
+    // gated this with an `aws:ResourceTag/dda-portal:managed` Condition, but
+    // S3 does NOT honor aws:ResourceTag for bucket-level actions like
+    // s3:ListBucket on regular buckets (it applies only via Access Point
+    // ARNs or per-bucket ABAC), so that Condition silently denied ALL
+    // data-bucket browsing (regression: "AccessDenied ... s3:ListBucket").
+    // The grant below is therefore unconditional on the S3 data plane, but
+    // deliberately scoped to data-plane actions only — NO control-plane
+    // actions (PutBucketPolicy, ACLs, DeleteBucket, PutBucketTagging, etc.)
+    // are granted here, and cross-account data access is still gated by the
+    // assumed DDAPortalAccessRole in the UseCase account.
+    // Resolve the data-plane bucket scope from the optional allowlist. Each
+    // allowlist entry may be a bare bucket name or a full `arn:aws:s3:::name`
+    // ARN; normalize to the canonical bucket ARN. Empty/unset -> all buckets.
+    // (Deliberately duplicated from the ComputeStack's createLambdaRole —
+    // extracting a shared helper would touch compute-stack.ts, which this
+    // fix must leave byte-identical.)
+    const allowlist = (props.dataBucketAllowlist ?? []).filter((b) => b.length > 0);
+    const bucketArns: string[] =
+      allowlist.length > 0
+        ? allowlist.map((b) =>
+            b.startsWith('arn:aws:s3:::')
+              ? b.replace(/\/\*?$/, '')
+              : `arn:aws:s3:::${b}`
+          )
+        : ['arn:aws:s3:::*'];
+    const bucketLevelResources = bucketArns;
+    const objectLevelResources = bucketArns.map((arn) => `${arn}/*`);
+
+    handlerRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:ListBucket',
+        's3:GetBucketLocation',
+        's3:GetBucketTagging',
+      ],
+      resources: bucketLevelResources,
+    }));
+    handlerRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:GetObject',
+        's3:PutObject',
+      ],
+      resources: objectLevelResources,
     }));
 
     // ------------------------------------------------------------------

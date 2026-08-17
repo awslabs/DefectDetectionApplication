@@ -24,6 +24,7 @@ from synthetic_core import SEED_MODULUS, build_generation_plan
 
 model_ids = st.sampled_from([
     "amazon.nova-canvas-v1:0", "amazon.titan-image-generator-v2:0",
+    "stability.stable-image-inpaint-v1:0",
 ])
 
 source_images = st.lists(

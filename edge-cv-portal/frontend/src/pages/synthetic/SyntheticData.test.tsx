@@ -48,6 +48,7 @@ vi.mock('../../services/api', () => ({
 import { apiService } from '../../services/api';
 import SyntheticData, {
   NO_SOURCES_MESSAGE,
+  SOURCE_PICKER_PAGE_SIZE,
   VARIATION_COUNT_MESSAGE,
   isValidVariationCount,
 } from './SyntheticData';
@@ -128,6 +129,9 @@ beforeEach(() => {
     prefix: 'datasets/castings/',
     bucket: 'bucket',
     total_found: 2,
+    offset: 0,
+    limit: 12,
+    has_more: false,
     images: [
       {
         key: 'datasets/castings/img1.png',
@@ -166,6 +170,59 @@ async function openWizard() {
   await waitFor(() => expect(createButton).toBeEnabled());
   await userEvent.click(createButton);
   await waitFor(() => expect(mocked.listSyntheticModels).toHaveBeenCalled());
+}
+
+/**
+ * 63-key paged fixture (source-image-picker-pagination, task 4): 32
+ * anomaly-*.jpg sorting lexicographically before 31 normal-*.jpg, mirroring
+ * the reported counterexample dataset.
+ */
+function pagedKeys(prefix: string): string[] {
+  const anomaly = Array.from(
+    { length: 32 },
+    (_, i) => `${prefix}anomaly-${String(i).padStart(3, '0')}.jpg`
+  );
+  const normal = Array.from(
+    { length: 31 },
+    (_, i) => `${prefix}normal-${String(i).padStart(3, '0')}.jpg`
+  );
+  return [...anomaly, ...normal];
+}
+
+/** Make getImagePreview respect offset/limit and return paged slices. */
+function mockPagedPreview() {
+  mocked.getImagePreview.mockImplementation(async (params) => {
+    const keys = pagedKeys(params.prefix);
+    const offset = params.offset ?? 0;
+    const limit = params.limit ?? 8;
+    const page = keys.slice(offset, offset + limit);
+    return {
+      prefix: params.prefix,
+      bucket: 'bucket',
+      total_found: keys.length,
+      offset,
+      limit,
+      has_more: offset + limit < keys.length,
+      images: page.map((key) => ({
+        key,
+        filename: key.slice(key.lastIndexOf('/') + 1),
+        size: 1,
+        last_modified: '2025-01-01',
+        presigned_url: `https://example.com/${key}`,
+      })),
+      expires_in_seconds: 1800,
+    };
+  });
+}
+
+async function selectDataset(prefix: string) {
+  // The FormField label "Dataset" is part of the trigger's accessible name
+  // both before and after a selection.
+  const datasetSelect = await screen.findByRole('button', {
+    name: /^dataset\b/i,
+  });
+  await userEvent.click(datasetSelect);
+  await userEvent.click(await screen.findByText(prefix));
 }
 
 async function selectModel(displayName: string) {
@@ -306,6 +363,177 @@ describe('SyntheticData wizard', () => {
     await waitFor(() =>
       expect(screen.queryByText(NO_SOURCES_MESSAGE)).not.toBeInTheDocument()
     );
+  });
+});
+
+describe('SyntheticData source-image picker pagination', () => {
+  const PREFIX = 'datasets/castings/';
+
+  beforeEach(() => {
+    mockPagedPreview();
+  });
+
+  async function openPickerOnFirstPage() {
+    await openWizard();
+    await selectDataset(PREFIX);
+    await screen.findByText('Showing 1–12 of 63');
+  }
+
+  function nextButton() {
+    return screen.getByRole('button', { name: /next page/i });
+  }
+
+  function previousButton() {
+    return screen.getByRole('button', { name: /previous page/i });
+  }
+
+  it('fetches pages with offsets 0, 12, 24 on Next navigation (Req 2.2)', async () => {
+    await openPickerOnFirstPage();
+    expect(mocked.getImagePreview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        usecase_id: 'uc-1',
+        prefix: PREFIX,
+        offset: 0,
+        limit: SOURCE_PICKER_PAGE_SIZE,
+      })
+    );
+    // Page 1 renders the first slice.
+    expect(
+      await screen.findByTestId('source-thumb-anomaly-000.jpg')
+    ).toBeInTheDocument();
+
+    await userEvent.click(nextButton());
+    await screen.findByText('Showing 13–24 of 63');
+    expect(mocked.getImagePreview).toHaveBeenCalledWith(
+      expect.objectContaining({ prefix: PREFIX, offset: 12 })
+    );
+    expect(
+      screen.getByTestId('source-thumb-anomaly-012.jpg')
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId('source-thumb-anomaly-000.jpg')
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(nextButton());
+    await screen.findByText('Showing 25–36 of 63');
+    expect(mocked.getImagePreview).toHaveBeenCalledWith(
+      expect.objectContaining({ prefix: PREFIX, offset: 24 })
+    );
+    // Page 3 crosses into the normal-*.jpg keys (offset 24..35).
+    expect(
+      screen.getByTestId('source-thumb-normal-000.jpg')
+    ).toBeInTheDocument();
+
+    // Previous returns to the prior page with the prior offset.
+    await userEvent.click(previousButton());
+    await screen.findByText('Showing 13–24 of 63');
+    expect(mocked.getImagePreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ prefix: PREFIX, offset: 12 })
+    );
+  });
+
+  it('shows the position indicator and disables controls at the bounds (Req 2.2, 2.4)', async () => {
+    await openPickerOnFirstPage();
+    // First page: Previous disabled, Next enabled.
+    expect(previousButton()).toBeDisabled();
+    expect(nextButton()).toBeEnabled();
+
+    await userEvent.click(nextButton());
+    await screen.findByText('Showing 13–24 of 63');
+    expect(previousButton()).toBeEnabled();
+
+    // Walk to the last page (offsets 24, 36, 48, 60).
+    for (const range of ['25–36', '37–48', '49–60', '61–63']) {
+      await userEvent.click(nextButton());
+      await screen.findByText(`Showing ${range} of 63`);
+    }
+    expect(nextButton()).toBeDisabled();
+    expect(previousButton()).toBeEnabled();
+  });
+
+  it('preserves selections and the selected-count text across pages (Req 2.3)', async () => {
+    await openPickerOnFirstPage();
+    await userEvent.click(screen.getByTestId('source-thumb-anomaly-000.jpg'));
+    expect(screen.getByText(/1 selected/)).toBeInTheDocument();
+
+    await userEvent.click(nextButton());
+    await screen.findByText('Showing 13–24 of 63');
+    // Off-page selection still counted.
+    expect(screen.getByText(/1 selected/)).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('source-thumb-anomaly-012.jpg'));
+    expect(screen.getByText(/2 selected/)).toBeInTheDocument();
+
+    // Back to page 1: selection intact, thumbnail still marked selected.
+    await userEvent.click(previousButton());
+    await screen.findByText('Showing 1–12 of 63');
+    expect(screen.getByText(/2 selected/)).toBeInTheDocument();
+    expect(
+      screen.getByTestId('source-thumb-anomaly-000.jpg')
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('submits source_images containing keys selected on two pages (Req 2.5)', async () => {
+    mocked.createSyntheticSession.mockResolvedValue({
+      session: { session_id: 'sess-1' },
+    } as any);
+    await openPickerOnFirstPage();
+    await selectModel('Amazon Nova Canvas');
+    await userEvent.type(screen.getByLabelText('Object type'), 'casting');
+    await userEvent.click(screen.getByRole('radio', { name: /defect images/i }));
+
+    await userEvent.click(screen.getByTestId('source-thumb-anomaly-000.jpg'));
+    await userEvent.click(nextButton());
+    await screen.findByText('Showing 13–24 of 63');
+    await userEvent.click(screen.getByTestId('source-thumb-anomaly-012.jpg'));
+
+    const submit = screen.getByRole('button', { name: /^create session$/i });
+    await waitFor(() => expect(submit).toBeEnabled());
+    await userEvent.click(submit);
+
+    await waitFor(() => expect(mocked.createSyntheticSession).toHaveBeenCalled());
+    const payload = mocked.createSyntheticSession.mock.calls[0][0];
+    const submittedKeys = (payload.source_images ?? []).map(
+      (img: any) => img.key
+    );
+    expect(submittedKeys).toContain(`${PREFIX}anomaly-000.jpg`);
+    expect(submittedKeys).toContain(`${PREFIX}anomaly-012.jpg`);
+    expect(submittedKeys).toHaveLength(2);
+  });
+
+  it('resets the page and clears the selection on dataset change (Req 3.6)', async () => {
+    mocked.listDatasets.mockResolvedValue({
+      datasets: [
+        {
+          prefix: PREFIX,
+          image_count: 63,
+          last_modified: null,
+          has_subdirectories: false,
+        },
+        {
+          prefix: 'datasets/widgets/',
+          image_count: 63,
+          last_modified: null,
+          has_subdirectories: false,
+        },
+      ],
+      bucket: 'bucket',
+      base_prefix: '',
+    });
+    await openPickerOnFirstPage();
+    await userEvent.click(screen.getByTestId('source-thumb-anomaly-000.jpg'));
+    await userEvent.click(nextButton());
+    await screen.findByText('Showing 13–24 of 63');
+    expect(screen.getByText(/1 selected/)).toBeInTheDocument();
+
+    // Change dataset: page resets to offset 0 and the selection is cleared.
+    await selectDataset('datasets/widgets/');
+    await screen.findByText('Showing 1–12 of 63');
+    expect(mocked.getImagePreview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ prefix: 'datasets/widgets/', offset: 0 })
+    );
+    expect(screen.getByText(/0 selected/)).toBeInTheDocument();
+    // At-least-one-source validation returns (Req 3.6).
+    expect(screen.getByText(NO_SOURCES_MESSAGE)).toBeInTheDocument();
   });
 });
 
