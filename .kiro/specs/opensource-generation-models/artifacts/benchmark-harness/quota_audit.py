@@ -30,13 +30,41 @@ EC2_QUOTAS = [
 ]
 
 # SageMaker endpoint-usage quotas are per instance type; match by quota name.
+# Covers every instance type the exploration's size classes touch: the small
+# class (g5/g6 24 GB), the medium/large class actually used in Phase C
+# (g6e.8xlarge — host-RAM bound, see benchmark-results/README.md), the g6e
+# types a future implementation might right-size onto, and the p4d/p4de/p5
+# fallbacks for bf16 large-class hosting.
 SAGEMAKER_INSTANCE_TYPES = [
     "ml.g5.xlarge",
+    "ml.g5.2xlarge",
+    "ml.g5.4xlarge",
+    "ml.g5.12xlarge",
     "ml.g6.xlarge",
+    "ml.g6.2xlarge",
+    "ml.g6.4xlarge",
+    "ml.g6.12xlarge",
     "ml.g6e.xlarge",
     "ml.g6e.2xlarge",
     "ml.g6e.4xlarge",
+    "ml.g6e.8xlarge",
+    "ml.g6e.12xlarge",
+    "ml.g6e.16xlarge",
+    "ml.g6e.24xlarge",
+    "ml.g6e.48xlarge",
     "ml.p4d.24xlarge",
+    "ml.p4de.24xlarge",
+    "ml.p5.48xlarge",
+]
+
+# Async-inference endpoint quotas are separate from real-time endpoint usage;
+# audited too because SageMaker async is the only Hosting_Option with a native
+# scale-to-zero mechanism (task 7.2).
+SAGEMAKER_ASYNC_INSTANCE_TYPES = [
+    "ml.g5.xlarge",
+    "ml.g6e.xlarge",
+    "ml.g6e.2xlarge",
+    "ml.g6e.8xlarge",
 ]
 
 
@@ -54,6 +82,12 @@ def audit_ec2(client) -> list:
 def audit_sagemaker(client) -> list:
     """Collect endpoint-usage quotas for the instance types of interest."""
     wanted = {f"{t} for endpoint usage": t for t in SAGEMAKER_INSTANCE_TYPES}
+    wanted.update(
+        {
+            f"{t} for asynchronous inference endpoint usage": t
+            for t in SAGEMAKER_ASYNC_INSTANCE_TYPES
+        }
+    )
     rows = []
     found = {}
     paginator = client.get_paginator("list_service_quotas")

@@ -20,3 +20,16 @@ the P quota bounds any p4d fallback (96 vCPUs per p4d.24xlarge).
 SageMaker per-instance-type endpoint quotas bound future endpoint
 hosting; zero/absent values need quota increase requests before a
 production implementation.
+
+---
+
+> **⚠️ SUPERSEDED for the SageMaker g6e rows (task 7.1, 2026-08-17T23:32:17Z).**
+> The `ml.g6e.* for endpoint usage` values of `0.0` recorded above are **wrong**.
+> A live re-audit (`aws service-quotas list-service-quotas --service-code
+> sagemaker --region us-east-1`) shows `ml.g6e.xlarge` = 4, `ml.g6e.2xlarge` = 4
+> (both raised from 1 by the increases approved 2026-08-17T22:59:29Z),
+> `ml.g6e.4xlarge` / `8xlarge` / `12xlarge` / `16xlarge` = 1, and only
+> `ml.g6e.24xlarge` / `48xlarge` / p4d / p4de / p5 = 0. The authoritative record
+> is `../quota-audit.md`; the EC2 vCPU rows above are unchanged and still valid.
+> Consequence: the "quota is 0" reason recorded elsewhere for skipping optional
+> task 4.4 was incorrect — see `../quota-audit.md` §2.

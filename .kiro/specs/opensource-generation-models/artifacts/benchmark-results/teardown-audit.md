@@ -110,9 +110,19 @@ with their instances).
 
 ## Step 3 — Delete tagged SageMaker endpoints / endpoint-configs / models
 
-Optional task 4.4 was **never executed** (skipped — see the run-index note in
-`README.md`: SageMaker endpoint quotas for g6e instance types are 0 on this
-account), so no SageMaker resource was created. Verified anyway:
+Optional task 4.4 was **never executed** — skipped by explicit **user decision
+on 2026-08-17** to stop provisioning and move to the analysis phases (see the
+"Optional task 4.4" section of `README.md`) — so no SageMaker resource was
+created. Verified anyway:
+
+> **⚠️ Correction (task 7.1, 2026-08-17T23:32:17Z):** an earlier version of this
+> paragraph attributed the skip to "SageMaker endpoint quotas for g6e instance
+> types are 0 on this account". That was **factually wrong** — live values are
+> `ml.g6e.xlarge` = 4, `ml.g6e.2xlarge` = 4, `ml.g6e.4xlarge`/`8xlarge`/
+> `12xlarge`/`16xlarge` = 1 (see `../quota-audit.md` §1–2), and a quota of 1 is
+> enough for one short-lived measurement endpoint. Quota was not the blocker;
+> the user decision was. Nothing in this audit's teardown result changes: no
+> tagged SageMaker resource was created or survives.
 
 ```
 $ aws sagemaker list-endpoints --region us-east-1 --query 'Endpoints[].EndpointName' --output json

@@ -106,33 +106,39 @@ One row per planned Benchmark_Run. Status vocabulary: `pending` (not started),
 | flux.2 [dev] | large | `flux.2/run-001/` | complete | 13/13 ok (4 t2i via Flux2Pipeline 28-step; 9 "inpaint" via the official instruction-editing path — **no mask API exists for FLUX.2 [dev]**, mask parity fails: outside-mask MAE 9.6–67.2 vs 1.0–6.1 for FLUX.1-Fill-dev). Required bitsandbytes NF4 quantization; bf16+cpu_offload OOMed on the 48 GB L40S (`offload-probe-metrics.json`) |
 | hunyuanimage | large | `hunyuanimage/run-001/` | complete (**substituted model**) | **Benchmarked HunyuanImage-2.1 (17B), not the matrix's HunyuanImage-3.0 (80B MoE)** — 3.0 bf16 needs p4de/p5-class hardware, outside the Cost_Cap; substitution sanctioned by the matrix's "Sizing note for Task 4.3" option (c). 4/13 ok: 4 t2i ok; 9 inpaint `failed/unsupported_task` (HunyuanImagePipeline is text-to-image only; no Hunyuan inpaint pipeline in diffusers, no documented mask API for 3.0 either). Required NF4; bf16+cpu_offload OOMed (`attempt-1-bf16-offload-metrics.json`) |
 
-### Optional task 4.4 — SageMaker cold start: **SKIPPED (not measurable on this account)**
+### Optional task 4.4 — SageMaker cold start: **SKIPPED by user decision (2026-08-17)**
 
-No SageMaker endpoint was ever created for this exploration. The reason is a
-hard account constraint, not Cost_Cap headroom (USD 488.89 of the cap was still
-free):
+No SageMaker endpoint was ever created for this exploration. The reason is an
+explicit **user decision to stop provisioning** after Phase C/D and move to the
+analysis phases (Phases E–G). It was neither a Cost_Cap constraint (USD 488.89
+of the cap was still free) nor a quota constraint. Task 4.4 is optional (`*` in
+`tasks.md`), so skipping it is within the plan.
 
-> The Phase B GPU quota audit (`../benchmark-harness/quota_audit.py`,
-> `../benchmark-harness/quota-audit-trial.md`) found **SageMaker endpoint usage
-> quotas of 0 for every g6e instance type** in us-east-1 on Portal_Account
-> 164152369890 (`ml.g6e.xlarge` L-B0729CB4 = 0, `ml.g6e.2xlarge` L-F8D7F460 = 0,
-> `ml.g6e.4xlarge` L-93531071 = 0, `ml.p4d.24xlarge` L-09F79647 = 0). A
-> real-time endpoint cannot be created on the hardware the shortlisted
-> (medium/large) models require, so **scale-from-zero Cold_Start_Time cannot be
-> measured on this account**. The non-zero quotas that do exist
-> (`ml.g5.xlarge` = 4, `ml.g6.xlarge` = 1) only cover the small class, whose
-> models are not shortlist candidates for inpainting — a PixArt endpoint would
-> measure SageMaker's cold-start mechanics but not the shortlist's model-load
-> time, which dominates Cold_Start_Time for a 12B+ model.
+> **⚠️ Correction (task 7.1, 2026-08-17T23:32:17Z).** An earlier version of this
+> section stated that SageMaker endpoint usage quotas for g6e instance types were
+> **0** on this account and gave that as the reason task 4.4 could not run. **That
+> was factually wrong.** A live re-audit
+> (`aws service-quotas list-service-quotas --service-code sagemaker --region
+> us-east-1`, full transcript in `../quota-audit.md`) shows non-zero endpoint
+> usage quotas for every g6e type up to 16xlarge: `ml.g6e.xlarge` L-B0729CB4 = 4,
+> `ml.g6e.2xlarge` L-F8D7F460 = 4 (both raised from **1** by increases approved
+> 2026-08-17T22:59:29Z), `ml.g6e.4xlarge` L-93531071 = 1, `ml.g6e.8xlarge`
+> L-96A28D02 = 1, `ml.g6e.12xlarge` L-60313EA3 = 1, `ml.g6e.16xlarge`
+> L-2930A179 = 1; only `ml.g6e.24xlarge` L-AE407E8B, `ml.g6e.48xlarge`
+> L-E0C458EA and the p4d/p4de/p5 types are 0. A quota of **1 is sufficient for a
+> single short-lived cold-start measurement endpoint**, so **quota was not the
+> blocker**. The stale `0` values came from
+> `../benchmark-harness/quota-audit-trial.md` (2026-08-17T04:33:54Z), which is now
+> marked superseded for its g6e rows.
 
-**Consequence for Phase E (task 7.2, hosting comparison):** SageMaker
-scale-from-zero cold start must be sourced from **documented AWS estimates**,
-clearly labelled as estimates rather than measurements. The only measured
-cold-start data this exploration produced is the Phase C proxy from protocol §3
-(`model_load_seconds` + first-case latency on a fresh EC2 instance), available
-per run in each `metrics.json`. Task 4.4 stays unchecked in `tasks.md` (it is
-optional). Requesting the g6e SageMaker endpoint quota increase is an open
-prerequisite for the decision record (task 9.1).
+**Consequence for Phase E (task 7.2, hosting comparison) — unchanged:** because
+no endpoint was created, SageMaker scale-from-zero cold start is sourced from
+**documented AWS behaviour, clearly labelled as estimates** rather than
+measurements, combined with the measured Phase C model-load proxy from protocol
+§3 (`model_load_seconds` + first-case latency on a fresh EC2 instance), available
+per run in each `metrics.json`. Measuring real SageMaker scale-from-zero cold
+start remains an open item for the future implementation spec (recorded in
+`../decision-record.md`), not a blocked one.
 
 ## Evidence Files
 

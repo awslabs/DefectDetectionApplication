@@ -96,7 +96,7 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
     - Skip any model the matrix excluded (weights unobtainable) and record the skip in the run index; if the ledger reaches the Cost_Cap, stop provisioning and record remaining runs as `incomplete` with the reason in `benchmark-results/README.md`
     - _Requirements: 1.7, 2.5, 2.6, 2.7, 2.9, 2.10_
 
-  - [ ]* 4.4 Measure SageMaker cold start for the shortlist (only if Cost_Cap headroom remains)
+  - [ ]* 4.4 Measure SageMaker cold start for the shortlist (only if Cost_Cap headroom remains) — SKIPPED (optional, confirmed by user 2026-08-17: no further provisioning). ⚠️ CORRECTION FOR TASK 7.1/7.2: the skip reason recorded in `benchmark-results/README.md` states g6e SageMaker endpoint quotas are 0. A live re-check on 2026-08-17 shows they are **1** for ml.g6e.xlarge/2xlarge/4xlarge/8xlarge/12xlarge/16xlarge (0 only for 24xlarge/48xlarge) — a single endpoint WAS permissible, so quota was not the true blocker. Task 7.1 must record the verified values and correct that note; 7.2 uses documented cold-start estimates regardless. Increase requests to 4 each: ml.g6e.xlarge `5abacbc48f714600aab88fb3048a73300lWtOjBn`, ml.g6e.2xlarge `a5045b7c81134c3db082d723129b9dd5KbYC9Qgs` — both **APPROVED** 2026-08-17T22:59:29Z (verified in task 7.1; live values now 4/4). Corrections landed in `artifacts/quota-audit.md` §2, `benchmark-results/README.md`, `benchmark-results/teardown-audit.md`.
     - ⚠️ Provisions a short-lived SageMaker endpoint (tagged) for the 1–2 shortlisted models to measure scale-from-zero Cold_Start_Time; same ledger + `should_provision` gate; delete endpoint/config/model immediately after measurement
     - Skip entirely if headroom is insufficient — hosting comparison then uses documented estimates only
     - _Requirements: 2.3, 2.9, 3.2_
@@ -117,19 +117,19 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
     - **Property 7: Portal non-modification**
     - _Requirements: 9.1, 9.2, 9.4_
 
-- [ ] 6. Checkpoint — teardown gate
+- [x] 6. Checkpoint — teardown gate
   - Ensure `teardown-audit.md` shows all tag-filtered queries empty, the stack snapshot diff is empty, and the ledger is reconciled. Ask the user if questions arise.
 
-- [ ] 7. Phase E — Hosting comparison and cost model
-  - [ ] 7.1 Run the quota audit and record GPU quotas
+- [x] 7. Phase E — Hosting comparison and cost model
+  - [x] 7.1 Run the quota audit and record GPU quotas
     - Execute `quota_audit.py`; record current Portal_Account GPU_Quota values per required instance type in us-east-1 and the quota increases a future implementation would need
     - _Requirements: 3.4_
 
-  - [ ] 7.2 Author the hosting comparison
+  - [x] 7.2 Author the hosting comparison
     - Write `artifacts/hosting-comparison.md` covering all five Hosting_Options (SageMaker real-time, SageMaker async, SageMaker JumpStart, EC2 + inference server, ECS/EKS GPU): always-on and on-demand Availability_Mode support with scale-to-zero mechanism and Cold_Start_Time characteristics (measured where 4.4 ran, documented estimates otherwise); instance types per size class from the matrix; Lambda integration path (invocation API, auth, timeout analysis vs measured per-image latency); quota findings from 7.1; ranking per Availability_Mode with rationale
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
 
-  - [ ] 7.3 Author the cost model
+  - [x] 7.3 Author the cost model
     - Write `artifacts/cost-model.md`: ≥3 Usage_Profiles (dev-light ~50 img/day c1, steady-team ~500 img/day c2, production-sustained ~5,000 img/day c4 — finalize numbers); estimate grid of (benchmarked Candidate_Model) × (viable Hosting_Option) × (Availability_Mode) × Usage_Profile using measured latencies and current us-east-1 pricing; Nova Canvas Bedrock per-image baseline row per profile; cold-start cost-vs-latency tradeoff line per on-demand combination; if a companion cost script is written, include the monotonicity sanity check (more images never lowers on-demand cost)
     - **Property 9: Cost model coverage and monotonicity**
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5_
