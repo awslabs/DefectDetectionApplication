@@ -134,13 +134,13 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
     - **Property 9: Cost model coverage and monotonicity**
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5_
 
-- [ ] 8. Phase F — Design proposals
-  - [ ] 8.1 Author the model registry proposal
+- [x] 8. Phase F — Design proposals
+  - [x] 8.1 Author the model registry proposal
     - Write `artifacts/model-registry-proposal.md`: DynamoDB-backed schema superset of `MODEL_CATALOG` entries (model_id, display_name, five capability flags, max_images_per_call, randomization_defaults, provider_type, endpoint_config, availability_mode, enabled) with a field-coverage table cross-checked against `synthetic_core.py`; per-environment endpoint_config (prod/dev with distinct Availability_Modes); admin UI operations (add/edit/enable/disable) with sketched API surface; migration path (seed from catalog, registry-preferred read with catalog fallback flag, Bedrock entries functional throughout); availability filtering generalization (ListFoundationModels intersection for Bedrock entries, endpoint health/reachability with caching for selfhosted); authorization boundary restricting writes to the portal admin role via the existing authorizer
     - **Property 8: Registry schema field coverage**
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7_
 
-  - [ ] 8.2 Author the integration proposal
+  - [x] 8.2 Author the integration proposal
     - Write `artifacts/integration-proposal.md`: Selfhosted_Provider generalizing the stability-generation-models Provider/Request_Adapter split with adapter selection by registry provider_type, invoking `sagemaker-runtime:InvokeEndpoint(Async)` or HTTPS instead of `bedrock:InvokeModel`; per-recommended-model adapter mapping tables (source image, mask, resolved prompt, Task_Seed, randomization params → request schema; response → image bytes); explicit Pipeline_Invariants subsections (unchanged `derive_task_seed`, per-preview model id/seed/resolved prompt recording, Mask_Region recording for `bbox_from_mask`, byte-identical Nova Canvas path); error taxonomy (endpoint_unreachable, endpoint_cold_starting, generation_failure, malformed_response) mapped to existing per-task failure recording; Lambda timeout analysis with the async invocation pattern for on-demand Availability_Mode
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6_
 
