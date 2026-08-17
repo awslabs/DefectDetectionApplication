@@ -91,7 +91,7 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
     - Run all frozen cases; inpainting via FLUX.1-Fill-dev per the matrix's inpainting-path finding; capture model_load_seconds + first-case latency as Cold_Start_Time proxy; write per-run artifacts and rubric scores in notes.md
     - _Requirements: 2.5, 2.6, 2.7, 2.9, 2.10_
 
-  - [ ] 4.3 Benchmark FLUX.2 and HunyuanImage (large class, if included)
+  - [x] 4.3 Benchmark FLUX.2 and HunyuanImage (large class, if included)
     - ⚠️ Provisions g6e.2xlarge / g6e.4xlarge (p4d slice only if required), sized from the matrix's pinned parameter counts; same tag, ledger, and `should_provision` gate per launch
     - Skip any model the matrix excluded (weights unobtainable) and record the skip in the run index; if the ledger reaches the Cost_Cap, stop provisioning and record remaining runs as `incomplete` with the reason in `benchmark-results/README.md`
     - _Requirements: 1.7, 2.5, 2.6, 2.7, 2.9, 2.10_

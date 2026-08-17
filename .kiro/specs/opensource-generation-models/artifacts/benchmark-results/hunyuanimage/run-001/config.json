@@ -1,0 +1,39 @@
+{
+  "run_id": "hunyuan21-r1",
+  "ledger_run_id": "large-r1",
+  "model": "hunyuanimage",
+  "model_substitution": {
+    "matrix_row": "HunyuanImage-3.0 (80B MoE, 13B active/token)",
+    "benchmarked": "HunyuanImage-2.1 (17B)",
+    "reason": "HunyuanImage-3.0 bf16 needs 3-4x80 GB (p4de.24xlarge / p5.48xlarge) — outside the USD 500 Cost_Cap for this exploration. The Evaluation_Matrix sanctions HunyuanImage-2.1 as the substitute with the substitution recorded (matrix 'Sizing note for Task 4.3', option (c)).",
+    "hf_repo_upstream": "tencent/HunyuanImage-2.1",
+    "hf_repo_used": "hunyuanvideo-community/HunyuanImage-2.1-Diffusers (official diffusers conversion; HunyuanImagePipeline in diffusers 0.39)"
+  },
+  "pipelines": {
+    "text_to_image": "HunyuanImagePipeline (num_inference_steps=50, negative_prompt='', 1024x1024)",
+    "inpainting": "none — HunyuanImagePipeline.__call__ takes no image/mask_image argument and diffusers ships no Hunyuan inpaint pipeline; all 9 inpainting cases recorded failed / unsupported_task per protocol §3 step 5 and the matrix finding (no documented mask API)."
+  },
+  "instance_type": "g6e.8xlarge",
+  "instance_id": "i-0a5ecae8136b7dca2",
+  "availability_zone": "us-east-1c",
+  "ami": "ami-012ba162b9cd2729c (Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 Ubuntu 22.04)",
+  "gpu": "NVIDIA L40S 48GB (44.4 GiB usable), driver 580.126.09",
+  "host_ram_gib": 248,
+  "environment": {
+    "python": "3.12.10 (/opt/pytorch venv)",
+    "torch": "2.7.0+cu128",
+    "torch_dtype": "bfloat16",
+    "diffusers": "0.39.0",
+    "transformers": "5.15.0",
+    "accelerate": "1.14.0",
+    "bitsandbytes": "0.50.1",
+    "memory_strategy": "bitsandbytes NF4 4-bit on transformer + text_encoder + enable_model_cpu_offload (attempt 2). Attempt 1 (bf16 + enable_model_cpu_offload, the flux1-r1 pattern) OOMed on all 4 t2i cases — recorded in attempt-1-bf16-offload-metrics.json."
+  },
+  "wallclock_budget_minutes": 240,
+  "launch_utc": "2026-08-17T20:27:56Z",
+  "terminate_utc": "2026-08-17T21:14:08Z",
+  "instance_hours": 0.385,
+  "hourly_rate_usd": 4.52856,
+  "weights_download_seconds": 62.9,
+  "notes": "Instance shared with the flux.2 run (ledger row large-r1); instance-hours split evenly, the ledger row carries the whole-instance actual (0.77 h / USD 3.49). model_load_seconds reflects a warm HF cache (weights pre-downloaded, 62.9 s)."
+}

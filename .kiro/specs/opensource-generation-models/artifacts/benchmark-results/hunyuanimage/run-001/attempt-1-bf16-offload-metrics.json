@@ -1,0 +1,130 @@
+{
+  "run_id": "hunyuan21-r1",
+  "model": "hunyuanimage",
+  "instance_type": "g6e.8xlarge",
+  "account": "164152369890",
+  "region": "us-east-1",
+  "model_load_seconds": 0.9842683200001829,
+  "cases": [
+    {
+      "case_id": "inpaint-001",
+      "task_type": "inpainting",
+      "latency_seconds": 3.835100005744607e-05,
+      "seed": 101,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: HunyuanImagePipeline is text-to-image only (no mask/image conditioning; no Hunyuan inpaint pipeline in diffusers)"
+    },
+    {
+      "case_id": "inpaint-002",
+      "task_type": "inpainting",
+      "latency_seconds": 7.04100011716946e-06,
+      "seed": 102,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: HunyuanImagePipeline is text-to-image only (no mask/image conditioning; no Hunyuan inpaint pipeline in diffusers)"
+    },
+    {
+      "case_id": "inpaint-003",
+      "task_type": "inpainting",
+      "latency_seconds": 5.07100003233063e-06,
+      "seed": 103,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: HunyuanImagePipeline is text-to-image only (no mask/image conditioning; no Hunyuan inpaint pipeline in diffusers)"
+    },
+    {
+      "case_id": "inpaint-004",
+      "task_type": "inpainting",
+      "latency_seconds": 4.470000021683518e-06,
+      "seed": 104,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: HunyuanImagePipeline is text-to-image only (no mask/image conditioning; no Hunyuan inpaint pipeline in diffusers)"
+    },
+    {
+      "case_id": "inpaint-005",
+      "task_type": "inpainting",
+      "latency_seconds": 4.4299999899521936e-06,
+      "seed": 105,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: HunyuanImagePipeline is text-to-image only (no mask/image conditioning; no Hunyuan inpaint pipeline in diffusers)"
+    },
+    {
+      "case_id": "inpaint-006",
+      "task_type": "inpainting",
+      "latency_seconds": 4.149999995206599e-06,
+      "seed": 106,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: HunyuanImagePipeline is text-to-image only (no mask/image conditioning; no Hunyuan inpaint pipeline in diffusers)"
+    },
+    {
+      "case_id": "inpaint-101",
+      "task_type": "inpainting",
+      "latency_seconds": 4.099999841855606e-06,
+      "seed": 111,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: HunyuanImagePipeline is text-to-image only (no mask/image conditioning; no Hunyuan inpaint pipeline in diffusers)"
+    },
+    {
+      "case_id": "inpaint-102",
+      "task_type": "inpainting",
+      "latency_seconds": 4.140000100960606e-06,
+      "seed": 112,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: HunyuanImagePipeline is text-to-image only (no mask/image conditioning; no Hunyuan inpaint pipeline in diffusers)"
+    },
+    {
+      "case_id": "inpaint-103",
+      "task_type": "inpainting",
+      "latency_seconds": 3.82999996872968e-06,
+      "seed": 113,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: HunyuanImagePipeline is text-to-image only (no mask/image conditioning; no Hunyuan inpaint pipeline in diffusers)"
+    },
+    {
+      "case_id": "t2i-001",
+      "task_type": "text_to_image",
+      "latency_seconds": 7.703192540999908,
+      "seed": 201,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "OutOfMemoryError: CUDA out of memory. Tried to allocate 124.00 MiB. GPU 0 has a total capacity of 44.39 GiB of which 69.38 MiB is free. Including non-PyTorch memory, this process has 44.32 GiB memory in use. Of the allocated memory 43.81 GiB is allocated by PyTorch, and 9.46 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    },
+    {
+      "case_id": "t2i-002",
+      "task_type": "text_to_image",
+      "latency_seconds": 0.025591333999955168,
+      "seed": 202,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "OutOfMemoryError: CUDA out of memory. Tried to allocate 38.00 MiB. GPU 0 has a total capacity of 44.39 GiB of which 7.38 MiB is free. Including non-PyTorch memory, this process has 44.38 GiB memory in use. Of the allocated memory 43.86 GiB is allocated by PyTorch, and 22.84 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    },
+    {
+      "case_id": "t2i-003",
+      "task_type": "text_to_image",
+      "latency_seconds": 0.013006756999857316,
+      "seed": 203,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "OutOfMemoryError: CUDA out of memory. Tried to allocate 38.00 MiB. GPU 0 has a total capacity of 44.39 GiB of which 7.38 MiB is free. Including non-PyTorch memory, this process has 44.38 GiB memory in use. Of the allocated memory 43.86 GiB is allocated by PyTorch, and 22.84 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    },
+    {
+      "case_id": "t2i-004",
+      "task_type": "text_to_image",
+      "latency_seconds": 0.012105704000077822,
+      "seed": 204,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "OutOfMemoryError: CUDA out of memory. Tried to allocate 38.00 MiB. GPU 0 has a total capacity of 44.39 GiB of which 7.38 MiB is free. Including non-PyTorch memory, this process has 44.38 GiB memory in use. Of the allocated memory 43.86 GiB is allocated by PyTorch, and 22.84 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    }
+  ],
+  "instance_hours": 0.0,
+  "estimated_cost_usd": 0.0,
+  "billing_reconciled_cost_usd": null
+}

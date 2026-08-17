@@ -1,0 +1,37 @@
+{
+  "run_id": "flux2-r1",
+  "ledger_run_id": "large-r1",
+  "model": "flux.2",
+  "hf_repos": {
+    "text_to_image": "black-forest-labs/FLUX.2-dev",
+    "inpainting": "black-forest-labs/FLUX.2-dev (same weights; instruction-editing path — no mask input exists)"
+  },
+  "pipelines": {
+    "text_to_image": "Flux2Pipeline (num_inference_steps=28, guidance_scale=4.0, 1024x1024)",
+    "inpainting": "Flux2Pipeline reference-editing call — image=[frozen source], prompt='Edit this photo: <frozen prompt>. Change nothing else in the image.' (num_inference_steps=28, guidance_scale=4.0, 768x768). Flux2Pipeline.__call__ exposes no mask_image parameter; diffusers ships a mask inpaint pipeline only for FLUX.2 [klein] (Flux2KleinInpaintPipeline, Qwen3 encoder, not loadable with [dev] weights). Mask parity assessed post-hoc against the frozen mask — see notes.md."
+  },
+  "instance_type": "g6e.8xlarge",
+  "instance_id": "i-0a5ecae8136b7dca2",
+  "availability_zone": "us-east-1c",
+  "ami": "ami-012ba162b9cd2729c (Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 Ubuntu 22.04)",
+  "gpu": "NVIDIA L40S 48GB (44.4 GiB usable), driver 580.126.09",
+  "host_ram_gib": 248,
+  "environment": {
+    "python": "3.12.10 (/opt/pytorch venv)",
+    "torch": "2.7.0+cu128",
+    "torch_dtype": "bfloat16",
+    "diffusers": "0.39.0",
+    "transformers": "5.15.0",
+    "accelerate": "1.14.0",
+    "bitsandbytes": "0.50.1",
+    "memory_strategy": "bitsandbytes NF4 4-bit on transformer + text_encoder (diffusers PipelineQuantizationConfig, officially documented quantization path) + enable_model_cpu_offload. Plain bf16 + enable_model_cpu_offload was attempted first and OOMed — see offload-probe-metrics.json."
+  },
+  "wallclock_budget_minutes": 240,
+  "launch_utc": "2026-08-17T20:27:56Z",
+  "terminate_utc": "2026-08-17T21:14:08Z",
+  "instance_hours": 0.385,
+  "hourly_rate_usd": 4.52856,
+  "hf_gated_access": "FLUX.2-dev is HF-gated; a pre-validated token was written to the instance HF cache at runtime via SSM and never committed to the repo or archived logs.",
+  "weights_download_seconds": 123.8,
+  "notes": "Instance shared with the hunyuanimage run (ledger row large-r1); instance-hours split evenly between the two model runs, the ledger row carries the whole-instance actual (0.77 h / USD 3.49). Sizing note: the matrix planned g6e.8xlarge with enable_model_cpu_offload as first attempt because host RAM binds under offload (flux1-r1 lesson); the 32B DiT alone (~64 GB bf16) exceeds the 48 GB L40S, so offload cannot help and NF4 quantization was required. This is an officially supported diffusers FP8/quantized path per Req 2.9 escalation order — no instance-size escalation was needed."
+}
