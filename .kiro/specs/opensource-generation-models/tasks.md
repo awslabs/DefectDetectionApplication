@@ -101,18 +101,18 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
     - Skip entirely if headroom is insufficient — hosting comparison then uses documented estimates only
     - _Requirements: 2.3, 2.9, 3.2_
 
-- [ ] 5. Phase D — Teardown and audit (gate: nothing proceeds until clean)
-  - [ ] 5.1 Execute the teardown checklist and capture evidence
+- [x] 5. Phase D — Teardown and audit (gate: nothing proceeds until clean)
+  - [x] 5.1 Execute the teardown checklist and capture evidence
     - Run all 7 protocol teardown steps: terminate tagged EC2 instances, delete tagged EBS volumes/snapshots, delete tagged SageMaker endpoints/configs/models, copy representative outputs into `benchmark-results/` then delete the benchmark S3 bucket, delete temporary security groups/key pairs/IAM roles
     - Capture the CLI output of every tag-filtered verification query (`exploration=opensource-generation-models` returns empty for each resource type) into `artifacts/benchmark-results/teardown-audit.md`; if any tagged resource survives, re-run until all queries return empty
     - **Property 6: Teardown completeness**
     - _Requirements: 2.8, 9.3_
 
-  - [ ] 5.2 Reconcile the cost ledger against billing
+  - [x] 5.2 Reconcile the cost ledger against billing
     - Pull Cost Explorer actuals filtered by the benchmark tag; fill `billing_reconciled_cost_usd` in each run's metrics.json and finalize the ledger totals and run index (including any `incomplete` runs and reasons) in `benchmark-results/README.md`
     - _Requirements: 2.7, 2.9_
 
-  - [ ] 5.3 Verify the portal is untouched
+  - [x] 5.3 Verify the portal is untouched
     - Capture the post-exploration `describe-stacks` snapshot, diff against the Phase B pre-exploration snapshot (must be empty), and run `git status` over `edge-cv-portal/` and `src/` (must show no modifications); archive both results in `teardown-audit.md`
     - **Property 7: Portal non-modification**
     - _Requirements: 9.1, 9.2, 9.4_

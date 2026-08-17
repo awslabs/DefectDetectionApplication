@@ -1,0 +1,11 @@
+{
+  "strategy": "bnb4",
+  "placement": "enable_model_cpu_offload (nf4 transformer + text_encoder)",
+  "num_inference_steps": 28,
+  "model_load_seconds": 38.11324109100002,
+  "repo": "black-forest-labs/FLUX.2-dev",
+  "t2i_size": 1024,
+  "edit_size": 768,
+  "guidance_scale": 4.0,
+  "edit_prompt_wrapper": "Edit this photo: add <frozen prompt>. Change nothing else in the image."
+}

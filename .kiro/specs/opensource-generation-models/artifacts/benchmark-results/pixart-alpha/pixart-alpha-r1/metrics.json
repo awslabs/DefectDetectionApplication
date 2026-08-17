@@ -126,5 +126,10 @@
   ],
   "instance_hours": 0.6031,
   "estimated_cost_usd": 0.6067,
-  "billing_reconciled_cost_usd": null
+  "billing_reconciled_cost_usd": null,
+  "billing_reconciliation": {
+    "status": "superseded-not-attributed",
+    "reason": "Parallel task-4.1 execution against the same instance as ledger row pixart-r1. Collapsed out of the reconciliation per README's duplicate-execution note: the canonical metrics set for this model is the sibling run-001/ directory. Retained as raw evidence only; its instance_hours/estimated_cost fields must not be summed into any total.",
+    "canonical_metrics": "pixart-alpha/run-001/metrics.json"
+  }
 }

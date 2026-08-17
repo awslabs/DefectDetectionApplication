@@ -126,5 +126,17 @@
   ],
   "instance_hours": 0.385,
   "estimated_cost_usd": 1.7435,
-  "billing_reconciled_cost_usd": null
+  "billing_reconciled_cost_usd": null,
+  "billing_reconciliation": {
+    "status": "pending-cost-explorer-lag",
+    "attempted_utc": "2026-08-17T21:29:43Z",
+    "ledger_row": "large-r1",
+    "ledger_instance_hours": 0.77,
+    "ledger_actual_cost_usd": 3.49,
+    "run_attribution": "even 50% split of the shared g6e.8xlarge (i-0a5ecae8136b7dca2) with flux.2",
+    "query": "aws ce get-cost-and-usage --time-period Start=2026-08-17,End=2026-08-19 --granularity DAILY --metrics UnblendedCost --filter '{\"Tags\":{\"Key\":\"exploration\",\"Values\":[\"opensource-generation-models\"]}}' --group-by Type=DIMENSION,Key=SERVICE",
+    "result": "Total UnblendedCost 0 USD, Groups [] for both days (Estimated=true); `aws ce get-tags --tag-key exploration` returned [\"\"] \u2014 the `exploration` tag is not an activated cost allocation tag and no tagged usage has been ingested yet.",
+    "corroboration": "Untagged CE probe for USAGE_TYPE BoxUsage:g5.xlarge / BoxUsage:g6e.8xlarge in us-east-1 on 2026-08-17 also returned no rows (GPU BoxUsage not yet ingested; the same query did return EBS:VolumeUsage.gp3 and TimedStorage-ByteHrs, so 2026-08-17 data is partially ingested only).",
+    "authoritative_cost_source_until_reconciled": "cost ledger table in benchmark-results/README.md (instance-hours x published on-demand rate)"
+  }
 }

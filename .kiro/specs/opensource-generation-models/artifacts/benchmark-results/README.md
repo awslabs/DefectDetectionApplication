@@ -20,11 +20,75 @@ actual costs of finished rows + projected costs of in-flight rows. Managed by
 | flux1-r1 | flux.1-schnell + flux.1-dev(+Fill) | g6e.8xlarge | complete | 2026-08-17T15:27:02Z | 2026-08-17T16:48:41Z | 13.59 | 6.16 |
 | large-r1 | flux.2 + hunyuanimage-2.1 | g6e.8xlarge | complete | 2026-08-17T20:27:56Z | 2026-08-17T21:14:08Z | 18.11 | 3.49 |
 
-**Spend so far: USD 11.11 / 500.00** (pixart-r1 complete: 1.2061 h × $1.006/hr = $1.21; pixart-r2 complete: 0.2525 h × $1.006/hr = $0.25, both g5.xlarge; flux1-r1 complete: 1.3608 h × $4.52856/hr = $6.16, g6e.8xlarge — one shared instance for the flux.1-schnell and flux.1-dev(+Fill) runs, terminated 2026-08-17T16:48:41Z and verified; large-r1 complete: 0.7700 h × $4.52856/hr = $3.49, g6e.8xlarge — one shared instance for the flux.2 and hunyuanimage-2.1 runs, instance `i-0a5ecae8136b7dca2` terminated 2026-08-17T21:14:08Z and verified by tag-filtered `describe-instances`. Per-run `metrics.json` split the 0.77 h evenly (0.385 h / $1.74 each); this ledger row is authoritative for actual spend)
+**FINAL TOTAL (all runs complete, teardown verified): USD 11.11 / 500.00 Cost_Cap
+— 2.2 % of cap used, no run stopped for cost.** Sum of the four `actual_cost_usd`
+values above (1.21 + 0.25 + 6.16 + 3.49). Per-model attribution (one metrics set
+per model, shared instances split evenly — see the reconciliation note below):
+pixart-alpha $1.21 · pixart-sigma $0.25 · flux.1-schnell $3.08 ·
+flux.1-dev(+Fill) $3.08 · flux.2 $1.74 · hunyuanimage-2.1 $1.74.
 
-Phase D reconciliation: `billing_reconciled_cost_usd` per run and the final
-ledger totals are filled from Cost Explorer actuals filtered by the exploration
-tag (task 5.2).
+**Spend derivation: USD 11.11 / 500.00** (pixart-r1 complete: 1.2061 h × $1.006/hr = $1.21; pixart-r2 complete: 0.2525 h × $1.006/hr = $0.25, both g5.xlarge; flux1-r1 complete: 1.3608 h × $4.52856/hr = $6.16, g6e.8xlarge — one shared instance for the flux.1-schnell and flux.1-dev(+Fill) runs, terminated 2026-08-17T16:48:41Z and verified; large-r1 complete: 0.7700 h × $4.52856/hr = $3.49, g6e.8xlarge — one shared instance for the flux.2 and hunyuanimage-2.1 runs, instance `i-0a5ecae8136b7dca2` terminated 2026-08-17T21:14:08Z and verified by tag-filtered `describe-instances`. Per-run `metrics.json` split the 0.77 h evenly (0.385 h / $1.74 each); this ledger row is authoritative for actual spend)
+
+### Phase D billing reconciliation (task 5.2) — **PENDING-WITH-EVIDENCE**
+
+`billing_reconciled_cost_usd` remains `null` in every `metrics.json`. Tag-filtered
+Cost Explorer actuals were **not yet available** when reconciliation ran; the
+figures above are therefore not replaced by invented numbers. Each canonical
+`metrics.json` carries a `billing_reconciliation` object recording the status,
+the exact query, the timestamp, and the ledger row it will reconcile against.
+
+Attempted 2026-08-17T21:29:43Z (last benchmark instance terminated
+2026-08-17T21:14:08Z — 15 minutes earlier):
+
+```
+$ aws ce get-cost-and-usage --time-period Start=2026-08-17,End=2026-08-19 \
+    --granularity DAILY --metrics UnblendedCost \
+    --filter '{"Tags":{"Key":"exploration","Values":["opensource-generation-models"]}}' \
+    --group-by Type=DIMENSION,Key=SERVICE
+→ 2026-08-17: Total UnblendedCost 0 USD, Groups [], Estimated true
+→ 2026-08-18: Total UnblendedCost 0 USD, Groups [], Estimated true
+```
+
+Two independent reasons the tag-filtered actuals are empty, both confirmed:
+
+1. **The `exploration` tag is not an activated cost allocation tag.**
+   `aws ce get-tags --time-period Start=2026-08-17,End=2026-08-19 --tag-key exploration`
+   returns `{"Tags": [""], "ReturnSize": 1, "TotalSize": 1}` and
+   `aws ce list-cost-allocation-tags` returns `{"CostAllocationTags": []}` — the
+   account has no cost allocation tag activated, so Cost Explorer cannot split
+   spend by this tag at all. Activation is a billing-console action that also
+   only applies to usage recorded *after* activation, so retroactive
+   tag-filtered reconciliation of these runs is not achievable on this account.
+2. **Cost Explorer has not ingested the GPU usage yet.** An untagged control
+   probe for the exact benchmark usage types on the run day returned no rows:
+   `--filter` on `USAGE_TYPE in {BoxUsage:g5.xlarge, BoxUsage:g6e.8xlarge}`,
+   `REGION=us-east-1`, `2026-08-17` → no groups, while the same query *did*
+   return `EBS:VolumeUsage.gp3` (1.8047 USD) and `TimedStorage-ByteHrs`
+   (0.2882 USD) for that day. So 2026-08-17 is only partially ingested (CE lags
+   several hours to ~24 h and the day is still `Estimated: true`).
+
+**Consequence.** The cost ledger table above is the **authoritative** cost
+record for this exploration (instance-hours from the recorded launch/terminate
+timestamps × the published us-east-1 on-demand rate). Phase E's cost model
+should cite the ledger, not Cost Explorer. To close the reconciliation later,
+re-run the query above once 2026-08-17/18 are finalized in Cost Explorer;
+absent tag activation, the usable check is the untagged
+`BoxUsage:g5.xlarge` + `BoxUsage:g6e.8xlarge` totals for 2026-08-17, which
+should come to ≈ USD 11.11 (1.4586 g5.xlarge hours + 2.1308 g6e.8xlarge hours),
+allowing for any unrelated account usage of those types.
+
+**Duplicate-attribution collapse (as instructed by the reconciliation note at
+the bottom of this file):** one metrics set per model is now explicit.
+`pixart-alpha/run-001/` and `pixart-sigma/run-001/` are canonical;
+`pixart-alpha/pixart-alpha-r1/` and `pixart-sigma/pixart-sigma-r1/` are marked
+`SUPERSEDED.md` + `billing_reconciliation.status = "superseded-not-attributed"`
+and their hours/costs are excluded from every total (they are retained only
+because their `outputs/` images are the last surviving copies of that parallel
+execution). The even 50 % splits recorded inside the shared-instance runs
+(`flux1-r1` → flux.1-schnell + flux.1-dev; `large-r1` → flux.2 +
+hunyuanimage-2.1) are per-model attributions of one real instance cost, not
+additional spend: 3.08 + 3.08 = 6.16 (`flux1-r1`) and 1.74 + 1.74 = 3.49
+(`large-r1`, ±0.01 rounding).
 
 ## Run Index
 
@@ -42,16 +106,60 @@ One row per planned Benchmark_Run. Status vocabulary: `pending` (not started),
 | flux.2 [dev] | large | `flux.2/run-001/` | complete | 13/13 ok (4 t2i via Flux2Pipeline 28-step; 9 "inpaint" via the official instruction-editing path — **no mask API exists for FLUX.2 [dev]**, mask parity fails: outside-mask MAE 9.6–67.2 vs 1.0–6.1 for FLUX.1-Fill-dev). Required bitsandbytes NF4 quantization; bf16+cpu_offload OOMed on the 48 GB L40S (`offload-probe-metrics.json`) |
 | hunyuanimage | large | `hunyuanimage/run-001/` | complete (**substituted model**) | **Benchmarked HunyuanImage-2.1 (17B), not the matrix's HunyuanImage-3.0 (80B MoE)** — 3.0 bf16 needs p4de/p5-class hardware, outside the Cost_Cap; substitution sanctioned by the matrix's "Sizing note for Task 4.3" option (c). 4/13 ok: 4 t2i ok; 9 inpaint `failed/unsupported_task` (HunyuanImagePipeline is text-to-image only; no Hunyuan inpaint pipeline in diffusers, no documented mask API for 3.0 either). Required NF4; bf16+cpu_offload OOMed (`attempt-1-bf16-offload-metrics.json`) |
 
+### Optional task 4.4 — SageMaker cold start: **SKIPPED (not measurable on this account)**
+
+No SageMaker endpoint was ever created for this exploration. The reason is a
+hard account constraint, not Cost_Cap headroom (USD 488.89 of the cap was still
+free):
+
+> The Phase B GPU quota audit (`../benchmark-harness/quota_audit.py`,
+> `../benchmark-harness/quota-audit-trial.md`) found **SageMaker endpoint usage
+> quotas of 0 for every g6e instance type** in us-east-1 on Portal_Account
+> 164152369890 (`ml.g6e.xlarge` L-B0729CB4 = 0, `ml.g6e.2xlarge` L-F8D7F460 = 0,
+> `ml.g6e.4xlarge` L-93531071 = 0, `ml.p4d.24xlarge` L-09F79647 = 0). A
+> real-time endpoint cannot be created on the hardware the shortlisted
+> (medium/large) models require, so **scale-from-zero Cold_Start_Time cannot be
+> measured on this account**. The non-zero quotas that do exist
+> (`ml.g5.xlarge` = 4, `ml.g6.xlarge` = 1) only cover the small class, whose
+> models are not shortlist candidates for inpainting — a PixArt endpoint would
+> measure SageMaker's cold-start mechanics but not the shortlist's model-load
+> time, which dominates Cold_Start_Time for a 12B+ model.
+
+**Consequence for Phase E (task 7.2, hosting comparison):** SageMaker
+scale-from-zero cold start must be sourced from **documented AWS estimates**,
+clearly labelled as estimates rather than measurements. The only measured
+cold-start data this exploration produced is the Phase C proxy from protocol §3
+(`model_load_seconds` + first-case latency on a fresh EC2 instance), available
+per run in each `metrics.json`. Task 4.4 stays unchecked in `tasks.md` (it is
+optional). Requesting the g6e SageMaker endpoint quota increase is an open
+prerequisite for the decision record (task 9.1).
+
 ## Evidence Files
 
 - `pre-exploration-stacks.json` — pre-exploration CloudFormation stack snapshot
   (225 stacks, captured 2026-08-17T04:33:10Z before any provisioning; Req 9.4).
   `LastUpdatedTime` falls back to `CreationTime` for never-updated stacks so
   the Phase D diff (task 5.3) is well-defined for every stack.
-- `teardown-audit.md` — created in Phase D (task 5.1): tag-filtered teardown
-  verification queries, stack snapshot diff, `git status` evidence.
+- `post-exploration-stacks.json` — post-exploration CloudFormation stack
+  snapshot (225 stacks, captured 2026-08-17T21:31:09Z after teardown; Req 9.4),
+  same shape as the pre-exploration snapshot.
+- `teardown-audit.md` — Phase D evidence (tasks 5.1 and 5.3): all 7 protocol §7
+  teardown steps with literal CLI transcripts, the tag-filtered verification
+  sweep (all per-service queries empty — Property 6), the pre/post stack
+  snapshot diff with per-stack attribution, and `git status` over
+  `edge-cv-portal/` and `src/` (Property 7). Teardown result: benchmark bucket,
+  security group, IAM role + instance profile, and the temporary HF-token SSM
+  parameter deleted; no instance, volume, snapshot, key pair, or SageMaker
+  resource left; 0 stacks added or removed.
 - `<model>/<run-id>/` — per-run `config.json`, `metrics.json`, representative
-  `outputs/`, `notes.md` with rubric scores (protocol §8).
+  `outputs/`, `notes.md` with rubric scores (protocol §8), plus the run's
+  driver log pulled from the bucket before deletion. Every committed output was
+  byte-verified (md5 vs S3 ETag) against the bucket object before the bucket was
+  deleted; the `output_uri` values in `metrics.json` now point at deleted
+  objects by design (protocol §7.4) — the committed `outputs/` are the surviving
+  evidence. Coverage: 4/4 attempted cases for the three text-to-image-only
+  models, 5/13 representative cases (same case ids across models) for the FLUX
+  runs.
 
 > **Execution note (2026-08-17, task 4.3):** the large class ran both models
 > sequentially on one g6e.8xlarge (ledger row `large-r1`), the same
@@ -80,3 +188,17 @@ One row per planned Benchmark_Run. Status vocabulary: `pending` (not started),
 > `run-001` attributions — the cost ledger above is the single source of truth
 > for actual spend (USD 1.46 total across both instances). Task 5.2
 > reconciliation should collapse to one metrics set per model.
+> **Done (task 5.2):** the two parallel-execution dirs now carry `SUPERSEDED.md`
+> and `billing_reconciliation.status = "superseded-not-attributed"`; the
+> canonical set is one `run-001/` per model. See the billing reconciliation
+> section above.
+>
+> **Phase D closure (2026-08-17, tasks 5.1 / 5.2 / 5.3):** teardown executed and
+> verified — see `teardown-audit.md`. All tagged Benchmark_Infrastructure is
+> gone (bucket, security group, IAM role + instance profile, temporary HF-token
+> SSM parameter; instances/volumes already gone), every per-service tag-filtered
+> query returns empty, no CloudFormation stack was added or removed, and
+> `git status` over `edge-cv-portal/` and `src/` is clean. Final ledger total
+> USD 11.11 of the 500 Cost_Cap; billing reconciliation is
+> **pending-with-evidence** (Cost Explorer tag data unavailable — details above),
+> with the ledger table as the authoritative cost source for Phase E.

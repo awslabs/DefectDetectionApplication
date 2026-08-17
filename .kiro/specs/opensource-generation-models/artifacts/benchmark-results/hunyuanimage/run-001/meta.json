@@ -1,0 +1,11 @@
+{
+  "strategy": "bnb4",
+  "placement": "enable_model_cpu_offload (nf4 transformer + text_encoder)",
+  "num_inference_steps": 50,
+  "model_load_seconds": 18.924431967000146,
+  "repo": "hunyuanvideo-community/HunyuanImage-2.1-Diffusers",
+  "t2i_size": 1024,
+  "edit_size": 768,
+  "guidance_scale": 4.0,
+  "edit_prompt_wrapper": null
+}
