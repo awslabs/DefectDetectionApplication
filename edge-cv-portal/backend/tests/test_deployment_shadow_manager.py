@@ -140,10 +140,41 @@ class TestShadowManagerAutoInclude:
         assert "dda-camera-bindings" in entry["reason"]
         assert "dda-model-status" in entry["reason"]
 
-    def test_caller_supplied_shadow_manager_is_not_overridden(self, sm_env):
-        """When the caller already includes aws.greengrass.ShadowManager the
-        auto-include is skipped: their pinned version/config is submitted
-        untouched and no auto_included entry is reported."""
+    # CONSCIOUS REPOINT (shadowmanager-sync-config-on-revision, design
+    # Decision 6): this test was
+    # ``test_caller_supplied_shadow_manager_is_not_overridden`` and pinned
+    # the exact defect (requirement 1.1 of that bugfix) — a caller-supplied
+    # ShadowManager entry submitted untouched, bare, permanently disarming
+    # the synchronize auto-include after a target's first revision. Its
+    # unfixed assertions, VERBATIM (also recorded in
+    # test_shadowmanager_sync_revision_preservation.py before the fix):
+    #
+    #     def test_caller_supplied_shadow_manager_is_not_overridden(self, sm_env):
+    #         """When the caller already includes aws.greengrass.ShadowManager the
+    #         auto-include is skipped: their pinned version/config is submitted
+    #         untouched and no auto_included entry is reported."""
+    #         status, payload = sm_env.deploy_components(
+    #             [LOCAL_SERVER_COMPONENT,
+    #              {"component_name": "aws.greengrass.ShadowManager",
+    #               "component_version": "2.3.5"}],
+    #             target_devices=["line-a-camera-01"])
+    #
+    #         assert status == 201, payload
+    #         [call] = sm_env.gg.create_deployment_calls
+    #         assert call["components"]["aws.greengrass.ShadowManager"] == {
+    #             "componentVersion": "2.3.5"}
+    #         assert [e for e in payload["auto_included"]
+    #                 if e["component_name"] == "aws.greengrass.ShadowManager"] == []
+    def test_caller_supplied_shadow_manager_keeps_version_and_gains_portal_merge(
+            self, sm_env):
+        """When the caller already includes aws.greengrass.ShadowManager
+        (the revise flow always does — bare, the prefill API strips config
+        structurally), the entry is COMPLETED rather than skipped
+        (requirements 2.1/3.5 of shadowmanager-sync-config-on-revision):
+        the caller's pinned version is submitted verbatim, the submitted
+        entry carries the full portal synchronize merge, and — like the
+        caller-supplied-Nucleus store-limit merge — no auto_included entry
+        is reported (merge-into-existing is logged, not reported)."""
         status, payload = sm_env.deploy_components(
             [LOCAL_SERVER_COMPONENT,
              {"component_name": "aws.greengrass.ShadowManager",
@@ -152,8 +183,13 @@ class TestShadowManagerAutoInclude:
 
         assert status == 201, payload
         [call] = sm_env.gg.create_deployment_calls
-        assert call["components"]["aws.greengrass.ShadowManager"] == {
-            "componentVersion": "2.3.5"}
+        entry = call["components"]["aws.greengrass.ShadowManager"]
+        # The caller's explicit pin survives verbatim (3.5).
+        assert entry["componentVersion"] == "2.3.5"
+        # The bare entry gained the full portal synchronize merge (2.1).
+        merged = json.loads(entry["configurationUpdate"]["merge"])
+        assert merged == EXPECTED_SYNC_CONFIG
+        # Still no auto_included ShadowManager entry (design Decision 4).
         assert [e for e in payload["auto_included"]
                 if e["component_name"] == "aws.greengrass.ShadowManager"] == []
 

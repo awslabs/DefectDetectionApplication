@@ -907,7 +907,7 @@ export default function CreateDeployment() {
   ) => {
     const allComponents = [...allPrivateComponents, ...allPublicComponents];
     // Skip auto-included infrastructure that the backend re-adds automatically.
-    const autoManaged = new Set(['aws.greengrass.Nucleus', 'aws.greengrass.LogManager']);
+    const autoManaged = new Set(['aws.greengrass.Nucleus', 'aws.greengrass.LogManager', 'aws.greengrass.ShadowManager']);
 
     const preloaded: ComponentSelection[] = [];
     for (const ec of existingComps) {

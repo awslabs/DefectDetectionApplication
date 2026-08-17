@@ -484,6 +484,187 @@ def resolve_shadow_manager_version(greengrass_client, region, running_nucleus):
         running_nucleus, SHADOW_MANAGER_VERSION)
 
 
+def portal_shadow_sync_config():
+    """The portal's full ShadowManager `synchronize` configuration — the
+    SINGLE source for both the fresh-add auto-include and the ensure/merge
+    path (shadowmanager-sync-config-on-revision: the two paths must never
+    drift). Returns a fresh dict per call so callers can mutate and
+    serialize freely."""
+    return {
+        'synchronize': {
+            'direction': 'betweenDeviceAndCloud',
+            'coreThing': {
+                'classic': True,
+                'namedShadows': [
+                    CAMERA_REGISTRY_SHADOW_NAME,
+                    CAMERA_BINDINGS_SHADOW_NAME,
+                    MODEL_STATUS_SHADOW_NAME
+                ]
+            }
+        }
+    }
+
+
+def ensure_shadow_manager_sync(components_map, resolve_version):
+    """Ensure the components map about to be SUBMITTED carries the portal
+    ShadowManager `synchronize` configuration (bugfix:
+    shadowmanager-sync-config-on-revision).
+
+    Portal deployment revisions used to ship aws.greengrass.ShadowManager
+    bare (or with a stale merge) because the auto-include was gated on the
+    component being ABSENT from the submitted set. Greengrass preserves the
+    device's last-applied configuration for a bare entry, so shadow names
+    added to the portal list after a target's last CONFIGURED revision
+    (e.g. dda-model-status) never reached revised devices.
+
+    Args:
+        components_map: the dict about to be submitted; mutated in place.
+        resolve_version: ZERO-ARG callable returning a pinned version
+            string; called lazily, at most once, and only when the entry
+            lacks an explicit componentVersion (explicit caller versions
+            are respected verbatim — requirement 3.5).
+
+    Returns:
+        'added'     — ShadowManager was absent: the full portal entry was
+                      added (the fresh-add auto-include path, byte-identical
+                      to the original inline block — requirement 3.1).
+        'merged'    — an existing entry was completed: a bare/corrupt merge
+                      got the full portal config injected (corrupt logged),
+                      a stale merge got the portal shadow names UNIONED
+                      into namedShadows (existing order kept, missing
+                      portal names appended in portal-constant order;
+                      caller extras and field values preserved — 2.1/2.2,
+                      3.2/3.3), and/or a missing componentVersion was
+                      resolved.
+        'unchanged' — the entry already covers every portal shadow name and
+                      carries a version: nothing is touched and the merge
+                      STRING is left byte-identical (no re-serialization).
+    """
+    component_name = 'aws.greengrass.ShadowManager'
+    portal_names = [CAMERA_REGISTRY_SHADOW_NAME,
+                    CAMERA_BINDINGS_SHADOW_NAME,
+                    MODEL_STATUS_SHADOW_NAME]
+
+    if component_name not in components_map:
+        components_map[component_name] = {
+            'componentVersion': resolve_version(),
+            'configurationUpdate': {
+                'merge': json.dumps(portal_shadow_sync_config())
+            }
+        }
+        return 'added'
+
+    entry = components_map[component_name]
+    version_filled = False
+    if not entry.get('componentVersion'):
+        # Only a version-less entry triggers the (lazy) resolver: the real
+        # CreateDeployment API rejects component entries without a
+        # componentVersion.
+        entry['componentVersion'] = resolve_version()
+        version_filled = True
+
+    config_update = entry.get('configurationUpdate')
+    merge = (config_update.get('merge')
+             if isinstance(config_update, dict) else None)
+
+    document = None
+    entry_state = 'bare'
+    if merge:
+        try:
+            document = json.loads(merge)
+        except (TypeError, ValueError):
+            document = None
+        if isinstance(document, dict):
+            entry_state = 'stale'
+        else:
+            # Nothing recoverable exists to preserve; shipping a corrupt
+            # merge helps nobody — replace with the full portal config.
+            logger.warning(
+                f"Corrupt {component_name} configurationUpdate.merge "
+                f"(unparseable or non-dict document); replacing with the "
+                f"full portal synchronize config: {merge!r}")
+            document = None
+            entry_state = 'corrupt'
+
+    if document is not None:
+        # Strict no-op gate: an entry already covering every portal shadow
+        # name is left untouched — the merge string byte-identical, no
+        # default-filling of direction/classic — so a compliant submission
+        # is a no-op (preservation scope; requirements 3.2, 3.3).
+        sync = document.get('synchronize')
+        if isinstance(sync, dict):
+            core = sync.get('coreThing')
+            if isinstance(core, dict):
+                named = core.get('namedShadows')
+                if (isinstance(named, list)
+                        and all(n in named for n in portal_names)):
+                    if version_filled:
+                        logger.info(
+                            f"Resolved missing componentVersion "
+                            f"{entry['componentVersion']} for "
+                            f"{component_name} (synchronize merge already "
+                            f"compliant, left byte-identical)")
+                        return 'merged'
+                    return 'unchanged'
+
+    if document is None:
+        # Bare (or corrupt) entry: inject the full portal config. Sibling
+        # configurationUpdate keys (e.g. a reset list) are preserved.
+        if not isinstance(config_update, dict):
+            config_update = {}
+            entry['configurationUpdate'] = config_update
+        config_update['merge'] = json.dumps(portal_shadow_sync_config())
+        resulting_names = list(portal_names)
+    else:
+        # Parseable but stale: setdefault-navigate and UNION — portal
+        # defaults fill ABSENT keys only, present values survive
+        # byte-for-byte, unknown keys anywhere are untouched.
+        sync = document.get('synchronize')
+        if not isinstance(sync, dict):
+            if sync is not None:
+                logger.warning(
+                    f"Corrupt {component_name} merge: non-dict "
+                    f"'synchronize' node ({sync!r}); replacing the subtree "
+                    f"with the portal defaults")
+            sync = {}
+            document['synchronize'] = sync
+        core = sync.get('coreThing')
+        if not isinstance(core, dict):
+            if core is not None:
+                logger.warning(
+                    f"Corrupt {component_name} merge: non-dict 'coreThing' "
+                    f"node ({core!r}); replacing the subtree with the "
+                    f"portal defaults")
+            core = {}
+            sync['coreThing'] = core
+        sync.setdefault('direction', 'betweenDeviceAndCloud')
+        core.setdefault('classic', True)
+        named = core.get('namedShadows')
+        if not isinstance(named, list):
+            if named is not None:
+                logger.warning(
+                    f"Corrupt {component_name} merge: non-list "
+                    f"'namedShadows' ({named!r}); replacing with the "
+                    f"portal shadow names")
+            named = []
+            core['namedShadows'] = named
+        # Union — never replace: existing names keep their order, missing
+        # portal names are appended in portal-constant order.
+        for shadow_name in portal_names:
+            if shadow_name not in named:
+                named.append(shadow_name)
+        config_update['merge'] = json.dumps(document)
+        resulting_names = list(named)
+
+    # Merge-into-existing is logged, not reported in auto_included (design
+    # Decision 4 — the Nucleus caller-supplied elif precedent).
+    logger.info(
+        f"Completed existing {component_name} entry ({entry_state}) with "
+        f"the portal synchronize config; namedShadows now: "
+        f"{resulting_names}")
+    return 'merged'
+
+
 def handler(event, context):
     """
     Handle deployment management requests
@@ -1175,54 +1356,44 @@ def create_deployment(body, user):
         elif not enable_inference_uploader:
             logger.info("InferenceUploader not included - disabled in UseCase configuration")
         
-        # Auto-include ShadowManager with a synchronization config for the
-        # camera-registry-sync named shadows. ShadowManager is already an
+        # Ensure ShadowManager carries the portal synchronization config for
+        # the camera-registry-sync named shadows. ShadowManager is already an
         # implicit dependency of the LocalServer component (VersionRequirement
         # >=2.2.0), but without an explicit `synchronize` configuration it runs
         # with its default config and the dda-camera-registry /
         # dda-camera-bindings local shadows never mirror to IoT Core
-        # (devices stay "Never synced" in the Portal). The entry is pinned to
-        # the newest public version compatible with the device's running
-        # Nucleus (fallback SHADOW_MANAGER_VERSION): the CreateDeployment API
-        # requires componentVersion on every component entry and rejects the
-        # deployment otherwise ("Missing required parameter in
-        # components.aws.greengrass.ShadowManager: componentVersion").
-        if needs_nucleus and 'aws.greengrass.ShadowManager' not in components_map:
-            shadow_manager_config = {
-                'synchronize': {
-                    'direction': 'betweenDeviceAndCloud',
-                    'coreThing': {
-                        'classic': True,
-                        'namedShadows': [
-                            CAMERA_REGISTRY_SHADOW_NAME,
-                            CAMERA_BINDINGS_SHADOW_NAME,
-                            MODEL_STATUS_SHADOW_NAME
-                        ]
-                    }
-                }
-            }
-            shadow_manager_version = resolve_shadow_manager_version(
-                greengrass_client, region, running_nucleus
-            )
-            components_map['aws.greengrass.ShadowManager'] = {
-                'componentVersion': shadow_manager_version,
-                'configurationUpdate': {
-                    'merge': json.dumps(shadow_manager_config)
-                }
-            }
-            auto_included.append({
-                'component_name': 'aws.greengrass.ShadowManager',
-                'component_version': shadow_manager_version,
-                'reason': (f'Syncs the {CAMERA_REGISTRY_SHADOW_NAME}, '
-                           f'{CAMERA_BINDINGS_SHADOW_NAME} and '
-                           f'{MODEL_STATUS_SHADOW_NAME} named shadows with '
-                           'IoT Core for camera registry synchronization '
-                           'and model GPU-fallback status visibility')
-            })
-            logger.info(
-                f"Auto-included aws.greengrass.ShadowManager {shadow_manager_version} with "
-                f"synchronization for named shadows: {CAMERA_REGISTRY_SHADOW_NAME}, "
-                f"{CAMERA_BINDINGS_SHADOW_NAME}, {MODEL_STATUS_SHADOW_NAME}")
+        # (devices stay "Never synced" in the Portal). Absent -> auto-included
+        # ('added'), pinned to the newest public version compatible with the
+        # device's running Nucleus (fallback SHADOW_MANAGER_VERSION): the
+        # CreateDeployment API requires componentVersion on every component
+        # entry and rejects the deployment otherwise ("Missing required
+        # parameter in components.aws.greengrass.ShadowManager:
+        # componentVersion"). Present (the revise flow resubmits it bare —
+        # shadowmanager-sync-config-on-revision) -> the portal config is
+        # merged into the caller's entry ('merged', logged but not reported
+        # in auto_included — the caller-supplied-Nucleus elif precedent
+        # below), so revisions can no longer disarm the synchronize config.
+        if needs_nucleus:
+            shadow_sync_result = ensure_shadow_manager_sync(
+                components_map,
+                resolve_version=lambda: resolve_shadow_manager_version(
+                    greengrass_client, region, running_nucleus))
+            if shadow_sync_result == 'added':
+                shadow_manager_version = components_map[
+                    'aws.greengrass.ShadowManager']['componentVersion']
+                auto_included.append({
+                    'component_name': 'aws.greengrass.ShadowManager',
+                    'component_version': shadow_manager_version,
+                    'reason': (f'Syncs the {CAMERA_REGISTRY_SHADOW_NAME}, '
+                               f'{CAMERA_BINDINGS_SHADOW_NAME} and '
+                               f'{MODEL_STATUS_SHADOW_NAME} named shadows with '
+                               'IoT Core for camera registry synchronization '
+                               'and model GPU-fallback status visibility')
+                })
+                logger.info(
+                    f"Auto-included aws.greengrass.ShadowManager {shadow_manager_version} with "
+                    f"synchronization for named shadows: {CAMERA_REGISTRY_SHADOW_NAME}, "
+                    f"{CAMERA_BINDINGS_SHADOW_NAME}, {MODEL_STATUS_SHADOW_NAME}")
         
         # Determine target ARN (iot_client and running_nucleus were resolved above)
         # Greengrass deployments must target thing groups, not individual things
@@ -3582,6 +3753,24 @@ def create_workflow_deployment(body, user):
                 logger.warning(
                     f"Could not read components of existing deployment "
                     f"{existing_deployment.get('deploymentId')}: {e}")
+
+        # ShadowManager synchronize ensure (shadowmanager-sync-config-on-
+        # revision): the copy above is verbatim, so a bare or stale
+        # ShadowManager entry from the previous revision would otherwise
+        # ship forever (Greengrass preserves the device's last-applied
+        # config for a bare entry) and portal shadow names added after the
+        # target's last CONFIGURED revision would never sync. PRESENCE-gated
+        # on purpose: fresh workflow deployments must not start
+        # auto-including ShadowManager (out of scope; 3.6 keeps carry-over
+        # verbatim). Copied entries always carry componentVersion, so the
+        # lazy resolver effectively never fires; if it ever does,
+        # running_nucleus=None returns the static SHADOW_MANAGER_VERSION pin
+        # immediately — no new Nucleus lookup on this path.
+        if 'aws.greengrass.ShadowManager' in components_map:
+            ensure_shadow_manager_sync(
+                components_map,
+                resolve_version=lambda: resolve_shadow_manager_version(
+                    greengrass_client, region, None))
 
         component_name = workflow_component_name(workflow_id)
         # Setting the entry (re)places the workflow component at the new
