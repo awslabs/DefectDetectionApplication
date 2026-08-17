@@ -1,0 +1,106 @@
+[
+  {
+    "case_id": "inpaint-001",
+    "task_type": "inpainting",
+    "prompt": "a deep scratch on a brushed metal bracket, industrial inspection photo",
+    "seed": 101,
+    "image": "inpaint-001-source.png",
+    "mask": "inpaint-001-mask.png"
+  },
+  {
+    "case_id": "inpaint-002",
+    "task_type": "inpainting",
+    "prompt": "a patch of orange-brown corrosion on a steel sheet, factory quality-control photo",
+    "seed": 102,
+    "image": "inpaint-002-source.png",
+    "mask": "inpaint-002-mask.png"
+  },
+  {
+    "case_id": "inpaint-003",
+    "task_type": "inpainting",
+    "prompt": "a shallow dent on a stamped metal panel, raking light inspection photo",
+    "seed": 103,
+    "image": "inpaint-003-source.png",
+    "mask": "inpaint-003-mask.png"
+  },
+  {
+    "case_id": "inpaint-004",
+    "task_type": "inpainting",
+    "prompt": "weld porosity with small gas holes along a weld seam, macro industrial photo",
+    "seed": 104,
+    "image": "inpaint-004-source.png",
+    "mask": "inpaint-004-mask.png"
+  },
+  {
+    "case_id": "inpaint-005",
+    "task_type": "inpainting",
+    "prompt": "a large paint chip exposing bare metal on a coated surface, inspection photo",
+    "seed": 105,
+    "image": "inpaint-005-source.png",
+    "mask": "inpaint-005-mask.png"
+  },
+  {
+    "case_id": "inpaint-006",
+    "task_type": "inpainting",
+    "prompt": "a hairline crack in a cast aluminum housing, macro defect photo",
+    "seed": 106,
+    "image": "inpaint-006-source.png",
+    "mask": "inpaint-006-mask.png"
+  },
+  {
+    "case_id": "inpaint-101",
+    "task_type": "inpainting",
+    "prompt": "a chocolate chip cookie with a large broken-off chunk missing from its edge, top-down food inspection photo",
+    "seed": 111,
+    "image": "inpaint-101-source.png",
+    "mask": "inpaint-101-mask.png"
+  },
+  {
+    "case_id": "inpaint-102",
+    "task_type": "inpainting",
+    "prompt": "a dark burned patch on the surface of a chocolate chip cookie, overhead quality-control photo",
+    "seed": 112,
+    "image": "inpaint-102-source.png",
+    "mask": "inpaint-102-mask.png"
+  },
+  {
+    "case_id": "inpaint-103",
+    "task_type": "inpainting",
+    "prompt": "a deep crack running across the surface of a chocolate chip cookie, macro food defect photo",
+    "seed": 113,
+    "image": "inpaint-103-source.png",
+    "mask": "inpaint-103-mask.png"
+  },
+  {
+    "case_id": "t2i-001",
+    "task_type": "text_to_image",
+    "prompt": "a scratched metal plate, top-down industrial inspection photo, harsh lighting",
+    "seed": 201,
+    "image": null,
+    "mask": null
+  },
+  {
+    "case_id": "t2i-002",
+    "task_type": "text_to_image",
+    "prompt": "a corroded steel surface with rust patches, factory quality-control photo",
+    "seed": 202,
+    "image": null,
+    "mask": null
+  },
+  {
+    "case_id": "t2i-003",
+    "task_type": "text_to_image",
+    "prompt": "a cracked plastic housing, macro defect photography, shallow depth of field",
+    "seed": 203,
+    "image": null,
+    "mask": null
+  },
+  {
+    "case_id": "t2i-004",
+    "task_type": "text_to_image",
+    "prompt": "a broken chocolate chip cookie split into pieces on a conveyor belt, top-down food factory inspection photo",
+    "seed": 204,
+    "image": null,
+    "mask": null
+  }
+]

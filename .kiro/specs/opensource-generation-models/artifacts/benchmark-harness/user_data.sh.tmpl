@@ -1,0 +1,40 @@
+#!/bin/bash
+# EC2 user-data template for a Benchmark_Run instance (protocol §3 step 3).
+#
+# Template variables (substitute before launch):
+#   {{WALLCLOCK_BUDGET_MINUTES}}  per-run wall-clock budget (default 180; large class 240)
+#   {{RUN_ID}}                    ledger run id
+#   {{OUTPUT_BUCKET}}             tagged benchmark S3 bucket (s3://...)
+#
+# The instance MUST be launched with:
+#   --instance-initiated-shutdown-behavior terminate
+#   --tag-specifications 'ResourceType=instance,Tags=[{Key=exploration,Value=opensource-generation-models}]'
+#                        'ResourceType=volume,Tags=[{Key=exploration,Value=opensource-generation-models}]'
+# so the shutdown guard below terminates (not just stops) the instance.
+
+set -euo pipefail
+
+# ---- Self-terminating guard: an abandoned instance cannot silently burn budget.
+# Schedules a hard shutdown WALLCLOCK_BUDGET_MINUTES from boot, independent of
+# whether the benchmark process is alive. shutdown -h + terminate-on-shutdown
+# behavior => instance terminates.
+shutdown -h +{{WALLCLOCK_BUDGET_MINUTES}} "benchmark wall-clock budget exhausted ({{RUN_ID}})" &
+
+# Belt-and-braces cron guard in case the scheduled shutdown is cancelled:
+echo "*/5 * * * * root test \$(cut -d. -f1 /proc/uptime) -gt \$(( {{WALLCLOCK_BUDGET_MINUTES}} * 60 )) && /sbin/shutdown -h now 'cron budget guard ({{RUN_ID}})'" \
+  > /etc/cron.d/benchmark-budget-guard
+chmod 644 /etc/cron.d/benchmark-budget-guard
+
+# ---- Environment (Deep Learning AMI: torch preinstalled; pin diffusers stack)
+python3 -m pip install --upgrade 'diffusers==0.31.0' 'transformers==4.46.3' \
+  'accelerate==1.1.1' 'sentencepiece' 'protobuf'
+
+# ---- Fetch harness + frozen cases from the tagged benchmark bucket
+mkdir -p /opt/benchmark && cd /opt/benchmark
+aws s3 sync {{OUTPUT_BUCKET}}/harness/ . --region us-east-1
+
+# The run itself is driven interactively or via SSM:
+#   python3 run_driver.py --model <model> --run-id {{RUN_ID}} ... --out metrics.json
+# Post-run, outputs and metrics are synced back before terminate:
+#   aws s3 sync outputs/ {{OUTPUT_BUCKET}}/runs/{{RUN_ID}}/outputs/
+#   aws s3 cp metrics.json {{OUTPUT_BUCKET}}/runs/{{RUN_ID}}/metrics.json

@@ -14,65 +14,65 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
 ## Tasks
 
 - [ ] 1. Phase A — Candidate model evaluation matrix (desk research)
-  - [ ] 1.1 Create artifacts scaffold and evaluation matrix skeleton
+  - [x] 1.1 Create artifacts scaffold and evaluation matrix skeleton
     - Create `artifacts/` directory layout per the design (evaluation-matrix.md, benchmark-results/, benchmark-harness/)
     - Author `artifacts/evaluation-matrix.md` skeleton: one row per Candidate_Model (FLUX.1-dev, FLUX.1-schnell, FLUX.2, HunyuanImage, PixArt-alpha, PixArt-Sigma) with the fixed column schema — capability flags in `MODEL_CATALOG` vocabulary (text_to_image, inpainting, image_variation, seed, cfg_scale), inpainting path (native | official-variant | community | unsupported), license (name, commercial terms, URL), resources (parameter count, min/recommended GPU memory, satisfying AWS instance types), weights access (location, open | gated | api-only, redistribution restrictions), benchmark status (included | excluded)
     - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6_
 
-  - [ ] 1.2 Research and fill the FLUX family rows
+  - [x] 1.2 Research and fill the FLUX family rows
     - Verify and record FLUX.1-dev (~12B, non-commercial license, FLUX.1-Fill-dev official inpainting variant, gated HF download), FLUX.1-schnell (Apache 2.0, inpainting path likely community/unsupported, open download), and FLUX.2 (license, size, inpainting path, weights access all to verify — api-only variants trigger 1.7 exclusion)
     - Cite evidence URLs (license text, model cards) in each cell
     - _Requirements: 1.2, 1.3, 1.4, 1.5, 1.6, 1.7_
 
-  - [ ] 1.3 Research and fill HunyuanImage and PixArt rows, resolve exclusions
+  - [x] 1.3 Research and fill HunyuanImage and PixArt rows, resolve exclusions
     - Verify and record HunyuanImage (Tencent community license commercial clauses, size class, inpainting path) and PixArt-alpha / PixArt-Sigma (~0.6B, open licenses, open HF download, weak inpainting)
     - For any model whose weights are unobtainable for self-hosting, record the finding with evidence and mark benchmark status `excluded (weights unobtainable)`
     - Pin parameter counts so Phase C large-class instance sizing (g6e.2xlarge / g6e.4xlarge / p4d fallback) can be finalized
     - _Requirements: 1.2, 1.3, 1.4, 1.5, 1.6, 1.7_
 
-  - [ ] 1.4 Evaluation matrix completeness review
+  - [x] 1.4 Evaluation matrix completeness review
     - Run the review checklist from Property 1: every Candidate_Model row has all required fields populated with evidence links; exclusion markings are consistent (Property 2 first half)
     - Record the checklist outcome at the bottom of `evaluation-matrix.md`
     - **Property 1: Deliverable completeness over the candidate set** (matrix portion)
     - _Requirements: 1.1, 1.7_
 
 - [ ] 2. Phase B — Benchmark protocol, harness, and pre-exploration snapshot
-  - [ ] 2.1 Author the benchmark protocol
+  - [x] 2.1 Author the benchmark protocol
     - Write `artifacts/benchmark-protocol.md` with sections in design order: candidate list (post-1.7 exclusions) → frozen test-case set (≥5 inpainting source/mask/prompt triples covering different defect types and mask sizes, ≥3 text-to-image defect prompts, fixed seeds per case) → per-run procedure (launch, load, run cases, capture metrics, terminate) → metrics definitions (per-image latency, model_load_seconds, Cold_Start_Time, actual cost) → human quality rubric (mask adherence, background preservation, defect realism, prompt fidelity, each 1–5) → Cost_Cap (final USD number, proposed 500) and ledger procedure → teardown checklist (7 steps from the design) → evidence requirements
     - This artifact is the gate: no Benchmark_Infrastructure may be provisioned before it is committed
     - _Requirements: 2.1, 2.2, 2.3, 2.4_
 
-  - [ ] 2.2 Commit the frozen benchmark test-case inputs
+  - [x] 2.2 Commit the frozen benchmark test-case inputs
     - Place source images, binary mask PNGs, and prompt/seed definitions under `artifacts/benchmark-harness/cases/` with a `cases.json` manifest (case_id, task_type, prompt, seed, image/mask paths)
     - Same byte-identical cases run against every candidate
     - _Requirements: 2.2_
 
-  - [ ] 2.3 Implement the benchmark harness core
+  - [x] 2.3 Implement the benchmark harness core
     - Write plain Python scripts under `artifacts/benchmark-harness/` (never deployed as portal infrastructure): `should_provision(spend_so_far, projected_run_cost, cap)` pure function; ledger read/update helpers for the `benchmark-results/README.md` cost table; the per-run case loop that records `status: failed` + `failure_mode` for a failing case and continues with remaining cases; the `metrics.json` writer and schema assertion (run_id, model, instance_type, account, region, model_load_seconds, per-case latency/seed/status/output_uri/failure_mode, instance_hours, estimated_cost_usd, billing_reconciled_cost_usd) enforced before a run is marked complete; run driver using `diffusers` official pipelines (FluxPipeline, FluxFillPipeline, Hunyuan pipelines, PixArtAlphaPipeline / PixArtSigmaPipeline)
     - Include the self-terminating instance guard (cron `shutdown` after per-run wall-clock budget) in the launch user-data template
     - _Requirements: 2.3, 2.4, 2.9, 2.10_
 
-  - [ ] 2.4 Write pytest boundary tests for should_provision
+  - [x] 2.4 Write pytest boundary tests for should_provision
     - Tests in `artifacts/benchmark-harness/tests/`: below cap (true), exactly at cap (false), above cap (false), zero spend, projected alone exceeding cap
     - **Property 3: Cost_Cap invariant**
     - **Validates: Requirements 2.4, 2.9**
 
-  - [ ] 2.5 Write pytest failure-isolation test for the case loop
+  - [x] 2.5 Write pytest failure-isolation test for the case loop
     - Inject a failing case mid-run; assert the failure mode is recorded for that case and every remaining case still executes
     - **Property 5: Failure isolation in benchmark runs**
     - **Validates: Requirements 2.10**
 
-  - [ ] 2.6 Write pytest metrics schema assertion test
+  - [x] 2.6 Write pytest metrics schema assertion test
     - Assert a complete run record passes and records missing latency/seed/status/output reference, instance-hours, or estimated cost are rejected before a run can be marked complete
     - **Property 4: Benchmark result-record completeness**
     - **Validates: Requirements 2.6, 2.7**
 
-  - [ ] 2.7 Capture the pre-exploration stack snapshot
+  - [x] 2.7 Capture the pre-exploration stack snapshot
     - Run `aws cloudformation describe-stacks` (stack names + LastUpdatedTime) against the Portal_Account and commit the snapshot under `artifacts/benchmark-results/` before any provisioning
     - Create `artifacts/benchmark-results/README.md` with the empty cost ledger table (Cost_Cap header from the protocol) and run index
     - _Requirements: 9.4, 2.4_
 
-  - [ ] 2.8 Implement the read-only GPU quota audit script
+  - [x] 2.8 Implement the read-only GPU quota audit script
     - Write `artifacts/benchmark-harness/quota_audit.py` calling `service-quotas` for EC2 running on-demand G/P/VT vCPU quotas and SageMaker per-instance-type endpoint quotas in us-east-1; output a table consumed later by the hosting comparison
     - Read-only; not Benchmark_Infrastructure
     - _Requirements: 3.4_

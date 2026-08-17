@@ -1,0 +1,908 @@
+{
+  "captured_utc": "2026-08-17T03:44:19Z",
+  "account": "164152369890",
+  "region": "us-east-1",
+  "purpose": "Pre-exploration CloudFormation stack snapshot (Req 9.4). Diffed against the post-exploration snapshot in Phase D task 5.3.",
+  "stacks": [
+    {
+      "StackName": "Avastus-Yolov5-BuildPipeline",
+      "LastUpdatedTime": "2022-11-03T15:07:36.891000+00:00"
+    },
+    {
+      "StackName": "Avastus-Yolov5-MLOpsSetup",
+      "LastUpdatedTime": "2022-10-26T17:27:56.596000+00:00"
+    },
+    {
+      "StackName": "Boomi-Atom",
+      "LastUpdatedTime": "2021-05-05T18:21:11.228000+00:00"
+    },
+    {
+      "StackName": "Boomi-Atom-Ryantest1",
+      "LastUpdatedTime": "2021-06-07T20:06:14.463000+00:00"
+    },
+    {
+      "StackName": "CDF",
+      "LastUpdatedTime": "2022-11-17T23:13:36.863000+00:00"
+    },
+    {
+      "StackName": "CDKToolkit",
+      "LastUpdatedTime": "2026-06-18T16:40:28.336000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalAuthStack",
+      "LastUpdatedTime": "2026-08-17T00:56:41.100000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalBuildFleetStack",
+      "LastUpdatedTime": "2026-08-17T02:58:18.883000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalComputeStack",
+      "LastUpdatedTime": "2026-08-17T02:52:35.049000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalComputeStack-ApiGatewayNestedStackApiGatewayNestedStackResource85A55C6F-I1VTU544AK48",
+      "LastUpdatedTime": "2026-08-17T02:53:13.073000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalComputeStack-CameraRegistryApiNestedStackCameraRegistryApiNestedStackResou-10ZGSZI4EQR5K",
+      "LastUpdatedTime": "2026-08-17T02:53:35.876000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalComputeStack-DdaLabelingApiNestedStackDdaLabelingApiNestedStackResource26B-1G35354IU2CQ2",
+      "LastUpdatedTime": "2026-08-17T02:54:11.170000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalComputeStack-QuickSetupApiNestedStackQuickSetupApiNestedStackResource3ACF4-MLB34VDHTI8G",
+      "LastUpdatedTime": "2026-08-17T02:53:59.307000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalComputeStack-UserAdminApiNestedStackUserAdminApiNestedStackResourceAB49428-Q9WHJWF3IOJ6",
+      "LastUpdatedTime": "2026-08-17T02:53:47.586000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalComputeStack-WorkflowManagerGapsApiNestedStackWorkflowManagerGapsApiNested-LH5KZ24LMLMS",
+      "LastUpdatedTime": "2026-08-17T02:54:22.712000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalFrontendStack",
+      "LastUpdatedTime": "2026-08-17T01:05:18.935000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalNodeDesignerStack",
+      "LastUpdatedTime": "2026-08-17T02:57:01.687000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalNodeDesignerStack-NodeDesignerApiNestedStackNodeDesignerApiNestedStackReso-1VQIOTM3QZU0B",
+      "LastUpdatedTime": "2026-08-17T02:57:29.550000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalStorageStack",
+      "LastUpdatedTime": "2026-08-17T00:57:02.779000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalSyntheticDataStack",
+      "LastUpdatedTime": "2026-08-17T02:55:59.299000+00:00"
+    },
+    {
+      "StackName": "EdgeCVPortalTestRunnerStack",
+      "LastUpdatedTime": "2026-08-17T02:49:00.527000+00:00"
+    },
+    {
+      "StackName": "GdkPipelineInfrastructureCDK",
+      "LastUpdatedTime": "2022-11-04T18:44:23.205000+00:00"
+    },
+    {
+      "StackName": "GdkPipelineInfrastructureCDKCrossAccountStackDev02CCACE2",
+      "LastUpdatedTime": "2022-11-04T18:43:55.532000+00:00"
+    },
+    {
+      "StackName": "IoTSiteWiseDemoAssets",
+      "LastUpdatedTime": "2025-01-30T19:43:29.350000+00:00"
+    },
+    {
+      "StackName": "MFGTimeseriesWS",
+      "LastUpdatedTime": "2023-01-27T19:40:05.278000+00:00"
+    },
+    {
+      "StackName": "PipelineInfrastructureCDK",
+      "LastUpdatedTime": "2022-11-05T08:29:01.191000+00:00"
+    },
+    {
+      "StackName": "PipelineInfrastructureCDKCrossAccountStackDev93C3E97B",
+      "LastUpdatedTime": "2022-11-05T08:29:38.388000+00:00"
+    },
+    {
+      "StackName": "SiteWiseWorkshop",
+      "LastUpdatedTime": "2020-01-15T20:51:10.446000+00:00"
+    },
+    {
+      "StackName": "SupportBotStarter-final1",
+      "LastUpdatedTime": "2020-06-09T20:37:07.879000+00:00"
+    },
+    {
+      "StackName": "VideoAnalysisRootStack",
+      "LastUpdatedTime": "2026-06-18T18:15:27.551000+00:00"
+    },
+    {
+      "StackName": "VideoAnalysisRootStack-EvaluationServiceStackNestedStackEvaluationServiceStackNestedSt-1RR7MSCEM7IV4",
+      "LastUpdatedTime": "2026-06-18T16:41:19.188000+00:00"
+    },
+    {
+      "StackName": "VideoAnalysisRootStack-EvaluationServiceStackNestedStackEvaluationServiceStackNestedSt-71UKWRSUJR17",
+      "LastUpdatedTime": "2026-06-18T18:39:38.424000+00:00"
+    },
+    {
+      "StackName": "VideoAnalysisRootStack-ExtractionServicePreStackNestedStackExtractionServicePreStackNe-ZQGO87OAFRJT",
+      "LastUpdatedTime": "2026-06-18T18:15:30.319000+00:00"
+    },
+    {
+      "StackName": "VideoAnalysisRootStack-ExtractionServiceStackNestedStackExtractionServiceStackNestedSt-10RIZ80R0IAC2",
+      "LastUpdatedTime": "2026-06-18T18:17:24.508000+00:00"
+    },
+    {
+      "StackName": "VideoAnalysisRootStack-FrontStackNestedStackFrontStackNestedStackResource7969E672-1C6FOPG9T55SL",
+      "LastUpdatedTime": "2026-06-18T16:41:19.047000+00:00"
+    },
+    {
+      "StackName": "VideoAnalysisRootStack-FrontStackNestedStackFrontStackNestedStackResource7969E672-1FP3KG85W0ZMT",
+      "LastUpdatedTime": "2026-06-18T18:42:16.807000+00:00"
+    },
+    {
+      "StackName": "VssOrchestrationStack",
+      "LastUpdatedTime": "2026-06-18T17:51:21.737000+00:00"
+    },
+    {
+      "StackName": "WebHostingStub",
+      "LastUpdatedTime": "2022-11-22T04:56:40.273000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824",
+      "LastUpdatedTime": "2022-10-18T18:20:25.602000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-apibackend-AQMNGCBAXTDE",
+      "LastUpdatedTime": "2022-10-18T18:21:55.648000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-authamplifyppetest1-1RDXQP72J9Q68",
+      "LastUpdatedTime": "2022-10-18T18:20:33.049000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-customcustomResource-1TZPP3Y5BCTAO",
+      "LastUpdatedTime": "2022-10-18T18:20:33.231000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functioncameraLambda-1DX7AT34M3I9W",
+      "LastUpdatedTime": "2022-10-18T18:20:35.167000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functiondeleteEvent-A7HZO92SAHHA",
+      "LastUpdatedTime": "2022-10-18T18:20:33.033000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functiondeleteModel-A4LZ4GLTDGO2",
+      "LastUpdatedTime": "2022-10-18T18:20:32.777000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functiondeploymentLambda-1R9QVENZH6C9Z",
+      "LastUpdatedTime": "2022-10-18T18:20:32.711000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functiondeviceLambda-Y5SRW3K9I2NM",
+      "LastUpdatedTime": "2022-10-18T18:20:33.692000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functionexportBucketLambda-E39PIWVGPXNS",
+      "LastUpdatedTime": "2022-10-18T18:20:33.114000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functionexportEvent-FPLO5JKQXVB5",
+      "LastUpdatedTime": "2022-10-18T18:20:33.045000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functioninvokeStep-19ACO32BFS1SX",
+      "LastUpdatedTime": "2022-10-18T18:20:33.123000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functionlistEvent-1I5N3FNI16307",
+      "LastUpdatedTime": "2022-10-18T18:20:32.653000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functionlistModel-XGFAWOSJBLPT",
+      "LastUpdatedTime": "2022-10-18T18:20:32.662000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functionstoredApplicationLambda-ND5X0WCXWXEN",
+      "LastUpdatedTime": "2022-10-18T18:20:32.597000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-functionverifyEvent-DNCUSW9FGKXG",
+      "LastUpdatedTime": "2022-10-18T18:20:33.667000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-hostingamplifyhosting-1RRLLFU4TCBVQ",
+      "LastUpdatedTime": "2022-10-18T18:20:33.281000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-storageCamera-O4ACNGKVYXD8",
+      "LastUpdatedTime": "2022-10-18T18:20:33.242000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-storageDeployment-1Q9UM6GLKOF46",
+      "LastUpdatedTime": "2022-10-18T18:20:33.278000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-storageDevice-1BKZNHQAT1VFA",
+      "LastUpdatedTime": "2022-10-18T18:20:33.198000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-storageEvent-1OQUK14OJPURT",
+      "LastUpdatedTime": "2022-10-18T18:20:33.328000+00:00"
+    },
+    {
+      "StackName": "amplify-panoramamlops-mainline-181824-storageModel-13DHH24CNSEQS",
+      "LastUpdatedTime": "2022-10-18T18:20:32.984000+00:00"
+    },
+    {
+      "StackName": "apigatewaylogroles",
+      "LastUpdatedTime": "2019-11-21T05:14:23.082000+00:00"
+    },
+    {
+      "StackName": "asdfasdfasdfasdf",
+      "LastUpdatedTime": "2019-11-21T04:50:39.415000+00:00"
+    },
+    {
+      "StackName": "aws-cloud9-L4VDemo-e7c698b1aab64b34a2720b0ed0ad8685",
+      "LastUpdatedTime": "2022-09-01T21:04:23.365000+00:00"
+    },
+    {
+      "StackName": "aws-cloud9-NXP-iMX8MEVK-0016b41e75b94bf9b53773e79d44c916",
+      "LastUpdatedTime": "2021-05-19T19:55:58.681000+00:00"
+    },
+    {
+      "StackName": "aws-cloud9-l4v-test-890688e936a44120b17ad15456294362",
+      "LastUpdatedTime": "2022-08-29T23:09:10.500000+00:00"
+    },
+    {
+      "StackName": "bedrock-zero-to-hero",
+      "LastUpdatedTime": "2024-10-23T15:34:08.348000+00:00"
+    },
+    {
+      "StackName": "cdf-deployment-helper-Dev",
+      "LastUpdatedTime": "2022-11-17T23:26:16.229000+00:00"
+    },
+    {
+      "StackName": "cdf-eventbus-Dev",
+      "LastUpdatedTime": "2022-11-04T20:38:47.969000+00:00"
+    },
+    {
+      "StackName": "cdf-greengrass2-installer-config-generators-Dev",
+      "LastUpdatedTime": "2022-11-17T23:27:00.090000+00:00"
+    },
+    {
+      "StackName": "cdf-greengrass2-provisioning-Dev",
+      "LastUpdatedTime": "2022-11-17T23:29:45.256000+00:00"
+    },
+    {
+      "StackName": "cdf-openssl-Dev",
+      "LastUpdatedTime": "2022-11-17T23:25:33.421000+00:00"
+    },
+    {
+      "StackName": "cdf-provisioning-Dev",
+      "LastUpdatedTime": "2022-11-17T23:27:05.197000+00:00"
+    },
+    {
+      "StackName": "cloudxrtest1",
+      "LastUpdatedTime": "2020-10-17T22:40:47.378000+00:00"
+    },
+    {
+      "StackName": "completetest1",
+      "LastUpdatedTime": "2020-05-27T17:37:38.224000+00:00"
+    },
+    {
+      "StackName": "coretest1",
+      "LastUpdatedTime": "2019-11-16T05:03:13.978000+00:00"
+    },
+    {
+      "StackName": "coretest10",
+      "LastUpdatedTime": "2019-11-16T07:27:42.097000+00:00"
+    },
+    {
+      "StackName": "coretest11",
+      "LastUpdatedTime": "2019-11-16T07:45:01.710000+00:00"
+    },
+    {
+      "StackName": "coretest12",
+      "LastUpdatedTime": "2019-11-16T07:50:07.049000+00:00"
+    },
+    {
+      "StackName": "coretest17",
+      "LastUpdatedTime": "2019-11-19T17:49:29.508000+00:00"
+    },
+    {
+      "StackName": "coretest18",
+      "LastUpdatedTime": "2019-11-19T18:53:07.443000+00:00"
+    },
+    {
+      "StackName": "coretest2",
+      "LastUpdatedTime": "2019-11-16T05:16:01.827000+00:00"
+    },
+    {
+      "StackName": "coretest23",
+      "LastUpdatedTime": "2019-11-21T04:43:25.947000+00:00"
+    },
+    {
+      "StackName": "coretest3",
+      "LastUpdatedTime": "2019-11-16T05:22:13.603000+00:00"
+    },
+    {
+      "StackName": "coretest31",
+      "LastUpdatedTime": "2019-11-21T07:44:09.566000+00:00"
+    },
+    {
+      "StackName": "coretest4",
+      "LastUpdatedTime": "2019-11-16T05:27:14.515000+00:00"
+    },
+    {
+      "StackName": "coretest6",
+      "LastUpdatedTime": "2019-11-16T06:22:13.845000+00:00"
+    },
+    {
+      "StackName": "coretest7",
+      "LastUpdatedTime": "2019-11-16T06:41:59.732000+00:00"
+    },
+    {
+      "StackName": "coretest8",
+      "LastUpdatedTime": "2019-11-16T07:15:05.049000+00:00"
+    },
+    {
+      "StackName": "coretest9",
+      "LastUpdatedTime": "2019-11-16T07:19:26.960000+00:00"
+    },
+    {
+      "StackName": "dda-ws-test-14",
+      "LastUpdatedTime": "2024-04-02T20:01:15.600000+00:00"
+    },
+    {
+      "StackName": "dda-ws-test10",
+      "LastUpdatedTime": "2024-04-02T15:11:23.735000+00:00"
+    },
+    {
+      "StackName": "dda-ws-test11",
+      "LastUpdatedTime": "2024-04-02T15:14:57.727000+00:00"
+    },
+    {
+      "StackName": "dda-ws-test12",
+      "LastUpdatedTime": "2024-04-02T15:20:00.701000+00:00"
+    },
+    {
+      "StackName": "dda-ws-test4",
+      "LastUpdatedTime": "2024-04-01T21:02:06.549000+00:00"
+    },
+    {
+      "StackName": "dda-ws-test5",
+      "LastUpdatedTime": "2024-04-01T21:06:19.497000+00:00"
+    },
+    {
+      "StackName": "dda-ws-test6",
+      "LastUpdatedTime": "2024-04-02T14:47:00.920000+00:00"
+    },
+    {
+      "StackName": "dda-ws-test7",
+      "LastUpdatedTime": "2024-04-02T14:50:06.190000+00:00"
+    },
+    {
+      "StackName": "dda-ws-test9",
+      "LastUpdatedTime": "2024-04-02T15:05:26.347000+00:00"
+    },
+    {
+      "StackName": "ddawstest",
+      "LastUpdatedTime": "2024-04-01T19:24:48.872000+00:00"
+    },
+    {
+      "StackName": "ddawstest1",
+      "LastUpdatedTime": "2024-04-01T20:18:24.908000+00:00"
+    },
+    {
+      "StackName": "ddawstest3",
+      "LastUpdatedTime": "2024-04-01T20:45:59.149000+00:00"
+    },
+    {
+      "StackName": "dynamotablesongs",
+      "LastUpdatedTime": "2019-11-21T06:04:20.495000+00:00"
+    },
+    {
+      "StackName": "eks-quickstart-RegionalSharedResources",
+      "LastUpdatedTime": "2021-04-07T20:52:28.758000+00:00"
+    },
+    {
+      "StackName": "eksprtest2",
+      "LastUpdatedTime": "2021-05-26T16:01:48.684000+00:00"
+    },
+    {
+      "StackName": "eksprtest4-MoleculeStack-4XWVWNMH2MEG-EKSStack-Z7ESH0ZC5MK9-AccountSharedResources-1WMF518F87LSR",
+      "LastUpdatedTime": "2021-05-26T16:33:20.645000+00:00"
+    },
+    {
+      "StackName": "eksprtest5-MoleculeStack-OA1IX96SGO43-EKSStack-1XYN1SVXYWMOR-AccountSharedResources-1U4WF64GHMPXV",
+      "LastUpdatedTime": "2021-05-26T17:01:33.657000+00:00"
+    },
+    {
+      "StackName": "ggroles1",
+      "LastUpdatedTime": "2020-02-16T07:29:59.061000+00:00"
+    },
+    {
+      "StackName": "ggtest123",
+      "LastUpdatedTime": "2020-02-16T07:42:27.964000+00:00"
+    },
+    {
+      "StackName": "ggtest2",
+      "LastUpdatedTime": "2020-02-16T07:57:46.114000+00:00"
+    },
+    {
+      "StackName": "ggtest3",
+      "LastUpdatedTime": "2020-02-16T08:07:21.204000+00:00"
+    },
+    {
+      "StackName": "ggtest4",
+      "LastUpdatedTime": "2020-02-16T08:11:35.531000+00:00"
+    },
+    {
+      "StackName": "ggtest5",
+      "LastUpdatedTime": "2020-02-16T08:15:42.024000+00:00"
+    },
+    {
+      "StackName": "ggtest6",
+      "LastUpdatedTime": "2020-02-16T08:19:17.854000+00:00"
+    },
+    {
+      "StackName": "greengrass-deepstream-164152369890-us-east-1-test-stack",
+      "LastUpdatedTime": "2020-07-20T02:54:13.962000+00:00"
+    },
+    {
+      "StackName": "greengrass-deepstream-provisioning-164152369890-us-east-1-test-stack",
+      "LastUpdatedTime": "2020-07-20T02:22:19.140000+00:00"
+    },
+    {
+      "StackName": "iottest",
+      "LastUpdatedTime": "2019-11-06T02:26:31.148000+00:00"
+    },
+    {
+      "StackName": "keypairtest",
+      "LastUpdatedTime": "2024-04-02T18:59:33.643000+00:00"
+    },
+    {
+      "StackName": "l4vworkshopstack",
+      "LastUpdatedTime": "2021-11-05T03:45:46.264000+00:00"
+    },
+    {
+      "StackName": "molecule-test3",
+      "LastUpdatedTime": "2020-06-30T21:51:03.363000+00:00"
+    },
+    {
+      "StackName": "pr1c-installer",
+      "LastUpdatedTime": "2026-08-14T17:43:19.031000+00:00"
+    },
+    {
+      "StackName": "predictivemaintenancev2",
+      "LastUpdatedTime": "2020-06-03T19:43:59.588000+00:00"
+    },
+    {
+      "StackName": "qis-backend-component",
+      "LastUpdatedTime": "2022-11-18T02:17:15.455000+00:00"
+    },
+    {
+      "StackName": "qis-backend-component-deploy-pipeline",
+      "LastUpdatedTime": "2022-11-18T02:06:29.356000+00:00"
+    },
+    {
+      "StackName": "qis-device-filereplicator",
+      "LastUpdatedTime": "2022-11-04T19:30:49.877000+00:00"
+    },
+    {
+      "StackName": "qis-device-orchestrator",
+      "LastUpdatedTime": "2022-11-04T20:02:37.698000+00:00"
+    },
+    {
+      "StackName": "qis-edge-ml-accelerator",
+      "LastUpdatedTime": "2022-11-21T18:16:53.676000+00:00"
+    },
+    {
+      "StackName": "qis-remote-ui",
+      "LastUpdatedTime": "2022-11-22T04:49:30.657000+00:00"
+    },
+    {
+      "StackName": "rhythmcloud-dynamo",
+      "LastUpdatedTime": "2020-02-14T05:39:36.680000+00:00"
+    },
+    {
+      "StackName": "rhythmcloud-gg",
+      "LastUpdatedTime": "2020-02-14T05:58:14.671000+00:00"
+    },
+    {
+      "StackName": "rhythmcloud-gg2",
+      "LastUpdatedTime": "2020-02-14T06:18:04.301000+00:00"
+    },
+    {
+      "StackName": "rhythmcoud-gg1",
+      "LastUpdatedTime": "2020-02-14T06:09:48.341000+00:00"
+    },
+    {
+      "StackName": "rumitest2",
+      "LastUpdatedTime": "2019-10-29T20:35:40.188000+00:00"
+    },
+    {
+      "StackName": "ryan-atom-pub-test1",
+      "LastUpdatedTime": "2020-09-21T16:39:10.244000+00:00"
+    },
+    {
+      "StackName": "ryan-boomi-eksmolecule-test-2",
+      "LastUpdatedTime": "2020-10-19T21:20:57.898000+00:00"
+    },
+    {
+      "StackName": "ryan-boomi-molecule-eks-test-3",
+      "LastUpdatedTime": "2020-10-19T21:27:59.749000+00:00"
+    },
+    {
+      "StackName": "ryan-boomi-molecule-test-1",
+      "LastUpdatedTime": "2020-06-26T19:19:39.639000+00:00"
+    },
+    {
+      "StackName": "ryan-boomi-molecule-test-2",
+      "LastUpdatedTime": "2020-06-26T21:20:04.552000+00:00"
+    },
+    {
+      "StackName": "ryan-boomi-molecule-test-4",
+      "LastUpdatedTime": "2020-06-30T22:09:52.871000+00:00"
+    },
+    {
+      "StackName": "ryan-deepniviatest",
+      "LastUpdatedTime": "2020-06-23T15:01:25.903000+00:00"
+    },
+    {
+      "StackName": "ryan-deepstream",
+      "LastUpdatedTime": "2020-06-22T22:20:57.005000+00:00"
+    },
+    {
+      "StackName": "ryanekstest4",
+      "LastUpdatedTime": "2020-10-19T21:39:38.899000+00:00"
+    },
+    {
+      "StackName": "ryanekstest5",
+      "LastUpdatedTime": "2020-10-19T21:44:50.664000+00:00"
+    },
+    {
+      "StackName": "ryanekstest6",
+      "LastUpdatedTime": "2020-10-19T21:52:10.889000+00:00"
+    },
+    {
+      "StackName": "ryanekstest7",
+      "LastUpdatedTime": "2020-10-19T21:59:06.357000+00:00"
+    },
+    {
+      "StackName": "ryantesteks",
+      "LastUpdatedTime": "2020-10-19T21:08:14.837000+00:00"
+    },
+    {
+      "StackName": "ryantestlikeclaytons",
+      "LastUpdatedTime": "2021-05-10T21:48:41.904000+00:00"
+    },
+    {
+      "StackName": "ssm-assoc",
+      "LastUpdatedTime": "2024-08-22T12:12:59.461000+00:00"
+    },
+    {
+      "StackName": "stacklogroles",
+      "LastUpdatedTime": "2020-02-14T05:27:14.607000+00:00"
+    },
+    {
+      "StackName": "starter-update1",
+      "LastUpdatedTime": "2020-06-19T15:00:46.167000+00:00"
+    },
+    {
+      "StackName": "startertest1",
+      "LastUpdatedTime": "2020-05-27T15:58:11.377000+00:00"
+    },
+    {
+      "StackName": "startertest2",
+      "LastUpdatedTime": "2020-05-27T17:02:52.792000+00:00"
+    },
+    {
+      "StackName": "startertest3",
+      "LastUpdatedTime": "2020-05-27T17:06:13.492000+00:00"
+    },
+    {
+      "StackName": "startertest4",
+      "LastUpdatedTime": "2020-05-27T17:23:56.035000+00:00"
+    },
+    {
+      "StackName": "startertest5",
+      "LastUpdatedTime": "2020-05-27T17:29:41.701000+00:00"
+    },
+    {
+      "StackName": "starterupdate2",
+      "LastUpdatedTime": "2020-06-19T15:14:31.921000+00:00"
+    },
+    {
+      "StackName": "starterupdate3",
+      "LastUpdatedTime": "2020-06-19T15:19:07.995000+00:00"
+    },
+    {
+      "StackName": "streaming-workshop-infrastructure1",
+      "LastUpdatedTime": "2020-09-22T18:38:44.982000+00:00"
+    },
+    {
+      "StackName": "streaming-workshop-infrastructure2",
+      "LastUpdatedTime": "2020-09-22T18:59:57.965000+00:00"
+    },
+    {
+      "StackName": "streaming-workshop-infrastructure3",
+      "LastUpdatedTime": "2020-09-22T19:35:54.144000+00:00"
+    },
+    {
+      "StackName": "support-bot-test-13",
+      "LastUpdatedTime": "2020-05-12T20:40:40.607000+00:00"
+    },
+    {
+      "StackName": "support-bot-test-14",
+      "LastUpdatedTime": "2020-05-12T21:07:58.463000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-11",
+      "LastUpdatedTime": "2020-05-12T18:21:51.084000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-12",
+      "LastUpdatedTime": "2020-05-12T19:17:33.475000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-15",
+      "LastUpdatedTime": "2020-05-12T21:13:24.471000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-16",
+      "LastUpdatedTime": "2020-05-12T21:38:45.192000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-17",
+      "LastUpdatedTime": "2020-05-12T21:45:54.187000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-18",
+      "LastUpdatedTime": "2020-05-12T21:57:34.306000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-20",
+      "LastUpdatedTime": "2020-05-12T22:17:08.302000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-64",
+      "LastUpdatedTime": "2020-05-26T16:26:47.576000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-69",
+      "LastUpdatedTime": "2020-05-26T21:45:09.020000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-7",
+      "LastUpdatedTime": "2020-05-12T16:39:54.883000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-70",
+      "LastUpdatedTime": "2020-05-26T23:03:46.116000+00:00"
+    },
+    {
+      "StackName": "supportbot-test-cf3",
+      "LastUpdatedTime": "2020-05-13T19:53:39.596000+00:00"
+    },
+    {
+      "StackName": "tCaT-quickstart-boomi-atom-quickstart-boomi-atom-f9efadf4dc0d492ab3747466500c-VPCStack-1FR5IA2VW0W9D",
+      "LastUpdatedTime": "2020-08-27T20:30:07.236000+00:00"
+    },
+    {
+      "StackName": "tCaT-quickstart-boomi-atom-quickstart-boomi-atom-f9efadf4dc0d492ab3747466500c74cb",
+      "LastUpdatedTime": "2020-08-27T20:29:58.269000+00:00"
+    },
+    {
+      "StackName": "teamserver-test-2",
+      "LastUpdatedTime": "2020-05-31T04:24:05.105000+00:00"
+    },
+    {
+      "StackName": "teamserver-test-3",
+      "LastUpdatedTime": "2020-05-31T04:27:27.594000+00:00"
+    },
+    {
+      "StackName": "teamserver-test-4",
+      "LastUpdatedTime": "2020-05-31T04:46:44.183000+00:00"
+    },
+    {
+      "StackName": "teamserver-test-5",
+      "LastUpdatedTime": "2020-05-31T05:04:16.923000+00:00"
+    },
+    {
+      "StackName": "teamserver-test-6",
+      "LastUpdatedTime": "2020-05-31T05:05:58.272000+00:00"
+    },
+    {
+      "StackName": "teamserver-test-7",
+      "LastUpdatedTime": "2020-05-31T05:21:22.808000+00:00"
+    },
+    {
+      "StackName": "teamservertest1",
+      "LastUpdatedTime": "2020-05-31T04:22:47.070000+00:00"
+    },
+    {
+      "StackName": "tesetcore27",
+      "LastUpdatedTime": "2019-11-21T06:16:16.291000+00:00"
+    },
+    {
+      "StackName": "test0515-1",
+      "LastUpdatedTime": "2020-05-15T22:28:33.647000+00:00"
+    },
+    {
+      "StackName": "test1",
+      "LastUpdatedTime": "2019-11-07T20:19:42.400000+00:00"
+    },
+    {
+      "StackName": "test10",
+      "LastUpdatedTime": "2019-11-12T03:44:55.206000+00:00"
+    },
+    {
+      "StackName": "test11",
+      "LastUpdatedTime": "2019-11-12T03:57:51.628000+00:00"
+    },
+    {
+      "StackName": "test12",
+      "LastUpdatedTime": "2019-11-12T04:03:36.418000+00:00"
+    },
+    {
+      "StackName": "test13",
+      "LastUpdatedTime": "2019-11-12T04:11:43.786000+00:00"
+    },
+    {
+      "StackName": "test2",
+      "LastUpdatedTime": "2019-11-07T20:25:10.407000+00:00"
+    },
+    {
+      "StackName": "test4",
+      "LastUpdatedTime": "2019-11-12T03:19:58.810000+00:00"
+    },
+    {
+      "StackName": "test5",
+      "LastUpdatedTime": "2019-11-12T03:24:51.220000+00:00"
+    },
+    {
+      "StackName": "test6",
+      "LastUpdatedTime": "2019-11-12T03:28:29.009000+00:00"
+    },
+    {
+      "StackName": "test7",
+      "LastUpdatedTime": "2019-11-12T03:35:09.035000+00:00"
+    },
+    {
+      "StackName": "test9",
+      "LastUpdatedTime": "2019-11-12T03:38:42.620000+00:00"
+    },
+    {
+      "StackName": "testapi1",
+      "LastUpdatedTime": "2019-11-15T03:37:30.516000+00:00"
+    },
+    {
+      "StackName": "testapi3",
+      "LastUpdatedTime": "2019-11-15T03:55:41.007000+00:00"
+    },
+    {
+      "StackName": "testcore15",
+      "LastUpdatedTime": "2019-11-19T17:34:29.372000+00:00"
+    },
+    {
+      "StackName": "testcore16",
+      "LastUpdatedTime": "2019-11-19T17:43:39.163000+00:00"
+    },
+    {
+      "StackName": "testcore24",
+      "LastUpdatedTime": "2019-11-21T04:55:06.729000+00:00"
+    },
+    {
+      "StackName": "testcore25",
+      "LastUpdatedTime": "2019-11-21T05:08:47.969000+00:00"
+    },
+    {
+      "StackName": "testcore27",
+      "LastUpdatedTime": "2019-11-21T06:09:47.993000+00:00"
+    },
+    {
+      "StackName": "testcore35",
+      "LastUpdatedTime": "2019-11-21T19:32:00.632000+00:00"
+    },
+    {
+      "StackName": "testcore36",
+      "LastUpdatedTime": "2019-11-21T19:37:24.331000+00:00"
+    },
+    {
+      "StackName": "testcore37",
+      "LastUpdatedTime": "2019-11-21T19:39:23.135000+00:00"
+    },
+    {
+      "StackName": "testcore38",
+      "LastUpdatedTime": "2019-11-21T19:48:53.105000+00:00"
+    },
+    {
+      "StackName": "testcore39",
+      "LastUpdatedTime": "2019-11-21T19:52:03.791000+00:00"
+    },
+    {
+      "StackName": "testcore41",
+      "LastUpdatedTime": "2019-11-21T19:55:57.619000+00:00"
+    },
+    {
+      "StackName": "testcore42",
+      "LastUpdatedTime": "2019-11-21T20:06:54.353000+00:00"
+    },
+    {
+      "StackName": "testcore44",
+      "LastUpdatedTime": "2019-11-21T20:12:56.625000+00:00"
+    },
+    {
+      "StackName": "testcore45",
+      "LastUpdatedTime": "2019-11-21T20:19:44.865000+00:00"
+    },
+    {
+      "StackName": "testcore46",
+      "LastUpdatedTime": "2019-11-21T20:24:49.220000+00:00"
+    },
+    {
+      "StackName": "testcore47",
+      "LastUpdatedTime": "2019-11-21T20:39:23.412000+00:00"
+    },
+    {
+      "StackName": "testcore48",
+      "LastUpdatedTime": "2019-11-21T20:48:43.236000+00:00"
+    },
+    {
+      "StackName": "testcore49",
+      "LastUpdatedTime": "2019-11-22T03:51:22.910000+00:00"
+    },
+    {
+      "StackName": "testcore50",
+      "LastUpdatedTime": "2019-11-22T03:58:43.998000+00:00"
+    },
+    {
+      "StackName": "testcore51",
+      "LastUpdatedTime": "2019-11-22T04:12:19.317000+00:00"
+    },
+    {
+      "StackName": "testcore52",
+      "LastUpdatedTime": "2019-11-22T04:17:28.205000+00:00"
+    },
+    {
+      "StackName": "testcore53",
+      "LastUpdatedTime": "2019-11-22T04:24:57.417000+00:00"
+    },
+    {
+      "StackName": "testcore55",
+      "LastUpdatedTime": "2019-11-22T04:45:11.138000+00:00"
+    },
+    {
+      "StackName": "testcore56",
+      "LastUpdatedTime": "2019-11-22T06:04:43.093000+00:00"
+    },
+    {
+      "StackName": "testtopic2",
+      "LastUpdatedTime": "2019-11-20T07:04:35.821000+00:00"
+    },
+    {
+      "StackName": "testtopic3",
+      "LastUpdatedTime": "2019-11-20T07:08:31.410000+00:00"
+    },
+    {
+      "StackName": "testtopic4",
+      "LastUpdatedTime": "2019-11-20T07:31:17.554000+00:00"
+    },
+    {
+      "StackName": "topictest",
+      "LastUpdatedTime": "2019-11-20T06:58:12.671000+00:00"
+    }
+  ]
+}
