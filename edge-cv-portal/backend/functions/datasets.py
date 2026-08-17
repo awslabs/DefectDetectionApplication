@@ -78,6 +78,9 @@ def get_data_bucket_and_credentials(usecase):
             'data-access'
         )
         bucket = usecase.get('data_s3_bucket') or usecase.get('s3_bucket')
+        # Derive base prefix; DynamoDB items may contain null/empty values,
+        # so coerce to '' — never return None in the prefix slot
+        prefix = usecase.get('data_s3_prefix') or usecase.get('s3_prefix') or ''
     else:
         # Use UseCase Account (this one requires external_id)
         credentials = assume_usecase_role(
@@ -86,8 +89,9 @@ def get_data_bucket_and_credentials(usecase):
             'data-access'
         )
         bucket = usecase['s3_bucket']
+        prefix = usecase.get('s3_prefix') or ''
     
-    return bucket, None, credentials
+    return bucket, prefix, credentials
 
 
 def list_datasets(event):
@@ -116,6 +120,9 @@ def list_datasets(event):
         
         # Get bucket and credentials (uses Data Account if configured)
         bucket, base_prefix, credentials = get_data_bucket_and_credentials(usecase)
+        
+        # Defensive None-safety: never let None reach the f-string composition
+        base_prefix = base_prefix or ''
         
         # Create S3 client with assumed credentials
         s3 = boto3.client(
