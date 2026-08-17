@@ -9,10 +9,19 @@ parameter to ``resolve_model_components``; a signature-tolerant wrapper
 below calls the new three-arg form first and falls back to the old
 two-arg form on TypeError):
 
-(a) singular vLLM-shape records (``published_component: {component_name:
-    'model-vllm-<x>'}``) resolve and emit exactly today's entries —
-    ``{'VersionRequirement': '>=0.0.0', 'DependencyType': 'HARD'}`` per
-    distinct component — property over generated names (Hypothesis);
+(a) vLLM-shape records resolve and emit stably — property over generated
+    names (Hypothesis). CONSCIOUS REPOINT
+    (vllm-model-reload-after-backend-restart task 3.6, user-approved
+    extension of that spec's task-2 record): requirement 2.6 of that
+    bugfix forbids the singular short-circuit this leg used to pin
+    (verbatim resolution + unsuffixed base-name emission — the incident's
+    exact arch-agnostic HARD dependency). The generated records now carry
+    the platform-suffixed per-JetPack ``components`` evidence the
+    multi-arch vLLM publish writes back, resolution is per selected
+    architecture, and emission is one UNPINNED HARD entry per distinct
+    SUFFIXED name — omitted under the Defect F single-variant discipline
+    when the selection resolves to divergent per-target names. The
+    unsuffixed base name never appears;
 (b) a record with NEITHER publish shape raises the exact existing
     "has no published Greengrass component" PackagingError; a missing
     record raises the exact "no record in the Use_Case model registry"
@@ -123,8 +132,30 @@ def resolve(packaging, model_names, usecase_id, archs):
         return packaging.resolve_model_components(model_names, usecase_id)
 
 
-def seed_vllm_record(training_table, usecase_id, model_name, component_name):
-    """A training-jobs record in the singular vLLM publish shape."""
+#: arch -> primary publish-target id (the workflow_packaging
+#: ARCH_TO_PUBLISH_TARGET vocabulary for this suite's VALID_ARCHS),
+#: restated here so the assertions cannot drift with the implementation.
+ARCH_TO_TARGET = {
+    "x86_64": "x86_64-cpu",
+    "x86_64_nvidia": "x86_64-cuda",
+    "arm64_jp4": "jetson-xavier",
+    "arm64_jp5": "jetson-xavier-jp5",
+    "arm64_jp6": "jetson-xavier-jp6",
+}
+
+
+def suffixed_name(component_name, arch):
+    return f"{component_name}-{ARCH_TO_TARGET[arch]}"
+
+
+def seed_vllm_record(training_table, usecase_id, model_name, component_name,
+                     archs):
+    """A training-jobs record in the vLLM publish shape greengrass_publish.py
+    writes since the multi-arch publish fix: the singular map keeps the
+    unsuffixed base name (the component_name-index GSI key) PLUS the
+    platform-suffixed per-JetPack ``components`` entries covering ``archs``
+    (repointed at vllm-model-reload-after-backend-restart task 3.6 — 2.6
+    forbids the legacy singular-only shape resolving)."""
     training_table.put_item(Item={
         "training_id": f"tr-{uuid.uuid4()}",
         "usecase_id": usecase_id,
@@ -135,7 +166,14 @@ def seed_vllm_record(training_table, usecase_id, model_name, component_name):
             "component_name": component_name,
             "component_version": "1.0.0",
             "runtime": "vllm",
-            "supported_architectures": ["arm64_jp6"],
+            "supported_architectures": list(archs),
+            "components": [{
+                "component_name": suffixed_name(component_name, arch),
+                "component_version": "1.0.0",
+                "target": ARCH_TO_TARGET[arch],
+                "architecture": arch,
+                "supported_architectures": [arch],
+            } for arch in archs],
         },
     })
 
@@ -155,35 +193,61 @@ arch_lists = st.lists(st.sampled_from(VALID_ARCHS), min_size=1,
 
 
 # ---------------------------------------------------------------------------
-# (a) vLLM-shape resolution + emission unchanged (Requirement 3.1)
+# (a) vLLM-shape resolution + emission — suffixed-only per 2.6
+# (REPOINTED at vllm-model-reload-after-backend-restart task 3.6; supersedes
+# the 3.1 verbatim-resolution contract for vLLM-shape records)
 # ---------------------------------------------------------------------------
 
 @settings(max_examples=25, deadline=None)
 @given(model_names=model_name_lists, archs=arch_lists)
-def test_vllm_shape_records_resolve_and_emit_todays_entries(
+def test_vllm_shape_records_resolve_and_emit_suffixed_only(
         packaging_env, model_names, archs):
-    """**Property 2: Preservation — vLLM resolution unchanged**
+    """**Property 2: Preservation — vLLM resolution stable under the 2.6
+    contract** (conscious repoint of the singular-verbatim leg —
+    vllm-model-reload-after-backend-restart 2.6 forbids the short-circuit
+    this leg used to pin).
 
-    For any generated model names carrying the singular vLLM publish shape,
-    resolution succeeds and model_component_dependencies emits exactly one
-    unpinned HARD entry per component, byte-identical to today's output.
+    For any generated model names carrying the modern vLLM publish shape
+    (base name + per-JetPack ``components`` covering the selected archs),
+    resolution yields exactly the platform-suffixed names for the selection
+    and emission follows the existing disciplines: a single-arch selection
+    emits one unpinned HARD entry per model's suffixed component; a
+    multi-arch selection resolves to divergent per-target names and is
+    omitted (Defect F single-variant rule). The unsuffixed base name never
+    appears in either.
 
-    **Validates: Requirements 3.1**
+    **Validates: Requirements 3.1 (contract superseded for vLLM records by
+    vllm-model-reload-after-backend-restart 2.6)**
     """
     usecase_id = f"uc-{uuid.uuid4()}"
-    expected = {}
+    expected_resolved = {}
+    expected_emitted = {}
     for name in model_names:
         component_name = f"model-vllm-{name}"
         seed_vllm_record(packaging_env.training_table, usecase_id, name,
-                         component_name)
-        expected[component_name] = dict(MODEL_DEPENDENCY_ENTRY)
+                         component_name, archs)
+        names = {suffixed_name(component_name, arch) for arch in archs}
+        expected_resolved[name] = names
+        if len(names) == 1:
+            # Single distinct suffixed name -> one unpinned HARD entry.
+            expected_emitted[next(iter(names))] = dict(MODEL_DEPENDENCY_ENTRY)
+        # Multiple distinct per-target names -> omitted (Defect F).
 
     resolved = resolve(packaging_env.packaging, model_names, usecase_id,
                        archs)
 
-    assert set(resolved) == set(model_names)
+    assert {model: set(value) for model, value in resolved.items()} \
+        == expected_resolved
+    base_names = {f"model-vllm-{name}" for name in model_names}
+    for value in resolved.values():
+        assert not base_names.intersection(set(value)), (
+            "2.6 REGRESSION: an unsuffixed base name appeared in a "
+            "resolved value: {!r}".format(resolved))
     emitted = packaging_env.packaging.model_component_dependencies(resolved)
-    assert emitted == expected
+    assert emitted == expected_emitted
+    assert not base_names.intersection(emitted), (
+        "2.6 REGRESSION: an unsuffixed base name was emitted: {!r}"
+        .format(emitted))
 
 
 # ---------------------------------------------------------------------------

@@ -1309,6 +1309,122 @@ def gather_model_references(definition: Dict, descriptors_by_id: Dict
     return references
 
 
+def _resolve_vllm_components(record: Dict, archs, label: str) -> set:
+    """Per-architecture resolution of a vLLM-shape record's platform-suffixed
+    Per_JetPack_Component names (vllm-model-reload-after-backend-restart 2.6,
+    design Decision 5). Returns a SET of suffixed component names — the
+    vision resolved-value shape, so model_component_dependencies needs no
+    change — or raises PackagingError when any selected architecture lacks
+    suffixed coverage.
+
+    Sources, in order:
+
+    1. PRIMARY — ``published_component['components']`` (the per-JetPack
+       entries the multi-arch vLLM publish writes back): entries with a
+       non-empty string ``component_name`` whose ``architecture`` (an
+       ``arm64_jpN`` arch id, the workflow's own vocabulary) is one of the
+       selected archs contribute their suffixed names.
+    2. SECONDARY — the record's plural ``published_components`` entries with
+       ``status == 'published'``, matched on ``target`` against each selected
+       arch's PRIMARY publish-target id (``ARCH_TO_PUBLISH_TARGET[arch]``,
+       the ``jetson-xavier-jpN`` ids). The vision-only extra acceptance
+       (ARCH_TO_EXTRA_PUBLISH_TARGETS, ``onnx-jetson-xavier-jp7``)
+       deliberately does NOT apply to vLLM records.
+
+    FAIL CLOSED (coverage gate): every selected architecture must be covered
+    by at least one suffixed entry from either source, else PackagingError
+    naming the model AND the uncovered architecture(s) — with the
+    legacy-record remediation for records that carry only the unsuffixed
+    base name. The unsuffixed base ``component_name`` (kept in the record as
+    the component_name-index GSI key for legacy readers) is NEVER a fallback
+    and NEVER appears in a resolved value: emitting it verbatim is exactly
+    the incident's arch-agnostic HARD dependency (defect 1.6 — the JP6-era
+    ``model-vllm-qwen3-vl-8b-instruct`` artifact dragging
+    LocalServer.arm64JP6 onto the JP7 Thor).
+    """
+    published = record.get('published_component')
+    published = published if isinstance(published, dict) else {}
+    base_name = published.get('component_name')
+    base_name = base_name if isinstance(base_name, str) else ''
+    model_name = record.get('model_name')
+    if not (isinstance(model_name, str) and model_name):
+        model_name = label.split('/', 1)[-1]
+
+    names_by_arch: Dict[str, set] = {arch: set() for arch in archs}
+
+    def _suffixed_name(entry) -> Optional[str]:
+        """The entry's component_name when it is usable suffixed evidence:
+        a non-empty string that is NOT the unsuffixed base name (2.6)."""
+        if not isinstance(entry, dict):
+            return None
+        entry_name = entry.get('component_name')
+        if not (isinstance(entry_name, str) and entry_name):
+            return None
+        if base_name and entry_name == base_name:
+            return None
+        return entry_name
+
+    # Primary source: per-JetPack ``components`` entries, matched on the
+    # workflow's own arch vocabulary — no mirrored target map needed.
+    per_jetpack = published.get('components')
+    per_jetpack = per_jetpack if isinstance(per_jetpack, list) else []
+    for entry in per_jetpack:
+        entry_name = _suffixed_name(entry)
+        if entry_name is None:
+            continue
+        arch = entry.get('architecture')
+        if arch in names_by_arch:
+            names_by_arch[arch].add(entry_name)
+
+    # Secondary source: plural published entries matched on the PRIMARY
+    # publish-target id only (an arch with no known primary target simply
+    # gains no secondary coverage and the gate below fails closed on it).
+    target_to_archs: Dict[str, set] = {}
+    for arch in archs:
+        primary = ARCH_TO_PUBLISH_TARGET.get(arch)
+        if primary:
+            target_to_archs.setdefault(primary, set()).add(arch)
+    plural_entries = record.get('published_components')
+    plural_entries = plural_entries if isinstance(plural_entries, list) else []
+    for entry in plural_entries:
+        if not isinstance(entry, dict) or entry.get('status') != 'published':
+            continue
+        entry_name = _suffixed_name(entry)
+        if entry_name is None:
+            continue
+        for arch in target_to_archs.get(entry.get('target'), ()):
+            names_by_arch[arch].add(entry_name)
+
+    uncovered = sorted(arch for arch, names in names_by_arch.items()
+                       if not names)
+    if uncovered:
+        # A legacy record carries only the unsuffixed base name: no usable
+        # suffixed evidence in either source for ANY architecture.
+        legacy = (not any(_suffixed_name(e) for e in per_jetpack)
+                  and not any(_suffixed_name(e) for e in plural_entries
+                              if isinstance(e, dict)
+                              and e.get('status') == 'published'))
+        if legacy:
+            remediation = (
+                "re-publish the model for every selected architecture - "
+                "this record predates per-JetPack vLLM components")
+        else:
+            remediation = ("re-publish the model for every selected "
+                           "architecture before packaging workflows that "
+                           "use it")
+        raise PackagingError(
+            label,
+            f"Model '{model_name}' has no platform-suffixed published vLLM "
+            f"component covering the selected architecture(s) "
+            f"[{', '.join(uncovered)}]; the arch-agnostic base component "
+            f"name is never emitted as a dependency "
+            f"(vllm-model-reload-after-backend-restart 2.6). {remediation}")
+    resolved_names = set()
+    for names in names_by_arch.values():
+        resolved_names.update(names)
+    return resolved_names
+
+
 def resolve_model_components(model_names: List[str], usecase_id: str,
                              archs) -> Dict[str, Any]:
     """Resolve each referenced model name to its published Greengrass model
@@ -1320,10 +1436,19 @@ def resolve_model_components(model_names: List[str], usecase_id: str,
     Both publish shapes are read (vision-model-packaging-regression
     2.1/2.2):
 
-    - vLLM shape — ``published_component`` (singular map carrying an
-      arch-agnostic ``component_name``, written by the vLLM publish
-      path): resolved exactly as before; the map itself is the resolved
-      value.
+    - vLLM shape — ``published_component`` (singular map written by the
+      vLLM publish path, carrying the arch-agnostic base
+      ``component_name`` plus, since the multi-arch publish fix,
+      platform-suffixed per-JetPack ``components`` entries): resolved
+      PER SELECTED ARCHITECTURE through the suffixed evidence by
+      _resolve_vllm_components (vllm-model-reload-after-backend-restart
+      2.6, Decision 5) — the resolved value is a set of suffixed names,
+      the vision shape; every selected architecture must be covered or
+      PackagingError names the model and the uncovered arch(s); the
+      unsuffixed base name is NEVER emitted. A singular map with no
+      evidence at all (empty map / empty component_name and no
+      per-JetPack entries) falls through to the plural/unpublished gates
+      below unchanged.
     - vision shape — ``published_components`` (plural, per-compile-target
       list of ``{component_name, target, component_version, status}``
       entries written by greengrass_publish.py): entries with
@@ -1338,9 +1463,8 @@ def resolve_model_components(model_names: List[str], usecase_id: str,
       genuinely unpublished records (no singular component_name and no
       plural entries at all).
 
-    Returns ``{model_name: resolved value}`` — the vLLM published map or
-    the vision set of component names — consumed by
-    model_component_dependencies.
+    Returns ``{model_name: resolved value}`` — a set of component names in
+    both shapes — consumed by model_component_dependencies.
 
     FAIL CLOSED, mirroring the plugin gates: a model with no registry
     record, or no published component in either shape, raises
@@ -1373,12 +1497,23 @@ def resolve_model_components(model_names: List[str], usecase_id: str,
                 f"Model '{name}' referenced by the workflow has no record "
                 f"in the Use_Case model registry; it may have been removed "
                 f"since the workflow was validated")
-        # vLLM shape: singular published_component map — today's path.
+        # vLLM shape: singular published_component map. The verbatim
+        # short-circuit is GONE (vllm-model-reload-after-backend-restart
+        # 2.6, Decision 5): a record carrying vLLM evidence — a non-empty
+        # base component_name or per-JetPack ``components`` entries —
+        # resolves per selected architecture through its platform-suffixed
+        # entries, failing closed on any uncovered architecture. Evidence-
+        # free singular maps keep falling through so the genuinely-
+        # unpublished gate below is byte-identical.
         published = record.get('published_component')
-        component_name = published.get('component_name') \
+        base_component_name = published.get('component_name') \
             if isinstance(published, dict) else None
-        if isinstance(component_name, str) and component_name:
-            resolved[name] = published
+        per_jetpack_entries = published.get('components') \
+            if isinstance(published, dict) else None
+        if (isinstance(base_component_name, str) and base_component_name) \
+                or (isinstance(per_jetpack_entries, list)
+                    and per_jetpack_entries):
+            resolved[name] = _resolve_vllm_components(record, archs, label)
             continue
         # Vision shape: plural per-target published_components list.
         published_entries = [
@@ -1482,6 +1617,113 @@ def model_component_dependencies(resolved: Dict[str, Any]) -> Dict:
     return {name: {'VersionRequirement': '>=0.0.0',
                    'DependencyType': 'HARD'}
             for name in sorted(components)}
+
+
+#: Recipe ComponentDependencies key prefix the arch-contradiction guard
+#: inspects (vllm-model-reload-after-backend-restart 2.6, Decision 6).
+_LOCAL_SERVER_DEP_PREFIX = 'aws.edgeml.dda.LocalServer.'
+
+
+def _latest_component_version_arn(greengrass, component_name: str):
+    """The versioned ARN of ``component_name``'s latest registered version
+    in the Use_Case account, or None when the component is not found."""
+    for page in greengrass.get_paginator('list_components').paginate(
+            scope='PRIVATE'):
+        for comp in page.get('components', []):
+            if comp.get('componentName') == component_name:
+                return (comp.get('latestVersion') or {}).get('arn')
+    return None
+
+
+def _model_arch_contradiction_guard(greengrass, resolved: Dict[str, Any],
+                                    archs) -> None:
+    """Defense-in-depth arch-contradiction guard
+    (vllm-model-reload-after-backend-restart 2.6, design Decision 6),
+    invoked AFTER model resolution: REFUSE packaging when a resolved model
+    component's own recipe HARD-depends on a LocalServer variant serving
+    NONE of the selected architectures.
+
+    Per resolved model component name: fetch the component's LATEST version
+    recipe from Greengrass (one ``get_component`` call, alongside the
+    existing ``list_components`` version-resolution traffic), read its
+    ``ComponentDependencies`` keys matching ``aws.edgeml.dda.LocalServer.*``,
+    and compare each against the selected architectures' variants
+    (ARCH_TO_LOCAL_SERVER_COMPONENT). A variant serving none of them raises
+    PackagingError naming the model component, the contradicting LocalServer
+    variant, and the target architecture(s) — the incident's blast radius
+    (a wrong-arch LocalServer LINEAGE crash-looping a production device) is
+    cheapest to stop at packaging time, and false positives are structurally
+    implausible: a Per_JetPack_Component's LocalServer dependency IS its
+    architecture identity (the vllm-multi-arch publish invariant).
+
+    FAIL OPEN on reads: a recipe naming no LocalServer dependency, a
+    component that cannot be found, or ANY read failure (throttle, transient
+    API error, malformed recipe) logs a warning and proceeds — the guard is
+    secondary (the per-arch resolution already prevents the incident class)
+    and must never make packaging flakier than the primary fix.
+    """
+    selected_variants = {
+        ARCH_TO_LOCAL_SERVER_COMPONENT[arch]
+        for arch in archs if arch in ARCH_TO_LOCAL_SERVER_COMPONENT}
+    component_names = set()
+    for value in resolved.values():
+        if isinstance(value, dict):
+            # Tolerated legacy shape (pre-2.6 resolved values were the
+            # singular published map); current resolution emits sets only.
+            name = value.get('component_name')
+            if isinstance(name, str) and name:
+                component_names.add(name)
+        else:
+            component_names.update(
+                name for name in value if isinstance(name, str) and name)
+    for component_name in sorted(component_names):
+        try:
+            arn = _latest_component_version_arn(greengrass, component_name)
+            if not arn:
+                logger.warning(
+                    'Arch-contradiction guard: resolved model component %s '
+                    'not found in the Use_Case account (or has no latest '
+                    'version); skipping the guard check for it',
+                    component_name)
+                continue
+            recipe_blob = greengrass.get_component(
+                recipeOutputFormat='JSON', arn=arn).get('recipe')
+            if hasattr(recipe_blob, 'read'):
+                recipe_blob = recipe_blob.read()
+            dependencies = json.loads(recipe_blob).get(
+                'ComponentDependencies') or {}
+            local_server_variants = sorted(
+                key for key in dependencies
+                if isinstance(key, str)
+                and key.startswith(_LOCAL_SERVER_DEP_PREFIX))
+        except Exception as err:  # ANY read failure: warn and proceed
+            logger.warning(
+                'Arch-contradiction guard: could not read the recipe of '
+                'resolved model component %s (%s); proceeding without the '
+                'guard check for it - per-arch resolution already '
+                'guarantees platform-suffixed dependencies',
+                component_name, err)
+            continue
+        if not local_server_variants:
+            logger.warning(
+                'Arch-contradiction guard: resolved model component %s '
+                'names no aws.edgeml.dda.LocalServer.* dependency in its '
+                'recipe; proceeding', component_name)
+            continue
+        contradicting = [variant for variant in local_server_variants
+                         if variant not in selected_variants]
+        if contradicting:
+            raise PackagingError(
+                f"models/{component_name}",
+                f"Model component '{component_name}' HARD-depends on "
+                f"LocalServer variant(s) [{', '.join(contradicting)}] "
+                f"serving none of the workflow's target architecture(s) "
+                f"[{', '.join(sorted(archs))}] "
+                f"(expected variant(s): "
+                f"[{', '.join(sorted(selected_variants))}]). Deploying it "
+                f"would drag a wrong-architecture LocalServer lineage onto "
+                f"the device; re-publish or repoint the model component "
+                f"for the selected architecture(s)")
 
 
 def local_server_component_dependencies(archs) -> Dict:
@@ -2266,6 +2508,14 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
         session_name = f"wf-pkg-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64]
         usecase_s3 = get_usecase_client('s3', usecase, session_name=session_name)
         greengrass = get_usecase_client('greengrassv2', usecase, session_name=session_name)
+
+        # Defense-in-depth arch-contradiction guard
+        # (vllm-model-reload-after-backend-restart 2.6, Decision 6): refuse
+        # packaging when a resolved model component's recipe HARD-depends on
+        # a LocalServer variant serving none of the selected architectures;
+        # any read failure warns and proceeds.
+        _model_arch_contradiction_guard(greengrass, resolved_models,
+                                        architectures)
 
         # Greengrass component versions are immutable, so re-packaging an
         # unchanged workflow version (e.g. after a portal config change like a

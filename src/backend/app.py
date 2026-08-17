@@ -313,6 +313,16 @@ def start_vllm_runtime():
         vllm_server.start()
         text_generation.set_runtime(manager)
         feature_configs_utils.set_vllm_manager(manager)
+        # Re-drive staged-but-unloaded models after a backend restart
+        # (vllm-model-reload-after-backend-restart, design File 4 /
+        # Decision 7). The import lives INSIDE this try block, after the
+        # VLLM_AVAILABLE early return, so vLLM-free images never import
+        # or construct the reconciler; a reconciler construction/start
+        # failure is caught by the existing containment below.
+        from vllm_runtime.reconciler import VllmReconciler
+        VllmReconciler(manager).start()
+        logger.info(
+            "vLLM reconciler started (staged-model reload after restart).")
         logger.info("vLLM runtime manager started.")
         return vllm_server
     except Exception:

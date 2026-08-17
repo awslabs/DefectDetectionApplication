@@ -132,14 +132,21 @@ VLLM_FEATURE_TYPE = "VllmModel"
 
 #: Manager model state -> the status reported through the existing device
 #: model-status mechanisms (feature-config API, shadow sync): LOADING→LOADING,
-#: READY→READY, FAILED→FAILED. STAGED models have their load request on the
-#: way (vllm_model_prep.py stages then immediately requests the load), so they
-#: report as LOADING (Requirement 4.7).
+#: READY→READY, FAILED→FAILED. STAGED models report as LOADING because a load
+#: is guaranteed to follow within bounded time: on first deploy the component
+#: Startup issues it (vllm_model_prep.py stages then immediately requests the
+#: load), and after a backend restart the vLLM reconciler
+#: (vllm_runtime.reconciler) re-drives every staged, desired model
+#: (Requirement 4.7; vllm-model-reload-after-backend-restart Decision 3).
+#: UNLOADED (staged but explicitly unloaded — tombstoned) reports STOPPED,
+#: reusing the existing device status vocabulary (LFV models already report
+#: STOPPED, so every consumer renders it).
 _VLLM_STATUS_MAP = {
     "STAGED": "LOADING",
     "LOADING": "LOADING",
     "READY": "READY",
     "FAILED": "FAILED",
+    "UNLOADED": "STOPPED",
 }
 
 _vllm_manager = None

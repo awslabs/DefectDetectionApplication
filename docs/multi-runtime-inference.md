@@ -652,9 +652,10 @@ HF-sourced vLLM model components cache their downloaded weights on the
 device under `HF_HOME=/aws_dda/hf_cache` (set in the `environment` of all
 three backend services in `src/docker-compose.yaml`). Because `/aws_dda`
 is a persistent read-write bind mount, the cache survives backend
-container recreation: after the first download, a recreated container
-reloads the model from the local cache in seconds, with no re-download
-and no dependency on huggingface.co being reachable.
+container recreation: after the first download, the post-restart reload
+(driven by the backend's vLLM reconciler, §23 — the cache by itself never
+re-issues a load) reads the weights from the local cache, with no
+re-download and no dependency on huggingface.co being reachable.
 
 ### 22.1 Caches accumulate — undeployment does NOT remove them
 
@@ -695,3 +696,93 @@ rm -rf "/aws_dda/hf_cache/hub/models--Qwen--Qwen2.5-VL-7B-Instruct-AWQ"
 If the model is deployed again later, the first load simply re-downloads
 the weights (requires huggingface.co reachability, same as any first
 download). To see what is using space: `du -sh /aws_dda/hf_cache/hub/*`.
+
+## 23. vLLM post-restart lifecycle (reconciler + unload tombstone)
+
+(Spec: `vllm-model-reload-after-backend-restart`.) The vLLM load used to be
+a **one-shot** action: the model component's Startup
+(`vllm_model_prep.py`) stages the Triton-style repository under
+`VLLM_MODEL_DIR` and POSTs one load to the backend's runtime server, but
+the loaded engine lives **in the backend process** — recreated empty on
+every backend start. A backend restart (crash, `docker restart`, the
+awscrt abort class) therefore used to orphan every loaded model: staged on
+disk, component RUNNING, yet `models: {}` forever, every generate 409,
+status stuck "LOADING", until a human restarted the model component. That
+is fixed by a reconciler in the backend itself.
+
+### 23.1 The `Vllm_Reconciler`
+
+`src/backend/vllm_runtime/reconciler.py` (`VllmReconciler`), started by
+`app.py::start_vllm_runtime()` after the runtime server is up, as one
+daemon thread named `vllm-reconciler` (vLLM-free images — JP5 default,
+x86 — never import or construct it; their startup sequence is unchanged):
+
+- **One-shot scan.** One snapshot of the model repository at backend
+  start: models in state STAGED (explicitly unloaded / tombstoned models
+  are excluded — see §23.2), sorted by name for a deterministic order. No
+  periodic re-scan; every backend start runs a fresh one.
+- **Sequential loopback re-drive.** Each candidate load is issued through
+  the SAME loopback model-control endpoint the component Startup uses —
+  `POST http://127.0.0.1:{VLLM_RUNTIME_PORT}/v2/repository/models/{m}/load`
+  — never `manager.load()` directly, so engine construction happens on the
+  runtime server's event loop and concurrent loads (e.g. a component
+  Startup racing the reconciler on a fresh deploy) serialize to exactly
+  ONE engine construction. The state is re-checked right before each POST
+  and LOADING/READY models are skipped.
+- **Bounded retries.** `RECONCILE_RETRY_BACKOFF_SECONDS = (30, 120, 480)`
+  — 4 attempts total, ~10.5 min worst case, never a retry storm. Each
+  failed attempt applies the same KV-cache-OOM single unload→reload
+  recovery the component Startup uses. On exhaustion the model stays
+  FAILED with the retained failure reason and one prominent ERROR log
+  names the model, the reason, and that automatic retries are exhausted.
+  One model's failure never stops the scan for the others.
+
+This also makes the `vllm_model_prep.py` `LOAD_UNREACHABLE` diagnostic's
+promise — "the model **stays staged for the next LocalServer start**" —
+actually true: the staged repository always survived on disk, but before
+the reconciler nothing ever scanned it and re-issued the load. The
+reconciler is what redeems that promise (the prep script itself is
+unchanged).
+
+### 23.2 The `Unload_Tombstone` (`.dda_explicit_unload`)
+
+Reconciliation must distinguish "desired but orphaned by a restart" from
+"explicitly stopped". An explicit unload (model-control
+`POST .../unload`) writes a marker file
+`VLLM_MODEL_DIR/{model}/.dda_explicit_unload` (content is triage-only
+JSON with a UTC timestamp; its mere existence is what counts):
+
+- **Unload suppresses.** A staged-but-tombstoned model is skipped by the
+  reconciler and stays unloaded across restarts. The unload itself always
+  succeeds and frees the engine — a marker write failure is logged and
+  never fails the unload.
+- **Load / re-stage re-arms.** An explicit load clears the marker as its
+  first action, and the component Startup's atomic re-stage
+  (`shutil.rmtree` + `os.rename` directory replace) removes it wholesale
+  with the old directory — a redeploy re-arms reconciliation with zero
+  `vllm_model_prep.py` changes.
+- **`--cleanup` removes everything.** The component Shutdown's
+  `vllm_model_prep.py --cleanup` removes the staged directory, marker
+  included — nothing left staged, nothing scanned, no litter, never
+  resurrected.
+
+### 23.3 Truthful status vocabulary
+
+The status surfaces (feature-config API and the text-generation 409
+category) now tell the truth about the post-restart lifecycle:
+
+- **UNLOADED → "STOPPED".** A staged-but-tombstoned model reports the new
+  reporting-only `UNLOADED` state, mapped to the existing device status
+  vocabulary as `STOPPED` in feature-config and to the `unloaded` 409
+  category in text-generation — a generate against an explicitly unloaded
+  model fails fast instead of burning the workflow binding's 240 s poll
+  budget (the binding polls only on "loading").
+- **STAGED → "LOADING" is now guaranteed.** This mapping used to assume "a
+  load request is on the way" with no mechanism behind it after a restart.
+  It is retained because the reconciler makes it true by construction:
+  first deploy — the component Startup's load; after a restart — the
+  reconciler's re-drive; bounded time in both cases.
+- **FAILED with retained reason after exhaustion.** When the retry
+  schedule is exhausted, the model reports FAILED with the retained
+  backend failure reason — never an indefinite "LOADING" with no load in
+  flight.

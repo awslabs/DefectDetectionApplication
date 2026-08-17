@@ -30,6 +30,19 @@ resolve against. The recipe under assertion is captured from the
 `create_component_version(inlineRecipe=...)` call on the mocked Use_Case
 Greengrass client.
 
+CONSCIOUS REPOINT (vllm-model-reload-after-backend-restart task 3.6,
+user-approved extension of that spec's task-2 record): requirement 2.6 of
+that bugfix forbids the singular short-circuit this suite's fixture relied
+on — legacy singular-only records now FAIL CLOSED and the unsuffixed base
+name is never emitted (it is the incident's exact arch-agnostic HARD
+dependency). The fixture's two records now carry platform-suffixed publish
+evidence (the LLM record gains the per-JetPack ``components`` entry the
+multi-arch vLLM publish writes back; the vision record moves to the plural
+``published_components`` vision shape greengrass_publish.py actually
+writes), and the model-dependency assertion expects the platform-suffixed
+JP6 component name. The suite's ORIGINAL concern — the recipe carries HARD
+model + LocalServer dependency edges (Defect C, 1.7/1.8) — is unchanged.
+
 Validates: Requirements 1.7, 1.8
 """
 import json
@@ -50,6 +63,11 @@ LLM_MODEL_COMPONENT = "model-vllm-opt125m-smoke"
 VISION_MODEL_NAME = "defect-model"
 VISION_MODEL_COMPONENT = "model-defect-model"
 JP6_LOCAL_SERVER_COMPONENT = "aws.edgeml.dda.LocalServer.arm64JP6"
+JP6_TARGET = "jetson-xavier-jp6"
+#: Platform-suffixed component names (vllm-model-reload-after-backend-restart
+#: 2.6): only these may be emitted as model dependencies since the 3.6 fix.
+LLM_MODEL_COMPONENT_JP6 = f"{LLM_MODEL_COMPONENT}-{JP6_TARGET}"
+VISION_MODEL_COMPONENT_JP6 = f"{VISION_MODEL_COMPONENT}-{JP6_TARGET}"
 
 
 # --------------------------------------------------------------------------
@@ -158,8 +176,12 @@ class DependencyPackagingEnv:
         })
 
         # Model_Registry records with published Greengrass components, the
-        # shape greengrass_publish.py writes (published_component map): the
-        # fixed resolution path extracts published_component.component_name.
+        # shapes greengrass_publish.py writes TODAY (repointed at
+        # vllm-model-reload-after-backend-restart task 3.6 — 2.6 forbids
+        # the legacy singular-only shape resolving): the vLLM record's
+        # singular map carries the platform-suffixed per-JetPack
+        # ``components`` evidence beside the base name, and the vision
+        # record uses the plural per-target ``published_components`` list.
         packaging_env.training_table.put_item(Item={
             "training_id": f"tr-{uuid.uuid4()}",
             "usecase_id": self.usecase_id,
@@ -171,6 +193,13 @@ class DependencyPackagingEnv:
                 "component_version": "1.0.0",
                 "runtime": "vllm",
                 "supported_architectures": ["arm64_jp6"],
+                "components": [{
+                    "component_name": LLM_MODEL_COMPONENT_JP6,
+                    "component_version": "1.0.0",
+                    "target": JP6_TARGET,
+                    "architecture": "arm64_jp6",
+                    "supported_architectures": ["arm64_jp6"],
+                }],
             },
         })
         packaging_env.training_table.put_item(Item={
@@ -179,10 +208,13 @@ class DependencyPackagingEnv:
             "model_name": VISION_MODEL_NAME,
             "model_type": "anomaly_detection",
             "created_at": 1,
-            "published_component": {
-                "component_name": VISION_MODEL_COMPONENT,
+            "published_component": None,
+            "published_components": [{
+                "component_name": VISION_MODEL_COMPONENT_JP6,
                 "component_version": "1.0.0",
-            },
+                "target": JP6_TARGET,
+                "status": "published",
+            }],
         })
 
         status, payload = env.invoke("POST", "/workflows", self.user, body={
@@ -248,6 +280,10 @@ class TestWorkflowRecipeDependencies:
         binding modelName: opt125m-smoke carries no modelComponent(m) entry —
         Greengrass gets no ordering/health edge to the model component.
 
+        (Repointed at vllm-model-reload-after-backend-restart task 3.6: the
+        expected model dependency is now the PLATFORM-SUFFIXED JP6 component
+        name — 2.6 forbids the unsuffixed base name this leg used to pin.)
+
         Validates: Requirements 1.7 (expected behavior 2.8)
         """
         status, payload = dep_env.package(["arm64_jp6"])
@@ -255,16 +291,20 @@ class TestWorkflowRecipeDependencies:
 
         recipe = dep_env.registered_recipe()
         deps = recipe.get("ComponentDependencies") or {}
-        assert LLM_MODEL_COMPONENT in deps, (
+        assert LLM_MODEL_COMPONENT_JP6 in deps, (
             "COUNTEREXAMPLE (Defect C): recipe for workflow '{}' "
             "(llm_inference modelName: {}) has ComponentDependencies {} — "
             "no {} entry (only dda.plugin.* entries are ever emitted)"
             .format(dep_env.workflow_id, LLM_MODEL_NAME,
-                    sorted(deps.keys()), LLM_MODEL_COMPONENT))
-        entry = deps[LLM_MODEL_COMPONENT]
+                    sorted(deps.keys()), LLM_MODEL_COMPONENT_JP6))
+        assert LLM_MODEL_COMPONENT not in deps, (
+            "2.6 REGRESSION (vllm-model-reload-after-backend-restart): the "
+            "unsuffixed base name {} was emitted as a dependency"
+            .format(LLM_MODEL_COMPONENT))
+        entry = deps[LLM_MODEL_COMPONENT_JP6]
         assert entry.get("DependencyType") == "HARD", (
             "COUNTEREXAMPLE (Defect C): {} dependency is not HARD: {!r}"
-            .format(LLM_MODEL_COMPONENT, entry))
+            .format(LLM_MODEL_COMPONENT_JP6, entry))
         assert entry.get("VersionRequirement"), (
             "model component dependency carries no VersionRequirement")
 

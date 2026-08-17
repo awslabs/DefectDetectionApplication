@@ -26,6 +26,17 @@ They pin four baselines:
 3. (3.3) ``gather_model_references`` (and, through the full packaging
    handler, ``resolve_model_components``) sees the ORIGINAL registry
    names - the Model_Registry snapshot is keyed by them.
+   CONSCIOUS REPOINT (vllm-model-reload-after-backend-restart task 3.6,
+   user-approved extension of that spec's task-2 record): requirement
+   2.6 of that bugfix makes legacy singular-only records fail closed
+   and forbids emitting the unsuffixed base component name, so the
+   full-handler harness now seeds the shapes greengrass_publish.py
+   writes TODAY (vLLM records with platform-suffixed per-JetPack
+   ``components`` evidence, vision records in the plural
+   ``published_components`` shape) and the recipe-dependency
+   assertions expect the platform-suffixed names. The property under
+   test - resolution is keyed by ORIGINAL registry names, never
+   rewritten ones - is unchanged.
 4. (3.4) The two private ``_safe_model_name`` copies
    (``greengrass_publish.py``, ``packaging.py``) and
    ``derive_vllm_component_name`` match the reference transform
@@ -447,24 +458,52 @@ class PreservationPackagingEnv:
             "s3_bucket": self.usecase_bucket,
         })
 
-        # Model_Registry records in the shape greengrass_publish.py writes,
-        # keyed by the ORIGINAL registry name (Requirement 3.3).
+        # Model_Registry records in the shapes greengrass_publish.py
+        # writes TODAY, keyed by the ORIGINAL registry name (Requirement
+        # 3.3). Repointed at vllm-model-reload-after-backend-restart task
+        # 3.6: 2.6 makes legacy singular-only records fail closed, so
+        # vLLM records carry the platform-suffixed per-JetPack
+        # ``components`` entry and vision records use the plural
+        # ``published_components`` shape.
         for model_name, component_name, model_type in model_records:
-            item = {
-                "training_id": f"tr-{uuid.uuid4()}",
-                "usecase_id": self.usecase_id,
-                "model_name": model_name,
-                "model_type": model_type,
-                "created_at": 1,
-                "published_component": {
-                    "component_name": component_name,
-                    "component_version": "1.0.0",
-                },
-            }
             if model_type == "vllm":
-                item["published_component"]["runtime"] = "vllm"
-                item["published_component"]["supported_architectures"] = \
-                    ["arm64_jp6"]
+                item = {
+                    "training_id": f"tr-{uuid.uuid4()}",
+                    "usecase_id": self.usecase_id,
+                    "model_name": model_name,
+                    "model_type": model_type,
+                    "created_at": 1,
+                    "published_component": {
+                        "component_name": component_name,
+                        "component_version": "1.0.0",
+                        "runtime": "vllm",
+                        "supported_architectures": ["arm64_jp6"],
+                        "components": [{
+                            "component_name":
+                                f"{component_name}-jetson-xavier-jp6",
+                            "component_version": "1.0.0",
+                            "target": "jetson-xavier-jp6",
+                            "architecture": "arm64_jp6",
+                            "supported_architectures": ["arm64_jp6"],
+                        }],
+                    },
+                }
+            else:
+                item = {
+                    "training_id": f"tr-{uuid.uuid4()}",
+                    "usecase_id": self.usecase_id,
+                    "model_name": model_name,
+                    "model_type": model_type,
+                    "created_at": 1,
+                    "published_component": None,
+                    "published_components": [{
+                        "component_name":
+                            f"{component_name}-jetson-xavier-jp6",
+                        "component_version": "1.0.0",
+                        "target": "jetson-xavier-jp6",
+                        "status": "published",
+                    }],
+                }
             packaging_env.training_table.put_item(Item=item)
 
         status, payload = env.invoke("POST", "/workflows", self.user, body={
@@ -602,9 +641,12 @@ class TestFullPackagingPathPreservation:
         model_ref values against Model_Registry records stored under the
         ORIGINAL registry names - including the live counterexample's
         unsafe llm name - and the recipe's ComponentDependencies carry the
-        published component names those records recorded. If the fix ever
-        rewrote the names BEFORE resolution, this packaging run would fail
-        closed (502) instead of registering."""
+        published component names those records recorded (since the
+        vllm-model-reload-after-backend-restart 3.6 repoint: the
+        platform-suffixed per-JetPack names - 2.6 forbids the unsuffixed
+        base names). If the fix ever rewrote the names BEFORE resolution,
+        this packaging run would fail closed (502) instead of
+        registering."""
         harness = PreservationPackagingEnv(
             env, packaging_env, monkeypatch,
             llm_definition(UNSAFE_LLM_NAME),
@@ -620,5 +662,9 @@ class TestFullPackagingPathPreservation:
             "names: {}".format(payload))
 
         deps = harness.registered_recipe().get("ComponentDependencies") or {}
-        assert UNSAFE_LLM_COMPONENT in deps
-        assert VISION_MODEL_COMPONENT in deps
+        assert f"{UNSAFE_LLM_COMPONENT}-jetson-xavier-jp6" in deps
+        assert f"{VISION_MODEL_COMPONENT}-jetson-xavier-jp6" in deps
+        # 2.6 (vllm-model-reload-after-backend-restart): the unsuffixed
+        # base names never appear as dependencies.
+        assert UNSAFE_LLM_COMPONENT not in deps
+        assert VISION_MODEL_COMPONENT not in deps

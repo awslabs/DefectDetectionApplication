@@ -24,7 +24,16 @@ model. Each model moves through the per-model state machine
     STAGED -> LOADING -> READY | FAILED(reason)
 
 with ``UNKNOWN`` the answer for names never staged, and ``unload`` freeing
-the engine from any state. Failures are isolated: one model's load or
+the engine from any state. An explicit ``unload`` of a still-staged
+repository additionally writes the Unload_Tombstone marker
+(:data:`~vllm_runtime.constants.UNLOAD_TOMBSTONE_NAME`, spec
+vllm-model-reload-after-backend-restart Decision 2) so the post-restart
+reconciler never re-drives a load the operator deliberately stopped;
+staged-but-tombstoned repositories report the REPORTING-ONLY
+``UNLOADED`` state (Decision 3 — derived from disk exactly the way
+STAGED is, no transition-logic change), and an explicit ``load`` clears
+the marker first-thing (re-arming reconciliation). Failures are
+isolated: one model's load or
 serve error (including GPU out-of-memory) transitions only that model to
 FAILED — logged with the model name and the backend error — and never
 touches another engine (4.6, 8.9). The embedded vision Triton scans its
@@ -38,15 +47,17 @@ injectable, which is also how tests drive the manager with a fake
 """
 import gc
 import inspect
+import json
 import logging
 import threading
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Mapping, Optional, Union
 
-from vllm_runtime.constants import VLLM_MODEL_DIR
+from vllm_runtime.constants import UNLOAD_TOMBSTONE_NAME, VLLM_MODEL_DIR
 from vllm_runtime.repository import (
     CONFIG_PBTXT_RELATIVE_PATH,
     RepositoryValidationError,
@@ -97,6 +108,13 @@ class ModelState(str, Enum):
     FAILED = "FAILED"
     #: The name was never staged on this device.
     UNKNOWN = "UNKNOWN"
+    #: REPORTING-ONLY (spec vllm-model-reload-after-backend-restart,
+    #: Decision 3; Requirements 2.3, 2.4): a staged repository whose most
+    #: recent lifecycle event was an explicit unload — the
+    #: Unload_Tombstone marker is present. Derived from disk state
+    #: exactly the way STAGED already is; NO transition logic reaches
+    #: this state, and the reconciler never re-drives such a model.
+    UNLOADED = "UNLOADED"
 
 
 @dataclass(frozen=True)
@@ -209,14 +227,14 @@ class VllmRuntimeManager:
     def state(self, model_name: str) -> ModelStatus:
         """The model's current status: its tracked state when the manager
         knows it, STAGED when a repository directory exists on disk but no
-        load was requested yet, UNKNOWN for never-staged names."""
+        load was requested yet (UNLOADED when that repository carries the
+        Unload_Tombstone — Decision 3, reporting-only), UNKNOWN for
+        never-staged names."""
         with self._lock:
             entry = self._models.get(model_name)
             if entry is not None:
                 return entry.status
-        if self._repository_staged(model_name):
-            return ModelStatus(ModelState.STAGED)
-        return UNKNOWN_STATUS
+        return self._disk_derived_status(model_name)
 
     def list_models(self) -> Dict[str, ModelStatus]:
         """Every model the manager tracks plus every repository staged on
@@ -227,7 +245,7 @@ class VllmRuntimeManager:
         if self.model_dir.is_dir():
             for child in sorted(self.model_dir.iterdir()):
                 if child.name not in statuses and self._repository_staged(child.name):
-                    statuses[child.name] = ModelStatus(ModelState.STAGED)
+                    statuses[child.name] = self._disk_derived_status(child.name)
         return statuses
 
     def engine_args(self, model_name: str) -> Dict[str, Any]:
@@ -243,6 +261,76 @@ class VllmRuntimeManager:
             self.model_dir / model_name / CONFIG_PBTXT_RELATIVE_PATH
         ).is_file()
 
+    def _disk_derived_status(self, model_name: str) -> ModelStatus:
+        """Status of an UNTRACKED name, derived purely from disk state
+        (spec vllm-model-reload-after-backend-restart, Decision 3):
+        UNLOADED when the staged repository carries the Unload_Tombstone,
+        STAGED when staged without it, UNKNOWN when nothing is staged.
+        Reporting-only — no transition logic involved."""
+        if self._repository_staged(model_name):
+            if self._tombstoned(model_name):
+                return ModelStatus(ModelState.UNLOADED)
+            return ModelStatus(ModelState.STAGED)
+        return UNKNOWN_STATUS
+
+    # --- Unload_Tombstone helpers (Decision 2; Requirements 2.4, 3.5) ------
+
+    def _tombstone_path(self, model_name: str) -> Path:
+        return self.model_dir / model_name / UNLOAD_TOMBSTONE_NAME
+
+    def _tombstoned(self, model_name: str) -> bool:
+        """Whether the model's repository carries the Unload_Tombstone.
+        Only the marker's EXISTENCE matters — its content is triage-only
+        JSON (a UTC timestamp) and is never parsed, so a corrupt or
+        unreadable marker still counts as tombstoned."""
+        try:
+            return self._tombstone_path(model_name).exists()
+        except OSError:  # unreadable marker/directory still suppresses
+            return True
+
+    def _clear_tombstone(self, model_name: str) -> None:
+        """Best-effort Unload_Tombstone removal (an explicit load re-arms
+        reconciliation). Removal failure is logged and the caller
+        proceeds."""
+        try:
+            self._tombstone_path(model_name).unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "Could not remove the unload tombstone of vLLM model "
+                "'%s'; proceeding anyway",
+                model_name,
+                exc_info=True,
+            )
+
+    def _write_tombstone(self, model_name: str) -> None:
+        """Best-effort Unload_Tombstone write after an explicit unload of
+        a still-staged repository, so the post-restart reconciler never
+        re-drives a load the operator deliberately stopped (Decision 2).
+        The content is triage-only JSON with a UTC timestamp; ANY
+        filesystem error is logged and swallowed — the unload's return
+        value and semantics stay byte-identical (Requirement 3.5 is
+        categorical)."""
+        if not self._repository_staged(model_name):
+            return
+        try:
+            self._tombstone_path(model_name).write_text(
+                json.dumps(
+                    {
+                        "marker": "explicit unload",
+                        "unloaded_at_utc": datetime.now(
+                            timezone.utc
+                        ).isoformat(),
+                    }
+                )
+            )
+        except Exception:  # noqa: BLE001 - unload must always succeed (3.5)
+            logger.exception(
+                "Could not write the unload tombstone of vLLM model "
+                "'%s'; the unload still succeeds (the model will be "
+                "reconciled on the next backend start)",
+                model_name,
+            )
+
     # --- lifecycle ---------------------------------------------------------
 
     async def load(self, model_name: str) -> ModelStatus:
@@ -255,7 +343,12 @@ class VllmRuntimeManager:
         only this model to FAILED with the backend reason retained and
         logged with the model name; every other engine is untouched
         (Requirements 4.6, 4.7, 8.9).
+
+        FIRST action: best-effort removal of any Unload_Tombstone — an
+        explicit load re-arms post-restart reconciliation (Decision 2;
+        removal failure logs and the load proceeds).
         """
+        self._clear_tombstone(model_name)
         with self._lock:
             entry = self._models.get(model_name)
             if entry is not None and entry.status.state in (
@@ -306,14 +399,23 @@ class VllmRuntimeManager:
     def unload(self, model_name: str) -> bool:
         """Remove the model from any state, shutting its engine down and
         freeing GPU memory. Returns True when the manager was tracking the
-        model."""
+        model.
+
+        When the repository is still staged on disk, a best-effort
+        Unload_Tombstone is written AFTER the engine shutdown/reclaim
+        (Decision 2) so the post-restart reconciler treats the model as
+        explicitly stopped; any filesystem error is logged and the
+        unload's return value and semantics stay byte-identical
+        (Requirement 3.5)."""
         with self._lock:
             entry = self._models.pop(model_name, None)
         if entry is None:
+            self._write_tombstone(model_name)
             return False
         if entry.engine is not None:
             self._shutdown_engine(model_name, entry.engine)
         self._reclaim_gpu_memory(model_name)
+        self._write_tombstone(model_name)
         logger.info("vLLM model '%s' unloaded", model_name)
         return True
 
@@ -512,11 +614,7 @@ class VllmRuntimeManager:
                 return entry.engine
             status = entry.status if entry is not None else None
         if status is None:
-            status = (
-                ModelStatus(ModelState.STAGED)
-                if self._repository_staged(model_name)
-                else UNKNOWN_STATUS
-            )
+            status = self._disk_derived_status(model_name)
         raise ModelUnavailableError(model_name, status)
 
     # --- multimodal support (edge-vlm-image-inference) ---------------------

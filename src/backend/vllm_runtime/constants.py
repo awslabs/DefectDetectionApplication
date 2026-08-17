@@ -55,3 +55,16 @@ try:
     )
 except ValueError:
     VLLM_RUNTIME_PORT = DEFAULT_VLLM_RUNTIME_PORT
+
+#: Unload_Tombstone marker filename (spec
+#: vllm-model-reload-after-backend-restart, Requirements 2.4, 3.5).
+#: An explicit unload writes ``{VLLM_MODEL_DIR}/{model_name}/{marker}``
+#: so the post-restart reconciler never re-drives a load the operator
+#: deliberately stopped. The marker clears on re-stage for free: the
+#: component Startup's atomic directory replace in vllm_model_prep.py
+#: (``shutil.rmtree`` + ``os.rename`` swaps the whole model directory)
+#: removes the marker together with the old directory — zero
+#: ``vllm_model_prep.py`` changes needed. An explicit load also clears
+#: it (re-arming reconciliation). One shared constant for the writer
+#: (the manager's ``unload()``) and any reader (the reconciler).
+UNLOAD_TOMBSTONE_NAME = ".dda_explicit_unload"

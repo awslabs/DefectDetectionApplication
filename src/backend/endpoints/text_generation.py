@@ -358,12 +358,18 @@ def get_runtime() -> Any:
 #: Manager state -> the category the API reports (Requirement 5.5
 #: distinguishes loading / failed / unknown; STAGED is known to the
 #: device and on its way to serving, so it reports as loading).
+#: UNLOADED (staged but explicitly unloaded — tombstoned) reports its own
+#: "unloaded" category so a generate against it fails fast and truthfully:
+#: the workflow binding polls ONLY on "loading", so it must not burn its
+#: 240 s budget on a model no load will follow
+#: (vllm-model-reload-after-backend-restart Decision 3).
 _STATE_CATEGORY = {
     ModelState.READY.value: "ready",
     ModelState.STAGED.value: "loading",
     ModelState.LOADING.value: "loading",
     ModelState.FAILED.value: "failed",
     ModelState.UNKNOWN.value: "unknown",
+    ModelState.UNLOADED.value: "unloaded",
 }
 
 

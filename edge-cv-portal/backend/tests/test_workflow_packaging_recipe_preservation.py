@@ -304,8 +304,16 @@ class PreservationPackagingEnv:
             "s3_bucket": self.usecase_bucket,
         })
 
-        # Published Model_Registry records (greengrass_publish shape) so the
-        # post-fix resolution path resolves instead of failing closed.
+        # Published Model_Registry records (the shapes greengrass_publish.py
+        # writes TODAY) so the resolution path resolves instead of failing
+        # closed. Repointed at vllm-model-reload-after-backend-restart task
+        # 3.6 (user-approved extension of that spec's task-2 record):
+        # requirement 2.6 makes legacy singular-only records fail closed,
+        # so the vLLM record carries its platform-suffixed per-JetPack
+        # ``components`` entry and the vision record uses the plural
+        # ``published_components`` vision shape. This suite's contract —
+        # every recipe field EXCEPT ComponentDependencies is stable — is
+        # unchanged (the assertions never name the model components).
         packaging_env.training_table.put_item(Item={
             "training_id": f"tr-{uuid.uuid4()}",
             "usecase_id": self.usecase_id,
@@ -317,6 +325,14 @@ class PreservationPackagingEnv:
                 "component_version": "1.0.0",
                 "runtime": "vllm",
                 "supported_architectures": ["arm64_jp6"],
+                "components": [{
+                    "component_name":
+                        f"{LLM_MODEL_COMPONENT}-jetson-xavier-jp6",
+                    "component_version": "1.0.0",
+                    "target": "jetson-xavier-jp6",
+                    "architecture": "arm64_jp6",
+                    "supported_architectures": ["arm64_jp6"],
+                }],
             },
         })
         packaging_env.training_table.put_item(Item={
@@ -325,10 +341,14 @@ class PreservationPackagingEnv:
             "model_name": VISION_MODEL_NAME,
             "model_type": "anomaly_detection",
             "created_at": 1,
-            "published_component": {
-                "component_name": VISION_MODEL_COMPONENT,
+            "published_component": None,
+            "published_components": [{
+                "component_name":
+                    f"{VISION_MODEL_COMPONENT}-jetson-xavier-jp6",
                 "component_version": "1.0.0",
-            },
+                "target": "jetson-xavier-jp6",
+                "status": "published",
+            }],
         })
 
         status, payload = env.invoke("POST", "/workflows", self.user, body={

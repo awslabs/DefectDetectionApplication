@@ -37,6 +37,32 @@ is about vLLM-shape (singular) records, absent records, or genuinely
 unpublished records — never a record carrying plural ``published_components``
 entries (isBugCondition_G, task 15 / Property 13's domain).
 
+CONSCIOUS REPOINT (vllm-model-reload-after-backend-restart task 3.6):
+requirement 2.6 of that bugfix supersedes the edge-deploy-reliability
+2.21/3.17 contract for vLLM-shape (singular) records — the verbatim
+singular short-circuit IS defect 1.6 (the arch-agnostic base name emitted
+as a HARD dependency dragged the JP6-era artifact and
+LocalServer.arm64JP6 onto the JP7 Thor). Exactly the two legs recorded at
+that spec's task 2 are repointed to the 2.6 contract, and NOTHING else:
+
+- ``TestSingularVllmResolutionPreserved.test_singular_records_resolve_to_
+  todays_exact_output`` (singular-map verbatim resolution for ANY arch
+  selection) is now ``test_singular_records_fail_closed_per_architecture``:
+  a legacy record carrying only the unsuffixed base name FAILS CLOSED for
+  ANY arch selection, naming the model and every uncovered architecture
+  with the legacy-record remediation.
+- ``TestDependencyEmissionPreserved.test_model_dependencies_for_resolved_
+  singular_records_stable`` (base-name dependency emission) is now
+  ``test_model_dependencies_for_resolved_vllm_records_suffixed_only``:
+  records carrying platform-suffixed per-JetPack ``components`` evidence
+  resolve to the suffixed names and emission is one UNPINNED HARD entry
+  per distinct SUFFIXED name — the unsuffixed base name never appears.
+
+Every other leg — the no-record gate, ALL genuinely-unpublished shapes
+(including the empty-singular parametrizations, which still fall through
+to the unchanged unpublished gate), and the plugin/LocalServer goldens —
+passes UNMODIFIED.
+
 The fix changes `resolve_model_components`' signature to accept the
 selected archs (design Fix Implementation §8). The `resolve()` helper below
 inspects the live signature and passes archs only when the function accepts
@@ -208,41 +234,57 @@ def published_map(component_name, component_version):
 
 
 # --------------------------------------------------------------------------
-# (a) vLLM-shape (singular) records resolve to today's exact output
-# (Requirements 2.21, 3.17)
+# (a) vLLM-shape (singular) records fail closed per architecture
+# (REPOINTED to vllm-model-reload-after-backend-restart 2.6, task 3.6 —
+# supersedes the 2.21/3.17 verbatim-resolution contract for these records)
 # --------------------------------------------------------------------------
 
 class TestSingularVllmResolutionPreserved:
 
     @settings(max_examples=20, deadline=None)
     @given(shapes=vllm_registry_shapes, archs=arch_selections)
-    def test_singular_records_resolve_to_todays_exact_output(
+    def test_singular_records_fail_closed_per_architecture(
             self, packaging_env, shapes, archs):
-        """**Feature: edge-deploy-reliability, Property 14: Preservation —
-        vLLM resolution and other gates unchanged**
+        """**Feature: vllm-model-reload-after-backend-restart, Property 5:
+        workflow packaging emits only platform-suffixed vLLM model
+        dependencies** (conscious repoint of the Property 14 verbatim-
+        resolution leg — requirement 2.6 forbids the singular short-circuit
+        this leg used to pin).
 
-        For ANY set of vLLM-shape records (singular published_component
-        with a model-vllm-* component_name) and ANY arch selection, the
-        resolution output is exactly today's ``{model_name: published
-        map}`` — the seeded singular map, byte-identical, no PackagingError.
+        For ANY set of LEGACY vLLM-shape records (singular
+        published_component carrying ONLY the unsuffixed model-vllm-* base
+        component_name — no per-JetPack ``components``, no plural entries)
+        and ANY arch selection, resolution FAILS CLOSED with a
+        PackagingError naming the model and EVERY uncovered (i.e. every
+        selected) architecture, carrying the legacy-record remediation —
+        the base name is never resolved, so it can never be emitted.
 
-        Validates: Requirements 2.21, 3.17
+        Validates: Requirements 2.6
         """
         usecase_id = fresh_usecase_id()
-        expected = {}
         for model_name, (component_name, version) in shapes.items():
-            published = published_map(component_name, version)
             seed_vllm_record(packaging_env.training_table, usecase_id,
-                             model_name, published)
-            expected[model_name] = published
+                             model_name, published_map(component_name,
+                                                       version))
 
-        resolved = resolve(packaging_env.packaging, sorted(shapes),
-                           usecase_id, archs=archs)
-        assert resolved == expected, (
-            "PRESERVATION REGRESSION (Property 14/2.21/3.17): singular "
-            "vLLM records no longer resolve to today's exact output for "
-            "archs {}: got {!r}, expected {!r}"
-            .format(archs, resolved, expected))
+        with pytest.raises(packaging_env.packaging.PackagingError) as info:
+            resolve(packaging_env.packaging, sorted(shapes),
+                    usecase_id, archs=archs)
+        message = info.value.message
+        # Resolution processes models in sorted order and fails closed on
+        # the FIRST legacy record, naming it.
+        first_model = sorted(shapes)[0]
+        assert first_model in message, (
+            "2.6 REGRESSION: the fail-closed error must name the model; "
+            "got: {!r}".format(message))
+        for arch in archs:
+            assert arch in message, (
+                "2.6 REGRESSION: the fail-closed error must name every "
+                "uncovered architecture ({} missing); got: {!r}"
+                .format(arch, message))
+        assert "predates per-JetPack vLLM components" in message, (
+            "2.6 REGRESSION: the legacy-record remediation text is gone; "
+            "got: {!r}".format(message))
 
 
 # --------------------------------------------------------------------------
@@ -343,39 +385,73 @@ class TestGenuinelyUnpublishedGatePreserved:
 # 3.19)
 # --------------------------------------------------------------------------
 
+#: The one arch/target pair the repointed emission leg resolves for —
+#: resolve()'s default arch selection and its primary publish-target id.
+EMISSION_ARCH = "arm64_jp6"
+EMISSION_TARGET = "jetson-xavier-jp6"
+
+
+def published_map_with_per_jetpack(component_name, component_version):
+    """The MODERN singular published_component map: the unsuffixed base
+    name (kept as the component_name-index GSI key for legacy readers)
+    PLUS a platform-suffixed per-JetPack ``components`` entry covering
+    EMISSION_ARCH — the greengrass_publish.py write-back shape since the
+    multi-arch publish fix."""
+    suffixed = f"{component_name}-{EMISSION_TARGET}"
+    published = published_map(component_name, component_version)
+    published["components"] = [{
+        "component_name": suffixed,
+        "component_version": component_version,
+        "target": EMISSION_TARGET,
+        "architecture": EMISSION_ARCH,
+        "supported_architectures": [EMISSION_ARCH],
+    }]
+    return published
+
+
 class TestDependencyEmissionPreserved:
 
     @settings(max_examples=20, deadline=None)
     @given(shapes=vllm_registry_shapes)
-    def test_model_dependencies_for_resolved_singular_records_stable(
+    def test_model_dependencies_for_resolved_vllm_records_suffixed_only(
             self, packaging_env, shapes):
-        """**Feature: edge-deploy-reliability, Property 14: Preservation —
-        vLLM resolution and other gates unchanged**
+        """**Feature: vllm-model-reload-after-backend-restart, Property 5:
+        workflow packaging emits only platform-suffixed vLLM model
+        dependencies** (conscious repoint of the Property 14 base-name
+        emission leg — requirement 2.6 forbids emitting the unsuffixed base
+        name this leg used to pin).
 
-        For ANY set of singular-resolved vLLM records, model_component_
-        dependencies emits exactly one UNPINNED ('>=0.0.0') HARD entry per
-        distinct component_name — today's exact contract, end-to-end from
-        real resolution output.
+        For ANY set of vLLM records carrying platform-suffixed per-JetPack
+        ``components`` evidence, model_component_dependencies emits exactly
+        one UNPINNED ('>=0.0.0') HARD entry per distinct SUFFIXED
+        component name — end-to-end from real resolution output — and the
+        unsuffixed base name NEVER appears.
 
-        Validates: Requirements 3.17
+        Validates: Requirements 2.6
         """
         usecase_id = fresh_usecase_id()
         for model_name, (component_name, version) in shapes.items():
             seed_vllm_record(packaging_env.training_table, usecase_id,
-                             model_name, published_map(component_name,
-                                                       version))
+                             model_name,
+                             published_map_with_per_jetpack(component_name,
+                                                            version))
 
         resolved = resolve(packaging_env.packaging, sorted(shapes),
                            usecase_id)
         out = packaging_env.packaging.model_component_dependencies(resolved)
 
-        expected = {component_name: {"VersionRequirement": ">=0.0.0",
-                                     "DependencyType": "HARD"}
+        expected = {f"{component_name}-{EMISSION_TARGET}":
+                    {"VersionRequirement": ">=0.0.0",
+                     "DependencyType": "HARD"}
                     for component_name, _ in shapes.values()}
         assert out == expected, (
-            "PRESERVATION REGRESSION (Property 14/3.17): model dependency "
-            "emission for singular-resolved records changed: got {!r}, "
-            "expected {!r}".format(out, expected))
+            "2.6 REGRESSION: model dependency emission for vLLM records "
+            "with per-JetPack evidence changed: got {!r}, expected {!r}"
+            .format(out, expected))
+        for component_name, _ in shapes.values():
+            assert component_name not in out, (
+                "2.6 REGRESSION: the unsuffixed base name {!r} was "
+                "emitted as a dependency".format(component_name))
 
     def test_plugin_dependency_emission_sample_unchanged(self,
                                                          packaging_env):
