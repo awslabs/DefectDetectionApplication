@@ -1,0 +1,34 @@
+{
+  "run_id": "flux1dev-r1",
+  "ledger_run_id": "flux1-r1",
+  "model": "flux.1-dev",
+  "hf_repos": {
+    "text_to_image": "black-forest-labs/FLUX.1-dev",
+    "inpainting": "black-forest-labs/FLUX.1-Fill-dev"
+  },
+  "pipelines": {
+    "text_to_image": "FluxPipeline (num_inference_steps=28, guidance_scale=3.5)",
+    "inpainting": "FluxFillPipeline (official Fill variant per Evaluation_Matrix, num_inference_steps=50, guidance_scale=30.0)"
+  },
+  "instance_type": "g6e.8xlarge",
+  "instance_id": "i-0e2e34b3c412c5da3",
+  "availability_zone": "us-east-1b",
+  "ami": "ami-012ba162b9cd2729c (Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 Ubuntu 22.04)",
+  "gpu": "NVIDIA L40S 48GB",
+  "environment": {
+    "python": "3.12 (/opt/pytorch venv)",
+    "torch": "2.7.0+cu128",
+    "torch_dtype": "bfloat16",
+    "memory_strategy": "enable_model_cpu_offload; pipelines loaded sequentially per task group (one resident at a time)",
+    "diffusers": "0.32.2",
+    "transformers": "4.46.3",
+    "accelerate": "1.1.1"
+  },
+  "wallclock_budget_minutes": 180,
+  "launch_utc": "2026-08-17T15:27:02Z",
+  "terminate_utc": "2026-08-17T16:48:41Z",
+  "instance_hours": 0.6804,
+  "hourly_rate_usd": 4.52856,
+  "hf_gated_access": "FLUX.1-dev and FLUX.1-Fill-dev are HF-gated; a pre-validated token was written to the instance's HF cache at runtime via SSM (never committed to the repo).",
+  "notes": "Instance shared with the flux.1-schnell run (ledger row flux1-r1); instance-hours split evenly, ledger row carries the whole-instance actual. Combined run: FluxFillPipeline (Fill-dev) served the 9 inpainting cases, FluxPipeline (base dev) the 4 t2i cases, loaded sequentially. model_load_seconds (4.44 = 1.58 inpaint + 2.86 t2i) reflect a warm HF cache (~58 GB dev + ~55 GB Fill-dev pre-downloaded; dev_dl_seconds=450.2, fill_dl_seconds=445.6 recorded separately). Weights downloads sized the EBS volume at 300 GB."
+}

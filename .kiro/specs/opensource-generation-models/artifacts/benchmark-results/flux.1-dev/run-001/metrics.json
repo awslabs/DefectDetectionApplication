@@ -1,0 +1,130 @@
+{
+  "run_id": "flux1dev-r1",
+  "model": "flux.1-dev",
+  "instance_type": "g6e.8xlarge",
+  "account": "164152369890",
+  "region": "us-east-1",
+  "model_load_seconds": 4.437123952999173,
+  "cases": [
+    {
+      "case_id": "inpaint-001",
+      "task_type": "inpainting",
+      "latency_seconds": 40.412548297000285,
+      "seed": 101,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/inpaint-001.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-002",
+      "task_type": "inpainting",
+      "latency_seconds": 37.60764094200022,
+      "seed": 102,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/inpaint-002.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-003",
+      "task_type": "inpainting",
+      "latency_seconds": 36.846564076000504,
+      "seed": 103,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/inpaint-003.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-004",
+      "task_type": "inpainting",
+      "latency_seconds": 36.839852557000086,
+      "seed": 104,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/inpaint-004.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-005",
+      "task_type": "inpainting",
+      "latency_seconds": 36.68376886700025,
+      "seed": 105,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/inpaint-005.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-006",
+      "task_type": "inpainting",
+      "latency_seconds": 36.607704099999864,
+      "seed": 106,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/inpaint-006.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-101",
+      "task_type": "inpainting",
+      "latency_seconds": 36.804081266999674,
+      "seed": 111,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/inpaint-101.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-102",
+      "task_type": "inpainting",
+      "latency_seconds": 36.74956221600041,
+      "seed": 112,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/inpaint-102.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-103",
+      "task_type": "inpainting",
+      "latency_seconds": 36.4015096359999,
+      "seed": 113,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/inpaint-103.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-001",
+      "task_type": "text_to_image",
+      "latency_seconds": 37.03151066600003,
+      "seed": 201,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/t2i-001.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-002",
+      "task_type": "text_to_image",
+      "latency_seconds": 34.48649850200036,
+      "seed": 202,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/t2i-002.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-003",
+      "task_type": "text_to_image",
+      "latency_seconds": 34.61499822800033,
+      "seed": 203,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/t2i-003.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-004",
+      "task_type": "text_to_image",
+      "latency_seconds": 34.531589726000675,
+      "seed": 204,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1dev-r1/outputs/t2i-004.png",
+      "status": "ok",
+      "failure_mode": null
+    }
+  ],
+  "instance_hours": 0.6804,
+  "estimated_cost_usd": 3.08,
+  "billing_reconciled_cost_usd": null
+}

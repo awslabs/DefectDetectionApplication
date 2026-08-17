@@ -1,0 +1,130 @@
+{
+  "run_id": "flux1schnell-r1",
+  "model": "flux.1-schnell",
+  "instance_type": "g6e.8xlarge",
+  "account": "164152369890",
+  "region": "us-east-1",
+  "model_load_seconds": 4.181055423999851,
+  "cases": [
+    {
+      "case_id": "inpaint-001",
+      "task_type": "inpainting",
+      "latency_seconds": 26.359997037000085,
+      "seed": 101,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/inpaint-001.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-002",
+      "task_type": "inpainting",
+      "latency_seconds": 23.085629147999953,
+      "seed": 102,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/inpaint-002.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-003",
+      "task_type": "inpainting",
+      "latency_seconds": 21.771012907999875,
+      "seed": 103,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/inpaint-003.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-004",
+      "task_type": "inpainting",
+      "latency_seconds": 20.339814567000076,
+      "seed": 104,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/inpaint-004.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-005",
+      "task_type": "inpainting",
+      "latency_seconds": 20.258988893999685,
+      "seed": 105,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/inpaint-005.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-006",
+      "task_type": "inpainting",
+      "latency_seconds": 20.295511798000007,
+      "seed": 106,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/inpaint-006.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-101",
+      "task_type": "inpainting",
+      "latency_seconds": 20.23280806999992,
+      "seed": 111,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/inpaint-101.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-102",
+      "task_type": "inpainting",
+      "latency_seconds": 20.146020904000125,
+      "seed": 112,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/inpaint-102.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "inpaint-103",
+      "task_type": "inpainting",
+      "latency_seconds": 20.05238657200016,
+      "seed": 113,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/inpaint-103.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-001",
+      "task_type": "text_to_image",
+      "latency_seconds": 22.576594665000357,
+      "seed": 201,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/t2i-001.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-002",
+      "task_type": "text_to_image",
+      "latency_seconds": 20.49579883999968,
+      "seed": 202,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/t2i-002.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-003",
+      "task_type": "text_to_image",
+      "latency_seconds": 20.217890514999908,
+      "seed": 203,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/t2i-003.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-004",
+      "task_type": "text_to_image",
+      "latency_seconds": 20.18990385699999,
+      "seed": 204,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/flux1schnell-r1/outputs/t2i-004.png",
+      "status": "ok",
+      "failure_mode": null
+    }
+  ],
+  "instance_hours": 0.6804,
+  "estimated_cost_usd": 3.08,
+  "billing_reconciled_cost_usd": null
+}

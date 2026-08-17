@@ -1,0 +1,26 @@
+{
+  "run_id": "pixart-sigma-r1",
+  "ledger_run_id": "pixart-r2",
+  "model": "pixart-sigma",
+  "hf_repo": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+  "pipeline": "PixArtSigmaPipeline",
+  "instance_type": "g5.xlarge",
+  "instance_id": "i-01361c1f436a6cab7",
+  "availability_zone": "us-east-1c",
+  "ami": "ami-012ba162b9cd2729c (Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 Ubuntu 22.04 20260427)",
+  "gpu": "NVIDIA A10G 24GB",
+  "environment": {
+    "python": "3.12 (/opt/pytorch venv)",
+    "torch": "2.7.0+cu128",
+    "torch_dtype": "bfloat16",
+    "diffusers": "0.31.0",
+    "transformers": "4.46.3",
+    "accelerate": "1.1.1"
+  },
+  "wallclock_budget_minutes": 180,
+  "launch_utc": "2026-08-17T14:50:30Z",
+  "terminate_utc": "2026-08-17T15:05:39Z",
+  "instance_hours": 0.2525,
+  "hourly_rate_usd": 1.006,
+  "notes": "Second instance for the small-class runs: the first instance (pixart-r1) self-terminated mid Sigma load. This instance had the 48G swapfile enabled before the run; Sigma completed on the first attempt. model_load_seconds benefits from a warm HF download (weights fetched fresh on this instance, so load includes full download+load)."
+}

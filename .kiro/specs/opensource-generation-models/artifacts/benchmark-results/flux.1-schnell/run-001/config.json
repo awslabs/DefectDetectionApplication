@@ -1,0 +1,30 @@
+{
+  "run_id": "flux1schnell-r1",
+  "ledger_run_id": "flux1-r1",
+  "model": "flux.1-schnell",
+  "hf_repo": "black-forest-labs/FLUX.1-schnell",
+  "pipelines": {
+    "text_to_image": "FluxPipeline (num_inference_steps=4, guidance_scale=0.0, max_sequence_length=256)",
+    "inpainting": "FluxInpaintPipeline (community path, num_inference_steps=4, guidance_scale=0.0, strength=0.85, max_sequence_length=256)"
+  },
+  "instance_type": "g6e.8xlarge",
+  "instance_id": "i-0e2e34b3c412c5da3",
+  "availability_zone": "us-east-1b",
+  "ami": "ami-012ba162b9cd2729c (Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 Ubuntu 22.04)",
+  "gpu": "NVIDIA L40S 48GB",
+  "environment": {
+    "python": "3.12 (/opt/pytorch venv)",
+    "torch": "2.7.0+cu128",
+    "torch_dtype": "bfloat16",
+    "memory_strategy": "enable_model_cpu_offload (full .to('cuda') of a FLUX bf16 pipeline OOMs a 48 GB L40S at load)",
+    "diffusers": "0.32.2",
+    "transformers": "4.46.3",
+    "accelerate": "1.1.1"
+  },
+  "wallclock_budget_minutes": 180,
+  "launch_utc": "2026-08-17T15:27:02Z",
+  "terminate_utc": "2026-08-17T16:48:41Z",
+  "instance_hours": 0.6804,
+  "hourly_rate_usd": 4.52856,
+  "notes": "Instance shared with the flux.1-dev(+Fill) run (ledger row flux1-r1); instance-hours split evenly between the two runs, ledger row carries the whole-instance actual. g6e.xlarge (planned) was rejected at launch time: 32 GiB host RAM cannot hold the ~34 GB bf16 FLUX pipeline under enable_model_cpu_offload (the 4.1 PixArt host-OOM lesson applied); g6e.8xlarge (384 GiB RAM, same single L40S GPU, $4.529/hr) was the smallest g6e with headroom for two 12B-class pipelines' offload plus HF cache. Model load seconds (4.18) reflect a warm HF cache; first-download times are excluded by protocol (load = pipeline load start to ready)."
+}

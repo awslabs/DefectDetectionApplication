@@ -86,7 +86,7 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
     - Run all frozen cases per model; write `benchmark-results/pixart-alpha/<run-id>/` and `benchmark-results/pixart-sigma/<run-id>/` (config.json, metrics.json, representative outputs, notes.md with rubric scores for any inpainting cases); record failure modes and continue on per-case failure
     - _Requirements: 2.5, 2.6, 2.7, 2.9, 2.10_
 
-  - [ ] 4.2 Benchmark FLUX.1-schnell, FLUX.1-dev, and FLUX.1-Fill-dev (medium class)
+  - [x] 4.2 Benchmark FLUX.1-schnell, FLUX.1-dev, and FLUX.1-Fill-dev (medium class)
     - ⚠️ Provisions a g6e.xlarge (L40S 48 GB) on-demand instance, same tag, same ledger + `should_provision` gate before launch and ledger update after terminate
     - Run all frozen cases; inpainting via FLUX.1-Fill-dev per the matrix's inpainting-path finding; capture model_load_seconds + first-case latency as Cold_Start_Time proxy; write per-run artifacts and rubric scores in notes.md
     - _Requirements: 2.5, 2.6, 2.7, 2.9, 2.10_

@@ -26,7 +26,9 @@ echo "*/5 * * * * root test \$(cut -d. -f1 /proc/uptime) -gt \$(( {{WALLCLOCK_BU
 chmod 644 /etc/cron.d/benchmark-budget-guard
 
 # ---- Environment (Deep Learning AMI: torch preinstalled; pin diffusers stack)
-python3 -m pip install --upgrade 'diffusers==0.31.0' 'transformers==4.46.3' \
+# diffusers >= 0.32 is required for FluxFillPipeline (FLUX.1-Fill-dev);
+# 0.32.2 remains compatible with the PixArt / Flux pipelines used earlier.
+python3 -m pip install --upgrade 'diffusers==0.32.2' 'transformers==4.46.3' \
   'accelerate==1.1.1' 'sentencepiece' 'protobuf'
 
 # ---- Fetch harness + frozen cases from the tagged benchmark bucket
