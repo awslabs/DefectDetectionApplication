@@ -5,6 +5,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
+import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import * as path from 'path';
 
@@ -164,8 +165,9 @@ export class SyntheticDataStack extends cdk.Stack {
     // versions from the same assets as the ComputeStack (the
     // NodeDesignerStack and BuildFleetStack do the same for the shared
     // layer), keeping the cross-stack dependency one-directional. The
-    // imaging layer is new to this feature and bundles Pillow (built by
-    // backend/layers/imaging/build.sh, same convention as the jwt layer).
+    // imaging layer is new to this feature and bundles Pillow via CDK
+    // asset bundling (see below) so synth always produces a populated
+    // layer regardless of the build host state.
     // ------------------------------------------------------------------
     const sharedLayer = new lambda.LayerVersion(this, 'SyntheticSharedLayer', {
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/shared')),
@@ -179,8 +181,55 @@ export class SyntheticDataStack extends cdk.Stack {
       description: 'JWT dependencies for the synthetic data Lambda function',
     });
 
+    // Imaging layer (Pillow): bundled at synth time via CDK asset bundling.
+    //
+    // BUGFIX (synthetic-imaging-layer-empty): this asset was previously the
+    // raw backend/layers/imaging directory, relying on build.sh having been
+    // run manually to create python/ before deploy — when it wasn't, an
+    // EMPTY layer (only build.sh + requirements.txt) synthesized and
+    // deployed cleanly, and the handler failed at runtime with
+    // "No module named 'PIL'". Bundling makes synth itself produce the
+    // populated layer: the local tryBundle path runs pip on the host with
+    // the same manylinux wheel targeting as build.sh (fast, no Docker
+    // needed); if it fails, CDK falls back to the Docker bundling image.
+    // build.sh remains valid for manual/standalone layer builds.
+    const imagingLayerSourceDir = path.join(__dirname, '../../backend/layers/imaging');
     const imagingLayer = new lambda.LayerVersion(this, 'SyntheticImagingLayer', {
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/imaging')),
+      code: lambda.Code.fromAsset(imagingLayerSourceDir, {
+        bundling: {
+          image: lambda.Runtime.PYTHON_3_11.bundlingImage,
+          command: [
+            'bash',
+            '-c',
+            'pip install -r requirements.txt -t /asset-output/python',
+          ],
+          local: {
+            tryBundle(outputDir: string): boolean {
+              try {
+                // Same wheel targeting as build.sh: Pillow ships native
+                // extensions, so force the manylinux wheel matching the
+                // Lambda runtime (Python 3.11, x86_64) regardless of host.
+                execSync(
+                  [
+                    'pip install',
+                    `-r ${path.join(imagingLayerSourceDir, 'requirements.txt')}`,
+                    `-t ${path.join(outputDir, 'python')}`,
+                    '--platform manylinux2014_x86_64',
+                    '--implementation cp',
+                    '--python-version 3.11',
+                    '--only-binary=:all:',
+                  ].join(' '),
+                  { stdio: ['ignore', 'pipe', 'pipe'] }
+                );
+                return true;
+              } catch {
+                // Fall back to the Docker bundling image.
+                return false;
+              }
+            },
+          },
+        },
+      }),
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
       description:
         'Pillow for synthetic preview image decode/diff (bbox_from_diff auto-annotation)',
