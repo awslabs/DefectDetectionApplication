@@ -185,7 +185,24 @@ def _patched_datasets(usecase, assume_calls=None, client_calls=None):
 
 
 def _seed_bucket(s3, bucket, keys):
-    s3.create_bucket(Bucket=bucket)
+    """Create the bucket and seed it with exactly the given object keys.
+
+    The bucket is purged first: when an outer (session-scoped) moto mock is
+    already active — e.g. conftest's ``aws_stack`` fixture activated by
+    another test file in the same pytest run — the nested per-example
+    ``mock_aws()`` contexts share that outer backend and no longer wipe
+    state on exit, so objects from earlier examples would otherwise leak in.
+    """
+    try:
+        s3.create_bucket(Bucket=bucket)
+    except (s3.exceptions.BucketAlreadyOwnedByYou,
+            s3.exceptions.BucketAlreadyExists):
+        pass
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket):
+        stale = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+        if stale:
+            s3.delete_objects(Bucket=bucket, Delete={"Objects": stale})
     for key in keys:
         s3.put_object(Bucket=bucket, Key=key, Body=b"x")
 

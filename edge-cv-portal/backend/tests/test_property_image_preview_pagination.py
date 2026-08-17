@@ -128,9 +128,25 @@ MAX_PAGES = 32
 # Helpers
 # --------------------------------------------------------------------------- #
 def _seed_bucket(keys):
-    """Create the moto bucket and seed it with the given object keys."""
+    """Create the moto bucket and seed it with exactly the given object keys.
+
+    The bucket is purged first: when an outer (session-scoped) moto mock is
+    already active — e.g. conftest's ``aws_stack`` fixture activated by
+    another test file in the same pytest run — the nested per-example
+    ``mock_aws()`` contexts share that outer backend and no longer wipe
+    state on exit, so objects from earlier examples would otherwise leak in.
+    """
     s3 = boto3.client("s3", region_name=REGION)
-    s3.create_bucket(Bucket=BUCKET)
+    try:
+        s3.create_bucket(Bucket=BUCKET)
+    except (s3.exceptions.BucketAlreadyOwnedByYou,
+            s3.exceptions.BucketAlreadyExists):
+        pass
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=BUCKET):
+        stale = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+        if stale:
+            s3.delete_objects(Bucket=BUCKET, Delete={"Objects": stale})
     for key in keys:
         s3.put_object(Bucket=BUCKET, Key=key, Body=b"fake-image-bytes")
     return s3
