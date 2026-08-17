@@ -13,7 +13,7 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
 
 ## Tasks
 
-- [ ] 1. Phase A — Candidate model evaluation matrix (desk research)
+- [x] 1. Phase A — Candidate model evaluation matrix (desk research)
   - [x] 1.1 Create artifacts scaffold and evaluation matrix skeleton
     - Create `artifacts/` directory layout per the design (evaluation-matrix.md, benchmark-results/, benchmark-harness/)
     - Author `artifacts/evaluation-matrix.md` skeleton: one row per Candidate_Model (FLUX.1-dev, FLUX.1-schnell, FLUX.2, HunyuanImage, PixArt-alpha, PixArt-Sigma) with the fixed column schema — capability flags in `MODEL_CATALOG` vocabulary (text_to_image, inpainting, image_variation, seed, cfg_scale), inpainting path (native | official-variant | community | unsupported), license (name, commercial terms, URL), resources (parameter count, min/recommended GPU memory, satisfying AWS instance types), weights access (location, open | gated | api-only, redistribution restrictions), benchmark status (included | excluded)
@@ -36,7 +36,7 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
     - **Property 1: Deliverable completeness over the candidate set** (matrix portion)
     - _Requirements: 1.1, 1.7_
 
-- [ ] 2. Phase B — Benchmark protocol, harness, and pre-exploration snapshot
+- [x] 2. Phase B — Benchmark protocol, harness, and pre-exploration snapshot
   - [x] 2.1 Author the benchmark protocol
     - Write `artifacts/benchmark-protocol.md` with sections in design order: candidate list (post-1.7 exclusions) → frozen test-case set (≥5 inpainting source/mask/prompt triples covering different defect types and mask sizes, ≥3 text-to-image defect prompts, fixed seeds per case) → per-run procedure (launch, load, run cases, capture metrics, terminate) → metrics definitions (per-image latency, model_load_seconds, Cold_Start_Time, actual cost) → human quality rubric (mask adherence, background preservation, defect realism, prompt fidelity, each 1–5) → Cost_Cap (final USD number, proposed 500) and ledger procedure → teardown checklist (7 steps from the design) → evidence requirements
     - This artifact is the gate: no Benchmark_Infrastructure may be provisioned before it is committed

@@ -41,8 +41,9 @@ One row per planned Benchmark_Run. Status vocabulary: `pending` (not started),
 ## Evidence Files
 
 - `pre-exploration-stacks.json` — pre-exploration CloudFormation stack snapshot
-  (225 stacks, captured 2026-08-17 before any provisioning; Req 9.4). Diffed
-  against the post-exploration snapshot in task 5.3.
+  (225 stacks, captured 2026-08-17T04:33:10Z before any provisioning; Req 9.4).
+  `LastUpdatedTime` falls back to `CreationTime` for never-updated stacks so
+  the Phase D diff (task 5.3) is well-defined for every stack.
 - `teardown-audit.md` — created in Phase D (task 5.1): tag-filtered teardown
   verification queries, stack snapshot diff, `git status` evidence.
 - `<model>/<run-id>/` — per-run `config.json`, `metrics.json`, representative

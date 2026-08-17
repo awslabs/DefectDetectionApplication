@@ -1,8 +1,8 @@
 {
-  "captured_utc": "2026-08-17T03:44:19Z",
+  "captured_utc": "2026-08-17T04:33:10Z",
   "account": "164152369890",
   "region": "us-east-1",
-  "purpose": "Pre-exploration CloudFormation stack snapshot (Req 9.4). Diffed against the post-exploration snapshot in Phase D task 5.3.",
+  "purpose": "Pre-exploration CloudFormation stack snapshot (Req 9.4). LastUpdatedTime falls back to CreationTime for never-updated stacks. Diffed against the post-exploration snapshot in Phase D task 5.3.",
   "stacks": [
     {
       "StackName": "Avastus-Yolov5-BuildPipeline",
@@ -34,35 +34,35 @@
     },
     {
       "StackName": "EdgeCVPortalBuildFleetStack",
-      "LastUpdatedTime": "2026-08-17T02:58:18.883000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:20:35.107000+00:00"
     },
     {
       "StackName": "EdgeCVPortalComputeStack",
-      "LastUpdatedTime": "2026-08-17T02:52:35.049000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:23:16.738000+00:00"
     },
     {
       "StackName": "EdgeCVPortalComputeStack-ApiGatewayNestedStackApiGatewayNestedStackResource85A55C6F-I1VTU544AK48",
-      "LastUpdatedTime": "2026-08-17T02:53:13.073000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:15:29.137000+00:00"
     },
     {
       "StackName": "EdgeCVPortalComputeStack-CameraRegistryApiNestedStackCameraRegistryApiNestedStackResou-10ZGSZI4EQR5K",
-      "LastUpdatedTime": "2026-08-17T02:53:35.876000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:15:52.037000+00:00"
     },
     {
       "StackName": "EdgeCVPortalComputeStack-DdaLabelingApiNestedStackDdaLabelingApiNestedStackResource26B-1G35354IU2CQ2",
-      "LastUpdatedTime": "2026-08-17T02:54:11.170000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:16:27.328000+00:00"
     },
     {
       "StackName": "EdgeCVPortalComputeStack-QuickSetupApiNestedStackQuickSetupApiNestedStackResource3ACF4-MLB34VDHTI8G",
-      "LastUpdatedTime": "2026-08-17T02:53:59.307000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:16:15.566000+00:00"
     },
     {
       "StackName": "EdgeCVPortalComputeStack-UserAdminApiNestedStackUserAdminApiNestedStackResourceAB49428-Q9WHJWF3IOJ6",
-      "LastUpdatedTime": "2026-08-17T02:53:47.586000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:16:03.712000+00:00"
     },
     {
       "StackName": "EdgeCVPortalComputeStack-WorkflowManagerGapsApiNestedStackWorkflowManagerGapsApiNested-LH5KZ24LMLMS",
-      "LastUpdatedTime": "2026-08-17T02:54:22.712000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:16:38.908000+00:00"
     },
     {
       "StackName": "EdgeCVPortalFrontendStack",
@@ -70,11 +70,11 @@
     },
     {
       "StackName": "EdgeCVPortalNodeDesignerStack",
-      "LastUpdatedTime": "2026-08-17T02:57:01.687000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:19:17.178000+00:00"
     },
     {
       "StackName": "EdgeCVPortalNodeDesignerStack-NodeDesignerApiNestedStackNodeDesignerApiNestedStackReso-1VQIOTM3QZU0B",
-      "LastUpdatedTime": "2026-08-17T02:57:29.550000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:19:45.242000+00:00"
     },
     {
       "StackName": "EdgeCVPortalStorageStack",
@@ -82,11 +82,11 @@
     },
     {
       "StackName": "EdgeCVPortalSyntheticDataStack",
-      "LastUpdatedTime": "2026-08-17T02:55:59.299000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:18:19.731000+00:00"
     },
     {
       "StackName": "EdgeCVPortalTestRunnerStack",
-      "LastUpdatedTime": "2026-08-17T02:49:00.527000+00:00"
+      "LastUpdatedTime": "2026-08-17T04:11:42.382000+00:00"
     },
     {
       "StackName": "GdkPipelineInfrastructureCDK",

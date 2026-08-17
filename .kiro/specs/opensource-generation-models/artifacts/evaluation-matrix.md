@@ -114,3 +114,42 @@ Property 1 (matrix portion): for every Candidate_Model, a row exists with all re
 **Checklist outcome: PASS** — matrix complete for all six Candidate_Models; three Legal_Review_Flags pre-identified for the Decision_Record (FLUX.1-dev non-commercial, FLUX.2 [dev] non-commercial, HunyuanImage territory/MAU clauses); one sizing decision deferred to the Phase C checkpoint (HunyuanImage-3.0 instance class).
 
 *Reviewed: August 2026, during Task 1.4. Content in cited cells was paraphrased from sources for compliance with licensing restrictions.*
+
+---
+
+## Pinned Parameter Counts → Phase C Instance Sizing (Task 1.3 output)
+
+| Size class | Model(s) | Pinned params | Benchmark instance (Phase C) |
+|---|---|---|---|
+| Small | PixArt-alpha, PixArt-Sigma | 0.6B DiT + 4.7B T5-XXL (~11 GB bf16 pipeline) | g5.xlarge or g6.xlarge (24 GB) — as designed |
+| Medium | FLUX.1-dev, FLUX.1-schnell, FLUX.1-Fill-dev | 12B each (~34 GB bf16 pipeline) | g6e.xlarge (L40S 48 GB) — as designed |
+| Large | HunyuanImage-2.1 | 17B DiT + refiner + encoders | g6e.2xlarge/g6e.4xlarge (48 GB GPU + host-RAM offload); p4d slice fallback for bf16 |
+| Large | FLUX.2 [dev] | 32B DiT + ~24B text encoder | g6e.4xlarge with FP8/4-bit quantization + offload; p4d.24xlarge (A100 80 GB) fallback |
+
+No Candidate_Model has unobtainable weights → **no 1.7 exclusions**; all six are `included`. The only api-only artifacts encountered (FLUX.2 pro/flex/max) are variants outside the benchmarked checkpoints, recorded in the FLUX.2 row.
+
+## Key Findings for Downstream Phases
+
+1. **Only FLUX.1-dev (+Fill-dev) offers an official mask-based inpainting path** — the pipeline's make-or-break capability. It carries a non-commercial license (Legal_Review_Flag).
+2. **FLUX.1-schnell (Apache 2.0) is the only license-clean candidate with any inpainting story** (community-grade); Phase C must measure whether community inpainting quality is acceptable.
+3. **FLUX.2 [dev] has native image_variation (reference editing)** — uniquely valuable for the fallback path (zero Bedrock models in us-east-1 support variation) — but no mask inpainting and a non-commercial license. FLUX.2 [klein] 4B (Apache 2.0) is a license-clean family member worth a benchmark note.
+4. **HunyuanImage-2.1's license §5(b) prohibits using outputs to improve other AI models** — likely fatal for a synthetic-training-data pipeline independent of quality; also EU/UK/South Korea territory exclusion.
+5. **PixArt models are cheap T2I-only data points**; they cannot serve the primary path.
+
+## Completeness Review (Task 1.4 — Property 1, matrix portion)
+
+Checklist run 2026-02 against every Candidate_Model row (FLUX.1-dev, FLUX.1-schnell, FLUX.2, HunyuanImage, PixArt-alpha, PixArt-Sigma):
+
+| Check (per row) | FLUX.1-dev | FLUX.1-schnell | FLUX.2 | HunyuanImage | PixArt-alpha | PixArt-Sigma |
+|---|---|---|---|---|---|---|
+| All five capability flags recorded in `MODEL_CATALOG` vocabulary (1.2) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Inpainting path from closed vocabulary `native/official-variant/community/unsupported` (1.3) | ✅ official-variant | ✅ community | ✅ community | ✅ unsupported | ✅ unsupported | ✅ unsupported |
+| License name + commercial terms + license text URL (1.4) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Parameter count + min/recommended GPU memory + satisfying AWS instance types (1.5) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Weights location + access mechanism (`open/gated/api-only`) + redistribution restrictions (1.6) | ✅ gated | ✅ open | ✅ gated (dev) / api-only variants noted | ✅ open | ✅ open | ✅ open |
+| Benchmark status `included/excluded` with evidence, exclusions consistent (1.7) | ✅ included | ✅ included | ✅ included | ✅ included | ✅ included | ✅ included |
+| Every cell carries at least one evidence URL | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+**Exclusion-consistency check (Property 2, first half):** zero rows are marked `excluded`, and zero benchmark-results directories exist yet, so the "excluded ⇒ no benchmark results" implication holds vacuously. Consistent.
+
+**Outcome: PASS** — all six rows fully populated with evidence links; matrix satisfies Requirements 1.1–1.6, with no 1.7 exclusions to record. Matrix is ready to feed the Benchmark_Protocol candidate list (all six included) and Phase C instance sizing.

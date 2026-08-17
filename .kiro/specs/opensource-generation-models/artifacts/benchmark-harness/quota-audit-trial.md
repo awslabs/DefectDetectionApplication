@@ -1,6 +1,6 @@
 # GPU Quota Audit — Portal_Account 164152369890, us-east-1
 
-Captured 2026-08-17T03:46:25Z by `benchmark-harness/quota_audit.py` (read-only, Req 3.4).
+Captured 2026-08-17T04:33:54Z by `benchmark-harness/quota_audit.py` (read-only, Req 3.4).
 
 | Service | Quota | Code | Current value |
 |---|---|---|---|
