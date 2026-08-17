@@ -11,8 +11,9 @@
  * - ForgotPasswordModal: success confirmation says the temporary password
  *   was sent to the registered email without any password value (4.3);
  *   no-verified-email and delivery errors surfaced (4.4, 4.5).
- * - RoleModal: exactly the five defined roles with the current role
- *   preselected (5.2); rejection reasons (incl. last-PortalAdmin guard)
+ * - RoleModal: exactly the six defined roles with the current role
+ *   preselected (5.2, extended by dda-data-labeling 2.1); rejection
+ *   reasons (incl. last-PortalAdmin guard)
  *   shown in the modal (5.3); success reported for the parent to confirm
  *   and re-fetch (5.7).
  * - DeleteModal (Requirements 14.1-14.3, 14.7, 14.9-14.11): explicit
@@ -314,7 +315,31 @@ describe('RoleModal', () => {
   const changeButton = () =>
     screen.getByRole('button', { name: 'Change role' });
 
-  it('offers exactly the five defined roles with the current role preselected (Requirement 5.2)', () => {
+  // CONSCIOUS REPOINT (user-manager-datalabeler-role, design Decision 2):
+  // this test was
+  // ``offers exactly the five defined roles with the current role
+  // preselected (Requirement 5.2)`` and pinned the five-role count that
+  // dda-data-labeling Requirement 2.1 supersedes (DataLabeler is assigned/
+  // revoked through the existing user administration functions). Its
+  // unfixed assertion, VERBATIM (also recorded in that spec's task-2
+  // preservation OUTCOME before the fix):
+  //
+  //     it('offers exactly the five defined roles with the current role preselected (Requirement 5.2)', () => {
+  //       renderModal();
+  //
+  //       const select = createWrapper(document.body).findSelect()!;
+  //
+  //       // Current role preselected in the trigger.
+  //       expect(select.findTrigger().getElement()).toHaveTextContent('Operator');
+  //
+  //       // Open the dropdown: exactly the five defined roles.
+  //       select.openDropdown();
+  //       const options = select.findDropdown().findOptions();
+  //       expect(options.map((o) => o.getElement().textContent)).toEqual([
+  //         ...PORTAL_ROLES,
+  //       ]);
+  //     });
+  it('offers exactly the six defined roles with the current role preselected (Requirement 5.2, extended by dda-data-labeling Requirement 2.1)', () => {
     renderModal();
 
     const select = createWrapper(document.body).findSelect()!;
@@ -322,7 +347,8 @@ describe('RoleModal', () => {
     // Current role preselected in the trigger.
     expect(select.findTrigger().getElement()).toHaveTextContent('Operator');
 
-    // Open the dropdown: exactly the five defined roles.
+    // Open the dropdown: exactly the six defined roles (dda-data-labeling
+    // Requirement 2.1 supersedes the original five-role count).
     select.openDropdown();
     const options = select.findDropdown().findOptions();
     expect(options.map((o) => o.getElement().textContent)).toEqual([

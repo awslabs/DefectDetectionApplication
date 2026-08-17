@@ -58,13 +58,14 @@ import { apiService } from '../../services/api';
 import type { AdminAccount } from '../../services/api';
 import { getErrorMessage } from '../../utils/errorHandling';
 
-/** The five defined Portal_Role values (Requirement 5.2). */
+/** The six defined Portal_Role values (portal-user-manager Requirement 5.2, extended by dda-data-labeling Requirement 2.1). */
 export const PORTAL_ROLES = [
   'PortalAdmin',
   'UseCaseAdmin',
   'DataScientist',
   'Operator',
   'Viewer',
+  'DataLabeler',
 ] as const;
 
 /**

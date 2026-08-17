@@ -1685,6 +1685,14 @@ export class ComputeStack extends cdk.Stack {
 
     edgeCredentialsTable.grantReadWriteData(userAdminHandler);
     accountSyncTable.grantReadWriteData(userAdminHandler);
+    // finalize_audit_event (shared_utils.py) recovers the audit table's
+    // (event_id, timestamp) range key with a dynamodb:Query before the
+    // terminal update_item — the base createLambdaRole only grants
+    // grantWriteData, so without this the deployed handler 500s after
+    // every mutation's Cognito effect (user-manager-datalabeler-role,
+    // design Decisions 3-4). Exactly the missing action, narrower than
+    // grantReadData (no Scan/GetItem), scoped to this handler only.
+    props.auditLogTable.grant(userAdminHandler, 'dynamodb:Query');
     // Immediate sync attempt after staging (the 5-minute schedule is the
     // fallback when the invoke fails).
     accountSyncHandler.grantInvoke(userAdminHandler);
