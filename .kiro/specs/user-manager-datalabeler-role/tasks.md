@@ -225,7 +225,7 @@ graph TD
     - Nothing committed; no fix implemented; task-1 files' exploration cases untouched.
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
 
-- [ ] 3. Fix: six-role vocabulary in the User Manager modals + scoped audit Query grant (design "Fix Implementation" Files 1-3)
+- [x] 3. Fix: six-role vocabulary in the User Manager modals + scoped audit Query grant (design "Fix Implementation" Files 1-3)
 
   - [x] 3.1 Frontend: append 'DataLabeler' to PORTAL_ROLES + the conscious test repoint (design Files 1 + 2)
     - In `edge-cv-portal/frontend/src/pages/admin/UserManagerModals.tsx` (~L63): append `'DataLabeler'` LAST to the exported `PORTAL_ROLES` array (preserves the five's order, matches the backend tuple); update the doc comment to "The six defined Portal_Role values (portal-user-manager Requirement 5.2, extended by dda-data-labeling Requirement 2.1)". NO other change — both modals (~L270, ~L515) map the same array
@@ -281,7 +281,7 @@ graph TD
       - Scope check (`git status` / `git diff --stat`): the only spec-relevant tracked diffs are `UserManagerModals.tsx` (+2/-1, task 3.1), `UserManagerModals.test.tsx` (+31/-3, the ONE recorded repoint), `compute-stack.ts` (+8/-0, task 3.2); the three new test files remain untracked. No preservation test modified beyond the repoint; no `src/` file, no baseline file. Nothing committed.
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
 
-- [ ] 4. Fix-checking: vocabulary parity + grant scope (design Properties 3 + 4)
+- [x] 4. Fix-checking: vocabulary parity + grant scope (design Properties 3 + 4)
   - **Property 3: Fix Checking** - Frontend/Backend Role Vocabulary Parity
   - **Property 4: Fix Checking** - Scoped Audit Query Grant in the Synthesized Template
   - Frontend (extend the task-1 vitest file): enumerate all six roles (`it.each`) — each is offered by BOTH dropdowns; option lists exactly equal the backend tuple in order; a DataLabeler create submission reaches `createAdminUser` with `role: 'DataLabeler'` and a DataLabeler role change reaches `setAdminUserRole(username, 'DataLabeler')` — the same payload shapes the existing tests pin for other roles (2.3: the backend already accepts them, `test_dda_labeling_rbac_role.py`)
