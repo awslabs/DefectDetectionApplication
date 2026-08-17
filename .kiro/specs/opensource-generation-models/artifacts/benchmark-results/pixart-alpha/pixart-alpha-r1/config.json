@@ -1,0 +1,26 @@
+{
+  "run_id": "pixart-alpha-r1",
+  "ledger_run_id": "pixart-r1",
+  "model": "pixart-alpha",
+  "hf_repo": "PixArt-alpha/PixArt-XL-2-1024-MS",
+  "pipeline": "PixArtAlphaPipeline",
+  "instance_id": "i-01b4e3e5e2fe0eb99",
+  "instance_type": "g5.xlarge",
+  "gpu": "NVIDIA A10G 24 GB",
+  "ami_id": "ami-012ba162b9cd2729c",
+  "ami_name": "Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 (Ubuntu 22.04) 20260427",
+  "region": "us-east-1",
+  "account": "164152369890",
+  "environment_pins": {
+    "torch": "2.13.0+cu130",
+    "diffusers": "0.31.0",
+    "transformers": "4.46.3",
+    "accelerate": "1.1.1",
+    "dtype": "bfloat16"
+  },
+  "wallclock_budget_minutes": 180,
+  "instance_launch_utc": "2026-08-17T13:27:02Z",
+  "instance_terminate_utc": "2026-08-17T14:39:24Z",
+  "output_bucket": "s3://opensource-genmodels-benchmark-164152369890",
+  "notes": "Shared instance with pixart-sigma-r1 (both small-class, single ledger row pixart-r1). Instance driven via SSM send-command; no SSH keys. Self-terminate guard: shutdown -h +180 plus cron uptime guard; instance-initiated-shutdown-behavior=terminate."
+}

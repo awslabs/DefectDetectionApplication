@@ -77,11 +77,11 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
     - Read-only; not Benchmark_Infrastructure
     - _Requirements: 3.4_
 
-- [ ] 3. Checkpoint — provisioning gate
+- [x] 3. Checkpoint — provisioning gate
   - Ensure all harness pytest tests pass, `benchmark-protocol.md` is committed, the pre-exploration snapshot exists, and the Cost_Cap ledger is initialized. Ask the user if questions arise. Do not proceed to Phase C otherwise.
 
 - [ ] 4. Phase C — Benchmark execution ⚠️ REAL AWS GPU COST
-  - [ ] 4.1 Benchmark PixArt-alpha and PixArt-Sigma (small class)
+  - [x] 4.1 Benchmark PixArt-alpha and PixArt-Sigma (small class)
     - ⚠️ Provisions a g5.xlarge or g6.xlarge on-demand instance tagged `exploration=opensource-generation-models`. Before launch: update the ledger and verify `should_provision(spend + projected, cap)` is true. After terminate: record instance-hours and estimated cost in the ledger
     - Run all frozen cases per model; write `benchmark-results/pixart-alpha/<run-id>/` and `benchmark-results/pixart-sigma/<run-id>/` (config.json, metrics.json, representative outputs, notes.md with rubric scores for any inpainting cases); record failure modes and continue on per-case failure
     - _Requirements: 2.5, 2.6, 2.7, 2.9, 2.10_

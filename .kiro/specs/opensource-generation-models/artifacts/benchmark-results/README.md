@@ -15,8 +15,9 @@ actual costs of finished rows + projected costs of in-flight rows. Managed by
 
 | run_id | model | instance_type | status | launch_utc | terminate_utc | projected_cost_usd | actual_cost_usd |
 |---|---|---|---|---|---|---|---|
+| pixart-r1 | pixart-alpha + pixart-sigma | g5.xlarge | complete | 2026-08-17T13:27:02Z | 2026-08-17T14:39:24Z | 3.02 | 1.21 |
 
-**Spend so far: USD 0.00 / 500.00** (no runs launched)
+**Spend so far: USD 1.21 / 500.00** (pixart-r1 complete: 1.2061 instance-hours × $1.006/hr g5.xlarge on-demand)
 
 Phase D reconciliation: `billing_reconciled_cost_usd` per run and the final
 ledger totals are filled from Cost Explorer actuals filtered by the exploration
@@ -31,8 +32,8 @@ One row per planned Benchmark_Run. Status vocabulary: `pending` (not started),
 
 | model | size class | run dir | status | reason |
 |---|---|---|---|---|
-| pixart-alpha | small | `pixart-alpha/` | pending | — |
-| pixart-sigma | small | `pixart-sigma/` | pending | — |
+| pixart-alpha | small | `pixart-alpha/pixart-alpha-r1/` | complete | t2i 4/4 ok; 9 inpaint cases `failed/unsupported_task` (T2I-only model per matrix) |
+| pixart-sigma | small | `pixart-sigma/pixart-sigma-r1/` | complete | t2i 4/4 ok; 9 inpaint cases `failed/unsupported_task` (T2I-only model per matrix) |
 | flux.1-schnell | medium | `flux.1-schnell/` | pending | — |
 | flux.1-dev (+Fill) | medium | `flux.1-dev/` | pending | — |
 | flux.2 | large | `flux.2/` | pending | — (inclusion per Evaluation_Matrix) |

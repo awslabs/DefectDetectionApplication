@@ -1,0 +1,130 @@
+{
+  "run_id": "pixart-alpha-r1",
+  "model": "pixart-alpha",
+  "instance_type": "g5.xlarge",
+  "account": "164152369890",
+  "region": "us-east-1",
+  "model_load_seconds": 853.0450701850001,
+  "cases": [
+    {
+      "case_id": "inpaint-001",
+      "task_type": "inpainting",
+      "latency_seconds": 4.208000018479652e-05,
+      "seed": 101,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: no inpainting pipeline for this model"
+    },
+    {
+      "case_id": "inpaint-002",
+      "task_type": "inpainting",
+      "latency_seconds": 3.870000000461005e-06,
+      "seed": 102,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: no inpainting pipeline for this model"
+    },
+    {
+      "case_id": "inpaint-003",
+      "task_type": "inpainting",
+      "latency_seconds": 3.04000013784389e-06,
+      "seed": 103,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: no inpainting pipeline for this model"
+    },
+    {
+      "case_id": "inpaint-004",
+      "task_type": "inpainting",
+      "latency_seconds": 2.880000010918593e-06,
+      "seed": 104,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: no inpainting pipeline for this model"
+    },
+    {
+      "case_id": "inpaint-005",
+      "task_type": "inpainting",
+      "latency_seconds": 2.809999841701938e-06,
+      "seed": 105,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: no inpainting pipeline for this model"
+    },
+    {
+      "case_id": "inpaint-006",
+      "task_type": "inpainting",
+      "latency_seconds": 2.7099999897473026e-06,
+      "seed": 106,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: no inpainting pipeline for this model"
+    },
+    {
+      "case_id": "inpaint-101",
+      "task_type": "inpainting",
+      "latency_seconds": 2.699999868127634e-06,
+      "seed": 111,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: no inpainting pipeline for this model"
+    },
+    {
+      "case_id": "inpaint-102",
+      "task_type": "inpainting",
+      "latency_seconds": 2.193000000261236e-05,
+      "seed": 112,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: no inpainting pipeline for this model"
+    },
+    {
+      "case_id": "inpaint-103",
+      "task_type": "inpainting",
+      "latency_seconds": 4.450999995242455e-06,
+      "seed": 113,
+      "output_uri": null,
+      "status": "failed",
+      "failure_mode": "RuntimeError: unsupported_task: no inpainting pipeline for this model"
+    },
+    {
+      "case_id": "t2i-001",
+      "task_type": "text_to_image",
+      "latency_seconds": 20.129237612999987,
+      "seed": 201,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/pixart-alpha-r1/outputs/t2i-001.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-002",
+      "task_type": "text_to_image",
+      "latency_seconds": 6.381848558999991,
+      "seed": 202,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/pixart-alpha-r1/outputs/t2i-002.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-003",
+      "task_type": "text_to_image",
+      "latency_seconds": 6.695465012999875,
+      "seed": 203,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/pixart-alpha-r1/outputs/t2i-003.png",
+      "status": "ok",
+      "failure_mode": null
+    },
+    {
+      "case_id": "t2i-004",
+      "task_type": "text_to_image",
+      "latency_seconds": 6.638688980999859,
+      "seed": 204,
+      "output_uri": "s3://opensource-genmodels-benchmark-164152369890/runs/pixart-alpha-r1/outputs/t2i-004.png",
+      "status": "ok",
+      "failure_mode": null
+    }
+  ],
+  "instance_hours": 0.6031,
+  "estimated_cost_usd": 0.6067,
+  "billing_reconciled_cost_usd": null
+}
