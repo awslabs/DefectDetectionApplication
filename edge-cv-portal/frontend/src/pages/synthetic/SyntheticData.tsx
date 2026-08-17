@@ -57,6 +57,9 @@ export const VARIATION_COUNT_MESSAGE =
 /** At-least-one-source message (Req 3.6). */
 export const NO_SOURCES_MESSAGE = 'At least one Source_Image is required';
 
+/** Source-image picker page size: 2 rows × 6 columns (Req 2.2). */
+export const SOURCE_PICKER_PAGE_SIZE = 12;
+
 /** True iff `value` parses as an integer in 1..20 (Req 4.1). */
 export function isValidVariationCount(value: string): boolean {
   if (!/^\d+$/.test(value.trim())) return false;
@@ -135,6 +138,10 @@ export default function SyntheticData() {
   const [thumbs, setThumbs] = useState<SourceThumb[]>([]);
   const [thumbsLoading, setThumbsLoading] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  // Source-image picker pagination (Req 2.2-2.5): 0-based offset of the
+  // current page and the true total image count under the prefix.
+  const [pageOffset, setPageOffset] = useState(0);
+  const [totalImages, setTotalImages] = useState(0);
 
   // Source classification (Req 3.2-3.4).
   const [sourceClass, setSourceClass] = useState<SyntheticSourceClass | ''>('');
@@ -237,30 +244,37 @@ export default function SyntheticData() {
     };
   }, [creating, usecaseId, objectType, defectType]);
 
-  // Presigned Source_Image thumbnails for the browsed prefix (Req 3.5).
+  // Presigned Source_Image thumbnails for the browsed prefix, one page at a
+  // time (Req 2.2, 3.5). Re-runs on page change; per-page loading state.
   useEffect(() => {
     const prefix = datasetPrefix?.value as string | undefined;
     if (!creating || !usecaseId || !prefix) return;
     setThumbsLoading(true);
     setThumbs([]);
     apiService
-      .getImagePreview({ usecase_id: usecaseId, prefix, limit: 50 })
-      .then(({ images }) =>
+      .getImagePreview({
+        usecase_id: usecaseId,
+        prefix,
+        offset: pageOffset,
+        limit: SOURCE_PICKER_PAGE_SIZE,
+      })
+      .then(({ images, total_found }) => {
+        setTotalImages(total_found);
         setThumbs(
           images.map((img) => ({
             key: img.key,
             filename: img.filename,
             presigned_url: img.presigned_url,
           }))
-        )
-      )
+        );
+      })
       .catch((err) => setError(getErrorMessage(err, 'Failed to preview images')))
       .finally(() => setThumbsLoading(false));
     if (!manifestKey) {
       setManifestKey(`${prefix}manifests/train.manifest`);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [creating, usecaseId, datasetPrefix]);
+  }, [creating, usecaseId, datasetPrefix, pageOffset]);
 
   // Model-appropriate randomization defaults on model selection (Req 4.3).
   const handleModelChange = (option: SelectProps.Option) => {
@@ -631,6 +645,8 @@ export default function SyntheticData() {
                     onChange={({ detail }) => {
                       setDatasetPrefix(detail.selectedOption);
                       setSelectedKeys(new Set());
+                      setPageOffset(0);
+                      setTotalImages(0);
                     }}
                     options={datasets.map((dataset) => ({
                       label: dataset.prefix,
@@ -651,8 +667,8 @@ export default function SyntheticData() {
                     </Box>
                     <div
                       style={{
-                        display: 'flex',
-                        flexWrap: 'wrap',
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(6, 96px)',
                         gap: '8px',
                       }}
                     >
@@ -690,6 +706,40 @@ export default function SyntheticData() {
                         );
                       })}
                     </div>
+                    {/* Page controls + position indicator (Req 2.2, 2.4). */}
+                    <SpaceBetween direction="horizontal" size="xs">
+                      <Button
+                        disabled={pageOffset === 0 || thumbsLoading}
+                        onClick={() =>
+                          setPageOffset(
+                            Math.max(pageOffset - SOURCE_PICKER_PAGE_SIZE, 0)
+                          )
+                        }
+                        ariaLabel="Previous page"
+                      >
+                        Previous
+                      </Button>
+                      <Button
+                        disabled={
+                          pageOffset + SOURCE_PICKER_PAGE_SIZE >= totalImages ||
+                          thumbsLoading
+                        }
+                        onClick={() =>
+                          setPageOffset(pageOffset + SOURCE_PICKER_PAGE_SIZE)
+                        }
+                        ariaLabel="Next page"
+                      >
+                        Next
+                      </Button>
+                      <Box variant="small" padding={{ top: 'xs' }}>
+                        Showing {pageOffset + 1}–
+                        {Math.min(
+                          pageOffset + SOURCE_PICKER_PAGE_SIZE,
+                          totalImages
+                        )}{' '}
+                        of {totalImages}
+                      </Box>
+                    </SpaceBetween>
                   </>
                 )}
                 {/* Classification of the selection (Req 3.2-3.4). */}

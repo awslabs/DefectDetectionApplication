@@ -323,16 +323,20 @@ def get_image_preview(event):
     Query Parameters:
         - usecase_id: Required. The use case ID
         - prefix: Required. The S3 prefix to preview
-        - limit: Optional. Number of images to preview (default: 8, max: 20)
+        - limit: Optional. Number of images per page (default: 8, max: 50)
+        - offset: Optional. 0-based index of the first image (default: 0)
     
     Returns:
-        List of presigned URLs for image preview
+        List of presigned URLs for the requested page, plus paging metadata
+        (total_found is the TRUE total image count under the prefix, with
+        offset, limit and has_more for pagination)
     """
     try:
         params = event.get('queryStringParameters', {}) or {}
         usecase_id = params.get('usecase_id')
         prefix = params.get('prefix')
-        limit = min(int(params.get('limit', '8')), 20)  # Max 20 images
+        offset = max(int(params.get('offset', '0')), 0)
+        limit = min(max(int(params.get('limit', '8')), 1), 50)  # Per-page cap: 50
         
         if not usecase_id or not prefix:
             return create_response(400, {
@@ -353,7 +357,9 @@ def get_image_preview(event):
             aws_session_token=credentials['SessionToken']
         )
         
-        # Find image files
+        # Collect ALL image-extension keys under the prefix (the paginator
+        # walks every list_objects_v2 page; S3 returns keys in stable
+        # lexicographic order), then slice the requested page.
         image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
         image_keys = []
         
@@ -371,17 +377,13 @@ def get_image_preview(event):
                         'size': obj['Size'],
                         'last_modified': obj['LastModified'].isoformat()
                     })
-                    
-                    # Stop when we have enough images
-                    if len(image_keys) >= limit:
-                        break
-            
-            if len(image_keys) >= limit:
-                break
         
-        # Generate presigned URLs (valid for 30 minutes)
+        # Slice the requested page
+        page_keys = image_keys[offset:offset + limit]
+        
+        # Generate presigned URLs for the page only (valid for 30 minutes)
         preview_images = []
-        for image in image_keys:
+        for image in page_keys:
             try:
                 presigned_url = s3.generate_presigned_url(
                     'get_object',
@@ -404,6 +406,9 @@ def get_image_preview(event):
             'prefix': prefix,
             'bucket': bucket,
             'total_found': len(image_keys),
+            'offset': offset,
+            'limit': limit,
+            'has_more': offset + limit < len(image_keys),
             'images': preview_images,
             'expires_in_seconds': 1800
         })

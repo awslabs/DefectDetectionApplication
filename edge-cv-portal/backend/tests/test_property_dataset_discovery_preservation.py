@@ -310,8 +310,10 @@ def test_get_image_preview_previews_exactly_the_supplied_prefix(
     body = json.loads(response["body"])
     assert body["prefix"] == prefix
     assert body["bucket"] == BUCKET
-    assert body["total_found"] == min(n_images, 8)  # default limit is 8
-    assert len(body["images"]) == body["total_found"]
+    # total_found is the TRUE total under the prefix (source-image-picker-
+    # pagination fix); the returned page is capped at the default limit of 8.
+    assert body["total_found"] == n_images
+    assert len(body["images"]) == min(n_images, 8)
     assert all(img["key"].startswith(prefix) for img in body["images"])
     assert all(img["presigned_url"] for img in body["images"])
     assert body["expires_in_seconds"] == 1800

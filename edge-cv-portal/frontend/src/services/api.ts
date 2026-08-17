@@ -1004,10 +1004,14 @@ class ApiService {
     usecase_id: string;
     prefix: string;
     limit?: number;
+    offset?: number;
   }): Promise<{
     prefix: string;
     bucket: string;
     total_found: number;
+    offset: number;
+    limit: number;
+    has_more: boolean;
     images: Array<{
       key: string;
       filename: string;
@@ -1021,6 +1025,7 @@ class ApiService {
       usecase_id: params.usecase_id,
       prefix: params.prefix,
       ...(params.limit && { limit: params.limit.toString() }),
+      ...(params.offset !== undefined && { offset: params.offset.toString() }),
     });
     return this.request(`/datasets/preview?${queryParams}`);
   }
