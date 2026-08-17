@@ -9,7 +9,7 @@
     "edge-cv-portal/backend/functions/jwt_authorizer.py": "a6346ca76c243e2c9978ee757d770f0cf2a180756a05bfc99f8abf58dceef876",
     "edge-cv-portal/backend/functions/model_converter.py": "1acab7c119908377dc6d315685126492075be0165c8dea51b5594762b2dc2738",
     "edge-cv-portal/backend/functions/packaging.py": "f7a420314bd7f1779adaf3a75d8cf5499fcf81ad0339678eceb771031b9c67ec",
-    "src/backend/app.py": "d697bafe32d514e79a2f703284b4843627c07ac297ab66ea6278b783f3fe6842",
+    "src/backend/app.py": "d61f996a371ad7328f2851f7985d7f5cb4e4298bfb7eaec5eb604b007973086c",
     "src/backend/snapshot/Snapshotter.py": "a99ffc761450606da95ccea51ddd2e78dbe300997673a556b419ca3fdd8ffd2b",
     "src/backend/utils/camera_manager.py": "746e550302ee0edf5e51f67674262f27186bada164135b67b4ddf14fba061bcc",
     "src/backend/utils/digital_input_process_manager.py": "5a0980f9661ffd90ff965bc4d2f7f16775fed7c7b4b3c5c65d0a99218c457aab",
