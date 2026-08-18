@@ -198,6 +198,7 @@ class TestRunResults:
         self, client, session_factory, tmp_path
     ):
         out = str(tmp_path)
+        _write(os.path.join(out, f"{_CAPTURE_ID}.jpg"), b"jpeg-bytes")
         _write(os.path.join(out, f"{_CAPTURE_ID}.mask.png"), _PNG_BYTES)
         _seed_execution(
             session_factory,
@@ -207,6 +208,80 @@ class TestRunResults:
         )
         body = client.get("/workflows/executions/exec-1/results").json()
         assert body["images"][0]["hasOverlay"] is True
+
+    def test_node_entries_appended_after_output_entry(
+        self, client, session_factory, tmp_path
+    ):
+        """Node frames surface as additive ``node`` entries after the
+        ``output`` entry (vlm-bedrock-parity Requirement 4.3)."""
+        out = str(tmp_path)
+        _write(os.path.join(out, f"{_CAPTURE_ID}.jpg"), b"jpeg-bytes")
+        _write(os.path.join(out, f"{_CAPTURE_ID}.node.vlm1.reference.jpg"), b"r")
+        _write(os.path.join(out, f"{_CAPTURE_ID}.node.vlm1.in.jpg"), b"i")
+        _seed_execution(
+            session_factory,
+            has_image_results=True,
+            output_dir=out,
+            capture_id=_CAPTURE_ID,
+        )
+        body = client.get("/workflows/executions/exec-1/results").json()
+        assert body["hasImageResults"] is True
+        assert body["captureId"] == _CAPTURE_ID
+        assert body["images"] == [
+            {"kind": "output", "hasOverlay": False},
+            {
+                "kind": "node",
+                "nodeId": "vlm1",
+                "port": "in",
+                "hasOverlay": False,
+            },
+            {
+                "kind": "node",
+                "nodeId": "vlm1",
+                "port": "reference",
+                "hasOverlay": False,
+            },
+        ]
+
+    def test_node_image_only_run_omits_output_entry(
+        self, client, session_factory, tmp_path
+    ):
+        """A run with node frames but no base output artifact lists only its
+        node entries — no ``output`` entry with no file behind it."""
+        out = str(tmp_path)
+        _write(os.path.join(out, f"{_CAPTURE_ID}.node.bedrock1.in.jpg"), b"i")
+        _seed_execution(
+            session_factory,
+            has_image_results=True,
+            output_dir=out,
+            capture_id=_CAPTURE_ID,
+        )
+        body = client.get("/workflows/executions/exec-1/results").json()
+        assert body["hasImageResults"] is True
+        assert body["images"] == [
+            {
+                "kind": "node",
+                "nodeId": "bedrock1",
+                "port": "in",
+                "hasOverlay": False,
+            }
+        ]
+
+    def test_routed_run_without_artifacts_lists_nothing(
+        self, client, session_factory, tmp_path
+    ):
+        """``hasImageResults`` keeps its routing meaning while ``images``
+        reports only artifacts that exist."""
+        _seed_execution(
+            session_factory,
+            has_image_results=True,
+            output_dir=str(tmp_path),
+            capture_id=_CAPTURE_ID,
+        )
+        body = client.get("/workflows/executions/exec-1/results").json()
+        assert body["hasImageResults"] is True
+        assert body["captureId"] == _CAPTURE_ID
+        assert body["images"] == []
 
 
 class TestRunOverlay:
@@ -296,6 +371,105 @@ class TestBaseOutputImageResolution:
         )
 
 
+class TestNodeImageListing:
+    """``run_artifacts.list_node_images`` / ``node_image_path``
+    (vlm-bedrock-parity Requirement 4.3).
+
+    Keys purely on the ``{capture_id}.node.{nodeId}.{port}.jpg`` names
+    ``pipeline_executor._persist_node_frames`` writes — no node-type and no
+    port-name allow-list — and resolves only reported pairs, so the serving
+    route cannot escape ``output_dir``."""
+
+    def _node_file(self, out, node_id, port, data=b"frame"):
+        path = os.path.join(out, f"{_CAPTURE_ID}.node.{node_id}.{port}.jpg")
+        _write(path, data)
+        return path
+
+    def test_lists_pairs_sorted_by_node_then_in_before_reference(
+        self, tmp_path
+    ):
+        out = str(tmp_path)
+        self._node_file(out, "vlm1", "reference")
+        self._node_file(out, "vlm1", "in")
+        self._node_file(out, "bedrock1", "in")
+        # Non-node artifacts of the same run are ignored.
+        _write(os.path.join(out, f"{_CAPTURE_ID}.jpg"), b"base")
+        _write(os.path.join(out, f"{_CAPTURE_ID}.overlay.jpg"), b"overlay")
+        _write(os.path.join(out, f"{_CAPTURE_ID}.json"), "{}")
+        assert run_artifacts.list_node_images(out, _CAPTURE_ID) == [
+            {"nodeId": "bedrock1", "port": "in"},
+            {"nodeId": "vlm1", "port": "in"},
+            {"nodeId": "vlm1", "port": "reference"},
+        ]
+
+    def test_unknown_ports_are_listed_after_known_ones(self, tmp_path):
+        out = str(tmp_path)
+        self._node_file(out, "n1", "aux")
+        self._node_file(out, "n1", "reference")
+        self._node_file(out, "n1", "in")
+        assert [e["port"] for e in
+                run_artifacts.list_node_images(out, _CAPTURE_ID)] == [
+            "in",
+            "reference",
+            "aux",
+        ]
+
+    def test_ignores_other_runs_and_malformed_names(self, tmp_path):
+        out = str(tmp_path)
+        self._node_file(out, "vlm1", "in")
+        _write(os.path.join(out, "other-capture.node.vlm1.in.jpg"), b"x")
+        _write(os.path.join(out, f"{_CAPTURE_ID}.node.noport.jpg"), b"x")
+        _write(os.path.join(out, f"{_CAPTURE_ID}.node.vlm1.in.png"), b"x")
+        assert run_artifacts.list_node_images(out, _CAPTURE_ID) == [
+            {"nodeId": "vlm1", "port": "in"}
+        ]
+
+    def test_empty_for_missing_inputs_and_missing_dir(self, tmp_path):
+        assert run_artifacts.list_node_images(None, _CAPTURE_ID) == []
+        assert run_artifacts.list_node_images(str(tmp_path), None) == []
+        assert run_artifacts.list_node_images("/no/such/dir", _CAPTURE_ID) == []
+        # Existing but empty directory.
+        assert run_artifacts.list_node_images(str(tmp_path), _CAPTURE_ID) == []
+
+    def test_path_resolves_only_reported_pairs(self, tmp_path):
+        out = str(tmp_path)
+        expected = self._node_file(out, "vlm1", "in", b"in-bytes")
+        assert (
+            run_artifacts.node_image_path(out, _CAPTURE_ID, "vlm1", "in")
+            == expected
+        )
+        with open(expected, "rb") as f:
+            assert f.read() == b"in-bytes"
+        assert (
+            run_artifacts.node_image_path(
+                out, _CAPTURE_ID, "vlm1", "reference"
+            )
+            is None
+        )
+        assert (
+            run_artifacts.node_image_path(out, _CAPTURE_ID, "nope", "in")
+            is None
+        )
+
+    def test_path_rejects_traversal_shapes(self, tmp_path):
+        out = str(tmp_path / "run")
+        os.makedirs(out)
+        self._node_file(out, "vlm1", "in")
+        _write(os.path.join(str(tmp_path), "secret.jpg"), b"secret")
+        for node_id, port in (
+            ("../secret", "jpg"),
+            ("..", "/etc/passwd"),
+            ("vlm1", "../../secret"),
+        ):
+            assert (
+                run_artifacts.node_image_path(out, _CAPTURE_ID, node_id, port)
+                is None
+            )
+        assert (
+            run_artifacts.node_image_path(out, _CAPTURE_ID, None, "in") is None
+        )
+
+
 class TestResultsLinkArtifactsEquivalence:
     """Property 7: Results-link and artifacts equivalence.
 
@@ -303,10 +477,15 @@ class TestResultsLinkArtifactsEquivalence:
     and artifacts equivalence**
     **Validates: Requirements 5.1, 5.2**
 
-    ``hasImageResults`` (and thus a non-empty results payload / the "View
-    results" link) is true if and only if the run routed capture artifacts
-    (terminal File_Output_Node), independent of which artifact files happen
-    to be present on disk.
+    ``hasImageResults`` (and thus the "View results" link) is true if and
+    only if the run routed capture artifacts (terminal File_Output_Node),
+    independent of which artifact files happen to be present on disk.
+
+    The ``images`` list, by contrast, enumerates what actually exists on
+    disk (vlm-bedrock-parity Requirement 4.3): the ``output`` entry is
+    emitted only when the base output artifact is present, so a routed run
+    whose files are absent yields ``hasImageResults: true`` with an empty
+    list rather than an ``output`` entry with no file behind it.
     """
 
     @settings(max_examples=100, deadline=None)
@@ -347,9 +526,11 @@ class TestResultsLinkArtifactsEquivalence:
             body = client.get("/workflows/executions/exec-1/results").json()
 
         # hasImageResults iff the run routed capture artifacts, and the
-        # payload (the link's data) is non-empty exactly in that case.
+        # output entry is present exactly when its file exists.
         assert body["hasImageResults"] is routed
-        assert (len(body["images"]) > 0) is routed
+        kinds = [image["kind"] for image in body["images"]]
+        assert ("output" in kinds) is (routed and base_present)
+        assert "node" not in kinds
         if routed:
             assert body["captureId"] == _CAPTURE_ID
         else:

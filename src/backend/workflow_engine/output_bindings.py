@@ -1734,13 +1734,21 @@ class LlmInferenceProcessor:
                 frame_bytes = _downscale_frame_or_original(
                     frame_bytes, max_image_dimension, node_id, port)
             image_b64 = base64.b64encode(frame_bytes).decode("ascii")
-        # Reference-frame attachment (vlm-anomaly-reference-parity
-        # Requirements 4.1, 4.2) with Bedrock's OPTIONAL semantics —
-        # unlike the 'in' frame above, a missing/unreadable reference is
-        # NEVER a node error: the compiler emits
-        # capturePaths.reference = None when the port is not fed, and
-        # pre-feature packages omit the key entirely; both proceed with
-        # single-image inference on the input frame alone.
+        # Reference-frame attachment (vlm-bedrock-parity Requirements
+        # 3.1, 3.2, 3.3). Three shapes, and the FED-but-unreadable case
+        # FAILS CLOSED — this supersedes vlm-anomaly-reference-parity
+        # Requirement 4.2's degrade-to-single-image rule:
+        # - reference unfed (None) or key absent (pre-feature package) →
+        #   single-image inference on the input frame alone (3.3);
+        # - fed and readable → the frame rides the invocation
+        #   base64-encoded beside the input frame (3.1);
+        # - fed but unreadable → contained node error naming node,
+        #   port and resolved path, invoker never called (3.2). The
+        #   author asked for a comparison the device could not deliver;
+        #   answering anyway yields a confident verdict about an image
+        #   the model never saw.
+        # Bedrock keeps degrading (Requirement 6.4) — only this node
+        # type moves.
         reference_b64: Optional[str] = None
         reference_path = capture_paths.get("reference")
         if not reference_path:
@@ -1756,10 +1764,22 @@ class LlmInferenceProcessor:
                 with open(reference_path, "rb") as f:
                     reference_bytes = f.read()
             except OSError as e:
-                logger.warning(
-                    "LLM inference node '%s': could not read the "
-                    "captured 'reference' frame from %s (%s); performing "
-                    "single-image inference", node_id, reference_path, e)
+                # FAIL CLOSED (vlm-bedrock-parity Requirement 3.2): a
+                # fed-but-unreadable reference is a contained node
+                # error — the invoker is never called.
+                logger.error(
+                    "LLM inference node %s failed: could not read the "
+                    "captured '%s' frame from %s (%s); other bindings "
+                    "are unaffected", node_id, "reference",
+                    reference_path, e,
+                )
+                return {
+                    "error": (
+                        "LLM inference node '{0}' could not read the "
+                        "captured '{1}' frame from {2}: {3}".format(
+                            node_id, "reference", reference_path, e)
+                    )
+                }
             else:
                 if max_image_dimension is not None:
                     # Same downscaling treatment as the 'in' frame

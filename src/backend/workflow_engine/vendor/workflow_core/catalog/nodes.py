@@ -801,10 +801,16 @@ LLM_INFERENCE = NodeTypeDescriptor(
                                         '"confidence": 0..1}) and the parsed '
                                         "verdict becomes the inference "
                                         "metadata; in freeform mode the "
-                                        "rendered prompt is sent as-is.",
+                                        "rendered prompt is sent as-is. "
+                                        "When the reference input port is "
+                                        "connected the captured reference "
+                                        "image is sent with the prompt so "
+                                        "the model can compare the "
+                                        "inspected frame against it.",
                             examples=["Summarize this inspection result: "
                                       "anomalous={is_anomalous}, "
-                                      "confidence={confidence}"],
+                                      "confidence={confidence}",
+                                      BEDROCK_DEFAULT_PROMPT],
                             multiline=True),
         # Response mode toggle, mirroring bedrock_inference's. UNLIKE
         # Bedrock (default True) this defaults FALSE — matching the

@@ -3168,9 +3168,10 @@
         },
         "default": null,
         "depends_on": null,
-        "description": "Prompt sent to the model. {field} placeholders are replaced with values from the upstream inference metadata at execution time. In anomaly mode the executor automatically appends the JSON-format instruction ({\"is_anomalous\": true|false, \"confidence\": 0..1}) and the parsed verdict becomes the inference metadata; in freeform mode the rendered prompt is sent as-is.",
+        "description": "Prompt sent to the model. {field} placeholders are replaced with values from the upstream inference metadata at execution time. In anomaly mode the executor automatically appends the JSON-format instruction ({\"is_anomalous\": true|false, \"confidence\": 0..1}) and the parsed verdict becomes the inference metadata; in freeform mode the rendered prompt is sent as-is. When the reference input port is connected the captured reference image is sent with the prompt so the model can compare the inspected frame against it.",
         "examples": [
-          "Summarize this inspection result: anomalous={is_anomalous}, confidence={confidence}"
+          "Summarize this inspection result: anomalous={is_anomalous}, confidence={confidence}",
+          "Compare the input image to the reference image; is_anomalous is true when the input meaningfully differs from the reference."
         ],
         "multiline": true,
         "name": "prompt_template",

@@ -238,28 +238,85 @@ def _get_execution_or_404(execution_id: str, db: Session) -> WorkflowExecution:
     return execution
 
 
+def _base_output_artifact_exists(
+    execution: WorkflowExecution, node_images: list
+) -> bool:
+    """True when the run's base output artifact — the file the
+    ``.../output-image`` route serves — actually exists on disk.
+
+    ``run_artifacts.base_output_image_path`` falls back to any non-overlay
+    ``.jpg`` in the run's ``output_dir``, which includes the
+    ``{capture_id}.node.{nodeId}.{port}.jpg`` inference-node frames. Those
+    are surfaced as their own ``node`` entries, so a resolution that landed
+    on one of them means the run has node frames and no base output image
+    (vlm-bedrock-parity Requirement 4.3)."""
+    resolved = run_artifacts.base_output_image_path(
+        execution.output_dir, execution.capture_id
+    )
+    if not resolved:
+        return False
+    node_names = {
+        "{0}.node.{1}.{2}.jpg".format(
+            execution.capture_id, entry["nodeId"], entry["port"]
+        )
+        for entry in node_images
+    }
+    return os.path.basename(resolved) not in node_names
+
+
 @router.get("/workflows/executions/{execution_id}/results")
 def get_workflow_execution_results(
     execution_id: str, db: Session = Depends(get_db)
 ) -> dict:
-    """Viewable-image metadata for a run (Requirements 4.1, 5.1, 5.2).
+    """Viewable-image metadata for a run (Requirements 4.1, 5.1, 5.2;
+    vlm-bedrock-parity Requirement 4.3).
 
-    ``hasImageResults`` mirrors whether the run routed capture artifacts
-    (its terminal node was a File_Output_Node), so the "View results" link
-    appears exactly when viewable images exist (Property 7). When there are
-    no image results the payload is empty-but-200; the base image is served
-    separately (see ``download_file`` ``.../output-image``) and the overlay
-    mask via ``.../overlay``. 404 for an unknown execution (R4.6)."""
+    ``hasImageResults`` mirrors whether the run produced viewable images —
+    a routed terminal capture (File_Output_Node) or persisted
+    inference-node frames — so the "View results" link appears exactly when
+    viewable images exist (Property 7). When there are no image results the
+    payload is empty-but-200; the base image is served separately (see
+    ``download_file`` ``.../output-image``), each node frame via
+    ``.../node-image?nodeId=&port=``, and the overlay mask via
+    ``.../overlay``. 404 for an unknown execution (R4.6).
+
+    ``images`` lists what actually exists on disk: the
+    ``{"kind": "output"}`` entry only when the run's base output artifact
+    is present, followed by one additive
+    ``{"kind": "node", "nodeId", "port"}`` entry per persisted
+    inference-node frame (``run_artifacts.list_node_images``, port-generic
+    so ``bedrock_inference`` and ``llm_inference`` surface identically).
+    A node-image-only run therefore no longer reports an ``output`` entry
+    with no file behind it. Existing consumers ignore unknown kinds."""
     execution = _get_execution_or_404(execution_id, db)
     if not execution.has_image_results:
         return {"hasImageResults": False, "captureId": None, "images": []}
-    has_overlay = run_artifacts.overlay_artifact_exists(
+    node_images = run_artifacts.list_node_images(
         execution.output_dir, execution.capture_id
     )
+    images = []
+    if _base_output_artifact_exists(execution, node_images):
+        images.append(
+            {
+                "kind": "output",
+                "hasOverlay": run_artifacts.overlay_artifact_exists(
+                    execution.output_dir, execution.capture_id
+                ),
+            }
+        )
+    for entry in node_images:
+        images.append(
+            {
+                "kind": "node",
+                "nodeId": entry["nodeId"],
+                "port": entry["port"],
+                "hasOverlay": False,
+            }
+        )
     return {
         "hasImageResults": True,
         "captureId": execution.capture_id,
-        "images": [{"kind": "output", "hasOverlay": has_overlay}],
+        "images": images,
     }
 
 

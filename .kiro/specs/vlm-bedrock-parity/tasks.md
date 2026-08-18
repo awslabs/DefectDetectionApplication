@@ -38,8 +38,8 @@ change, asserting identity by byte/structural equality rather than re-deriving e
 
 ## Tasks
 
-- [ ] 1. G1 — fail-closed `reference` semantics in the LLM_Inference_Processor
-  - [ ] 1.1 Retarget the shipped unreadable-reference test to the fail-closed rule
+- [x] 1. G1 — fail-closed `reference` semantics in the LLM_Inference_Processor
+  - [x] 1.1 Retarget the shipped unreadable-reference test to the fail-closed rule
     - `test/backend-test/workflow_engine/test_llm_reference_attachment.py`: rename
       `test_unreadable_reference_is_never_a_node_error` →
       `test_unreadable_reference_is_a_contained_node_error` and invert its assertions — the
@@ -58,7 +58,7 @@ change, asserting identity by byte/structural equality rather than re-deriving e
     - This task runs RED (it fails against the shipped degrade path); 1.2 turns it green
     - _Requirements: 3.2, 3.3, 6.1_
 
-  - [ ] 1.2 Implement the fail-closed reference branch
+  - [x] 1.2 Implement the fail-closed reference branch
     - `src/backend/workflow_engine/output_bindings.py`, `LlmInferenceProcessor._run_one`
       (reference-attachment block, currently ~lines 1358–1395): replace the `except OSError`
       warn-and-continue path with a contained node error returned **before** any invoker call:
@@ -107,7 +107,7 @@ change, asserting identity by byte/structural equality rather than re-deriving e
       keys yields identical outcomes for the two node types
     - _Requirements: 4.2_
 
-- [ ] 2. Checkpoint — LLM/Bedrock executor suites
+- [x] 2. Checkpoint — LLM/Bedrock executor suites
   - `PYTHONPATH=src/backend:test/backend-test:test/backend-test/workflow_engine python3 -m pytest
     test/backend-test/workflow_engine/test_llm_reference_attachment.py
     test/backend-test/workflow_engine/test_llm_anomaly_mode.py
@@ -119,8 +119,8 @@ change, asserting identity by byte/structural equality rather than re-deriving e
   - Per `.kiro/steering/builds.md`, run this family standalone (known moto leakage in full sweeps)
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 3. G2 — catalog `prompt_template` comparison guidance (both copies)
-  - [ ] 3.1 Extend the `llm_inference` `prompt_template` descriptor (portal copy)
+- [x] 3. G2 — catalog `prompt_template` comparison guidance (both copies)
+  - [x] 3.1 Extend the `llm_inference` `prompt_template` descriptor (portal copy)
     - `edge-cv-portal/backend/layers/workflow_core/python/workflow_core/catalog/nodes.py`,
       `LLM_INFERENCE`: append to `prompt_template`'s `description` a sentence stating that when
       the `reference` port is connected the captured reference image is sent with the prompt so
@@ -131,7 +131,7 @@ change, asserting identity by byte/structural equality rather than re-deriving e
       (`anomaly_mode` stays `default=False` per design decision 2), no port change
     - _Requirements: 4.1, 1.7, 6.2_
 
-  - [ ] 3.2 Re-vendor the device copy and regenerate the catalog baseline
+  - [x] 3.2 Re-vendor the device copy and regenerate the catalog baseline
     - Run `src/backend/workflow_engine/vendor/re_vendor.sh`; never hand-edit
       `src/backend/workflow_engine/vendor/workflow_core/catalog/nodes.py`
     - Regenerate `edge-cv-portal/backend/layers/workflow_core/tests/catalog_baseline.json` per the
@@ -185,13 +185,13 @@ change, asserting identity by byte/structural equality rather than re-deriving e
       identifiers) the set produced by substituting a `bedrock_inference` node
     - _Requirements: 2.2, 2.3, 6.2_
 
-- [ ] 4. Checkpoint — workflow_core suite and catalog sync
+- [x] 4. Checkpoint — workflow_core suite and catalog sync
   - `cd edge-cv-portal/backend && python3 -m pytest layers/workflow_core/tests/ -q`
   - Confirm the regenerated `catalog_baseline.json` diff is limited to the `prompt_template`
     change and both `workflow_core` copies are byte-identical (`diff -r`, `__pycache__` excluded)
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 5. G4 — dual-copy byte-equality guard and documented re-vendor mechanism
+- [x] 5. G4 — dual-copy byte-equality guard and documented re-vendor mechanism
   - [ ]* 5.1 Write property test for dual-copy byte equality (tree-wide)
     - **Feature: vlm-bedrock-parity, Property 11: Dual-copy byte equality**
     - **Validates: Requirements 5.1, 5.2**
@@ -203,7 +203,7 @@ change, asserting identity by byte/structural equality rather than re-deriving e
       Workflow_Compiler are covered by construction, and future shared modules need no test edit
     - _Requirements: 5.1, 5.2_
 
-  - [ ] 5.2 Document the re-vendor mechanism
+  - [x] 5.2 Document the re-vendor mechanism
     - `src/backend/workflow_engine/vendor/README.md`: state that the portal copy is the single
       source of truth, that the device copy is produced only by `re_vendor.sh` (rsync mirror,
       `__pycache__`/`*.pyc` excluded) and is never hand-edited, and that the Property 11 guard in
@@ -211,8 +211,8 @@ change, asserting identity by byte/structural equality rather than re-deriving e
       regeneration step for descriptor edits
     - _Requirements: 5.1, 5.2_
 
-- [ ] 6. G3 — port-generic node-image surfacing
-  - [ ] 6.1 Add `run_artifacts.list_node_images`
+- [x] 6. G3 — port-generic node-image surfacing
+  - [x] 6.1 Add `run_artifacts.list_node_images`
     - `src/backend/workflow_engine/run_artifacts.py`: `list_node_images(output_dir, capture_id)`
       parsing `{capture_id}.node.{nodeId}.{port}.jpg` into `[{"nodeId": ..., "port": ...}]` plus a
       resolver returning the on-disk path for a `(nodeId, port)` pair; sorted deterministically
@@ -221,7 +221,7 @@ change, asserting identity by byte/structural equality rather than re-deriving e
       raises), matching the module's existing helper style
     - _Requirements: 4.3_
 
-  - [ ] 6.2 Add additive node entries to the run-results payload
+  - [x] 6.2 Add additive node entries to the run-results payload
     - `src/backend/workflow_engine/api.py`, `get_workflow_execution_results`: append
       `{"kind": "node", "nodeId": ..., "port": ..., "hasOverlay": false}` entries after the
       existing `output` entry, from `list_node_images`; keep `hasImageResults`/`captureId`
@@ -231,7 +231,7 @@ change, asserting identity by byte/structural equality rather than re-deriving e
       `output` entry with no file behind it; `hasImageResults` stays true when either kind exists
     - _Requirements: 4.3_
 
-  - [ ] 6.3 Add the `node-image` serving route
+  - [x] 6.3 Add the `node-image` serving route
     - `src/backend/endpoints/download_file.py`:
       `GET /workflows/executions/{execution_id}/node-image?nodeId=&port=&token=` on the
       `unauthenticated_router` with `validate_token_in_query_param`, mirroring the shipped
@@ -252,7 +252,7 @@ change, asserting identity by byte/structural equality rather than re-deriving e
       existing `output`/`hasImageResults`/`captureId` fields keep their shape
     - _Requirements: 4.3_
 
-  - [ ] 6.5 Render node sections in the device run-results view
+  - [x] 6.5 Render node sections in the device run-results view
     - `src/frontend/src/api/WorkflowRegistrationAPI.ts`: extend
       `WorkflowExecutionResultImage` additively (`kind: "output" | "input" | "node"`, optional
       `nodeId`/`port`) and add `workflowExecutionNodeImageUrl(executionId, nodeId, port, token?)`
@@ -272,7 +272,7 @@ change, asserting identity by byte/structural equality rather than re-deriving e
       image degrade gracefully
     - _Requirements: 4.3_
 
-- [ ] 7. Checkpoint — run-results API and device frontend
+- [x] 7. Checkpoint — run-results API and device frontend
   - `PYTHONPATH=src/backend:test/backend-test:test/backend-test/workflow_engine python3 -m pytest
     test/backend-test/workflow_engine/test_workflow_run_results_api.py
     test/backend-test/workflow_engine/test_node_frame_persistence.py
@@ -388,7 +388,7 @@ change, asserting identity by byte/structural equality rather than re-deriving e
       output, and that both node images are listed by `/results`
     - _Requirements: 4.2, 4.3_
 
-- [ ] 11. Final checkpoint
+- [x] 11. Final checkpoint
   - `cd edge-cv-portal/backend && python3 -m pytest layers/workflow_core/tests/ -q`
   - `PYTHONPATH=src/backend:test/backend-test:test/backend-test/workflow_engine python3 -m pytest
     test/backend-test/workflow_engine/ -q`

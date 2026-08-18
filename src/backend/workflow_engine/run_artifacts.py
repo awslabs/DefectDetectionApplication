@@ -56,6 +56,21 @@ _MASK_SUFFIX = ".mask.png"
 _JSONL_SUFFIX = ".jsonl"
 _METADATA_SUFFIX = ".json"
 
+#: Inference-node frame artifacts, written by
+#: ``pipeline_executor._persist_node_frames`` as
+#: ``{capture_id}.node.{sanitized_nodeId}.{port}.jpg``. The node id is
+#: sanitized to ``[A-Za-z0-9_.-]`` there; port names come from the node
+#: descriptor's input ports and carry no dots, so the ``{nodeId}.{port}``
+#: tail splits unambiguously on its LAST dot.
+_NODE_IMAGE_MARKER = ".node."
+_NODE_IMAGE_SUFFIX = ".jpg"
+
+#: Presentation order for known ports: the inspected frame before the
+#: reference frame, matching the order the frames are sent to the model.
+#: Ports outside this tuple sort after it, alphabetically — the listing
+#: carries no port-name allow-list (design §7).
+_PORT_PRESENTATION_ORDER = ("in", "reference")
+
 #: Content-type markers inside the run's result ``.jsonl`` (mirrors
 #: ``utils.constants.INFERENCE_OUTPUT_MASK_CONTENT_TYPE_PREFIX`` /
 #: ``INFERENCE_OUTPUT_RES_LABEL_CONTENT_TYPE``). Duplicated here as small
@@ -110,6 +125,92 @@ def overlay_artifact_exists(
         if os.path.isfile(_artifact_path(output_dir, capture_id, suffix)):
             return True
     return False
+
+
+def _port_sort_key(port: str) -> Tuple[int, str]:
+    """Sort key placing known ports in presentation order and any other
+    port after them, alphabetically."""
+    if port in _PORT_PRESENTATION_ORDER:
+        return (_PORT_PRESENTATION_ORDER.index(port), "")
+    return (len(_PORT_PRESENTATION_ORDER), port)
+
+
+def list_node_images(
+    output_dir: Optional[str], capture_id: Optional[str]
+) -> list:
+    """The run's persisted inference-node frames as
+    ``[{'nodeId': ..., 'port': ...}]`` (Requirement 4.3).
+
+    Keys purely on the ``{capture_id}.node.{nodeId}.{port}.jpg`` filename
+    pattern written by ``pipeline_executor._persist_node_frames`` — no
+    node-type and no port-name allow-list — so ``bedrock_inference`` and
+    ``llm_inference`` nodes surface identically and a future third port
+    needs no change here.
+
+    Entries are sorted deterministically: by node id, then by port with
+    ``in`` before ``reference`` (invocation order), any other port after
+    those alphabetically.
+
+    Best-effort and contained (matching this module's other helpers): a
+    ``None``/empty ``output_dir``/``capture_id``, a missing directory, or
+    an unreadable listing all yield ``[]`` rather than raising, so the
+    endpoints never 500 on partial output."""
+    if not output_dir or not capture_id:
+        return []
+    prefix = "{0}{1}".format(capture_id, _NODE_IMAGE_MARKER)
+    try:
+        names = os.listdir(output_dir)
+    except OSError:
+        logger.debug(
+            "Could not list node images in %s", output_dir, exc_info=True
+        )
+        return []
+    entries = []
+    for name in names:
+        if not name.startswith(prefix) or not name.endswith(
+            _NODE_IMAGE_SUFFIX
+        ):
+            continue
+        tail = name[len(prefix):-len(_NODE_IMAGE_SUFFIX)]
+        node_id, _, port = tail.rpartition(".")
+        if not node_id or not port:
+            continue
+        if not os.path.isfile(os.path.join(output_dir, name)):
+            continue
+        entries.append({"nodeId": node_id, "port": port})
+    entries.sort(key=lambda e: (e["nodeId"], _port_sort_key(e["port"])))
+    return entries
+
+
+def node_image_path(
+    output_dir: Optional[str],
+    capture_id: Optional[str],
+    node_id: Optional[str],
+    port: Optional[str],
+) -> Optional[str]:
+    """The on-disk path of the run's node frame for ``(node_id, port)``, or
+    ``None`` (Requirement 4.3).
+
+    Resolves only pairs that :func:`list_node_images` actually reports, so
+    traversal shapes (``../``) and fabricated node/port names yield
+    ``None`` by construction rather than escaping ``output_dir``.
+    Best-effort and contained: never raises."""
+    if not output_dir or not capture_id or not node_id or not port:
+        return None
+    for entry in list_node_images(output_dir, capture_id):
+        if entry["nodeId"] == node_id and entry["port"] == port:
+            path = os.path.join(
+                output_dir,
+                "{0}{1}{2}.{3}{4}".format(
+                    capture_id,
+                    _NODE_IMAGE_MARKER,
+                    node_id,
+                    port,
+                    _NODE_IMAGE_SUFFIX,
+                ),
+            )
+            return path if os.path.isfile(path) else None
+    return None
 
 
 def read_mask_overlay(

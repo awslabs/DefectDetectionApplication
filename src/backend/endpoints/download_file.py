@@ -199,6 +199,55 @@ def load_workflow_execution_output_image(
     )
 
 
+@unauthenticated_router.get("/workflows/executions/{execution_id}/node-image")
+def load_workflow_execution_node_image(
+    execution_id: str,
+    nodeId: str = None,
+    port: str = None,
+    token: str = None,
+    db: Session = Depends(get_db),
+):
+    """Serve a run's persisted inference-node frame for ``(nodeId, port)``
+    (vlm-bedrock-parity Requirement 4.3).
+
+    Mirrors the output-image route above: on the unauthenticated_router with
+    token-in-query so a browser ``<img>`` load carries the credential as a
+    URL parameter (the SPA cannot attach an Authorization header to an image
+    element). The frames were persisted by
+    ``pipeline_executor._persist_node_frames`` as
+    ``{capture_id}.node.{nodeId}.{port}.jpg`` under the run's artifact
+    directory.
+
+    ``run_artifacts.node_image_path`` resolves only pairs that
+    ``run_artifacts.list_node_images`` actually reports for the execution, so
+    traversal shapes and fabricated node/port names cannot escape
+    ``output_dir`` — they resolve to ``None`` and answer 404 by construction.
+    404 also for an unknown execution or a run with no such node frame."""
+    validate_token_in_query_param(token)
+
+    execution = db.get(WorkflowExecution, execution_id)
+    if execution is None:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail=f"Workflow execution '{execution_id}' was not found",
+        )
+
+    image_path = run_artifacts.node_image_path(
+        execution.output_dir, execution.capture_id, nodeId, port
+    )
+    if image_path:
+        return FileResponse(image_path, media_type="image/jpeg")
+
+    raise HTTPException(
+        status_code=HTTP_404_NOT_FOUND,
+        detail=(
+            f"Server unable to load node image for execution "
+            f"'{execution_id}', node '{nodeId}', port '{port}'. "
+            f"Error: 'Image not found'."
+        ),
+    )
+
+
 class RetrainInputImagesRequest(BaseModel):
     startTime: Optional[int] = None
     endTime: Optional[int] = None

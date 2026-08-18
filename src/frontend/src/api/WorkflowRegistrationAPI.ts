@@ -70,10 +70,22 @@ export interface WorkflowRegistrationDetails extends WorkflowRegistration {
   executions: WorkflowExecution[];
 }
 
-/** A single viewable image produced by a run. */
+/**
+ * A single viewable image produced by a run.
+ *
+ * `kind: "node"` entries are the additive per-inference-node frames
+ * (vlm-bedrock-parity Requirement 4.3): one entry per persisted
+ * `(nodeId, port)` pair, served by `workflowExecutionNodeImageUrl`. The
+ * `output` entry is emitted only when the run's base output artifact exists,
+ * so a node-image-only run carries no `output` entry at all.
+ */
 export interface WorkflowExecutionResultImage {
-  kind: "output" | "input";
+  kind: "output" | "input" | "node";
   hasOverlay: boolean;
+  /** Present on `kind: "node"` entries: the inference node's id. */
+  nodeId?: string;
+  /** Present on `kind: "node"` entries: the node input port (`in`/`reference`). */
+  port?: string;
 }
 
 /** Response shape of the run results-metadata endpoint. */
@@ -244,4 +256,26 @@ export function workflowExecutionOutputImageUrl(
 ): string {
   const base = `${EXECUTIONS_ENDPOINT}/${id}/output-image`;
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+/**
+ * Build the URL for one persisted inference-node frame of a run
+ * (vlm-bedrock-parity Requirement 4.3).
+ *
+ * Mirrors `workflowExecutionOutputImageUrl`: the node/port selectors and the
+ * auth token (when auth is enabled) all ride the query string, because the
+ * frame is served on a download route that reads the token from the query
+ * parameters and a browser `<img>` cannot attach an Authorization header.
+ */
+export function workflowExecutionNodeImageUrl(
+  id: string,
+  nodeId: string,
+  port: string,
+  token?: string,
+): string {
+  const params = new URLSearchParams({ nodeId, port });
+  if (token) {
+    params.set("token", token);
+  }
+  return `${EXECUTIONS_ENDPOINT}/${id}/node-image?${params.toString()}`;
 }

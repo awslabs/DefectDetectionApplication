@@ -12,16 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tests for the LlmInferenceProcessor's reference-frame attachment
-(vlm-anomaly-reference-parity task 2).
+(vlm-anomaly-reference-parity task 2, retargeted by vlm-bedrock-parity
+task 1.1).
 
 Requirements 4.1-4.4, 7.1: after the existing ``in``-frame handling the
-processor reads ``capturePaths["reference"]`` with Bedrock's OPTIONAL
-semantics — a readable reference rides the invocation base64-encoded as
-the fifth positional argument; ``None``, an absent key (pre-feature
-package), or an unreadable file logs the omission and proceeds with
-single-image inference (never a node error). The default invoker adds
-``reference_image`` to the POST body only when a reference is supplied;
-reference-less bodies stay byte-identical to pre-feature bodies.
+processor reads ``capturePaths["reference"]`` — a readable reference
+rides the invocation base64-encoded as the fifth positional argument;
+``None`` or an absent key (unfed port / pre-feature package) logs the
+omission and proceeds with single-image inference (never a node error).
+A fed-but-UNREADABLE reference is a contained node error and no model is
+invoked (fail closed). The default invoker adds ``reference_image`` to
+the POST body only when a reference is supplied; reference-less bodies
+stay byte-identical to pre-feature bodies.
+
+SUPERSESSION (vlm-bedrock-parity Requirement 3.2, design decision 3):
+the fed-but-unreadable ``reference`` rule in this module **supersedes**
+``vlm-anomaly-reference-parity`` Requirement 4.2's degrade-to-single-image
+behavior for ``llm_inference``. The authority for the current rule is
+``vlm-bedrock-parity`` Requirement 3.2: name the node, the ``reference``
+port and the resolved path in a contained node error, invoke no model for
+that binding, and keep processing the remaining bindings. The rationale is
+intent-based — a *fed* port whose frame is unreadable means the author
+asked for a comparison the device failed to deliver, so answering anyway
+would produce a confident verdict about an image the model never saw. The
+*unfed* contract (``None``/absent ⇒ single-image) does not move, and
+``bedrock_inference`` keeps degrading to single-image (Requirement 6.4).
 """
 import base64
 import sys
@@ -118,7 +133,9 @@ def run_one(capture_paths, work_dir):
 
 
 # ---------------------------------------------------------------------------
-# Processor: the four reference shapes (Requirements 4.1, 4.2, 7.1)
+# Processor: the four reference shapes (Requirements 4.1, 4.2, 7.1; the
+# fed-but-unreadable shape now follows vlm-bedrock-parity Requirement 3.2,
+# which supersedes vlm-anomaly-reference-parity Requirement 4.2)
 # ---------------------------------------------------------------------------
 
 class TestReferenceShapes:
@@ -162,26 +179,29 @@ class TestReferenceShapes:
         assert len(calls[0]) == 4
         assert calls[0][3] == INPUT_B64
 
-    def test_unreadable_reference_is_never_a_node_error(
-        self, work_dir, caplog
+    def test_unreadable_reference_is_a_contained_node_error(
+        self, work_dir
     ):
-        # Requirement 4.2: a fed-but-unreadable reference logs a warning
-        # and proceeds single-image — unlike the 'in' frame, NEVER a
-        # node error.
-        with caplog.at_level("WARNING"):
-            outcome, calls = run_one(
-                {"in": "{work_dir}/vlm_frame_in.jpg",
-                 "reference": "{work_dir}/never_written.jpg"},
-                work_dir,
-            )
-        assert outcome == {"generated_text": "generated answer"}
-        assert len(calls) == 1
-        assert len(calls[0]) == 4  # single-image arity
-        assert calls[0][3] == INPUT_B64
-        assert any(
-            "reference" in record.message for record in caplog.records
-            if record.levelname == "WARNING"
+        # vlm-bedrock-parity Requirement 3.2 (fail closed) — SUPERSEDES
+        # vlm-anomaly-reference-parity Requirement 4.2's
+        # degrade-to-single-image rule for llm_inference: a fed but
+        # unreadable reference frame is a contained node error naming the
+        # node, the 'reference' port and the RESOLVED path, and the model
+        # is never invoked for that binding. Bedrock still degrades
+        # (Requirement 6.4); the unfed contract (3.3) is unchanged.
+        outcome, calls = run_one(
+            {"in": "{work_dir}/vlm_frame_in.jpg",
+             "reference": "{work_dir}/never_written.jpg"},
+            work_dir,
         )
+        assert set(outcome.keys()) == {"error"}
+        assert "generated_text" not in outcome
+        error = outcome["error"]
+        assert "llm1" in error
+        assert "reference" in error
+        assert "{0}/never_written.jpg".format(work_dir) in error
+        assert "{work_dir}" not in error
+        assert calls == []
 
     def test_no_frames_keeps_prefeature_three_argument_arity(self):
         # Requirement 7.1: no capturePaths at all → the pre-feature
