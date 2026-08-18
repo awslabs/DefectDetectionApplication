@@ -144,18 +144,19 @@ This is an exploration/planning spec. Tasks produce documents, benchmark evidenc
     - Write `artifacts/integration-proposal.md`: Selfhosted_Provider generalizing the stability-generation-models Provider/Request_Adapter split with adapter selection by registry provider_type, invoking `sagemaker-runtime:InvokeEndpoint(Async)` or HTTPS instead of `bedrock:InvokeModel`; per-recommended-model adapter mapping tables (source image, mask, resolved prompt, Task_Seed, randomization params → request schema; response → image bytes); explicit Pipeline_Invariants subsections (unchanged `derive_task_seed`, per-preview model id/seed/resolved prompt recording, Mask_Region recording for `bbox_from_mask`, byte-identical Nova Canvas path); error taxonomy (endpoint_unreachable, endpoint_cold_starting, generation_failure, malformed_response) mapped to existing per-task failure recording; Lambda timeout analysis with the async invocation pattern for on-demand Availability_Mode
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6_
 
-- [ ] 9. Phase G — Decision record
-  - [ ] 9.1 Author the decision record
+- [x] 9. Phase G — Decision record
+  - [x] 9.1 Author the decision record
     - Write `artifacts/decision-record.md` in ADR format consolidating all prior artifacts: recommended Candidate_Models with Hosting_Option and Availability_Mode per model per environment and rationale citing benchmark evidence; alternatives considered with rejection reasons; licensing disposition table for every Candidate_Model (cleared | legal-review-required | unsuitable) with Legal_Review_Flags recording specific license clauses and intended production usage (FLUX.1-dev non-commercial terms at minimum); flagged models excluded from the production-recommended set while retaining benchmark results; open questions and prerequisites (GPU quota increases, unresolved Legal_Review_Flags); if no candidate met the inpainting bar, state the finding and recommend a fallback direction (e.g., Nova Canvas + revisit the stability spec)
     - _Requirements: 7.1, 7.2, 7.3, 7.4, 8.1, 8.2, 8.3, 8.4, 8.5_
 
-  - [ ] 9.2 Cross-document consistency review
+  - [x] 9.2 Cross-document consistency review
     - Run the Property 1 and Property 2 checklists across artifacts: every Candidate_Model has a complete matrix row and a licensing disposition; excluded models have no benchmark results; legal-flagged models are absent from the production-recommended set but retain benchmark data; record the review outcome in `decision-record.md`
     - **Property 1: Deliverable completeness over the candidate set** / **Property 2: Exclusion consistency**
     - _Requirements: 1.1, 1.7, 7.1, 7.4, 8.1_
 
-- [ ] 10. Final checkpoint
+- [x] 10. Final checkpoint
   - Ensure all harness tests pass, all seven deliverables exist under `artifacts/`, and the teardown audit is clean. Ask the user if questions arise.
+  - **Verified 2026-08-17:** harness suite **35 passed** (`benchmark-harness/tests/`, incl. the new cost-model monotonicity checks); all seven deliverables present (`evaluation-matrix.md`, `benchmark-protocol.md` + `benchmark-results/`, `hosting-comparison.md`, `cost-model.md`, `model-registry-proposal.md`, `integration-proposal.md`, `decision-record.md`, plus `quota-audit.md` for Req 3.4); teardown audit clean and re-verified (tagging-API index shows two deleted resources, per-service `describe-*` confirm both gone — note appended to `teardown-audit.md`); no portal source, frontend, or CDK file modified (Req 9.2); Property 1 and Property 2 checklists **PASS** (`decision-record.md` §9).
 
 ## Notes
 

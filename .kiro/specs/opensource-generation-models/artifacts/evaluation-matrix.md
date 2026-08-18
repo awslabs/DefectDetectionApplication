@@ -153,3 +153,32 @@ Checklist run 2026-02 against every Candidate_Model row (FLUX.1-dev, FLUX.1-schn
 **Exclusion-consistency check (Property 2, first half):** zero rows are marked `excluded`, and zero benchmark-results directories exist yet, so the "excluded ⇒ no benchmark results" implication holds vacuously. Consistent.
 
 **Outcome: PASS** — all six rows fully populated with evidence links; matrix satisfies Requirements 1.1–1.6, with no 1.7 exclusions to record. Matrix is ready to feed the Benchmark_Protocol candidate list (all six included) and Phase C instance sizing.
+
+---
+
+## Phase C reconciliation of the inpainting-path column (added during task 9.2)
+
+This document carries **two** Property-1 checklist tables from Phase A (the
+duplicate "Completeness review" sections above) whose `inpainting path` values
+disagree. Resolution, recorded during the task 9.2 cross-document consistency
+review:
+
+- The **summary matrix at the top of this file is authoritative for Phase A**
+  (desk research). Where the two checklist tables conflict, the summary matrix wins.
+- **Phase C measurement supersedes both** for three rows. Measured values
+  (`benchmark-results/<model>/run-001/notes.md`):
+
+| Candidate_Model | Phase A (matrix) | **Phase C measured** | Evidence |
+|---|---|---|---|
+| FLUX.1-dev (+ Fill-dev) | official-variant | **official-variant** (confirmed) | `FluxFillPipeline`, real binary mask, outside-mask MAE 1.0–6.1, mask adherence 4.7/5 |
+| FLUX.1-schnell | community | **community** (confirmed) | generic `FluxInpaintPipeline`, ring MAE 2–3× far (boundary seams), mask adherence 3.9/5 |
+| FLUX.2 [dev] | native (caveated) | **unsupported** | `Flux2Pipeline` exposes no `mask_image`; the instruction-edit path gives outside-mask MAE 9.6–67.2 and re-renders the whole frame. A mask pipeline exists only for FLUX.2 [klein] |
+| HunyuanImage (benchmarked as 2.1) | official-variant (caveated) | **unsupported** | `HunyuanImagePipeline` takes no image/mask; all 9 inpaint cases `failed / unsupported_task`. HunyuanImage-3.0 still has no documented mask API |
+| PixArt-alpha | community / ❌ | **unsupported** | all 9 inpaint cases `failed / unsupported_task` |
+| PixArt-Sigma | community / ❌ | **unsupported** | all 9 inpaint cases `failed / unsupported_task` |
+
+Consequence for Req 1.3: the closed-vocabulary value for FLUX.2 [dev],
+HunyuanImage, PixArt-alpha and PixArt-Sigma is **`unsupported`** as of Phase C.
+No row changes its Req 1.7 benchmark status (`included` for all six) and no
+Legal_Review_Flag changes. The Decision_Record §9c records this reconciliation and
+the Property 1 / Property 2 review outcome (both PASS).

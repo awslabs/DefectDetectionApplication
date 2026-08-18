@@ -462,3 +462,34 @@ deliberately left in place:
 
 Total exploration spend per the ledger: **USD 11.11 of the 500 Cost_Cap**
 (reconciliation status in `README.md`).
+
+---
+
+## Post-Phase-E re-verification (task 10 final checkpoint, 2026-08-17T23:5xZ)
+
+Re-run at the end of the analysis phases to confirm nothing reappeared. The
+Resource Groups Tagging API still indexes two **deleted** resources from the
+`large-r1` run, which the authoritative per-service calls confirm are gone:
+
+```
+$ aws resourcegroupstaggingapi get-resources --region us-east-1 \
+    --tag-filters Key=exploration,Values=opensource-generation-models \
+    --query 'ResourceTagMappingList[].ResourceARN' --output json
+[
+  "arn:aws:ec2:us-east-1:164152369890:volume/vol-0f522525f0eef6b5d",
+  "arn:aws:ec2:us-east-1:164152369890:instance/i-0a5ecae8136b7dca2"
+]
+
+$ aws ec2 describe-instances --region us-east-1 --instance-ids i-0a5ecae8136b7dca2
+→ Reservations: []                      # instance fully deregistered
+
+$ aws ec2 describe-volumes --region us-east-1 --volume-ids vol-0f522525f0eef6b5d
+→ InvalidVolume.NotFound: The volume 'vol-0f522525f0eef6b5d' does not exist.
+```
+
+**Result: no live tagged resource exists.** The tagging index retains entries for
+terminated instances and deleted volumes for a period after deletion; the
+per-service `describe-*` calls (Step 1 and Step 2 above, re-confirmed here) are
+authoritative for Property 6. Nothing was provisioned during Phases E–G — those
+phases are documentation and read-only API calls only (`service-quotas`,
+`pricing`, `bedrock` list/describe).
