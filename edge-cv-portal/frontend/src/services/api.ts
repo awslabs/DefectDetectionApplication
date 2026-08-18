@@ -332,13 +332,43 @@ export interface VllmPublishedComponent {
  */
 export type VllmEngineConfiguration = Record<string, string | number | boolean>;
 
-/** One per-architecture finding of a preflight Fit_Check evaluation. */
+/**
+ * One per-architecture finding of a preflight Fit_Check evaluation.
+ *
+ * The first five fields are the ORIGINAL contract and are unchanged in name
+ * and type. Everything below them is the ADDITIVE term breakdown behind
+ * `fits` that `vllm_fit_check.FitFinding` gained in
+ * `jp6-vllm-kv-cache-oom-regression` (design Decision 2, File 7), declared
+ * **optional** on purpose: findings serialized before that change omit the
+ * fields entirely, and every existing consumer reads only `message` — which
+ * already states each term with its number — so absence must keep rendering
+ * exactly as today (Requirements 2.1, 2.3, 3.1).
+ */
 export interface VllmFitCheckFinding {
   arch: string;
   fits: boolean;
   budget_bytes: number;
   required_bytes: number;
   message: string;
+  /** Estimated on-GPU weight size charged against the budget. */
+  weights_bytes?: number;
+  /** Estimated PyTorch activation/profiling peak — an ESTIMATE, not measured. */
+  activation_bytes?: number;
+  /** Serving-margin floor reserved for the KV cache. */
+  kv_floor_bytes?: number;
+  /** Memory co-resident consumers hold on the shared (unified) device. */
+  co_tenancy_bytes?: number;
+  /**
+   * Ceiling on `gpu_memory_utilization` for this architecture; `null` when
+   * no cap is known (the backend omits rather than invents one).
+   */
+  fraction_cap?: number | null;
+  /** Effective `limit_mm_per_prompt.image` the activation term scales with. */
+  images_per_prompt?: number;
+  /** Which conditions failed: `'budget'` | `'co_tenancy'`. */
+  failed_conditions?: string[];
+  /** Soft warnings on a verdict: `'thin_margin'` | `'near_cap'`. */
+  warnings?: string[];
 }
 
 /**

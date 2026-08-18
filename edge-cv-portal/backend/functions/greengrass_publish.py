@@ -825,15 +825,26 @@ def publish_component(event: Dict, context: Any) -> Dict:
             )
 
         # ── vLLM preflight Fit_Check gate (Requirements 3.4, 3.6, 3.7) ──────
+        # REVISED by `jp6-vllm-kv-cache-oom-regression` (design Decision 2,
+        # Fix Implementation File 2; defect 1.8, expected 2.8). The gate is
+        # now PER-ARCHITECTURE: it blocks when the Fit_Check fails for ANY
+        # supported Target_Architecture. The SUPERSEDED rule from
+        # `vllm-sizing-and-packaging-errors` Requirement 3.6 blocked only
+        # when EVERY architecture failed (`every_arch_fails = all(not
+        # finding.fits …)`), so the 2026-08-17 incident configuration —
+        # infeasible on `arm64_jp6`, feasible on `arm64_jp7` — shipped with
+        # status 'warnings' and took a JP6 device's deployment to
+        # FAILED_ROLLBACK_COMPLETE. Do not narrow this back to all-arch.
+        #
         # Runs BEFORE any component registration: publish is the moment the
         # configuration becomes deployable, so this is the fail-closed point.
-        # If the estimated weights + minimum KV cache exceed the
-        # gpu_memory_utilization × Device_Memory_Profile budget on EVERY
-        # supported Target_Architecture, the publish fails with 422 and the
-        # full sizing findings — unless the request body carries the explicit
-        # `skip_fit_check: true` override, which proceeds and is recorded in
-        # the audit event. An undeterminable Weight_Estimate never blocks:
-        # the publish proceeds with an 'unverified' annotation.
+        # A failing architecture fails the publish with 422 and the full
+        # sizing findings (ALL architectures' findings are carried; only the
+        # failing ones are named in the error text) — unless the request body
+        # carries the explicit `skip_fit_check: true` override, which
+        # proceeds and is recorded in the audit event. An undeterminable
+        # Weight_Estimate never blocks: the publish proceeds with an
+        # 'unverified' annotation.
         vllm_fit_check = None
         vllm_fit_overridden = False
         if vllm_record:
@@ -874,25 +885,31 @@ def publish_component(event: Dict, context: Any) -> Dict:
                     engine_configuration, estimate, vllm_archs)
                 findings_payload = [asdict(finding) for finding in findings]
                 estimate_payload = asdict(estimate)
-                every_arch_fails = bool(findings) and \
-                    all(not finding.fits for finding in findings)
+                # jp6-vllm-kv-cache-oom-regression: ANY failing architecture
+                # gates the publish (the per-architecture verdict gates the
+                # architecture it applies to).
+                failing = [
+                    finding for finding in findings if not finding.fits]
+                failing_archs = ', '.join(finding.arch for finding in failing)
 
-                if every_arch_fails and not skip_fit_check:
-                    # Requirement 3.6: fail the publish before any component
-                    # registration. The FitFinding messages carry the full
-                    # sizing statement (estimate, configured fraction,
-                    # per-architecture budget, and the raise/reduce/shrink
-                    # remediation) and the findings array lets the GUI
-                    # render them per architecture.
+                if failing and not skip_fit_check:
+                    # Requirement 3.6 (as revised): fail the publish before
+                    # any component registration. The FitFinding messages
+                    # carry the full sizing statement (estimate, configured
+                    # fraction, per-architecture budget, every sizing term
+                    # and the ordered remediation menu); the findings array
+                    # carries ALL architectures so the GUI can render the
+                    # passing ones alongside the failing ones.
                     failing_messages = ' '.join(
-                        finding.message for finding in findings)
+                        finding.message for finding in failing)
                     logger.error(
                         f"vLLM publish blocked by fit check for training "
-                        f"{training_id}: {failing_messages}")
+                        f"{training_id} on {failing_archs}: "
+                        f"{failing_messages}")
                     return create_response(422, {
                         'error': (
-                            f"vLLM fit check failed for every supported "
-                            f"architecture: {failing_messages}"),
+                            f"vLLM fit check failed for {failing_archs}: "
+                            f"{failing_messages}"),
                         'fit_check': {
                             'status': 'failed',
                             'estimate': estimate_payload,
@@ -903,30 +920,47 @@ def publish_component(event: Dict, context: Any) -> Dict:
                         'component_version': component_version,
                     })
 
-                if every_arch_fails:
+                if failing:
                     # Requirement 3.7: explicit skip_fit_check override —
                     # proceed and record the override in the audit event.
+                    # Behavior is unchanged; only the trigger widened from
+                    # all-arch to any-arch.
                     vllm_fit_overridden = True
                     vllm_fit_check = {
                         'status': 'overridden',
                         'estimate': estimate_payload,
                         'findings': findings_payload,
                         'message': (
-                            'Fit check failed for every supported '
-                            'architecture but was overridden by '
-                            'skip_fit_check.'),
+                            f'Fit check failed for {failing_archs} but was '
+                            f'overridden by skip_fit_check.'),
                     }
                     logger.warning(
-                        f"vLLM fit check FAILED for every supported "
-                        f"architecture but skip_fit_check was supplied; "
-                        f"proceeding with publish for training {training_id}")
+                        f"vLLM fit check FAILED for {failing_archs} but "
+                        f"skip_fit_check was supplied; proceeding with "
+                        f"publish for training {training_id}")
                 else:
-                    all_fit = all(finding.fits for finding in findings)
+                    # Every architecture fits. 'warnings' now means "fits
+                    # everywhere, but at least one finding carries a soft
+                    # warning" (thin_margin / near_cap — vllm_fit_check's
+                    # FitFinding.warnings), so the status keeps a meaning
+                    # under the any-arch gate instead of becoming dead.
+                    soft_warnings = sorted({
+                        warning
+                        for finding in findings
+                        for warning in (getattr(finding, 'warnings', None)
+                                        or [])
+                    })
                     vllm_fit_check = {
-                        'status': 'passed' if all_fit else 'warnings',
+                        'status': 'warnings' if soft_warnings else 'passed',
                         'estimate': estimate_payload,
                         'findings': findings_payload,
                     }
+                    if soft_warnings:
+                        logger.warning(
+                            f"vLLM fit check passed for every supported "
+                            f"architecture with soft warnings "
+                            f"({', '.join(soft_warnings)}) for training "
+                            f"{training_id}")
 
         # Publish component for each target
         # Each target gets its own component with target suffix in the name
@@ -1315,9 +1349,12 @@ def publish_component(event: Dict, context: Any) -> Dict:
             'message': f'Published {success_count} component(s) successfully'
         }
         if vllm_fit_check is not None:
-            # Fit_Check annotation (Requirements 3.4, 3.7): 'unverified'
+            # Fit_Check annotation (Requirements 3.4, 3.7): 'passed' when
+            # every architecture fits cleanly, 'warnings' when they all fit
+            # but a finding carries a soft warning (thin_margin / near_cap —
+            # jp6-vllm-kv-cache-oom-regression), 'unverified'
             # when the estimate could not be determined, 'overridden' when
-            # skip_fit_check bypassed an all-architecture failure.
+            # skip_fit_check bypassed a per-architecture failure.
             success_body['fit_check'] = vllm_fit_check
         return create_response(200, success_body)
         

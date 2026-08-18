@@ -5,13 +5,33 @@
 correctness**
 
 _For any_ engine configuration, weight estimate, and architecture set, a
-FitFinding reports `fits = true` if and only if
-`gpu_memory_utilization × DEVICE_MEMORY_PROFILE_BYTES[arch] ≥ estimate +
-MINIMUM_KV_CACHE_BYTES`, and every failing finding's message contains the
-architecture name, the budget, the estimate, and the word "raise" applied to
-`gpu_memory_utilization` (never advice to lower it).
+FitFinding reports `fits = true` if and only if BOTH named conditions hold:
+
+- **A (budget sufficiency)**: `gpu_memory_utilization ×
+  DEVICE_MEMORY_PROFILE_BYTES[arch] ≥ weights + activation_allowance +
+  MINIMUM_KV_CACHE_BYTES`
+- **B (co-tenancy safety)**: `gpu_memory_utilization ≤ (profile[arch] −
+  CO_TENANCY_RESERVATION_BYTES[arch]) / profile[arch]`
+
+and every failing finding's message contains the architecture name, the
+budget, the estimate, the activation and co-tenancy terms, leads with
+demand-reducing remediation, and mentions raising `gpu_memory_utilization`
+only with the co-tenancy cap stated — never advice to lower it.
 
 **Validates: Requirements 3.1, 3.8, 3.9**
+
+**REPOINTED** by `jp6-vllm-kv-cache-oom-regression` (spec task 3.2, design
+Decision 2 "Sibling-spec items that must be consciously repointed", row S5).
+The original assertions were `required_bytes = estimate_bytes +
+MINIMUM_KV_CACHE_BYTES` and `expected_fits = budget_bytes >= required_bytes`
+with the message required to advise `raise gpu_memory_utilization`. That
+model reported 4.50 GiB of slack for the 2026-08-17
+`ryanorinagxdevkithomelabjp622` load whose device-measured KV remainder was
+−7.83 GiB, because it omitted vLLM's activation/profiling peak (measured
+4.92 GiB) and modelled no co-tenancy on shared unified memory. What is
+**KEPT unchanged and never weakened** is the negative assertion: no message
+may advise *lowering* `gpu_memory_utilization` as a cure for insufficient
+KV cache (Requirement 3.9's surviving invariant).
 
 `evaluate_fit` is pure (stdlib-only, no AWS), so this test runs directly
 against the module with no fixtures.
@@ -34,10 +54,40 @@ from vllm_fit_check import (
 PROFILE_ARCHS = sorted(DEVICE_MEMORY_PROFILE_BYTES)
 UNPROFILED_ARCHS = ("arm64_jp4", "x86_64", "unknown-arch")
 
+# ---------------------------------------------------------------------------
+# The corrected model's arithmetic, mirrored LOCALLY from design Decision 2
+# of jp6-vllm-kv-cache-oom-regression — so this test checks the module
+# against the specification rather than against itself.
+# ---------------------------------------------------------------------------
+ACTIVATION_FLOOR_BYTES = 2 * GIB
+ACTIVATION_WEIGHT_FRACTION = 0.75
+MULTIMODAL_IMAGE_INCREMENT = 1.0
+CO_TENANCY_RESERVATION_BYTES = {
+    'arm64_jp6': 6 * GIB,   # measured: ~5.7 GiB of ONNX Triton stubs + containers
+    'arm64_jp5': 6 * GIB,   # same 30 GiB profile class
+    'arm64_jp7': 8 * GIB,   # design estimate, unmeasured [HARDWARE H8]
+}
+DEFAULT_IMAGES_PER_PROMPT = 1
+
 
 def format_gib(num_bytes):
     """Mirror the module's GiB rendering ('14.25 GiB')."""
     return f"{num_bytes / GIB:.2f} GiB"
+
+
+def expected_activation_allowance(weights_bytes,
+                                  images=DEFAULT_IMAGES_PER_PROMPT):
+    """design Decision 2: ``max(floor, fraction × weights) × (1 + increment ×
+    (images − 1))`` — an ESTIMATE, deliberately erring high."""
+    base = max(ACTIVATION_FLOOR_BYTES,
+               ACTIVATION_WEIGHT_FRACTION * weights_bytes)
+    return int(base * (1.0 + MULTIMODAL_IMAGE_INCREMENT * (max(1, images) - 1)))
+
+
+def expected_fraction_cap(arch):
+    """``(profile − co_tenancy) / profile`` — JP6 ``(30 − 6)/30 = 0.80``."""
+    profile = DEVICE_MEMORY_PROFILE_BYTES[arch]
+    return (profile - CO_TENANCY_RESERVATION_BYTES[arch]) / profile
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +105,14 @@ _utilizations = st.floats(
 @st.composite
 def engine_configurations(draw):
     """(configuration dict, effective utilization) — the setting present as
-    float or Decimal, or absent (default applies)."""
+    float or Decimal, or absent (default applies).
+
+    NOTE (jp6-vllm-kv-cache-oom-regression): deliberately does NOT emit
+    ``limit_mm_per_prompt``, so the effective images-per-prompt stays at the
+    authored default of 1 for every example. The sibling preservation suite
+    (`test_property_jp6_fit_preservation.py`) imports this generator and
+    computes its corrected-model scope at one image; emitting two here would
+    silently change that scope."""
     kind = draw(st.sampled_from(("float", "decimal", "absent")))
     if kind == "absent":
         return {}, DEFAULT_GPU_MEMORY_UTILIZATION
@@ -100,13 +157,16 @@ _architecture_sets = st.lists(
        architectures=_architecture_sets)
 def test_fit_decision_correctness(config_case, estimate_case, architectures):
     """**Feature: vllm-sizing-and-packaging-errors, Property 4: Fit_Check
-    decision correctness**
+    decision correctness** (repointed by
+    jp6-vllm-kv-cache-oom-regression Decision 2)
 
-    fits ⟺ gpu_memory_utilization × profile[arch] ≥ estimate +
-    MINIMUM_KV_CACHE_BYTES for every profiled architecture, and every
-    failing message names the profile entry, the budget, the estimate, and
-    the raise-gpu_memory_utilization remediation — never advice to lower it
-    (Requirements 3.1, 3.8, 3.9)."""
+    fits ⟺ condition A (budget ≥ weights + activation allowance + KV floor)
+    AND condition B (utilization ≤ the co-tenancy cap) for every profiled
+    architecture, and every failing message names the profile entry, the
+    budget, the estimate, the activation and co-tenancy terms, leads with
+    demand-reducing remediation, and offers raising
+    gpu_memory_utilization only with the cap stated — never advice to lower
+    it (Requirements 3.1, 3.8, 3.9)."""
     engine_configuration, utilization = config_case
     estimate_arg, estimate_bytes = estimate_case
 
@@ -120,27 +180,37 @@ def test_fit_decision_correctness(config_case, estimate_case, architectures):
         f"expected findings for {profiled}, got "
         f"{[f.arch for f in findings]}")
 
-    required_bytes = estimate_bytes + MINIMUM_KV_CACHE_BYTES
+    # required = weights + activation allowance + KV floor. The activation
+    # allowance is the term the shipped model omitted entirely: for the
+    # incident's 6.47 GiB of weights the device measured a 4.92 GiB peak.
+    activation_bytes = expected_activation_allowance(estimate_bytes)
+    required_bytes = (estimate_bytes + activation_bytes
+                      + MINIMUM_KV_CACHE_BYTES)
     for finding in findings:
         profile_bytes = DEVICE_MEMORY_PROFILE_BYTES[finding.arch]
         budget_bytes = int(float(utilization) * profile_bytes)
+        cap = expected_fraction_cap(finding.arch)
 
-        # Budget = gpu_memory_utilization × profile[arch]; required =
-        # estimate + minimum KV cache (Requirement 3.1).
+        # Budget = gpu_memory_utilization × profile[arch] (unchanged —
+        # the profile values and this identity are preserved); required now
+        # carries the activation allowance (Requirement 3.1 as revised).
         assert finding.budget_bytes == budget_bytes, (
             f"{finding.arch}: budget {finding.budget_bytes} != "
             f"utilization {utilization} × profile {profile_bytes}")
         assert finding.required_bytes == required_bytes, (
             f"{finding.arch}: required {finding.required_bytes} != "
-            f"estimate {estimate_bytes} + min KV cache "
-            f"{MINIMUM_KV_CACHE_BYTES}")
+            f"estimate {estimate_bytes} + activation allowance "
+            f"{activation_bytes} + min KV cache {MINIMUM_KV_CACHE_BYTES}")
 
-        # The decision: fits ⟺ budget ≥ estimate + minimum KV cache (3.1).
-        expected_fits = budget_bytes >= required_bytes
+        # The decision: fits ⟺ A ∧ B (3.1 as revised by Decision 2).
+        condition_a = budget_bytes >= required_bytes
+        condition_b = float(utilization) <= cap
+        expected_fits = condition_a and condition_b
         assert finding.fits is expected_fits, (
             f"{finding.arch}: fits={finding.fits} but budget "
-            f"{budget_bytes} vs required {required_bytes} implies "
-            f"{expected_fits}")
+            f"{budget_bytes} vs required {required_bytes} (A={condition_a}) "
+            f"and utilization {utilization} vs cap {cap:.4f} "
+            f"(B={condition_b}) imply {expected_fits}")
 
         # Every message names the profile entry used (Requirement 3.8).
         assert finding.arch in finding.message
@@ -154,12 +224,57 @@ def test_fit_decision_correctness(config_case, estimate_case, architectures):
             assert format_gib(estimate_bytes) in finding.message, (
                 f"{finding.arch}: failing message must state the estimate "
                 f"{format_gib(estimate_bytes)}: {finding.message!r}")
-            # ... and the remediation in the correct direction: raise
-            # gpu_memory_utilization, never lower it (Requirement 3.9).
-            assert re.search(r"raise\s+gpu_memory_utilization",
+            # ... names the activation allowance, labelled an ESTIMATE, and
+            # the co-tenancy term (design Decision 2/3: an operator must be
+            # able to audit the verdict instead of trusting it) ...
+            assert format_gib(activation_bytes) in finding.message, (
+                f"{finding.arch}: failing message must state the activation "
+                f"allowance {format_gib(activation_bytes)}: "
+                f"{finding.message!r}")
+            assert re.search(r"activation", finding.message, re.IGNORECASE), (
+                f"{finding.arch}: failing message names no activation term: "
+                f"{finding.message!r}")
+            assert re.search(r"estimate", finding.message, re.IGNORECASE), (
+                f"{finding.arch}: the activation allowance must be labelled "
+                f"an estimate: {finding.message!r}")
+            assert re.search(r"co-tenan|co-resident|other consumers",
                              finding.message, re.IGNORECASE), (
-                f"{finding.arch}: failing message must advise raising "
-                f"gpu_memory_utilization: {finding.message!r}")
+                f"{finding.arch}: failing message states no co-tenancy "
+                f"term: {finding.message!r}")
+            # ... leads with the remediations that reduce our own demand
+            # (Decision 3's ordering — the only ordering that cannot starve
+            # the co-resident ONNX GPU models) ...
+            demand_reducing = re.search(
+                r"max_model_len|smaller.{0,20}model|limit_mm_per_prompt|"
+                r"free device memory", finding.message, re.IGNORECASE)
+            assert demand_reducing, (
+                f"{finding.arch}: failing message offers nothing that "
+                f"reduces demand: {finding.message!r}")
+            raising = re.search(r"rais(e|ing)\W", finding.message,
+                                re.IGNORECASE)
+            if raising:
+                assert demand_reducing.start() < raising.start(), (
+                    f"{finding.arch}: the remediation mentions raising the "
+                    f"fraction before the demand-reducing options: "
+                    f"{finding.message!r}")
+            # ... and offers raising the fraction only below the cap and
+            # only with the cap stated (Requirement 3.9 as narrowed by
+            # Decision 3 — the hazard is that the fraction is of TOTAL
+            # memory on a device whose co-tenants already hold ~6 GiB).
+            offers_raise = re.search(r"raise\s+.{0,40}gpu_memory_utilization",
+                                     finding.message, re.IGNORECASE)
+            if offers_raise:
+                assert float(utilization) < cap, (
+                    f"{finding.arch}: raising gpu_memory_utilization is "
+                    f"offered although {utilization} is already at/above the "
+                    f"{cap:.2f} cap: {finding.message!r}")
+                assert f"{cap:.2f}" in finding.message, (
+                    f"{finding.arch}: raising gpu_memory_utilization is "
+                    f"offered without stating the {cap:.2f} cap: "
+                    f"{finding.message!r}")
+            # KEPT VERBATIM from the sibling spec, never weakened: no
+            # message may advise LOWERING the fraction as a cure for
+            # insufficient KV cache (Requirement 3.9).
             assert not re.search(r"(lower|decrease|reduce)\w*\s+"
                                  r"gpu_memory_utilization",
                                  finding.message, re.IGNORECASE), (

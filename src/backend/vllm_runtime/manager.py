@@ -39,6 +39,22 @@ FAILED — logged with the model name and the backend error — and never
 touches another engine (4.6, 8.9). The embedded vision Triton scans its
 own separate repository directory and is untouched by anything here (8.8).
 
+Before an engine is constructed the manager runs the device memory
+preflight (:mod:`vllm_runtime.memory_budget`, spec
+jp6-vllm-kv-cache-oom-regression Decision 4): a doomed load costs ~4 min
+of vLLM profiling and blocks the runtime server's event loop for the whole
+construction, so a load whose requirement exceeds the device's measured
+available memory — or the budget ``gpu_memory_utilization`` carves out of
+the device's real total — is refused in the time of one ``/proc/meminfo``
+read, with the full arithmetic in the FAILED reason. Around every failure
+the manager measures whether the attempt's memory came back and, when it
+did not, sets the per-backend-life Starvation_Latch so the next attempt is
+refused instead of deepening the observed cascade (three failed loads left
+the incident device at 26 GB used / 3 GB free with no model loaded).
+Failure reasons carry exactly one stable category token (with the original
+backend text verbatim after it), and a load that reaches READY with a KV
+margin under the floor logs a WARNING instead of looking healthy.
+
 vLLM is **not** imported at module import time: the ``vllm`` package only
 exists on vLLM-capable images (JetPack 6 / JetPack 7), so the import happens lazily
 inside the default engine/sampling-params factories. Both factories are
@@ -57,7 +73,16 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Mapping, Optional, Union
 
+from vllm_runtime import memory_budget
 from vllm_runtime.constants import UNLOAD_TOMBSTONE_NAME, VLLM_MODEL_DIR
+from vllm_runtime.memory_budget import (
+    MINIMUM_KV_CACHE_BYTES,
+    PREFLIGHT_REFUSED_MARKER,
+    RECLAIM_TOLERANCE_BYTES,
+    THIN_MARGIN_CONCURRENCY,
+    StarvationLatch,
+    format_gib,
+)
 from vllm_runtime.repository import (
     CONFIG_PBTXT_RELATIVE_PATH,
     RepositoryValidationError,
@@ -93,6 +118,211 @@ _QWEN_VL_TWO_IMAGE_PROMPT_FALLBACK = (
     "Reference image: <|vision_start|><|image_pad|><|vision_end|>\n"
     "{prompt}<|im_end|>\n<|im_start|>assistant\n"
 )
+
+# --- failure classification (spec jp6-vllm-kv-cache-oom-regression, ------
+# --- Decision 6; defect 1.6, expected behavior 2.6) ----------------------
+#
+# The device could not tell an accounting fault from a budget fault: the
+# KV-cache exhaustion message (21:59:50Z, 22:12:16Z) and the NVML allocator
+# INTERNAL ASSERT (13:36:30Z, 13:39:38Z, 21:44Z) both surfaced as raw
+# reasons. Each failure reason now carries exactly ONE category token,
+# PREPENDED, with the original backend text preserved VERBATIM after it —
+# so `dda_triton.vllm_model_prep.KV_CACHE_HINT_MARKERS` (and the
+# reconciler's mirror of it) keep matching, and no status surface changes
+# shape. Whether the NVML assert is the same exhaustion seen from the
+# allocator or a distinct CUDA/NVML fault is an OPEN QUESTION; the token
+# records the symptom, not a cause.
+
+#: vLLM could not reserve KV-cache blocks inside the configured budget.
+KV_CACHE_EXHAUSTION_TOKEN = "kv-cache-exhaustion:"
+#: torch's caching allocator / NVML failed while querying device memory.
+ALLOCATOR_NVML_FAULT_TOKEN = "allocator-nvml-fault:"
+#: The staged Triton_vLLM_Repository did not validate (no engine attempted).
+REPOSITORY_INVALID_TOKEN = "repository-invalid:"
+#: Anything else that broke engine construction or serving.
+ENGINE_CONSTRUCTION_ERROR_TOKEN = "engine-construction-error:"
+
+#: Token for a failure reason the classifier CANNOT recognise.
+#:
+#: DELIBERATELY EMPTY, and reported as a deviation from design Property 7
+#: (which names `engine-construction-error:` here). The reason is a direct
+#: contract collision: the sibling spec
+#: `vllm-model-reload-after-backend-restart` — preserved verbatim by this
+#: spec's Requirement 3.7 ("truthful status surfaces") — pins the retained
+#: FAILED reason to the BACKEND text exactly
+#: (`test_property_truthful_status.py`: `retained == reason`,
+#: `test_property_vllm_reload_preservation.py`: full `ModelStatus` identity,
+#: `test_property_reconciler_lifecycle.py`: `status.reason ==
+#: plan.permanent_reason(...)`). Prefixing an unrecognised reason breaks
+#: five of those legs, and they encode a validated on-device contract.
+#:
+#: Nothing this spec needs is lost: the categories that make a symptom
+#: DISTINGUISHABLE (defect 1.6 — KV-cache exhaustion vs the NVML allocator
+#: assert, plus preflight refusals and repository invalidity) are all
+#: recognised and tokenized. An unrecognised reason carries no category
+#: because the manager genuinely does not know one.
+#:
+#: Setting this back to :data:`ENGINE_CONSTRUCTION_ERROR_TOKEN` is the whole
+#: change if those sibling legs are instead repointed to accept a token.
+UNCLASSIFIED_FAILURE_TOKEN = ""
+
+#: Every category token, including the preflight marker owned by
+#: :mod:`vllm_runtime.memory_budget` (that reason arrives already tokenized,
+#: so the classifier must not prepend a second one).
+FAILURE_CATEGORY_TOKENS = (
+    KV_CACHE_EXHAUSTION_TOKEN,
+    ALLOCATOR_NVML_FAULT_TOKEN,
+    PREFLIGHT_REFUSED_MARKER,
+    REPOSITORY_INVALID_TOKEN,
+    ENGINE_CONSTRUCTION_ERROR_TOKEN,
+)
+
+#: Case-insensitive signatures of the KV-cache exhaustion path. The first
+#: two are vLLM's own text (verbatim from the incident's HTTP 409 body);
+#: the third is the same wording the prep matches.
+_KV_CACHE_SIGNATURES = (
+    "no available memory for the cache",
+    "memory for the cache blocks",
+    "gpu_memory_utilization",
+)
+
+#: Case-insensitive signatures of the allocator/NVML fault path, verbatim
+#: from ``NVML_SUCCESS == r INTERNAL ASSERT FAILED at
+#: "/opt/pytorch/c10/cuda/CUDACachingAllocator.cpp":1131``.
+_ALLOCATOR_NVML_SIGNATURES = (
+    "nvml_success",
+    "cudacachingallocator",
+)
+
+
+def classify_failure_reason(
+    reason: Optional[str],
+    default_token: str = UNCLASSIFIED_FAILURE_TOKEN,
+) -> str:
+    """The category token for a failure reason — a pure function.
+
+    A reason that ALREADY starts with one of
+    :data:`FAILURE_CATEGORY_TOKENS` keeps it (the preflight composes its own
+    marker), so classification is idempotent and a reason never carries two
+    tokens. ``default_token`` is the answer for an unrecognised reason and
+    is how the caller says "this was a repository validation failure"
+    instead of an engine-construction one.
+    """
+    text = (reason or "").strip()
+    for token in FAILURE_CATEGORY_TOKENS:
+        if text.startswith(token):
+            return token
+    lowered = text.lower()
+    if any(signature in lowered for signature in _ALLOCATOR_NVML_SIGNATURES):
+        return ALLOCATOR_NVML_FAULT_TOKEN
+    if any(signature in lowered for signature in _KV_CACHE_SIGNATURES):
+        return KV_CACHE_EXHAUSTION_TOKEN
+    return default_token
+
+
+def classify_failure(
+    reason: Optional[str],
+    default_token: str = UNCLASSIFIED_FAILURE_TOKEN,
+) -> str:
+    """``"<category token> <original reason>"`` — the classified reason
+    stored on the model status and logged. The original text is preserved
+    verbatim after the token; an already-classified reason is returned
+    unchanged."""
+    text = reason or ""
+    token = classify_failure_reason(text, default_token)
+    if not token or text.strip().startswith(token):
+        return text
+    # The original text follows the token BYTE FOR BYTE (whitespace and
+    # all): every existing consumer matches substrings of it.
+    return "{} {}".format(token, text)
+
+
+def _default_kv_margin_reader(engine: Any) -> Optional[Dict[str, Any]]:
+    """Best-effort read of a loaded engine's KV sizing — the injection seam
+    behind the thin-margin WARNING (Decision 6; expected behavior 2.7).
+
+    A small ``getattr`` chain over ``engine.engine.cache_config``
+    (``num_gpu_blocks``, ``block_size``) plus the model config's
+    ``max_model_len`` and KV geometry. Returns ``None`` for ANY engine shape
+    it cannot read — no exception escapes, and the caller then logs one
+    debug line and changes nothing. Never touches CUDA: every value here is
+    a plain attribute the engine already computed.
+    """
+    try:
+        inner = getattr(engine, "engine", None) or engine
+        cache_config = getattr(inner, "cache_config", None)
+        if cache_config is None:
+            cache_config = getattr(engine, "cache_config", None)
+        if cache_config is None:
+            return None
+        blocks = getattr(cache_config, "num_gpu_blocks", None)
+        block_size = getattr(cache_config, "block_size", None)
+        if isinstance(blocks, bool) or isinstance(block_size, bool):
+            return None
+        if not isinstance(blocks, int) or not isinstance(block_size, int):
+            return None
+        if blocks <= 0 or block_size <= 0:
+            return None
+        tokens = blocks * block_size
+
+        model_config = getattr(inner, "model_config", None)
+        if model_config is None:
+            model_config = getattr(engine, "model_config", None)
+        max_model_len = getattr(cache_config, "max_model_len", None)
+        if not isinstance(max_model_len, int) or isinstance(
+            max_model_len, bool
+        ) or max_model_len <= 0:
+            max_model_len = getattr(model_config, "max_model_len", None)
+        concurrency = None
+        if isinstance(max_model_len, int) and not isinstance(
+            max_model_len, bool
+        ) and max_model_len > 0:
+            concurrency = tokens / float(max_model_len)
+
+        return {
+            "num_gpu_blocks": blocks,
+            "block_size": block_size,
+            "tokens": tokens,
+            "max_model_len": max_model_len,
+            "concurrency": concurrency,
+            "kv_bytes": _kv_bytes_from_geometry(model_config, tokens),
+        }
+    except Exception:  # noqa: BLE001 - introspection is strictly best-effort
+        return None
+
+
+def _kv_bytes_from_geometry(model_config: Any,
+                            tokens: int) -> Optional[int]:
+    """KV-cache bytes for ``tokens`` tokens, from the model config's KV
+    geometry (``layers × kv_heads × head_size × 2 (K and V) × 2 bytes``) —
+    the same arithmetic vLLM's own ``the rest of the memory reserved for KV
+    Cache is …`` line reports. ``None`` when the geometry is not readable
+    (exotic engine shapes, accessors needing arguments this call cannot
+    supply); the concurrency arm of the thin-margin check still applies."""
+    if model_config is None:
+        return None
+
+    def _measure(name: str) -> Optional[int]:
+        accessor = getattr(model_config, name, None)
+        if not callable(accessor):
+            return None
+        try:
+            value = accessor()
+        except TypeError:
+            return None
+        except Exception:  # noqa: BLE001 - best-effort
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return None
+        return value
+
+    layers = _measure("get_num_layers")
+    kv_heads = _measure("get_num_kv_heads")
+    head_size = _measure("get_head_size")
+    if None in (layers, kv_heads, head_size):
+        return None
+    # 2 tensors (K and V) x 2 bytes per element (fp16/bf16 KV dtype).
+    return int(tokens) * layers * kv_heads * head_size * 2 * 2
 
 
 class ModelState(str, Enum):
@@ -203,9 +433,13 @@ class VllmRuntimeManager:
     ``sampling_params_factory`` maps a plain parameter mapping to the
     sampling-params object the engine expects. Both default to the real
     vLLM implementations (imported lazily) and are injectable so tests
-    run with fakes and no GPU. All state access is lock-guarded, so the
-    manager is safe to touch from the HTTP server's event loop and from
-    status-reporting threads alike.
+    run with fakes and no GPU. ``memory_reader`` (a callable returning
+    ``/proc/meminfo``-shaped text) and ``kv_margin_reader`` (an engine ->
+    KV-sizing mapping) follow the same convention: they default to the
+    real readers so host tests can drive the preflight, the
+    Starvation_Latch and the thin-margin check with fakes and no GPU. All
+    state access is lock-guarded, so the manager is safe to touch from the
+    HTTP server's event loop and from status-reporting threads alike.
     """
 
     def __init__(
@@ -213,14 +447,25 @@ class VllmRuntimeManager:
         model_dir: Union[str, Path] = VLLM_MODEL_DIR,
         engine_factory: Optional[Callable[[Mapping[str, Any]], Any]] = None,
         sampling_params_factory: Optional[Callable[[Mapping[str, Any]], Any]] = None,
+        memory_reader: Optional[Callable[[], str]] = None,
+        kv_margin_reader: Optional[Callable[[Any], Optional[Dict[str, Any]]]] = None,
     ):
         self.model_dir = Path(model_dir)
         self._engine_factory = engine_factory or _default_engine_factory
         self._sampling_params_factory = (
             sampling_params_factory or _default_sampling_params_factory
         )
+        #: ``None`` keeps :func:`memory_budget.read_memory`'s own default,
+        #: resolved at CALL time so the module attribute stays patchable.
+        self._memory_reader = memory_reader
+        self._kv_margin_reader = kv_margin_reader or _default_kv_margin_reader
         self._lock = threading.Lock()
         self._models: Dict[str, _ManagedModel] = {}
+        #: Starvation_Latch (Decision 5): set when a failed attempt's memory
+        #: did not come back, cleared by an explicit unload. Per backend
+        #: life, lock-guarded, NEVER persisted — no tombstone interaction,
+        #: no new status surface.
+        self._starvation_latch: Optional[StarvationLatch] = None
 
     # --- inspection --------------------------------------------------------
 
@@ -363,13 +608,81 @@ class VllmRuntimeManager:
         try:
             engine_args = parse_repository(self.model_dir / model_name)
         except RepositoryValidationError as err:
-            return self._fail(model_name, str(err))
-        # vLLM's default caps images per prompt at 1; two-image reference
-        # generation needs 2 (vlm-anomaly-reference-parity Requirement
-        # 6.6). setdefault: an explicit model.json value wins unchanged,
-        # and the arg is a standard EngineArgs field, harmless for
-        # text-only models.
-        engine_args.setdefault("limit_mm_per_prompt", {"image": 2})
+            return self._fail(model_name, str(err),
+                              category=REPOSITORY_INVALID_TOKEN)
+        # NOTHING is defaulted into the engine args here — deliberately.
+        #
+        # `limit_mm_per_prompt` used to be forced to {"image": 2} on this
+        # line so two-image reference generation worked on any model
+        # (vlm-anomaly-reference-parity Requirement 6.6). That default is
+        # REMOVED (spec jp6-vllm-kv-cache-oom-regression, Decision 1): it
+        # doubled the images a vision-language engine profiles for, inside
+        # an unchanged gpu_memory_utilization budget whose one-image
+        # activation peak was already 4.92 GiB of 11.98 GiB, and it was
+        # invisible to every sizing surface by construction — the model was
+        # published as fitting and then could not load (defect 1.4).
+        #
+        # The multimodal limit is now an AUTHORED, SIZED engine setting
+        # (`model_import.ENGINE_DEFAULTS['limit_mm_per_prompt']`, default
+        # {"image": 1}, sized by the publish-time Fit_Check and propagated
+        # verbatim into model.json). When the staged args omit the key the
+        # engine uses vLLM's own default of one image — exactly what
+        # LocalServer 1.0.59 profiled for. A model that needs two images is
+        # authored with {"image": 2} and sized for it; a two-image request
+        # against a one-image model fails truthfully in
+        # `_build_multimodal_prompt` rather than silently answering a
+        # different question. DO NOT re-add a device-side default here.
+
+        # Device memory preflight (Decision 4): refuse a doomed load in the
+        # time of one /proc/meminfo read instead of ~4 min of engine
+        # profiling that blocks the runtime server's event loop, and refuse
+        # outright while the Starvation_Latch is set (Decision 5). Pure
+        # kernel/disk reads — never CUDA, never NVML (that invariant is
+        # `memory_budget`'s module docstring and `_reclaim_gpu_memory`'s).
+        with self._lock:
+            latch = self._starvation_latch
+        verdict = memory_budget.preflight(
+            engine_args,
+            reader=self._memory_reader,
+            latch=latch,
+            model_name=model_name,
+        )
+        available_before = verdict.terms.get("available_bytes")
+        failed_conditions = tuple(verdict.terms.get("failed_conditions") or ())
+        # A refusal is only ENFORCED when its arithmetic rests on measured
+        # terms. When the weights could not be sized on disk the verdict is
+        # built from the documented ACTIVATION_FLOOR + KV-floor lower bound
+        # (never a guessed weight), and refusing a load on a number this
+        # runtime did not measure would be exactly the kind of invented
+        # verdict the unsound publish-time gate was made of: the diagnostic
+        # is logged and the engine decides. The Starvation_Latch arm is
+        # enforced either way — it needs no weight estimate, only the two
+        # readings around the previous failed attempt.
+        if not verdict.ok and (not verdict.unverified
+                               or "latch" in failed_conditions):
+            return self._fail(
+                model_name,
+                verdict.refusal_reason or "{} vLLM model '{}' was refused by "
+                "the device memory preflight".format(
+                    PREFLIGHT_REFUSED_MARKER, model_name),
+            )
+        if not verdict.ok:
+            logger.warning(
+                "Device memory preflight for vLLM model '%s' did NOT clear, "
+                "but its weights could not be sized on disk, so the verdict "
+                "rests on a lower bound and the load PROCEEDS (it may still "
+                "fail in engine profiling): %s",
+                model_name, verdict.refusal_reason,
+            )
+        elif verdict.unverified:
+            logger.info(
+                "Device memory preflight for vLLM model '%s' ran UNVERIFIED "
+                "(the weights could not be sized on disk; measured available "
+                "%s against a %s lower-bound requirement); the load proceeds",
+                model_name,
+                format_gib(verdict.terms.get("available_bytes")),
+                format_gib(verdict.terms.get("required_bytes")),
+            )
 
         with self._lock:
             entry = self._models.get(model_name)
@@ -384,7 +697,8 @@ class VllmRuntimeManager:
             if inspect.isawaitable(engine):
                 engine = await engine
         except Exception as err:  # noqa: BLE001 - failure isolation (4.6, 8.9)
-            return self._fail(model_name, str(err))
+            return self._fail(model_name, str(err),
+                              available_before=available_before)
 
         with self._lock:
             entry = self._models.get(model_name)
@@ -394,6 +708,9 @@ class VllmRuntimeManager:
             entry.engine = engine
             entry.status = ModelStatus(ModelState.READY)
         logger.info("vLLM model '%s' is READY", model_name)
+        # READY is still READY: this only adds a WARNING when the engine's
+        # own KV sizing says the load is one retry from failing (2.7).
+        self._warn_on_thin_kv_margin(model_name, engine)
         return ModelStatus(ModelState.READY)
 
     def unload(self, model_name: str) -> bool:
@@ -406,9 +723,28 @@ class VllmRuntimeManager:
         (Decision 2) so the post-restart reconciler treats the model as
         explicitly stopped; any filesystem error is logged and the
         unload's return value and semantics stay byte-identical
-        (Requirement 3.5)."""
+        (Requirement 3.5).
+
+        An explicit unload also CLEARS the Starvation_Latch (Decision 5): a
+        deliberate stop/start cycle is allowed to try again. The latch is
+        the "do not retry into a starved device" memory of a failed
+        attempt, not a permanent verdict — and when the device really is
+        still starved the preflight's measured-availability arm refuses the
+        next load anyway."""
         with self._lock:
             entry = self._models.pop(model_name, None)
+            latch = self._starvation_latch
+            self._starvation_latch = None
+        if latch is not None:
+            logger.info(
+                "Cleared the vLLM starvation latch (set by the failed load "
+                "of '%s': %s available before, %s after) on the explicit "
+                "unload of '%s'; the next load is measured afresh",
+                latch.model_name,
+                format_gib(latch.available_before_bytes),
+                format_gib(latch.available_after_bytes),
+                model_name,
+            )
         if entry is None:
             self._write_tombstone(model_name)
             return False
@@ -419,7 +755,13 @@ class VllmRuntimeManager:
         logger.info("vLLM model '%s' unloaded", model_name)
         return True
 
-    def _fail(self, model_name: str, reason: str) -> ModelStatus:
+    def _fail(
+        self,
+        model_name: str,
+        reason: str,
+        available_before: Optional[int] = None,
+        category: str = UNCLASSIFIED_FAILURE_TOKEN,
+    ) -> ModelStatus:
         """Transition one model to FAILED, retaining and logging the
         backend reason with the model name (Requirement 4.6). No other
         model is touched.
@@ -430,9 +772,24 @@ class VllmRuntimeManager:
         first-load OOM that keeps OOMing on every plain retry until an
         unload releases the memory. Reclaim it here so the next load
         attempt starts from a clean allocator state.
+
+        The retained reason gains at most ONE category token
+        (:func:`classify_failure`), with the original backend text verbatim
+        after it. ``category`` is the answer for a reason the classifier
+        does not recognise — the caller's knowledge of WHICH layer failed
+        (see :data:`UNCLASSIFIED_FAILURE_TOKEN` for why the default adds no
+        token).
+
+        ``available_before`` is the memory reading taken before this
+        attempt's engine construction. When it is supplied, the reclaim is
+        MEASURED (Decision 5): if the memory did not come back within
+        :data:`RECLAIM_TOLERANCE_BYTES` the Starvation_Latch is set and a
+        prominent WARNING says so, and the preflight refuses further loads
+        in this backend life instead of deepening the cascade.
         """
-        logger.error("vLLM model '%s' failed: %s", model_name, reason)
-        status = ModelStatus(ModelState.FAILED, reason=reason)
+        classified = classify_failure(reason, category)
+        logger.error("vLLM model '%s' failed: %s", model_name, classified)
+        status = ModelStatus(ModelState.FAILED, reason=classified)
         with self._lock:
             entry = self._models.get(model_name)
             engine = entry.engine if entry is not None else None
@@ -442,7 +799,117 @@ class VllmRuntimeManager:
         if engine is not None:
             self._shutdown_engine(model_name, engine)
         self._reclaim_gpu_memory(model_name)
+        if available_before is not None:
+            self._latch_starvation_if_memory_did_not_return(
+                model_name, available_before
+            )
         return status
+
+    def _latch_starvation_if_memory_did_not_return(
+        self, model_name: str, available_before: int
+    ) -> None:
+        """Measure whether the failed attempt's memory came back, and latch
+        the answer when it did not (Decision 5; defect 1.5, expected
+        behavior 2.5).
+
+        Read AFTER ``_shutdown_engine`` + ``_reclaim_gpu_memory``, so it
+        measures the outcome of the reclaim rather than predicting it —
+        which is exactly what the evidence supports: reclaim cleared an
+        8.34 GiB non-torch swing on the KV-OOM path and cleared NOTHING on
+        the NVML-assert path (three failed loads → 26 GB used / 3 GB free
+        with no model loaded, recovered only by a container restart). No
+        knowledge of WHY is needed to measure WHETHER.
+        """
+        reading = memory_budget.read_memory(self._memory_reader)
+        if reading is None:
+            logger.info(
+                "Could not measure the memory reclaimed after the failed "
+                "load of vLLM model '%s'; no starvation verdict is recorded",
+                model_name,
+            )
+            return
+        available_after = reading.available_bytes
+        if available_after >= available_before - RECLAIM_TOLERANCE_BYTES:
+            return
+        latch = StarvationLatch(
+            model_name=model_name,
+            available_before_bytes=int(available_before),
+            available_after_bytes=int(available_after),
+        )
+        with self._lock:
+            if self._starvation_latch is None:
+                self._starvation_latch = latch
+        logger.warning(
+            "STARVED DEVICE: the failed load of vLLM model '%s' did NOT "
+            "return its memory — %s available before the attempt, %s after "
+            "the engine shutdown and CUDA reclaim (%s did not come back, "
+            "more than the %s reclaim tolerance). Further vLLM loads are "
+            "refused in this backend life to stop the allocation cascade "
+            "(every retry would start with less memory than the last, and "
+            "the co-resident GPU models share this memory). Recovery "
+            "requires a BACKEND CONTAINER RESTART; an explicit unload of a "
+            "vLLM model clears this latch and allows one measured retry.",
+            model_name,
+            format_gib(available_before),
+            format_gib(available_after),
+            format_gib(latch.lost_bytes),
+            format_gib(RECLAIM_TOLERANCE_BYTES),
+        )
+
+    def _warn_on_thin_kv_margin(self, model_name: str, engine: Any) -> None:
+        """Best-effort thin-margin report for a model that just reached
+        READY (Decision 6; defect 1.7, expected behavior 2.7).
+
+        The incident's "successful" retry reached READY with ``the rest of
+        the memory reserved for KV Cache is 0.65GiB`` at ``Maximum
+        concurrency for 4096 tokens per request: 2.95x`` — one retry and
+        0.65 GiB from failing, reported as an unqualified success. A
+        derived KV size below :data:`MINIMUM_KV_CACHE_BYTES`, or a derived
+        concurrency below :data:`THIN_MARGIN_CONCURRENCY`, now logs a
+        WARNING. READY is still READY, and an engine whose shape cannot be
+        read produces one debug line and no behavior change.
+        """
+        try:
+            margin = self._kv_margin_reader(engine)
+        except Exception:  # noqa: BLE001 - introspection is best-effort
+            margin = None
+        if not margin:
+            logger.debug(
+                "KV-cache sizing of vLLM model '%s' is not readable on this "
+                "engine; no thin-margin check was performed", model_name,
+            )
+            return
+        kv_bytes = margin.get("kv_bytes")
+        concurrency = margin.get("concurrency")
+        thin_bytes = isinstance(kv_bytes, (int, float)) \
+            and kv_bytes < MINIMUM_KV_CACHE_BYTES
+        thin_concurrency = isinstance(concurrency, (int, float)) \
+            and concurrency < THIN_MARGIN_CONCURRENCY
+        if not (thin_bytes or thin_concurrency):
+            return
+        logger.warning(
+            "THIN KV-CACHE MARGIN: vLLM model '%s' reached READY with only "
+            "%s of KV cache (%s GPU blocks x %s tokens = %s tokens, "
+            "maximum concurrency %s at max_model_len %s) against a %s "
+            "serving-margin floor and a %.1fx thin-margin threshold. This "
+            "load is ONE RETRY from failing: the same configuration failed "
+            "on this device when the co-resident memory happened to be "
+            "higher at profiling time. Reduce demand (max_model_len, "
+            "limit_mm_per_prompt.image, a smaller or more quantized model) "
+            "or free device memory; raising gpu_memory_utilization takes "
+            "memory the co-resident GPU models are already using.",
+            model_name,
+            format_gib(kv_bytes) if isinstance(kv_bytes, (int, float))
+            else "an unknown amount",
+            margin.get("num_gpu_blocks"),
+            margin.get("block_size"),
+            margin.get("tokens"),
+            "{:.2f}x".format(concurrency)
+            if isinstance(concurrency, (int, float)) else "unknown",
+            margin.get("max_model_len"),
+            format_gib(MINIMUM_KV_CACHE_BYTES),
+            THIN_MARGIN_CONCURRENCY,
+        )
 
     @staticmethod
     def _shutdown_engine(model_name: str, engine: Any) -> None:
@@ -692,8 +1159,16 @@ class VllmRuntimeManager:
         Undecodable image bytes raise :class:`GenerationError` naming the
         image (input or reference) decoding failure, before the engine is
         ever invoked (Requirement 4.7; vlm-anomaly-reference-parity 6.5).
-        PIL is imported lazily so the module keeps importing on images
-        without the vLLM wheel."""
+        A reference-image request against a model whose AUTHORED
+        ``limit_mm_per_prompt.image`` is below 2 raises the same way, with
+        the effective limit and the remediation (spec
+        jp6-vllm-kv-cache-oom-regression Decision 1) — the reference image
+        is never silently dropped, because answering the one-image question
+        confidently is worse in a defect-detection product than failing
+        loudly with an exact fix. PIL is imported lazily so the module keeps
+        importing on images without the vLLM wheel."""
+        if reference_bytes is not None:
+            self._require_two_image_capacity(model_name)
         import io
 
         try:
@@ -767,6 +1242,36 @@ class VllmRuntimeManager:
             "prompt": templated,
             "multi_modal_data": multi_modal_data,
         }
+
+    def _require_two_image_capacity(self, model_name: str) -> None:
+        """Refuse a two-image (reference) request when the loaded model's
+        AUTHORED multimodal limit is one image (Decision 1; expected
+        behavior 2.4, preservation 3.9).
+
+        The limit is read from the model's tracked engine args — the staged
+        ``model.json``, verbatim — so the answer is one per published model
+        rather than a function of transient device state. Models authored
+        with ``limit_mm_per_prompt = {"image": 2}`` (and sized for it by the
+        publish-time Fit_Check) keep serving two-image anomaly-reference
+        requests unchanged."""
+        effective = memory_budget.images_per_prompt(
+            self.engine_args(model_name)
+        )
+        if effective >= 2:
+            return
+        raise GenerationError(
+            model_name,
+            "this request supplies a reference image, which needs two images "
+            "per prompt, but model '{}' is authored for "
+            "limit_mm_per_prompt.image = {} — the reference image is NOT "
+            "silently dropped, because a one-image answer would be a "
+            "confident verdict about a different question. Remediation: set "
+            "`limit_mm_per_prompt.image = 2` in the model's engine "
+            "configuration, then re-package and re-publish the model (the "
+            "publish-time fit check sizes the larger two-image profiling "
+            "peak, so the configuration is checked against the device "
+            "budget before it ships)".format(model_name, effective),
+        )
 
     def _resolve_tokenizer(self, model_name: str) -> Any:
         """Best-effort synchronous tokenizer lookup on the loaded engine

@@ -18,6 +18,18 @@ Covers publish_component's vLLM preflight gate:
   publish proceeds with `fit_check.status == 'unverified'`
   (Requirement 3.4)
 
+REPOINTED (S6) by `jp6-vllm-kv-cache-oom-regression` task 3.3: the gate is
+now PER-ARCHITECTURE (design Decision 2 / Fix Implementation File 2). The
+all-architecture case above is UNCHANGED and must keep passing exactly as
+recorded — nothing in it was weakened. Two cases are ADDED for the widened
+trigger (defect 1.8, expected 2.8):
+
+- a record that fails `arm64_jp6` while fitting `arm64_jp7` is refused with
+  422, `fit_check.status == 'failed'`, only the failing architecture named
+  in the error text and ALL findings carried in `fit_check.findings`
+- the same record with `skip_fit_check: true` proceeds, annotates
+  `overridden`, and the audit event records the override
+
 Runs against the moto-backed conftest stack with the real
 functions/greengrass_publish.py handler; greengrassv2 (which moto does
 not implement) is a fake client recording created recipes. The weight
@@ -29,6 +41,7 @@ _Requirements: 3.6, 3.7, 3.4_
 import importlib.util
 import json
 import os
+import re
 import sys
 import uuid
 from types import SimpleNamespace
@@ -367,6 +380,111 @@ def test_skip_fit_check_override_proceeds_and_audits(
     event = publish_events[0]
     assert event["result"] == "success"
     assert event["details"]["skip_fit_check"] is True
+
+
+# ---------------------------------------------------------------------------
+# ANY-architecture failure -> 422 (jp6-vllm-kv-cache-oom-regression 1.8, 2.8)
+#
+# 6 GiB of weights at the seeded util 0.3 under the corrected sizing model:
+# required = 6 + max(2, 0.75 x 6) + 1 = 11.50 GiB, which exceeds the
+# 0.3 x 30 = 9.00 GiB arm64_jp6 budget but fits the 0.3 x 120 = 36.00 GiB
+# arm64_jp7 budget. Infeasible on the architecture being deployed, feasible
+# on another: exactly how the 2026-08-17 incident configuration reached the
+# fleet under the superseded all-arch rule.
+# ---------------------------------------------------------------------------
+
+JP6_ONLY_FAILING_ESTIMATE = WeightEstimate(
+    total_bytes=6 * GIB,
+    method="safetensors_files",
+    detail="synthetic 6 GiB estimate (JP6-infeasible, JP7-feasible)",
+)
+
+
+def assert_jp6_only_failing_premise():
+    """Guard the fixture's premise against the shipped sizing model, so a
+    constant change surfaces here instead of silently voiding the case."""
+    from vllm_fit_check import evaluate_fit
+
+    findings = evaluate_fit(
+        {"gpu_memory_utilization": "0.3"},
+        JP6_ONLY_FAILING_ESTIMATE,
+        ["arm64_jp6", "arm64_jp7"])
+    premise = {finding.arch: finding.fits for finding in findings}
+    assert premise == {"arm64_jp6": False, "arm64_jp7": True}, (
+        f"premise check failed — the estimate is no longer JP6-infeasible / "
+        f"JP7-feasible under the shipped model: {premise}")
+
+
+def test_any_arch_failure_blocks_publish_with_422(
+        pub_env, seeded, monkeypatch):
+    assert_jp6_only_failing_premise()
+    record = seed_vllm_record(pub_env, seeded)
+    patch_estimate(pub_env, monkeypatch, JP6_ONLY_FAILING_ESTIMATE)
+
+    response = pub_env.module.publish_component(
+        publish_event(record["training_id"], seeded.user_id), None)
+
+    assert response["statusCode"] == 422, response["body"]
+    body = json.loads(response["body"])
+
+    assert body["fit_check"]["status"] == "failed"
+    findings = body["fit_check"]["findings"]
+
+    # ALL findings are carried, passing ones included.
+    assert {finding["arch"]: finding["fits"] for finding in findings} == {
+        "arm64_jp6": False, "arm64_jp7": True}
+    assert body["fit_check"]["estimate"]["total_bytes"] == 6 * GIB
+
+    # Only the FAILING architecture is named in the error text.
+    assert "arm64_jp6" in body["error"]
+    assert "arm64_jp7" not in body["error"]
+    # The never-lower invariant holds on this branch too.
+    assert not re.search(r"(lower|decrease|reduce)\w*\s+"
+                         r"gpu_memory_utilization",
+                         body["error"], re.IGNORECASE), body["error"]
+
+    # No component registration was attempted, record untouched.
+    assert seeded.gg.created == []
+    stored = stored_record(pub_env, record["training_id"])
+    assert "published" not in stored
+    assert "published_components" not in stored
+    assert stored["updated_at"] == record["updated_at"]
+
+
+def test_any_arch_failure_with_skip_fit_check_is_overridden_and_audited(
+        pub_env, seeded, monkeypatch):
+    assert_jp6_only_failing_premise()
+    record = seed_vllm_record(pub_env, seeded)
+    patch_estimate(pub_env, monkeypatch, JP6_ONLY_FAILING_ESTIMATE)
+
+    response = pub_env.module.publish_component(
+        publish_event(record["training_id"], seeded.user_id,
+                      extra_body={"skip_fit_check": True}), None)
+
+    assert response["statusCode"] == 200, response["body"]
+    body = json.loads(response["body"])
+
+    # Override branch behavior is unchanged; only its trigger widened.
+    assert body["fit_check"]["status"] == "overridden"
+    assert {finding["arch"]: finding["fits"]
+            for finding in body["fit_check"]["findings"]} == {
+        "arm64_jp6": False, "arm64_jp7": True}
+    assert "arm64_jp6" in body["fit_check"]["message"]
+    assert "skip_fit_check" in body["fit_check"]["message"]
+
+    # The publish proceeded through component registration.
+    assert len(seeded.gg.created) == 1
+    assert seeded.gg.created[0]["ComponentName"] == \
+        "model-vllm-fit-gate-llm-jetson-xavier-jp6"
+    stored = stored_record(pub_env, record["training_id"])
+    assert stored["published"] is True
+
+    # The override is audited.
+    publish_events = [e for e in audit_events(pub_env, seeded.user_id)
+                      if e["action"] == "publish_greengrass_component"]
+    assert len(publish_events) == 1
+    assert publish_events[0]["result"] == "success"
+    assert publish_events[0]["details"]["skip_fit_check"] is True
 
 
 # ---------------------------------------------------------------------------

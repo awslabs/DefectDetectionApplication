@@ -35,8 +35,13 @@ TRAINING_JOBS_TABLE_NAME = "test-training-jobs-engine-update-roundtrip"
 
 # The defined engine settings (must match model_import.ENGINE_DEFAULTS —
 # asserted in the fixture so drift is caught).
+# ``limit_mm_per_prompt`` was added by jp6-vllm-kv-cache-oom-regression task
+# 3.1 (the multimodal limit becomes an authored, sized engine setting,
+# design Decision 1). The drift guard itself is unchanged in strength: it
+# still pins the key set exactly.
 KNOWN_ENGINE_KEYS = ("dtype", "gpu_memory_utilization", "max_model_len",
-                     "tensor_parallel_size", "enforce_eager")
+                     "tensor_parallel_size", "enforce_eager",
+                     "limit_mm_per_prompt")
 
 
 @pytest.fixture(scope="module")
@@ -93,6 +98,9 @@ ENGINE_VALUE_STRATEGIES = {
     "max_model_len": st.integers(min_value=1, max_value=131072),
     "tensor_parallel_size": st.integers(min_value=1, max_value=8),
     "enforce_eager": st.booleans(),
+    # Only {"image": <int 1..8>} is accepted (task 3.1).
+    "limit_mm_per_prompt": st.integers(min_value=1, max_value=8).map(
+        lambda n: {"image": n}),
 }
 
 
@@ -128,6 +136,17 @@ def to_ddb(value):
 def assert_value_equals(key, expected, actual):
     """Numeric equality across the int/float/Decimal representations the
     DynamoDB and JSON round trips produce."""
+    if isinstance(expected, dict):
+        # Nested settings (limit_mm_per_prompt) round trip as maps; compare
+        # key-wise so the numeric representations are checked, not just ==.
+        assert isinstance(actual, dict), (
+            f"{key}: {actual!r} is not an object")
+        assert set(actual) == set(expected), (
+            f"{key}: got keys {sorted(actual)}, expected {sorted(expected)}")
+        for sub_key, sub_expected in expected.items():
+            assert_value_equals(f"{key}.{sub_key}", sub_expected,
+                                actual[sub_key])
+        return
     if isinstance(expected, bool):
         assert actual is expected, (
             f"{key}: got {actual!r}, expected {expected!r}")

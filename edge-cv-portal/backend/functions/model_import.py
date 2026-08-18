@@ -3,6 +3,7 @@ Model Import Lambda functions
 Implements BYOM (Bring Your Own Model) functionality
 Allows importing pre-trained models that conform to DDA format
 """
+import copy
 import json
 import os
 import re
@@ -65,10 +66,25 @@ ENGINE_DEFAULTS = {
     'gpu_memory_utilization': 0.5,
     'max_model_len': 2048,
     'tensor_parallel_size': 1,
-    'enforce_eager': True
+    'enforce_eager': True,
+    # Images the engine may accept per prompt. Authored and SIZED here
+    # (jp6-vllm-kv-cache-oom-regression, Decision 1) rather than defaulted
+    # on the device: the value drives vLLM's multimodal profiling peak, so
+    # an unbudgeted device-side default is invisible to every sizing
+    # surface by construction (defect 1.4). Named exactly as vLLM's
+    # EngineArgs field so it propagates verbatim into model.json with no
+    # translation anywhere (Requirement 3.3).
+    'limit_mm_per_prompt': {'image': 1}
 }
 
 ENGINE_DTYPE_VALUES = ('auto', 'float16', 'bfloat16', 'float32')
+
+# limit_mm_per_prompt accepts exactly one key mapped to an integer in this
+# inclusive range. Two-image reference generation
+# (vlm-anomaly-reference-parity Requirement 6.6) needs {'image': 2}.
+LIMIT_MM_PER_PROMPT_KEY = 'image'
+LIMIT_MM_IMAGE_MIN = 1
+LIMIT_MM_IMAGE_MAX = 8
 
 
 def _validate_engine_setting(key: str, value: Any) -> str:
@@ -96,6 +112,27 @@ def _validate_engine_setting(key: str, value: Any) -> str:
     elif key == 'enforce_eager':
         if not isinstance(value, bool):
             return 'enforce_eager must be a boolean'
+    elif key == 'limit_mm_per_prompt':
+        # Accept ONLY {"image": <int 1..8>}: nothing else is sized by the
+        # Fit_Check (jp6-vllm-kv-cache-oom-regression Decision 1).
+        shape = (f'limit_mm_per_prompt must be an object of the form '
+                 f'{{"{LIMIT_MM_PER_PROMPT_KEY}": <integer '
+                 f'{LIMIT_MM_IMAGE_MIN}..{LIMIT_MM_IMAGE_MAX}>}}')
+        if isinstance(value, bool) or not isinstance(value, dict):
+            return shape
+        if set(value) != {LIMIT_MM_PER_PROMPT_KEY}:
+            return (f'{shape}; the only accepted key is '
+                    f'"{LIMIT_MM_PER_PROMPT_KEY}"')
+        images = value[LIMIT_MM_PER_PROMPT_KEY]
+        # bool is an int subclass — reject explicitly
+        if isinstance(images, bool) or not isinstance(images, int):
+            return (f'limit_mm_per_prompt.{LIMIT_MM_PER_PROMPT_KEY} must be '
+                    f'an integer in {LIMIT_MM_IMAGE_MIN}..'
+                    f'{LIMIT_MM_IMAGE_MAX}')
+        if not (LIMIT_MM_IMAGE_MIN <= images <= LIMIT_MM_IMAGE_MAX):
+            return (f'limit_mm_per_prompt.{LIMIT_MM_PER_PROMPT_KEY} must be '
+                    f'an integer in {LIMIT_MM_IMAGE_MIN}..'
+                    f'{LIMIT_MM_IMAGE_MAX}')
     return ''
 
 
@@ -186,8 +223,11 @@ def resolve_engine_configuration(supplied: Dict) -> Dict:
 
     The result contains every defined setting: supplied values keep their
     values, omitted settings get their documented defaults (1.2, 1.3).
+
+    The copy is deep so a nested default (``limit_mm_per_prompt``) can never
+    be aliased into a caller's resolved configuration.
     """
-    resolved = dict(ENGINE_DEFAULTS)
+    resolved = copy.deepcopy(ENGINE_DEFAULTS)
     for key, value in (supplied or {}).items():
         if key in ENGINE_DEFAULTS:
             resolved[key] = value
@@ -483,6 +523,24 @@ def get_vllm_engine_spec(event: Dict, context: Any) -> Dict:
                 'range': 'true | false',
                 'description': 'Disable CUDA graph capture and always execute '
                                'the model in eager mode.'
+            },
+            'limit_mm_per_prompt': {
+                'default': ENGINE_DEFAULTS['limit_mm_per_prompt'],
+                'type': 'object',
+                'range': f'{{"{LIMIT_MM_PER_PROMPT_KEY}": '
+                         f'<integer {LIMIT_MM_IMAGE_MIN}..'
+                         f'{LIMIT_MM_IMAGE_MAX}>}}',
+                'accepted_keys': [LIMIT_MM_PER_PROMPT_KEY],
+                'description': 'Images the engine may accept per prompt. '
+                               'Raising it increases the engine\'s '
+                               'profiling peak (more GPU memory is reserved '
+                               'for activations, leaving less for the KV '
+                               'cache), so size it deliberately. Two-image '
+                               'reference generation '
+                               '(vlm-anomaly-reference-parity Requirement '
+                               '6.6) requires {"image": 2}; text-only and '
+                               'single-image models should stay at '
+                               '{"image": 1}.'
             }
         },
         'source': {

@@ -44,7 +44,12 @@ Startup sequence (Requirements 4.4, 4.5, 4.8, 4.9, 2.7):
    ``model_autostart_utils.wait_for_server`` backoff to tolerate
    LocalServer still booting (best-effort, mirroring
    model_convertor.start_model: the runtime carries LOADING/READY/FAILED
-   through the device model-status mechanisms).
+   through the device model-status mechanisms). A refusal from the runtime's
+   own device-memory preflight (reason prefixed ``preflight-refused:``) is
+   classified as ``LOAD_PREFLIGHT_REFUSED``: it skips the KV-cache
+   unload -> reload recovery and exits 0, because the verdict is produced
+   before any allocation and a component retry cannot change it (spec:
+   jp6-vllm-kv-cache-oom-regression, design Decision 4).
 
 ``--cleanup`` unloads the model via the model-control endpoint and removes
 the staged directory, mirroring convert_model_cleanup.py.
@@ -321,14 +326,130 @@ LOAD_OK = "LOAD_OK"
 LOAD_HTTP_ERROR = "LOAD_HTTP_ERROR"
 LOAD_UNREACHABLE = "LOAD_UNREACHABLE"
 
+#: LOAD_PREFLIGHT_REFUSED: the runtime's device-side memory preflight refused
+#: the load BEFORE constructing an engine — no GPU memory was allocated, no
+#: ~4 min profiling ran, and the refusal reason carries the measured available
+#: memory, the computed requirement with every term, and the setting to change
+#: (spec: jp6-vllm-kv-cache-oom-regression, design Decision 4).
+#: This classification exits **0**: the verdict is deterministic and produced
+#: before any allocation, so a Greengrass component retry cannot change it.
+#: Exit 1 here is the mechanism of defect 1.9 — one mis-sized model takes the
+#: whole deployment BROKEN → FAILED_ROLLBACK_COMPLETE and blocks every
+#: unrelated change for that device. Nothing is hidden: the prominent ERROR
+#: line below carries the full diagnostic and the runtime reports the model
+#: FAILED with the same reason through the unchanged status surfaces.
+#: Non-deterministic failures (LOAD_UNREACHABLE, LOAD_HTTP_ERROR) keep exit 1
+#: because a retry can genuinely fix them.
+LOAD_PREFLIGHT_REFUSED = "LOAD_PREFLIGHT_REFUSED"
+
+#: Stable prefix of a device-side memory-preflight refusal reason.
+#: OWNER: ``src/backend/vllm_runtime/memory_budget.py``
+#: (``memory_budget.PREFLIGHT_REFUSED_MARKER``). DUPLICATED here on purpose —
+#: this script is seeded standalone to /aws_dda by cp_model_conversion_files
+#: and runs outside the backend package, so it cannot import ``vllm_runtime``
+#: in every context. A host test pins the two literals EQUAL
+#: (test/backend-test/jp6_vllm_kv_cache_oom/): keep them in lockstep.
+PREFLIGHT_REFUSED_MARKER = "preflight-refused:"
+
 #: Markers in an extracted load-failure reason indicating vLLM could not
 #: reserve KV-cache blocks (weights already exceed the configured GPU
 #: memory fraction) — triggers the actionable remediation hint
-#: (spec: vllm-sizing-and-packaging-errors, Requirement 4.2).
+#: (spec: vllm-sizing-and-packaging-errors, Requirement 4.2). UNCHANGED by
+#: jp6-vllm-kv-cache-oom-regression: only the remediation TEXT changed, and
+#: PREFLIGHT_REFUSED_MARKER is tested BEFORE these markers.
 KV_CACHE_HINT_MARKERS = (
     "No available memory for the cache blocks",
     "gpu_memory_utilization",
 )
+
+#: Ceiling the remediation menu quotes for 'gpu_memory_utilization'.
+#: MIRRORED from ``memory_budget.fraction_cap()`` /
+#: ``edge-cv-portal/backend/functions/vllm_fit_check.py`` (the single source of
+#: truth): (30 GiB total − 6 GiB measured as held by the co-resident ONNX GPU
+#: models) / 30 GiB = 0.80 on ``arm64_jp6``, the incident device class. Quoted
+#: as that architecture's figure, NOT as a measurement of the device this
+#: script runs on — the prep reads no memory itself. The measured, quantified
+#: cap comes from the runtime's own preflight, which carries it inside the
+#: refusal reason (spec: jp6-vllm-kv-cache-oom-regression, Decision 3).
+CO_TENANCY_FRACTION_CAP_JP6 = 0.80
+
+#: Extracted reason of the most recent authoritative load failure in this
+#: process. ``prepare`` restates a preflight refusal's full diagnostic in its
+#: terminal ERROR line from here, rather than widening ``request_load``'s
+#: return value — the string classification it returns is pinned by the device
+#: preservation suites. Reset at the start of every ``request_load``.
+_last_load_failure_reason = None
+
+
+def last_load_failure_reason():
+    """The extracted reason of the most recent authoritative load failure in
+    this process, or ``None`` when no HTTP failure was seen (e.g. the load
+    succeeded, or ``request_load`` was substituted in a test)."""
+    return _last_load_failure_reason
+
+
+def kv_cache_remediation_menu(engine_args=None) -> str:
+    """Decision 3's ordered remediation menu for a KV-cache budget failure
+    (spec: jp6-vllm-kv-cache-oom-regression, defect 1.3).
+
+    The ORDER is the whole point, and it is the same wording contract the
+    portal's ``vllm_fit_check`` messages use:
+
+    1. the co-tenancy hazard first — this device shares ONE pool of unified
+       memory with the co-resident ONNX GPU models and
+       ``gpu_memory_utilization`` is a fraction of TOTAL memory, so a larger
+       fraction takes memory those models are already using (success condition
+       2.10 makes starving them a failure, so "raise the fraction" cannot lead);
+    2. the remediations that reduce THIS model's own demand;
+    3. raising the fraction last, bounded by the co-tenancy ceiling, and
+       replaced by "unsafe here" once the staged fraction already meets it.
+
+    Nothing here ever advises *lowering* ``gpu_memory_utilization`` as a cure
+    for insufficient KV cache — that invariant (sibling spec Requirement 3.9)
+    is kept in full for every failure mode.
+    """
+    utilization = None
+    if isinstance(engine_args, dict):
+        try:
+            utilization = float(engine_args.get("gpu_memory_utilization"))
+        except (TypeError, ValueError):
+            utilization = None
+
+    parts = [
+        "Remediation (in this order): this device shares ONE pool of unified "
+        "memory with the co-resident ONNX GPU models, and "
+        "'gpu_memory_utilization' is a fraction of TOTAL device memory — so a "
+        "larger fraction is taken from memory those models are already using.",
+        "Reduce this model's own demand FIRST: (1) bound "
+        "'limit_mm_per_prompt.image' in the model's engine configuration (the "
+        "biggest single lever for a vision-language model — every extra image "
+        "per prompt enlarges vLLM's activation/profiling peak); (2) reduce "
+        "'max_model_len'; (3) choose a smaller or more quantized model; "
+        "(4) free device memory by stopping unused model components.",
+    ]
+    if utilization is not None and utilization >= CO_TENANCY_FRACTION_CAP_JP6:
+        parts.append(
+            "Raising 'gpu_memory_utilization' is unsafe here: the staged {:g} "
+            "already meets or exceeds the {:.2f} co-tenancy ceiling for this "
+            "device class (30 GiB total minus ~6 GiB held by the co-resident "
+            "models), so a larger fraction would come out of "
+            "theirs.".format(utilization, CO_TENANCY_FRACTION_CAP_JP6)
+        )
+    else:
+        parts.append(
+            "ONLY THEN, and only while the fraction stays below the {:.2f} "
+            "co-tenancy ceiling for this device class (30 GiB total minus "
+            "~6 GiB held by the co-resident models), RAISE "
+            "'gpu_memory_utilization' — in small steps, verifying after each "
+            "one that the co-resident ONNX models still load on "
+            "GPU.".format(CO_TENANCY_FRACTION_CAP_JP6)
+        )
+    parts.append(
+        "Then re-package and re-publish the model; the portal's fit check "
+        "sizes weights, the activation allowance (an ESTIMATE) and the "
+        "KV-cache floor against the target architecture's budget."
+    )
+    return " ".join(parts)
 
 
 def extract_load_failure_reason(body_text: str) -> str:
@@ -355,20 +476,24 @@ def log_load_failure(model_name: str, status_code, body_text: str, engine_args=N
     ``gpu_memory_utilization`` / ``max_model_len`` values are included
     when the engine args are available (spec:
     vllm-sizing-and-packaging-errors, Requirements 4.1, 4.2, 4.3, 4.4).
-    The raw body stays available at debug level for triage."""
+    The raw body stays available at debug level for triage.
+
+    The KV remediation is Decision 3's ordered menu (spec:
+    jp6-vllm-kv-cache-oom-regression, defect 1.3) — the old "RAISE
+    'gpu_memory_utilization'" advice led, which on this shared unified-memory
+    device grows the model's claim on memory the co-resident ONNX GPU models
+    hold. A refusal from the runtime's own memory preflight already carries
+    that menu, composed from the device's MEASURED numbers, so no second and
+    less informed copy is appended to it.
+    """
     reason = extract_load_failure_reason(body_text)
     line = "VllmLoadModel: model '{}' FAILED to load (HTTP {}): {}".format(
         model_name, status_code, reason
     )
-    if any(marker in reason for marker in KV_CACHE_HINT_MARKERS):
-        line += (
-            " | Remediation: the model's weights leave no GPU memory for "
-            "vLLM KV-cache blocks inside the configured "
-            "'gpu_memory_utilization' fraction — RAISE "
-            "'gpu_memory_utilization' in the model's engine configuration, "
-            "reduce 'max_model_len', or deploy a smaller model, then "
-            "re-package and re-publish."
-        )
+    if PREFLIGHT_REFUSED_MARKER in reason:
+        pass
+    elif any(marker in reason for marker in KV_CACHE_HINT_MARKERS):
+        line += " | " + kv_cache_remediation_menu(engine_args)
     if isinstance(engine_args, dict):
         line += " | staged engine args: gpu_memory_utilization={}, max_model_len={}".format(
             engine_args.get("gpu_memory_utilization"),
@@ -400,10 +525,34 @@ def request_load(model_name: str, engine_args=None) -> str:
     single-attempt semantics.
 
     Returns a classification: ``LOAD_OK`` (HTTP 200), ``LOAD_HTTP_ERROR``
-    (authoritative non-200 HTTP response received), or ``LOAD_UNREACHABLE``
+    (authoritative non-200 HTTP response received), ``LOAD_UNREACHABLE``
     (no HTTP response ever received — every attempt died at the connection
-    level or the server was never reachable)."""
+    level or the server was never reachable), or ``LOAD_PREFLIGHT_REFUSED``
+    (the runtime's device-side memory preflight refused the load before any
+    allocation)."""
+    global _last_load_failure_reason
+    _last_load_failure_reason = None
     outcome, reason = _request_load_attempt(model_name, engine_args)
+    _last_load_failure_reason = reason
+    if outcome == LOAD_HTTP_ERROR and reason is not None \
+            and PREFLIGHT_REFUSED_MARKER in reason:
+        # Tested BEFORE KV_CACHE_HINT_MARKERS, deliberately: the preflight
+        # diagnostic legitimately contains the string 'gpu_memory_utilization'
+        # (it spells the device budget out as util x MemTotal), which would
+        # otherwise trigger the unload -> reload recovery below for a load that
+        # never allocated anything — an unload of a model that was never
+        # constructed, followed by an identical, equally doomed second refusal.
+        # The refusal is deterministic and pre-allocation: there is nothing to
+        # release and nothing a retry could change (spec:
+        # jp6-vllm-kv-cache-oom-regression, design Decision 4).
+        logging.warning(
+            "VllmLoadModel: load of '{}' was refused by the runtime's device "
+            "memory preflight before any GPU allocation; skipping the KV-cache "
+            "unload -> reload recovery (nothing was allocated, so there is "
+            "nothing to reclaim and a retry would be refused "
+            "identically)".format(model_name)
+        )
+        return LOAD_PREFLIGHT_REFUSED
     if (
         outcome == LOAD_HTTP_ERROR
         and reason is not None
@@ -416,7 +565,8 @@ def request_load(model_name: str, engine_args=None) -> str:
             "runtime)".format(model_name)
         )
         request_unload(model_name)
-        outcome, _ = _request_load_attempt(model_name, engine_args)
+        outcome, recovery_reason = _request_load_attempt(model_name, engine_args)
+        _last_load_failure_reason = recovery_reason
     return outcome
 
 
@@ -565,7 +715,9 @@ def prepare(args) -> int:
     # never-reachable runtime (isBugCondition_D — no HTTP response ever
     # received) gets an actionable diagnostic naming the likely cause: the
     # LocalServer backend container left stopped by a deployment restart
-    # (spec: edge-deploy-reliability, Defect D, Requirement 2.10).
+    # (spec: edge-deploy-reliability, Defect D, Requirement 2.10). The ONE
+    # authoritative failure that does NOT exit non-zero is a device-memory
+    # preflight refusal, which no retry can change (see below).
     # The staged engine args (rewritten for S3-sourced records, verbatim
     # otherwise) travel into the load path so an authoritative HTTP failure
     # logs the active gpu_memory_utilization / max_model_len (spec:
@@ -574,6 +726,32 @@ def prepare(args) -> int:
         rewritten_engine_args if rewritten_engine_args is not None else engine_args
     )
     outcome = request_load(model_name, staged_engine_args)
+    if outcome == LOAD_PREFLIGHT_REFUSED:
+        # Deterministic, pre-allocation refusal: exit 0 so this one model's
+        # memory budget does not take the whole Greengrass deployment BROKEN ->
+        # rolled back (defect 1.9: revision 73 -> FAILED_ROLLBACK_COMPLETE,
+        # blocking every unrelated change for the device and leaving the latest
+        # cloud deployment a FAILED revision that future revisions preload
+        # from). Nothing is silent: this prominent ERROR carries the full
+        # diagnostic, the runtime reports the model FAILED with the same reason
+        # through the unchanged status surfaces, and the portal's fit check
+        # refuses the same configuration at publish time.
+        diagnostic = last_load_failure_reason() or (
+            "the runtime's device memory preflight refused the load; see the "
+            "LocalServer log for the measured available memory and the "
+            "computed requirement"
+        )
+        logging.error(
+            "VllmLoadModel: model '{}' was REFUSED by the device memory "
+            "preflight before any GPU memory was allocated: {} | The staged "
+            "configuration cannot load on this device as it stands, so a "
+            "component retry cannot change the outcome and the deployment is "
+            "NOT failed for this reason; the model is reported FAILED with "
+            "its reason through the model-status surfaces. Re-package and "
+            "re-publish with the remediation above, or free device memory, "
+            "then redeploy.".format(model_name, diagnostic)
+        )
+        return 0
     if outcome == LOAD_UNREACHABLE:
         logging.error(
             "Model '{}' staged, but the vLLM runtime at {}:{} was never "

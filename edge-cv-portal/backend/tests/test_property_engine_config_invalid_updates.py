@@ -31,8 +31,12 @@ from conftest import REGION
 
 TRAINING_JOBS_TABLE_NAME = "test-training-jobs-engine-update-invalid"
 
+# ``limit_mm_per_prompt`` was added by jp6-vllm-kv-cache-oom-regression task
+# 3.1 (design Decision 1). The drift guard below keeps its exact-key-set
+# strength.
 KNOWN_ENGINE_KEYS = ("dtype", "gpu_memory_utilization", "max_model_len",
-                     "tensor_parallel_size", "enforce_eager")
+                     "tensor_parallel_size", "enforce_eager",
+                     "limit_mm_per_prompt")
 
 _ALNUM = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
@@ -83,6 +87,8 @@ VALID_VALUE_STRATEGIES = {
     "max_model_len": st.integers(min_value=1, max_value=131072),
     "tensor_parallel_size": st.integers(min_value=1, max_value=8),
     "enforce_eager": st.booleans(),
+    "limit_mm_per_prompt": st.integers(min_value=1, max_value=8).map(
+        lambda n: {"image": n}),
 }
 
 # Out-of-range / wrong-type values per known setting (all JSON-serializable
@@ -98,6 +104,12 @@ INVALID_VALUE_STRATEGIES = {
         (0, -2, 1.5, True, False, "1", None)),
     "enforce_eager": st.sampled_from(
         (0, 1, 2.5, "true", "false", "True", None)),
+    # non-dict, extra key, missing key, non-int and out-of-range images
+    "limit_mm_per_prompt": st.sampled_from(
+        (2, "2", 1.0, True, False, None, [2], [],
+         {}, {"image": 0}, {"image": 9}, {"image": -1}, {"image": True},
+         {"image": False}, {"image": 1.5}, {"image": "2"}, {"image": None},
+         {"video": 1}, {"image": 1, "video": 1}, {"image": 2, "audio": 1})),
 }
 
 # Unknown setting keys — never a defined key, and never the literal

@@ -33,12 +33,18 @@ from conftest import REGION
 
 TRAINING_JOBS_TABLE_NAME = "test-training-jobs-engine-detail-audit"
 
+# ``limit_mm_per_prompt`` was added by jp6-vllm-kv-cache-oom-regression task
+# 3.1 (the multimodal limit becomes an authored, sized engine setting,
+# design Decision 1), so the resolved configuration this suite compares
+# against carries it too. assert_config_equals keeps its exact-key-set
+# strength.
 STORED_ENGINE_CONFIGURATION = {
     "dtype": "bfloat16",
     "gpu_memory_utilization": Decimal("0.3"),
     "max_model_len": 4096,
     "tensor_parallel_size": 1,
     "enforce_eager": True,
+    "limit_mm_per_prompt": {"image": 1},
 }
 
 
@@ -157,7 +163,11 @@ def assert_config_equals(expected, actual):
     assert set(actual) == set(expected), (
         f"expected settings {sorted(expected)}, got {sorted(actual)}")
     for key, value in expected.items():
-        if isinstance(value, bool):
+        if isinstance(value, dict):
+            # Nested setting (limit_mm_per_prompt): same comparison, one
+            # level down, so Decimal("1") vs 1 is checked numerically.
+            assert_config_equals(value, actual[key])
+        elif isinstance(value, bool):
             assert actual[key] is value, (
                 f"{key}: got {actual[key]!r}, expected {value!r}")
         elif isinstance(value, (int, float, Decimal)):
