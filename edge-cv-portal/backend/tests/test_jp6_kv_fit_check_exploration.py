@@ -330,6 +330,11 @@ def _seed_vllm_record(pub_env, seeded):
             "max_model_len": 4096,
             "tensor_parallel_size": 1,
             "enforce_eager": True,
+            # The authored multimodal limit as `resolve_engine_configuration`
+            # leaves it since the 2026-08-19 video widening: ONE multimodal
+            # unit. Authoring it keeps this case about the per-architecture
+            # ESCAPE (defect 1.8) instead of about the unbounded-video term.
+            "limit_mm_per_prompt": {"image": 1, "video": 0},
         },
         "packaged_components": [{
             "target": "jetson-xavier-jp6",
@@ -363,10 +368,11 @@ def _publish_event(training_id, user_id, extra_body=None):
     }
 
 
-# 20 GiB of weights at util 0.4: required 21 GiB under the SHIPPED formula
-# exceeds the 12.00 GiB arm64_jp6 budget but fits the 48.00 GiB arm64_jp7
-# budget — infeasible on the architecture being deployed, feasible on
-# another, which is precisely the escape.
+# 20 GiB of weights at util 0.4, ONE authored multimodal unit: required 21 GiB
+# under the SHIPPED formula (36 GiB under the corrected one) exceeds the
+# 12.00 GiB arm64_jp6 budget but fits the 48.00 GiB arm64_jp7 budget —
+# infeasible on the architecture being deployed, feasible on another, which is
+# precisely the escape.
 JP6_INFEASIBLE_JP7_FEASIBLE_ESTIMATE = WeightEstimate(
     total_bytes=20 * GIB,
     method="safetensors_files",
@@ -384,7 +390,8 @@ def test_case3_jp6_infeasible_jp7_feasible_record_must_not_publish(
     False and today's gate ships the configuration with at most a warning.
     """
     findings = evaluate_fit(
-        {'gpu_memory_utilization': INCIDENT_UTILIZATION},
+        {'gpu_memory_utilization': INCIDENT_UTILIZATION,
+         'limit_mm_per_prompt': {'image': 1, 'video': 0}},
         JP6_INFEASIBLE_JP7_FEASIBLE_ESTIMATE,
         ['arm64_jp6', 'arm64_jp7'])
     premise = {finding.arch: finding.fits for finding in findings}

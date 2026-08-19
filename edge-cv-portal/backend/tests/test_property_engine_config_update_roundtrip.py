@@ -98,9 +98,16 @@ ENGINE_VALUE_STRATEGIES = {
     "max_model_len": st.integers(min_value=1, max_value=131072),
     "tensor_parallel_size": st.integers(min_value=1, max_value=8),
     "enforce_eager": st.booleans(),
-    # Only {"image": <int 1..8>} is accepted (task 3.1).
-    "limit_mm_per_prompt": st.integers(min_value=1, max_value=8).map(
-        lambda n: {"image": n}),
+    # An optional {"image": <int 1..8>} and an optional {"video": <int 0..8>},
+    # at least one of them (task 3.1; the `video` key was added by the video
+    # widening task — `video: 0` is the JP6-measured serving configuration).
+    "limit_mm_per_prompt": st.one_of(
+        st.integers(min_value=1, max_value=8).map(lambda n: {"image": n}),
+        st.integers(min_value=0, max_value=8).map(lambda n: {"video": n}),
+        st.tuples(st.integers(min_value=1, max_value=8),
+                  st.integers(min_value=0, max_value=8)).map(
+            lambda pair: {"image": pair[0], "video": pair[1]}),
+    ),
 }
 
 

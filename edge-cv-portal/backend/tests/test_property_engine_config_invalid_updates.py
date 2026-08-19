@@ -87,8 +87,16 @@ VALID_VALUE_STRATEGIES = {
     "max_model_len": st.integers(min_value=1, max_value=131072),
     "tensor_parallel_size": st.integers(min_value=1, max_value=8),
     "enforce_eager": st.booleans(),
-    "limit_mm_per_prompt": st.integers(min_value=1, max_value=8).map(
-        lambda n: {"image": n}),
+    # An optional "image" (1..8) and an optional "video" (0..8); at least
+    # one of them. `video: 0` is the JP6-measured configuration (see
+    # model_import's LIMIT_MM_RANGES comment).
+    "limit_mm_per_prompt": st.one_of(
+        st.integers(min_value=1, max_value=8).map(lambda n: {"image": n}),
+        st.integers(min_value=0, max_value=8).map(lambda n: {"video": n}),
+        st.tuples(st.integers(min_value=1, max_value=8),
+                  st.integers(min_value=0, max_value=8)).map(
+            lambda pair: {"image": pair[0], "video": pair[1]}),
+    ),
 }
 
 # Out-of-range / wrong-type values per known setting (all JSON-serializable
@@ -104,12 +112,20 @@ INVALID_VALUE_STRATEGIES = {
         (0, -2, 1.5, True, False, "1", None)),
     "enforce_eager": st.sampled_from(
         (0, 1, 2.5, "true", "false", "True", None)),
-    # non-dict, extra key, missing key, non-int and out-of-range images
+    # non-dict, no key at all, unknown sub-key (still fail-closed), non-int
+    # and out-of-range counts on BOTH accepted sub-keys.
+    # NOTE (video widening): `{"video": 1}` and `{"image": 1, "video": 1}`
+    # moved from this list to VALID_VALUE_STRATEGIES — bounding video is now
+    # authorable. `{"image": 2, "audio": 1}` stays here: an unknown sub-key
+    # is still rejected fail-closed.
     "limit_mm_per_prompt": st.sampled_from(
         (2, "2", 1.0, True, False, None, [2], [],
          {}, {"image": 0}, {"image": 9}, {"image": -1}, {"image": True},
          {"image": False}, {"image": 1.5}, {"image": "2"}, {"image": None},
-         {"video": 1}, {"image": 1, "video": 1}, {"image": 2, "audio": 1})),
+         {"video": -1}, {"video": 9}, {"video": True}, {"video": 1.5},
+         {"video": "0"}, {"video": None}, {"image": 1, "video": 9},
+         {"image": 0, "video": 0}, {"image": 2, "audio": 1},
+         {"audio": 1}, {"image": 1, "video": 0, "audio": 1})),
 }
 
 # Unknown setting keys — never a defined key, and never the literal

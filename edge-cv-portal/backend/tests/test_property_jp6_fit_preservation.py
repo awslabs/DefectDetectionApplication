@@ -119,15 +119,31 @@ CO_TENANCY_RESERVATION_BYTES = {
     'arm64_jp7': 8 * GIB,   # design estimate, unmeasured [HARDWARE H6]
 }
 DEFAULT_IMAGES_PER_PROMPT = 1
+# Videos vLLM assumes when `limit_mm_per_prompt.video` is NOT authored — its
+# own per-modality default of 1, i.e. UNBOUNDED. Widened schema, 2026-08-19:
+# MEASURED on `ryanorinagxdevkithomelabjp622` (LocalServer.arm64JP6 1.0.62) at
+# `gpu_memory_utilization = 0.55`, `{'image': 1, 'video': 0}` profiled a
+# 2.47 GiB activation peak (KV 6.43 GiB, 29.41x, READY) while `{'image': 1}`
+# alone profiled 4.93 GiB (KV 0.20 GiB, 0.89x, FAILED), because vLLM reserves
+# half of its 32768-token worst case for video (`{'image': 16384,
+# 'video': 16384}`). So a configuration that authors NOTHING is sized for TWO
+# multimodal units, and the authored default `{'image': 1, 'video': 0}` for
+# one.
+DEFAULT_VIDEOS_PER_PROMPT = 1
+DEFAULT_MULTIMODAL_UNITS = DEFAULT_IMAGES_PER_PROMPT + DEFAULT_VIDEOS_PER_PROMPT
 
 
-def activation_allowance(weights_bytes, images_per_prompt=DEFAULT_IMAGES_PER_PROMPT):
-    """design Decision 2: ``max(floor, fraction × weights) × (1 +
-    increment × (images − 1))``."""
+def activation_allowance(weights_bytes,
+                         multimodal_units=DEFAULT_MULTIMODAL_UNITS):
+    """design Decision 2 as amended 2026-08-19: ``max(floor, fraction ×
+    weights) × (1 + increment × (units − 1))``, where ``units`` is the TOTAL
+    of the authored per-modality limits (images + videos), not the image count
+    alone. The default is what an Engine_Configuration authoring NOTHING is
+    sized for: one image plus one unbounded video."""
     base = max(ACTIVATION_FLOOR_BYTES,
                int(ACTIVATION_WEIGHT_FRACTION * weights_bytes))
-    images = max(1, int(images_per_prompt))
-    return int(base * (1 + MULTIMODAL_IMAGE_INCREMENT * (images - 1)))
+    units = max(1, int(multimodal_units))
+    return int(base * (1 + MULTIMODAL_IMAGE_INCREMENT * (units - 1)))
 
 
 def fraction_cap(arch):
@@ -138,7 +154,7 @@ def fraction_cap(arch):
 
 
 def fits_under_corrected_model(arch, utilization, weights_bytes,
-                               images_per_prompt=DEFAULT_IMAGES_PER_PROMPT):
+                               multimodal_units=DEFAULT_MULTIMODAL_UNITS):
     """``NOT isBugCondition(X)`` for the fit-verdict legs: the record fits
     under the CORRECTED model (condition A ∧ condition B), which implies it
     fits under the shipped one too (``required_corrected >=
@@ -146,7 +162,7 @@ def fits_under_corrected_model(arch, utilization, weights_bytes,
     profile = DEVICE_MEMORY_PROFILE_BYTES[arch]
     budget = int(float(utilization) * profile)
     required = (int(weights_bytes)
-                + activation_allowance(weights_bytes, images_per_prompt)
+                + activation_allowance(weights_bytes, multimodal_units)
                 + MINIMUM_KV_CACHE_BYTES)
     return budget >= required and float(utilization) <= fraction_cap(arch)
 
@@ -268,8 +284,10 @@ def test_jp7_record_within_headroom_fits_under_both_models():
     **[HARDWARE] H6** (task 12) and is NOT claimed here.
 
     **Validates: Requirements 3.4**"""
-    findings = evaluate_fit({'gpu_memory_utilization': JP7_UTILIZATION},
-                            JP7_WEIGHTS_BYTES, ['arm64_jp7'])
+    findings = evaluate_fit(
+        {'gpu_memory_utilization': JP7_UTILIZATION,
+         'limit_mm_per_prompt': {'image': 1, 'video': 0}},
+        JP7_WEIGHTS_BYTES, ['arm64_jp7'])
     assert len(findings) == 1
     finding = findings[0]
 
@@ -279,13 +297,24 @@ def test_jp7_record_within_headroom_fits_under_both_models():
     assert format_gib(finding.budget_bytes) == "60.00 GiB"
 
     corrected_required = (JP7_WEIGHTS_BYTES
-                          + activation_allowance(JP7_WEIGHTS_BYTES)
+                          + activation_allowance(JP7_WEIGHTS_BYTES, 1)
                           + MINIMUM_KV_CACHE_BYTES)
     assert format_gib(corrected_required) == "29.00 GiB", format_gib(
         corrected_required)
     assert corrected_required <= finding.budget_bytes
     assert JP7_UTILIZATION <= fraction_cap('arm64_jp7')
     assert round(fraction_cap('arm64_jp7'), 4) == 0.9333
+
+    # And a LEGACY record that authors no multimodal limit at all — sized for
+    # two units since the 2026-08-19 widening, because vLLM's own video
+    # default is 1 — still fits on JP7 (16 + 24 + 1 = 41.00 GiB of a 60.00 GiB
+    # budget). Preservation 3.4 holds for both authoring shapes.
+    legacy = evaluate_fit({'gpu_memory_utilization': JP7_UTILIZATION},
+                          JP7_WEIGHTS_BYTES, ['arm64_jp7'])[0]
+    assert legacy.multimodal_units == DEFAULT_MULTIMODAL_UNITS
+    assert format_gib(legacy.required_bytes) == "41.00 GiB", format_gib(
+        legacy.required_bytes)
+    assert legacy.fits is True, legacy.message
 
 
 # ---------------------------------------------------------------------------
@@ -808,12 +837,14 @@ def test_model_json_propagation_of_the_five_keys_is_byte_identical(pub_env):
 # Fixed-shape legs — ABSENT on the unfixed tree, they bind at task 3.9
 # ---------------------------------------------------------------------------
 
-def test_authored_multimodal_default_is_one_image_when_the_field_exists():
-    """FIXED-SHAPE LEG (binds at task 3.9). Once task 3.1 lands,
-    ``ENGINE_DEFAULTS['limit_mm_per_prompt']`` must be ``{'image': 1}`` —
-    the authored, sized default that replaces the device-side
-    ``{'image': 2}`` setdefault. SKIPPED as absent on the unfixed tree
-    rather than asserted, so this file passes today.
+def test_authored_multimodal_default_is_one_image_and_bounded_video():
+    """FIXED-SHAPE LEG (bound at task 3.9, amended by the video widening).
+    ``ENGINE_DEFAULTS['limit_mm_per_prompt']`` must be
+    ``{'image': 1, 'video': 0}`` — the authored, sized default that replaces
+    the device-side ``{'image': 2}`` setdefault, with the video modality
+    BOUNDED because leaving it out lets vLLM apply its own default of 1 and
+    measured a 4.93 GiB activation peak instead of 2.47 GiB on JP6
+    (2026-08-19).
 
     **Validates: Requirements 3.3, 3.9**"""
     sys.modules.pop("model_import", None)
@@ -822,7 +853,8 @@ def test_authored_multimodal_default_is_one_image_when_the_field_exists():
     if 'limit_mm_per_prompt' not in model_import.ENGINE_DEFAULTS:
         pytest.skip("fixed-shape leg: ENGINE_DEFAULTS has no "
                     "limit_mm_per_prompt yet (binds at task 3.9)")
-    assert model_import.ENGINE_DEFAULTS['limit_mm_per_prompt'] == {'image': 1}
+    assert model_import.ENGINE_DEFAULTS['limit_mm_per_prompt'] == {
+        'image': 1, 'video': 0}
 
 
 def test_new_fit_finding_terms_agree_with_the_corrected_model_when_present():
@@ -833,12 +865,22 @@ def test_new_fit_finding_terms_agree_with_the_corrected_model_when_present():
     1 GiB, co-tenancy 6 GiB, cap 0.80. SKIPPED as absent today.
 
     **Validates: Requirements 3.1**"""
-    finding = evaluate_fit({'gpu_memory_utilization': 0.4},
-                           int(6.5 * GIB), ['arm64_jp6'])[0]
+    finding = evaluate_fit(
+        {'gpu_memory_utilization': 0.4,
+         'limit_mm_per_prompt': {'image': 1, 'video': 0}},
+        int(6.5 * GIB), ['arm64_jp6'])[0]
     if not hasattr(finding, 'activation_bytes'):
         pytest.skip("fixed-shape leg: FitFinding has no activation_bytes "
                     "yet (binds at task 3.9)")
-    assert finding.activation_bytes == activation_allowance(int(6.5 * GIB))
+    # ONE authored multimodal unit: the design's recorded 4.88 GiB allowance.
+    assert finding.activation_bytes == activation_allowance(int(6.5 * GIB), 1)
+    assert format_gib(finding.activation_bytes) == "4.88 GiB"
+    # The same record with video LEFT UNBOUNDED is TWO units, so the recorded
+    # arithmetic doubles — the 2026-08-19 measurement (2.47 -> 4.93 GiB peak).
+    unbounded = evaluate_fit({'gpu_memory_utilization': 0.4},
+                             int(6.5 * GIB), ['arm64_jp6'])[0]
+    assert unbounded.activation_bytes == activation_allowance(int(6.5 * GIB))
+    assert unbounded.activation_bytes == 2 * finding.activation_bytes
     assert finding.kv_floor_bytes == MINIMUM_KV_CACHE_BYTES
     assert finding.co_tenancy_bytes == CO_TENANCY_RESERVATION_BYTES['arm64_jp6']
     assert round(finding.fraction_cap, 2) == 0.80

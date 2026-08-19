@@ -192,13 +192,21 @@ INCIDENT_UTIL = 0.4
 
 class TestWorkedVerdicts:
     def test_verdict_1_incident_one_image_fails_by_0_38_gib(self):
-        """Incident replay: util=0.4, 6.5 GiB weights, 1 image on JP6.
+        """Incident replay: util=0.4, 6.5 GiB weights, ONE multimodal unit
+        on JP6 (`{'image': 1, 'video': 0}` — the authored default).
         budget = 12.00 GiB, activation = max(2, 0.75×6.5) = 4.88 GiB,
         required = 6.5 + 4.88 + 1 = 12.38 GiB → A fails by 0.38 GiB, B
         passes (0.4 ≤ 0.80). The corrected model reproduces the reality
-        the shipped one missed by 4.50 GiB of claimed slack."""
+        the shipped one missed by 4.50 GiB of claimed slack.
+
+        The limit is authored explicitly because the allowance now scales
+        with TOTAL multimodal units: leaving `video` unbounded is a SECOND
+        unit (vLLM's own per-modality default), which the JP6 measurements
+        of 2026-08-19 priced at 4.93 GiB instead of 2.47 GiB — covered by
+        `test_unauthored_video_is_a_second_unit` below."""
         findings = evaluate_fit(
-            {'gpu_memory_utilization': INCIDENT_UTIL, 'max_model_len': 4096},
+            {'gpu_memory_utilization': INCIDENT_UTIL, 'max_model_len': 4096,
+             'limit_mm_per_prompt': {'image': 1, 'video': 0}},
             INCIDENT_WEIGHTS, ['arm64_jp6'])
         assert len(findings) == 1
         finding = findings[0]
@@ -215,27 +223,63 @@ class TestWorkedVerdicts:
         assert INCIDENT_UTIL <= fraction_cap('arm64_jp6')
 
     def test_verdict_2_incident_two_images_fails_by_5_25_gib(self):
-        """Same model, 2 images: activation = 9.75 GiB, required =
-        17.25 GiB → A fails by 5.25 GiB. The 1.0.61 regression is visible
-        at authoring time (defect 1.4)."""
+        """Same model, 2 images with video bounded (2 units): activation =
+        9.75 GiB, required = 17.25 GiB → A fails by 5.25 GiB. The 1.0.61
+        regression is visible at authoring time (defect 1.4)."""
         findings = evaluate_fit(
             {'gpu_memory_utilization': INCIDENT_UTIL,
-             'limit_mm_per_prompt': {'image': 2}},
+             'limit_mm_per_prompt': {'image': 2, 'video': 0}},
             INCIDENT_WEIGHTS, ['arm64_jp6'])
         finding = findings[0]
 
         assert finding.fits is False
         assert finding.images_per_prompt == 2
+        assert finding.multimodal_units == 2
         assert _gib(finding.activation_bytes) == "9.75 GiB"
         assert _gib(finding.required_bytes) == "17.25 GiB"
         assert "short by 5.25 GiB" in finding.message
 
+    def test_unauthored_video_is_a_second_unit(self):
+        """MEASURED 2026-08-19 on `ryanorinagxdevkithomelabjp622`
+        (LocalServer.arm64JP6 1.0.62), same model, same
+        `gpu_memory_utilization = 0.55`: `{'image': 1, 'video': 0}` profiled
+        an activation peak of 2.47 GiB (KV 6.43 GiB, 29.41x, READY) while
+        `{'image': 1}` alone profiled 4.93 GiB (KV 0.20 GiB, 0.89x, FAILED)
+        — vLLM reserves half of its 32768-token worst case for video
+        (`{'image': 16384, 'video': 16384}`).
+
+        So the same authored image count with video LEFT UNBOUNDED must be
+        sized as two units: activation 9.75 GiB, required 17.25 GiB, the
+        same numbers as an explicitly two-unit configuration."""
+        unbounded = evaluate_fit(
+            {'gpu_memory_utilization': INCIDENT_UTIL,
+             'limit_mm_per_prompt': {'image': 1}},
+            INCIDENT_WEIGHTS, ['arm64_jp6'])[0]
+        bounded = evaluate_fit(
+            {'gpu_memory_utilization': INCIDENT_UTIL,
+             'limit_mm_per_prompt': {'image': 1, 'video': 0}},
+            INCIDENT_WEIGHTS, ['arm64_jp6'])[0]
+
+        assert unbounded.images_per_prompt == bounded.images_per_prompt == 1
+        assert unbounded.videos_per_prompt == 1   # vLLM's own default
+        assert bounded.videos_per_prompt == 0     # authored bound
+        assert unbounded.multimodal_units == 2
+        assert bounded.multimodal_units == 1
+        assert _gib(unbounded.activation_bytes) == "9.75 GiB"
+        assert _gib(unbounded.required_bytes) == "17.25 GiB"
+        assert unbounded.activation_bytes == 2 * bounded.activation_bytes
+        # And the message says what the omission costs and how to fix it.
+        assert 'limit_mm_per_prompt.video' in unbounded.message
+        assert '"video": 0' in unbounded.message
+
     def test_verdict_3_jp7_qwen3_vl_fits_unchanged(self):
-        """JP7 qwen3-vl: util=0.5, ~16 GiB weights, 1 image: budget =
+        """JP7 qwen3-vl: util=0.5, ~16 GiB weights, one unit: budget =
         60.00 GiB, required = 16 + 12 + 1 = 29.00 GiB → fits;
         0.5 ≤ 0.933. The JP7 verdict is unchanged, with no warnings."""
         findings = evaluate_fit(
-            {'gpu_memory_utilization': 0.5}, 16 * GIB, ['arm64_jp7'])
+            {'gpu_memory_utilization': 0.5,
+             'limit_mm_per_prompt': {'image': 1, 'video': 0}},
+            16 * GIB, ['arm64_jp7'])
         finding = findings[0]
 
         assert finding.fits is True
@@ -272,7 +316,8 @@ class TestWorkedVerdicts:
 class TestMessageComposition:
     def _incident_failing_message(self):
         findings = evaluate_fit(
-            {'gpu_memory_utilization': INCIDENT_UTIL, 'max_model_len': 4096},
+            {'gpu_memory_utilization': INCIDENT_UTIL, 'max_model_len': 4096,
+             'limit_mm_per_prompt': {'image': 1, 'video': 0}},
             INCIDENT_WEIGHTS, ['arm64_jp6'])
         return findings[0].message
 
@@ -288,6 +333,9 @@ class TestMessageComposition:
         assert "0.80" in message              # the Fraction_Cap
         assert "arm64_jp6" in message         # the profile entry used
         assert "max_model_len" in message and "4096" in message
+        # The multimodal units the allowance assumed are named, per modality.
+        assert "1 multimodal unit(s) per prompt" in message
+        assert "1 image(s) + 0 video(s)" in message
 
     def test_remediation_ordering_hazard_reduce_then_last_resort(self):
         message = self._incident_failing_message()

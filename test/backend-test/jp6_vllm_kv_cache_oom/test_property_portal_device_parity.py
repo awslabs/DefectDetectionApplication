@@ -52,6 +52,31 @@ Properties in this file (all facets of Property 8):
        sides, so the two models cannot drift apart through their input
        parsing either.
 
+ASYMMETRY, recorded deliberately (video widening, 2026-08-19). The portal
+now sizes the activation allowance from the TOTAL authored multimodal UNITS
+(``image`` + ``video``), because vLLM reserves its worst-case token budget per
+modality — its own warning on `ryanorinagxdevkithomelabjp622`: "worst-case
+total number of multimodal tokens (32768) ... out of which {'image': 16384,
+'video': 16384} are reserved for multi-modal embeddings". MEASURED there at
+``gpu_memory_utilization = 0.55``: ``{"image": 1, "video": 0}`` profiled a
+2.47 GiB activation peak (KV 6.43 GiB, 29.41x, READY) while ``{"image": 1}``
+alone profiled 4.93 GiB (KV 0.20 GiB, 0.89x, FAILED). The DEVICE mirror
+(`vllm_runtime.memory_budget`) still counts images only, and it must: it ships
+ONLY inside an `aws.edgeml.dda.LocalServer.arm64JP6` component build, which is
+task 10/11's leg, and the ≈0.375-per-unit recalibration those measurements
+imply lands with it in task 14 / H8. So this suite pins:
+
+  * EXACT parity — every mirrored constant, and the whole required-bytes
+    arithmetic — wherever the two modules see the same number of multimodal
+    units (which includes every configuration that authors ``video``, i.e.
+    everything the portal now writes by default), and
+  * the SAFE DIRECTION where they do not: the portal is never LESS
+    conservative than the device, and portal-accepted still implies
+    device-accepted (P8-C).
+
+Neither leg is weakened: a drift in the shared formula, in any constant, or in
+the safe direction still fails loudly here.
+
 NOTE on scope (design Decision 4): the device preflight enforces the
 portal's condition A (budget sufficiency) against the device's REAL
 ``MemTotal``, plus its own starvation arm against ``MemAvailable``. The
@@ -175,19 +200,35 @@ def grid_points(draw):
     """One grid point: an architecture, weights, and an engine
     configuration whose utilization / multimodal limit / max_model_len are
     each independently present or omitted (omission exercises the mirrored
-    defaults)."""
+    defaults).
+
+    The multimodal limit is drawn over BOTH authoring shapes: with and
+    without the ``video`` sub-key (the 2026-08-19 widening). Authoring
+    ``video`` is what makes the portal's unit count equal the device
+    mirror's image count, so both the exact-parity arm and the
+    safe-direction arm of P8-B are exercised."""
     arch = draw(_architectures)
     weights_bytes = draw(_weights)
     config = {}
     if draw(st.booleans()):
         config["gpu_memory_utilization"] = draw(_utilizations)
     if draw(st.booleans()):
-        config["limit_mm_per_prompt"] = {
-            "image": draw(st.integers(min_value=1, max_value=8))}
+        limit = {"image": draw(st.integers(min_value=1, max_value=8))}
+        if draw(st.booleans()):
+            limit["video"] = draw(st.integers(min_value=0, max_value=2))
+        config["limit_mm_per_prompt"] = limit
     if draw(st.booleans()):
         config["max_model_len"] = draw(st.integers(min_value=256,
                                                    max_value=32768))
     return arch, weights_bytes, config
+
+
+def _unit_counts(config):
+    """``(portal_units, device_units)`` for ``config``: the portal counts
+    images + videos (an unauthored ``video`` costing vLLM's own default of
+    1), the device mirror counts images only until its component build
+    lands (task 14 / H8)."""
+    return fit.multimodal_units(config), mb.images_per_prompt(config)
 
 
 def _portal_finding(config, weights_bytes, arch):
@@ -217,18 +258,23 @@ def test_property_same_required_bytes_and_budget_verdict(point):
     """
     arch, weights_bytes, config = point
     finding = _portal_finding(config, weights_bytes, arch)
+    portal_units, device_units = _unit_counts(config)
 
     total = mb.DEVICE_MEMORY_PROFILE_BYTES[arch]
     reading = mb.MemoryReading(total_bytes=total, available_bytes=total)
     verdict = mb.evaluate_device_fit(config, reading,
                                      weights_bytes=weights_bytes, arch=arch)
 
-    # Same numbers, term by term.
+    # The mirrored FORMULA itself never drifts: fed the same unit count, both
+    # modules compute the same requirement. (This is the invariant the H8
+    # recalibration must preserve when the device leg's build lands.)
     assert verdict.unverified is False
-    assert verdict.terms["required_bytes"] == finding.required_bytes, (
-        verdict.terms, finding)
-    assert verdict.terms["activation_bytes"] == finding.activation_bytes, (
-        verdict.terms, finding)
+    assert mb.required_bytes(weights_bytes, portal_units) \
+        == finding.required_bytes
+    assert mb.activation_allowance(weights_bytes, portal_units) \
+        == finding.activation_bytes
+
+    # Terms that do not depend on the unit count agree unconditionally.
     assert verdict.terms["budget_bytes"] == finding.budget_bytes, (
         verdict.terms, finding)
     assert (verdict.terms["kv_floor_bytes"] == finding.kv_floor_bytes
@@ -239,22 +285,46 @@ def test_property_same_required_bytes_and_budget_verdict(point):
         verdict.terms, finding)
     assert verdict.terms["fraction_cap"] == finding.fraction_cap, (
         verdict.terms, finding)
-    # The standalone device formula computes the same requirement too.
-    assert mb.required_bytes(weights_bytes, finding.images_per_prompt) \
-        == finding.required_bytes
 
-    # Same budget-sufficiency verdict (condition A). With MemAvailable ==
-    # MemTotal the preflight's starvation arm cannot refuse anything its
-    # budget arm (util x MemTotal, identical to the portal's budget here)
-    # does not, so verdict.ok IS condition A.
     portal_condition_a = 'budget' not in finding.failed_conditions
     assert portal_condition_a == (
         finding.budget_bytes >= finding.required_bytes)  # self-consistency
-    assert verdict.ok == portal_condition_a, (
-        "budget-sufficiency drift: portal condition A={} "
-        "(budget={} required={}) but device verdict.ok={} terms={}".format(
-            portal_condition_a, finding.budget_bytes,
-            finding.required_bytes, verdict.ok, verdict.terms))
+
+    if portal_units == device_units:
+        # EXACT parity: every remaining term, and the verdict itself. With
+        # MemAvailable == MemTotal the preflight's starvation arm cannot
+        # refuse anything its budget arm (util x MemTotal, identical to the
+        # portal's budget here) does not, so verdict.ok IS condition A.
+        assert verdict.terms["required_bytes"] == finding.required_bytes, (
+            verdict.terms, finding)
+        assert verdict.terms["activation_bytes"] == finding.activation_bytes, (
+            verdict.terms, finding)
+        assert verdict.ok == portal_condition_a, (
+            "budget-sufficiency drift: portal condition A={} "
+            "(budget={} required={}) but device verdict.ok={} "
+            "terms={}".format(portal_condition_a, finding.budget_bytes,
+                              finding.required_bytes, verdict.ok,
+                              verdict.terms))
+    else:
+        # The authored-video dimension the device mirror does not know yet
+        # (it ships with the JP6 component build; H8 recalibration, task 14).
+        # The portal must be STRICTLY MORE conservative — never less — and its
+        # verdict must therefore imply the device's.
+        assert portal_units > device_units, (
+            "the portal must never count FEWER multimodal units than the "
+            "device mirror: portal={} device={} config={}".format(
+                portal_units, device_units, config))
+        assert finding.required_bytes >= verdict.terms["required_bytes"], (
+            "the portal became LESS conservative than the device mirror: "
+            "portal required={} device required={} config={}".format(
+                finding.required_bytes, verdict.terms["required_bytes"],
+                config))
+        if portal_condition_a:
+            assert verdict.ok, (
+                "portal accepted (condition A) but the device refused, in "
+                "the very state the portal models: finding={} terms={} "
+                "refusal={}".format(finding, verdict.terms,
+                                    verdict.refusal_reason))
 
 
 # ---------------------------------------------------------------------------
@@ -344,11 +414,23 @@ def test_property_tolerant_readers_agree_on_hostile_configs(
 
     device_images = mb.images_per_prompt(config)
     device_util = mb.gpu_memory_utilization(config)
+    portal_units = fit.multimodal_units(config)
 
     assert finding.images_per_prompt == device_images, (
         "images-per-prompt reader drift on {!r}: portal={} device={}".format(
             raw_limit, finding.images_per_prompt, device_images))
+    # The shared formula, fed the portal's unit count, reproduces the
+    # finding exactly — so hostile input cannot make the two ARITHMETICS
+    # diverge, only the (deliberately more conservative) portal unit count.
     assert finding.required_bytes == mb.required_bytes(weights_bytes,
+                                                       portal_units), (
+        raw_limit, raw_util, finding)
+    # And a hostile value never makes the portal cheaper than the device:
+    # every degraded reading still counts at least the image units the
+    # device counts (the authored-video leg lands with task 14 / H8).
+    assert portal_units >= device_images, (raw_limit, portal_units,
+                                           device_images)
+    assert finding.required_bytes >= mb.required_bytes(weights_bytes,
                                                        device_images), (
         raw_limit, raw_util, finding)
     assert finding.budget_bytes == int(

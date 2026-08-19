@@ -67,24 +67,77 @@ ENGINE_DEFAULTS = {
     'max_model_len': 2048,
     'tensor_parallel_size': 1,
     'enforce_eager': True,
-    # Images the engine may accept per prompt. Authored and SIZED here
-    # (jp6-vllm-kv-cache-oom-regression, Decision 1) rather than defaulted
-    # on the device: the value drives vLLM's multimodal profiling peak, so
-    # an unbudgeted device-side default is invisible to every sizing
-    # surface by construction (defect 1.4). Named exactly as vLLM's
+    # Multimodal items the engine may accept per prompt. Authored and SIZED
+    # here (jp6-vllm-kv-cache-oom-regression, Decision 1) rather than
+    # defaulted on the device: the value drives vLLM's multimodal profiling
+    # peak, so an unbudgeted device-side default is invisible to every
+    # sizing surface by construction (defect 1.4). Named exactly as vLLM's
     # EngineArgs field so it propagates verbatim into model.json with no
     # translation anywhere (Requirement 3.3).
-    'limit_mm_per_prompt': {'image': 1}
+    #
+    # `video: 0` is part of the DEFAULT deliberately. Video is never an input
+    # in this product (inputs are camera frames and folder images), but vLLM
+    # sizes its worst case from the multimodal limits it is given and its own
+    # per-modality default is 1 — verbatim from the engine's warning on
+    # `ryanorinagxdevkithomelabjp622` (LocalServer.arm64JP6 1.0.62,
+    # 2026-08-19): "worst-case total number of multimodal tokens (32768) ...
+    # out of which {'image': 16384, 'video': 16384} are reserved for
+    # multi-modal embeddings". Half that worst case is video the product
+    # never sends. Measured on that device, same model, same
+    # `gpu_memory_utilization = 0.55`:
+    #   * {'image': 1, 'video': 0} -> activation peak 2.47 GiB, KV 6.43 GiB,
+    #     Maximum concurrency 29.41x, READY.
+    #   * {'image': 1} (video UNBOUND) -> activation peak 4.93 GiB, KV
+    #     0.20 GiB, concurrency 0.89x, FAILED ("max seq len (4096) is larger
+    #     than the maximum number of tokens that can be stored in KV cache
+    #     (3664)").
+    # Bounding video to 0 HALVES the measured activation peak (4.93 -> 2.47
+    # GiB) and was the only schema-expressible configuration measured to
+    # serve `qwen2-5-vl-7b-instruct-awq` on JP6 with real headroom, so it is
+    # what a newly authored record gets by default. A model that genuinely
+    # takes video authors its own count explicitly.
+    'limit_mm_per_prompt': {'image': 1, 'video': 0}
 }
 
 ENGINE_DTYPE_VALUES = ('auto', 'float16', 'bfloat16', 'float32')
 
-# limit_mm_per_prompt accepts exactly one key mapped to an integer in this
-# inclusive range. Two-image reference generation
-# (vlm-anomaly-reference-parity Requirement 6.6) needs {'image': 2}.
+# limit_mm_per_prompt accepts the modality keys below, each mapped to an
+# integer in its own inclusive range; every OTHER sub-key is rejected
+# fail-closed with a per-field finding.
+#
+# `image` keeps its 1..8 range: two-image reference generation
+# (vlm-anomaly-reference-parity Requirement 6.6) needs {'image': 2}, and a
+# vision-language model that accepts no image at all is not a configuration
+# this portal authors.
+#
+# `video` accepts **0**, and that is the whole point of its range starting
+# there. MEASURED on `ryanorinagxdevkithomelabjp622` (LocalServer.arm64JP6
+# 1.0.62, MemTotal 29.96 GiB), from vLLM's own profiling output:
+#   * `gpu_memory_utilization=0.55` + {'image': 1, 'video': 0} →
+#     weights 6.59 | non_torch 0.98 | activation peak 2.47 | KV 6.43 GiB,
+#     Maximum concurrency 29.41x, READY.
+#   * `gpu_memory_utilization=0.55` + {'image': 1} (video UNBOUND) →
+#     weights 6.59 | non_torch 4.76 | activation peak 4.93 | KV 0.20 GiB,
+#     concurrency 0.89x, FAILED ("max seq len (4096) is larger than the
+#     maximum number of tokens that can be stored in KV cache (3664)").
+# vLLM's own warning explains why: the worst-case multimodal budget is 32768
+# tokens, {'image': 16384, 'video': 16384} — HALF of it reserved for video on
+# a model only ever asked for images. Bounding video to 0 halves the
+# activation peak (4.93 → 2.47 GiB) and is the ONLY configuration measured to
+# serve this model with real headroom, so the authored schema must be able to
+# express it.
 LIMIT_MM_PER_PROMPT_KEY = 'image'
+LIMIT_MM_VIDEO_KEY = 'video'
+LIMIT_MM_ACCEPTED_KEYS = (LIMIT_MM_PER_PROMPT_KEY, LIMIT_MM_VIDEO_KEY)
 LIMIT_MM_IMAGE_MIN = 1
 LIMIT_MM_IMAGE_MAX = 8
+LIMIT_MM_VIDEO_MIN = 0
+LIMIT_MM_VIDEO_MAX = 8
+#: Per-modality inclusive ranges, keyed by sub-key.
+LIMIT_MM_RANGES = {
+    LIMIT_MM_PER_PROMPT_KEY: (LIMIT_MM_IMAGE_MIN, LIMIT_MM_IMAGE_MAX),
+    LIMIT_MM_VIDEO_KEY: (LIMIT_MM_VIDEO_MIN, LIMIT_MM_VIDEO_MAX),
+}
 
 
 def _validate_engine_setting(key: str, value: Any) -> str:
@@ -113,26 +166,40 @@ def _validate_engine_setting(key: str, value: Any) -> str:
         if not isinstance(value, bool):
             return 'enforce_eager must be a boolean'
     elif key == 'limit_mm_per_prompt':
-        # Accept ONLY {"image": <int 1..8>}: nothing else is sized by the
-        # Fit_Check (jp6-vllm-kv-cache-oom-regression Decision 1).
-        shape = (f'limit_mm_per_prompt must be an object of the form '
-                 f'{{"{LIMIT_MM_PER_PROMPT_KEY}": <integer '
-                 f'{LIMIT_MM_IMAGE_MIN}..{LIMIT_MM_IMAGE_MAX}>}}')
+        # Accept an optional "image" (1..8) and an optional "video" (0..8),
+        # at least one of them; every other sub-key is rejected fail-closed
+        # (jp6-vllm-kv-cache-oom-regression Decision 1). Bounding "video" to
+        # 0 is what stops vLLM reserving half of its 32768-token worst-case
+        # multimodal budget for a modality the model is never asked for.
+        shape = (f'limit_mm_per_prompt must be an object with an optional '
+                 f'"{LIMIT_MM_PER_PROMPT_KEY}" (integer {LIMIT_MM_IMAGE_MIN}..'
+                 f'{LIMIT_MM_IMAGE_MAX}) and an optional '
+                 f'"{LIMIT_MM_VIDEO_KEY}" (integer {LIMIT_MM_VIDEO_MIN}..'
+                 f'{LIMIT_MM_VIDEO_MAX}) key')
         if isinstance(value, bool) or not isinstance(value, dict):
             return shape
-        if set(value) != {LIMIT_MM_PER_PROMPT_KEY}:
-            return (f'{shape}; the only accepted key is '
-                    f'"{LIMIT_MM_PER_PROMPT_KEY}"')
-        images = value[LIMIT_MM_PER_PROMPT_KEY]
-        # bool is an int subclass — reject explicitly
-        if isinstance(images, bool) or not isinstance(images, int):
-            return (f'limit_mm_per_prompt.{LIMIT_MM_PER_PROMPT_KEY} must be '
-                    f'an integer in {LIMIT_MM_IMAGE_MIN}..'
-                    f'{LIMIT_MM_IMAGE_MAX}')
-        if not (LIMIT_MM_IMAGE_MIN <= images <= LIMIT_MM_IMAGE_MAX):
-            return (f'limit_mm_per_prompt.{LIMIT_MM_PER_PROMPT_KEY} must be '
-                    f'an integer in {LIMIT_MM_IMAGE_MIN}..'
-                    f'{LIMIT_MM_IMAGE_MAX}')
+        unknown = sorted(str(k) for k in value if k not in LIMIT_MM_RANGES)
+        if unknown:
+            return (f'{shape}; the accepted keys are '
+                    f'"{LIMIT_MM_PER_PROMPT_KEY}" and '
+                    f'"{LIMIT_MM_VIDEO_KEY}" (rejected: '
+                    f'{", ".join(unknown)})')
+        if not value:
+            return (f'{shape}; at least one of '
+                    f'"{LIMIT_MM_PER_PROMPT_KEY}", "{LIMIT_MM_VIDEO_KEY}" '
+                    f'is required')
+        for sub_key in LIMIT_MM_ACCEPTED_KEYS:
+            if sub_key not in value:
+                continue
+            minimum, maximum = LIMIT_MM_RANGES[sub_key]
+            count = value[sub_key]
+            # bool is an int subclass — reject explicitly
+            if isinstance(count, bool) or not isinstance(count, int):
+                return (f'limit_mm_per_prompt.{sub_key} must be an integer '
+                        f'in {minimum}..{maximum}')
+            if not (minimum <= count <= maximum):
+                return (f'limit_mm_per_prompt.{sub_key} must be an integer '
+                        f'in {minimum}..{maximum}')
     return ''
 
 
@@ -529,18 +596,28 @@ def get_vllm_engine_spec(event: Dict, context: Any) -> Dict:
                 'type': 'object',
                 'range': f'{{"{LIMIT_MM_PER_PROMPT_KEY}": '
                          f'<integer {LIMIT_MM_IMAGE_MIN}..'
-                         f'{LIMIT_MM_IMAGE_MAX}>}}',
-                'accepted_keys': [LIMIT_MM_PER_PROMPT_KEY],
-                'description': 'Images the engine may accept per prompt. '
-                               'Raising it increases the engine\'s '
-                               'profiling peak (more GPU memory is reserved '
-                               'for activations, leaving less for the KV '
-                               'cache), so size it deliberately. Two-image '
-                               'reference generation '
+                         f'{LIMIT_MM_IMAGE_MAX}>, '
+                         f'"{LIMIT_MM_VIDEO_KEY}": <integer '
+                         f'{LIMIT_MM_VIDEO_MIN}..{LIMIT_MM_VIDEO_MAX}>}} '
+                         f'(both keys optional, at least one required)',
+                'accepted_keys': list(LIMIT_MM_ACCEPTED_KEYS),
+                'description': 'Multimodal items the engine may accept per '
+                               'prompt. Raising a count increases the '
+                               'engine\'s profiling peak (more GPU memory is '
+                               'reserved for activations, leaving less for '
+                               'the KV cache), so size it deliberately. '
+                               'Two-image reference generation '
                                '(vlm-anomaly-reference-parity Requirement '
                                '6.6) requires {"image": 2}; text-only and '
                                'single-image models should stay at '
-                               '{"image": 1}.'
+                               '{"image": 1}. Set "video": 0 on a model that '
+                               'is only ever asked for images: vLLM '
+                               'otherwise reserves half of its worst-case '
+                               'multimodal token budget for video, and '
+                               'bounding it to 0 was measured on JP6 to '
+                               'halve the activation peak (4.93 GiB -> 2.47 '
+                               'GiB) and to turn a failing load into one '
+                               'serving with 6.43 GiB of KV cache.'
             }
         },
         'source': {

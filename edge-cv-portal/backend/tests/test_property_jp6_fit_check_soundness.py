@@ -72,14 +72,38 @@ from test_property_fit_check_decision import (  # noqa: E402
 # ---------------------------------------------------------------------------
 _images_cases = st.one_of(st.none(), st.integers(min_value=1, max_value=4))
 
+# The VIDEO dimension (widened schema, 2026-08-19): ``None`` means the key is
+# not authored at all, which is NOT free — vLLM applies its own per-modality
+# default of 1, so the modality costs a full extra unit. MEASURED on
+# `ryanorinagxdevkithomelabjp622` at `gpu_memory_utilization = 0.55`:
+# ``{"image": 1, "video": 0}`` profiled a 2.47 GiB activation peak (KV
+# 6.43 GiB, 29.41x, READY); ``{"image": 1}`` profiled 4.93 GiB (KV 0.20 GiB,
+# 0.89x, FAILED). An explicit ``0`` is therefore strictly cheaper than an
+# absent key, and both arms are generated here.
+_videos_cases = st.one_of(st.none(), st.integers(min_value=0, max_value=2))
 
-def _with_images(engine_configuration, images):
-    """Overlay the authored multimodal limit; return (config, effective)."""
+#: Videos vLLM assumes when the key is not authored (its own default).
+UNAUTHORED_VIDEOS = 1
+
+
+def _with_multimodal_limit(engine_configuration, images, videos):
+    """Overlay the authored multimodal limit; return
+    ``(config, effective_images, effective_videos, effective_units)``.
+
+    ``images is None`` / ``videos is None`` mean the sub-key is not authored,
+    so vLLM's own per-modality default of 1 applies to it."""
     config = dict(engine_configuration)
-    if images is None:
-        return config, 1
-    config["limit_mm_per_prompt"] = {"image": images}
-    return config, images
+    limit = {}
+    if images is not None:
+        limit["image"] = images
+    if videos is not None:
+        limit["video"] = videos
+    if limit:
+        config["limit_mm_per_prompt"] = limit
+    effective_images = 1 if images is None else images
+    effective_videos = UNAUTHORED_VIDEOS if videos is None else videos
+    return (config, effective_images, effective_videos,
+            effective_images + effective_videos)
 
 
 _NEVER_LOWER = re.compile(
@@ -93,9 +117,10 @@ _NEVER_LOWER = re.compile(
 # Validates: Requirements 2.1, 2.2
 @settings(deadline=None)
 @given(config_case=engine_configurations(), estimate_case=estimates(),
-       architectures=_architecture_sets, images=_images_cases)
+       architectures=_architecture_sets, images=_images_cases,
+       videos=_videos_cases)
 def test_verdict_equals_conjunction_of_budget_and_co_tenancy(
-        config_case, estimate_case, architectures, images):
+        config_case, estimate_case, architectures, images, videos):
     """**Property 1: Bug Condition — Unsound Fit_Check verdict** (verdict
     leg): for any (utilization, weights, arch set, images) the fixed
     ``evaluate_fit`` reports ``fits = A ∧ B`` EXACTLY — the activation
@@ -109,7 +134,9 @@ def test_verdict_equals_conjunction_of_budget_and_co_tenancy(
     """
     engine_configuration, utilization = config_case
     estimate_arg, estimate_bytes = estimate_case
-    config, effective_images = _with_images(engine_configuration, images)
+    (config, effective_images, effective_videos,
+     effective_units) = _with_multimodal_limit(engine_configuration, images,
+                                               videos)
 
     findings = evaluate_fit(config, estimate_arg, architectures)
 
@@ -117,7 +144,7 @@ def test_verdict_equals_conjunction_of_budget_and_co_tenancy(
     assert [f.arch for f in findings] == profiled
 
     activation_bytes = expected_activation_allowance(
-        estimate_bytes, effective_images)
+        estimate_bytes, effective_units)
     required_bytes = (estimate_bytes + activation_bytes
                       + MINIMUM_KV_CACHE_BYTES)
 
@@ -132,7 +159,9 @@ def test_verdict_equals_conjunction_of_budget_and_co_tenancy(
         assert finding.required_bytes == required_bytes, (
             f"{finding.arch}: required {finding.required_bytes} != weights "
             f"{estimate_bytes} + activation {activation_bytes} (at "
-            f"{effective_images} image(s)) + KV floor "
+            f"{effective_units} multimodal unit(s): "
+                f"{effective_images} image(s) + {effective_videos} "
+                f"video(s)) + KV floor "
             f"{MINIMUM_KV_CACHE_BYTES}")
 
         condition_a = budget_bytes >= required_bytes
@@ -149,6 +178,8 @@ def test_verdict_equals_conjunction_of_budget_and_co_tenancy(
         assert finding.activation_bytes == activation_bytes
         assert finding.kv_floor_bytes == MINIMUM_KV_CACHE_BYTES
         assert finding.images_per_prompt == effective_images
+        assert finding.videos_per_prompt == effective_videos
+        assert finding.multimodal_units == effective_units
         expected_failed = []
         if not condition_a:
             expected_failed.append('budget')
@@ -167,9 +198,10 @@ def test_verdict_equals_conjunction_of_budget_and_co_tenancy(
 # Validates: Requirements 2.1, 2.2
 @settings(deadline=None)
 @given(config_case=engine_configurations(), estimate_case=estimates(),
-       architectures=_architecture_sets, images=_images_cases)
+       architectures=_architecture_sets, images=_images_cases,
+       videos=_videos_cases)
 def test_failing_message_names_every_term_with_its_number(
-        config_case, estimate_case, architectures, images):
+        config_case, estimate_case, architectures, images, videos):
     """**Property 1: Bug Condition — Unsound Fit_Check verdict** (message
     leg): every generated FAILING finding's message names the weights, the
     activation allowance (labelled an ESTIMATE), the KV floor, the budget,
@@ -181,12 +213,14 @@ def test_failing_message_names_every_term_with_its_number(
     """
     engine_configuration, utilization = config_case
     estimate_arg, estimate_bytes = estimate_case
-    config, effective_images = _with_images(engine_configuration, images)
+    (config, effective_images, effective_videos,
+     effective_units) = _with_multimodal_limit(engine_configuration, images,
+                                               videos)
 
     findings = evaluate_fit(config, estimate_arg, architectures)
 
     activation_bytes = expected_activation_allowance(
-        estimate_bytes, effective_images)
+        estimate_bytes, effective_units)
 
     for finding in findings:
         if finding.fits:
@@ -216,6 +250,21 @@ def test_failing_message_names_every_term_with_its_number(
         assert f"{cap:.2f}" in message, (
             f"{finding.arch}: failing message misses the {cap:.2f} "
             f"Fraction_Cap: {message!r}")
+        # ... and the multimodal units the allowance assumed, per modality
+        # (the widened schema, 2026-08-19: an unauthored `video` is a full
+        # extra unit, so the message must say which units it sized for).
+        assert f"{effective_units} multimodal unit(s) per prompt" in message, (
+            f"{finding.arch}: failing message does not name the "
+            f"{effective_units} multimodal unit(s) the allowance assumed: "
+            f"{message!r}")
+        assert (f"{effective_images} image(s) + {effective_videos} video(s)"
+                in message), (
+            f"{finding.arch}: failing message does not break the units down "
+            f"per modality: {message!r}")
+        if videos is None:
+            assert 'limit_mm_per_prompt.video is NOT authored' in message, (
+                f"{finding.arch}: an unauthored video modality must be "
+                f"called out as the extra unit it is: {message!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -226,9 +275,10 @@ def test_failing_message_names_every_term_with_its_number(
 # Validates: Requirements 2.3
 @settings(deadline=None)
 @given(config_case=engine_configurations(), estimate_case=estimates(),
-       architectures=_architecture_sets, images=_images_cases)
+       architectures=_architecture_sets, images=_images_cases,
+       videos=_videos_cases)
 def test_remediation_orders_demand_reduction_and_respects_the_cap(
-        config_case, estimate_case, architectures, images):
+        config_case, estimate_case, architectures, images, videos):
     """**Property 1: Bug Condition — Unsound Fit_Check verdict**
     (remediation leg): every generated failing finding's remediation lists
     the demand-reducing options BEFORE any mention of raising the fraction;
@@ -240,7 +290,8 @@ def test_remediation_orders_demand_reduction_and_respects_the_cap(
     """
     engine_configuration, utilization = config_case
     estimate_arg, estimate_bytes = estimate_case
-    config, _effective_images = _with_images(engine_configuration, images)
+    config = _with_multimodal_limit(engine_configuration, images,
+                                    videos)[0]
 
     findings = evaluate_fit(config, estimate_arg, architectures)
 

@@ -36,15 +36,19 @@ TRAINING_JOBS_TABLE_NAME = "test-training-jobs-engine-detail-audit"
 # ``limit_mm_per_prompt`` was added by jp6-vllm-kv-cache-oom-regression task
 # 3.1 (the multimodal limit becomes an authored, sized engine setting,
 # design Decision 1), so the resolved configuration this suite compares
-# against carries it too. assert_config_equals keeps its exact-key-set
-# strength.
+# against carries it too. Its ``video: 0`` arm arrived with the 2026-08-19
+# video widening — the authored default is now ``{'image': 1, 'video': 0}``,
+# because leaving video unbounded lets vLLM reserve half of its 32768-token
+# worst-case multimodal budget for a modality this product never sends
+# (MEASURED on JP6: activation peak 4.93 GiB unbounded vs 2.47 GiB bounded).
+# assert_config_equals keeps its exact-key-set strength, one level down too.
 STORED_ENGINE_CONFIGURATION = {
     "dtype": "bfloat16",
     "gpu_memory_utilization": Decimal("0.3"),
     "max_model_len": 4096,
     "tensor_parallel_size": 1,
     "enforce_eager": True,
-    "limit_mm_per_prompt": {"image": 1},
+    "limit_mm_per_prompt": {"image": 1, "video": 0},
 }
 
 

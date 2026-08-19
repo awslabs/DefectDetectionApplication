@@ -68,7 +68,19 @@ status maps, the JP7 image, or the GPU-fallback status surfaces owned by
   memory vLLM will target. `gpu_memory_utilization` is a fraction of **total**
   device memory, not of free memory.
 - **Activation_Allowance**: The estimated PyTorch activation/profiling peak vLLM
-  charges against the Budget (measured 4.92 GiB for this model, one image).
+  charges against the Budget. It scales with **Multimodal_Units**, not with images
+  alone (amended 2026-08-19). Measured points, all same model: 4.92 GiB at
+  `util = 0.4` on 1.0.59 (one image, video **unbound**); on 1.0.62 at
+  `util = 0.55`, **2.47 GiB** with `{'image': 1, 'video': 0}` and **4.93 GiB** with
+  `{'image': 1}` (video unbound).
+- **Multimodal_Units**: The total of the authored per-modality limits
+  (`limit_mm_per_prompt.image + limit_mm_per_prompt.video`) the
+  Activation_Allowance is sized for. vLLM reserves its worst-case multimodal token
+  budget **per modality** (its own warning: 32768 tokens,
+  `{'image': 16384, 'video': 16384}`), so an **absent** `video` key is priced at
+  vLLM's own default of 1 — a full extra unit — while an authored `"video": 0`
+  costs nothing. This is why the product's default is `{'image': 1, 'video': 0}`:
+  one unit.
 - **Co_Tenancy_Reservation**: Per-architecture memory held by other consumers of
   the same unified memory before vLLM starts (measured ≈5.7 GiB in the three
   ONNX Triton python-backend stubs plus the containers; `free -g` showed 6 GB
@@ -257,15 +269,90 @@ that reaches READY with a healthy margin.
 
 ### Decision 1: the multimodal limit becomes an authored, sized engine setting; the device stops defaulting it
 
-**Decision.** `limit_mm_per_prompt` becomes a first-class
-`ENGINE_DEFAULTS` field with default `{"image": 1}`, validated (object with the
-single key `image`, integer 1–8), stored on the record, propagated **verbatim**
-into `model.json` (it is already a standard `EngineArgs` field, so no
-translation is needed anywhere), and read by the Fit_Check as the multimodal
-term of the Activation_Allowance. The device-side
+**Decision (REVISED 2026-08-19 — see "Schema revision" below; the original
+single-key form is recorded verbatim there and is SUPERSEDED).**
+`limit_mm_per_prompt` becomes a first-class `ENGINE_DEFAULTS` field with default
+`{"image": 1, "video": 0}`, validated as an object whose keys are a **non-empty
+subset of `{image, video}`** — `image` an integer **1..8**, `video` an integer
+**0..8**, every other sub-key rejected fail-closed with its own per-field
+finding — stored on the record, propagated **verbatim** into `model.json` (it is
+already a standard `EngineArgs` field, so no translation is needed anywhere), and
+read by the Fit_Check as the multimodal term of the Activation_Allowance. That
+term is the **total of the authored per-modality counts** (images + videos), not
+the image count alone, and an **absent** `video` key is priced at vLLM's own
+per-modality default of **1** — so omitting the bound is deliberately more
+expensive than authoring `"video": 0`. The device-side
 `engine_args.setdefault("limit_mm_per_prompt", {"image": 2})` is **removed**: when
-the staged args omit the key, the engine uses vLLM's own default (1 image) and
-the demand equals 1.0.59's.
+the staged args omit the key, the engine uses vLLM's own defaults and the demand
+equals 1.0.59's.
+
+**Schema revision (2026-08-19): per-modality keys, `video` bounded by default.**
+
+*Recorded verbatim, the schema this SUPERSEDES:* "`limit_mm_per_prompt` becomes a
+first-class `ENGINE_DEFAULTS` field with default `{"image": 1}`, validated
+(object with the single key `image`, integer 1–8)".
+
+*Why it is superseded:* the single-key schema **could not express the only
+configuration measured to serve this model on JP6 with headroom.** Measured on
+`ryanorinagxdevkithomelabjp622` (LocalServer.arm64JP6 **1.0.62**, MemTotal
+**29.96 GiB**), both runs at `gpu_memory_utilization = 0.55`, same model, verbatim
+from vLLM's own profiling output:
+
+- `{'image': 1, 'video': 0}` → `model weights take 6.59GiB; non_torch_memory
+  takes 0.98GiB; PyTorch activation peak memory takes 2.47GiB; the rest of the
+  memory reserved for KV Cache is 6.43GiB`, `Maximum concurrency for 4096 tokens
+  per request: 29.41x` — **READY** at 2026-08-19T00:29:52Z.
+- `{'image': 1}` (video unbound) → `model weights take 6.59GiB;
+  non_torch_memory takes 4.76GiB; PyTorch activation peak memory takes 4.93GiB;
+  the rest of the memory reserved for KV Cache is 0.20GiB`, `Maximum concurrency
+  ... 0.89x` — **FAILED**: `kv-cache-exhaustion: The model's max seq len (4096)
+  is larger than the maximum number of tokens that can be stored in KV cache
+  (3664)`.
+
+vLLM's own warning explains the mechanism: `worst-case total number of
+multimodal tokens (32768) ... out of which {'image': 16384, 'video': 16384} are
+reserved for multi-modal embeddings`. **Half** the worst case is video this
+product never sends — the inputs are camera frames and folder images — and the
+engine sizes its activation peak from the limits it is given, not from the
+traffic it receives. Bounding video to 0 **halves the activation peak, 4.93 →
+2.47 GiB**, which is the attributable, repeatable effect of the bound.
+
+*Honest note on the same two runs:* `non_torch_memory` **also** differed (0.98 vs
+4.76 GiB), and that term is known to swing independently of configuration on this
+device (historically −0.05 to 8.29 GiB, defect 1.7). The KV difference between the
+two runs is therefore **not** wholly attributable to the video bound; the
+**activation halving is**, and it is the only part this schema claims. The
+end-to-end READY-vs-FAILED outcome of these two specific runs is a single
+observation each, not a proven distribution.
+
+*Consequences carried into the rest of this design:*
+
+- The multimodal term of the Activation_Allowance counts **units** (images +
+  videos), so an unauthored `video` costs a full extra unit — the refusing
+  direction (Decision 2's formula, restated there).
+- `image` keeps `1..8` (a vision-language model that accepts no image is not a
+  configuration this portal authors) while `video` starts at **0** (a video-less
+  model is exactly what this product ships). The two sub-keys deliberately have
+  **different** ranges.
+- Every other sub-key (`audio`, …) stays **fail-closed** with a per-field
+  finding, and `{}` is rejected: a limit that bounds nothing is not a
+  configuration.
+- The engine-spec endpoint advertises both keys and both ranges, since both
+  frontend forms are schema-driven off it — an unadvertised key is unauthorable.
+- Preservation 3.9 is untouched: two-image reference generation is still
+  authorable as `{"image": 2, "video": 0}`.
+- **[ESTIMATE, not measured]** No claim is made here about `video: N > 0`
+  configurations; the schema admits `0..8` for symmetry with `image`, but no
+  video-serving configuration has been profiled on this hardware.
+- **Records stored before this field existed are priced at two units.** Both
+  Fit_Check call sites (`model_import.evaluate_fit_check`,
+  `greengrass_publish`) pass the **stored** `engine_configuration`, not the
+  resolved one, so a legacy record with no `limit_mm_per_prompt` gets vLLM's own
+  defaults (1 image + 1 unbounded video = 2 units) and a correspondingly larger
+  allowance. That is the honest reading of what such a record will actually do on
+  a device, and it is the fail-closed direction; re-authoring the record with
+  `{'image': 1, 'video': 0}` is the one-field fix and the remediation text says
+  so.
 
 **When a workflow needs two images but the loaded model was authored for one:
 fail the request truthfully.** `_build_multimodal_prompt` rejects a
@@ -321,13 +408,37 @@ re-package and re-publish"). It does not silently drop the reference image.
   needs translation in `packaging.py`, breaks the verbatim-propagation property,
   and hides the real knob from operators reading `model.json` on a device.
 
-**Honesty note.** The 4.92 GiB activation peak is the **one-image** number
-measured on 1.0.59. The two-image peak on 1.0.61 was never measured (the image
-was pruned from the device). The multimodal term in Decision 2's formula is
-therefore an explicitly conservative, unmeasured coefficient **[HARDWARE to
-calibrate]**, and the design's correctness does not depend on its precise value:
-the device preflight and the on-hardware verification task are what prove the
-outcome.
+**Honesty note.** The 4.92 GiB activation peak is the **one-image, video-unbound**
+number measured on 1.0.59 at `util = 0.4`. The two-image peak on 1.0.61 was never
+measured (the image was pruned from the device) and **still has not been** — no
+`{"image": 2, …}` configuration has been profiled on this hardware, so
+`MULTIMODAL_IMAGE_INCREMENT` remains an **[ESTIMATE, HARDWARE H8 to calibrate]**
+in the *per-additional-image* direction.
+
+**Amended 2026-08-19 — what the new measurements do and do not settle.** The two
+1.0.62 runs above give the *unit* term one real data point pair at
+`util = 0.55`: one unit (`{'image': 1, 'video': 0}`) → 2.47 GiB, two units
+(`{'image': 1}`, video at vLLM's default of 1) → 4.93 GiB. The **ratio** the
+formula encodes is therefore confirmed for units (2 units cost ≈2× one unit,
+within 0.01 GiB), while `ACTIVATION_WEIGHT_FRACTION = 0.75` is shown to be
+roughly **2× too high per unit** (the measurements imply ≈0.375 of weights:
+2.47 GiB against 6.59 GiB). That recalibration is **deferred, not forgotten** —
+the constant is mirrored in `src/backend/vllm_runtime/memory_budget.py` and pinned
+equal by the Property 8 parity test, and the device mirror ships **only** via an
+`aws.edgeml.dda.LocalServer.arm64JP6` component build, so both legs must move
+together (spec task 14 / H8). Until then the portal allowance stays deliberately
+high in the refusing direction, which is the intended posture. **The design's
+correctness does not depend on the coefficient's precision** — the device
+preflight and the on-hardware verification tasks are what prove the outcome.
+
+**Stated limitation of the portal model (not papered over).** Because the
+allowance is `max(2 GiB, 0.75 × weights) × units`, the portal predicts **4.94 GiB
+for the one-unit case and 9.89 GiB for the two-unit case** against the measured
+2.47 and 4.93 GiB. It reproduces the measured **direction and 2:1 ratio exactly**
+and therefore refuses the unbounded-video configuration more readily than the
+bounded one; it **cannot express the measured absolute 2.47 vs 4.93 GiB pair** at
+the current coefficient. No coefficient is invented here to make it fit — the
+single calibration point lands in H8 with the device mirror.
 
 ### Decision 2: a sound Fit_Check — activation allowance, co-tenancy cap, honest profile semantics, and a per-arch publish gate
 
@@ -335,11 +446,14 @@ outcome.
 documented terms.
 
 ```
-activation_allowance(weights, images) :=
+// units := limit_mm_per_prompt.image (default 1) + limit_mm_per_prompt.video
+//          (default 1 — vLLM's own per-modality default when the key is ABSENT;
+//           an authored "video": 0 contributes 0). Amended 2026-08-19.
+activation_allowance(weights, units) :=
     max(ACTIVATION_FLOOR_BYTES, ACTIVATION_WEIGHT_FRACTION * weights)
-    * (1 + MULTIMODAL_IMAGE_INCREMENT * (images - 1))
+    * (1 + MULTIMODAL_IMAGE_INCREMENT * (units - 1))
 
-required := weights + activation_allowance(weights, images) + MINIMUM_KV_CACHE
+required := weights + activation_allowance(weights, units) + MINIMUM_KV_CACHE
 budget   := util * DEVICE_MEMORY_PROFILE_BYTES[arch]
 cap      := (DEVICE_MEMORY_PROFILE_BYTES[arch]
              - CO_TENANCY_RESERVATION_BYTES[arch]) / DEVICE_MEMORY_PROFILE_BYTES[arch]
@@ -356,8 +470,8 @@ Constants, with their provenance:
 | `DEVICE_MEMORY_PROFILE_BYTES` | 30 GiB | 120 GiB | **Value unchanged** (satisfies sibling Requirement 3.8 literally); **re-documented** as TOTAL device memory as the engine sees it — reconciled against `free -g` total 29 GB and vLLM's own four terms summing to ≈29.95 GiB. |
 | `MINIMUM_KV_CACHE_BYTES` | 1 GiB | 1 GiB | Value unchanged; re-documented as a *serving-margin floor*, not a hard load threshold — 0.65 GiB demonstrably served at 2.95x for 4096 tokens. Breaching it is the Thin_Margin warning (Decision 6). |
 | `ACTIVATION_FLOOR_BYTES` | 2 GiB | 2 GiB | Conservative floor for small models where a fraction-of-weights term would round to nothing. Estimate. |
-| `ACTIVATION_WEIGHT_FRACTION` | 0.75 | 0.75 | Calibrated to the single measured point: 4.92 GiB peak against 6.47 GiB of weights = 0.76, `enforce_eager=true`, `max_model_len=4096`. |
-| `MULTIMODAL_IMAGE_INCREMENT` | 1.0 / extra image | 1.0 | **Unmeasured, deliberately high** so two-image configurations must be sized explicitly [HARDWARE to calibrate]. |
+| `ACTIVATION_WEIGHT_FRACTION` | 0.75 | 0.75 | Calibrated to the then-single measured point: 4.92 GiB peak against 6.47 GiB of weights = 0.76, `enforce_eager=true`, `max_model_len=4096` — which is now understood to have been a **two-unit** (video-unbound) measurement. The 2026-08-19 pair implies ≈**0.375 per unit**, i.e. this constant is ~2× high. **Recalibration DEFERRED to task 14 / H8** because the value is mirrored in the device module and pinned by the Property 8 parity test; both legs move together, and the device leg needs a JP6 component build. Conservative in the refusing direction meanwhile. |
+| `MULTIMODAL_IMAGE_INCREMENT` | 1.0 / extra **unit** | 1.0 | Per-**unit** ratio **confirmed** by the 2026-08-19 pair (2 units ≈ 2× one unit, within 0.01 GiB). Per-additional-**image** still **[ESTIMATE, H8]** — no `image ≥ 2` configuration has been profiled. Deliberately high so multi-unit configurations must be sized explicitly. |
 | `CO_TENANCY_RESERVATION_BYTES` | 6 GiB | 8 GiB | JP6 measured: 5.7 GiB in the three ONNX Triton stubs (`ps -eo rss`: 3,909,200 + 1,030,612 + 921,184 KB) plus containers; `free -g` showed 6 GB used at a clean backend restart with no engine. JP7 is an **estimate** (thor1 co-residency not measured) chosen where JP6-style headroom analysis cannot flip a JP7 verdict at the utilizations in use. |
 
 How the activation allowance is derived — and why it is a fraction of weights
@@ -384,16 +498,25 @@ the hazard in defects 1.2/1.3 and it is what protects the ONNX models.
 
 **Worked verdicts** (sanity checks, all from repo constants + measured numbers):
 
-- Incident, `util=0.4`, 1 image: `budget = 12.00`, `activation = max(2, 0.75×6.5)
-  = 4.88`, `required = 6.5 + 4.88 + 1 = 12.38` → **A fails by 0.38 GiB**, B
-  passes (0.4 ≤ 0.80). Verdict: does not fit — and the near-miss magnitude
-  matches the device's 0.65 GiB remainder against the 1 GiB floor. The corrected
-  model reproduces reality where the old one claimed 4.50 GiB of slack.
-- Same model, 2 images: `activation = 9.75`, `required = 17.25` → A fails by
-  5.25 GiB. The regression is visible at authoring time.
-- JP7 `qwen3-vl-8b-instruct`, `util=0.5`, 1 image, ~16 GiB weights: `budget =
+- Incident, `util=0.4`, `{'image': 1, 'video': 0}` = **1 unit**:
+  `budget = 12.00`, `activation = max(2, 0.75×6.5) = 4.88`,
+  `required = 6.5 + 4.88 + 1 = 12.38` → **A fails by 0.38 GiB**, B passes
+  (0.4 ≤ 0.80). Verdict: does not fit — and the near-miss magnitude matches the
+  device's 0.65 GiB remainder against the 1 GiB floor. The corrected model
+  reproduces reality where the old one claimed 4.50 GiB of slack.
+- Same model, `{'image': 1}` with **video unbound** = **2 units** (amended
+  2026-08-19): `activation = 9.75`, `required = 17.25` → A fails by 5.25 GiB.
+  This is the configuration the device measured at a 4.93 GiB peak with 0.20 GiB
+  of KV, so the refusal is the right direction — the *magnitude* is ~2× the
+  measured peak (see Decision 1's stated limitation).
+- Same model, `{'image': 2, 'video': 0}` = **2 units**: identical arithmetic
+  (`activation = 9.75`, `required = 17.25`). The 1.0.61 regression is visible at
+  authoring time. **[ESTIMATE — no `image = 2` profile exists; H8.]**
+- JP7 `qwen3-vl-8b-instruct`, `util=0.5`, 1 unit, ~16 GiB weights: `budget =
   60.00`, `required = 16 + 12 + 1 = 29.00` → fits; `0.5 ≤ 0.933`. **JP7 verdict
-  unchanged.**
+  unchanged** — and it stays unchanged even at 2 units
+  (`required = 16 + 24 + 1 = 41.00 ≤ 60.00`), so the units amendment cannot flip
+  a JP7 record that fits today (preservation 3.4).
 - The sibling spec's original incident (Qwen2.5-7B bf16, 14.25 GiB, `util=0.3`):
   fails under both the old and the new model. Its remediation stays correct.
 
@@ -427,7 +550,7 @@ point at this spec:
 | S5 | `edge-cv-portal/backend/tests/test_property_fit_check_decision.py:101` | `assert finding.required_bytes == required_bytes` where `required_bytes = estimate_bytes + MINIMUM_KV_CACHE_BYTES`; `expected_fits = budget_bytes >= required_bytes`; `assert re.search(r"raise\s+gpu_memory_utilization", finding.message, re.IGNORECASE)`; `assert not re.search(r"(lower|decrease|reduce)\w*\s+gpu_memory_utilization", …)` | **Repointed**: required includes the activation allowance; `fits` is A∧B; the message assertion becomes "names the activation and co-tenancy terms, leads with demand-reducing remediation, and mentions raising the fraction only with the cap stated". Note the old negative assertion forbids the string "reduce … gpu_memory_utilization" — the new message must still never advise *lowering* the fraction as a fix for insufficient KV, so that assertion is **kept**. |
 | S6 | `edge-cv-portal/backend/tests/test_vllm_publish_fit_gate.py:286` `test_all_arch_failure_blocks_publish_with_422` | all-arch failure → 422 | **Kept, plus** a new any-arch case; the all-arch case must keep passing. |
 | S7 | `edge-cv-portal/backend/tests/test_property_engine_config_update_roundtrip.py:36-64` and `test_property_engine_config_invalid_updates.py:59` | `KNOWN_ENGINE_KEYS = ("dtype", "gpu_memory_utilization", "max_model_len", "tensor_parallel_size", "enforce_eager")` … `assert set(model_import.ENGINE_DEFAULTS) == set(KNOWN_ENGINE_KEYS)` | **Repointed**: add `limit_mm_per_prompt`. The guard's purpose (catch drift) is preserved. |
-| S8 | `test_vllm_engine_config_detail_and_audit.py` (`assert_config_equals`) and any test asserting a literal resolved configuration | `assert set(actual) == set(expected)` over the resolved configuration | **Repointed**: expected literals gain `limit_mm_per_prompt: {"image": 1}`. |
+| S8 | `test_vllm_engine_config_detail_and_audit.py` (`assert_config_equals`) and any test asserting a literal resolved configuration | `assert set(actual) == set(expected)` over the resolved configuration | **Repointed**: expected literals gain `limit_mm_per_prompt: {"image": 1, "video": 0}` (**amended 2026-08-19**; the value first landed as `{"image": 1}` and was widened by the video bound — Decision 1 "Schema revision"). |
 | S9 | `test_property_fit_unverified_never_blocks.py`, `test_vllm_fit_check_estimation.py` | unverified/estimation behavior | **Unchanged** — must keep passing untouched (preservation 3.2). |
 
 **Rejected alternatives (fit model).**
@@ -762,6 +885,18 @@ SHALL compute the same required bytes and the same budget-sufficiency verdict, s
 a configuration accepted at publish time is never refused by the device for a
 reason the portal could have predicted.
 
+**Amended 2026-08-19 — the one axis where they deliberately differ.** The parity
+grid is over the **image** term, and parity there is exact. The portal now also
+prices an **unauthored `limit_mm_per_prompt.video`** as a second multimodal unit,
+which the device mirror does not yet do: the mirror lives in
+`src/backend/vllm_runtime/memory_budget.py` and ships only via an
+`aws.edgeml.dda.LocalServer.arm64JP6` component build, which has **not** run for
+this change. The divergence is one-directional and safe: the portal is the **more
+conservative** of the two on that axis, so it can only refuse earlier than the
+device, never accept something the device then refuses for a predictable reason.
+Both legs converge when the device build lands (with the H8 recalibration, task
+14).
+
 **Validates: Requirements 2.1, 2.9**
 
 Property 9: Preservation - JP7 and the JP6 ONNX models are untouched
@@ -803,18 +938,26 @@ with unchanged inference behavior and footprint. **[HARDWARE]**
    `CO_TENANCY_RESERVATION_BYTES`, `DEFAULT_IMAGES_PER_PROMPT = 1`. Re-document
    `MINIMUM_KV_CACHE_BYTES` as a serving-margin floor (0.65 GiB demonstrably
    served) rather than a hard load threshold.
-3. Add pure helpers: `activation_allowance(weights_bytes, images_per_prompt)`,
+3. Add pure helpers: `activation_allowance(weights_bytes, multimodal_units)`,
    `fraction_cap(arch)`, `images_per_prompt(engine_configuration)` (reads
    `limit_mm_per_prompt.image`, tolerating `Decimal`/missing/malformed values by
-   falling back to 1 — this module must never raise out of its public API).
+   falling back to 1 — this module must never raise out of its public API) and —
+   **amended 2026-08-19** — `videos_per_prompt(engine_configuration)` (reads
+   `limit_mm_per_prompt.video`, falling back to `DEFAULT_VIDEOS_PER_PROMPT = 1`,
+   vLLM's own per-modality default, so an unauthored bound is the expensive case),
+   `video_is_authored(engine_configuration)` (whether the message must explain the
+   omission) and `multimodal_units(engine_configuration)` = images + videos. The
+   image term stays **separate and floored at 1**: an authored `"video": 0` must
+   never be read as `images = 0`.
 4. Rewrite `evaluate_fit`: `required = weights + activation_allowance + KV floor`;
    `fits = (budget >= required) AND (util <= fraction_cap(arch))`.
 5. Extend `FitFinding` **additively**: keep `arch`, `fits`, `budget_bytes`,
    `required_bytes`, `message`; add `weights_bytes`, `activation_bytes`,
    `kv_floor_bytes`, `co_tenancy_bytes`, `fraction_cap`, `images_per_prompt`,
-   `failed_conditions: List[str]` (`"budget"` / `"co_tenancy"`), and
-   `warnings: List[str]` (e.g. `thin_margin`, `near_cap`). Existing consumers read
-   only the original five fields; `asdict` keeps working.
+   `videos_per_prompt`, `multimodal_units`, `failed_conditions: List[str]`
+   (`"budget"` / `"co_tenancy"`), and `warnings: List[str]` (e.g. `thin_margin`,
+   `near_cap`). Existing consumers read only the original five fields; `asdict`
+   keeps working.
 6. Rewrite both message branches to Decision 3's ordered menu, always naming
    every term and labelling the activation allowance an estimate. Keep the
    invariant that no message ever advises *lowering* `gpu_memory_utilization` as a
@@ -843,16 +986,23 @@ with unchanged inference behavior and footprint. **[HARDWARE]**
 
 *Portal leg. Defect 1.4 (authoring half), expected 2.4.*
 
-1. `ENGINE_DEFAULTS['limit_mm_per_prompt'] = {'image': 1}`.
-2. `_validate_engine_setting`: accept only a dict whose sole key is `image` mapped
-   to an int in 1..8 (reject `bool`, reject extra keys, reject non-ints) with a
-   per-field reason — the fail-closed rule for unknown keys is untouched.
+1. `ENGINE_DEFAULTS['limit_mm_per_prompt'] = {'image': 1, 'video': 0}`
+   (**amended 2026-08-19**; the single-key `{'image': 1}` form is superseded —
+   Decision 1 "Schema revision").
+2. `_validate_engine_setting`: accept a dict whose keys are a **non-empty subset
+   of `{image, video}`** — `image` an int in 1..8, `video` an int in 0..8 (reject
+   `bool` in both, reject unknown sub-keys, reject `{}`, reject non-ints) with a
+   per-sub-key reason quoting that sub-key's range — the fail-closed rule for
+   unknown engine keys is untouched.
 3. `ENGINE_SETTINGS_SPEC` (the settings endpoint): add the field with type,
-   default, accepted range and a description stating that raising it increases the
-   engine's profiling peak and that two-image reference generation
-   (`vlm-anomaly-reference-parity`) requires `image: 2`. Both frontend forms are
-   schema-driven off this endpoint, so the field renders with **no frontend
-   wiring**.
+   default, both accepted ranges, `accepted_keys = ["image", "video"]`, and a
+   description stating that raising a count increases the engine's profiling peak,
+   that two-image reference generation (`vlm-anomaly-reference-parity`) requires
+   `image: 2`, and that a model only ever asked for images should set
+   `"video": 0` (measured on JP6: activation peak 4.93 GiB unbounded vs 2.47 GiB
+   bounded). Both frontend forms are schema-driven off this endpoint, so the field
+   renders with **no frontend wiring** — which also means an **unadvertised
+   sub-key is unauthorable**, so `accepted_keys` must carry both.
 4. `resolve_engine_configuration` needs no change (it overlays on
    `ENGINE_DEFAULTS`); confirm `_to_dynamo_compatible` recursion over the nested
    map (it already recurses).
@@ -1342,8 +1492,14 @@ by pinning the previous LocalServer revision, exactly as revision
    invented.
 2. **The 1.0.61 dependency set and its `limit_mm_per_prompt` grep** — Leg 0. The
    fix does not depend on the answer; the *explanation* might.
-3. **The two-image activation peak** — **[H8]**; the multimodal coefficient is a
-   conservative placeholder until measured.
+3. **The two-image activation peak** — **[H8]**, still unmeasured; the
+   per-additional-*image* coefficient stays a conservative placeholder.
+   **Partially answered 2026-08-19 for the *unit* term**: `{'image': 1, 'video':
+   0}` → 2.47 GiB and `{'image': 1}` (video unbound) → 4.93 GiB at
+   `util = 0.55`, i.e. the 2× per-unit ratio is right and
+   `ACTIVATION_WEIGHT_FRACTION` is ~2× high (implied ≈0.375 of weights). Not
+   applied: the constant is mirrored in the device module and both legs must move
+   in one change, which needs a JP6 component build (task 14).
 4. **JP7 co-tenancy reality on thor1** — unmeasured; the 8 GiB reservation is a
    placeholder that cannot flip a JP7 verdict at the utilizations in use.
 5. **Whether `RECLAIM_TOLERANCE_BYTES = 0.5 GiB` and

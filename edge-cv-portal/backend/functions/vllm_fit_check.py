@@ -32,6 +32,28 @@ the two copies are pinned equal by the Property 8 parity test
 `test/backend-test/jp6_vllm_kv_cache_oom/test_property_portal_device_parity.py`.
 If you edit a value here, edit the mirror and re-run that test.
 
+**Amended 2026-08-19 (measured on `ryanorinagxdevkithomelabjp622`,
+LocalServer.arm64JP6 1.0.62).** The multimodal term of the allowance counts
+the TOTAL authored multimodal UNITS (images + videos), not images alone,
+because vLLM reserves its worst-case token budget per modality — its own
+warning: "worst-case total number of multimodal tokens (32768) ... out of
+which {'image': 16384, 'video': 16384} are reserved for multi-modal
+embeddings". At ``gpu_memory_utilization = 0.55`` the same model profiled a
+**2.47 GiB** activation peak with ``{"image": 1, "video": 0}`` (KV 6.43 GiB,
+29.41x concurrency, READY) and **4.93 GiB** with ``{"image": 1}`` alone (KV
+0.20 GiB, 0.89x, FAILED). An UNAUTHORED ``video`` key therefore costs a full
+extra unit here, which is the honest, refusing direction.
+
+The ratio those numbers imply is already what this module encodes (2 units
+cost 2x one unit); what they also show is that ``ACTIVATION_WEIGHT_FRACTION``
+is ~2x too high PER UNIT (real ≈0.375 of weights). That recalibration is
+DEFERRED to spec task 14 / H8 because the constant is mirrored in the DEVICE
+module, which ships only via an `aws.edgeml.dda.LocalServer.arm64JP6`
+component build — both legs must move together. The device mirror also still
+counts images only; until its build lands, the portal is deliberately the
+MORE conservative of the two on the authored-video dimension (proved
+directionally by the parity suite).
+
 Publish-time math is a NECESSARY, not sufficient, condition: the non-torch
 term vLLM charges against its own budget swung 8.34 GiB between two attempts
 four minutes apart on the same device. The device-side preflight
@@ -92,10 +114,28 @@ ACTIVATION_FLOOR_BYTES = 2 * GIB
 # refuse), never permissively.
 ACTIVATION_WEIGHT_FRACTION = 0.75
 
-# Extra activation cost per ADDITIONAL image per prompt, as a fraction of the
-# one-image allowance. UNMEASURED and deliberately high, so a two-image
+# Extra activation cost per ADDITIONAL multimodal unit per prompt, as a
+# fraction of the one-unit allowance. Deliberately high, so a two-unit
 # configuration must be sized explicitly rather than sneaking into an
-# already-published model's budget (defect 1.4). [HARDWARE H8 to calibrate]
+# already-published model's budget (defect 1.4).
+#
+# The 2026-08-19 JP6 measurements (same model, same
+# `gpu_memory_utilization = 0.55`) put the real per-unit cost near 0.375 of
+# weights rather than 0.75: `{"image": 1, "video": 0}` (1 unit) profiled a
+# 2.47 GiB activation peak against 6.59 GiB of weights, and `{"image": 1}`
+# (2 units — video unbounded at vLLM's own default) profiled 4.93 GiB. The
+# per-unit RATIO this constant encodes is therefore right (2 units cost
+# 2x one unit, within 0.01 GiB), but ACTIVATION_WEIGHT_FRACTION is roughly
+# 2x too high per unit.
+#
+# That recalibration is DEFERRED, not forgotten: `ACTIVATION_WEIGHT_FRACTION`
+# is mirrored in the DEVICE module `src/backend/vllm_runtime/memory_budget.py`
+# and pinned equal by the Property 8 parity test, so moving it here alone
+# would either break parity or ship a portal that predicts a budget the device
+# does not. The device leg ships ONLY via an `aws.edgeml.dda.LocalServer.
+# arm64JP6` component build, so both legs move together in spec task 14 / H8.
+# Until then the allowance stays conservative in the refusing direction, which
+# is the intended posture.
 MULTIMODAL_IMAGE_INCREMENT = 1.0
 
 # Memory held by OTHER consumers of the same unified memory before vLLM
@@ -118,6 +158,36 @@ CO_TENANCY_RESERVATION_BYTES = {
 # `model_import.ENGINE_DEFAULTS['limit_mm_per_prompt']` authors. The device
 # never injects a larger one (defect 1.4).
 DEFAULT_IMAGES_PER_PROMPT = 1
+
+# Videos per prompt when the authored Engine_Configuration does not bound them
+# — vLLM's OWN per-modality default, which is 1, i.e. UNBOUNDED as far as this
+# product is concerned. An absent `limit_mm_per_prompt.video` is therefore
+# MORE expensive than an explicit `"video": 0`, and that asymmetry is the
+# point: vLLM sizes its worst case from the limits it is given. Verbatim from
+# the engine on `ryanorinagxdevkithomelabjp622` (LocalServer.arm64JP6 1.0.62,
+# 2026-08-19): "worst-case total number of multimodal tokens (32768) ... out
+# of which {'image': 16384, 'video': 16384} are reserved for multi-modal
+# embeddings" — half of that worst case is video this product never sends
+# (inputs are camera frames and folder images). Measured, same model, same
+# `gpu_memory_utilization = 0.55`:
+#   * {'image': 1, 'video': 0} -> activation peak 2.47 GiB, KV 6.43 GiB,
+#     Maximum concurrency 29.41x, READY.
+#   * {'image': 1}             -> activation peak 4.93 GiB, KV 0.20 GiB,
+#     concurrency 0.89x, FAILED (max seq len 4096 > 3664 KV tokens).
+# So bounding video HALVES the measured activation peak, and a configuration
+# that does not bound it must be sized for both modalities.
+DEFAULT_VIDEOS_PER_PROMPT = 1
+
+# The modality sub-keys the authored `limit_mm_per_prompt` may bound, matching
+# `model_import.LIMIT_MM_ACCEPTED_KEYS` (image 1..8, video 0..8).
+MULTIMODAL_MODALITY_KEYS = ('image', 'video')
+
+# Multimodal units an Engine_Configuration that authors NOTHING is sized for:
+# one image plus one (unbounded) video, i.e. vLLM's own defaults. The authored
+# default `{'image': 1, 'video': 0}` is ONE unit, which is why authoring it is
+# what buys the KV cache back.
+DEFAULT_MULTIMODAL_UNITS = (DEFAULT_IMAGES_PER_PROMPT
+                            + DEFAULT_VIDEOS_PER_PROMPT)
 
 # A passing verdict this close to the Fraction_Cap carries a 'near_cap' soft
 # warning: the configuration fits, but has no room for co-tenancy growth.
@@ -168,6 +238,12 @@ class FitFinding:
     co_tenancy_bytes: int = 0
     fraction_cap: Optional[float] = None
     images_per_prompt: int = DEFAULT_IMAGES_PER_PROMPT
+    # Videos per prompt and the TOTAL multimodal units the allowance was
+    # sized for (images + videos). Additive like every field above: an
+    # unauthored `limit_mm_per_prompt.video` reports vLLM's own default of 1,
+    # which is what makes it cost as much as an image.
+    videos_per_prompt: int = DEFAULT_VIDEOS_PER_PROMPT
+    multimodal_units: int = DEFAULT_MULTIMODAL_UNITS
     failed_conditions: List[str] = field(default_factory=list)  # budget|co_tenancy
     warnings: List[str] = field(default_factory=list)           # thin_margin|near_cap
 
@@ -187,13 +263,18 @@ def _round_up_fraction(value: float) -> float:
 
 
 def activation_allowance(weights_bytes: Any,
-                         images_per_prompt: int = DEFAULT_IMAGES_PER_PROMPT
-                         ) -> int:
+                         multimodal_units: int = 1) -> int:
     """Estimated PyTorch activation/profiling peak vLLM charges against the
     budget, in bytes:
 
         max(ACTIVATION_FLOOR_BYTES, ACTIVATION_WEIGHT_FRACTION × weights)
-        × (1 + MULTIMODAL_IMAGE_INCREMENT × (images − 1))
+        × (1 + MULTIMODAL_IMAGE_INCREMENT × (units − 1))
+
+    ``multimodal_units`` is the TOTAL of the authored per-modality limits
+    (images + videos, :func:`multimodal_units`), not the image count alone:
+    vLLM reserves its worst-case token budget per modality, so an unbounded
+    video modality costs a whole extra unit (measured 2.47 -> 4.93 GiB on JP6,
+    2026-08-19). One unit is the baseline allowance.
 
     A fraction of weights rather than something cleverer on purpose: a
     per-model-class table would need measurements we do not have, a fixed
@@ -205,18 +286,18 @@ def activation_allowance(weights_bytes: Any,
 
     This is an ESTIMATE and every message that quotes it says so. Tolerant of
     hostile input (never raises): unusable values degrade to 0 weights and to
-    one image.
+    one multimodal unit.
     """
     try:
         weights = max(int(weights_bytes or 0), 0)
     except (TypeError, ValueError):
         weights = 0
     try:
-        images = max(int(images_per_prompt), 1)
+        units = max(int(multimodal_units), 1)
     except (TypeError, ValueError):
-        images = DEFAULT_IMAGES_PER_PROMPT
+        units = 1
     base = max(ACTIVATION_FLOOR_BYTES, ACTIVATION_WEIGHT_FRACTION * weights)
-    multiplier = 1.0 + MULTIMODAL_IMAGE_INCREMENT * (images - 1)
+    multiplier = 1.0 + MULTIMODAL_IMAGE_INCREMENT * (units - 1)
     return int(base * multiplier)
 
 
@@ -277,6 +358,71 @@ def images_per_prompt(engine_configuration: Any) -> int:
         return DEFAULT_IMAGES_PER_PROMPT
 
 
+def video_is_authored(engine_configuration: Any) -> bool:
+    """True when the Engine_Configuration explicitly bounds
+    ``limit_mm_per_prompt.video`` with a usable integer.
+
+    False means vLLM's own per-modality default (1) applies, i.e. the video
+    modality is UNBOUNDED and is charged a full extra multimodal unit — the
+    distinction the messages must state, because it is the difference between
+    a 2.47 GiB and a 4.93 GiB measured activation peak. Never raises.
+    """
+    try:
+        limit = (engine_configuration or {}).get('limit_mm_per_prompt')
+        if not isinstance(limit, dict) or 'video' not in limit:
+            return False
+        raw = limit['video']
+        if raw is None or isinstance(raw, bool):
+            return False
+        return int(raw) >= 0
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def videos_per_prompt(engine_configuration: Any) -> int:
+    """Effective videos per prompt from the AUTHORED ``limit_mm_per_prompt``
+    (``{"video": N}``), the second modality the activation allowance scales
+    with (`model_import.ENGINE_DEFAULTS`, design Decision 1 as amended
+    2026-08-19).
+
+    An absent, malformed, boolean or negative value falls back to
+    :data:`DEFAULT_VIDEOS_PER_PROMPT` — vLLM's own default of 1, i.e.
+    UNBOUNDED — so NOT authoring the key is deliberately MORE expensive than
+    authoring ``"video": 0``. Zero is a legal authored value and the one the
+    product's default uses. Never raises.
+    """
+    try:
+        limit = (engine_configuration or {}).get('limit_mm_per_prompt')
+        if not isinstance(limit, dict):
+            # A non-dict limit is read as an image count by
+            # `images_per_prompt`; it bounds no video modality at all.
+            return DEFAULT_VIDEOS_PER_PROMPT
+        raw = limit.get('video')
+        if raw is None or isinstance(raw, bool):
+            return DEFAULT_VIDEOS_PER_PROMPT
+        videos = int(raw)
+        return videos if videos >= 0 else DEFAULT_VIDEOS_PER_PROMPT
+    except (AttributeError, TypeError, ValueError):
+        return DEFAULT_VIDEOS_PER_PROMPT
+
+
+def multimodal_units(engine_configuration: Any) -> int:
+    """TOTAL multimodal units per prompt the activation allowance is sized
+    for: ``images_per_prompt + videos_per_prompt``.
+
+    vLLM reserves its worst-case multimodal token budget PER MODALITY (its own
+    warning: 32768 tokens, ``{'image': 16384, 'video': 16384}``), so the term
+    that scales the activation peak is the total number of units, not the
+    image count. Measured consequence on JP6 (2026-08-19, same model, same
+    ``gpu_memory_utilization = 0.55``): ``{"image": 1, "video": 0}`` is ONE
+    unit and profiled a 2.47 GiB peak (READY, 29.41x concurrency), while
+    ``{"image": 1}`` is TWO units — video unbounded — and profiled 4.93 GiB
+    (FAILED on KV cache). Always at least 1 (the image floor). Never raises.
+    """
+    return (images_per_prompt(engine_configuration)
+            + videos_per_prompt(engine_configuration))
+
+
 def _gpu_memory_utilization(engine_configuration: Any) -> float:
     """``gpu_memory_utilization`` from the configuration (``Decimal``/int/
     float accepted), defaulting to
@@ -295,11 +441,31 @@ def _gpu_memory_utilization(engine_configuration: Any) -> float:
     return util
 
 
+def _multimodal_clause(images: int, videos: int, units: int,
+                       video_authored: bool) -> str:
+    """The multimodal term the activation allowance assumed, named in full:
+    the total units and the per-modality counts behind it, plus — when the
+    video modality is NOT authored — what that omission costs and how to fix
+    it. Every message that quotes the allowance carries this clause."""
+    clause = (f"{units} multimodal unit(s) per prompt "
+              f"({images} image(s) + {videos} video(s))")
+    if not video_authored:
+        clause += (
+            " — limit_mm_per_prompt.video is NOT authored, so vLLM's own "
+            "per-modality default of 1 applies and the video modality is "
+            "sized as a full extra unit; authoring \"video\": 0 removes it "
+            "(measured on JP6: activation peak 4.93 GiB unbounded vs "
+            "2.47 GiB at \"video\": 0)")
+    return clause
+
+
 def _terms_sentence(arch: str, weights_bytes: int, activation_bytes: int,
                     required_bytes: int, budget_bytes: int,
                     profile_bytes: int, utilization: float,
                     reservation_bytes: int, cap: Optional[float],
-                    images: int) -> str:
+                    images: int, videos: int = DEFAULT_VIDEOS_PER_PROMPT,
+                    units: Optional[int] = None,
+                    video_authored: bool = False) -> str:
     """The auditable statement of every term with its number, shared by the
     passing and failing branches — so an operator can check the verdict
     instead of trusting it. The activation allowance is labelled an
@@ -307,12 +473,15 @@ def _terms_sentence(arch: str, weights_bytes: int, activation_bytes: int,
     cap_clause = ("no co-tenancy cap is known for this architecture"
                   if cap is None else
                   f"co-tenancy cap on the fraction {cap:.2f}")
+    if units is None:
+        units = images + videos
     return (
         f"estimated weights {_format_gib(weights_bytes)} + activation "
         f"allowance {_format_gib(activation_bytes)} (an ESTIMATE: "
         f"max({_format_gib(ACTIVATION_FLOOR_BYTES)}, "
-        f"{ACTIVATION_WEIGHT_FRACTION:g} x weights) for {images} image(s) "
-        f"per prompt) + KV cache floor "
+        f"{ACTIVATION_WEIGHT_FRACTION:g} x weights) for "
+        f"{_multimodal_clause(images, videos, units, video_authored)}) "
+        f"+ KV cache floor "
         f"{_format_gib(MINIMUM_KV_CACHE_BYTES)} = "
         f"{_format_gib(required_bytes)} required, against a "
         f"{_format_gib(budget_bytes)} budget "
@@ -327,7 +496,9 @@ def _remediation_sentences(arch: str, engine_configuration: Dict[str, Any],
                            images: int, utilization: float,
                            cap: Optional[float], profile_bytes: int,
                            reservation_bytes: int, required_bytes: int,
-                           weights_exceed_budget: bool) -> str:
+                           weights_exceed_budget: bool,
+                           videos: int = DEFAULT_VIDEOS_PER_PROMPT,
+                           video_authored: bool = False) -> str:
     """Decision 3's ORDERED remediation menu.
 
     The order is the whole point (defect 1.3): the co-tenancy hazard first,
@@ -345,11 +516,24 @@ def _remediation_sentences(arch: str, engine_configuration: Dict[str, Any],
         f"fraction of TOTAL memory, so a larger fraction takes memory those "
         f"models are already using.",
         f"Reduce demand first: bound limit_mm_per_prompt.image (effective "
-        f"{images}), reduce max_model_len (configured "
+        f"{images}) and limit_mm_per_prompt.video (effective {videos}"
+        f"{'' if video_authored else ', NOT authored'}), reduce "
+        f"max_model_len (configured "
         f"{max_model_len if max_model_len is not None else 'unset'}), choose "
         f"a smaller or more quantized model, or free device memory by "
         f"stopping unused model components.",
     ]
+    if not video_authored:
+        # The cheapest demand reduction there is, and the one this product
+        # can always take: video is never an input here (measured on JP6
+        # 2026-08-19 — bounding it halved the activation peak and turned a
+        # failing load into one serving with 6.43 GiB of KV cache).
+        parts.append(
+            "Cheapest first: set limit_mm_per_prompt.video = 0. vLLM "
+            "otherwise reserves half of its worst-case multimodal token "
+            "budget (32768 tokens, {'image': 16384, 'video': 16384}) for a "
+            "modality this product never sends, which on JP6 measured a "
+            "4.93 GiB activation peak instead of 2.47 GiB.")
     if weights_exceed_budget:
         parts.insert(1, (
             "The weights alone exceed the configured budget, so no "
@@ -393,7 +577,7 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
     For every architecture present in DEVICE_MEMORY_PROFILE_BYTES, two named
     conditions over documented terms (design Decision 2)::
 
-        activation := activation_allowance(weights, images_per_prompt)
+        activation := activation_allowance(weights, multimodal_units)
         required   := weights + activation + MINIMUM_KV_CACHE_BYTES
         budget     := gpu_memory_utilization * profile[arch]
         cap        := (profile[arch] - co_tenancy[arch]) / profile[arch]
@@ -409,10 +593,12 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
         engine_configuration: resolved Engine_Configuration.
             ``gpu_memory_utilization`` (Decimal/int/float, default
             DEFAULT_GPU_MEMORY_UTILIZATION) sizes the budget;
-            ``limit_mm_per_prompt.image`` (default
-            DEFAULT_IMAGES_PER_PROMPT) sizes the multimodal term of the
-            activation allowance; ``max_model_len`` is quoted in the
-            remediation.
+            ``limit_mm_per_prompt`` sizes the multimodal term of the
+            activation allowance as the TOTAL of its per-modality counts
+            (``image`` default DEFAULT_IMAGES_PER_PROMPT, ``video`` default
+            DEFAULT_VIDEOS_PER_PROMPT — vLLM's own default of 1, so an
+            unauthored video modality costs a full extra unit);
+            ``max_model_len`` is quoted in the remediation.
         estimate: estimated on-GPU weight size in bytes, either a plain
             number or an object exposing ``total_bytes`` (WeightEstimate).
         architectures: Target_Architecture identifiers to evaluate.
@@ -427,6 +613,9 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
     """
     utilization = _gpu_memory_utilization(engine_configuration)
     images = images_per_prompt(engine_configuration)
+    videos = videos_per_prompt(engine_configuration)
+    units = images + videos
+    video_authored = video_is_authored(engine_configuration)
     try:
         weights_bytes = int(getattr(estimate, 'total_bytes', estimate))
     except (TypeError, ValueError):
@@ -437,7 +626,7 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
                        f"{estimate!r}")
         return []
 
-    activation_bytes = activation_allowance(weights_bytes, images)
+    activation_bytes = activation_allowance(weights_bytes, units)
     required_bytes = (weights_bytes + activation_bytes
                       + MINIMUM_KV_CACHE_BYTES)
 
@@ -471,7 +660,7 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
         terms = _terms_sentence(
             arch, weights_bytes, activation_bytes, required_bytes,
             budget_bytes, profile_bytes, utilization, reservation_bytes, cap,
-            images)
+            images, videos, units, video_authored)
 
         if fits:
             message = f"Fit check passed for {arch}: {terms}."
@@ -512,7 +701,8 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
                 + _remediation_sentences(
                     arch, engine_configuration or {}, images, utilization,
                     cap, profile_bytes, reservation_bytes, required_bytes,
-                    weights_exceed_budget=weights_bytes > budget_bytes))
+                    weights_exceed_budget=weights_bytes > budget_bytes,
+                    videos=videos, video_authored=video_authored))
 
         findings.append(FitFinding(
             arch=arch,
@@ -526,6 +716,8 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
             co_tenancy_bytes=reservation_bytes,
             fraction_cap=cap,
             images_per_prompt=images,
+            videos_per_prompt=videos,
+            multimodal_units=units,
             failed_conditions=failed_conditions,
             warnings=warnings,
         ))

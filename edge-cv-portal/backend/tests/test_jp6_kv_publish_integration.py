@@ -289,15 +289,19 @@ INFEASIBLE_ESTIMATE = WeightEstimate(
 )
 
 FEASIBLE_CONFIG = {"gpu_memory_utilization": 0.5, "max_model_len": 4096}
+# `video: 0` is authored alongside `image: 2` because the allowance scales with
+# TOTAL multimodal units since the 2026-08-19 widening: `{"image": 2}` alone
+# leaves the video modality at vLLM's own default of 1, which is a THIRD unit.
 INFEASIBLE_CONFIG = {"gpu_memory_utilization": 0.3, "max_model_len": 4096,
-                     "limit_mm_per_prompt": {"image": 2}}
+                     "limit_mm_per_prompt": {"image": 2, "video": 0}}
 
 
 def assert_feasible_premise():
     """Guard the fixture's premise against the SHIPPED sizing model, so a
     constant change surfaces here instead of silently voiding the case."""
     findings = evaluate_fit(
-        {"gpu_memory_utilization": "0.5", "limit_mm_per_prompt": {"image": 2}},
+        {"gpu_memory_utilization": "0.5",
+         "limit_mm_per_prompt": {"image": 2, "video": 0}},
         FEASIBLE_ESTIMATE, ["arm64_jp6", "arm64_jp7"])
     premise = {f.arch: f.fits for f in findings}
     assert premise == {"arm64_jp6": True, "arm64_jp7": True}, premise
@@ -305,7 +309,8 @@ def assert_feasible_premise():
 
 def assert_infeasible_premise():
     findings = evaluate_fit(
-        {"gpu_memory_utilization": "0.3", "limit_mm_per_prompt": {"image": 2}},
+        {"gpu_memory_utilization": "0.3",
+         "limit_mm_per_prompt": {"image": 2, "video": 0}},
         INFEASIBLE_ESTIMATE, ["arm64_jp6", "arm64_jp7"])
     premise = {f.arch: f.fits for f in findings}
     assert premise == {"arm64_jp6": False, "arm64_jp7": True}, premise
@@ -349,15 +354,20 @@ def test_authored_multimodal_limit_reaches_model_json_verbatim_end_to_end(
     # Update the engine configuration: author the two-image limit.
     response = ienv.model_import.handler(
         update_event(training_id, seeded,
-                     {"limit_mm_per_prompt": {"image": 2}}), None)
+                     {"limit_mm_per_prompt": {"image": 2,
+                                              "video": 0}}), None)
     assert response["statusCode"] == 200, response["body"]
     body = json.loads(response["body"])
     assert body["engine_configuration"]["limit_mm_per_prompt"] == {
-        "image": 2}
+        "image": 2, "video": 0}
     # The REAL evaluate_fit sized the AUTHORED value (2.4): every finding
     # of the update's non-blocking fit check carries images_per_prompt 2.
     assert body["fit_check"]["status"] == "passed", body["fit_check"]
     assert all(f["images_per_prompt"] == 2
+               for f in body["fit_check"]["findings"])
+    # ...and at the authored video bound, so the total is TWO units, not the
+    # three an unauthored video would cost (2026-08-19 measurement).
+    assert all(f["videos_per_prompt"] == 0 and f["multimodal_units"] == 2
                for f in body["fit_check"]["findings"])
 
     # Package: the REAL vLLM bypass generates the repository, zips it and
@@ -378,8 +388,14 @@ def test_authored_multimodal_limit_reaches_model_json_verbatim_end_to_end(
         ienv, packaged[0]["component_package_s3"])
     assert path == "integration-fit-llm/1/model.json"
     model_json = json.loads(model_json_text)
-    assert model_json["limit_mm_per_prompt"] == {"image": 2}
+    assert model_json["limit_mm_per_prompt"] == {"image": 2, "video": 0}
     staged_images = model_json["limit_mm_per_prompt"]["image"]
+    staged_videos = model_json["limit_mm_per_prompt"]["video"]
+    assert isinstance(staged_videos, int) and \
+        not isinstance(staged_videos, bool)
+    assert staged_videos == 0, (
+        "the authored video bound must reach the staged model.json as the "
+        "JSON number 0, not a Decimal or a string: {!r}".format(staged_videos))
     assert isinstance(staged_images, int) and \
         not isinstance(staged_images, bool)
     # The complete resolved configuration, verbatim, plus the documented
@@ -390,7 +406,7 @@ def test_authored_multimodal_limit_reaches_model_json_verbatim_end_to_end(
         "max_model_len": 4096,
         "tensor_parallel_size": 1,
         "enforce_eager": True,
-        "limit_mm_per_prompt": {"image": 2},
+        "limit_mm_per_prompt": {"image": 2, "video": 0},
         "model": HF_MODEL_ID,
     }
     # ...and the ZIP's bytes are exactly generate_vllm_repository's output
