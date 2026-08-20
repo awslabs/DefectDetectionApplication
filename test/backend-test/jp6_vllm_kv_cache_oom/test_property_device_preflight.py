@@ -51,9 +51,10 @@ Properties in this file:
        ONE load request — never the unload -> reload recovery.
   P5-F **``prepare()`` exits 0 on a preflight refusal, loudly** [2.9,
        3.8] — the prominent ERROR carries the full diagnostic verbatim.
-  P5-G **Every other classification keeps its exit code** [3.8] —
-       ``LOAD_OK`` -> 0, ``LOAD_UNREACHABLE`` -> 1, ``LOAD_HTTP_ERROR``
-       -> 1, unchanged.
+  P5-G **Only a never-reachable runtime fails the component** [3.8] —
+       ``LOAD_OK`` -> 0 and ``LOAD_UNREACHABLE`` -> 1 unchanged;
+       ``LOAD_HTTP_ERROR`` -> **0** as of the task 14 H11 dispatch (the
+       verbatim original mapping is recorded at the test).
   P5-H **The duplicated marker stays in lockstep** [3.8] —
        ``vllm_model_prep.PREFLIGHT_REFUSED_MARKER`` equals
        ``memory_budget.PREFLIGHT_REFUSED_MARKER``.
@@ -138,11 +139,28 @@ def preflight_inputs(draw):
     if draw(st.booleans()):
         args["max_model_len"] = draw(st.integers(min_value=256,
                                                  max_value=32768))
+    # BOTH authoring shapes, with and without the `video` bound: the device
+    # now sizes from TOTAL multimodal units like the portal, so an unauthored
+    # `video` costs a full extra unit (task 14 / H8+H9; the mirror previously
+    # counted images only).
+    #
+    # SUPERSEDED, recorded verbatim:
+    #     images = 1
+    #     if draw(st.booleans()):
+    #         images = draw(st.integers(min_value=1, max_value=4))
+    #         args["limit_mm_per_prompt"] = {"image": images}
+    #     return (total_mib * MIB, available_mib * MIB, util, images,
+    #             weights_bytes, args)
     images = 1
+    videos = mb.DEFAULT_VIDEOS_PER_PROMPT  # unauthored: vLLM's own default
     if draw(st.booleans()):
         images = draw(st.integers(min_value=1, max_value=4))
-        args["limit_mm_per_prompt"] = {"image": images}
-    return (total_mib * MIB, available_mib * MIB, util, images,
+        limit = {"image": images}
+        if draw(st.booleans()):
+            videos = draw(st.integers(min_value=0, max_value=2))
+            limit["video"] = videos
+        args["limit_mm_per_prompt"] = limit
+    return (total_mib * MIB, available_mib * MIB, util, images + videos,
             weights_bytes, args)
 
 
@@ -161,18 +179,44 @@ def refusing_inputs(draw):
         "max_model_len": draw(st.integers(min_value=256, max_value=32768)),
     }
     images = 1
+    videos = mb.DEFAULT_VIDEOS_PER_PROMPT
     if draw(st.booleans()):
         images = draw(st.integers(min_value=1, max_value=4))
-        args["limit_mm_per_prompt"] = {"image": images}
-    return (total_mib * MIB, available_mib * MIB, util, images,
+        limit = {"image": images}
+        if draw(st.booleans()):
+            videos = draw(st.integers(min_value=0, max_value=2))
+            limit["video"] = videos
+        args["limit_mm_per_prompt"] = limit
+    return (total_mib * MIB, available_mib * MIB, util, images + videos,
             weights_bytes, args)
 
 
-def _required(weights_bytes, images):
-    """The design's requirement, composed from the module's own terms:
-    weights + activation allowance + KV floor."""
-    return (weights_bytes + mb.activation_allowance(weights_bytes, images)
-            + mb.MINIMUM_KV_CACHE_BYTES)
+def _required(weights_bytes, units):
+    """The design's requirement, composed from the module's own CONSTANTS (not
+    from ``mb.required_bytes``, so a drift in that function is still caught):
+    weights + non-torch allowance + activation allowance + KV VIABILITY floor.
+
+    REPOINTED 2026-08-19 (spec task 14 / H8 + H9). SUPERSEDED ORACLE, recorded
+    verbatim before the change::
+
+        def _required(weights_bytes, images):
+            \"\"\"The design's requirement, composed from the module's own
+            terms: weights + activation allowance + KV floor.\"\"\"
+            return (weights_bytes
+                    + mb.activation_allowance(weights_bytes, images)
+                    + mb.MINIMUM_KV_CACHE_BYTES)
+
+    Two deliberate changes, neither a weakening: ``NON_TORCH_ALLOWANCE_BYTES``
+    is now charged (it is subtracted from the same budget on every load and
+    was omitted entirely — task 11's ninth OUTCOME block, defect (a)), and the
+    hard KV term is the small VIABILITY floor rather than the 1 GiB
+    serving-margin floor, which is now the thin-margin WARNING threshold (H9 —
+    charging it hard refused the configuration 1.0.59 demonstrably served).
+    The scaling term is TOTAL multimodal units, not the image count.
+    """
+    return (weights_bytes + mb.NON_TORCH_ALLOWANCE_BYTES
+            + mb.activation_allowance(weights_bytes, units)
+            + mb.KV_VIABILITY_FLOOR_BYTES)
 
 
 # ---------------------------------------------------------------------------
@@ -190,14 +234,15 @@ def test_property_refuses_iff_requirement_exceeds_the_measured_minimum(
 
     # Validates: Requirements 2.9
     """
-    total, available, util, images, weights_bytes, args = inputs
+    total, available, util, units, weights_bytes, args = inputs
     reading = mb.MemoryReading(total_bytes=total, available_bytes=available)
 
     verdict = mb.evaluate_device_fit(args, reading,
                                      weights_bytes=weights_bytes)
 
-    required = _required(weights_bytes, images)
+    required = _required(weights_bytes, units)
     assert verdict.terms["required_bytes"] == required, verdict.terms
+    assert verdict.terms["multimodal_units"] == units, verdict.terms
     assert verdict.terms["available_bytes"] == available, verdict.terms
     assert verdict.unverified is False
 
@@ -231,14 +276,21 @@ def test_property_refuses_iff_requirement_exceeds_the_measured_minimum(
 def test_property_refusal_reason_names_the_terms_and_the_settings(inputs):
     """P5-B. Every generated refusal reason starts with the marker and
     names: the measured available bytes (as MemAvailable), the computed
-    requirement WITH its three terms (weights, activation allowance
-    labelled an ESTIMATE, KV floor), and the specific engine settings to
-    change (2.9: "naming the measured available memory, the computed
-    requirement, and the specific engine setting to change").
+    requirement WITH its four terms (weights, non-torch allowance labelled an
+    ESTIMATE, activation allowance labelled an ESTIMATE, KV VIABILITY floor),
+    and the specific engine settings to change (2.9: "naming the measured
+    available memory, the computed requirement, and the specific engine
+    setting to change").
+
+    REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED assertions, recorded
+    verbatim — the term set grew, so this is strictly stronger::
+
+        assert mb.format_gib(mb.MINIMUM_KV_CACHE_BYTES) in reason, reason
+        assert "ESTIMATE" in reason, reason  # the allowance is labelled one
 
     # Validates: Requirements 2.9
     """
-    total, available, util, images, weights_bytes, args = inputs
+    total, available, util, units, weights_bytes, args = inputs
     reading = mb.MemoryReading(total_bytes=total, available_bytes=available)
 
     verdict = mb.evaluate_device_fit(args, reading,
@@ -250,8 +302,8 @@ def test_property_refusal_reason_names_the_terms_and_the_settings(inputs):
     reason = verdict.refusal_reason
     assert reason.startswith(mb.PREFLIGHT_REFUSED_MARKER), reason
 
-    required = _required(weights_bytes, images)
-    activation = mb.activation_allowance(weights_bytes, images)
+    required = _required(weights_bytes, units)
+    activation = mb.activation_allowance(weights_bytes, units)
     # The measured available bytes, named as the kernel field.
     assert mb.format_gib(available) in reason, reason
     assert "MemAvailable" in reason, reason
@@ -259,8 +311,13 @@ def test_property_refusal_reason_names_the_terms_and_the_settings(inputs):
     assert mb.format_gib(required) in reason, reason
     assert mb.format_gib(weights_bytes) in reason, reason
     assert mb.format_gib(activation) in reason, reason
-    assert mb.format_gib(mb.MINIMUM_KV_CACHE_BYTES) in reason, reason
-    assert "ESTIMATE" in reason, reason  # the allowance is labelled one
+    assert mb.format_gib(mb.NON_TORCH_ALLOWANCE_BYTES) in reason, reason
+    assert mb.format_gib(mb.KV_VIABILITY_FLOOR_BYTES) in reason, reason
+    # BOTH estimated terms are labelled ESTIMATEs, by name.
+    assert "non-torch allowance {} (ESTIMATE)".format(
+        mb.format_gib(mb.NON_TORCH_ALLOWANCE_BYTES)) in reason, reason
+    assert "activation allowance {} (ESTIMATE".format(
+        mb.format_gib(activation)) in reason, reason
     # The specific settings to change (Decision 3's ordered menu).
     assert "limit_mm_per_prompt.image" in reason, reason
     assert "max_model_len" in reason, reason
@@ -277,12 +334,23 @@ def test_property_undeterminable_weights_use_the_lower_bound_unverified(
         inputs):
     """P5-C. With ``weights_bytes=None`` the verdict is marked
     ``unverified`` and its requirement is the documented
-    ``ACTIVATION_FLOOR + KV floor`` LOWER BOUND (scaled only by the
-    authored image count) — never a guessed weight; a refusal says so.
+    ``NON_TORCH + ACTIVATION_FLOOR + KV viability floor`` LOWER BOUND (scaled
+    only by the authored multimodal units) — never a guessed weight; a refusal
+    says so.
+
+    REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED lower bound, recorded
+    verbatim::
+
+        lower_bound = (mb.activation_allowance(0, images)
+                       + mb.MINIMUM_KV_CACHE_BYTES)
+        ...
+        if images == 1:
+            assert lower_bound == (mb.ACTIVATION_FLOOR_BYTES
+                                   + mb.MINIMUM_KV_CACHE_BYTES)
 
     # Validates: Requirements 2.9
     """
-    total, available, util, images, _weights, args = inputs
+    total, available, util, units, _weights, args = inputs
     reading = mb.MemoryReading(total_bytes=total, available_bytes=available)
 
     verdict = mb.evaluate_device_fit(args, reading, weights_bytes=None)
@@ -290,12 +358,14 @@ def test_property_undeterminable_weights_use_the_lower_bound_unverified(
     assert verdict.unverified is True
     assert verdict.terms["weights_bytes"] is None, (
         "an undeterminable weight was invented: {}".format(verdict.terms))
-    lower_bound = (mb.activation_allowance(0, images)
-                   + mb.MINIMUM_KV_CACHE_BYTES)
+    lower_bound = (mb.NON_TORCH_ALLOWANCE_BYTES
+                   + mb.activation_allowance(0, units)
+                   + mb.KV_VIABILITY_FLOOR_BYTES)
     assert verdict.terms["required_bytes"] == lower_bound, verdict.terms
-    if images == 1:
-        assert lower_bound == (mb.ACTIVATION_FLOOR_BYTES
-                               + mb.MINIMUM_KV_CACHE_BYTES)
+    if units == 1:
+        assert lower_bound == (mb.NON_TORCH_ALLOWANCE_BYTES
+                               + mb.ACTIVATION_FLOOR_BYTES
+                               + mb.KV_VIABILITY_FLOOR_BYTES)
 
     budget = int(util * total)
     should_refuse = lower_bound > min(available, budget)
@@ -324,7 +394,7 @@ def test_property_engine_factory_is_never_called_on_a_refusal(tmp_path,
 
     # Validates: Requirements 2.9
     """
-    total, available, util, images, weights_bytes, args = inputs
+    total, available, util, units, weights_bytes, args = inputs
     index = next(_dir_counter)
     weights_dir = weight_tree(tmp_path / "weights-{}".format(index),
                               weights_bytes)
@@ -341,7 +411,7 @@ def test_property_engine_factory_is_never_called_on_a_refusal(tmp_path,
     # The oracle sees exactly what the code sees: the fake meminfo text is
     # written in kB, and every generated figure is a whole MiB, so the
     # round-trip is exact.
-    required = _required(weights_bytes, images)
+    required = _required(weights_bytes, units)
     budget = int(util * total)
     should_refuse = required > min(available, budget)
 
@@ -537,10 +607,29 @@ def test_property_prepare_exits_zero_and_logs_the_full_diagnostic(tmp_path,
                                        mp.LOAD_HTTP_ERROR)))
 def test_property_existing_classifications_keep_their_exit_codes(
         tmp_path, classification):
-    """P5-G. ``LOAD_OK`` -> 0, ``LOAD_UNREACHABLE`` -> 1,
-    ``LOAD_HTTP_ERROR`` -> 1 — byte-for-byte the pre-fix contract
-    Greengrass' Startup retry behavior depends on (3.8): the new
-    ``LOAD_PREFLIGHT_REFUSED`` -> 0 branch changed none of them.
+    """P5-G. ``LOAD_OK`` -> 0 and ``LOAD_UNREACHABLE`` -> 1 are byte-for-byte
+    the pre-fix contract Greengrass' Startup retry behavior depends on
+    (3.8); the ``LOAD_PREFLIGHT_REFUSED`` -> 0 branch changed neither.
+
+    CONSCIOUS REPOINT (task 14 H11 dispatch; task 11 OUTCOME block 18):
+    ``LOAD_HTTP_ERROR`` -> **0**. Verbatim original::
+
+        expected = 0 if classification == mp.LOAD_OK else 1
+
+        \"\"\"P5-G. ``LOAD_OK`` -> 0, ``LOAD_UNREACHABLE`` -> 1,
+        ``LOAD_HTTP_ERROR`` -> 1 — byte-for-byte the pre-fix contract
+        Greengrass' Startup retry behavior depends on (3.8): the new
+        ``LOAD_PREFLIGHT_REFUSED`` -> 0 branch changed none of them.
+
+        # Validates: Requirements 3.8
+        \"\"\"
+
+    Reason: a model-load failure must not be able to mark the COMPONENT
+    broken (three transient-DNS failures -> BROKEN -> two HARD-dependent
+    workflows stuck at INSTALLED -> device UNHEALTHY). ``LOAD_UNREACHABLE``
+    deliberately keeps exit 1 and is still asserted here, so the property
+    still distinguishes the one classification a component retry can fix
+    from the ones it cannot.
 
     # Validates: Requirements 3.8
     """
@@ -556,7 +645,7 @@ def test_property_existing_classifications_keep_their_exit_codes(
         exit_code = mp.prepare(_args(unarchived_repo_path=str(repo),
                                      model_name=DEFAULT_MODEL_NAME))
 
-    expected = 0 if classification == mp.LOAD_OK else 1
+    expected = 1 if classification == mp.LOAD_UNREACHABLE else 0
     assert exit_code == expected, (
         "{} -> exit {} (expected {})".format(classification, exit_code,
                                              expected))

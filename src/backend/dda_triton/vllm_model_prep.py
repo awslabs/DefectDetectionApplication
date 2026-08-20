@@ -53,8 +53,69 @@ Startup sequence (Requirements 4.4, 4.5, 4.8, 4.9, 2.7):
 
 ``--cleanup`` unloads the model via the model-control endpoint and removes
 the staged directory, mirroring convert_model_cleanup.py.
+
+EXIT-CODE CONTRACT (this is the COMPONENT's exit code, not the model's
+state — the model's state always travels through the model-status
+surfaces):
+
+===========================  ====  ==========================================
+classification               exit  why
+===========================  ====  ==========================================
+``LOAD_OK``                     0  loaded.
+``LOAD_PREFLIGHT_REFUSED``      0  deterministic, pre-allocation refusal; a
+                                   component retry cannot change it.
+``LOAD_HTTP_ERROR``             0  the runtime answered authoritatively, so
+                                   the model is FAILED-with-reason on the
+                                   status surfaces and the in-backend
+                                   reconciler owns the retries. Failing the
+                                   COMPONENT here takes unrelated,
+                                   co-deployed components and every workflow
+                                   that HARD-depends on this one down with
+                                   it (see below).
+``LOAD_UNREACHABLE``            1  the runtime was never reachable: the
+                                   component genuinely started before the
+                                   backend was ready, and a component-level
+                                   retry IS the correct recovery.
+repository/weights defects      1  nothing was staged; the artifact or the
+                                   arguments are wrong.
+===========================  ====  ==========================================
+
+``LOAD_HTTP_ERROR`` -> 0 is a DELIBERATE change of the mapping recorded in
+bugfix.md 3.8 (spec: jp6-vllm-kv-cache-oom-regression, task 11 OUTCOME
+block 18). Evidence: three consecutive load attempts failed on TRANSIENT DNS
+(``Failed to resolve 'huggingface.co' ([Errno -3] Temporary failure in name
+resolution)``) at 12:00:47Z / 12:02:09Z / 12:03:22Z, each logging ``Startup
+script exited. {exitCode=1}``; after the third the component reached
+``currentState=BROKEN``. Two deployed workflows
+(``dda.workflow.0c7fe31a-...`` 7.0.0 and ``dda.workflow.1f0b4c0c-...``
+9.0.0) HARD-depend on that component, so they were left stuck at
+``INSTALLED`` and the whole core device went ``UNHEALTHY``: a transient
+network fault inside ONE model's load took down unrelated workflows. A model
+that cannot load is a MODEL failure and is reported as one; it is not a
+COMPONENT failure. Do NOT "restore" exit 1 here.
+
+STAGED-REPOSITORY OWNERSHIP (spec: jp6-vllm-kv-cache-oom-regression,
+task 14 H11/H12; task 11 OUTCOME blocks 13 and 17-18). Every component that
+passes the same ``--model_name`` stages the SAME device path
+``{VLLM_MODEL_DIR}/{model_name}/``, and multiple portal model records
+legitimately do. Two consequences were observed in production: a concurrent
+double-stage 2 ms apart (so ordering alone can never make it safe), and a
+NON-OWNING component's ``--cleanup`` unloading and deleting another
+component's freshly-loaded model 0.6 s after its load succeeded. Therefore
+the stage-or-cleanup critical section is serialised on an OS-level advisory
+file lock keyed by the model name (:func:`stage_lock`), and a successful
+stage records an owner marker inside the staged repository
+(:data:`OWNER_MARKER_NAME`): a foreign stage is permitted but WARNED (the
+newest deployment legitimately takes over), a foreign ``--cleanup`` is
+REFUSED (both the unload POST and the directory removal are skipped) and
+still exits 0. Both guards fail OPEN — a stuck lock or an unreadable marker
+must never brick a device.
 """
 import argparse
+import contextlib
+import datetime
+import errno
+import fcntl
 import json
 import logging
 import os
@@ -101,6 +162,42 @@ _BACKEND_RE = re.compile(r'^\s*backend\s*:\s*"([^"]*)"', re.MULTILINE)
 #: sweeps leftovers carrying this prefix for its model.
 _STAGING_PREFIX = ".staging-"
 
+#: Name of the owner marker written INSIDE a successfully staged repository
+#: (spec: jp6-vllm-kv-cache-oom-regression, task 14 H11).
+#:
+#: Filename choice, documented because it must not collide with the Triton
+#: vLLM backend's repository contract. That layout is exactly
+#: ``config.pbtxt`` + ``1/model.json`` (see :func:`validate_repository` and
+#: ``vllm_runtime.repository.parse_repository``), so a dot-prefixed
+#: ``.dda_stage_owner.json`` can never shadow a Triton file, a version
+#: directory (those are numeric) or a backend/config name. The runtime
+#: IGNORES it by construction: ``parse_repository`` reads only the two
+#: contract paths and never enumerates the repository, and
+#: ``VllmRuntimeManager._repository_staged`` keys on
+#: ``{model_name}/config.pbtxt`` alone. It is also written only into the
+#: STAGED tree, never into the unarchived artifact, so
+#: :func:`validate_repository`'s "unexpected entries" rule is untouched.
+OWNER_MARKER_NAME = ".dda_stage_owner.json"
+
+#: Directory holding the per-model advisory lock files. Deliberately a
+#: SIBLING of VLLM_MODEL_DIR, not a child: the lock must survive
+#: ``--cleanup`` deleting the staged tree (and must never appear inside the
+#: repository root the runtime scans). See :func:`stage_lock_path`.
+STAGE_LOCK_DIR_SUFFIX = ".locks"
+
+#: Bounded blocking acquire for :func:`stage_lock`. The measured collision
+#: window was 2 ms (two components staging the same path), so this is five
+#: orders of magnitude more than the stage path needs; it is sized for the
+#: ``--cleanup`` path, whose unload POST can take up to
+#: UNLOAD_REQUEST_TIMEOUT_SECONDS. On timeout the lock is NOT taken and the
+#: work proceeds anyway (fail-open): a stuck lock must not brick a device or
+#: fail a Greengrass deployment.
+STAGE_LOCK_TIMEOUT_SECONDS = 120
+
+#: Poll interval of the bounded acquire (non-blocking flock + sleep, so the
+#: timeout needs no signals and stays portable).
+STAGE_LOCK_POLL_SECONDS = 0.05
+
 #: An engine load can pull/initialize a large model; the recipe's Startup
 #: timeout is 1800s, stay inside it.
 LOAD_REQUEST_TIMEOUT_SECONDS = 1500
@@ -125,7 +222,13 @@ parser.add_argument(
     help="Device-local decompressed LLM weights path (S3-sourced records only)",
 )
 parser.add_argument("--model_name", help="Model name")
-parser.add_argument("--component_name", help="Greengrass component name (logging)")
+parser.add_argument(
+    "--component_name",
+    help="Greengrass component name: logged, and recorded as the owner of "
+    "the staged repository so a non-owning component's --cleanup is refused "
+    "(optional; when absent or empty, ownership is not enforced at all and "
+    "behaviour is exactly as before the marker existed)",
+)
 parser.add_argument(
     "--cleanup",
     action="store_true",
@@ -303,6 +406,242 @@ def stage_repository(
         shutil.rmtree(staging_root, ignore_errors=True)
 
 
+# --- 3b. staged-repository ownership (H11) and mutual exclusion (H12) --------
+#
+# Why this exists at all, so nobody removes it as ceremony (spec:
+# jp6-vllm-kv-cache-oom-regression, task 14 H11/H12; task 11 OUTCOME blocks
+# 13 and 17-18):
+#
+#   * ``--component_name`` used to be logging-only, and there was no guard on
+#     ``{VLLM_MODEL_DIR}/{model_name}/`` at all: staging was last-write-wins
+#     and ``--cleanup`` deleted the tree regardless of who staged it. Three
+#     portal model records publish components that all stage
+#     ``--model_name qwen2-5-vl-7b-instruct-awq``.
+#   * Block 13: two components logged ``INFO:Preparing vLLM model ...`` at
+#     08:53:59.239Z and ``INFO:Staged vLLM model ...`` at 08:53:59.241Z — 2 ms
+#     apart, same directory. Ordering alone therefore cannot make the stage
+#     safe; it needs MUTUAL EXCLUSION.
+#   * Blocks 17-18: one component's load succeeded at 11:00:23.768Z; 0.6 s
+#     later the OTHER component's Shutdown ran ``POST /unload`` 200 ->
+#     ``unloaded successfully`` -> ``Cleaned directory: .../
+#     qwen2-5-vl-7b-instruct-awq``. So the guard must cover ``--cleanup``'s
+#     UNLOAD step as well as its directory removal.
+#
+# Both guards fail OPEN. A stuck lock, an unwritable lock directory, or a
+# malformed marker degrades to today's behaviour with a WARNING; it never
+# fails a deployment.
+
+
+def stage_lock_path(model_name: str, model_repo_dir: str = None) -> str:
+    """Absolute path of the advisory lock file for ``model_name``.
+
+    Lives in ``{model_repo_dir}{STAGE_LOCK_DIR_SUFFIX}``, a SIBLING of the
+    repository root: the lock file must survive ``--cleanup`` deleting the
+    staged tree, and must not appear inside the directory the runtime scans
+    for staged repositories.
+    """
+    root = VLLM_MODEL_DIR if model_repo_dir is None else model_repo_dir
+    lock_dir = "{}{}".format(root.rstrip("/"), STAGE_LOCK_DIR_SUFFIX)
+    return os.path.join(lock_dir, "{}.lock".format(model_name))
+
+
+@contextlib.contextmanager
+def stage_lock(model_name: str, model_repo_dir: str = None,
+               timeout_seconds: float = STAGE_LOCK_TIMEOUT_SECONDS):
+    """Serialise the stage-or-cleanup critical section for ``model_name``
+    across PROCESSES.
+
+    An OS-level advisory lock (``fcntl.flock``) on a lock file outside the
+    staged tree is the only mechanism that works here: Greengrass spawns a
+    separate ``python3`` process per lifecycle script, so a threading lock
+    would be useless, and the lock has to outlive the tree that ``--cleanup``
+    deletes.
+
+    The acquire is BOUNDED (``timeout_seconds``, a named constant by default)
+    and implemented as a non-blocking ``flock`` polled until the deadline, so
+    it needs no signals. On timeout — or if the lock file cannot be created
+    at all — a WARNING is logged and the body runs UNLOCKED (fail-open): a
+    stuck lock must not brick a device or fail a Greengrass deployment.
+
+    Yields ``True`` when the lock is held, ``False`` when it was not taken.
+    """
+    path = stage_lock_path(model_name, model_repo_dir)
+    handle = None
+    acquired = False
+    try:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            handle = open(path, "a+")
+        except OSError as err:
+            logging.warning(
+                "Stage lock for model '{}' is unavailable ({}: {}); "
+                "proceeding WITHOUT mutual exclusion — a concurrent stage or "
+                "cleanup by another component sharing this --model_name could "
+                "interleave".format(model_name, path, err)
+            )
+            handle = None
+        if handle is not None:
+            deadline = time.monotonic() + max(float(timeout_seconds), 0.0)
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except OSError as err:
+                    if err.errno not in (errno.EACCES, errno.EAGAIN):
+                        logging.warning(
+                            "Stage lock for model '{}' could not be acquired "
+                            "({}); proceeding WITHOUT mutual "
+                            "exclusion".format(model_name, err)
+                        )
+                        break
+                    if time.monotonic() >= deadline:
+                        logging.warning(
+                            "Stage lock for model '{}' was still held by "
+                            "another process after the {:g}s "
+                            "STAGE_LOCK_TIMEOUT_SECONDS budget; proceeding "
+                            "WITHOUT mutual exclusion rather than failing the "
+                            "deployment (fail-open)".format(
+                                model_name, timeout_seconds
+                            )
+                        )
+                        break
+                    time.sleep(STAGE_LOCK_POLL_SECONDS)
+        yield acquired
+    finally:
+        if handle is not None:
+            if acquired:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                handle.close()
+            except OSError:
+                pass
+
+
+def owner_marker_path(model_name: str, model_repo_dir: str = None) -> str:
+    """Absolute path of the owner marker inside ``model_name``'s staged
+    repository."""
+    root = VLLM_MODEL_DIR if model_repo_dir is None else model_repo_dir
+    return os.path.join(root, model_name, OWNER_MARKER_NAME)
+
+
+def read_owner_marker(model_name: str, model_repo_dir: str = None):
+    """The parsed owner marker of ``model_name``'s staged repository, or
+    ``None`` when there is none.
+
+    FAILS OPEN: an absent, unreadable, malformed or non-object marker yields
+    ``None`` (with a WARNING for the malformed/unreadable cases) so a
+    corrupt marker degrades to the pre-marker behaviour instead of crashing
+    a deployment.
+    """
+    path = owner_marker_path(model_name, model_repo_dir)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            marker = json.load(handle)
+    except (ValueError, OSError, UnicodeDecodeError) as err:
+        logging.warning(
+            "Owner marker of staged vLLM model '{}' is unreadable or "
+            "malformed ({}: {}); treating the staged repository as UNOWNED so "
+            "this deployment is not blocked by a corrupt "
+            "marker".format(model_name, path, err)
+        )
+        return None
+    if not isinstance(marker, dict):
+        logging.warning(
+            "Owner marker of staged vLLM model '{}' is not a JSON object "
+            "(got {}): {}; treating the staged repository as "
+            "UNOWNED".format(model_name, type(marker).__name__, path)
+        )
+        return None
+    return marker
+
+
+def marker_owner(marker) -> str:
+    """The component name recorded in ``marker``, or ``""`` when the marker
+    is absent or records no usable owner (fail-open)."""
+    if not isinstance(marker, dict):
+        return ""
+    owner = marker.get("component_name")
+    return owner if isinstance(owner, str) else ""
+
+
+def write_owner_marker(staged_dir: str, model_name: str, component: str,
+                       source_path: str = None) -> bool:
+    """Record ``component`` as the owner of the repository staged at
+    ``staged_dir``.
+
+    Written ATOMICALLY (temp sibling inside the staged directory +
+    ``os.replace``) so a marker is never observed half-written. Returns
+    whether it was written; a failure is a WARNING, never a failed
+    deployment — the marker is a guard, not a prerequisite for serving.
+    """
+    path = os.path.join(staged_dir, OWNER_MARKER_NAME)
+    marker = {
+        "component_name": component,
+        "model_name": model_name,
+        "source_unarchived_path": source_path or "",
+        "staged_at": datetime.datetime.now(datetime.timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "marker_version": 1,
+    }
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=OWNER_MARKER_NAME + ".", dir=staged_dir
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(marker, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except OSError as err:
+        logging.warning(
+            "Unable to write the owner marker for staged vLLM model '{}' "
+            "({}: {}); the staged repository stays UNOWNED and another "
+            "component sharing this --model_name could clean it "
+            "up".format(model_name, path, err)
+        )
+        return False
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    logging.info(
+        "Recorded component '{}' as owner of staged vLLM model '{}' "
+        "({})".format(component, model_name, path)
+    )
+    return True
+
+
+def warn_foreign_stage(model_name: str, owner: str, component: str) -> None:
+    """The prominent WARNING for a stage by a component that is NOT the
+    recorded owner. The stage itself is PERMITTED — the newest deployment
+    legitimately takes the path over — but both component names and the
+    shared ``--model_name`` are named so the collision is visible in the
+    component log instead of being inferred from a config that silently
+    changed (task 11 OUTCOME blocks 11 and 13)."""
+    logging.warning(
+        "STAGING COLLISION: component '{}' is staging vLLM model '{}', which "
+        "is currently owned by a DIFFERENT component '{}'. Both components "
+        "pass --model_name '{}' and therefore share ONE staged path '{}': "
+        "whichever stages last wins, so this component's engine "
+        "configuration now replaces the other's. Publish the two records "
+        "under distinct model names, or remove the component that should no "
+        "longer own this model.".format(
+            component, model_name, owner, model_name,
+            os.path.join(VLLM_MODEL_DIR, model_name),
+        )
+    )
+
+
 # --- 4. model-control requests -----------------------------------------------
 
 
@@ -322,6 +661,16 @@ LOAD_RETRY_BACKOFF_SECONDS = (3, 6, 12, 24, 48)
 #: LOAD_UNREACHABLE: every attempt ended in a wait_for_server failure or a
 #: connection-level requests.RequestException with no HTTP response ever
 #: received (isBugCondition_D — the runtime was never reachable).
+#:
+#: EXIT CODES: LOAD_OK -> 0, LOAD_HTTP_ERROR -> **0**, LOAD_UNREACHABLE -> 1.
+#: LOAD_HTTP_ERROR moved from 1 to 0 deliberately (spec:
+#: jp6-vllm-kv-cache-oom-regression, task 11 OUTCOME block 18) — a MODEL that
+#: cannot load must not be able to mark the COMPONENT broken. See the
+#: module docstring's exit-code contract for the evidence (three transient-DNS
+#: load failures -> currentState=BROKEN -> two HARD-dependent workflows stuck
+#: at INSTALLED -> core device UNHEALTHY). LOAD_UNREACHABLE keeps exit 1: the
+#: runtime was never reachable, so the component genuinely started before the
+#: backend was ready and a component-level retry IS the recovery.
 LOAD_OK = "LOAD_OK"
 LOAD_HTTP_ERROR = "LOAD_HTTP_ERROR"
 LOAD_UNREACHABLE = "LOAD_UNREACHABLE"
@@ -338,8 +687,11 @@ LOAD_UNREACHABLE = "LOAD_UNREACHABLE"
 #: unrelated change for that device. Nothing is hidden: the prominent ERROR
 #: line below carries the full diagnostic and the runtime reports the model
 #: FAILED with the same reason through the unchanged status surfaces.
-#: Non-deterministic failures (LOAD_UNREACHABLE, LOAD_HTTP_ERROR) keep exit 1
-#: because a retry can genuinely fix them.
+#: ``LOAD_UNREACHABLE`` is the ONLY classification that still exits 1, because
+#: it is the only one where a COMPONENT-level retry is the right recovery (the
+#: component started before the backend was ready). ``LOAD_HTTP_ERROR`` now
+#: exits 0 for the same reason this classification does — the model's failure
+#: is reported as the MODEL's, and the in-backend reconciler owns its retries.
 LOAD_PREFLIGHT_REFUSED = "LOAD_PREFLIGHT_REFUSED"
 
 #: Stable prefix of a device-side memory-preflight refusal reason.
@@ -696,8 +1048,29 @@ def prepare(args) -> int:
         )
 
     model_dir_src = os.path.join(args.unarchived_repo_path, model_name)
+    # The stage is serialised against every other component that shares this
+    # --model_name, and the owner marker is written INSIDE the lock, so a
+    # concurrent stage cannot interleave between the copy and the marker
+    # (task 14 H12: two components were caught staging this exact path 2 ms
+    # apart). The lock is held for the stage only — NOT across the load
+    # request, which can take ~4 min of engine construction and must never
+    # block another component's teardown.
     try:
-        staged_dir = stage_repository(model_dir_src, model_name, rewritten_engine_args)
+        with stage_lock(model_name):
+            existing_owner = marker_owner(read_owner_marker(model_name))
+            if component and existing_owner and existing_owner != component:
+                warn_foreign_stage(model_name, existing_owner, component)
+            staged_dir = stage_repository(
+                model_dir_src, model_name, rewritten_engine_args
+            )
+            if component:
+                # Only an identified component can own the path; with
+                # --component_name absent or empty nothing is recorded and
+                # behaviour is exactly as before the marker existed.
+                write_owner_marker(
+                    staged_dir, model_name, component,
+                    args.unarchived_repo_path,
+                )
     except OSError as err:
         logging.error(
             "Unable to stage vLLM model '{}' into {}: {}".format(
@@ -707,17 +1080,20 @@ def prepare(args) -> int:
         return 1
     logging.info("Staged vLLM model '{}' at '{}'".format(model_name, staged_dir))
 
-    # Exit non-zero when the load could not be delivered (after retries):
-    # Greengrass then fails the Startup script and restarts the component,
-    # re-driving the load — matching the vision-model path's behavior. An
-    # HTTP-level FAILED from the runtime also exits non-zero so the component
-    # state reflects reality instead of "healthy but never loaded". A
-    # never-reachable runtime (isBugCondition_D — no HTTP response ever
-    # received) gets an actionable diagnostic naming the likely cause: the
-    # LocalServer backend container left stopped by a deployment restart
-    # (spec: edge-deploy-reliability, Defect D, Requirement 2.10). The ONE
-    # authoritative failure that does NOT exit non-zero is a device-memory
-    # preflight refusal, which no retry can change (see below).
+    # Exit non-zero ONLY when a COMPONENT-level retry is the right recovery.
+    # That is exactly the never-reachable case (isBugCondition_D — no HTTP
+    # response ever received): the component started before the backend was
+    # ready, so Greengrass restarting it re-drives the load. It gets an
+    # actionable diagnostic naming the likely cause, the LocalServer backend
+    # container left stopped by a deployment restart (spec:
+    # edge-deploy-reliability, Defect D, Requirement 2.10).
+    #
+    # Every AUTHORITATIVE answer from the runtime — a device-memory preflight
+    # refusal AND any other HTTP failure — exits 0: the model's failure is the
+    # MODEL's, reported with its reason through the model-status surfaces, and
+    # failing the component instead takes co-deployed components and every
+    # workflow that HARD-depends on this one down with it (see the module
+    # docstring's exit-code contract for the block-18 evidence).
     # The staged engine args (rewritten for S3-sourced records, verbatim
     # otherwise) travel into the load path so an authoritative HTTP failure
     # logs the active gpu_memory_utilization / max_model_len (spec:
@@ -768,7 +1144,39 @@ def prepare(args) -> int:
             "is back.".format(model_name, VLLM_RUNTIME_HOST, runtime_port())
         )
         return 1
+    if outcome == LOAD_HTTP_ERROR:
+        # DELIBERATE (spec: jp6-vllm-kv-cache-oom-regression, task 11 OUTCOME
+        # block 18): exit 0, not 1. The prominent ERROR line was already
+        # emitted by log_load_failure() with the model name, the HTTP status,
+        # the runtime's verbatim reason and the staged engine args (bugfix.md
+        # 3.8's pinned elements, all preserved); this terminal line states what
+        # happens next instead of failing the component.
+        #
+        # Why the old exit 1 was harmful, from production: three consecutive
+        # load attempts failed on TRANSIENT DNS ("Failed to resolve
+        # 'huggingface.co' ([Errno -3] Temporary failure in name resolution)")
+        # at 12:00:47Z / 12:02:09Z / 12:03:22Z, each ending "Startup script
+        # exited. {exitCode=1}"; after the third the component went
+        # currentState=BROKEN, and because dda.workflow.0c7fe31a-... 7.0.0 and
+        # dda.workflow.1f0b4c0c-... 9.0.0 HARD-depend on it they were left
+        # stuck at INSTALLED and the core device went UNHEALTHY. A transient
+        # network fault in ONE model's load must not take unrelated workflows
+        # down. Do NOT "restore" exit 1 here.
+        logging.error(
+            "Model '{}' is staged but the vLLM runtime answered the load "
+            "request with an authoritative failure (the ERROR above carries "
+            "the HTTP status and the runtime's verbatim reason). The model is "
+            "reported FAILED with that reason through the model-status "
+            "surfaces, the in-backend vLLM reconciler owns the retries (it "
+            "re-drives staged models with backoff and a 4-attempt budget), "
+            "and this component is deliberately NOT failed — exiting 0 so "
+            "co-deployed components and the workflows that depend on this one "
+            "stay available.".format(model_name)
+        )
+        return 0
     if outcome != LOAD_OK:
+        # Defensive: an unknown classification keeps the historical
+        # fail-the-component behaviour, message verbatim.
         logging.error(
             "Model '{}' staged but the load request did not succeed; "
             "exiting non-zero so the component retries".format(model_name)
@@ -780,24 +1188,58 @@ def prepare(args) -> int:
 def cleanup(args) -> int:
     """Shutdown path (--cleanup): unload, then remove the staged directory
     and any leftover staging temp siblings (mirrors convert_model_cleanup).
-    Returns the process exit code."""
+    Returns the process exit code.
+
+    Ownership guard (spec: jp6-vllm-kv-cache-oom-regression, task 14
+    H11/H12). The whole critical section — the owner check, the unload POST
+    and the directory removal — runs under the per-model stage lock, and a
+    teardown by a component that is NOT the recorded owner is REFUSED: both
+    the unload and the removal are skipped, a prominent WARNING names the
+    owner and the requester, and the exit code is still 0 so the teardown is
+    not failed. The unload MUST be inside the guard: in production a
+    non-owning component's Shutdown unloaded and deleted another component's
+    model 0.6 s after that model's load succeeded (task 11 OUTCOME blocks
+    17-18). A cleanup by the recorded owner, or when no marker exists, or
+    when ``--component_name`` is absent, behaves exactly as before.
+    """
     model_name = args.model_name
+    component = args.component_name or ""
     try:
-        request_unload(model_name)
-        staged_dir = os.path.join(VLLM_MODEL_DIR, model_name)
-        if os.path.exists(staged_dir) and os.path.isdir(staged_dir):
-            shutil.rmtree(staged_dir)
-            logging.info("Cleaned directory: {}".format(staged_dir))
-        if os.path.isdir(VLLM_MODEL_DIR):
-            leftover_prefix = "{}{}-".format(_STAGING_PREFIX, model_name)
-            for entry in os.listdir(VLLM_MODEL_DIR):
-                if entry.startswith(leftover_prefix):
-                    shutil.rmtree(
-                        os.path.join(VLLM_MODEL_DIR, entry), ignore_errors=True
+        with stage_lock(model_name):
+            owner = marker_owner(read_owner_marker(model_name))
+            if component and owner and owner != component:
+                logging.warning(
+                    "REFUSING --cleanup of staged vLLM model '{}': it is "
+                    "owned by component '{}', not by the requesting component "
+                    "'{}'. Skipping BOTH the unload request and the removal "
+                    "of '{}' — a non-owning teardown has already destroyed a "
+                    "freshly-loaded model in production (unload 200 then "
+                    "'Cleaned directory' 0.6 s after the owner's load "
+                    "succeeded). Exiting 0 so this teardown is not "
+                    "failed.".format(
+                        model_name, owner, component,
+                        os.path.join(VLLM_MODEL_DIR, model_name),
                     )
-                    logging.info("Cleaned leftover staging directory: {}".format(entry))
-        logging.info("Directory cleanup finished")
-        return 0
+                )
+                return 0
+            request_unload(model_name)
+            staged_dir = os.path.join(VLLM_MODEL_DIR, model_name)
+            if os.path.exists(staged_dir) and os.path.isdir(staged_dir):
+                shutil.rmtree(staged_dir)
+                logging.info("Cleaned directory: {}".format(staged_dir))
+            if os.path.isdir(VLLM_MODEL_DIR):
+                leftover_prefix = "{}{}-".format(_STAGING_PREFIX, model_name)
+                for entry in os.listdir(VLLM_MODEL_DIR):
+                    if entry.startswith(leftover_prefix):
+                        shutil.rmtree(
+                            os.path.join(VLLM_MODEL_DIR, entry),
+                            ignore_errors=True,
+                        )
+                        logging.info(
+                            "Cleaned leftover staging directory: {}".format(entry)
+                        )
+            logging.info("Directory cleanup finished")
+            return 0
     except Exception as e:
         logging.error("Exception occurred while cleaning vLLM model dir: {}".format(e))
         return 1

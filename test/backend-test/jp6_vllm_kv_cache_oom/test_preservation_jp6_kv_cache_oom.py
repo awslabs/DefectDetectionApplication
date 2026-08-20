@@ -134,15 +134,44 @@ class _Response:
 @pytest.mark.parametrize("classification,expected_exit", [
     (mp.LOAD_OK, 0),
     (mp.LOAD_UNREACHABLE, 1),
-    (mp.LOAD_HTTP_ERROR, 1),
+    # CONSCIOUS REPOINT, 1 -> 0 (see the docstring below).
+    (mp.LOAD_HTTP_ERROR, 0),
 ])
 def test_prep_exit_codes_are_preserved(tmp_path, monkeypatch,
                                        classification, expected_exit):
-    """OBSERVED on the unfixed tree and preserved (3.8): the three existing
-    ``request_load`` classifications map to their exit codes exactly —
-    ``LOAD_OK`` → 0, ``LOAD_UNREACHABLE`` → 1, ``LOAD_HTTP_ERROR`` → 1 — so
-    Greengrass keeps retrying a component whose load did not land and keeps
-    accepting one that did.
+    """``LOAD_OK`` → 0 and ``LOAD_UNREACHABLE`` → 1 are OBSERVED on the
+    unfixed tree and preserved (3.8): Greengrass keeps retrying a component
+    whose runtime was never reachable and keeps accepting one whose load
+    landed.
+
+    CONSCIOUS REPOINT (task 14 H11 dispatch; task 11 OUTCOME block 18):
+    ``LOAD_HTTP_ERROR`` now maps to **0**. Verbatim original, recorded so
+    the change is auditable::
+
+        @pytest.mark.parametrize("classification,expected_exit", [
+            (mp.LOAD_OK, 0),
+            (mp.LOAD_UNREACHABLE, 1),
+            (mp.LOAD_HTTP_ERROR, 1),
+        ])
+        ...
+        \"\"\"OBSERVED on the unfixed tree and preserved (3.8): the three
+        existing ``request_load`` classifications map to their exit codes
+        exactly — ``LOAD_OK`` → 0, ``LOAD_UNREACHABLE`` → 1,
+        ``LOAD_HTTP_ERROR`` → 1 — so Greengrass keeps retrying a component
+        whose load did not land and keeps accepting one that did.
+
+        _Requirements: 3.8_\"\"\"
+
+    Reason (evidence, not preference): three consecutive load attempts
+    failed on transient DNS at 12:00:47Z / 12:02:09Z / 12:03:22Z, each
+    exiting 1, and the third drove the component to
+    ``currentState=BROKEN`` — which left the two workflows that HARD-depend
+    on it stuck at ``INSTALLED`` and turned the core device UNHEALTHY. An
+    authoritative runtime answer is a MODEL failure, reported as one; the
+    in-backend reconciler owns its retries. NOTHING here was weakened: the
+    other two mappings keep their exact assertions, and the model's failure
+    reporting is pinned by the companion tests below and in
+    ``test_property_stage_ownership.py``.
 
     _Requirements: 3.8_"""
     repo = _unarchived_repo(tmp_path)

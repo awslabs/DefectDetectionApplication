@@ -65,7 +65,9 @@ import gc
 import inspect
 import json
 import logging
+import os
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -166,6 +168,26 @@ ENGINE_CONSTRUCTION_ERROR_TOKEN = "engine-construction-error:"
 #: change if those sibling legs are instead repointed to accept a token.
 UNCLASSIFIED_FAILURE_TOKEN = ""
 
+#: Failure categories that must NOT trigger the offline-cache gate's single
+#: retry (:data:`HF_OFFLINE_ENV_VARS`). The retry exists for ONE reason: an
+#: incomplete local snapshot, which `estimate_weights_on_disk` cannot
+#: detect because verifying it against the repo manifest needs the network.
+#: A KV-cache exhaustion, an allocator/NVML fault or a preflight refusal is
+#: a DEVICE-MEMORY failure — retrying it would spend another ~4 min of
+#: doomed profiling and start the second attempt with less memory than the
+#: first, which is precisely the cascade defect 1.5 / Decision 5 exist to
+#: stop (three failed loads left the device at 26 GB used / 3 GB free with
+#: no model loaded). Deviation from the dispatch brief, recorded
+#: deliberately: the brief said "retry whenever offline mode was applied by
+#: us", and scoping it this way is what keeps the "no retry into a starved
+#: device" contract (exploration Case 6 and Property 6-D both pin exactly
+#: one construction per failed KV-OOM load) intact without weakening it.
+_NO_OFFLINE_RETRY_TOKENS = (
+    KV_CACHE_EXHAUSTION_TOKEN,
+    ALLOCATOR_NVML_FAULT_TOKEN,
+    PREFLIGHT_REFUSED_MARKER,
+)
+
 #: Every category token, including the preflight marker owned by
 #: :mod:`vllm_runtime.memory_budget` (that reason arrives already tokenized,
 #: so the classifier must not prepend a second one).
@@ -193,6 +215,81 @@ _ALLOCATOR_NVML_SIGNATURES = (
     "nvml_success",
     "cudacachingallocator",
 )
+
+# --- offline engine construction (spec jp6-vllm-kv-cache-oom-regression, -
+# --- task 11 OUTCOME block 18; defect 1.9's blast radius) ----------------
+#
+# PROVENANCE — DO NOT "simplify" THIS AWAY. On 2026-08-19 the JP6 model
+# component went BROKEN after three consecutive load failures at 12:00:47Z,
+# 12:02:09Z and 12:03:22Z (each `Startup script exited. {exitCode=1}`) whose
+# reason was, verbatim:
+#
+#   (MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443):
+#   Max retries exceeded with url: /api/models/Qwen/Qwen2.5-VL-7B-Instruct-
+#   AWQ/tree/main?recursive=True&expand=False (Caused by
+#   NameResolutionError("...: Failed to resolve \'huggingface.co\'
+#   ([Errno -3] Temporary failure in name resolution)"))')
+#
+# The repository was ALREADY staged locally (gpu_memory_utilization=0.55,
+# max_model_len=4096) and the weights were already in the HF cache; the
+# network call is vLLM/transformers resolving the repo id
+# `Qwen/Qwen2.5-VL-7B-Instruct-AWQ`, NOT our code (`src/backend` contains no
+# huggingface_hub / HfApi / snapshot_download call in the load path). Two
+# deployed workflows HARD-depend on that component, so they were left stuck
+# at INSTALLED: a transient DNS fault became a workflow outage.
+#
+# So when the weights are demonstrably on disk, the engine is constructed
+# with Hugging Face OFFLINE MODE enabled — an unreachable huggingface.co
+# then cannot fail an already-staged model.
+HF_OFFLINE_ENV_VARS = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+
+# --- Starvation_Latch settling (spec jp6-vllm-kv-cache-oom-regression, ---
+# --- task 11 OUTCOME block 9, defect (b); Decision 5) --------------------
+#
+# The latch read `/proc/meminfo` immediately after `_shutdown_engine` +
+# `_reclaim_gpu_memory`, i.e. against an UNSETTLED reading, because the
+# driver releases asynchronously. Measured: the latch reported `9.45 GiB
+# did not come back` and later in the SAME backend life, with NO restart,
+# MemAvailable had recovered by ~5.2 GiB unaided — the genuinely-stranded
+# amount was ~4 GiB, not 9.45 (a later occurrence reported 12.35 GiB). So
+# it OVER-TRIGGERED: it refused loads and demanded a container restart when
+# the memory would have come back on its own.
+#
+# PROPOSED THRESHOLDS (the same discipline as
+# `memory_budget.RECLAIM_TOLERANCE_BYTES` and `THIN_MARGIN_CONCURRENCY`):
+# these two numbers are NOT measured, and task 14 / H8 owns their
+# calibration alongside the other proposed constants.
+
+#: Delay between settle re-samples, seconds.
+STARVATION_SETTLE_DELAY_SECONDS = 1.5
+#: How many EXTRA samples to take after a first reading that looked
+#: starved. Worst case adds 3 x 1.5 s = 4.5 s, and ONLY on a failure path
+#: that already cost minutes of engine profiling — the healthy path (a
+#: first reading within tolerance) sleeps not at all, so the runtime
+#: server is never stalled for long.
+STARVATION_SETTLE_RESAMPLES = 3
+
+#: Sleep used between settle re-samples — a module-level callable so host
+#: tests never actually sleep (patch this attribute, or pass ``sleep=`` to
+#: :class:`VllmRuntimeManager`). Resolved at CALL time.
+_default_sleep = time.sleep
+
+# --- KV-margin readability (task 11 OUTCOME block 9, defect (d)) ---------
+#
+# A load reached READY with 0.77 GiB of KV against the 1 GiB floor —
+# exactly the H5 shape — and NO WARNING appeared: `kv_bytes` introspection
+# returned None and the only fallback was `logger.debug`, so the thinnest
+# margin yet observed was reported as an unqualified success. The reader
+# now says WHICH of three cases a reading is, so the caller can reach a
+# verdict from a PARTIAL reading instead of falling silent.
+
+#: Blocks, block size AND KV bytes were all readable.
+KV_MARGIN_FULL = "full"
+#: The geometry (blocks x block size, and usually ``max_model_len``) was
+#: readable but ``kv_bytes`` was not — the shape the device hit.
+KV_MARGIN_PARTIAL = "partial"
+#: A ``cache_config`` exists but nothing usable could be read from it.
+KV_MARGIN_UNREADABLE = "unreadable"
 
 
 def classify_failure_reason(
@@ -237,55 +334,90 @@ def classify_failure(
     return "{} {}".format(token, text)
 
 
+def _safe_attr(obj: Any, name: str) -> Any:
+    """``getattr`` that answers ``None`` instead of raising — engine
+    introspection meets exotic shapes whose attribute access explodes."""
+    try:
+        return getattr(obj, name, None)
+    except Exception:  # noqa: BLE001 - introspection is best-effort
+        return None
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    """``value`` when it is a strictly-positive plain ``int`` (a ``bool`` is
+    an ``int`` and is rejected), else ``None``."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
 def _default_kv_margin_reader(engine: Any) -> Optional[Dict[str, Any]]:
     """Best-effort read of a loaded engine's KV sizing — the injection seam
     behind the thin-margin WARNING (Decision 6; expected behavior 2.7).
 
     A small ``getattr`` chain over ``engine.engine.cache_config``
     (``num_gpu_blocks``, ``block_size``) plus the model config's
-    ``max_model_len`` and KV geometry. Returns ``None`` for ANY engine shape
-    it cannot read — no exception escapes, and the caller then logs one
-    debug line and changes nothing. Never touches CUDA: every value here is
-    a plain attribute the engine already computed.
+    ``max_model_len`` and KV geometry. Never touches CUDA: every value here
+    is a plain attribute the engine already computed, and no exception
+    escapes.
+
+    The answer carries a ``readable`` classification, because "unreadable"
+    used to collapse three different situations into one silent ``None``
+    (defect (d): the device reached READY with 0.77 GiB of KV and nothing
+    warned, because ``kv_bytes`` alone was ``None``):
+
+    - ``None`` — the engine exposes NO ``cache_config`` at all (V1's
+      engine-core child, and every pre-Decision-6 fake): there is nothing
+      to report and nothing to escalate, so the caller stays quiet.
+    - :data:`KV_MARGIN_UNREADABLE` — a ``cache_config`` exists but nothing
+      usable could be read from it: the caller says so at WARNING level.
+    - :data:`KV_MARGIN_PARTIAL` — the geometry is readable but ``kv_bytes``
+      is not: the caller still reaches a verdict from the concurrency.
+    - :data:`KV_MARGIN_FULL` — everything, including ``kv_bytes``.
     """
     try:
-        inner = getattr(engine, "engine", None) or engine
-        cache_config = getattr(inner, "cache_config", None)
+        inner = _safe_attr(engine, "engine") or engine
+        cache_config = _safe_attr(inner, "cache_config")
         if cache_config is None:
-            cache_config = getattr(engine, "cache_config", None)
+            cache_config = _safe_attr(engine, "cache_config")
         if cache_config is None:
             return None
-        blocks = getattr(cache_config, "num_gpu_blocks", None)
-        block_size = getattr(cache_config, "block_size", None)
-        if isinstance(blocks, bool) or isinstance(block_size, bool):
-            return None
-        if not isinstance(blocks, int) or not isinstance(block_size, int):
-            return None
-        if blocks <= 0 or block_size <= 0:
-            return None
-        tokens = blocks * block_size
 
-        model_config = getattr(inner, "model_config", None)
+        model_config = _safe_attr(inner, "model_config")
         if model_config is None:
-            model_config = getattr(engine, "model_config", None)
-        max_model_len = getattr(cache_config, "max_model_len", None)
-        if not isinstance(max_model_len, int) or isinstance(
-            max_model_len, bool
-        ) or max_model_len <= 0:
-            max_model_len = getattr(model_config, "max_model_len", None)
-        concurrency = None
-        if isinstance(max_model_len, int) and not isinstance(
-            max_model_len, bool
-        ) and max_model_len > 0:
-            concurrency = tokens / float(max_model_len)
+            model_config = _safe_attr(engine, "model_config")
+        max_model_len = _positive_int(_safe_attr(cache_config,
+                                                 "max_model_len"))
+        if max_model_len is None:
+            max_model_len = _positive_int(_safe_attr(model_config,
+                                                     "max_model_len"))
+
+        blocks = _positive_int(_safe_attr(cache_config, "num_gpu_blocks"))
+        block_size = _positive_int(_safe_attr(cache_config, "block_size"))
+        if blocks is None or block_size is None:
+            return {
+                "readable": KV_MARGIN_UNREADABLE,
+                "num_gpu_blocks": blocks,
+                "block_size": block_size,
+                "tokens": None,
+                "max_model_len": max_model_len,
+                "concurrency": None,
+                "kv_bytes": None,
+            }
+        tokens = blocks * block_size
+        concurrency = (tokens / float(max_model_len)
+                       if max_model_len is not None else None)
+        kv_bytes = _kv_bytes_from_geometry(model_config, tokens)
 
         return {
+            "readable": (KV_MARGIN_FULL if kv_bytes is not None
+                         else KV_MARGIN_PARTIAL),
             "num_gpu_blocks": blocks,
             "block_size": block_size,
             "tokens": tokens,
             "max_model_len": max_model_len,
             "concurrency": concurrency,
-            "kv_bytes": _kv_bytes_from_geometry(model_config, tokens),
+            "kv_bytes": kv_bytes,
         }
     except Exception:  # noqa: BLE001 - introspection is strictly best-effort
         return None
@@ -437,7 +569,9 @@ class VllmRuntimeManager:
     ``/proc/meminfo``-shaped text) and ``kv_margin_reader`` (an engine ->
     KV-sizing mapping) follow the same convention: they default to the
     real readers so host tests can drive the preflight, the
-    Starvation_Latch and the thin-margin check with fakes and no GPU. All
+    Starvation_Latch and the thin-margin check with fakes and no GPU.
+    ``sleep`` is the same convention for the Starvation_Latch's
+    settle-and-re-sample delay, so host tests never actually sleep. All
     state access is lock-guarded, so the manager is safe to touch from the
     HTTP server's event loop and from status-reporting threads alike.
     """
@@ -449,6 +583,7 @@ class VllmRuntimeManager:
         sampling_params_factory: Optional[Callable[[Mapping[str, Any]], Any]] = None,
         memory_reader: Optional[Callable[[], str]] = None,
         kv_margin_reader: Optional[Callable[[Any], Optional[Dict[str, Any]]]] = None,
+        sleep: Optional[Callable[[float], None]] = None,
     ):
         self.model_dir = Path(model_dir)
         self._engine_factory = engine_factory or _default_engine_factory
@@ -459,6 +594,10 @@ class VllmRuntimeManager:
         #: resolved at CALL time so the module attribute stays patchable.
         self._memory_reader = memory_reader
         self._kv_margin_reader = kv_margin_reader or _default_kv_margin_reader
+        #: ``None`` keeps the module-level :data:`_default_sleep`, resolved
+        #: at CALL time so the module attribute stays patchable. Only the
+        #: Starvation_Latch's settle-and-re-sample uses it.
+        self._sleep = sleep
         self._lock = threading.Lock()
         self._models: Dict[str, _ManagedModel] = {}
         #: Starvation_Latch (Decision 5): set when a failed attempt's memory
@@ -692,13 +831,51 @@ class VllmRuntimeManager:
             entry.status = ModelStatus(ModelState.LOADING)
         logger.info("Loading vLLM model '%s'", model_name)
 
+        # Offline-cache gate (task 11 OUTCOME block 18): when the weights
+        # are demonstrably on this device's disk, construct the engine with
+        # Hugging Face offline mode enabled so an unreachable huggingface.co
+        # cannot fail an already-staged model. Restored in the `finally`
+        # BELOW so an exception can never leak offline mode into unrelated
+        # work in this process (the manager serialises loads, but the
+        # restore must not depend on that).
+        restore_env = self._apply_hf_offline_mode(model_name, engine_args)
         try:
-            engine = self._engine_factory(engine_args)
-            if inspect.isawaitable(engine):
-                engine = await engine
-        except Exception as err:  # noqa: BLE001 - failure isolation (4.6, 8.9)
-            return self._fail(model_name, str(err),
-                              available_before=available_before)
+            try:
+                engine = await self._construct_engine(engine_args)
+            except Exception as err:  # noqa: BLE001 - isolation (4.6, 8.9)
+                if restore_env is None or classify_failure_reason(
+                        str(err)) in _NO_OFFLINE_RETRY_TOKENS:
+                    # Either offline mode was NOT applied by us (nothing to
+                    # undo, nothing to retry), or the failure is a
+                    # device-memory failure rather than a cache miss — see
+                    # `_NO_OFFLINE_RETRY_TOKENS`: retrying would repeat the
+                    # ~4 min profiling on a device with less memory than the
+                    # first attempt had.
+                    return self._fail(model_name, str(err),
+                                      available_before=available_before)
+                # Cache-miss fallback, EXACTLY ONCE:
+                # `estimate_weights_on_disk` sizes weight files, it does
+                # NOT verify the snapshot against the repo manifest (that
+                # needs the network), so an incomplete cache is possible
+                # and a first-time download must not regress.
+                logger.warning(
+                    "Constructing the engine of vLLM model '%s' in Hugging "
+                    "Face offline mode FAILED (%s). The locally cached "
+                    "weights may be incomplete, so the load is retried ONCE "
+                    "with the offline environment restored — a first-time or "
+                    "partial download must not be blocked by this gate.",
+                    model_name, err,
+                )
+                self._restore_environment(restore_env)
+                restore_env = None
+                try:
+                    engine = await self._construct_engine(engine_args)
+                except Exception as retry_err:  # noqa: BLE001 - isolation
+                    return self._fail(model_name, str(retry_err),
+                                      available_before=available_before)
+        finally:
+            if restore_env is not None:
+                self._restore_environment(restore_env)
 
         with self._lock:
             entry = self._models.get(model_name)
@@ -712,6 +889,71 @@ class VllmRuntimeManager:
         # own KV sizing says the load is one retry from failing (2.7).
         self._warn_on_thin_kv_margin(model_name, engine)
         return ModelStatus(ModelState.READY)
+
+    async def _construct_engine(self, engine_args: Mapping[str, Any]) -> Any:
+        """One engine construction through the injectable factory, awaiting
+        an awaitable result. Exactly the two lines that used to sit inline
+        in :meth:`load`, factored out so the offline-cache gate can run it
+        at most twice without duplicating them."""
+        engine = self._engine_factory(engine_args)
+        if inspect.isawaitable(engine):
+            engine = await engine
+        return engine
+
+    def _apply_hf_offline_mode(
+        self, model_name: str, engine_args: Mapping[str, Any]
+    ) -> Optional[Dict[str, Optional[str]]]:
+        """Enable Hugging Face offline mode for the coming engine
+        construction WHEN the model's weights are already on this device's
+        disk (task 11 OUTCOME block 18; :data:`HF_OFFLINE_ENV_VARS`).
+
+        Returns the snapshot to hand :meth:`_restore_environment`, or
+        ``None`` when nothing was changed — which is both the
+        weights-not-locatable answer (behaviour unchanged: no environment
+        manipulation, one construction attempt) and the caller's signal
+        that the single cache-miss retry does NOT apply.
+
+        :func:`memory_budget.estimate_weights_on_disk` is the probe: pure,
+        stdlib-only, network-free and CUDA-free, and it already resolves
+        ``models--{org}--{name}`` under ``HF_HUB_CACHE`` / ``$HF_HOME/hub``
+        / ``~/.cache/huggingface/hub``. A non-``None``, positive answer
+        means the weights are there.
+        """
+        try:
+            located = memory_budget.estimate_weights_on_disk(engine_args)
+        except Exception:  # noqa: BLE001 - the probe never decides alone
+            located = None
+        if not isinstance(located, int) or located <= 0:
+            return None
+
+        snapshot: Dict[str, Optional[str]] = {
+            name: os.environ.get(name) for name in HF_OFFLINE_ENV_VARS
+        }
+        for name in HF_OFFLINE_ENV_VARS:
+            os.environ[name] = "1"
+        logger.info(
+            "vLLM model '%s' has its weights on local disk (%s located in "
+            "the Hugging Face cache), so the engine is constructed with "
+            "Hugging Face offline mode enabled (%s): an unreachable "
+            "huggingface.co cannot fail an already-staged model (three "
+            "consecutive name-resolution failures took this component "
+            "BROKEN and left two dependent workflows stuck at INSTALLED).",
+            model_name,
+            format_gib(located),
+            ", ".join(HF_OFFLINE_ENV_VARS),
+        )
+        return snapshot
+
+    @staticmethod
+    def _restore_environment(snapshot: Mapping[str, Optional[str]]) -> None:
+        """Restore the EXACT prior state of the offline-mode variables:
+        a variable that was absent is DELETED again (never left as ``""``),
+        a variable that had a value gets that value back."""
+        for name, previous in snapshot.items():
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
 
     def unload(self, model_name: str) -> bool:
         """Remove the model from any state, shutting its engine down and
@@ -819,22 +1061,65 @@ class VllmRuntimeManager:
         the NVML-assert path (three failed loads → 26 GB used / 3 GB free
         with no model loaded, recovered only by a container restart). No
         knowledge of WHY is needed to measure WHETHER.
+
+        The first reading is taken exactly as before, and a reading within
+        :data:`RECLAIM_TOLERANCE_BYTES` returns IMMEDIATELY — no added
+        latency, no behaviour change, on the healthy path. Only a reading
+        that looks starved is re-sampled after
+        :data:`STARVATION_SETTLE_DELAY_SECONDS`, up to
+        :data:`STARVATION_SETTLE_RESAMPLES` more times, because the driver
+        releases ASYNCHRONOUSLY: the latch once reported "9.45 GiB did not
+        come back" and ~5.2 GiB came back unaided in the same backend life
+        with no restart (defect (b) of task 11's ninth OUTCOME block). The
+        latch is set only when EVERY sample was short, and it records the
+        BEST reading observed rather than the transient one.
         """
-        reading = memory_budget.read_memory(self._memory_reader)
-        if reading is None:
-            logger.info(
-                "Could not measure the memory reclaimed after the failed "
-                "load of vLLM model '%s'; no starvation verdict is recorded",
-                model_name,
-            )
-            return
-        available_after = reading.available_bytes
-        if available_after >= available_before - RECLAIM_TOLERANCE_BYTES:
-            return
+        sleeper = self._sleep if self._sleep is not None else _default_sleep
+        best_after: Optional[int] = None
+        samples = 0
+        settled_seconds = 0.0
+        for attempt in range(STARVATION_SETTLE_RESAMPLES + 1):
+            if attempt:
+                # Settle: the reading looked starved, so give the driver
+                # time to finish releasing before believing it.
+                sleeper(STARVATION_SETTLE_DELAY_SECONDS)
+                settled_seconds += STARVATION_SETTLE_DELAY_SECONDS
+            reading = memory_budget.read_memory(self._memory_reader)
+            if reading is None:
+                if best_after is None:
+                    logger.info(
+                        "Could not measure the memory reclaimed after the "
+                        "failed load of vLLM model '%s'; no starvation "
+                        "verdict is recorded", model_name,
+                    )
+                    return
+                break  # keep the readings we did get and judge on them
+            samples += 1
+            available_after = reading.available_bytes
+            if best_after is None or available_after > best_after:
+                best_after = available_after
+            if available_after >= available_before - RECLAIM_TOLERANCE_BYTES:
+                if attempt:
+                    # The observation this defect was missed for.
+                    logger.info(
+                        "The memory of the failed load of vLLM model '%s' "
+                        "CAME BACK after %.1f seconds of settling (%s "
+                        "available before the attempt, %s on sample %d of at "
+                        "most %d, within the %s reclaim tolerance); the "
+                        "driver had simply not finished releasing it, so NO "
+                        "starvation verdict is recorded",
+                        model_name, settled_seconds,
+                        format_gib(available_before),
+                        format_gib(available_after),
+                        samples, STARVATION_SETTLE_RESAMPLES + 1,
+                        format_gib(RECLAIM_TOLERANCE_BYTES),
+                    )
+                return
+
         latch = StarvationLatch(
             model_name=model_name,
             available_before_bytes=int(available_before),
-            available_after_bytes=int(available_after),
+            available_after_bytes=int(best_after),
         )
         with self._lock:
             if self._starvation_latch is None:
@@ -842,8 +1127,10 @@ class VllmRuntimeManager:
         logger.warning(
             "STARVED DEVICE: the failed load of vLLM model '%s' did NOT "
             "return its memory — %s available before the attempt, %s after "
-            "the engine shutdown and CUDA reclaim (%s did not come back, "
-            "more than the %s reclaim tolerance). Further vLLM loads are "
+            "the engine shutdown and CUDA reclaim (the BEST of %d sample(s) "
+            "taken over %.1f seconds of settling, so this is the settled "
+            "figure and not a transient one; %s did not come back, more "
+            "than the %s reclaim tolerance). Further vLLM loads are "
             "refused in this backend life to stop the allocation cascade "
             "(every retry would start with less memory than the last, and "
             "the co-resident GPU models share this memory). Recovery "
@@ -851,7 +1138,9 @@ class VllmRuntimeManager:
             "vLLM model clears this latch and allows one measured retry.",
             model_name,
             format_gib(available_before),
-            format_gib(available_after),
+            format_gib(best_after),
+            samples,
+            settled_seconds,
             format_gib(latch.lost_bytes),
             format_gib(RECLAIM_TOLERANCE_BYTES),
         )
@@ -865,9 +1154,25 @@ class VllmRuntimeManager:
         concurrency for 4096 tokens per request: 2.95x`` — one retry and
         0.65 GiB from failing, reported as an unqualified success. A
         derived KV size below :data:`MINIMUM_KV_CACHE_BYTES`, or a derived
-        concurrency below :data:`THIN_MARGIN_CONCURRENCY`, now logs a
-        WARNING. READY is still READY, and an engine whose shape cannot be
-        read produces one debug line and no behavior change.
+        concurrency below :data:`THIN_MARGIN_CONCURRENCY`, logs a WARNING.
+        READY is still READY in every case.
+
+        Three readability cases, kept DISTINCT (defect (d) of task 11's
+        ninth OUTCOME block: a load reached READY with 0.77 GiB of KV
+        against the 1 GiB floor and nothing warned, because ``kv_bytes``
+        alone was ``None`` and the only fallback was an invisible debug
+        line):
+
+        (i)   nothing readable — an engine exposing no ``cache_config`` at
+              all keeps the byte-identical debug line and stays quiet
+              (there is no evidence of a KV margin to verify); a
+              ``cache_config`` that IS exposed but yields nothing usable
+              now WARNS that the margin could not be verified.
+        (ii)  partially readable — geometry present, ``kv_bytes`` ``None``
+              because the KV accessors were unavailable: the verdict is
+              derived from what IS available (the concurrency), and the
+              message says the KV size is unknown.
+        (iii) fully readable — unchanged.
         """
         try:
             margin = self._kv_margin_reader(engine)
@@ -881,9 +1186,33 @@ class VllmRuntimeManager:
             return
         kv_bytes = margin.get("kv_bytes")
         concurrency = margin.get("concurrency")
-        thin_bytes = isinstance(kv_bytes, (int, float)) \
-            and kv_bytes < MINIMUM_KV_CACHE_BYTES
-        thin_concurrency = isinstance(concurrency, (int, float)) \
+        readable_bytes = isinstance(kv_bytes, (int, float)) \
+            and not isinstance(kv_bytes, bool)
+        readable_concurrency = isinstance(concurrency, (int, float)) \
+            and not isinstance(concurrency, bool)
+        if not readable_bytes and not readable_concurrency:
+            # Case (i) with a cache_config present: escalated from
+            # `logger.debug` to WARNING, because on the one device where it
+            # mattered the debug line was invisible in practice.
+            logger.warning(
+                "KV-CACHE MARGIN NOT VERIFIED: vLLM model '%s' reached READY "
+                "but this engine's KV sizing could NOT be read (blocks %s, "
+                "block size %s, max_model_len %s), so a thin margin against "
+                "the %s serving-margin floor CANNOT be ruled out for this "
+                "model — READY is still READY, and this load is NOT reported "
+                "as an unqualified success.",
+                model_name,
+                margin.get("num_gpu_blocks"),
+                margin.get("block_size"),
+                margin.get("max_model_len"),
+                format_gib(MINIMUM_KV_CACHE_BYTES),
+            )
+            return
+        # Case (ii)/(iii): judge on whichever arms ARE readable. An unknown
+        # `kv_bytes` no longer silences the concurrency arm — that silence
+        # is exactly how a 0.77 GiB margin passed as healthy.
+        thin_bytes = readable_bytes and kv_bytes < MINIMUM_KV_CACHE_BYTES
+        thin_concurrency = readable_concurrency \
             and concurrency < THIN_MARGIN_CONCURRENCY
         if not (thin_bytes or thin_concurrency):
             return

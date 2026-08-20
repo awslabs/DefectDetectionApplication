@@ -29,10 +29,12 @@ vllm_model_prep.py and asserted here as the golden behavior):
   * an authoritative HTTP error response from the runtime (even after
     leading connection refusals — refused-then-409 is NOT the bug
     condition) -> single-attempt semantics on the HTTP response (no retry
-    after it), the exact HTTP-error log line + raw-body debug message, the
-    exact generic terminal "staged but the load request did not succeed"
-    message, exit 1 — and NEVER the never-reachable diagnostic (naming
-    flask-app), which the Defect D fix reserves for isBugCondition_D;
+    after it), the exact HTTP-error log line + raw-body debug message, and
+    NEVER the never-reachable diagnostic (naming flask-app), which the
+    Defect D fix reserves for isBugCondition_D.
+    **CONSCIOUS CROSS-SPEC REPOINT of the exit code on this path only** —
+    see the INTENTIONAL GOLDEN UPDATE note on
+    HTTP_ERROR_TERMINAL_MESSAGE below;
   * HTTP 200 -> exit 0 with the exact "Model '{m}' loaded successfully!"
     message.
 
@@ -106,6 +108,53 @@ RAW_BODY_DEBUG_MESSAGE = (
 GENERIC_TERMINAL_MESSAGE = (
     "Model '{model}' staged but the load request did not succeed; "
     "exiting non-zero so the component retries")
+# INTENTIONAL GOLDEN UPDATE (cross-spec), CONSCIOUS REPOINT of ONE mapping:
+# the jp6-vllm-kv-cache-oom-regression spec (task 14 H11 dispatch; evidence in
+# its task 11 OUTCOME block 18) changed the COMPONENT's exit code for the
+# authoritative-HTTP-error path from 1 to **0**, and replaced the terminal log
+# line accordingly.
+#
+# Verbatim originals recorded so the repoint is auditable and can never be
+# mistaken for a weakening:
+#
+#     assert exit_code == 1
+#     assert GENERIC_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
+#         in logs.messages
+#
+# and, in the property test:
+#
+#     else:
+#         assert exit_code == 1
+#         assert HTTP_ERROR_MESSAGE.format(...) in logs.messages
+#         assert GENERIC_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
+#             in logs.messages
+#
+# Reason (production evidence, not preference): three consecutive load
+# attempts failed on TRANSIENT DNS ("Failed to resolve 'huggingface.co'
+# ([Errno -3] Temporary failure in name resolution)") at 12:00:47Z /
+# 12:02:09Z / 12:03:22Z, each ending "Startup script exited. {exitCode=1}";
+# after the third the model component reached currentState=BROKEN, and because
+# two deployed workflows HARD-depend on it they were left stuck at INSTALLED
+# and the whole core device went UNHEALTHY. A model that cannot load is a MODEL
+# failure (reported FAILED-with-reason on the model-status surfaces, retried by
+# the in-backend reconciler), not a COMPONENT failure.
+#
+# NOTHING ELSE on this path was touched or weakened: the attempt counts, the
+# backoff sleeps, the single-attempt-on-HTTP-response semantics, the exact
+# HTTP-error log line, the raw-body debug line, the HTTP 200 path, and the
+# "never-reachable diagnostic must not leak here" guard are all still asserted
+# exactly as before. LOAD_UNREACHABLE (isBugCondition_D) still exits 1, which
+# is what Requirement 2.10 of edge-deploy-reliability is about, and that
+# behaviour is pinned by test_vllm_prep_diagnostics_*.
+HTTP_ERROR_TERMINAL_MESSAGE = (
+    "Model '{model}' is staged but the vLLM runtime answered the load "
+    "request with an authoritative failure (the ERROR above carries the HTTP "
+    "status and the runtime's verbatim reason). The model is reported FAILED "
+    "with that reason through the model-status surfaces, the in-backend vLLM "
+    "reconciler owns the retries (it re-drives staged models with backoff and "
+    "a 4-attempt budget), and this component is deliberately NOT failed — "
+    "exiting 0 so co-deployed components and the workflows that depend on "
+    "this one stay available.")
 SUCCESS_MESSAGE = "Model '{model}' loaded successfully!"
 
 #: The Defect D fix introduces a never-reachable diagnostic naming the
@@ -334,9 +383,10 @@ class TestHttpAndSuccessPathsUnchanged:
         """Golden (design edge case, NOT isBugCondition_D): attempt 1 is
         connection-refused but attempt 2 receives an authoritative HTTP 409.
         The HTTP response is terminal (single-attempt semantics — no retry
-        after it), the exact status-code + body + generic terminal messages
-        are emitted, exit code is 1, and the never-reachable diagnostic
-        never appears.
+        after it), the exact status-code + body messages are emitted, and the
+        never-reachable diagnostic never appears. Exit code **0** as of the
+        cross-spec repoint documented at HTTP_ERROR_TERMINAL_MESSAGE (the
+        verbatim original assertions are recorded there).
 
         Validates: Requirements 3.9
         """
@@ -344,7 +394,7 @@ class TestHttpAndSuccessPathsUnchanged:
             str(tmp_path), refusals=1, terminal_status=409,
             response_text="model load rejected: FAILED")
 
-        assert exit_code == 1
+        assert exit_code == 0
         assert posts == 2, "the HTTP response must be authoritative (no " \
                            "further attempts after it)"
         assert sleeps == [prep.LOAD_RETRY_BACKOFF_SECONDS[0]], \
@@ -354,8 +404,10 @@ class TestHttpAndSuccessPathsUnchanged:
             reason="model load rejected: FAILED") in logs.messages
         assert RAW_BODY_DEBUG_MESSAGE.format(
             body="model load rejected: FAILED") in logs.messages
-        assert GENERIC_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
+        assert HTTP_ERROR_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
             in logs.messages
+        assert GENERIC_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
+            not in logs.messages
         assert UNREACHABLE_DIAGNOSTIC_MARKER not in logs.text, (
             "PRESERVATION REGRESSION (Property 8): the never-reachable "
             "diagnostic leaked into the authoritative-HTTP-error path")
@@ -389,8 +441,9 @@ class TestHttpAndSuccessPathsUnchanged:
         k connection refusals followed by an HTTP response, the HTTP path
         governs — the response is terminal after exactly k+1 attempts and k
         backoff sleeps; HTTP 200 exits 0 with the success message, a non-200
-        exits 1 with the exact status-code and generic terminal messages —
-        and the never-reachable diagnostic NEVER appears (it is reserved for
+        exits 0 (cross-spec repoint, see HTTP_ERROR_TERMINAL_MESSAGE) with
+        the exact status-code message and the new terminal message — and the
+        never-reachable diagnostic NEVER appears (it is reserved for
         isBugCondition_D, where no HTTP response is ever received).
 
         Validates: Requirements 3.2, 3.9
@@ -415,12 +468,14 @@ class TestHttpAndSuccessPathsUnchanged:
             assert GENERIC_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
                 not in logs.messages
         else:
-            assert exit_code == 1
+            assert exit_code == 0
             assert HTTP_ERROR_MESSAGE.format(
                 model=MODEL_NAME, code=terminal_status,
                 reason="simulated runtime response") in logs.messages
-            assert GENERIC_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
+            assert HTTP_ERROR_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
                 in logs.messages
+            assert GENERIC_TERMINAL_MESSAGE.format(model=MODEL_NAME) \
+                not in logs.messages
 
         assert UNREACHABLE_DIAGNOSTIC_MARKER not in logs.text, (
             "PRESERVATION REGRESSION (Property 8): the never-reachable "

@@ -55,6 +55,24 @@ Properties in this file:
        reclaim shape (memory came back and MORE) leaves no latch and the
        retry constructs a second engine, exactly the single unload → reload
        recovery 1.0.59 survived by.
+  P6-F **The latch SETTLES before it believes a starved reading** [2.5] —
+       defect (b) of task 11's ninth OUTCOME block: the latch sampled
+       `/proc/meminfo` before the driver's ASYNCHRONOUS release, reported
+       `9.45 GiB did not come back`, and ~5.2 GiB came back unaided in the
+       SAME backend life with no restart (a later occurrence reported
+       12.35 GiB). For any first reading that looks starved but whose LATER
+       reading recovers, the fixed manager takes no starvation verdict, logs
+       one INFO line saying the memory came back after N seconds, and the
+       next load reaches engine construction. The healthy path (a first
+       reading within tolerance) sleeps NOT AT ALL, and the injected sleep
+       proves no host test ever really sleeps.
+  P6-G **When every sample is short it latches on the SETTLED figure**
+       [2.5] — the WARNING reports the BEST (highest) `available_after`
+       observed and how many samples were taken over what period, so the
+       recorded shortfall is the settled one rather than the transient
+       first reading; the message keeps both readings, the lost bytes, the
+       tolerance, the cascade explanation and the container-restart
+       recovery.
 
 HONESTY GUARD (binding, design "Honesty Guard"). This file proves the
 **decision logic only**, over INJECTED ``/proc/meminfo`` readings and the
@@ -87,6 +105,7 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 import vllm_runtime.memory_budget as mb
+import vllm_runtime.manager as manager_module
 from vllm_runtime.manager import ModelState
 from jp6_vllm_kv_cache_oom.fakes import (
     DEFAULT_MODEL_NAME,
@@ -97,6 +116,7 @@ from jp6_vllm_kv_cache_oom.fakes import (
     FailingEngineFactory,
     FakeMeminfoReader,
     RecordingEngineFactory,
+    RecordingSleeper,
     build_staged_repo,
     make_manager,
     weight_tree,
@@ -191,17 +211,26 @@ def starved_reading_pairs(draw):
     return total_mib * MIB, before_mib * MIB, (before_mib - lost_mib) * MIB
 
 
-def _build_failing_manager(tmp_path, readings):
+def _build_failing_manager(tmp_path, readings, sleeper=None):
     """A manager over a freshly staged repo (per-example unique dir) whose
     engine factory raises the verbatim KV-OOM reason and whose memory
-    reader is the scripted fake."""
+    reader is the scripted fake. ``sleeper`` is the latch's settle delay —
+    injected, so no host test ever really sleeps."""
     index = next(_dir_counter)
     repo = tmp_path / "repo-{}".format(index)
     build_staged_repo(repo, engine_args=_UNSIZABLE_ARGS)
     reader = FakeMeminfoReader(readings)
     factory = FailingEngineFactory(KV_OOM_REASON)
-    manager = make_manager(repo, factory, memory_reader=reader)
+    manager = make_manager(repo, factory, memory_reader=reader,
+                           sleeper=sleeper)
     return manager, factory, reader, repo
+
+
+def _settle_infos(records):
+    """The INFO line the latch logs when a later sample recovered."""
+    return [record.getMessage() for record in records
+            if record.levelno == logging.INFO
+            and "CAME BACK" in record.getMessage()]
 
 
 # ---------------------------------------------------------------------------
@@ -515,3 +544,191 @@ def test_recovering_reading_never_latches_and_the_retry_proceeds(tmp_path):
         "observed: {}]".format(reader.describe()))
     assert second.state is ModelState.FAILED  # the fake engine still fails
     assert not second.reason.startswith(mb.PREFLIGHT_REFUSED_MARKER)
+
+
+# ---------------------------------------------------------------------------
+# P6-F — the latch SETTLES before it believes a starved reading  [2.5]
+# ---------------------------------------------------------------------------
+
+@settings(deadline=None,
+          suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(recovering_sample=st.integers(
+    min_value=2, max_value=manager_module.STARVATION_SETTLE_RESAMPLES + 1))
+def test_property_memory_that_comes_back_later_never_latches(
+        tmp_path, recovering_sample):
+    """P6-F. For any sample at which the memory comes back, the latch takes
+    NO starvation verdict: the driver releases ASYNCHRONOUSLY, so a first
+    reading taken immediately after ``_shutdown_engine`` +
+    ``_reclaim_gpu_memory`` can be a transient. Measured on device: the
+    latch reported ``9.45 GiB did not come back`` and ~5.2 GiB came back
+    unaided in the SAME backend life with no restart (defect (b) of task
+    11's ninth OUTCOME block).
+
+    Asserted: no starvation WARNING, exactly one INFO line saying the
+    memory came back after N seconds and that no starvation verdict is
+    recorded, one injected sleep per re-sample (and NO real sleeping), and
+    the next load reaches engine construction — it is not refused.
+
+    # Validates: Requirements 2.5
+    """
+    before = 20 * GIB
+    starved = 8 * GIB
+    readings = ([(DEVICE_TOTAL_BYTES, before)]
+                + [(DEVICE_TOTAL_BYTES, starved)] * (recovering_sample - 1)
+                + [(DEVICE_TOTAL_BYTES, before)])
+    sleeper = RecordingSleeper()
+    manager, factory, reader, _repo = _build_failing_manager(
+        tmp_path, readings, sleeper=sleeper)
+
+    with _collected_logs() as records:
+        first = asyncio.run(manager.load(DEFAULT_MODEL_NAME))
+    assert first.state is ModelState.FAILED
+    assert factory.call_count == 1
+
+    assert not _starved_warnings(records), (
+        "a reading that recovered on sample {} still latched: {!r} "
+        "[readings observed: {}]".format(
+            recovering_sample, _starved_warnings(records),
+            reader.describe()))
+
+    infos = _settle_infos(records)
+    assert len(infos) == 1, (
+        "expected exactly one 'memory came back' INFO line for a recovery "
+        "on sample {}, got {!r}".format(recovering_sample, infos))
+    message = infos[0]
+    assert DEFAULT_MODEL_NAME in message, message
+    expected_seconds = manager_module.STARVATION_SETTLE_DELAY_SECONDS * (
+        recovering_sample - 1)
+    assert "{:.1f} seconds".format(expected_seconds) in message, message
+    assert "no starvation verdict" in message.lower(), message
+
+    # The delay was requested, never really slept: one sleep per re-sample.
+    assert sleeper.delays == [
+        manager_module.STARVATION_SETTLE_DELAY_SECONDS
+    ] * (recovering_sample - 1), sleeper.delays
+
+    second = asyncio.run(manager.load(DEFAULT_MODEL_NAME))
+    assert factory.call_count == 2, (
+        "a load after memory that DID come back was refused; the settle "
+        "re-sampling exists precisely to avoid that [readings observed: "
+        "{}]".format(reader.describe()))
+    assert not second.reason.startswith(mb.PREFLIGHT_REFUSED_MARKER), \
+        second.reason
+
+
+@settings(deadline=None,
+          suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(pair=reading_pairs())
+def test_property_the_healthy_path_never_sleeps(tmp_path, pair):
+    """P6-F, healthy-path half. A first reading already within
+    ``RECLAIM_TOLERANCE_BYTES`` returns immediately: no settle delay is
+    ever requested, so the fix adds NO latency to a failure whose memory
+    came straight back — the re-sampling cost is paid only where the
+    reading looks starved.
+
+    # Validates: Requirements 2.5
+    """
+    total, before, after = pair
+    sleeper = RecordingSleeper()
+    manager, factory, _reader, _repo = _build_failing_manager(
+        tmp_path, [(total, before), (total, after)], sleeper=sleeper)
+
+    asyncio.run(manager.load(DEFAULT_MODEL_NAME))
+    assert factory.call_count == 1
+
+    if after >= before - mb.RECLAIM_TOLERANCE_BYTES:
+        assert sleeper.call_count == 0, (
+            "the healthy path slept {} time(s) (before={}, after={})".format(
+                sleeper.call_count, mb.format_gib(before),
+                mb.format_gib(after)))
+    else:
+        # A starved-looking reading settles, but only ever a bounded number
+        # of times — the worst case is stated in the manager's constants.
+        assert sleeper.call_count == \
+            manager_module.STARVATION_SETTLE_RESAMPLES, sleeper.delays
+        assert sleeper.total == (
+            manager_module.STARVATION_SETTLE_RESAMPLES
+            * manager_module.STARVATION_SETTLE_DELAY_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# P6-G — latching reports the SETTLED (best) figure  [2.5]
+# ---------------------------------------------------------------------------
+
+def test_latching_reports_the_best_reading_and_the_sampling_window(tmp_path):
+    """P6-G. When EVERY sample is short the latch fires — and it reports the
+    BEST (highest) ``available_after`` observed plus how many samples were
+    taken over what period, so the recorded shortfall is the SETTLED figure
+    rather than the transient first reading (the defect: 9.45 GiB reported
+    against a genuinely-stranded ~4 GiB). The message keeps every existing
+    element: both readings, the lost bytes, the tolerance, the cascade
+    explanation and the backend-container-restart recovery.
+
+    # Validates: Requirements 2.5
+    """
+    before = 20 * GIB
+    transient = 5 * GIB   # the first, unsettled reading
+    best = 9 * GIB        # the best the driver ever gave back
+    sleeper = RecordingSleeper()
+    manager, factory, reader, _repo = _build_failing_manager(
+        tmp_path,
+        [(DEVICE_TOTAL_BYTES, before),
+         (DEVICE_TOTAL_BYTES, transient),
+         (DEVICE_TOTAL_BYTES, best),
+         (DEVICE_TOTAL_BYTES, 7 * GIB),
+         (DEVICE_TOTAL_BYTES, 6 * GIB)],
+        sleeper=sleeper)
+
+    with _collected_logs() as records:
+        first = asyncio.run(manager.load(DEFAULT_MODEL_NAME))
+    assert first.state is ModelState.FAILED
+    assert factory.call_count == 1
+
+    warnings = _starved_warnings(records)
+    assert warnings, "every sample was short but nothing latched"
+    message = warnings[0]
+    # The SETTLED figure, not the transient one.
+    assert mb.format_gib(best) in message, message
+    assert mb.format_gib(transient) not in message, (
+        "the WARNING reported the transient first reading instead of the "
+        "best observed: {!r}".format(message))
+    assert mb.format_gib(before) in message, message
+    # The sampling window is stated.
+    assert "4 sample" in message, message
+    assert "{:.1f} seconds".format(
+        manager_module.STARVATION_SETTLE_RESAMPLES
+        * manager_module.STARVATION_SETTLE_DELAY_SECONDS) in message, message
+    # ...and every pre-existing element survives.
+    assert mb.format_gib(before - best) in message, message
+    assert mb.format_gib(mb.RECLAIM_TOLERANCE_BYTES) in message, message
+    assert "cascade" in message, message
+    assert "BACKEND CONTAINER RESTART" in message, message
+    assert sleeper.delays == [
+        manager_module.STARVATION_SETTLE_DELAY_SECONDS
+    ] * manager_module.STARVATION_SETTLE_RESAMPLES, sleeper.delays
+
+    # The refusal carries the settled figure too.
+    refused = asyncio.run(manager.load(DEFAULT_MODEL_NAME))
+    assert factory.call_count == 1
+    assert refused.reason.startswith(mb.PREFLIGHT_REFUSED_MARKER)
+    assert mb.format_gib(best) in refused.reason, refused.reason
+
+
+def test_settle_constants_are_proposed_and_bounded():
+    """P6-G, constants half. The two settle constants are PROPOSED
+    thresholds (task 14 / H8 owns their calibration, exactly like
+    ``RECLAIM_TOLERANCE_BYTES`` and ``THIN_MARGIN_CONCURRENCY``), pinned
+    here so a silent drift is visible — and the worst-case added delay
+    stays modest, because this runs on a failure path that must not stall
+    the runtime server for long.
+
+    # Validates: Requirements 2.5
+    """
+    assert manager_module.STARVATION_SETTLE_DELAY_SECONDS == 1.5
+    assert manager_module.STARVATION_SETTLE_RESAMPLES == 3
+    worst_case = (manager_module.STARVATION_SETTLE_RESAMPLES
+                  * manager_module.STARVATION_SETTLE_DELAY_SECONDS)
+    assert worst_case == 4.5
+    assert worst_case <= 10.0, (
+        "the settle window grew beyond a modest bound: {} s".format(
+            worst_case))

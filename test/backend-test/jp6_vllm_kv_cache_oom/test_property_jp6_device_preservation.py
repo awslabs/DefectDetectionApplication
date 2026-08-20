@@ -224,8 +224,26 @@ def test_property_authored_engine_args_reach_the_engine_verbatim(
 def test_property_prep_exit_code_mapping_is_preserved(
         tmp_path, monkeypatch, classification, engine_args):
     """P-B. OBSERVED and preserved (3.8): whatever the staged args,
-    ``LOAD_OK`` exits 0 and every other existing classification exits 1 —
-    the contract Greengrass' Startup retry behavior depends on.
+    ``LOAD_OK`` exits 0 and ``LOAD_UNREACHABLE`` exits 1 — the contract
+    Greengrass' Startup retry behavior depends on — and the staged args
+    still travel into the load path verbatim.
+
+    CONSCIOUS REPOINT (task 14 H11 dispatch; task 11 OUTCOME block 18):
+    ``LOAD_HTTP_ERROR`` now exits **0**. Verbatim original::
+
+        \"\"\"P-B. OBSERVED and preserved (3.8): whatever the staged args,
+        ``LOAD_OK`` exits 0 and every other existing classification exits 1 —
+        the contract Greengrass' Startup retry behavior depends on.
+
+        _Requirements: 3.8_\"\"\"
+        ...
+        assert exit_code == (0 if classification == mp.LOAD_OK else 1), (
+            "{} -> exit {}".format(classification, exit_code))
+
+    Reason: an authoritative runtime answer is a MODEL failure and is
+    reported as one; failing the COMPONENT took two HARD-dependent workflows
+    and the whole device down for a transient DNS fault. The
+    ``LOAD_UNREACHABLE`` -> 1 arm is unchanged and still asserted.
 
     _Requirements: 3.8_"""
     repo = tmp_path / "unarchived"
@@ -243,7 +261,7 @@ def test_property_prep_exit_code_mapping_is_preserved(
     exit_code = mp.prepare(_args(unarchived_repo_path=str(repo),
                                  model_name=DEFAULT_MODEL_NAME))
 
-    assert exit_code == (0 if classification == mp.LOAD_OK else 1), (
+    assert exit_code == (1 if classification == mp.LOAD_UNREACHABLE else 0), (
         "{} -> exit {}".format(classification, exit_code))
     # The staged args travel into the load path verbatim (Requirement 4.4
     # of the sibling spec; the failure log reads them).

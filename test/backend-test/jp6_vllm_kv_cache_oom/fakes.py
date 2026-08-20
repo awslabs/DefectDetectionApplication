@@ -48,7 +48,15 @@ Pieces:
   multimodal flag) and ``cache_config`` (KV sizing for the thin-margin
   case).
 - :func:`thin_cache_config` / :func:`healthy_cache_config` — KV sizings
-  below and well above the margin, scaled to the incident's numbers.
+  below and well above the margin, scaled to the incident's numbers, plus
+  :func:`geometry_blind_model_config` for the PARTIALLY-readable case
+  (geometry readable, ``kv_bytes`` unknown — defect (d)).
+- :class:`OfflineProbingEngineFactory` / :func:`observed_hf_offline_env` /
+  :data:`HF_NAME_RESOLUTION_REASON` — the offline-cache gate's seam: what
+  the Hugging Face offline variables looked like INSIDE each construction,
+  and the verbatim `huggingface.co` name-resolution failure.
+- :class:`RecordingSleeper` — the Starvation_Latch's settle delay, recorded
+  and never slept (``make_manager`` installs one by default).
 - :func:`weight_tree` / :func:`hf_cache_tree` — sparse weight files (an
   N-GiB ``*.safetensors`` costs no disk) and the
   ``models--{org}--{name}`` HF cache layout, for the device-side
@@ -141,6 +149,24 @@ MANAGER_KWARG_CANDIDATES: Tuple[str, ...] = (
     "meminfo_reader",
     "memory_reader_factory",
 )
+
+#: Constructor keyword the Starvation_Latch's settle delay is injected
+#: through (the same convention as ``memory_reader``): the latch now
+#: re-samples ``/proc/meminfo`` after a short delay because the driver
+#: releases asynchronously (defect (b) of task 11's ninth OUTCOME block),
+#: and NO host test may actually sleep.
+MANAGER_SLEEP_KWARG_CANDIDATES: Tuple[str, ...] = (
+    "sleep",
+    "sleeper",
+    "settle_sleep",
+)
+
+#: Hugging Face offline-mode variables the load path sets around engine
+#: construction when the weights are already cached (task 11's eighteenth
+#: OUTCOME block: three `Failed to resolve 'huggingface.co'` load failures
+#: took the component BROKEN with the model already staged).
+HF_OFFLINE_ENV_VARS: Tuple[str, ...] = ("HF_HUB_OFFLINE",
+                                        "TRANSFORMERS_OFFLINE")
 
 
 # ---------------------------------------------------------------------------
@@ -262,18 +288,54 @@ def manager_reader_kwargs(reader: FakeMeminfoReader) -> Dict[str, Any]:
             if name in parameters}
 
 
+class RecordingSleeper:
+    """A fake sleep: records every requested delay and returns instantly.
+
+    HONESTY GUARD: host tests never sleep. ``total`` is what the code under
+    test *would* have waited, which is how a test states the latch's added
+    worst-case latency without paying it."""
+
+    def __init__(self) -> None:
+        self.delays: List[float] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.delays)
+
+    @property
+    def total(self) -> float:
+        return sum(self.delays)
+
+    def __call__(self, seconds: float) -> None:
+        self.delays.append(float(seconds))
+
+
+def manager_sleep_kwargs(sleeper: Any) -> Dict[str, Any]:
+    """The subset of :data:`MANAGER_SLEEP_KWARG_CANDIDATES` the live
+    ``VllmRuntimeManager.__init__`` accepts, mapped to ``sleeper``."""
+    parameters = inspect.signature(VllmRuntimeManager.__init__).parameters
+    return {name: sleeper for name in MANAGER_SLEEP_KWARG_CANDIDATES
+            if name in parameters}
+
+
 def make_manager(
     model_dir: Union[str, Path],
     engine_factory: Any,
     memory_reader: Optional[FakeMeminfoReader] = None,
     sampling_params_factory: Any = dict,
+    sleeper: Optional[Any] = None,
 ) -> VllmRuntimeManager:
     """A ``VllmRuntimeManager`` over ``model_dir`` driven by the injected
-    engine factory (and, when the constructor exposes the seam, the
-    injected memory reader). Never touches a GPU."""
+    engine factory (and, when the constructor exposes the seams, the
+    injected memory reader and settle sleep). Never touches a GPU, and
+    never sleeps: the Starvation_Latch's settle delay defaults to a
+    :class:`RecordingSleeper`, so its re-sampling costs no wall-clock
+    time."""
     kwargs: Dict[str, Any] = {}
     if memory_reader is not None:
         kwargs.update(manager_reader_kwargs(memory_reader))
+    kwargs.update(manager_sleep_kwargs(
+        sleeper if sleeper is not None else RecordingSleeper()))
     return VllmRuntimeManager(
         model_dir=model_dir,
         engine_factory=engine_factory,
@@ -333,6 +395,26 @@ def healthy_cache_config(num_gpu_blocks: int = 20000,
     )
 
 
+def geometry_blind_model_config(max_model_len: int = 4096,
+                                multimodal: bool = True) -> Any:
+    """A fake ``ModelConfig`` with NO KV-geometry accessors — the shape that
+    makes ``kv_bytes`` introspection answer ``None`` while blocks, block
+    size and ``max_model_len`` stay readable.
+
+    This is the PARTIALLY-READABLE case measured on device (defect (d) of
+    task 11's ninth OUTCOME block): a load reached READY with 0.77 GiB of KV
+    against the 1 GiB floor and no WARNING fired, because the only fallback
+    for an unknown ``kv_bytes`` was an invisible debug line."""
+    hf_config = SimpleNamespace(
+        architectures=["Qwen2_5_VLForConditionalGeneration"]
+    )
+    return SimpleNamespace(
+        is_multimodal_model=multimodal,
+        hf_config=hf_config,
+        max_model_len=max_model_len,
+    )
+
+
 def fake_model_config(multimodal: bool = True,
                       architectures: Optional[Iterable[str]] = None) -> Any:
     """A fake ``ModelConfig``: vLLM's own ``is_multimodal_model`` flag plus
@@ -364,13 +446,15 @@ class FakeEngine:
     def __init__(self, engine_args: Mapping[str, Any],
                  cache_config: Optional[Any] = None,
                  multimodal: bool = True,
-                 text: str = GENERATED_TEXT):
+                 text: str = GENERATED_TEXT,
+                 model_config: Optional[Any] = None):
         self.engine_args = dict(engine_args)
         self.text = text
         self.errored = False
         self.prompts: List[Any] = []
         self.engine = SimpleNamespace(
-            model_config=fake_model_config(multimodal=multimodal),
+            model_config=(model_config if model_config is not None
+                          else fake_model_config(multimodal=multimodal)),
             cache_config=cache_config or healthy_cache_config(),
         )
 
@@ -388,11 +472,18 @@ class RecordingEngineFactory:
     construction (defect 1.10)."""
 
     def __init__(self, cache_config: Optional[Any] = None,
-                 multimodal: bool = True):
+                 multimodal: bool = True,
+                 model_config: Optional[Any] = None):
         self.calls: List[Dict[str, Any]] = []
         self.engines: List[FakeEngine] = []
+        #: The Hugging Face offline-mode variables as they stood INSIDE each
+        #: construction — the oracle for the offline-cache gate (task 11's
+        #: eighteenth OUTCOME block): the load path may only apply offline
+        #: mode for the duration of construction.
+        self.observed_env: List[Dict[str, Optional[str]]] = []
         self._cache_config = cache_config
         self._multimodal = multimodal
+        self._model_config = model_config
 
     @property
     def call_count(self) -> int:
@@ -400,10 +491,12 @@ class RecordingEngineFactory:
 
     def __call__(self, engine_args: Mapping[str, Any]) -> FakeEngine:
         self.calls.append(dict(engine_args))
+        self.observed_env.append(observed_hf_offline_env())
         engine = FakeEngine(
             engine_args,
             cache_config=self._cache_config,
             multimodal=self._multimodal,
+            model_config=self._model_config,
         )
         self.engines.append(engine)
         return engine
@@ -417,6 +510,8 @@ class FailingEngineFactory:
     def __init__(self, reason: str = KV_OOM_REASON):
         self.reason = reason
         self.calls: List[Dict[str, Any]] = []
+        #: The offline-mode variables as they stood inside each attempt.
+        self.observed_env: List[Dict[str, Optional[str]]] = []
 
     @property
     def call_count(self) -> int:
@@ -424,7 +519,74 @@ class FailingEngineFactory:
 
     def __call__(self, engine_args: Mapping[str, Any]):
         self.calls.append(dict(engine_args))
+        self.observed_env.append(observed_hf_offline_env())
         raise RuntimeError(self.reason)
+
+
+#: The verbatim `huggingface.co` name-resolution failure that took the JP6
+#: model component BROKEN three times on 2026-08-19 (12:00:47Z, 12:02:09Z,
+#: 12:03:22Z) with the repository ALREADY staged locally — task 11's
+#: eighteenth OUTCOME block. vLLM/transformers raise this while resolving
+#: the repo id; nothing in `src/backend` calls the hub itself.
+HF_NAME_RESOLUTION_REASON = (
+    "(MaxRetryError('HTTPSConnectionPool(host=\\'huggingface.co\\', "
+    "port=443): Max retries exceeded with url: "
+    "/api/models/Qwen/Qwen2.5-VL-7B-Instruct-AWQ/tree/main"
+    "?recursive=True&expand=False (Caused by NameResolutionError(\"...: "
+    "Failed to resolve \\'huggingface.co\\' ([Errno -3] Temporary failure "
+    "in name resolution)\"))'), '(Request ID: ...)')"
+)
+
+
+def observed_hf_offline_env() -> Dict[str, Optional[str]]:
+    """The current value of every :data:`HF_OFFLINE_ENV_VARS` variable
+    (``None`` for absent) — the oracle for "offline mode was applied for the
+    duration of construction only, and restored exactly"."""
+    return {name: os.environ.get(name) for name in HF_OFFLINE_ENV_VARS}
+
+
+class OfflineProbingEngineFactory:
+    """An ``engine_factory`` that records the Hugging Face offline-mode
+    environment it was called under and fails its first ``fail_times``
+    constructions.
+
+    ``fail_times=1`` is the CACHE-MISS shape: the offline attempt fails (an
+    incomplete snapshot `estimate_weights_on_disk` cannot detect, since
+    verifying it against the repo manifest needs the network) and the single
+    permitted retry — with the offline variables restored — must succeed.
+    No GPU, no network, no real engine."""
+
+    def __init__(self, fail_times: int = 0,
+                 reason: str = HF_NAME_RESOLUTION_REASON,
+                 cache_config: Optional[Any] = None,
+                 model_config: Optional[Any] = None,
+                 multimodal: bool = True):
+        self.fail_times = int(fail_times)
+        self.reason = reason
+        self.calls: List[Dict[str, Any]] = []
+        self.observed_env: List[Dict[str, Optional[str]]] = []
+        self.engines: List[FakeEngine] = []
+        self._cache_config = cache_config
+        self._model_config = model_config
+        self._multimodal = multimodal
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    def __call__(self, engine_args: Mapping[str, Any]):
+        self.calls.append(dict(engine_args))
+        self.observed_env.append(observed_hf_offline_env())
+        if self.call_count <= self.fail_times:
+            raise RuntimeError(self.reason)
+        engine = FakeEngine(
+            engine_args,
+            cache_config=self._cache_config,
+            multimodal=self._multimodal,
+            model_config=self._model_config,
+        )
+        self.engines.append(engine)
+        return engine
 
 
 # ---------------------------------------------------------------------------

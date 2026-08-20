@@ -119,6 +119,7 @@ from jp6_vllm_kv_cache_oom.fakes import (
     FakeMeminfoReader,
     RecordingEngineFactory,
     build_staged_repo,
+    geometry_blind_model_config,
     healthy_cache_config,
     make_manager,
     png_bytes,
@@ -343,8 +344,17 @@ _KV_BYTES_PER_TOKEN = 28 * 4 * 128 * 2 * 2
 #: beside it, never a changed line).
 _READY_LINE = "vLLM model '{}' is READY".format(DEFAULT_MODEL_NAME)
 
-#: The one debug line an unreadable engine shape produces.
+#: The one debug line an engine exposing NO ``cache_config`` at all
+#: produces — the quiet case, deliberately unchanged.
 _NOT_READABLE_SIGNATURE = "no thin-margin check was performed"
+
+#: The WARNING an engine that DOES expose a ``cache_config`` produces when
+#: nothing usable can be read from it. Escalated from `logger.debug`
+#: (defect (d) of task 11's ninth OUTCOME block: on the one device where it
+#: mattered the debug line was invisible in practice, and a load that
+#: reached READY with 0.77 GiB of KV against the 1 GiB floor was reported
+#: as an unqualified success).
+_NOT_VERIFIED_SIGNATURE = "KV-CACHE MARGIN NOT VERIFIED"
 
 #: The thin-margin WARNING's signature.
 _THIN_MARGIN_SIGNATURE = "THIN KV-CACHE MARGIN"
@@ -786,8 +796,24 @@ class TestProperty7ThinMargin:
     estimate/placeholder per design Open question 5), the fixed manager
     logs a WARNING naming the margin and the concurrency — with READY
     still READY. Ample KV produces NO warning and the byte-identical
-    READY line; an exotic/unreadable engine shape produces one debug line,
-    no warning, and no behavior change.
+    READY line.
+
+    READABILITY IS THREE CASES, not two (REPOINTED 2026-08-19 for defect
+    (d) of task 11's ninth OUTCOME block: a load reached READY with
+    **0.77 GiB** of KV against the 1 GiB floor and **no WARNING appeared**,
+    because ``kv_bytes`` introspection returned ``None`` and the only
+    fallback was an invisible ``logger.debug`` line):
+
+    * an engine exposing NO ``cache_config`` at all stays QUIET — one debug
+      line, unchanged (``test_engine_without_any_cache_config_...``);
+    * an engine exposing a ``cache_config`` that yields nothing usable now
+      WARNS that the margin could not be VERIFIED (P7-I, repointed from
+      "one debug line, no warning" — a deliberate design change, no
+      assertion weakened: the test still pins READY, the byte-identical
+      READY line and exactly one line, now at WARNING level);
+    * a PARTIALLY readable reading (geometry present, ``kv_bytes``
+      unknown) still reaches a thin-margin verdict from the concurrency
+      (P7-J, new).
 
     HONESTY GUARD: the "engine" is a fake ``cache_config`` the manager's
     best-effort reader introspects — no GPU, no real KV allocation. This
@@ -908,13 +934,16 @@ class TestProperty7ThinMargin:
     @settings(deadline=None,
               suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(shape=st.sampled_from(_EXOTIC_CACHE_CONFIGS))
-    def test_property_unreadable_engine_shape_one_debug_line_no_warning(
+    def test_property_unreadable_cache_config_warns_it_was_not_verified(
             self, tmp_path, shape):
-        """**P7-I**: for any exotic/unreadable engine shape (missing
-        attributes, booleans, strings, floats, zero/negative counts, an
-        attribute access that raises), the load behaves exactly as before
-        Decision 6: READY, the byte-identical READY line, NO warning —
-        and exactly ONE debug line saying the sizing was not readable.
+        """**P7-I** (REPOINTED, deliberately — see the class docstring):
+        for any exotic engine shape that DOES expose a ``cache_config`` but
+        yields nothing usable (missing attributes, booleans, strings,
+        floats, zero/negative counts, an attribute access that raises), the
+        load stays READY with the byte-identical READY line — and now logs
+        exactly ONE WARNING saying the KV margin could NOT be verified, so
+        a thin margin cannot be ruled out. It is no longer an invisible
+        debug line, and no thin-margin verdict is invented either.
 
         # Validates: Requirements 2.7
         """
@@ -926,18 +955,112 @@ class TestProperty7ThinMargin:
             status = asyncio.run(manager.load(DEFAULT_MODEL_NAME))
 
         assert status == ModelStatus(ModelState.READY), (label, status)
-        assert not _messages(records, logging.WARNING), (
-            "an unreadable engine shape ({}) warned: {!r}".format(
-                label, _messages(records, logging.WARNING)))
         infos = _messages(records, logging.INFO)
         assert _READY_LINE in infos, (label, infos)
-        debugs = [message for message in
-                  _messages(records, logging.DEBUG)
-                  if _NOT_READABLE_SIGNATURE in message]
-        assert len(debugs) == 1, (
-            "expected exactly one 'not readable' debug line for shape "
-            "({}), got {}: {!r}".format(label, len(debugs), debugs))
-        assert DEFAULT_MODEL_NAME in debugs[0], debugs[0]
+
+        warnings = _messages(records, logging.WARNING)
+        assert len(warnings) == 1, (
+            "expected exactly one WARNING for shape ({}), got {!r}".format(
+                label, warnings))
+        message = warnings[0]
+        assert _NOT_VERIFIED_SIGNATURE in message, (label, message)
+        assert DEFAULT_MODEL_NAME in message, message
+        assert "READY is still READY" in message, message
+        assert format_gib(MINIMUM_KV_CACHE_BYTES) in message, message
+        # No thin-margin verdict is claimed on an unreadable engine.
+        assert _THIN_MARGIN_SIGNATURE not in message, message
+
+    # Validates: Requirements 2.7
+    @settings(deadline=None,
+              suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(geometry=kv_geometries())
+    def test_property_partially_readable_kv_still_reaches_a_verdict(
+            self, tmp_path, geometry):
+        """**P7-J** (NEW): for any geometry whose blocks, block size and
+        ``max_model_len`` are readable while ``kv_bytes`` is NOT (the KV
+        accessors unavailable — the shape measured on device), the verdict
+        is derived from what IS available: a derived concurrency below
+        ``THIN_MARGIN_CONCURRENCY`` still WARNS, and the message says the KV
+        size is unknown while still naming blocks, tokens, concurrency and
+        ``max_model_len``. An ample concurrency stays silent.
+
+        This is defect (d): a load reached READY with 0.77 GiB of KV against
+        the 1 GiB floor and nothing warned, because ``kv_bytes`` alone was
+        ``None``.
+
+        # Validates: Requirements 2.7
+        """
+        num_gpu_blocks, block_size, max_model_len = geometry
+        tokens = num_gpu_blocks * block_size
+        concurrency = tokens / float(max_model_len)
+        should_warn = concurrency < THIN_MARGIN_CONCURRENCY
+
+        factory = RecordingEngineFactory(
+            cache_config=_cache_config(num_gpu_blocks, block_size,
+                                       max_model_len),
+            model_config=geometry_blind_model_config(
+                max_model_len=max_model_len))
+        manager, _repo = _build_manager(tmp_path, factory)
+
+        with _collected_logs() as records:
+            status = asyncio.run(manager.load(DEFAULT_MODEL_NAME))
+
+        assert status == ModelStatus(ModelState.READY), (status, geometry)
+        assert _READY_LINE in _messages(records, logging.INFO)
+
+        warnings = [message for message in
+                    _messages(records, logging.WARNING)
+                    if _THIN_MARGIN_SIGNATURE in message]
+        if should_warn:
+            assert warnings, (
+                "a READY load whose KV bytes are UNKNOWN and whose derived "
+                "concurrency is {:.2f}x (threshold {:.1f}x) produced no "
+                "thin-margin WARNING — that silence is the defect".format(
+                    concurrency, THIN_MARGIN_CONCURRENCY))
+            message = warnings[0]
+            assert DEFAULT_MODEL_NAME in message, message
+            # The unknown KV size is stated as unknown, never guessed.
+            assert "an unknown amount" in message, message
+            # ...while everything that IS known is named.
+            assert str(num_gpu_blocks) in message, message
+            assert str(tokens) in message, message
+            assert "{:.2f}x".format(concurrency) in message, message
+            assert str(max_model_len) in message, message
+        else:
+            assert not warnings, (
+                "an ample derived concurrency ({:.2f}x) with unknown KV "
+                "bytes was reported thin: {!r}".format(concurrency,
+                                                       warnings))
+        # A partially-readable engine is never reported as unverifiable.
+        assert not [message for message in
+                    _messages(records, logging.WARNING)
+                    if _NOT_VERIFIED_SIGNATURE in message]
+
+    # Validates: Requirements 2.7
+    def test_the_measured_device_shape_warns(self, tmp_path):
+        """**P7-J, device leg**: the exact shape the device produced — READY
+        with a thin margin, ``kv_bytes`` unreadable — now WARNS. 1,024
+        blocks x 16 tokens = 16,384 tokens at ``max_model_len=16384`` is
+        1.00x concurrency, below the 2.0x threshold, with the KV byte figure
+        unavailable.
+
+        # Validates: Requirements 2.7
+        """
+        factory = RecordingEngineFactory(
+            cache_config=_cache_config(1024, 16, 16384),
+            model_config=geometry_blind_model_config(max_model_len=16384))
+        manager, _repo = _build_manager(tmp_path, factory)
+
+        with _collected_logs() as records:
+            status = asyncio.run(manager.load(DEFAULT_MODEL_NAME))
+
+        assert status == ModelStatus(ModelState.READY)
+        warnings = [message for message in
+                    _messages(records, logging.WARNING)
+                    if _THIN_MARGIN_SIGNATURE in message]
+        assert len(warnings) == 1, warnings
+        assert "an unknown amount" in warnings[0], warnings[0]
+        assert "1.00x" in warnings[0], warnings[0]
 
     # Validates: Requirements 2.7
     def test_engine_without_any_cache_config_is_also_unreadable(
