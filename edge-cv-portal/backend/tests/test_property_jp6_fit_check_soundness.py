@@ -8,13 +8,22 @@ set, images):
 
   - the verdict equals **A ∧ B** exactly, where
       A (budget sufficiency): ``util × profile[arch] >= weights +
-        activation_allowance(weights, images) + MINIMUM_KV_CACHE_BYTES``
+        NON_TORCH_MEMORY_BYTES +
+        activation_allowance(weights, multimodal_units)``  (amended
+        2026-08-19, task 14 / H8+H9 — the superseded form charged
+        ``+ MINIMUM_KV_CACHE_BYTES`` and no non-torch term at all; an
+        INTERMEDIATE form of the same amendment, also superseded, charged
+        ``+ KV_VIABILITY_FLOOR_BYTES`` — H9's final decision charges NO KV
+        term, so the KV cache is the remainder the budget leaves over)
       B (co-tenancy safety):  ``util <= (profile[arch] −
         CO_TENANCY_RESERVATION_BYTES[arch]) / profile[arch]``
   - _for every_ generated failing finding the message names the weights,
-    the activation allowance (labelled an ESTIMATE), the KV floor, the
-    budget, the co-tenancy reservation and the Fraction_Cap **with their
-    numbers**;
+    the non-torch allowance (labelled an ESTIMATE), the activation allowance
+    (labelled an ESTIMATE), the predicted KV remainder against the
+    serving-margin floor (superseded 2026-08-19 second pass: "the KV
+    viability floor" — H9 charges no KV term, so the remainder is what the
+    message owes), the budget, the
+    co-tenancy reservation and the Fraction_Cap **with their numbers**;
   - the remediation orders demand-reduction **before** raising the
     fraction;
   - the message never suggests a ``gpu_memory_utilization`` above
@@ -54,6 +63,7 @@ from vllm_fit_check import (
 # The sibling spec's generators and Decision-2 arithmetic mirrors — reused
 # verbatim so the two specs' guarantees stay directly comparable (task 4.1).
 from test_property_fit_check_decision import (  # noqa: E402
+    NON_TORCH_MEMORY_BYTES,
     _architecture_sets,
     engine_configurations,
     estimates,
@@ -143,10 +153,25 @@ def test_verdict_equals_conjunction_of_budget_and_co_tenancy(
     profiled = [a for a in architectures if a in DEVICE_MEMORY_PROFILE_BYTES]
     assert [f.arch for f in findings] == profiled
 
+    # REPOINTED 2026-08-19 (task 14 / H8 + H9). SUPERSEDED expression,
+    # recorded verbatim:
+    #     required_bytes = (estimate_bytes + activation_bytes
+    #                       + MINIMUM_KV_CACHE_BYTES)
+    # `required` now charges the non-torch residency vLLM always consumes and
+    # the small HARD KV VIABILITY floor; the 1 GiB serving margin became the
+    # thin-margin WARNING threshold it was always documented to be.
+    #
+    # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    # jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED expression,
+    # recorded VERBATIM:
+    #     required_bytes = (estimate_bytes + NON_TORCH_ALLOWANCE_BYTES
+    #                       + activation_bytes + KV_VIABILITY_FLOOR_BYTES)
+    # Reason: the operator's H9 decision charges NO KV term in `required`, hard
+    # or soft — the KV cache is the remainder the budget leaves over.
     activation_bytes = expected_activation_allowance(
         estimate_bytes, effective_units)
-    required_bytes = (estimate_bytes + activation_bytes
-                      + MINIMUM_KV_CACHE_BYTES)
+    required_bytes = (estimate_bytes + NON_TORCH_MEMORY_BYTES
+                      + activation_bytes)
 
     for finding in findings:
         profile_bytes = DEVICE_MEMORY_PROFILE_BYTES[finding.arch]
@@ -158,11 +183,10 @@ def test_verdict_equals_conjunction_of_budget_and_co_tenancy(
             f"int({utilization} × {profile_bytes})")
         assert finding.required_bytes == required_bytes, (
             f"{finding.arch}: required {finding.required_bytes} != weights "
-            f"{estimate_bytes} + activation {activation_bytes} (at "
+            f"{estimate_bytes} + non-torch {NON_TORCH_MEMORY_BYTES} + "
+            f"activation {activation_bytes} (at "
             f"{effective_units} multimodal unit(s): "
-                f"{effective_images} image(s) + {effective_videos} "
-                f"video(s)) + KV floor "
-            f"{MINIMUM_KV_CACHE_BYTES}")
+            f"{effective_images} image(s) + {effective_videos} video(s))")
 
         condition_a = budget_bytes >= required_bytes
         condition_b = float(utilization) <= cap
@@ -237,9 +261,45 @@ def test_failing_message_names_every_term_with_its_number(
         assert re.search(r"\bESTIMATE\b", message), (
             f"{finding.arch}: the activation allowance is not labelled an "
             f"ESTIMATE: {message!r}")
-        assert format_gib(MINIMUM_KV_CACHE_BYTES) in message, (
-            f"{finding.arch}: failing message misses the KV floor "
-            f"{format_gib(MINIMUM_KV_CACHE_BYTES)}: {message!r}")
+        # REPOINTED 2026-08-19 (task 14 / H9). SUPERSEDED assertion, recorded
+        # verbatim:
+        #     assert format_gib(MINIMUM_KV_CACHE_BYTES) in message, (
+        #         f"{finding.arch}: failing message misses the KV floor "
+        #         f"{format_gib(MINIMUM_KV_CACHE_BYTES)}: {message!r}")
+        # The term `required` charges — and therefore the one the message must
+        # quote — is the KV VIABILITY floor. The 1 GiB serving margin is
+        # quoted by the thin-margin warning, on PASSING verdicts.
+        #
+        # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+        # jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED
+        # assertion, recorded VERBATIM:
+        #     assert format_gib(KV_VIABILITY_FLOOR_BYTES) in message, (
+        #         f"{finding.arch}: failing message misses the KV viability "
+        #         f"floor {format_gib(KV_VIABILITY_FLOOR_BYTES)}: {message!r}")
+        # Reason: `required` charges no KV term, so there is no viability floor
+        # for the message to quote. What the message owes instead — and what is
+        # asserted here in its place, strictly more than a bare constant — is
+        # the PREDICTED KV REMAINDER the budget leaves over, stated against the
+        # 1 GiB serving-margin floor (the H9 surface itself).
+        assert (f"leaving a predicted KV cache remainder of "
+                f"{format_gib(finding.kv_headroom_bytes)} against the "
+                f"{format_gib(MINIMUM_KV_CACHE_BYTES)} serving-margin floor"
+                in message), (
+            f"{finding.arch}: failing message does not state the predicted KV "
+            f"remainder against the serving-margin floor: {message!r}")
+        assert "viability floor" not in message, (
+            f"{finding.arch}: the message still claims a KV viability floor "
+            f"that `required` does not charge: {message!r}")
+        # ... and the non-torch allowance, labelled an ESTIMATE like the
+        # activation allowance (it is the term the shipped model omitted).
+        assert format_gib(NON_TORCH_MEMORY_BYTES) in message, (
+            f"{finding.arch}: failing message misses the non-torch allowance "
+            f"{format_gib(NON_TORCH_MEMORY_BYTES)}: {message!r}")
+        assert (f"non-torch allowance "
+                f"{format_gib(NON_TORCH_MEMORY_BYTES)} (an ESTIMATE"
+                in message), (
+            f"{finding.arch}: the non-torch allowance is not labelled an "
+            f"ESTIMATE: {message!r}")
         assert format_gib(finding.budget_bytes) in message, (
             f"{finding.arch}: failing message misses the budget "
             f"{format_gib(finding.budget_bytes)}: {message!r}")

@@ -4,10 +4,21 @@ vLLM preflight fit check — pure sizing math, no AWS dependencies.
 Decides whether a vLLM model can be loaded inside the GPU memory budget
 granted by ``gpu_memory_utilization`` on each target device architecture
 (Device_Memory_Profile), over the terms vLLM actually charges against that
-budget: the weights, the activation/profiling peak, and a KV-cache floor —
+budget: the weights, the non-torch/co-tenant residency and the
+activation/profiling peak —
 plus a cap on the fraction itself, because on a Jetson's unified memory the
 budget is a fraction of TOTAL device memory that other resident consumers
 (the co-resident ONNX GPU models) are already holding.
+
+    required := weights + NON_TORCH_MEMORY_BYTES
+                + activation_allowance(weights, multimodal_units)
+
+``MINIMUM_KV_CACHE_BYTES`` is NOT in that sum, and NO KV term is: the KV cache
+is what the budget LEAVES OVER, so every verdict states the predicted remainder
+(``kv_headroom_bytes`` == ``budget - required``) and WARNS when that remainder
+falls below the serving-margin floor (amended 2026-08-19, spec task 14 /
+H9 — the shipped code charged it as a hard term, which refused the exact
+configuration LocalServer 1.0.59 demonstrably served).
 
 Imported by model_import.py (registration/update warnings), models.py, and
 greengrass_publish.py (publish gate), so this module must stay stdlib-only
@@ -45,14 +56,23 @@ embeddings". At ``gpu_memory_utilization = 0.55`` the same model profiled a
 extra unit here, which is the honest, refusing direction.
 
 The ratio those numbers imply is already what this module encodes (2 units
-cost 2x one unit); what they also show is that ``ACTIVATION_WEIGHT_FRACTION``
-is ~2x too high PER UNIT (real ≈0.375 of weights). That recalibration is
-DEFERRED to spec task 14 / H8 because the constant is mirrored in the DEVICE
-module, which ships only via an `aws.edgeml.dda.LocalServer.arm64JP6`
-component build — both legs must move together. The device mirror also still
-counts images only; until its build lands, the portal is deliberately the
-MORE conservative of the two on the authored-video dimension (proved
-directionally by the parity suite).
+cost 2x one unit, MEASURED-CONFIRMED to within 0.01 GiB). They also showed
+``ACTIVATION_WEIGHT_FRACTION`` to be ~2x too high PER UNIT, and that
+recalibration is now APPLIED here and in the device mirror in ONE change
+(0.75 -> 0.375, spec task 14 / H8), together with the ``required`` redesign
+(the non-torch term added, and the KV floor REMOVED from ``required`` so it is
+only the thin-margin warning threshold its own design always called it — task 14 / H9). The device mirror also adopted this
+module's UNITS model in the same change, so Property 8 parity is EXACT again
+in both authoring shapes.
+
+HONEST NOTE ON DIRECTION: this change makes ``required`` SMALLER for the
+incident model (12.28 -> 10.87 GiB at 6.45 GiB of weights, one unit), while
+design Decision 2 states the corrected model is "deliberately more
+conservative". That is not a reversal of intent. The shipped number was wrong
+in BOTH directions at once: it omitted a term that is always consumed
+(non-torch), double-counted activation (0.75 against a measured 0.375), and
+hard-charged a floor its own design calls soft. The result is a more ACCURATE
+model, and accuracy happens to be less strict here.
 
 Publish-time math is a NECESSARY, not sufficient, condition: the non-torch
 term vLLM charges against its own budget swung 8.34 GiB between two attempts
@@ -94,48 +114,122 @@ DEVICE_MEMORY_PROFILE_BYTES = {
     'arm64_jp7': 120 * GIB,  # 128 GB Thor class
 }
 
-# Serving-margin floor for KV-cache blocks beyond weights + activation —
-# NOT a hard load threshold. The incident device demonstrably SERVED this
-# model with 0.65 GiB of KV at 2.95x maximum concurrency for 4096 tokens, so
-# a sub-floor remainder is a thin margin (a warning), not proof of failure.
-# The floor is kept at 1 GiB as the margin we size for. Value unchanged.
+# Serving-margin floor for KV cache — the WARNING THRESHOLD ONLY. It is NOT a
+# term in `required` and it never refuses a configuration (amended 2026-08-19,
+# spec task 14 / H9). `required` charges NO KV term at all: the KV cache is
+# what the budget LEAVES OVER once the weights, the non-torch residency and
+# the activation peak are paid, which is exactly how vLLM computes it, so the
+# honest surface is the PREDICTED REMAINDER (`kv_headroom_bytes`) plus a
+# warning when that remainder falls under this floor.
+#
+# Value unchanged at 1 GiB, and its documented meaning unchanged: design
+# Decision 2 always called it "a *serving-margin* floor, not a hard load
+# threshold" and Decision 6 always made a sub-floor remainder the Thin_Margin
+# WARNING. What changed is that the SHIPPED code charged it as a hard term in
+# `required` — and that is what refused, at `gpu_memory_utilization = 0.4`,
+# the exact configuration LocalServer 1.0.59 demonstrably SERVED (0.65 GiB of
+# KV at 2.95x maximum concurrency for 4096 tokens). Same constant, two
+# contradictory roles; it now keeps only the role its own design gave it.
+#
+# SUPERSEDED IMPLEMENTATION, recorded so the reasoning is auditable: an
+# intermediate version of this change kept a HARD `KV_VIABILITY_FLOOR_BYTES =
+# 0.25 GiB` term in `required`, sitting between the 0.65 GiB that served and
+# the -0.22 GiB that failed. The operator took the simpler decision: no hard
+# KV term. The measured -0.22 GiB failure is not admitted by accident either —
+# that load ran with video UNBOUNDED, i.e. TWO multimodal units, and the units
+# model charges it 4.84 GiB of activation, leaving a predicted remainder of
+# 0.19 GiB that trips the thin-margin warning below.
 MINIMUM_KV_CACHE_BYTES = 1 * GIB
+
+# The non-torch / co-tenant residency vLLM subtracts from the SAME budget on
+# every load, and which the shipped `required` OMITTED entirely — a
+# PROPOSED THRESHOLD / ESTIMATE, under the same discipline as
+# ACTIVATION_WEIGHT_FRACTION and RECLAIM_TOLERANCE_BYTES: pinned by a host test
+# so a silent drift is visible, labelled an ESTIMATE in every message that
+# quotes it, and owned for calibration by spec task 14 / H8.
+#
+# WHY IT MUST BE CHARGED: vLLM's own profiling, verbatim from
+# `ryanorinagxdevkithomelabjp622` at `gpu_memory_utilization = 0.45`, is
+# "the current vLLM instance can use total_gpu_memory (29.96GiB) x
+# gpu_memory_utilization (0.45) = 13.48GiB" / "model weights take 6.59GiB;
+# non_torch_memory takes 2.18GiB; PyTorch activation peak memory takes
+# 4.93GiB; the rest of the memory reserved for KV Cache is -0.22GiB." That
+# load PASSED the shipped preflight and then FAILED for real, because the
+# preflight modelled three of the four terms. A term that always consumes the
+# budget cannot be absent from the model of it (bugfix.md 2.1: "SHALL model
+# every term that consumes the `gpu_memory_utilization` budget").
+#
+# PROVENANCE — MEASURED on that one device across seven runs (vLLM's own
+# `non_torch_memory takes ...` line): -0.05, 0.94, 0.98, 2.18, 3.67, 4.76,
+# 8.29 GiB. The median of those seven is 2.18 GiB, and 2 GiB is the nearest
+# round figure to it — deliberately the MIDDLE of the observed spread and NOT
+# the 8.29 GiB worst case, because encoding the worst case as a certainty would
+# refuse the configuration that demonstrably serves today (the same reasoning
+# `fraction_cap` gives for modelling co-tenancy as a cap on the fraction rather
+# than an addend to `required`).
+#
+# KNOWN LIMITATION, not papered over: a run whose non-torch residency is high
+# (3.67, 4.76, 8.29 GiB observed) is UNDER-predicted. Tolerable because this
+# term does not hard-fail a load: vLLM computes
+# `KV = budget - weights - non_torch - activation`, so a high non_torch
+# SHRINKS the KV cache rather than aborting, until KV goes negative (the
+# measured -0.22 GiB). The COMPENSATING CONTROL is the thin-margin WARNING
+# (MINIMUM_KV_CACHE_BYTES above, surfaced by the portal's `thin_margin` and by
+# `manager.py` after a load reaches READY), which makes a thin outcome
+# visible instead of silent. Calibration is owned by spec task 14 / H8, the
+# same discipline ACTIVATION_WEIGHT_FRACTION and RECLAIM_TOLERANCE_BYTES
+# already follow.
+#
+# ALTERNATIVE CONSIDERED AND DEFERRED: read the PREVIOUS load's actual
+# `non_torch_memory` off the engine and charge that instead of an estimate.
+# It is the accurate model and it is too much for this build (it needs engine
+# introspection plumbed through the device preflight and a persisted
+# per-device figure). Deferred, not rejected; owner is task 14 / H8.
+NON_TORCH_MEMORY_BYTES = 2 * GIB
 
 # Conservative floor for the activation/profiling peak, so small models —
 # where a fraction-of-weights term would round to nothing — still carry an
 # allowance. ESTIMATE.
 ACTIVATION_FLOOR_BYTES = 2 * GIB
 
-# Activation/profiling peak as a fraction of weights. Calibrated to the one
-# measured point available: `PyTorch activation peak memory takes 4.92GiB`
-# against `model weights take 6.47GiB` = 0.76, at `enforce_eager=true`,
-# `max_model_len=4096`, one image per prompt. ESTIMATE — every message that
-# quotes the allowance must label it one. It is used only conservatively (to
-# refuse), never permissively.
-ACTIVATION_WEIGHT_FRACTION = 0.75
+# Activation/profiling peak as a fraction of weights, PER MULTIMODAL UNIT.
+# ESTIMATE — every message that quotes the allowance must label it one.
+#
+# RECALIBRATED 2026-08-19 (spec task 14 / H8): 0.75 -> 0.375. The 0.75 came
+# from one measured point (`PyTorch activation peak memory takes 4.92GiB`
+# against `model weights take 6.47GiB` = 0.76) which is now understood to have
+# been a TWO-unit measurement — video was unbounded, so vLLM sized its
+# worst case for both modalities. The per-unit pair measured on
+# `ryanorinagxdevkithomelabjp622` (LocalServer.arm64JP6 1.0.62, same model,
+# same `gpu_memory_utilization = 0.55`, 6.59 GiB of weights) is:
+#   * ONE unit  (`{'image': 1, 'video': 0}`) -> activation peak 2.47 GiB
+#   * TWO units (`{'image': 1}`, video unbounded) -> activation peak 4.93 GiB
+# 2.47 / 6.59 = 0.375. At 6.45 GiB of weights and one unit the recalibrated
+# coefficient gives `max(2.00, 0.375 x 6.45) = 2.42 GiB` against the measured
+# 2.47 GiB — within 0.05 GiB. The old 0.75 predicted 4.94 / 9.89 GiB against
+# the measured 2.47 / 4.93, i.e. exactly 2x in both cases.
+#
+# CONSEQUENCE worth knowing: at 0.375 the ACTIVATION_FLOOR_BYTES (2 GiB) now
+# BINDS for every model under ~5.33 GiB of weights (2 / 0.375), so the floor —
+# not the fraction — is what sizes small models' allowance.
+ACTIVATION_WEIGHT_FRACTION = 0.375
 
 # Extra activation cost per ADDITIONAL multimodal unit per prompt, as a
-# fraction of the one-unit allowance. Deliberately high, so a two-unit
-# configuration must be sized explicitly rather than sneaking into an
-# already-published model's budget (defect 1.4).
+# fraction of the one-unit allowance.
 #
-# The 2026-08-19 JP6 measurements (same model, same
-# `gpu_memory_utilization = 0.55`) put the real per-unit cost near 0.375 of
-# weights rather than 0.75: `{"image": 1, "video": 0}` (1 unit) profiled a
-# 2.47 GiB activation peak against 6.59 GiB of weights, and `{"image": 1}`
-# (2 units — video unbounded at vLLM's own default) profiled 4.93 GiB. The
-# per-unit RATIO this constant encodes is therefore right (2 units cost
-# 2x one unit, within 0.01 GiB), but ACTIVATION_WEIGHT_FRACTION is roughly
-# 2x too high per unit.
+# MEASURED-CONFIRMED for the image<->video UNIT step (2026-08-19, same model,
+# same `gpu_memory_utilization = 0.55`): one unit (`{"image": 1, "video": 0}`)
+# profiled a 2.47 GiB activation peak and two units (`{"image": 1}`, video
+# unbounded at vLLM's own default) profiled 4.93 GiB — a 2:1 ratio, which is
+# exactly what 1.0 encodes, to within 0.01 GiB. Value UNCHANGED because the
+# measurement confirmed it; only ACTIVATION_WEIGHT_FRACTION moved.
 #
-# That recalibration is DEFERRED, not forgotten: `ACTIVATION_WEIGHT_FRACTION`
-# is mirrored in the DEVICE module `src/backend/vllm_runtime/memory_budget.py`
-# and pinned equal by the Property 8 parity test, so moving it here alone
-# would either break parity or ship a portal that predicts a budget the device
-# does not. The device leg ships ONLY via an `aws.edgeml.dda.LocalServer.
-# arm64JP6` component build, so both legs move together in spec task 14 / H8.
-# Until then the allowance stays conservative in the refusing direction, which
-# is the intended posture.
+# STILL UNMEASURED in the per-additional-IMAGE direction: no `image >= 2`
+# configuration has ever been profiled on this hardware, so extrapolating the
+# unit step to a second IMAGE remains an ESTIMATE (spec task 14 / H8).
+# Deliberately high there, so a multi-image configuration must be sized
+# explicitly rather than sneaking into an already-published model's budget
+# (defect 1.4).
 MULTIMODAL_IMAGE_INCREMENT = 1.0
 
 # Memory held by OTHER consumers of the same unified memory before vLLM
@@ -229,12 +323,25 @@ class FitFinding:
     arch: str
     fits: bool
     budget_bytes: int            # gpu_memory_utilization * profile[arch]
-    required_bytes: int          # weights + activation allowance + KV floor
+    # weights + non-torch allowance + activation allowance. NO KV term is
+    # charged (amended 2026-08-19: the non-torch term added, and the KV floor
+    # removed from the sum — it is the thin-margin WARNING threshold applied
+    # to `kv_headroom_bytes`, task 14 / H9)
+    required_bytes: int
     message: str                 # names every term, its number, remediation
     # --- additive terms: the audit trail behind `fits` ---
     weights_bytes: int = 0
     activation_bytes: int = 0        # ESTIMATE (see activation_allowance)
+    # The serving-margin floor, i.e. the thin-margin WARNING threshold. Kept
+    # in its original field and with its original value; it is NO LONGER a
+    # term in `required_bytes` (task 14 / H9).
     kv_floor_bytes: int = 0
+    # ESTIMATE: the non-torch/co-tenant residency vLLM charges against the
+    # same budget, and a term in `required_bytes`.
+    non_torch_bytes: int = 0
+    # budget - required_bytes: the KV cache this model predicts will remain.
+    # Below `kv_floor_bytes` it is a thin margin (a warning, never a refusal).
+    kv_headroom_bytes: int = 0
     co_tenancy_bytes: int = 0
     fraction_cap: Optional[float] = None
     images_per_prompt: int = DEFAULT_IMAGES_PER_PROMPT
@@ -299,6 +406,52 @@ def activation_allowance(weights_bytes: Any,
     base = max(ACTIVATION_FLOOR_BYTES, ACTIVATION_WEIGHT_FRACTION * weights)
     multiplier = 1.0 + MULTIMODAL_IMAGE_INCREMENT * (units - 1)
     return int(base * multiplier)
+
+
+def required_bytes(weights_bytes: Any, multimodal_units: int = 1) -> int:
+    """Every term vLLM charges against the ``gpu_memory_utilization`` budget,
+    in bytes::
+
+        weights + NON_TORCH_MEMORY_BYTES
+                + activation_allowance(weights, multimodal_units)
+
+    No KV term is charged (spec task 14 / H9). The KV cache is what the budget
+    LEAVES OVER once these three are paid — exactly how vLLM computes it — so
+    :func:`kv_headroom_bytes` states the predicted remainder and
+    :data:`MINIMUM_KV_CACHE_BYTES` is the WARNING threshold applied to it.
+    Charging that 1 GiB floor hard is what refused, at
+    ``gpu_memory_utilization = 0.4``, the exact configuration LocalServer
+    1.0.59 demonstrably served (0.65 GiB of KV at 2.95x concurrency for 4096
+    tokens).
+
+    Mirrored verbatim by ``memory_budget.required_bytes`` on the device and
+    pinned equal by the Property 8 parity test. Never raises.
+    """
+    try:
+        weights = max(int(weights_bytes or 0), 0)
+    except (TypeError, ValueError):
+        weights = 0
+    return (weights + NON_TORCH_MEMORY_BYTES
+            + activation_allowance(weights, multimodal_units))
+
+
+def kv_headroom_bytes(budget_bytes: Any, weights_bytes: Any,
+                      multimodal_units: int = 1) -> int:
+    """The KV cache this model predicts will remain::
+
+        budget - required_bytes(weights, multimodal_units)
+
+    i.e. exactly the quantity vLLM prints as "the rest of the memory reserved
+    for KV Cache". Below :data:`MINIMUM_KV_CACHE_BYTES` it is a THIN MARGIN
+    (a warning, never a refusal); at or below zero the configuration is
+    refused by :func:`evaluate_fit`'s condition A, which is the same
+    comparison written the other way round. Mirrored on the device and pinned
+    equal by the Property 8 parity test. Never raises."""
+    try:
+        budget = int(budget_bytes or 0)
+    except (TypeError, ValueError):
+        budget = 0
+    return budget - required_bytes(weights_bytes, multimodal_units)
 
 
 def co_tenancy_reservation_bytes(arch: Optional[str]) -> int:
@@ -460,42 +613,53 @@ def _multimodal_clause(images: int, videos: int, units: int,
 
 
 def _terms_sentence(arch: str, weights_bytes: int, activation_bytes: int,
-                    required_bytes: int, budget_bytes: int,
+                    required: int, budget_bytes: int,
                     profile_bytes: int, utilization: float,
                     reservation_bytes: int, cap: Optional[float],
                     images: int, videos: int = DEFAULT_VIDEOS_PER_PROMPT,
                     units: Optional[int] = None,
-                    video_authored: bool = False) -> str:
+                    video_authored: bool = False,
+                    headroom_bytes: Optional[int] = None) -> str:
     """The auditable statement of every term with its number, shared by the
     passing and failing branches — so an operator can check the verdict
-    instead of trusting it. The activation allowance is labelled an
-    ESTIMATE wherever it appears."""
+    instead of trusting it. BOTH estimated terms — the activation allowance
+    and the non-torch allowance — are labelled ESTIMATEs wherever they
+    appear, and NO KV floor is presented as part of the requirement (task 14 /
+    H9): what is stated instead is the PREDICTED KV REMAINDER the budget
+    leaves over, the quantity vLLM prints as "the rest of the memory reserved
+    for KV Cache"."""
     cap_clause = ("no co-tenancy cap is known for this architecture"
                   if cap is None else
                   f"co-tenancy cap on the fraction {cap:.2f}")
     if units is None:
         units = images + videos
+    if headroom_bytes is None:
+        headroom_bytes = budget_bytes - required
     return (
-        f"estimated weights {_format_gib(weights_bytes)} + activation "
+        f"estimated weights {_format_gib(weights_bytes)} + non-torch "
+        f"allowance {_format_gib(NON_TORCH_MEMORY_BYTES)} (an ESTIMATE: "
+        f"the median of seven measured non_torch_memory readings on JP6, "
+        f"-0.05 to 8.29 GiB) + activation "
         f"allowance {_format_gib(activation_bytes)} (an ESTIMATE: "
         f"max({_format_gib(ACTIVATION_FLOOR_BYTES)}, "
         f"{ACTIVATION_WEIGHT_FRACTION:g} x weights) for "
-        f"{_multimodal_clause(images, videos, units, video_authored)}) "
-        f"+ KV cache floor "
-        f"{_format_gib(MINIMUM_KV_CACHE_BYTES)} = "
-        f"{_format_gib(required_bytes)} required, against a "
+        f"{_multimodal_clause(images, videos, units, video_authored)}) = "
+        f"{_format_gib(required)} required, against a "
         f"{_format_gib(budget_bytes)} budget "
         f"(gpu_memory_utilization={utilization:g} of the {arch} profile's "
         f"{_format_gib(profile_bytes)} TOTAL device memory as the engine "
         f"sees it, of which co-resident consumers hold about "
-        f"{_format_gib(reservation_bytes)}; {cap_clause})"
+        f"{_format_gib(reservation_bytes)}; {cap_clause}), leaving a "
+        f"predicted KV cache remainder of {_format_gib(headroom_bytes)} "
+        f"against the {_format_gib(MINIMUM_KV_CACHE_BYTES)} serving-margin "
+        f"floor"
     )
 
 
 def _remediation_sentences(arch: str, engine_configuration: Dict[str, Any],
                            images: int, utilization: float,
                            cap: Optional[float], profile_bytes: int,
-                           reservation_bytes: int, required_bytes: int,
+                           reservation_bytes: int, required: int,
                            weights_exceed_budget: bool,
                            videos: int = DEFAULT_VIDEOS_PER_PROMPT,
                            video_authored: bool = False) -> str:
@@ -552,13 +716,13 @@ def _remediation_sentences(arch: str, engine_configuration: Dict[str, Any],
             f"are holding.")
         return ' '.join(parts)
 
-    needed_fraction = required_bytes / float(profile_bytes)
+    needed_fraction = required / float(profile_bytes)
     last = (
         f"Last resort — raise gpu_memory_utilization only within the "
         f"co-tenancy cap: it may be raised to at most {cap:.2f} on {arch} "
         f"({_format_gib(profile_bytes)} total minus "
         f"{_format_gib(reservation_bytes)} held by co-resident models), and "
-        f"the budget you need is {_format_gib(required_bytes)}, i.e. at "
+        f"the budget you need is {_format_gib(required)}, i.e. at "
         f"least {_round_up_fraction(needed_fraction):.2f}")
     if needed_fraction > cap:
         last += (" — which exceeds that cap, so raising the fraction cannot "
@@ -578,13 +742,18 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
     conditions over documented terms (design Decision 2)::
 
         activation := activation_allowance(weights, multimodal_units)
-        required   := weights + activation + MINIMUM_KV_CACHE_BYTES
+        required   := weights + NON_TORCH_MEMORY_BYTES + activation
         budget     := gpu_memory_utilization * profile[arch]
         cap        := (profile[arch] - co_tenancy[arch]) / profile[arch]
 
         A (budget sufficiency) : budget >= required
         B (co-tenancy safety)  : gpu_memory_utilization <= cap
         fits := A and B
+
+    NO KV term is charged in ``required``: the KV cache is what the budget
+    leaves over. A passing verdict whose predicted KV headroom
+    (:func:`kv_headroom_bytes`) falls below ``MINIMUM_KV_CACHE_BYTES`` carries
+    the ``thin_margin`` WARNING instead of being refused (task 14 / H9).
 
     Architectures without a profile entry are skipped (no finding emitted).
     ``budget_bytes`` keeps its original definition and value.
@@ -627,8 +796,10 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
         return []
 
     activation_bytes = activation_allowance(weights_bytes, units)
-    required_bytes = (weights_bytes + activation_bytes
-                      + MINIMUM_KV_CACHE_BYTES)
+    # weights + non-torch (ESTIMATE) + activation (ESTIMATE). No KV term:
+    # the 1 GiB serving margin is a warning threshold applied to the predicted
+    # remainder, never a charge in `required` (task 14 / H9).
+    required = (weights_bytes + NON_TORCH_MEMORY_BYTES + activation_bytes)
 
     findings = []
     for arch in architectures:
@@ -639,7 +810,7 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
         reservation_bytes = co_tenancy_reservation_bytes(arch)
         cap = fraction_cap(arch)
 
-        budget_ok = budget_bytes >= required_bytes
+        budget_ok = budget_bytes >= required
         co_tenancy_ok = cap is None or utilization <= cap
         fits = budget_ok and co_tenancy_ok
         failed_conditions = []
@@ -648,30 +819,41 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
         if not co_tenancy_ok:
             failed_conditions.append('co_tenancy')
 
+        # The KV cache this model predicts will remain (what vLLM prints as
+        # "the rest of the memory reserved for KV Cache").
+        headroom_bytes = budget_bytes - required
+
         # Soft warnings on a PASSING verdict: it fits, with a recorded
         # caution (design Decision 2's `warnings` status keeps a meaning).
         warnings: List[str] = []
         if fits:
-            if budget_bytes - required_bytes < MINIMUM_KV_CACHE_BYTES:
+            # THIN MARGIN, not a refusal (design Decision 2 / Decision 6,
+            # task 14 / H9): the configuration fits, but the KV cache its
+            # budget leaves over is under the 1 GiB serving margin. 0.65 GiB
+            # demonstrably served at 2.95x concurrency for 4096 tokens, so
+            # this is a caution, never a verdict.
+            if headroom_bytes < MINIMUM_KV_CACHE_BYTES:
                 warnings.append('thin_margin')
             if cap is not None and cap - utilization <= NEAR_CAP_WARNING_MARGIN:
                 warnings.append('near_cap')
 
         terms = _terms_sentence(
-            arch, weights_bytes, activation_bytes, required_bytes,
+            arch, weights_bytes, activation_bytes, required,
             budget_bytes, profile_bytes, utilization, reservation_bytes, cap,
-            images, videos, units, video_authored)
+            images, videos, units, video_authored, headroom_bytes)
 
         if fits:
             message = f"Fit check passed for {arch}: {terms}."
             if 'thin_margin' in warnings:
                 message += (
                     f" WARNING (thin margin): only "
-                    f"{_format_gib(budget_bytes - required_bytes)} remains "
-                    f"beyond the requirement, under the "
-                    f"{_format_gib(MINIMUM_KV_CACHE_BYTES)} KV cache floor "
-                    f"— this configuration is one co-tenancy swing from "
-                    f"failing on device.")
+                    f"{_format_gib(headroom_bytes)} of KV cache is predicted "
+                    f"to remain, under the "
+                    f"{_format_gib(MINIMUM_KV_CACHE_BYTES)} KV cache "
+                    f"serving-margin floor (a warning, not a refusal — "
+                    f"0.65 GiB served this model at 2.95x concurrency for "
+                    f"4096 tokens) — this configuration is one co-tenancy "
+                    f"swing from failing on device.")
             if 'near_cap' in warnings:
                 message += (
                     f" WARNING (near the co-tenancy cap): "
@@ -689,18 +871,18 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
             elif failed_conditions == ['budget']:
                 headline = (
                     f"Fit check FAILED for {arch} (budget condition: short "
-                    f"by {_format_gib(required_bytes - budget_bytes)})")
+                    f"by {_format_gib(required - budget_bytes)})")
             else:
                 headline = (
                     f"Fit check FAILED for {arch} (budget condition: short "
-                    f"by {_format_gib(required_bytes - budget_bytes)}; and "
+                    f"by {_format_gib(required - budget_bytes)}; and "
                     f"co-tenancy condition: gpu_memory_utilization="
                     f"{utilization:g} exceeds the {cap:.2f} cap)")
             message = (
                 f"{headline}: {terms}. "
                 + _remediation_sentences(
                     arch, engine_configuration or {}, images, utilization,
-                    cap, profile_bytes, reservation_bytes, required_bytes,
+                    cap, profile_bytes, reservation_bytes, required,
                     weights_exceed_budget=weights_bytes > budget_bytes,
                     videos=videos, video_authored=video_authored))
 
@@ -708,11 +890,13 @@ def evaluate_fit(engine_configuration: Dict[str, Any],
             arch=arch,
             fits=fits,
             budget_bytes=budget_bytes,
-            required_bytes=required_bytes,
+            required_bytes=required,
             message=message,
             weights_bytes=weights_bytes,
             activation_bytes=activation_bytes,
             kv_floor_bytes=MINIMUM_KV_CACHE_BYTES,
+            non_torch_bytes=NON_TORCH_MEMORY_BYTES,
+            kv_headroom_bytes=headroom_bytes,
             co_tenancy_bytes=reservation_bytes,
             fraction_cap=cap,
             images_per_prompt=images,

@@ -272,9 +272,11 @@ def test_measured_pair_at_util_055_is_reproduced_directionally():
     unit's allowance — the direction the device measured (2.47 vs 4.93 GiB of
     activation peak, 6.43 vs 0.20 GiB of KV cache left).
 
-    The MAGNITUDES are not claimed: `ACTIVATION_WEIGHT_FRACTION` is ~2x too
-    high per unit against those numbers, and recalibrating it needs the device
-    mirror to move in the same change — a component build, task 14 / H8.
+    The MAGNITUDES are now claimed too, within 0.05 GiB, because
+    `ACTIVATION_WEIGHT_FRACTION` HAS been recalibrated to the measured
+    0.375 per unit in the same change as the device mirror (task 14 / H8):
+    at 6.59 GiB of weights the model predicts 2.47 GiB for one unit and
+    4.94 GiB for two against the measured 2.47 and 4.93.
 
     # Validates: Requirements 2.1, 2.4
     """
@@ -289,8 +291,19 @@ def test_measured_pair_at_util_055_is_reproduced_directionally():
 
     assert bounded.multimodal_units == 1
     assert unbounded.multimodal_units == 2
-    assert unbounded.activation_bytes == 2 * bounded.activation_bytes
+    # REPOINTED 2026-08-19 (task 14 / H8). SUPERSEDED assertion, recorded
+    # verbatim:
+    #     assert unbounded.activation_bytes == 2 * bounded.activation_bytes
+    # The doubling holds to within ONE BYTE: the allowance truncates a FLOAT
+    # (`int(base * multiplier)`) and at 0.375 the base for these weights has a
+    # fractional part. Not weakened — one byte, and the same arithmetic runs on
+    # the device leg (Property 8 pins the two equal).
+    assert abs(unbounded.activation_bytes
+               - 2 * bounded.activation_bytes) <= 1
     assert bounded.required_bytes < unbounded.required_bytes
+    # The recalibrated magnitudes against the MEASURED peaks (2.47 / 4.93 GiB).
+    assert round(bounded.activation_bytes / GIB, 2) == 2.47
+    assert round(unbounded.activation_bytes / GIB, 2) == 4.94
     # The budget is the same 16.50 GiB in both cases (0.55 x 30 GiB).
     assert bounded.budget_bytes == unbounded.budget_bytes
     assert round(bounded.budget_bytes / GIB, 2) == 16.50

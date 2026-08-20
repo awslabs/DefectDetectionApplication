@@ -291,7 +291,19 @@ def test_fit_check_sizes_the_default_as_one_unit(mi):
     unbounded = evaluate_fit(legacy, weights, ["arm64_jp6"])[0]
     assert unbounded.videos_per_prompt == 1
     assert unbounded.multimodal_units == 2
-    assert unbounded.activation_bytes == 2 * bounded.activation_bytes
+    # REPOINTED 2026-08-19 (task 14 / H8). SUPERSEDED assertion, recorded
+    # verbatim:
+    #     assert unbounded.activation_bytes == 2 * bounded.activation_bytes
+    # The doubling still holds, but only to within ONE BYTE: the allowance is
+    # `int(base * multiplier)` over a FLOAT base, and at the recalibrated
+    # 0.375 coefficient `0.375 x int(6.59 GiB)` has a fractional part, so
+    # truncating once at two units differs from truncating at one unit and
+    # doubling. Not weakened — the tolerance is a single byte, and the
+    # production formula is byte-identical on both the portal and the device
+    # legs (Property 8 pins them equal).
+    assert abs(unbounded.activation_bytes
+               - 2 * bounded.activation_bytes) <= 1
+    assert unbounded.activation_bytes == activation_allowance(weights, 2)
     assert unbounded.required_bytes > bounded.required_bytes
     # Both messages label the allowance an ESTIMATE and name their units.
     for finding, units in ((bounded, 1), (unbounded, 2)):

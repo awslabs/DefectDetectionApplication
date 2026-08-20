@@ -81,6 +81,54 @@ def test_proposed_thresholds_carry_the_design_values():
     _Requirements: 2.5, 2.7_"""
     assert mb.RECLAIM_TOLERANCE_BYTES == int(0.5 * GIB)
     assert mb.THIN_MARGIN_CONCURRENCY == 2.0
+    # CONSCIOUS REPOINT 2026-08-19 (spec jp6-vllm-kv-cache-oom-regression,
+    # task 14 / H9). SUPERSEDED assertions, recorded VERBATIM — they pinned the
+    # INTERMEDIATE version of this change, which kept a HARD
+    # `KV_VIABILITY_FLOOR_BYTES = 0.25 GiB` term in `required` and named the
+    # non-torch constant `NON_TORCH_ALLOWANCE_BYTES`::
+    #
+    #     # Added 2026-08-19 (task 14 / H8 + H9): two more constants under the
+    #     # same PROPOSED/ESTIMATE discipline, pinned so a silent drift is
+    #     # visible. The ORDER of the two KV terms is the H9 invariant: the
+    #     # hard viability floor sits strictly between zero and the 1 GiB
+    #     # serving margin, so the configuration that served with 0.65 GiB of
+    #     # KV is admitted while a non-positive remainder is still refused.
+    #     assert mb.KV_VIABILITY_FLOOR_BYTES == int(0.25 * GIB)
+    #     assert mb.NON_TORCH_ALLOWANCE_BYTES == 2 * GIB
+    #     assert 0 < mb.KV_VIABILITY_FLOOR_BYTES < mb.MINIMUM_KV_CACHE_BYTES
+    #     assert mb.KV_VIABILITY_FLOOR_BYTES < int(0.65 * GIB)
+    #
+    # REASON: the operator took the simpler H9 decision — `required` charges NO
+    # KV term at all, hard or soft, because the KV cache is what the budget
+    # LEAVES OVER (exactly how vLLM computes it), and the constant is
+    # `NON_TORCH_MEMORY_BYTES`. Nothing is weakened: the replacement pins the
+    # WHOLE composition of `required` (strictly stronger than pinning one of
+    # its terms), pins the absence of the intermediate constant, and still
+    # pins the H9 outcome the superseded block existed to protect — the
+    # configuration that demonstrably SERVED with 0.65 GiB of KV is ADMITTED
+    # and merely warned about.
+    assert mb.NON_TORCH_MEMORY_BYTES == 2 * GIB
+    assert mb.MINIMUM_KV_CACHE_BYTES == 1 * GIB
+    assert mb.ACTIVATION_FLOOR_BYTES == 2 * GIB
+    assert mb.ACTIVATION_WEIGHT_FRACTION == 0.375
+    assert mb.MULTIMODAL_IMAGE_INCREMENT == 1.0
+    # H9: no KV term is charged, so `required` is exactly the three terms and
+    # is STRICTLY BELOW what it would be with the serving margin added.
+    for weights in (0, int(6.45 * GIB), 16 * GIB):
+        for units in (1, 2, 3):
+            assert mb.required_bytes(weights, units) == (
+                weights + mb.NON_TORCH_MEMORY_BYTES
+                + mb.activation_allowance(weights, units))
+            assert (mb.required_bytes(weights, units)
+                    < mb.required_bytes(weights, units)
+                    + mb.MINIMUM_KV_CACHE_BYTES)
+    # The intermediate hard-floor constant is GONE, not merely unused.
+    assert not hasattr(mb, "KV_VIABILITY_FLOOR_BYTES")
+    assert not hasattr(mb, "NON_TORCH_ALLOWANCE_BYTES")
+    # The 1 GiB floor's surviving role: 0.65 GiB of KV served this model at
+    # 2.95x concurrency for 4096 tokens, so it is under the floor and is a
+    # WARNING threshold, never a refusal.
+    assert int(0.65 * GIB) < mb.MINIMUM_KV_CACHE_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -288,9 +336,53 @@ def test_estimate_weights_on_disk_survives_an_unreadable_tree(tmp_path):
 # activation_allowance / required_bytes / fraction_cap edge cases
 # ---------------------------------------------------------------------------
 
-def test_activation_allowance_reproduces_the_incident_arithmetic():
-    """design Decision 2's worked verdict: 6.5 GiB of weights, one image →
-    ``max(2, 0.75 x 6.5) = 4.88 GiB``, ``required = 12.38 GiB``.
+def test_activation_allowance_reproduces_the_recalibrated_arithmetic():
+    """The MEASURED per-unit arithmetic (task 14 / H8): 6.5 GiB of weights,
+    ONE multimodal unit → ``max(2, 0.375 x 6.5) = 2.44 GiB``, and
+    ``required = 6.5 + 2.00 (non-torch) + 2.44 = 10.94 GiB``.
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    jp6-vllm-kv-cache-oom-regression, task 14 / H9). The INTERMEDIATE version
+    of this change kept a hard 0.25 GiB KV viability floor in ``required``.
+    SUPERSEDED assertions and docstring line, recorded VERBATIM::
+
+        ``required = 6.5 + 2.00 (non-torch) + 2.44 + 0.25 (KV viability) =
+        11.19 GiB``.
+
+        assert mb.format_gib(required) == "11.19 GiB"
+        # The four terms, and nothing else, make up the requirement.
+        assert required == (weights + mb.NON_TORCH_ALLOWANCE_BYTES + allowance
+                            + mb.KV_VIABILITY_FLOOR_BYTES)
+        # The 1 GiB serving margin is NOT charged (task 14 / H9).
+        assert mb.MINIMUM_KV_CACHE_BYTES not in (
+            required - weights - allowance - mb.NON_TORCH_ALLOWANCE_BYTES,)
+
+    Reason: the operator's H9 decision charges NO KV term at all — the KV cache
+    is the remainder the budget leaves over, which is how vLLM computes it — so
+    the requirement is exactly THREE terms and the constant is
+    ``NON_TORCH_MEMORY_BYTES``. Same strength: every term is still pinned to a
+    literal GiB string and the composition is still pinned exactly, now with
+    the additional assertion that NO KV amount of any size is inside it.
+
+    REPOINTED 2026-08-19. SUPERSEDED test, recorded verbatim::
+
+        def test_activation_allowance_reproduces_the_incident_arithmetic():
+            \"\"\"design Decision 2's worked verdict: 6.5 GiB of weights, one
+            image → ``max(2, 0.75 x 6.5) = 4.88 GiB``,
+            ``required = 12.38 GiB``.\"\"\"
+            weights = int(6.5 * GIB)
+            allowance = mb.activation_allowance(weights, 1)
+            required = mb.required_bytes(weights, 1)
+            assert allowance == pytest.approx(0.75 * weights, rel=1e-9)
+            assert mb.format_gib(allowance) == "4.88 GiB"
+            assert mb.format_gib(required) == "12.38 GiB"
+
+    Why: 0.75 was calibrated to one point now known to have been a TWO-unit
+    (video-unbounded) measurement, and the measured one-unit peak is 2.47 GiB
+    against 6.59 GiB of weights = 0.375. `required` also gained the non-torch
+    term it always omitted and traded the 1 GiB hard KV floor for the 0.25 GiB
+    viability floor (H9). Same strength: every term is still pinned to a
+    literal GiB string.
 
     _Requirements: 1.1, 2.1_"""
     weights = int(6.5 * GIB)
@@ -298,21 +390,51 @@ def test_activation_allowance_reproduces_the_incident_arithmetic():
     allowance = mb.activation_allowance(weights, 1)
     required = mb.required_bytes(weights, 1)
 
-    assert allowance == pytest.approx(0.75 * weights, rel=1e-9)
-    assert mb.format_gib(allowance) == "4.88 GiB"
-    assert mb.format_gib(required) == "12.38 GiB"
+    assert allowance == pytest.approx(0.375 * weights, rel=1e-9)
+    assert mb.format_gib(allowance) == "2.44 GiB"
+    assert mb.format_gib(required) == "10.94 GiB"
+    # The three terms, and nothing else, make up the requirement.
+    assert required == (weights + mb.NON_TORCH_MEMORY_BYTES + allowance)
+    # NO KV term is charged, of any size (task 14 / H9): the residue after the
+    # three terms is exactly zero, so neither the 1 GiB serving margin nor the
+    # intermediate 0.25 GiB viability floor is hiding in it.
+    assert required - weights - allowance - mb.NON_TORCH_MEMORY_BYTES == 0
 
 
-def test_activation_allowance_two_images_doubles_the_peak():
-    """`MULTIMODAL_IMAGE_INCREMENT = 1.0` is UNMEASURED and deliberately high,
-    so a two-image configuration must be sized explicitly ([HARDWARE] H8).
+def test_activation_allowance_two_units_doubles_the_peak():
+    """`MULTIMODAL_IMAGE_INCREMENT = 1.0` is MEASURED-CONFIRMED for the
+    image<->video UNIT step (2.47 -> 4.93 GiB, a 2:1 ratio within 0.01 GiB)
+    and still UNMEASURED per additional IMAGE, so a multi-unit configuration
+    must be sized explicitly ([HARDWARE] H8).
+
+    REPOINTED 2026-08-19. SUPERSEDED test, recorded verbatim::
+
+        def test_activation_allowance_two_images_doubles_the_peak():
+            \"\"\"`MULTIMODAL_IMAGE_INCREMENT = 1.0` is UNMEASURED and
+            deliberately high, so a two-image configuration must be sized
+            explicitly ([HARDWARE] H8).\"\"\"
+            weights = int(6.5 * GIB)
+            assert mb.activation_allowance(weights, 2) == \\
+                2 * mb.activation_allowance(weights, 1)
+            assert mb.format_gib(mb.required_bytes(weights, 2)) == "17.25 GiB"
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED assertion,
+    recorded VERBATIM — it priced the INTERMEDIATE hard 0.25 GiB KV viability
+    floor into ``required`` (6.50 + 2.00 + 4.88 + 0.25)::
+
+        assert mb.format_gib(mb.required_bytes(weights, 2)) == "13.62 GiB"
+
+    Reason: H9 charges no KV term, so ``required`` is 6.50 + 2.00 + 4.88 =
+    13.38 GiB. Same strength: the 2:1 unit ratio and the literal GiB string are
+    both still pinned.
 
     _Requirements: 2.1, 2.4_"""
     weights = int(6.5 * GIB)
 
     assert mb.activation_allowance(weights, 2) == \
         2 * mb.activation_allowance(weights, 1)
-    assert mb.format_gib(mb.required_bytes(weights, 2)) == "17.25 GiB"
+    assert mb.format_gib(mb.required_bytes(weights, 2)) == "13.38 GiB"
 
 
 @pytest.mark.parametrize("weights", [None, 0, 1, 1024, int(0.1 * GIB)])
@@ -325,12 +447,36 @@ def test_activation_allowance_floors_zero_and_tiny_weights(weights):
 
 
 def test_required_bytes_degrades_to_the_documented_lower_bound():
-    """Undeterminable weights → ``ACTIVATION_FLOOR + KV floor``, never a
-    guessed weight.
+    """Undeterminable weights → ``NON_TORCH + ACTIVATION_FLOOR``, never a
+    guessed weight — the lower bound the module's own docstring and the
+    ``UNVERIFIED`` refusal note both name.
+
+    REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED assertion, recorded
+    verbatim::
+
+        assert mb.required_bytes(None, 1) == \\
+            mb.ACTIVATION_FLOOR_BYTES + mb.MINIMUM_KV_CACHE_BYTES
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED assertion,
+    recorded VERBATIM — the INTERMEDIATE bound carried a hard KV viability
+    floor and named the constant ``NON_TORCH_ALLOWANCE_BYTES``::
+
+        assert mb.required_bytes(None, 1) == (mb.NON_TORCH_ALLOWANCE_BYTES
+                                             + mb.ACTIVATION_FLOOR_BYTES
+                                             + mb.KV_VIABILITY_FLOOR_BYTES)
+
+    Reason: H9 charges no KV term, so the documented bound is exactly
+    ``NON_TORCH + ACTIVATION_FLOOR`` = 4 GiB — which is what
+    :func:`evaluate_device_fit`'s ``UNVERIFIED`` note states in words, and the
+    two are now pinned to agree here.
 
     _Requirements: 2.9_"""
-    assert mb.required_bytes(None, 1) == \
-        mb.ACTIVATION_FLOOR_BYTES + mb.MINIMUM_KV_CACHE_BYTES
+    assert mb.required_bytes(None, 1) == (mb.NON_TORCH_MEMORY_BYTES
+                                          + mb.ACTIVATION_FLOOR_BYTES)
+    # The bound is a LOWER bound: no weight was invented, and it is strictly
+    # below the requirement of any model whose weights ARE sizable.
+    assert mb.required_bytes(None, 1) < mb.required_bytes(int(6.45 * GIB), 1)
 
 
 @pytest.mark.parametrize("images", [None, 0, -3, "two", 1.9, True, object()])
@@ -421,17 +567,181 @@ def test_fraction_cap_prefers_the_devices_measured_total():
 # evaluate_device_fit — the incident, and the honesty rules
 # ---------------------------------------------------------------------------
 
-def test_evaluate_device_fit_refuses_the_incident_configuration():
-    """The staged args verbatim from bugfix.md against the device's own total:
-    ``0.4 x 29.95 GiB = 11.98 GiB`` budget vs a 12.38 GiB requirement — the
-    refusal names measured available, every term, and the setting to change.
+def test_evaluate_device_fit_admits_the_1_0_59_equivalent_configuration():
+    """H9, the point of the floor split: the configuration LocalServer 1.0.59
+    demonstrably SERVED — the incident's staged args with the multimodal limit
+    authored as the product's default one unit, at
+    ``gpu_memory_utilization = 0.4`` — is ADMITTED again.
+
+    ``0.4 x 29.95 GiB = 11.98 GiB`` of budget against a
+    ``6.45 + 2.00 + 2.42 = 10.87 GiB`` requirement, leaving 1.11 GiB of
+    predicted KV cache — above the 1 GiB serving margin.
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED docstring line
+    and assertions, recorded VERBATIM — they priced the INTERMEDIATE hard
+    0.25 GiB KV viability floor and named its ``terms`` key::
+
+        ``6.45 + 2.00 + 2.42 + 0.25 = 11.12 GiB`` requirement
+
+        assert mb.format_gib(verdict.terms["required_bytes"]) == "11.12 GiB"
+        assert verdict.terms["non_torch_bytes"] == mb.NON_TORCH_ALLOWANCE_BYTES
+        assert (verdict.terms["kv_viability_floor_bytes"]
+                == mb.KV_VIABILITY_FLOOR_BYTES)
+
+    Reason: H9 charges no KV term at all, so there is no viability floor and no
+    ``kv_viability_floor_bytes`` term to report. Nothing is weakened — the
+    verdict asserted (ADMITTED, no warning, headroom above the serving margin)
+    is unchanged, and the absence of the intermediate term is now pinned
+    positively.
+
+    The shipped
+    preflight refused it because it charged the 1 GiB serving-margin floor as a
+    HARD term, converting "serves, with a thin margin, sometimes after one
+    retry" into "never loads" (0.65 GiB of KV served this model at 2.95x
+    concurrency for 4096 tokens).
+
+    REPOINTED 2026-08-19 (task 14 / H9). SUPERSEDED test, recorded verbatim —
+    it asserted the OPPOSITE verdict for this configuration, which is exactly
+    the contradiction H9 records::
+
+        def test_evaluate_device_fit_refuses_the_incident_configuration():
+            \"\"\"The staged args verbatim from bugfix.md against the device's
+            own total: ``0.4 x 29.95 GiB = 11.98 GiB`` budget vs a 12.38 GiB
+            requirement — the refusal names measured available, every term,
+            and the setting to change.\"\"\"
+            reading = mb.MemoryReading(total_bytes=DEVICE_TOTAL_BYTES,
+                                       available_bytes=int(23 * GIB))
+            verdict = mb.evaluate_device_fit(INCIDENT_ENGINE_ARGS, reading,
+                                             int(6.5 * GIB))
+            assert verdict.ok is False
+            assert verdict.unverified is False
+            assert verdict.terms["failed_conditions"] == ["budget"]
+            reason = verdict.refusal_reason
+            assert reason.startswith(mb.PREFLIGHT_REFUSED_MARKER)
+            assert "\\n" not in reason
+            for fragment in ("23.00 GiB", "11.98 GiB", "12.38 GiB",
+                             "6.50 GiB", "4.88 GiB", "1.00 GiB", "ESTIMATE",
+                             "limit_mm_per_prompt.image", "max_model_len"):
+                assert fragment in reason, fragment
+            assert not re.search(r"(lower|decrease|reduce)\\w*\\s+"
+                                 r"gpu_memory_utilization", reason,
+                                 re.IGNORECASE)
+
+    The refusal-diagnostic coverage that test carried is NOT lost: it is
+    asserted in full by
+    :func:`test_evaluate_device_fit_refuses_a_genuinely_short_budget` below,
+    over a configuration that genuinely does not fit.
 
     _Requirements: 1.1, 1.10, 2.1, 2.9_"""
+    args = dict(INCIDENT_ENGINE_ARGS,
+                limit_mm_per_prompt={"image": 1, "video": 0})
     reading = mb.MemoryReading(total_bytes=DEVICE_TOTAL_BYTES,
                                available_bytes=int(23 * GIB))
 
-    verdict = mb.evaluate_device_fit(INCIDENT_ENGINE_ARGS, reading,
-                                     int(6.5 * GIB))
+    verdict = mb.evaluate_device_fit(args, reading, int(6.45 * GIB),
+                                     arch="arm64_jp6")
+
+    assert verdict.ok is True, verdict.refusal_reason
+    assert verdict.refusal_reason is None
+    assert verdict.terms["failed_conditions"] == []
+    assert mb.format_gib(verdict.terms["required_bytes"]) == "10.87 GiB"
+    assert mb.format_gib(verdict.terms["budget_bytes"]) == "11.98 GiB"
+    assert mb.format_gib(verdict.terms["activation_bytes"]) == "2.42 GiB"
+    assert verdict.terms["non_torch_bytes"] == mb.NON_TORCH_MEMORY_BYTES
+    # No KV term is charged, so no viability floor is reported (H9); the
+    # serving margin is still reported, as the WARNING threshold it now is.
+    assert "kv_viability_floor_bytes" not in verdict.terms
+    assert verdict.terms["kv_floor_bytes"] == mb.MINIMUM_KV_CACHE_BYTES
+    # The predicted KV headroom clears the 1 GiB serving margin here, so not
+    # even a thin-margin warning fires (the device measured 0.65 GiB at this
+    # utilization when non_torch happened to be high).
+    assert verdict.terms["warnings"] == []
+    assert verdict.terms["kv_headroom_bytes"] >= mb.MINIMUM_KV_CACHE_BYTES
+
+
+def test_evaluate_device_fit_warns_thin_margin_without_refusing():
+    """A configuration that leaves a POSITIVE predicted KV remainder but less
+    than the 1 GiB serving margin PASSES with a ``thin_margin`` warning —
+    design Decision 2's "serving-margin floor, not a hard load threshold" and
+    Decision 6's Thin_Margin WARNING, which the shipped preflight contradicted
+    by refusing outright (task 14 / H9).
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED assertion,
+    recorded VERBATIM — it bracketed the headroom by the INTERMEDIATE hard
+    0.25 GiB viability floor::
+
+        assert (mb.KV_VIABILITY_FLOOR_BYTES
+                <= verdict.terms["kv_headroom_bytes"]
+                < mb.MINIMUM_KV_CACHE_BYTES)
+
+    Reason: with no hard KV term the lower bracket is what the budget arm
+    actually enforces, namely a POSITIVE remainder (``budget >= required`` is
+    ``headroom >= 0``). Not a loosening of what is tested: the same two-sided
+    bracket is asserted, against the bound the code now enforces, and the
+    ``0.51 GiB`` figure is pinned to a literal as well.
+
+    _Requirements: 2.1, 2.7_"""
+    args = dict(INCIDENT_ENGINE_ARGS,
+                gpu_memory_utilization=0.38,
+                limit_mm_per_prompt={"image": 1, "video": 0})
+    reading = mb.MemoryReading(total_bytes=DEVICE_TOTAL_BYTES,
+                               available_bytes=int(23 * GIB))
+
+    verdict = mb.evaluate_device_fit(args, reading, int(6.45 * GIB),
+                                     arch="arm64_jp6")
+
+    # 0.38 x 29.95 = 11.38 GiB of budget against 10.87 GiB required: it fits,
+    # with only 0.51 GiB of predicted KV — positive, so the budget arm admits
+    # it, but under the 1 GiB serving margin.
+    assert verdict.ok is True, verdict.refusal_reason
+    assert verdict.terms["failed_conditions"] == []
+    assert verdict.terms["warnings"] == ["thin_margin"]
+    assert (0 < verdict.terms["kv_headroom_bytes"]
+            < mb.MINIMUM_KV_CACHE_BYTES)
+    assert mb.format_gib(verdict.terms["kv_headroom_bytes"]) == "0.51 GiB"
+
+
+def test_evaluate_device_fit_refuses_a_genuinely_short_budget():
+    """The refusal diagnostic, in full, over a configuration that genuinely
+    does not fit: ``0.3 x 29.95 GiB = 8.98 GiB`` of budget against the same
+    10.87 GiB requirement. Carries every assertion the superseded
+    incident-refusal test made (see
+    :func:`test_evaluate_device_fit_admits_the_1_0_59_equivalent_configuration`),
+    repointed to the new term set — including the non-torch allowance, and the
+    PREDICTED KV REMAINDER stated against the serving-margin floor, all named
+    with their numbers.
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED fragments,
+    recorded VERBATIM — they asserted the INTERMEDIATE requirement total and
+    the hard viability floor's own sentence::
+
+        for fragment in ("23.00 GiB", "8.98 GiB", "11.12 GiB", "6.45 GiB",
+                         "non-torch allowance 2.00 GiB (ESTIMATE)",
+                         "activation allowance 2.42 GiB (ESTIMATE",
+                         "KV-cache viability floor 0.25 GiB",
+                         "1 multimodal unit(s): 1 image(s) + 0 video(s)",
+                         "limit_mm_per_prompt.image", "max_model_len"):
+            assert fragment in reason, fragment
+
+    Reason: with no KV term charged there is no viability-floor sentence to
+    name. What replaces it is STRICTLY MORE than a constant: the diagnostic must
+    state the PREDICTED KV REMAINDER this configuration leaves (-1.88 GiB) AND
+    the serving-margin floor it is measured against (1.00 GiB) — i.e. the H9
+    surface itself, asserted as one verbatim sentence. Every other fragment,
+    including both ESTIMATE labels, is unchanged.
+
+    _Requirements: 1.1, 1.10, 2.1, 2.9_"""
+    args = dict(INCIDENT_ENGINE_ARGS,
+                gpu_memory_utilization=0.3,
+                limit_mm_per_prompt={"image": 1, "video": 0})
+    reading = mb.MemoryReading(total_bytes=DEVICE_TOTAL_BYTES,
+                               available_bytes=int(23 * GIB))
+
+    verdict = mb.evaluate_device_fit(args, reading, int(6.45 * GIB),
+                                     arch="arm64_jp6")
 
     assert verdict.ok is False
     assert verdict.unverified is False
@@ -439,10 +749,17 @@ def test_evaluate_device_fit_refuses_the_incident_configuration():
     reason = verdict.refusal_reason
     assert reason.startswith(mb.PREFLIGHT_REFUSED_MARKER)
     assert "\n" not in reason
-    for fragment in ("23.00 GiB", "11.98 GiB", "12.38 GiB", "6.50 GiB",
-                     "4.88 GiB", "1.00 GiB", "ESTIMATE",
+    for fragment in ("23.00 GiB", "8.98 GiB", "10.87 GiB", "6.45 GiB",
+                     "non-torch allowance 2.00 GiB (ESTIMATE)",
+                     "activation allowance 2.42 GiB (ESTIMATE",
+                     "leaving a predicted KV cache remainder of -1.88 GiB "
+                     "against the 1.00 GiB serving-margin floor",
+                     "1 multimodal unit(s): 1 image(s) + 0 video(s)",
                      "limit_mm_per_prompt.image", "max_model_len"):
         assert fragment in reason, fragment
+    # The requirement names every term it CHARGES and no term it does not:
+    # nothing in the diagnostic claims a KV amount is part of the requirement.
+    assert "viability floor" not in reason, reason
     # Never advise LOWERING the fraction as a cure for insufficient KV.
     assert not re.search(r"(lower|decrease|reduce)\w*\s+"
                          r"gpu_memory_utilization", reason, re.IGNORECASE)
@@ -482,8 +799,34 @@ def test_evaluate_device_fit_accepts_a_healthy_configuration():
 
 
 def test_evaluate_device_fit_marks_undeterminable_weights_unverified():
-    """Weights-dependent arms degrade to the ACTIVATION_FLOOR + KV floor lower
+    """Weights-dependent arms degrade to the NON_TORCH + ACTIVATION_FLOOR lower
     bound, the verdict says UNVERIFIED, and no weight number is invented.
+
+    REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED assertion, recorded
+    verbatim::
+
+        assert verdict.terms["required_bytes"] == \\
+            mb.ACTIVATION_FLOOR_BYTES + mb.MINIMUM_KV_CACHE_BYTES
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED assertion,
+    recorded VERBATIM — the INTERMEDIATE bound added a hard viability floor and
+    named the constant ``NON_TORCH_ALLOWANCE_BYTES``::
+
+        assert verdict.terms["required_bytes"] == (
+            mb.NON_TORCH_ALLOWANCE_BYTES
+            + mb.activation_allowance(0, mb.DEFAULT_MULTIMODAL_UNITS)
+            + mb.KV_VIABILITY_FLOOR_BYTES)
+
+    Reason: H9 charges no KV term, so the degradation path's bound is exactly
+    ``NON_TORCH + activation_allowance(0, units)`` — coherent with
+    :func:`required_bytes`' own docstring and with the words the ``UNVERIFIED``
+    note puts in the refusal ("the NON_TORCH + ACTIVATION_FLOOR lower bound"),
+    which this test now also pins verbatim.
+
+    Note the staged incident args author NO ``limit_mm_per_prompt``, so they
+    are sized for TWO multimodal units (vLLM's own unbounded video default) —
+    the same conservative reading the portal makes.
 
     _Requirements: 2.9_"""
     reading = mb.MemoryReading(total_bytes=DEVICE_TOTAL_BYTES,
@@ -494,10 +837,15 @@ def test_evaluate_device_fit_marks_undeterminable_weights_unverified():
     assert verdict.unverified is True
     assert verdict.ok is False
     assert verdict.terms["weights_bytes"] is None
-    assert verdict.terms["required_bytes"] == \
-        mb.ACTIVATION_FLOOR_BYTES + mb.MINIMUM_KV_CACHE_BYTES
+    assert verdict.terms["multimodal_units"] == mb.DEFAULT_MULTIMODAL_UNITS
+    assert verdict.terms["required_bytes"] == (
+        mb.NON_TORCH_MEMORY_BYTES
+        + mb.activation_allowance(0, mb.DEFAULT_MULTIMODAL_UNITS))
     assert "UNVERIFIED" in verdict.refusal_reason
     assert "undeterminable" in verdict.refusal_reason
+    # The words the refusal uses for the bound match the bound it used.
+    assert ("the NON_TORCH + ACTIVATION_FLOOR lower bound"
+            in verdict.refusal_reason), verdict.refusal_reason
 
 
 def test_evaluate_device_fit_declines_to_judge_without_a_reading():
@@ -570,7 +918,12 @@ def test_evaluate_device_fit_quantifies_a_safe_fraction_below_the_cap():
 
     assert verdict.ok is False
     assert "may be raised to at most 0.80" in reason
-    assert "at least 0.41" in reason  # 12.38 / 29.95
+    # REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED assertion, recorded
+    # verbatim:  assert "at least 0.41" in reason  # 12.38 / 29.95
+    # The staged incident args author no `limit_mm_per_prompt`, so they are
+    # sized for TWO units: required = 6.50 + 2.00 + 4.88 + 0.25 = 13.62 GiB,
+    # and 13.62 / 29.95 = 0.45.
+    assert "at least 0.45" in reason  # 13.62 / 29.95
     # Demand-reducing remediation comes BEFORE the fraction sentence.
     assert reason.index("Reduce demand first") < \
         reason.index("may be raised to at most")
@@ -578,7 +931,14 @@ def test_evaluate_device_fit_quantifies_a_safe_fraction_below_the_cap():
 
 def test_evaluate_device_fit_sizes_the_authored_two_image_limit():
     """The multimodal term is the AUTHORED limit — a two-image model is sized
-    for two images, and the diagnostic says so.
+    for two images, and the diagnostic says so. With the video modality left
+    UNAUTHORED that is THREE units (vLLM's own default of 1 video), which is
+    the portal's reading too (task 14 / H8+H9 closed the divergence).
+
+    REPOINTED 2026-08-19. SUPERSEDED assertions, recorded verbatim::
+
+        assert mb.format_gib(verdict.terms["required_bytes"]) == "17.25 GiB"
+        assert "2 image(s)" in verdict.refusal_reason
 
     _Requirements: 2.4_"""
     args = dict(INCIDENT_ENGINE_ARGS, limit_mm_per_prompt={"image": 2})
@@ -588,8 +948,33 @@ def test_evaluate_device_fit_sizes_the_authored_two_image_limit():
     verdict = mb.evaluate_device_fit(args, reading, int(6.5 * GIB))
 
     assert verdict.terms["images_per_prompt"] == 2
-    assert mb.format_gib(verdict.terms["required_bytes"]) == "17.25 GiB"
-    assert "2 image(s)" in verdict.refusal_reason
+    assert verdict.terms["videos_per_prompt"] == mb.DEFAULT_VIDEOS_PER_PROMPT
+    assert verdict.terms["multimodal_units"] == 3
+    # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    # jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED assertion,
+    # recorded VERBATIM — it priced the INTERMEDIATE hard 0.25 GiB KV viability
+    # floor into `required`:
+    #     # 6.50 + 2.00 + (0.375 x 6.50 x 3 = 7.31) + 0.25
+    #     assert mb.format_gib(verdict.terms["required_bytes"]) == "16.06 GiB"
+    # Reason: H9 charges no KV term, so the total is 15.81 GiB. Same strength —
+    # the literal GiB string is still pinned.
+    # 6.50 + 2.00 + (0.375 x 6.50 x 3 = 7.31)
+    assert mb.format_gib(verdict.terms["required_bytes"]) == "15.81 GiB"
+    assert "3 multimodal unit(s): 2 image(s) + 1 video(s)" \
+        in verdict.refusal_reason
+    # The omission is named, with the fix and its measured effect.
+    assert "limit_mm_per_prompt.video (effective 1, NOT authored)" \
+        in verdict.refusal_reason
+    assert "set limit_mm_per_prompt.video = 0" in verdict.refusal_reason
+
+    # Bounding the video modality drops it back to two units, exactly as the
+    # portal prices it (measured: activation peak 4.93 -> 2.47 GiB).
+    bounded = dict(args, limit_mm_per_prompt={"image": 2, "video": 0})
+    bounded_verdict = mb.evaluate_device_fit(bounded, reading, int(6.5 * GIB))
+
+    assert bounded_verdict.terms["multimodal_units"] == 2
+    assert (bounded_verdict.terms["required_bytes"]
+            < verdict.terms["required_bytes"])
 
 
 def test_preflight_composes_the_reads_and_never_raises(tmp_path):

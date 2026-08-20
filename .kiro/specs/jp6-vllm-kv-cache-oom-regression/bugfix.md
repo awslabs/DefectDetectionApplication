@@ -457,11 +457,49 @@ nothing is staged
 
 3.8 WHEN the device-side prep stages and requests a load THEN its validated
 lifecycle semantics SHALL CONTINUE TO hold: atomic staging, exit-code
-classification (`LOAD_UNREACHABLE` / `LOAD_HTTP_ERROR` → exit 1 with the
-authoritative log), the single KV-OOM unload→reload recovery per attempt, the
+classification (`LOAD_UNREACHABLE` → exit 1 with the authoritative log;
+`LOAD_HTTP_ERROR` → exit **0** with that same authoritative log, unchanged in
+content), the single KV-OOM unload→reload recovery per attempt, the
 prominent ERROR line carrying model name, HTTP status, extracted reason, and the
 staged `gpu_memory_utilization` / `max_model_len`, and idempotent
 Shutdown/`--cleanup`
+
+**AMENDED 2026-08-19 (operator-approved), same discipline as the S1-S4
+amendments in `vllm-sizing-and-packaging-errors/requirements.md`.** Superseded
+text, recorded VERBATIM:
+
+> exit-code classification (`LOAD_UNREACHABLE` / `LOAD_HTTP_ERROR` → exit 1 with
+> the authoritative log)
+
+**New contract.** `LOAD_UNREACHABLE` keeps **exit 1**, because the runtime was
+never reachable — the component genuinely started before the backend was ready,
+so a component retry IS the recovery. Every **authoritative runtime answer**
+(`LOAD_HTTP_ERROR`, and `LOAD_PREFLIGHT_REFUSED` before it) exits **0**, because
+a MODEL failure is not a COMPONENT failure: the model is reported `FAILED` with
+its reason through the unchanged model-status surfaces and the in-backend
+reconciler owns the retries, while co-deployed components and the workflows that
+depend on them stay available. `LOAD_OK` → 0 is unchanged. Nothing is quieter:
+the prominent ERROR line keeps every element this clause pins.
+
+**Evidence.** Three consecutive transient-DNS load failures on
+`ryanorinagxdevkithomelabjp622` (`Failed to resolve 'huggingface.co'
+([Errno -3] Temporary failure in name resolution)`) at **12:00:47Z /
+12:02:09Z / 12:03:22Z**, each `Startup script exited. {exitCode=1}`; the third
+drove `currentState=BROKEN`, which stranded `dda.workflow.0c7fe31a-…` 7.0.0 and
+`dda.workflow.1f0b4c0c-…` 9.0.0 at `INSTALLED` and took the core device
+**UNHEALTHY**. A transient name-resolution failure on an already-staged model
+therefore cost the whole device, which is defect 1.9's mechanism reappearing
+through a different door.
+
+**Note on where this amendment landed.** The dispatch pointed at
+`vllm-sizing-and-packaging-errors/requirements.md` (Requirement 4 criterion 2
+area). That file carries **no** exit-code clause — `grep -c exit` over it
+returns **0**, and its Requirement 4 criteria 1-4 cover the ERROR line, the
+remediation order, unparseable bodies and the staged-args echo only. The clause
+that reads "`LOAD_UNREACHABLE` / `LOAD_HTTP_ERROR` → exit 1" is **this**
+document's 3.8, so the amendment was made here rather than inventing a
+criterion in a file that never held one. No other clause in either file was
+touched.
 
 3.9 WHEN a text-only vLLM model is loaded THEN its memory profile and behavior
 SHALL CONTINUE TO be unaffected by any multimodal-limit change, and the two-image

@@ -18,7 +18,7 @@ jp6-vllm-kv-cache-oom-regression, task 4.7).
 
 **Property 8: Preservation — Portal and device sizing models agree**
 (design "Correctness Properties"). _For any_ point on a grid of
-(architecture, weights, utilization, images), the portal's
+(architecture, weights, utilization, multimodal units), the portal's
 ``functions.vllm_fit_check`` budget model (File 1, the SINGLE SOURCE OF
 TRUTH) and the device's ``vllm_runtime.memory_budget`` model (File 5, the
 mirror — its constants block points HERE as the keep-in-sync guard) SHALL
@@ -29,17 +29,21 @@ portal could have predicted. Any drift between the two copies fails this
 suite loudly.
 
 Properties in this file (all facets of Property 8):
-  P8-A **Every mirrored constant is equal** [2.1, 2.9] — the five sizing
-       constants plus the profile/reservation tables and both reader
-       defaults, each also pinned to its design Decision 2 value so a
-       change to EITHER side (or to both, away from the design) fails.
+  P8-A **Every mirrored constant is equal** [2.1, 2.9] — the seven sizing
+       constants plus the profile/reservation tables and every reader
+       default, each also pinned to its design Decision 2 value (as amended
+       by task 14 / H8+H9) so a change to EITHER side — or to both, away
+       from the design — fails.
   P8-B **Same required bytes and same budget-sufficiency verdict** [2.1,
        2.9] — over the generated grid, the portal's ``evaluate_fit``
        finding and the device's ``evaluate_device_fit`` verdict (fed a
        reading whose ``MemTotal`` equals the architecture's profile entry)
-       agree on required bytes, activation allowance, budget bytes, KV
-       floor, images per prompt, co-tenancy reservation, fraction cap AND
-       on condition A itself (budget >= required).
+       agree on required bytes, the non-torch allowance, the activation
+       allowance, budget bytes, the KV serving margin (a WARNING
+       threshold on both legs, a term in NEITHER `required`), predicted KV
+       headroom, images/videos/units per prompt,
+       co-tenancy reservation, fraction cap AND on condition A itself
+       (budget >= required) — with NO unit-count exception.
   P8-C **Accepted at publish time is never refused by the device** [2.1,
        2.9] — for a device in exactly the state the portal models
        (``MemTotal`` = profile entry, ``MemAvailable`` = total minus the
@@ -47,35 +51,78 @@ Properties in this file (all facets of Property 8):
        (conditions A AND B) passes the device preflight.
   P8-D **The tolerant readers agree on hostile configurations** [2.1,
        2.9] — malformed / missing / ``Decimal`` / boolean / out-of-range
-       ``limit_mm_per_prompt`` and ``gpu_memory_utilization`` values
-       degrade to the SAME effective images and the SAME budget on both
-       sides, so the two models cannot drift apart through their input
-       parsing either.
+       ``limit_mm_per_prompt`` (including its ``video`` sub-key) and
+       ``gpu_memory_utilization`` values degrade to the SAME effective
+       images, videos, units, required bytes and budget on both sides, so
+       the two models cannot drift apart through their input parsing
+       either.
 
-ASYMMETRY, recorded deliberately (video widening, 2026-08-19). The portal
-now sizes the activation allowance from the TOTAL authored multimodal UNITS
-(``image`` + ``video``), because vLLM reserves its worst-case token budget per
-modality — its own warning on `ryanorinagxdevkithomelabjp622`: "worst-case
-total number of multimodal tokens (32768) ... out of which {'image': 16384,
-'video': 16384} are reserved for multi-modal embeddings". MEASURED there at
-``gpu_memory_utilization = 0.55``: ``{"image": 1, "video": 0}`` profiled a
-2.47 GiB activation peak (KV 6.43 GiB, 29.41x, READY) while ``{"image": 1}``
-alone profiled 4.93 GiB (KV 0.20 GiB, 0.89x, FAILED). The DEVICE mirror
-(`vllm_runtime.memory_budget`) still counts images only, and it must: it ships
-ONLY inside an `aws.edgeml.dda.LocalServer.arm64JP6` component build, which is
-task 10/11's leg, and the ≈0.375-per-unit recalibration those measurements
-imply lands with it in task 14 / H8. So this suite pins:
+THE DIVERGENCE RECORDED IN TASK 11's NINTH OUTCOME BLOCK IS NOW **CLOSED**
+(2026-08-19, spec task 14 / task 4.7). The device mirror has adopted the
+portal's UNITS model — ``videos_per_prompt``, ``video_is_authored``,
+``multimodal_units``, ``DEFAULT_VIDEOS_PER_PROMPT = 1``,
+``DEFAULT_MULTIMODAL_UNITS = 2`` and ``activation_allowance(weights, units)``,
+same names, same semantics, same tolerant-reader behaviour — in the SAME change
+that added ``NON_TORCH_MEMORY_BYTES`` to ``required``, recalibrated
+``ACTIVATION_WEIGHT_FRACTION`` (0.75 -> 0.375, H8) and REMOVED the KV floor
+from ``required`` (``MINIMUM_KV_CACHE_BYTES`` is the thin-margin warning
+threshold applied to the predicted remainder, and no KV term is charged — H9).
+Both legs moved together because this property pins them together.
 
-  * EXACT parity — every mirrored constant, and the whole required-bytes
-    arithmetic — wherever the two modules see the same number of multimodal
-    units (which includes every configuration that authors ``video``, i.e.
-    everything the portal now writes by default), and
-  * the SAFE DIRECTION where they do not: the portal is never LESS
-    conservative than the device, and portal-accepted still implies
-    device-accepted (P8-C).
+So parity is **EXACT again in BOTH authoring shapes**: every mirrored constant
+is equal, and the required-bytes arithmetic and the budget verdict agree at
+every generated point, whether or not the configuration authors
+``limit_mm_per_prompt.video``.
 
-Neither leg is weakened: a drift in the shared formula, in any constant, or in
-the safe direction still fails loudly here.
+**SUPERSEDED STOPGAP, recorded verbatim before deletion** (it was the
+one-directional assertion this file carried between the video widening and the
+device build, per task 11's ninth OUTCOME block and design Property 8's
+amendment)::
+
+    else:
+        # The authored-video dimension the device mirror does not know yet
+        # (it ships with the JP6 component build; H8 recalibration, task 14).
+        # The portal must be STRICTLY MORE conservative — never less — and its
+        # verdict must therefore imply the device's.
+        assert portal_units > device_units, (
+            "the portal must never count FEWER multimodal units than the "
+            "device mirror: portal={} device={} config={}".format(
+                portal_units, device_units, config))
+        assert finding.required_bytes >= verdict.terms["required_bytes"], (
+            "the portal became LESS conservative than the device mirror: "
+            "portal required={} device required={} config={}".format(
+                finding.required_bytes, verdict.terms["required_bytes"],
+                config))
+        if portal_condition_a:
+            assert verdict.ok, (
+                "portal accepted (condition A) but the device refused, in "
+                "the very state the portal models: finding={} terms={} "
+                "refusal={}".format(finding, verdict.terms,
+                                    verdict.refusal_reason))
+
+    # ... and in P8-D:
+    assert portal_units >= device_images, (raw_limit, portal_units,
+                                           device_images)
+    assert finding.required_bytes >= mb.required_bytes(weights_bytes,
+                                                       device_images), (
+        raw_limit, raw_util, finding)
+
+Nothing is weakened by removing it: exact equality is STRICTLY STRONGER than
+"portal >= device", and it now holds on the whole generated grid rather than
+only on the configurations that author ``video``. The MEASURED justification
+for the units model is unchanged and still binding: vLLM reserves its
+worst-case token budget per modality — its own warning on
+`ryanorinagxdevkithomelabjp622`: "worst-case total number of multimodal tokens
+(32768) ... out of which {'image': 16384, 'video': 16384} are reserved for
+multi-modal embeddings" — and at ``gpu_memory_utilization = 0.55``
+``{"image": 1, "video": 0}`` profiled a 2.47 GiB activation peak (KV 6.43 GiB,
+29.41x, READY) while ``{"image": 1}`` alone profiled 4.93 GiB (KV 0.20 GiB,
+0.89x, FAILED).
+
+STILL [HARDWARE]: the device leg of this change ships ONLY inside an
+`aws.edgeml.dda.LocalServer.arm64JP6` component build, which has NOT run for
+it. This file proves the two models agree; it cannot prove either matches the
+device (tasks 11/14).
 
 NOTE on scope (design Decision 4): the device preflight enforces the
 portal's condition A (budget sufficiency) against the device's REAL
@@ -145,17 +192,75 @@ def test_every_mirrored_constant_is_equal():
         'arm64_jp7': 8 * GIB,
     }
 
-    # The scalar sizing constants (design Decision 2's table).
-    assert fit.MINIMUM_KV_CACHE_BYTES == mb.MINIMUM_KV_CACHE_BYTES == 1 * GIB
+    # The scalar sizing constants (design Decision 2's table, as amended by
+    # task 14 / H8 + H9).
+    #
+    # SUPERSEDED PINS, recorded verbatim before the change:
+    #     assert (fit.ACTIVATION_WEIGHT_FRACTION
+    #             == mb.ACTIVATION_WEIGHT_FRACTION == 0.75)
+    # 0.75 was calibrated to one point that is now known to have been a
+    # TWO-unit (video-unbounded) measurement; the measured per-unit pair
+    # (2.47 GiB against 6.59 GiB of weights) puts it at 0.375. The pin is
+    # repointed, not removed — a silent drift on either side still fails.
     assert fit.ACTIVATION_FLOOR_BYTES == mb.ACTIVATION_FLOOR_BYTES == 2 * GIB
     assert (fit.ACTIVATION_WEIGHT_FRACTION
-            == mb.ACTIVATION_WEIGHT_FRACTION == 0.75)
+            == mb.ACTIVATION_WEIGHT_FRACTION == 0.375)
     assert (fit.MULTIMODAL_IMAGE_INCREMENT
             == mb.MULTIMODAL_IMAGE_INCREMENT == 1.0)
 
-    # The reader defaults both modules resolve omitted settings to.
+    # The non-torch allowance: a term the shipped `required` omitted entirely
+    # (task 11's ninth OUTCOME block, defect (a)). ESTIMATE, median of seven
+    # measured readings (-0.05 .. 8.29 GiB, median 2.18) rounded down.
+    #
+    # SUPERSEDED PIN, recorded verbatim before the change (the intermediate
+    # version of this change named the constant ...ALLOWANCE...):
+    #     assert (fit.NON_TORCH_ALLOWANCE_BYTES
+    #             == mb.NON_TORCH_ALLOWANCE_BYTES == 2 * GIB)
+    assert (fit.NON_TORCH_MEMORY_BYTES
+            == mb.NON_TORCH_MEMORY_BYTES == 2 * GIB)
+
+    # The KV floor is a WARNING THRESHOLD ON BOTH LEGS AND A TERM IN NEITHER
+    # `required` (task 14 / H9). Value and name unchanged at 1 GiB.
+    #
+    # SUPERSEDED PINS, recorded verbatim before the change (an intermediate
+    # version of this change kept a HARD 0.25 GiB viability floor in
+    # `required`; the operator's decision is that NO KV term is charged):
+    #     assert (fit.KV_VIABILITY_FLOOR_BYTES
+    #             == mb.KV_VIABILITY_FLOOR_BYTES == int(0.25 * GIB))
+    #     assert 0 < fit.KV_VIABILITY_FLOOR_BYTES < fit.MINIMUM_KV_CACHE_BYTES
+    #     assert fit.KV_VIABILITY_FLOOR_BYTES < int(0.65 * GIB)
+    # Nothing is weakened: the replacement pins the WHOLE composition of
+    # `required` on both legs, which is strictly stronger than pinning one of
+    # its terms.
+    assert fit.MINIMUM_KV_CACHE_BYTES == mb.MINIMUM_KV_CACHE_BYTES == 1 * GIB
+    assert not hasattr(fit, "KV_VIABILITY_FLOOR_BYTES")
+    assert not hasattr(mb, "KV_VIABILITY_FLOOR_BYTES")
+    for weights_bytes in (0, int(6.45 * GIB), 16 * GIB):
+        for units in (1, 2, 5):
+            composed = (weights_bytes + fit.NON_TORCH_MEMORY_BYTES
+                        + fit.activation_allowance(weights_bytes, units))
+            assert (fit.required_bytes(weights_bytes, units)
+                    == mb.required_bytes(weights_bytes, units)
+                    == composed), (weights_bytes, units)
+            # No KV term, hard or soft, is charged by either leg.
+            assert (fit.required_bytes(weights_bytes, units)
+                    < composed + fit.MINIMUM_KV_CACHE_BYTES)
+    # The 1 GiB floor's role: the configuration that demonstrably SERVED
+    # (0.65 GiB of KV at 2.95x for 4096 tokens) is ADMITTED and merely warned
+    # about, on both legs.
+    assert int(0.65 * GIB) < fit.MINIMUM_KV_CACHE_BYTES
+
+    # The reader defaults both modules resolve omitted settings to. An
+    # unauthored `limit_mm_per_prompt.video` costs a full extra unit on BOTH
+    # sides now (the divergence of task 11's ninth block, CLOSED).
     assert (fit.DEFAULT_IMAGES_PER_PROMPT
             == mb.DEFAULT_IMAGES_PER_PROMPT == 1)
+    assert (fit.DEFAULT_VIDEOS_PER_PROMPT
+            == mb.DEFAULT_VIDEOS_PER_PROMPT == 1)
+    assert (fit.DEFAULT_MULTIMODAL_UNITS
+            == mb.DEFAULT_MULTIMODAL_UNITS == 2)
+    assert (tuple(fit.MULTIMODAL_MODALITY_KEYS)
+            == tuple(mb.MULTIMODAL_MODALITY_KEYS) == ('image', 'video'))
     assert (fit.DEFAULT_GPU_MEMORY_UTILIZATION
             == mb.DEFAULT_GPU_MEMORY_UTILIZATION == 0.5)
 
@@ -224,11 +329,11 @@ def grid_points(draw):
 
 
 def _unit_counts(config):
-    """``(portal_units, device_units)`` for ``config``: the portal counts
-    images + videos (an unauthored ``video`` costing vLLM's own default of
-    1), the device mirror counts images only until its component build
-    lands (task 14 / H8)."""
-    return fit.multimodal_units(config), mb.images_per_prompt(config)
+    """``(portal_units, device_units)`` for ``config``. BOTH now count
+    images + videos, an unauthored ``video`` costing vLLM's own default of 1
+    (the device mirror adopted the portal's units model — task 14 / H8+H9), so
+    these must be EQUAL at every point."""
+    return fit.multimodal_units(config), mb.multimodal_units(config)
 
 
 def _portal_finding(config, weights_bytes, arch):
@@ -265,21 +370,48 @@ def test_property_same_required_bytes_and_budget_verdict(point):
     verdict = mb.evaluate_device_fit(config, reading,
                                      weights_bytes=weights_bytes, arch=arch)
 
-    # The mirrored FORMULA itself never drifts: fed the same unit count, both
-    # modules compute the same requirement. (This is the invariant the H8
-    # recalibration must preserve when the device leg's build lands.)
+    # The UNIT COUNT itself agrees now — this is the assertion that was
+    # relaxed to `portal_units >= device_units` between the video widening and
+    # the device mirror adopting the units model (task 11's ninth OUTCOME
+    # block); it is back to equality.
+    assert portal_units == device_units, (
+        "multimodal-unit reader drift: portal={} device={} config={}".format(
+            portal_units, device_units, config))
+
+    # The mirrored FORMULA itself never drifts.
     assert verdict.unverified is False
     assert mb.required_bytes(weights_bytes, portal_units) \
         == finding.required_bytes
     assert mb.activation_allowance(weights_bytes, portal_units) \
         == finding.activation_bytes
+    assert fit.required_bytes(weights_bytes, portal_units) \
+        == mb.required_bytes(weights_bytes, portal_units)
+    assert fit.kv_headroom_bytes(finding.budget_bytes, weights_bytes,
+                                 portal_units) \
+        == mb.kv_headroom_bytes(finding.budget_bytes, weights_bytes,
+                                portal_units)
 
-    # Terms that do not depend on the unit count agree unconditionally.
+    # EXACT parity on every shared term, unconditionally.
     assert verdict.terms["budget_bytes"] == finding.budget_bytes, (
         verdict.terms, finding)
+    assert verdict.terms["required_bytes"] == finding.required_bytes, (
+        verdict.terms, finding)
+    assert verdict.terms["activation_bytes"] == finding.activation_bytes, (
+        verdict.terms, finding)
+    assert (verdict.terms["non_torch_bytes"] == finding.non_torch_bytes
+            == mb.NON_TORCH_MEMORY_BYTES)
+    assert "kv_viability_floor_bytes" not in verdict.terms
+    # The serving margin is the WARNING threshold on both sides and is NOT a
+    # term in either `required_bytes`.
     assert (verdict.terms["kv_floor_bytes"] == finding.kv_floor_bytes
             == mb.MINIMUM_KV_CACHE_BYTES)
+    assert verdict.terms["kv_headroom_bytes"] == finding.kv_headroom_bytes, (
+        verdict.terms, finding)
     assert verdict.terms["images_per_prompt"] == finding.images_per_prompt, (
+        verdict.terms, finding)
+    assert verdict.terms["videos_per_prompt"] == finding.videos_per_prompt, (
+        verdict.terms, finding)
+    assert verdict.terms["multimodal_units"] == finding.multimodal_units, (
         verdict.terms, finding)
     assert verdict.terms["co_tenancy_bytes"] == finding.co_tenancy_bytes, (
         verdict.terms, finding)
@@ -290,41 +422,28 @@ def test_property_same_required_bytes_and_budget_verdict(point):
     assert portal_condition_a == (
         finding.budget_bytes >= finding.required_bytes)  # self-consistency
 
-    if portal_units == device_units:
-        # EXACT parity: every remaining term, and the verdict itself. With
-        # MemAvailable == MemTotal the preflight's starvation arm cannot
-        # refuse anything its budget arm (util x MemTotal, identical to the
-        # portal's budget here) does not, so verdict.ok IS condition A.
-        assert verdict.terms["required_bytes"] == finding.required_bytes, (
+    # The verdict itself. With MemAvailable == MemTotal the preflight's
+    # starvation arm cannot refuse anything its budget arm (util x MemTotal,
+    # identical to the portal's budget here) does not, so verdict.ok IS
+    # condition A.
+    assert verdict.ok == portal_condition_a, (
+        "budget-sufficiency drift: portal condition A={} "
+        "(budget={} required={}) but device verdict.ok={} "
+        "terms={}".format(portal_condition_a, finding.budget_bytes,
+                          finding.required_bytes, verdict.ok,
+                          verdict.terms))
+
+    # The thin-margin WARNING fires on the same side of the same threshold on
+    # both legs — a passing verdict whose predicted KV headroom is under the
+    # 1 GiB serving margin (task 14 / H9: a caution, never a refusal).
+    if verdict.ok:
+        device_thin = "thin_margin" in (verdict.terms["warnings"] or [])
+        assert device_thin == (
+            finding.kv_headroom_bytes < mb.MINIMUM_KV_CACHE_BYTES), (
             verdict.terms, finding)
-        assert verdict.terms["activation_bytes"] == finding.activation_bytes, (
-            verdict.terms, finding)
-        assert verdict.ok == portal_condition_a, (
-            "budget-sufficiency drift: portal condition A={} "
-            "(budget={} required={}) but device verdict.ok={} "
-            "terms={}".format(portal_condition_a, finding.budget_bytes,
-                              finding.required_bytes, verdict.ok,
-                              verdict.terms))
-    else:
-        # The authored-video dimension the device mirror does not know yet
-        # (it ships with the JP6 component build; H8 recalibration, task 14).
-        # The portal must be STRICTLY MORE conservative — never less — and its
-        # verdict must therefore imply the device's.
-        assert portal_units > device_units, (
-            "the portal must never count FEWER multimodal units than the "
-            "device mirror: portal={} device={} config={}".format(
-                portal_units, device_units, config))
-        assert finding.required_bytes >= verdict.terms["required_bytes"], (
-            "the portal became LESS conservative than the device mirror: "
-            "portal required={} device required={} config={}".format(
-                finding.required_bytes, verdict.terms["required_bytes"],
-                config))
-        if portal_condition_a:
-            assert verdict.ok, (
-                "portal accepted (condition A) but the device refused, in "
-                "the very state the portal models: finding={} terms={} "
-                "refusal={}".format(finding, verdict.terms,
-                                    verdict.refusal_reason))
+        if finding.fits:
+            assert device_thin == ('thin_margin' in finding.warnings), (
+                verdict.terms, finding)
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +499,11 @@ _hostile_limits = st.one_of(
     st.none(),
     _hostile_image_values,
     st.fixed_dictionaries({"image": _hostile_image_values}),
+    # The `video` sub-key on the hostile side too, now that BOTH modules read
+    # it (the divergence of task 11's ninth block is closed).
+    st.fixed_dictionaries({"video": _hostile_image_values}),
+    st.fixed_dictionaries({"image": _hostile_image_values,
+                           "video": _hostile_image_values}),
     st.lists(st.integers(), max_size=2),
 )
 
@@ -413,25 +537,26 @@ def test_property_tolerant_readers_agree_on_hostile_configs(
     finding = _portal_finding(config, weights_bytes, arch)
 
     device_images = mb.images_per_prompt(config)
+    device_videos = mb.videos_per_prompt(config)
+    device_units = mb.multimodal_units(config)
     device_util = mb.gpu_memory_utilization(config)
     portal_units = fit.multimodal_units(config)
 
     assert finding.images_per_prompt == device_images, (
         "images-per-prompt reader drift on {!r}: portal={} device={}".format(
             raw_limit, finding.images_per_prompt, device_images))
-    # The shared formula, fed the portal's unit count, reproduces the
-    # finding exactly — so hostile input cannot make the two ARITHMETICS
-    # diverge, only the (deliberately more conservative) portal unit count.
+    assert finding.videos_per_prompt == device_videos, (
+        "videos-per-prompt reader drift on {!r}: portal={} device={}".format(
+            raw_limit, finding.videos_per_prompt, device_videos))
+    assert finding.multimodal_units == device_units == portal_units, (
+        "multimodal-unit reader drift on {!r}: portal={} device={}".format(
+            raw_limit, portal_units, device_units))
+    assert mb.video_is_authored(config) == fit.video_is_authored(config), (
+        raw_limit,)
+    # The shared formula reproduces the finding exactly — so hostile input
+    # cannot make the two models diverge through their parsing either.
     assert finding.required_bytes == mb.required_bytes(weights_bytes,
-                                                       portal_units), (
-        raw_limit, raw_util, finding)
-    # And a hostile value never makes the portal cheaper than the device:
-    # every degraded reading still counts at least the image units the
-    # device counts (the authored-video leg lands with task 14 / H8).
-    assert portal_units >= device_images, (raw_limit, portal_units,
-                                           device_images)
-    assert finding.required_bytes >= mb.required_bytes(weights_bytes,
-                                                       device_images), (
+                                                       device_units), (
         raw_limit, raw_util, finding)
     assert finding.budget_bytes == int(
         device_util * mb.DEVICE_MEMORY_PROFILE_BYTES[arch]), (

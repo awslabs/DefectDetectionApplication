@@ -67,16 +67,22 @@ PROC_MEMINFO_PATH = "/proc/meminfo"
 # are pinned equal by the Property 8 cross-check test
 # `test/backend-test/jp6_vllm_kv_cache_oom/test_property_portal_device_parity.py`
 # (spec task 4.7), which imports BOTH modules and compares required bytes and
-# the budget verdict over a grid of (arch, weights, utilization, images): a
-# configuration accepted at publish time must never be refused by the device
-# for a reason the portal could have predicted. If you edit a value here,
-# edit the portal's and re-run that test.
+# the budget verdict over a grid of (arch, weights, utilization, multimodal
+# units): a configuration accepted at publish time must never be refused by
+# the device for a reason the portal could have predicted. If you edit a value
+# here, edit the portal's and re-run that test.
 #
-# NOTE (spec task 3.2 lands the portal side): the portal file currently holds
-# only `DEVICE_MEMORY_PROFILE_BYTES` and `MINIMUM_KV_CACHE_BYTES`; task 3.2
-# adds the activation/co-tenancy constants below to it with the same values
-# and the same provenance. Until it lands, the values here are the ones
-# recorded in design.md Decision 2.
+# PARITY IS EXACT AGAIN (2026-08-19, spec task 14 / task 4.7): this module now
+# carries the portal's UNITS model as well as its constants — an unauthored
+# `limit_mm_per_prompt.video` costs a full extra multimodal unit here too, so
+# the one-directional `portal >= device` stopgap recorded in task 11's ninth
+# OUTCOME block is CLOSED. The three changes landed in ONE change with the
+# portal because Property 8 pins the two legs together:
+#   * NON_TORCH_MEMORY_BYTES added to `required` (defect (a) of that block)
+#   * ACTIVATION_WEIGHT_FRACTION recalibrated 0.75 -> 0.375 (H8)
+#   * the KV floor REMOVED from `required`: MINIMUM_KV_CACHE_BYTES is the
+#     thin-margin warning threshold only, applied to the predicted KV
+#     remainder the budget leaves over (H9)
 
 #: TOTAL device memory as the engine sees it, per Target_Architecture (NOT
 #: "usable"): the `arm64_jp6` entry is reconciled against `free -g` total
@@ -89,24 +95,112 @@ DEVICE_MEMORY_PROFILE_BYTES: Dict[str, int] = {
     'arm64_jp7': 120 * GIB,  # 128 GB Thor class
 }
 
-#: Serving-margin floor for KV cache — NOT a hard load threshold: the
-#: incident device demonstrably served this model at 2.95x concurrency for
-#: 4096 tokens with 0.65 GiB of KV. Breaching it is a thin-margin WARNING.
+#: Serving-margin floor for KV cache — the WARNING THRESHOLD ONLY, never a
+#: term in :func:`required_bytes` and never a reason to refuse (amended
+#: 2026-08-19, spec task 14 / H9). `required_bytes` charges NO KV term at all:
+#: the KV cache is what the budget LEAVES OVER once the weights, the non-torch
+#: residency and the activation peak are paid, which is exactly how vLLM
+#: computes it, so the honest surface is the PREDICTED REMAINDER
+#: (:func:`kv_headroom_bytes`) plus a warning when it falls under this floor.
+#:
+#: Value unchanged at 1 GiB, and its documented meaning unchanged: design
+#: Decision 2 always called it "a *serving-margin* floor, not a hard load
+#: threshold" and Decision 6 always made a sub-floor remainder the Thin_Margin
+#: WARNING. What changed is that the SHIPPED preflight charged it as a HARD
+#: term in `required`, and that is what refused, at
+#: `gpu_memory_utilization = 0.4`, the exact configuration LocalServer 1.0.59
+#: demonstrably SERVED (0.65 GiB of KV at 2.95x maximum concurrency for 4096
+#: tokens). `manager.py` reads it for the post-load thin-margin WARNING, which
+#: is exactly the role its own design gave it.
+#:
+#: SUPERSEDED IMPLEMENTATION, recorded so the reasoning is auditable: an
+#: intermediate version of this change kept a HARD
+#: `KV_VIABILITY_FLOOR_BYTES = 0.25 GiB` term in `required`, between the
+#: 0.65 GiB that served and the -0.22 GiB that failed. The operator took the
+#: simpler decision: no hard KV term. The measured -0.22 GiB failure is not
+#: admitted by accident either — that load ran with video UNBOUNDED, i.e. TWO
+#: multimodal units, which the units model charges 4.84 GiB of activation,
+#: leaving a predicted remainder of 0.19 GiB that trips the thin-margin
+#: warning.
 MINIMUM_KV_CACHE_BYTES = 1 * GIB
 
+#: The non-torch / co-tenant residency vLLM subtracts from the SAME budget on
+#: every load, and which the shipped `required` OMITTED entirely — a
+#: **PROPOSED THRESHOLD / ESTIMATE**, under the same discipline as
+#: :data:`ACTIVATION_WEIGHT_FRACTION`, :data:`RECLAIM_TOLERANCE_BYTES` and
+#: :data:`THIN_MARGIN_CONCURRENCY`: pinned by a host test so a silent drift is
+#: visible, labelled an ESTIMATE in every message that quotes it, and owned for
+#: calibration by spec task 14 / H8.
+#:
+#: WHY IT MUST BE CHARGED: vLLM's own profiling, verbatim from
+#: `ryanorinagxdevkithomelabjp622` at `gpu_memory_utilization = 0.45`, is
+#: "the current vLLM instance can use total_gpu_memory (29.96GiB) x
+#: gpu_memory_utilization (0.45) = 13.48GiB" / "model weights take 6.59GiB;
+#: non_torch_memory takes 2.18GiB; PyTorch activation peak memory takes
+#: 4.93GiB; the rest of the memory reserved for KV Cache is -0.22GiB." That
+#: load PASSED the shipped preflight and then FAILED for real, because the
+#: preflight modelled three of the four terms — which also made its own "you
+#: need at least util = X" advice wrong in the PERMISSIVE direction
+#: (bugfix.md 2.1: "SHALL model every term that consumes the
+#: `gpu_memory_utilization` budget").
+#:
+#: PROVENANCE — MEASURED on that one device across seven runs (vLLM's own
+#: `non_torch_memory takes ...` line): -0.05, 0.94, 0.98, 2.18, 3.67, 4.76,
+#: 8.29 GiB. The median of those seven is 2.18 GiB, and 2 GiB is the nearest
+#: round figure to it — deliberately the MIDDLE of the observed spread and NOT
+#: the 8.29 GiB worst case, because encoding the worst case as a certainty
+#: would refuse the configuration that demonstrably serves today (the same
+#: reasoning :func:`fraction_cap` gives for modelling co-tenancy as a cap on
+#: the fraction rather than an addend to `required`).
+#:
+#: KNOWN LIMITATION, not papered over: a run whose non-torch residency is high
+#: (3.67, 4.76, 8.29 GiB observed) is UNDER-predicted. Tolerable because this
+#: term does not hard-fail a load: vLLM computes
+#: `KV = budget - weights - non_torch - activation`, so a high non_torch
+#: SHRINKS the KV cache rather than aborting, until KV goes negative (the
+#: measured -0.22 GiB). The COMPENSATING CONTROL is the thin-margin WARNING
+#: (:data:`MINIMUM_KV_CACHE_BYTES`, surfaced by `manager.py` after a load
+#: reaches READY and by the portal's `thin_margin`), which makes a thin
+#: outcome visible instead of silent. Calibration is owned by spec task 14 /
+#: H8 — the same discipline :data:`ACTIVATION_WEIGHT_FRACTION` and
+#: :data:`RECLAIM_TOLERANCE_BYTES` already follow.
+#:
+#: ALTERNATIVE CONSIDERED AND DEFERRED: read the PREVIOUS load's actual
+#: `non_torch_memory` off the engine and charge that instead of an estimate.
+#: It is the accurate model and it is too much for this build (it needs engine
+#: introspection plumbed through the preflight plus a persisted per-device
+#: figure). Deferred, not rejected; owner is task 14 / H8.
+NON_TORCH_MEMORY_BYTES = 2 * GIB
+
 #: Conservative floor for the activation/profiling peak, for small models
-#: where a fraction-of-weights term would round to nothing. ESTIMATE.
+#: where a fraction-of-weights term would round to nothing. ESTIMATE. At the
+#: recalibrated fraction below it BINDS for every model under ≈5.33 GiB of
+#: weights (2 / 0.375).
 ACTIVATION_FLOOR_BYTES = 2 * GIB
 
-#: Activation peak as a fraction of weights. Calibrated to the single
-#: measured point: 4.92 GiB peak against 6.47 GiB of weights = 0.76, at
-#: `enforce_eager=true`, `max_model_len=4096`. ESTIMATE — every message that
-#: quotes the allowance must label it one.
-ACTIVATION_WEIGHT_FRACTION = 0.75
+#: Activation peak as a fraction of weights, PER MULTIMODAL UNIT. ESTIMATE —
+#: every message that quotes the allowance must label it one.
+#:
+#: RECALIBRATED 2026-08-19 (spec task 14 / H8): 0.75 -> 0.375. The 0.75 came
+#: from one measured point (4.92 GiB peak against 6.47 GiB of weights = 0.76)
+#: which is now understood to have been a TWO-unit measurement — video was
+#: unbounded, so vLLM sized its worst case for both modalities. The per-unit
+#: pair measured on `ryanorinagxdevkithomelabjp622` (1.0.62, same model, same
+#: `gpu_memory_utilization = 0.55`, 6.59 GiB of weights): ONE unit
+#: (`{'image': 1, 'video': 0}`) -> 2.47 GiB; TWO units (`{'image': 1}`, video
+#: unbounded) -> 4.93 GiB. 2.47 / 6.59 = 0.375. At 6.45 GiB of weights and
+#: one unit that gives `max(2.00, 0.375 x 6.45) = 2.42 GiB` against the
+#: measured 2.47 GiB — within 0.05 GiB.
+ACTIVATION_WEIGHT_FRACTION = 0.375
 
-#: Extra activation cost per additional image per prompt. UNMEASURED and
-#: deliberately high, so two-image configurations must be sized explicitly
-#: ([HARDWARE] H8 calibrates it).
+#: Extra activation cost per ADDITIONAL multimodal unit per prompt, as a
+#: fraction of the one-unit allowance. MEASURED-CONFIRMED for the
+#: image<->video UNIT step (2.47 -> 4.93 GiB is 2:1, within 0.01 GiB), which
+#: is exactly what 1.0 encodes — value unchanged because the measurement
+#: confirmed it. STILL UNMEASURED in the per-additional-IMAGE direction: no
+#: `image >= 2` configuration has ever been profiled on this hardware, so
+#: extrapolating the unit step to a second IMAGE remains an ESTIMATE (spec
+#: task 14 / H8) and is deliberately high there.
 MULTIMODAL_IMAGE_INCREMENT = 1.0
 
 #: Memory held by other consumers of the same unified memory before vLLM
@@ -123,6 +217,31 @@ CO_TENANCY_RESERVATION_BYTES: Dict[str, int] = {
 #: Images per prompt when the authored configuration does not say. vLLM's own
 #: default. The device NEVER injects a different value (defect 1.4).
 DEFAULT_IMAGES_PER_PROMPT = 1
+
+#: Videos per prompt when the authored configuration does not BOUND them —
+#: vLLM's OWN per-modality default, which is 1, i.e. UNBOUNDED as far as this
+#: product is concerned. An absent `limit_mm_per_prompt.video` is therefore
+#: MORE expensive than an explicit `"video": 0`, and that asymmetry is the
+#: point: vLLM sizes its worst case from the limits it is given. Verbatim from
+#: the engine on `ryanorinagxdevkithomelabjp622` (1.0.62, 2026-08-19):
+#: "worst-case total number of multimodal tokens (32768) ... out of which
+#: {'image': 16384, 'video': 16384} are reserved for multi-modal embeddings" —
+#: half of that worst case is video this product never sends. Measured, same
+#: model, same `gpu_memory_utilization = 0.55`: `{'image': 1, 'video': 0}` ->
+#: activation peak 2.47 GiB, KV 6.43 GiB, 29.41x, READY; `{'image': 1}` ->
+#: activation peak 4.93 GiB, KV 0.20 GiB, 0.89x, FAILED.
+DEFAULT_VIDEOS_PER_PROMPT = 1
+
+#: The modality sub-keys an authored `limit_mm_per_prompt` may bound, matching
+#: the portal's `MULTIMODAL_MODALITY_KEYS` / `model_import`'s accepted keys.
+MULTIMODAL_MODALITY_KEYS: Tuple[str, ...] = ('image', 'video')
+
+#: Multimodal units a configuration that authors NOTHING is sized for: one
+#: image plus one (unbounded) video, i.e. vLLM's own defaults. The authored
+#: default `{'image': 1, 'video': 0}` is ONE unit, which is why authoring it
+#: is what buys the KV cache back.
+DEFAULT_MULTIMODAL_UNITS = (DEFAULT_IMAGES_PER_PROMPT
+                            + DEFAULT_VIDEOS_PER_PROMPT)
 
 #: Default when the engine configuration omits the setting — mirrors
 #: `model_import.ENGINE_DEFAULTS['gpu_memory_utilization']`.
@@ -293,6 +412,73 @@ def images_per_prompt(engine_args: Optional[Mapping[str, Any]]) -> int:
         return DEFAULT_IMAGES_PER_PROMPT
 
 
+def video_is_authored(engine_args: Optional[Mapping[str, Any]]) -> bool:
+    """True when the staged args explicitly bound ``limit_mm_per_prompt.video``
+    with a usable integer.
+
+    False means vLLM's own per-modality default (1) applies, i.e. the video
+    modality is UNBOUNDED and is charged a full extra multimodal unit — the
+    distinction the diagnostics must state, because it is the difference
+    between a measured 2.47 GiB and 4.93 GiB activation peak. Never raises.
+    """
+    try:
+        limit = (engine_args or {}).get("limit_mm_per_prompt")
+        if not isinstance(limit, Mapping) or "video" not in limit:
+            return False
+        raw = limit["video"]
+        if raw is None or isinstance(raw, bool):
+            return False
+        return int(raw) >= 0
+    except Exception:  # noqa: BLE001 - tolerant by contract
+        return False
+
+
+def videos_per_prompt(engine_args: Optional[Mapping[str, Any]]) -> int:
+    """Effective videos per prompt from the AUTHORED ``limit_mm_per_prompt``
+    (``{"video": N}``), the second modality the activation allowance scales
+    with.
+
+    An absent, malformed, boolean or negative value falls back to
+    :data:`DEFAULT_VIDEOS_PER_PROMPT` — vLLM's own default of 1, i.e.
+    UNBOUNDED — so NOT authoring the key is deliberately MORE expensive than
+    authoring ``"video": 0``. Zero is a legal authored value and the one the
+    product's default uses. Never raises.
+    """
+    try:
+        limit = (engine_args or {}).get("limit_mm_per_prompt")
+        if not isinstance(limit, Mapping):
+            # A non-mapping limit is read as an image count by
+            # `images_per_prompt`; it bounds no video modality at all.
+            return DEFAULT_VIDEOS_PER_PROMPT
+        raw = limit.get("video")
+        if raw is None or isinstance(raw, bool):
+            return DEFAULT_VIDEOS_PER_PROMPT
+        videos = int(raw)
+        return videos if videos >= 0 else DEFAULT_VIDEOS_PER_PROMPT
+    except Exception:  # noqa: BLE001 - tolerant by contract
+        return DEFAULT_VIDEOS_PER_PROMPT
+
+
+def multimodal_units(engine_args: Optional[Mapping[str, Any]]) -> int:
+    """TOTAL multimodal units per prompt the activation allowance is sized
+    for: ``images_per_prompt + videos_per_prompt``.
+
+    vLLM reserves its worst-case multimodal token budget PER MODALITY (its own
+    warning: 32768 tokens, ``{'image': 16384, 'video': 16384}``), so the term
+    that scales the activation peak is the total number of units, not the
+    image count. Measured on JP6 (2026-08-19, same model, same
+    ``gpu_memory_utilization = 0.55``): ``{"image": 1, "video": 0}`` is ONE
+    unit and profiled a 2.47 GiB peak (READY, 29.41x), while ``{"image": 1}``
+    is TWO units — video unbounded — and profiled 4.93 GiB (FAILED on KV
+    cache). Always at least 1 (the image floor). Never raises.
+
+    This is the portal's model, adopted here so Property 8 parity is EXACT
+    (spec task 4.7 / task 14); the device previously counted images only.
+    """
+    return (images_per_prompt(engine_args)
+            + videos_per_prompt(engine_args))
+
+
 def gpu_memory_utilization(engine_args: Optional[Mapping[str, Any]]) -> float:
     """``gpu_memory_utilization`` from the staged args (``Decimal``/int/float
     accepted), defaulting to :data:`DEFAULT_GPU_MEMORY_UTILIZATION`. Values
@@ -314,12 +500,18 @@ def gpu_memory_utilization(engine_args: Optional[Mapping[str, Any]]) -> float:
 # ---------------------------------------------------------------------------
 
 def activation_allowance(weights_bytes: Optional[int],
-                         images: int = DEFAULT_IMAGES_PER_PROMPT) -> int:
+                         multimodal_units: int = 1) -> int:
     """Estimated PyTorch activation/profiling peak vLLM charges against the
     budget:
 
         max(ACTIVATION_FLOOR_BYTES, ACTIVATION_WEIGHT_FRACTION * weights)
-        * (1 + MULTIMODAL_IMAGE_INCREMENT * (images - 1))
+        * (1 + MULTIMODAL_IMAGE_INCREMENT * (units - 1))
+
+    ``multimodal_units`` is the TOTAL of the authored per-modality limits
+    (images + videos, :func:`multimodal_units`), not the image count alone:
+    vLLM reserves its worst-case token budget per modality, so an unbounded
+    video modality costs a whole extra unit (measured 2.47 -> 4.93 GiB on JP6,
+    2026-08-19). One unit is the baseline allowance.
 
     An ESTIMATE, and every message that quotes it says so. It is used only
     conservatively (to refuse), never permissively.
@@ -329,11 +521,11 @@ def activation_allowance(weights_bytes: Optional[int],
     except Exception:  # noqa: BLE001 - tolerant by contract
         weights = 0
     try:
-        count = max(int(images), 1)
+        units = max(int(multimodal_units), 1)
     except Exception:  # noqa: BLE001 - tolerant by contract
-        count = DEFAULT_IMAGES_PER_PROMPT
+        units = 1
     base = max(ACTIVATION_FLOOR_BYTES, ACTIVATION_WEIGHT_FRACTION * weights)
-    multiplier = 1.0 + MULTIMODAL_IMAGE_INCREMENT * (count - 1)
+    multiplier = 1.0 + MULTIMODAL_IMAGE_INCREMENT * (units - 1)
     return int(base * multiplier)
 
 
@@ -379,20 +571,50 @@ def fraction_cap(arch: Optional[str] = None,
 
 
 def required_bytes(weights_bytes: Optional[int],
-                   images: int = DEFAULT_IMAGES_PER_PROMPT) -> int:
-    """``weights + activation_allowance + KV floor`` — the same required-bytes
-    term the portal's corrected Fit_Check computes (Property 8).
+                   multimodal_units: int = 1) -> int:
+    """Every term vLLM charges against the ``gpu_memory_utilization`` budget:
+
+        weights + NON_TORCH_MEMORY_BYTES
+                + activation_allowance(weights, multimodal_units)
+
+    — the same required-bytes term the portal's Fit_Check computes
+    (Property 8). NO KV term is charged (spec task 14 / H9): the KV cache is
+    what the budget LEAVES OVER, so :func:`kv_headroom_bytes` states the
+    predicted remainder and :data:`MINIMUM_KV_CACHE_BYTES` is the WARNING
+    threshold applied to it. 0.65 GiB of KV demonstrably served the incident
+    model at 2.95x concurrency for 4096 tokens, and charging that 1 GiB floor
+    hard is exactly what refused that configuration.
 
     When the weights are undeterminable the weights-dependent terms degrade to
-    the ``ACTIVATION_FLOOR + KV floor`` LOWER BOUND (never a guessed weight),
+    the ``NON_TORCH + ACTIVATION_FLOOR`` LOWER BOUND (never a guessed weight),
     and the verdict that uses it is marked ``unverified``.
     """
     try:
         weights = max(int(weights_bytes or 0), 0)
     except Exception:  # noqa: BLE001 - tolerant by contract
         weights = 0
-    return weights + activation_allowance(weights, images) \
-        + MINIMUM_KV_CACHE_BYTES
+    return (weights + NON_TORCH_MEMORY_BYTES
+            + activation_allowance(weights, multimodal_units))
+
+
+def kv_headroom_bytes(budget_bytes: Optional[int],
+                      weights_bytes: Optional[int],
+                      multimodal_units: int = 1) -> int:
+    """The KV cache this model predicts will remain:
+
+        budget - required_bytes(weights, multimodal_units)
+
+    i.e. exactly the quantity vLLM prints as "the rest of the memory reserved
+    for KV Cache". Below :data:`MINIMUM_KV_CACHE_BYTES` it is a THIN MARGIN
+    (a warning, never a refusal); at or below zero the load is refused by the
+    budget arm, which is the same comparison written the other way round.
+    Mirrored from the portal and pinned equal by the Property 8 parity test.
+    Never raises."""
+    try:
+        budget = int(budget_bytes or 0)
+    except Exception:  # noqa: BLE001 - tolerant by contract
+        budget = 0
+    return budget - required_bytes(weights_bytes, multimodal_units)
 
 
 # ---------------------------------------------------------------------------
@@ -555,7 +777,9 @@ def _remediation_menu(engine_args: Mapping[str, Any],
                       util: float,
                       cap: Optional[float],
                       total_bytes: Optional[int],
-                      needed_bytes: int) -> str:
+                      needed_bytes: int,
+                      videos: int = DEFAULT_VIDEOS_PER_PROMPT,
+                      video_authored: bool = False) -> str:
     """Decision 3's ordered remediation menu, one line.
 
     Order is the whole point (defect 1.3): the co-tenancy hazard first, then
@@ -570,11 +794,25 @@ def _remediation_menu(engine_args: Mapping[str, Any],
         "models and gpu_memory_utilization is a fraction of TOTAL memory, so "
         "a larger fraction takes memory those models are already using.",
         "Reduce demand first: bound limit_mm_per_prompt.image (effective "
-        "{}), reduce max_model_len (staged {}), choose a smaller or more "
+        "{}) and limit_mm_per_prompt.video (effective {}{}), reduce "
+        "max_model_len (staged {}), choose a smaller or more "
         "quantized model, or free device memory by stopping unused model "
-        "components.".format(images, max_model_len
+        "components.".format(images, videos,
+                             "" if video_authored else ", NOT authored",
+                             max_model_len
                              if max_model_len is not None else "unset"),
     ]
+    if not video_authored:
+        # The cheapest demand reduction there is, and the one this product can
+        # always take: video is never an input here (measured on this device —
+        # bounding it halved the activation peak and turned a failing load
+        # into one serving with 6.43 GiB of KV cache).
+        parts.append(
+            "Cheapest first: set limit_mm_per_prompt.video = 0. vLLM "
+            "otherwise reserves half of its worst-case multimodal token "
+            "budget (32768 tokens, {'image': 16384, 'video': 16384}) for a "
+            "modality this product never sends, which on this device "
+            "measured a 4.93 GiB activation peak instead of 2.47 GiB.")
     if cap is None:
         return " ".join(parts)
     if util >= cap:
@@ -614,19 +852,24 @@ def evaluate_device_fit(engine_args: Optional[Mapping[str, Any]],
 
     Three refusal conditions, any one of which refuses (design Decision 4):
 
-    - **P1 starvation** — ``available < weights + activation_allowance +
-      KV_floor``: the memory the device actually has right now cannot hold the
-      requirement, whatever the configured fraction says.
-    - **P2 budget** — ``util × MemTotal < weights + activation_allowance +
-      KV_floor``: the portal's condition A re-evaluated against the device's
-      REAL total (the incident: ``0.4 × 29.95 GiB = 11.98 GiB`` against a
-      12.38 GiB requirement).
+    - **P1 starvation** — ``available < required_bytes``: the memory the
+      device actually has right now cannot hold the requirement, whatever the
+      configured fraction says.
+    - **P2 budget** — ``util × MemTotal < required_bytes``: the portal's
+      condition A re-evaluated against the device's REAL total, where
+      ``required = weights + NON_TORCH_MEMORY_BYTES + activation_allowance``
+      (at 6.45 GiB of weights and one multimodal unit that is 10.87 GiB, which
+      ``0.4 × 29.96 GiB = 11.98 GiB`` clears — the configuration 1.0.59
+      served is admitted again, task 14 / H9).
+    - A verdict that fits but leaves less than
+      :data:`MINIMUM_KV_CACHE_BYTES` of predicted KV headroom passes with
+      ``terms["warnings"] == ["thin_margin"]`` — a caution, never a refusal.
     - **P3 latch** — a previous failed attempt's memory did not come back in
       this backend life; retrying into a starved device only deepens the
       cascade (defect 1.5).
 
     When ``weights_bytes`` is ``None`` the weights-dependent arms degrade to
-    the ``ACTIVATION_FLOOR + KV floor`` lower bound and the verdict is marked
+    the ``NON_TORCH + ACTIVATION_FLOOR`` lower bound and the verdict is marked
     ``unverified`` — never a guessed number. When ``reading`` is ``None``
     nothing is measurable, so P1/P2 cannot fire: the verdict is ``ok`` and
     ``unverified`` (a preflight that cannot measure must not refuse), while P3
@@ -637,31 +880,56 @@ def evaluate_device_fit(engine_args: Optional[Mapping[str, Any]],
     args: Mapping[str, Any] = engine_args or {}
     name = model_name or str(args.get("model") or "unknown")
     images = images_per_prompt(args)
+    videos = videos_per_prompt(args)
+    units = images + videos
+    video_authored = video_is_authored(args)
     util = gpu_memory_utilization(args)
     unverified = weights_bytes is None
     weights = 0 if unverified else max(int(weights_bytes or 0), 0)
-    activation = activation_allowance(weights, images)
-    required = weights + activation + MINIMUM_KV_CACHE_BYTES
+    activation = activation_allowance(weights, units)
+    # weights + non-torch (ESTIMATE) + activation (ESTIMATE). NO KV term is
+    # charged: MINIMUM_KV_CACHE_BYTES is the thin-margin WARNING threshold
+    # applied to the predicted remainder below, and `manager.py` applies the
+    # same threshold after a load reaches READY (task 14 / H9).
+    required = weights + NON_TORCH_MEMORY_BYTES + activation
 
     total = reading.total_bytes if reading is not None else None
     available = reading.available_bytes if reading is not None else None
     budget = int(util * total) if total else None
     cap = fraction_cap(arch, total)
+    # The KV cache this configuration predicts will remain (what vLLM prints
+    # as "the rest of the memory reserved for KV Cache"). Below the 1 GiB
+    # serving margin it is a THIN MARGIN — a warning, never a refusal.
+    headroom = None if budget is None else budget - required
+    warnings: List[str] = []
+    if headroom is not None and headroom < MINIMUM_KV_CACHE_BYTES:
+        warnings.append("thin_margin")
 
     terms: Dict[str, Any] = {
         "model": name,
         "weights_bytes": None if unverified else weights,
         "activation_bytes": activation,
+        "non_torch_bytes": NON_TORCH_MEMORY_BYTES,
+        # The serving-margin floor, i.e. the thin-margin WARNING threshold.
+        # Kept under its original key and with its original value; it is NO
+        # LONGER a term in `required_bytes` (task 14 / H9).
         "kv_floor_bytes": MINIMUM_KV_CACHE_BYTES,
+        "kv_headroom_bytes": headroom,
         "required_bytes": required,
         "available_bytes": available,
         "total_bytes": total,
         "budget_bytes": budget,
         "gpu_memory_utilization": util,
         "images_per_prompt": images,
+        "videos_per_prompt": videos,
+        "multimodal_units": units,
+        "video_is_authored": video_authored,
         "co_tenancy_bytes": co_tenancy_reservation_bytes(arch, total),
         "fraction_cap": cap,
         "unverified": unverified,
+        # A verdict that fits but breaches the 1 GiB serving margin passes
+        # WITH this warning; it is never a refusal.
+        "warnings": warnings,
         "failed_conditions": [],
     }
 
@@ -675,8 +943,11 @@ def evaluate_device_fit(engine_args: Optional[Mapping[str, Any]],
             "device is starved and a further attempt would only deepen the "
             "cascade. Recovery requires a backend container restart; the "
             "computed requirement for this model is {required} = weights "
-            "{weights} + activation allowance {activation} (ESTIMATE, {images}"
-            " image(s)) + KV-cache floor {floor}. {menu}"
+            "{weights} + non-torch allowance {non_torch} (ESTIMATE) + "
+            "activation allowance {activation} (ESTIMATE, {units} multimodal "
+            "unit(s): {images} image(s) + {videos} video(s)), leaving a "
+            "predicted KV cache remainder of {headroom} against the {floor} "
+            "serving-margin floor. {menu}"
         ).format(
             marker=PREFLIGHT_REFUSED_MARKER,
             name=name,
@@ -687,10 +958,17 @@ def evaluate_device_fit(engine_args: Optional[Mapping[str, Any]],
             required=format_gib(required),
             weights="undeterminable (lower bound used)" if unverified
                     else format_gib(weights),
+            non_torch=format_gib(NON_TORCH_MEMORY_BYTES),
             activation=format_gib(activation),
+            units=units,
             images=images,
+            videos=videos,
+            headroom=("undeterminable" if headroom is None
+                      else format_gib(headroom)),
             floor=format_gib(MINIMUM_KV_CACHE_BYTES),
-            menu=_remediation_menu(args, images, util, cap, total, required),
+            menu=_remediation_menu(args, images, util, cap, total, required,
+                                   videos=videos,
+                                   video_authored=video_authored),
         )
         return DeviceFitVerdict(ok=False, refusal_reason=reason, terms=terms,
                                 unverified=unverified)
@@ -714,8 +992,11 @@ def evaluate_device_fit(engine_args: Optional[Mapping[str, Any]],
         "measured available memory {available} (MemAvailable) and device "
         "budget {budget} (gpu_memory_utilization={util:g} x MemTotal {total}) "
         "against a computed requirement of {required} = weights {weights} + "
-        "activation allowance {activation} (ESTIMATE, {images} image(s)) + "
-        "KV-cache floor {floor}; failed condition(s): {failed}"
+        "non-torch allowance {non_torch} (ESTIMATE) + "
+        "activation allowance {activation} (ESTIMATE, {units} multimodal "
+        "unit(s): {images} image(s) + {videos} video(s)), leaving a predicted "
+        "KV cache remainder of {headroom} against the {floor} serving-margin "
+        "floor; failed condition(s): {failed}"
         "{unverified_note}. {menu}"
     ).format(
         marker=PREFLIGHT_REFUSED_MARKER,
@@ -727,15 +1008,20 @@ def evaluate_device_fit(engine_args: Optional[Mapping[str, Any]],
         required=format_gib(required),
         weights="undeterminable (lower bound used)" if unverified
                 else format_gib(weights),
+        non_torch=format_gib(NON_TORCH_MEMORY_BYTES),
         activation=format_gib(activation),
+        units=units,
         images=images,
+        videos=videos,
+        headroom=format_gib(headroom),
         floor=format_gib(MINIMUM_KV_CACHE_BYTES),
         failed=", ".join(failed),
         unverified_note=(
             "; the weights could not be sized on disk, so this is the "
-            "ACTIVATION_FLOOR + KV floor lower bound and the check is "
-            "UNVERIFIED" if unverified else ""),
-        menu=_remediation_menu(args, images, util, cap, total, required),
+            "NON_TORCH + ACTIVATION_FLOOR lower bound "
+            "and the check is UNVERIFIED" if unverified else ""),
+        menu=_remediation_menu(args, images, util, cap, total, required,
+                               videos=videos, video_authored=video_authored),
     )
     return DeviceFitVerdict(ok=False, refusal_reason=reason, terms=terms,
                             unverified=unverified)

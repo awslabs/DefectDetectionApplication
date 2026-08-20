@@ -60,8 +60,38 @@ UNPROFILED_ARCHS = ("arm64_jp4", "x86_64", "unknown-arch")
 # against the specification rather than against itself.
 # ---------------------------------------------------------------------------
 ACTIVATION_FLOOR_BYTES = 2 * GIB
-ACTIVATION_WEIGHT_FRACTION = 0.75
+# REPOINTED 2026-08-19 (jp6-vllm-kv-cache-oom-regression task 14 / H8).
+# SUPERSEDED value, recorded verbatim:  ACTIVATION_WEIGHT_FRACTION = 0.75
+# 0.75 was calibrated to one measured point now known to have been a TWO-unit
+# (video-unbounded) measurement. The measured per-unit pair on
+# `ryanorinagxdevkithomelabjp622` (1.0.62, `gpu_memory_utilization = 0.55`,
+# 6.59 GiB of weights) is 2.47 GiB for ONE unit and 4.93 GiB for TWO, i.e.
+# 2.47 / 6.59 = 0.375 per unit.
+ACTIVATION_WEIGHT_FRACTION = 0.375
 MULTIMODAL_IMAGE_INCREMENT = 1.0
+# The non-torch/co-tenant residency vLLM subtracts from the SAME budget on
+# every load, which the shipped `required` OMITTED entirely. ESTIMATE: median
+# of seven measured `non_torch_memory` readings on that device (-0.05, 0.94,
+# 0.98, 2.18, 3.67, 4.76, 8.29 GiB; median 2.18), rounded down to a whole GiB.
+#
+# CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+# jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED name and
+# constant, recorded VERBATIM:
+#     NON_TORCH_ALLOWANCE_BYTES = 2 * GIB
+#     # The HARD KV term in `required` (PROPOSED, task 14 / H9). It replaces
+#     # MINIMUM_KV_CACHE_BYTES in the sum: that 1 GiB constant keeps its value
+#     # and its name but is the thin-margin WARNING threshold only, which is
+#     # what design Decision 2 always said it was ("a serving-margin floor, not
+#     # a hard load threshold" — 0.65 GiB of KV demonstrably SERVED at 2.95x
+#     # for 4096 tokens, so charging it hard refused a configuration that
+#     # works).
+#     KV_VIABILITY_FLOOR_BYTES = int(0.25 * GIB)
+# Reason: the operator's H9 decision is that `required` charges NO KV term at
+# all — hard or soft — because the KV cache is the remainder the budget leaves
+# over, exactly how vLLM computes it; and the shipped constant is
+# NON_TORCH_MEMORY_BYTES. This oracle keeps its own independent copies so it
+# still checks the module against the specification rather than against itself.
+NON_TORCH_MEMORY_BYTES = 2 * GIB
 CO_TENANCY_RESERVATION_BYTES = {
     'arm64_jp6': 6 * GIB,   # measured: ~5.7 GiB of ONNX Triton stubs + containers
     'arm64_jp5': 6 * GIB,   # same 30 GiB profile class
@@ -201,12 +231,19 @@ def test_fit_decision_correctness(config_case, estimate_case, architectures):
         f"expected findings for {profiled}, got "
         f"{[f.arch for f in findings]}")
 
-    # required = weights + activation allowance + KV floor. The activation
-    # allowance is the term the shipped model omitted entirely: for the
-    # incident's 6.47 GiB of weights the device measured a 4.92 GiB peak.
+    # required = weights + non-torch allowance + activation allowance. NO KV
+    # term is charged (task 14 / H9): the KV cache is the remainder the budget
+    # leaves over. SUPERSEDED expression, recorded verbatim:
+    #     required_bytes = (estimate_bytes + activation_bytes
+    #                       + MINIMUM_KV_CACHE_BYTES)
+    # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9). SUPERSEDED
+    # expression, recorded VERBATIM — it charged the INTERMEDIATE hard 0.25 GiB
+    # viability floor and named the intermediate constant:
+    #     required_bytes = (estimate_bytes + NON_TORCH_ALLOWANCE_BYTES
+    #                       + activation_bytes + KV_VIABILITY_FLOOR_BYTES)
     activation_bytes = expected_activation_allowance(estimate_bytes)
-    required_bytes = (estimate_bytes + activation_bytes
-                      + MINIMUM_KV_CACHE_BYTES)
+    required_bytes = (estimate_bytes + NON_TORCH_MEMORY_BYTES
+                      + activation_bytes)
     for finding in findings:
         profile_bytes = DEVICE_MEMORY_PROFILE_BYTES[finding.arch]
         budget_bytes = int(float(utilization) * profile_bytes)
@@ -220,8 +257,24 @@ def test_fit_decision_correctness(config_case, estimate_case, architectures):
             f"utilization {utilization} × profile {profile_bytes}")
         assert finding.required_bytes == required_bytes, (
             f"{finding.arch}: required {finding.required_bytes} != "
-            f"estimate {estimate_bytes} + activation allowance "
-            f"{activation_bytes} + min KV cache {MINIMUM_KV_CACHE_BYTES}")
+            f"estimate {estimate_bytes} + non-torch allowance "
+            f"{NON_TORCH_MEMORY_BYTES} + activation allowance "
+            f"{activation_bytes}")
+        # The 1 GiB serving margin is the WARNING threshold, not a term.
+        # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9).
+        # SUPERSEDED assertions, recorded VERBATIM:
+        #     assert (finding.kv_viability_floor_bytes
+        #             == KV_VIABILITY_FLOOR_BYTES)
+        #     assert finding.non_torch_bytes == NON_TORCH_ALLOWANCE_BYTES
+        # Reason: no KV term is charged, so the finding reports no viability
+        # floor. Replaced by a positive pin that NO KV amount is inside
+        # `required` — strictly stronger than pinning one term's value.
+        assert finding.kv_floor_bytes == MINIMUM_KV_CACHE_BYTES
+        assert not hasattr(finding, "kv_viability_floor_bytes")
+        assert finding.non_torch_bytes == NON_TORCH_MEMORY_BYTES
+        assert (finding.required_bytes
+                == estimate_bytes + finding.non_torch_bytes
+                + finding.activation_bytes)
 
         # The decision: fits ⟺ A ∧ B (3.1 as revised by Decision 2).
         condition_a = budget_bytes >= required_bytes

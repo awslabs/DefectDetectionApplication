@@ -55,9 +55,23 @@ import pytest
 from boto3.dynamodb.conditions import Attr
 
 from conftest import REGION
+# CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+# jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED import list,
+# recorded VERBATIM:
+#     from vllm_fit_check import (
+#         GIB,
+#         KV_VIABILITY_FLOOR_BYTES,
+#         NON_TORCH_ALLOWANCE_BYTES,
+#         WeightEstimate,
+#         activation_allowance,
+#         evaluate_fit,
+#     )
+# Reason: H9's final decision charges NO KV term in `required`, so there is no
+# viability-floor constant, and the non-torch constant ships as
+# `NON_TORCH_MEMORY_BYTES`.
 from vllm_fit_check import (
     GIB,
-    MINIMUM_KV_CACHE_BYTES,
+    NON_TORCH_MEMORY_BYTES,
     WeightEstimate,
     activation_allowance,
     evaluate_fit,
@@ -269,8 +283,10 @@ def read_model_json_from_artifact(ienv, component_package_s3):
 # ---------------------------------------------------------------------------
 
 # 2 GiB of weights at util 0.5 with 2 images per prompt fits BOTH profiled
-# architectures under the corrected model:
-#   required = 2 + max(2, 0.75x2) x 2 + 1 = 7.00 GiB
+# architectures under the corrected model (numbers repointed 2026-08-19, task
+# 14 / H8+H9; the superseded line read
+# `required = 2 + max(2, 0.75x2) x 2 + 1 = 7.00 GiB`):
+#   required = 2 + 2 (non-torch) + max(2, 0.375x2) x 2 + 0.25 = 8.25 GiB
 #   arm64_jp6 budget 0.5 x 30 = 15.00 GiB, cap 0.80; arm64_jp7 budget 60.00.
 FEASIBLE_ESTIMATE = WeightEstimate(
     total_bytes=2 * GIB,
@@ -279,8 +295,10 @@ FEASIBLE_ESTIMATE = WeightEstimate(
 )
 
 # 6 GiB of weights at util 0.3 with 2 images per prompt is JP6-infeasible /
-# JP7-feasible under the corrected model:
-#   required = 6 + max(2, 0.75x6) x 2 + 1 = 16.00 GiB
+# JP7-feasible under the corrected model (numbers repointed 2026-08-19, task
+# 14 / H8+H9; the superseded line read
+# `required = 6 + max(2, 0.75x6) x 2 + 1 = 16.00 GiB`):
+#   required = 6 + 2 (non-torch) + max(2, 0.375x6) x 2 + 0.25 = 12.75 GiB
 #   arm64_jp6 budget 0.3 x 30 = 9.00 GiB (FAILS); arm64_jp7 budget 36.00.
 INFEASIBLE_ESTIMATE = WeightEstimate(
     total_bytes=6 * GIB,
@@ -426,10 +444,27 @@ def test_authored_multimodal_limit_reaches_model_json_verbatim_end_to_end(
     assert all(f["fits"] is True for f in by_arch.values())
     # The verdict was computed by the REAL corrected arithmetic, from the
     # authored two-image limit (2.4).
+    # REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED expression, recorded
+    # verbatim:
+    #     expected_required = (FEASIBLE_ESTIMATE.total_bytes
+    #                          + activation_allowance(
+    #                              FEASIBLE_ESTIMATE.total_bytes, 2)
+    #                          + MINIMUM_KV_CACHE_BYTES)
+    # `required` now charges the non-torch residency and the HARD KV VIABILITY
+    # floor; MINIMUM_KV_CACHE_BYTES became the thin-margin WARNING threshold.
+    #
+    # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9). SUPERSEDED
+    # expression, recorded VERBATIM:
+    #     expected_required = (FEASIBLE_ESTIMATE.total_bytes
+    #                          + NON_TORCH_ALLOWANCE_BYTES
+    #                          + activation_allowance(
+    #                              FEASIBLE_ESTIMATE.total_bytes, 2)
+    #                          + KV_VIABILITY_FLOOR_BYTES)
+    # Reason: H9's final decision charges NO KV term in `required` at all.
     expected_required = (FEASIBLE_ESTIMATE.total_bytes
+                         + NON_TORCH_MEMORY_BYTES
                          + activation_allowance(
-                             FEASIBLE_ESTIMATE.total_bytes, 2)
-                         + MINIMUM_KV_CACHE_BYTES)
+                             FEASIBLE_ESTIMATE.total_bytes, 2))
     for finding in by_arch.values():
         assert finding["images_per_prompt"] == 2
         assert finding["required_bytes"] == expected_required

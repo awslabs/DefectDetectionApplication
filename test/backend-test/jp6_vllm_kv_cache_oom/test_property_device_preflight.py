@@ -34,12 +34,32 @@ Properties in this file:
        ``required > min(reading.available, util x reading.total)``.
   P5-B **The refusal reason is a complete diagnostic** [2.9] — it starts
        with ``preflight-refused:``, names the measured available bytes,
-       the computed requirement WITH its terms (weights + activation
-       allowance, labelled an ESTIMATE, + KV floor), and the specific
-       engine settings to change.
+       the computed requirement WITH every term it charges (weights +
+       non-torch allowance + activation allowance, both allowances
+       labelled ESTIMATEs), the predicted KV remainder against the
+       serving-margin floor, and the specific engine settings to change.
   P5-C **Undeterminable weights degrade honestly** [2.9] — the verdict is
        marked ``unverified`` and rests on the documented
-       ``ACTIVATION_FLOOR + KV floor`` LOWER BOUND, never a guessed weight.
+       ``NON_TORCH + ACTIVATION_FLOOR`` LOWER BOUND, never a guessed
+       weight.
+
+  CONSCIOUS REPOINT 2026-08-19 (spec jp6-vllm-kv-cache-oom-regression,
+  task 14 / H8 + H9). SUPERSEDED summaries of P5-B and P5-C, recorded
+  VERBATIM before the change::
+
+    P5-B **The refusal reason is a complete diagnostic** [2.9] — it starts
+         with ``preflight-refused:``, names the measured available bytes,
+         the computed requirement WITH its terms (weights + activation
+         allowance, labelled an ESTIMATE, + KV floor), and the specific
+         engine settings to change.
+    P5-C **Undeterminable weights degrade honestly** [2.9] — the verdict is
+         marked ``unverified`` and rests on the documented
+         ``ACTIVATION_FLOOR + KV floor`` LOWER BOUND, never a guessed weight.
+
+  Reason: ``required`` gained the non-torch allowance it always omitted
+  (defect (a)) and charges NO KV term (H9), so the diagnostic names three
+  charged terms plus the predicted remainder, and the degradation bound is
+  ``NON_TORCH + ACTIVATION_FLOOR``.
   P5-D **On an enforced refusal the engine factory is never called**
        [2.9] — at the manager level, with the weights sizable on disk, a
        doomed load FAILS with the marked reason and ZERO engine
@@ -213,10 +233,33 @@ def _required(weights_bytes, units):
     serving-margin floor, which is now the thin-margin WARNING threshold (H9 —
     charging it hard refused the configuration 1.0.59 demonstrably served).
     The scaling term is TOTAL multimodal units, not the image count.
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    jp6-vllm-kv-cache-oom-regression, task 14 / H9). The block above described
+    an INTERMEDIATE version of the change that was never shipped: it kept a
+    hard ``KV_VIABILITY_FLOOR_BYTES = 0.25 GiB`` term in ``required`` and named
+    the non-torch constant ``NON_TORCH_ALLOWANCE_BYTES``. Neither name exists
+    in the module, so this oracle raised ``AttributeError`` — which is why the
+    four properties in this file were red at commit ``cd855db`` as well, BEFORE
+    the redesign landed. SUPERSEDED oracle, recorded VERBATIM::
+
+        return (weights_bytes + mb.NON_TORCH_ALLOWANCE_BYTES
+                + mb.activation_allowance(weights_bytes, units)
+                + mb.KV_VIABILITY_FLOOR_BYTES)
+
+    Reason: the operator's H9 decision is that ``required`` charges NO KV term
+    at all — the KV cache is the remainder the budget leaves over, exactly how
+    vLLM computes it — and the constant is ``NON_TORCH_MEMORY_BYTES``. Still
+    composed from the module's CONSTANTS rather than from ``mb.required_bytes``,
+    so a drift in that function is still caught, and it now also asserts the
+    composition is EXHAUSTIVE (no unnamed addend).
     """
-    return (weights_bytes + mb.NON_TORCH_ALLOWANCE_BYTES
-            + mb.activation_allowance(weights_bytes, units)
-            + mb.KV_VIABILITY_FLOOR_BYTES)
+    required = (weights_bytes + mb.NON_TORCH_MEMORY_BYTES
+                + mb.activation_allowance(weights_bytes, units))
+    # No KV amount of any size is inside the requirement (H9): the module's own
+    # function agrees with this constant-composed oracle exactly.
+    assert required == mb.required_bytes(weights_bytes, units)
+    return required
 
 
 # ---------------------------------------------------------------------------
@@ -276,11 +319,22 @@ def test_property_refuses_iff_requirement_exceeds_the_measured_minimum(
 def test_property_refusal_reason_names_the_terms_and_the_settings(inputs):
     """P5-B. Every generated refusal reason starts with the marker and
     names: the measured available bytes (as MemAvailable), the computed
-    requirement WITH its four terms (weights, non-torch allowance labelled an
-    ESTIMATE, activation allowance labelled an ESTIMATE, KV VIABILITY floor),
-    and the specific engine settings to change (2.9: "naming the measured
-    available memory, the computed requirement, and the specific engine
-    setting to change").
+    requirement WITH every term it CHARGES (weights, non-torch allowance
+    labelled an ESTIMATE, activation allowance labelled an ESTIMATE), the
+    PREDICTED KV REMAINDER the budget leaves over against the serving-margin
+    floor, and the specific engine settings to change (2.9: "naming the
+    measured available memory, the computed requirement, and the specific
+    engine setting to change").
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9). SUPERSEDED
+    docstring line, recorded VERBATIM::
+
+        requirement WITH its four terms (weights, non-torch allowance labelled
+        an ESTIMATE, activation allowance labelled an ESTIMATE, KV VIABILITY
+        floor)
+
+    Reason: there is no fourth term. H9 charges no KV amount, so what the
+    diagnostic owes the operator is the remainder, not a floor inside the sum.
 
     REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED assertions, recorded
     verbatim — the term set grew, so this is strictly stronger::
@@ -311,13 +365,30 @@ def test_property_refusal_reason_names_the_terms_and_the_settings(inputs):
     assert mb.format_gib(required) in reason, reason
     assert mb.format_gib(weights_bytes) in reason, reason
     assert mb.format_gib(activation) in reason, reason
-    assert mb.format_gib(mb.NON_TORCH_ALLOWANCE_BYTES) in reason, reason
-    assert mb.format_gib(mb.KV_VIABILITY_FLOOR_BYTES) in reason, reason
+    assert mb.format_gib(mb.NON_TORCH_MEMORY_BYTES) in reason, reason
     # BOTH estimated terms are labelled ESTIMATEs, by name.
     assert "non-torch allowance {} (ESTIMATE)".format(
-        mb.format_gib(mb.NON_TORCH_ALLOWANCE_BYTES)) in reason, reason
+        mb.format_gib(mb.NON_TORCH_MEMORY_BYTES)) in reason, reason
     assert "activation allowance {} (ESTIMATE".format(
         mb.format_gib(activation)) in reason, reason
+    # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    # jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED assertions,
+    # recorded VERBATIM — they named the INTERMEDIATE constants:
+    #     assert mb.format_gib(mb.NON_TORCH_ALLOWANCE_BYTES) in reason, reason
+    #     assert mb.format_gib(mb.KV_VIABILITY_FLOOR_BYTES) in reason, reason
+    #     assert "non-torch allowance {} (ESTIMATE)".format(
+    #         mb.format_gib(mb.NON_TORCH_ALLOWANCE_BYTES)) in reason, reason
+    # Reason: `required` charges no KV term, so there is no KV floor inside the
+    # requirement to name. What the diagnostic must state instead is the
+    # PREDICTED KV REMAINDER the budget leaves over and the serving-margin
+    # floor it is judged against — the H9 surface itself, asserted below with
+    # both numbers, which is strictly more than the superseded constant check.
+    budget = int(util * total)
+    assert ("leaving a predicted KV cache remainder of {} against the {} "
+            "serving-margin floor".format(
+                mb.format_gib(budget - required),
+                mb.format_gib(mb.MINIMUM_KV_CACHE_BYTES))) in reason, reason
+    assert "viability floor" not in reason, reason
     # The specific settings to change (Decision 3's ordered menu).
     assert "limit_mm_per_prompt.image" in reason, reason
     assert "max_model_len" in reason, reason
@@ -334,9 +405,13 @@ def test_property_undeterminable_weights_use_the_lower_bound_unverified(
         inputs):
     """P5-C. With ``weights_bytes=None`` the verdict is marked
     ``unverified`` and its requirement is the documented
-    ``NON_TORCH + ACTIVATION_FLOOR + KV viability floor`` LOWER BOUND (scaled
-    only by the authored multimodal units) — never a guessed weight; a refusal
-    says so.
+    ``NON_TORCH + ACTIVATION_FLOOR`` LOWER BOUND (scaled only by the authored
+    multimodal units) — never a guessed weight; a refusal says so.
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9). SUPERSEDED
+    docstring line, recorded VERBATIM::
+
+        ``NON_TORCH + ACTIVATION_FLOOR + KV viability floor`` LOWER BOUND
 
     REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED lower bound, recorded
     verbatim::
@@ -358,14 +433,33 @@ def test_property_undeterminable_weights_use_the_lower_bound_unverified(
     assert verdict.unverified is True
     assert verdict.terms["weights_bytes"] is None, (
         "an undeterminable weight was invented: {}".format(verdict.terms))
-    lower_bound = (mb.NON_TORCH_ALLOWANCE_BYTES
-                   + mb.activation_allowance(0, units)
-                   + mb.KV_VIABILITY_FLOOR_BYTES)
+    # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+    # jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED lower bound,
+    # recorded VERBATIM — it carried the INTERMEDIATE hard viability floor and
+    # the INTERMEDIATE constant name:
+    #     lower_bound = (mb.NON_TORCH_ALLOWANCE_BYTES
+    #                    + mb.activation_allowance(0, units)
+    #                    + mb.KV_VIABILITY_FLOOR_BYTES)
+    #     assert verdict.terms["required_bytes"] == lower_bound, verdict.terms
+    #     if units == 1:
+    #         assert lower_bound == (mb.NON_TORCH_ALLOWANCE_BYTES
+    #                                + mb.ACTIVATION_FLOOR_BYTES
+    #                                + mb.KV_VIABILITY_FLOOR_BYTES)
+    # Reason: H9 charges no KV term, so the degradation path's documented bound
+    # is `NON_TORCH + ACTIVATION_FLOOR` — the coherence the redesign had to
+    # keep once `required` gained an addend and lost one. Not weakened: the
+    # bound is still pinned exactly, still pinned to the FLOOR at one unit, and
+    # is additionally pinned to be a genuine LOWER bound (below the requirement
+    # of the same configuration with sizable weights).
+    lower_bound = (mb.NON_TORCH_MEMORY_BYTES
+                   + mb.activation_allowance(0, units))
     assert verdict.terms["required_bytes"] == lower_bound, verdict.terms
     if units == 1:
-        assert lower_bound == (mb.NON_TORCH_ALLOWANCE_BYTES
-                               + mb.ACTIVATION_FLOOR_BYTES
-                               + mb.KV_VIABILITY_FLOOR_BYTES)
+        assert lower_bound == (mb.NON_TORCH_MEMORY_BYTES
+                               + mb.ACTIVATION_FLOOR_BYTES)
+    assert lower_bound <= _required(_weights, units), (
+        "the 'lower bound' exceeded the requirement it stands in for: "
+        "{} vs {}".format(lower_bound, _required(_weights, units)))
 
     budget = int(util * total)
     should_refuse = lower_bound > min(available, budget)

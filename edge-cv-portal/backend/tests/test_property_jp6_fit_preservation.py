@@ -111,8 +111,30 @@ _PUBLISH_PATH = os.path.join(
 # is what pins the shipped constants to these values after the fix.
 # ---------------------------------------------------------------------------
 ACTIVATION_FLOOR_BYTES = 2 * GIB
-ACTIVATION_WEIGHT_FRACTION = 0.75
+# REPOINTED 2026-08-19 (task 14 / H8). SUPERSEDED value, recorded verbatim:
+#     ACTIVATION_WEIGHT_FRACTION = 0.75
+# Measured per-unit pair on `ryanorinagxdevkithomelabjp622` (1.0.62,
+# `gpu_memory_utilization = 0.55`, 6.59 GiB of weights): ONE unit -> 2.47 GiB,
+# TWO units -> 4.93 GiB, i.e. 0.375 of weights per unit. The old 0.75 was
+# calibrated to a single point now known to have been a two-unit measurement.
+ACTIVATION_WEIGHT_FRACTION = 0.375
 MULTIMODAL_IMAGE_INCREMENT = 1.0
+# The non-torch/co-tenant residency vLLM subtracts from the SAME budget on
+# every load — ESTIMATE, median of seven measured readings (-0.05 .. 8.29 GiB,
+# median 2.18) rounded down. The shipped `required` omitted it entirely.
+#
+# CONSCIOUS REPOINT 2026-08-19, SECOND PASS (spec
+# jp6-vllm-kv-cache-oom-regression, task 14 / H9). SUPERSEDED name and
+# constant, recorded VERBATIM:
+#     NON_TORCH_ALLOWANCE_BYTES = 2 * GIB
+#     # The HARD KV term in `required` (PROPOSED, task 14 / H9); the 1 GiB
+#     # MINIMUM_KV_CACHE_BYTES keeps its value and its name but is now only the
+#     # thin-margin WARNING threshold, which is what design Decision 2 always
+#     # documented it as.
+#     KV_VIABILITY_FLOOR_BYTES = int(0.25 * GIB)
+# Reason: H9's final decision charges NO KV term in `required` at all, and the
+# shipped constant is NON_TORCH_MEMORY_BYTES.
+NON_TORCH_MEMORY_BYTES = 2 * GIB
 CO_TENANCY_RESERVATION_BYTES = {
     'arm64_jp6': 6 * GIB,   # measured: 5.7 GiB of ONNX Triton stubs + containers
     'arm64_jp5': 6 * GIB,   # same 30 GiB profile class (test-local, conservative)
@@ -161,9 +183,27 @@ def fits_under_corrected_model(arch, utilization, weights_bytes,
     required_shipped``, identical budget)."""
     profile = DEVICE_MEMORY_PROFILE_BYTES[arch]
     budget = int(float(utilization) * profile)
-    required = (int(weights_bytes)
-                + activation_allowance(weights_bytes, multimodal_units)
-                + MINIMUM_KV_CACHE_BYTES)
+    # REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED expression, recorded
+    # verbatim:
+    #     required = (int(weights_bytes)
+    #                 + activation_allowance(weights_bytes, multimodal_units)
+    #                 + MINIMUM_KV_CACHE_BYTES)
+    # The implication this helper relies on still holds: the corrected
+    # requirement charges the non-torch allowance (2 GiB) plus an activation
+    # allowance that is never below its 2 GiB floor, so it stays strictly
+    # ABOVE the shipped `weights + MINIMUM_KV_CACHE_BYTES`.
+    #
+    # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9). SUPERSEDED
+    # expression, recorded VERBATIM:
+    #     required = (int(weights_bytes) + NON_TORCH_ALLOWANCE_BYTES
+    #                 + activation_allowance(weights_bytes, multimodal_units)
+    #                 + KV_VIABILITY_FLOOR_BYTES)
+    # The implication this helper relies on is UNAFFECTED by dropping the
+    # 0.25 GiB term: the corrected requirement still charges 2 GiB of non-torch
+    # plus an activation allowance never below its 2 GiB floor, so it remains
+    # strictly ABOVE the shipped `weights + MINIMUM_KV_CACHE_BYTES`.
+    required = (int(weights_bytes) + NON_TORCH_MEMORY_BYTES
+                + activation_allowance(weights_bytes, multimodal_units))
     return budget >= required and float(utilization) <= fraction_cap(arch)
 
 
@@ -278,10 +318,33 @@ JP7_WEIGHTS_BYTES = 16 * GIB
 def test_jp7_record_within_headroom_fits_under_both_models():
     """The recorded JP7 verdict (task 2, design 3.4): ``util = 0.5``,
     ~16 GiB of weights on ``arm64_jp7`` → ``budget = 60.00 GiB``,
-    corrected ``required = 16 + 12 + 1 = 29.00 GiB``, and
-    ``0.5 <= cap 0.9333`` — so the verdict is ``fits = True`` under the
-    shipped model AND under the corrected one. The device half of 3.4 is
-    **[HARDWARE] H6** (task 12) and is NOT claimed here.
+    corrected ``required = 16 + 2 (non-torch) + 6 (activation) + 0.25 (KV
+    viability) = 24.25 GiB``, and ``0.5 <= cap 0.9333`` — so the verdict is
+    ``fits = True`` under the shipped model AND under the corrected one. The
+    device half of 3.4 is **[HARDWARE] H6** (task 12) and is NOT claimed here.
+
+    REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED numbers, recorded
+    verbatim::
+
+        corrected_required = (JP7_WEIGHTS_BYTES
+                              + activation_allowance(JP7_WEIGHTS_BYTES, 1)
+                              + MINIMUM_KV_CACHE_BYTES)
+        assert format_gib(corrected_required) == "29.00 GiB", format_gib(
+            corrected_required)
+        ...
+        assert format_gib(legacy.required_bytes) == "41.00 GiB", format_gib(
+            legacy.required_bytes)
+
+    The PRESERVATION claim is unchanged and still what matters: JP7 fits under
+    both models, in both authoring shapes. The requirement moved DOWN
+    (29.00 -> 24.00 and 41.00 -> 30.00), so a JP7 record that fitted before
+    cannot have started failing.
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9). SUPERSEDED
+    figures, recorded VERBATIM: ``(29.00 -> 24.25 and 41.00 -> 30.25)`` — the
+    intermediate form of the change charged a hard 0.25 GiB KV viability floor;
+    H9's final decision charges no KV term, so both totals drop by 0.25 GiB and
+    the preservation claim is if anything safer.
 
     **Validates: Requirements 3.4**"""
     findings = evaluate_fit(
@@ -296,24 +359,42 @@ def test_jp7_record_within_headroom_fits_under_both_models():
         JP7_UTILIZATION * DEVICE_MEMORY_PROFILE_BYTES['arm64_jp7'])
     assert format_gib(finding.budget_bytes) == "60.00 GiB"
 
-    corrected_required = (JP7_WEIGHTS_BYTES
-                          + activation_allowance(JP7_WEIGHTS_BYTES, 1)
-                          + MINIMUM_KV_CACHE_BYTES)
-    assert format_gib(corrected_required) == "29.00 GiB", format_gib(
+    # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9). SUPERSEDED
+    # expression and figure, recorded VERBATIM:
+    #     corrected_required = (JP7_WEIGHTS_BYTES + NON_TORCH_ALLOWANCE_BYTES
+    #                           + activation_allowance(JP7_WEIGHTS_BYTES, 1)
+    #                           + KV_VIABILITY_FLOOR_BYTES)
+    #     assert format_gib(corrected_required) == "24.25 GiB", format_gib(
+    #         corrected_required)
+    # Reason: H9 charges no KV term, so JP7's requirement is 16 + 2 + 6 =
+    # 24.00 GiB. The PRESERVATION claim is untouched and if anything safer —
+    # the requirement moved DOWN again, so a JP7 record that fitted cannot
+    # have started failing.
+    corrected_required = (JP7_WEIGHTS_BYTES + NON_TORCH_MEMORY_BYTES
+                          + activation_allowance(JP7_WEIGHTS_BYTES, 1))
+    assert format_gib(corrected_required) == "24.00 GiB", format_gib(
         corrected_required)
+    assert corrected_required == finding.required_bytes
     assert corrected_required <= finding.budget_bytes
     assert JP7_UTILIZATION <= fraction_cap('arm64_jp7')
     assert round(fraction_cap('arm64_jp7'), 4) == 0.9333
 
     # And a LEGACY record that authors no multimodal limit at all — sized for
     # two units since the 2026-08-19 widening, because vLLM's own video
-    # default is 1 — still fits on JP7 (16 + 24 + 1 = 41.00 GiB of a 60.00 GiB
-    # budget). Preservation 3.4 holds for both authoring shapes.
+    # default is 1 — still fits on JP7 (16 + 2 + 12 = 30.00 GiB of a
+    # 60.00 GiB budget). Preservation 3.4 holds for both authoring shapes.
+    #
+    # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9). SUPERSEDED
+    # figure, recorded VERBATIM (it included the intermediate 0.25 GiB term):
+    #     # ... (16 + 2 + 12 + 0.25 = 30.25 GiB of a 60.00 GiB budget)
+    #     assert format_gib(legacy.required_bytes) == "30.25 GiB", format_gib(
+    #         legacy.required_bytes)
     legacy = evaluate_fit({'gpu_memory_utilization': JP7_UTILIZATION},
                           JP7_WEIGHTS_BYTES, ['arm64_jp7'])[0]
     assert legacy.multimodal_units == DEFAULT_MULTIMODAL_UNITS
-    assert format_gib(legacy.required_bytes) == "41.00 GiB", format_gib(
+    assert format_gib(legacy.required_bytes) == "30.00 GiB", format_gib(
         legacy.required_bytes)
+    assert legacy.fits is True, legacy.message
     assert legacy.fits is True, legacy.message
 
 
@@ -861,8 +942,20 @@ def test_new_fit_finding_terms_agree_with_the_corrected_model_when_present():
     """FIXED-SHAPE LEG (binds at task 3.9). Once task 3.2 lands, the
     additive ``FitFinding`` terms must reproduce this file's locally-defined
     corrected arithmetic for the incident's numbers (weights 6.5 GiB,
-    ``util = 0.4``, ``arm64_jp6``): activation allowance 4.88 GiB, KV floor
-    1 GiB, co-tenancy 6 GiB, cap 0.80. SKIPPED as absent today.
+    ``util = 0.4``, ``arm64_jp6``): activation allowance 2.44 GiB, non-torch
+    allowance 2 GiB, NO KV term charged, serving-margin floor 1 GiB,
+    co-tenancy 6 GiB, cap 0.80. SKIPPED as absent today.
+
+    CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9). SUPERSEDED
+    docstring clause, recorded VERBATIM: ``KV viability floor 0.25 GiB``.
+
+    REPOINTED 2026-08-19 (task 14 / H8+H9). SUPERSEDED assertions, recorded
+    verbatim::
+
+        assert format_gib(finding.activation_bytes) == "4.88 GiB"
+        ...
+        assert unbounded.activation_bytes == 2 * finding.activation_bytes
+        assert finding.kv_floor_bytes == MINIMUM_KV_CACHE_BYTES
 
     **Validates: Requirements 3.1**"""
     finding = evaluate_fit(
@@ -872,16 +965,37 @@ def test_new_fit_finding_terms_agree_with_the_corrected_model_when_present():
     if not hasattr(finding, 'activation_bytes'):
         pytest.skip("fixed-shape leg: FitFinding has no activation_bytes "
                     "yet (binds at task 3.9)")
-    # ONE authored multimodal unit: the design's recorded 4.88 GiB allowance.
+    # ONE authored multimodal unit at the recalibrated 0.375 per unit.
     assert finding.activation_bytes == activation_allowance(int(6.5 * GIB), 1)
-    assert format_gib(finding.activation_bytes) == "4.88 GiB"
+    assert format_gib(finding.activation_bytes) == "2.44 GiB"
     # The same record with video LEFT UNBOUNDED is TWO units, so the recorded
     # arithmetic doubles — the 2026-08-19 measurement (2.47 -> 4.93 GiB peak).
     unbounded = evaluate_fit({'gpu_memory_utilization': 0.4},
                              int(6.5 * GIB), ['arm64_jp6'])[0]
     assert unbounded.activation_bytes == activation_allowance(int(6.5 * GIB))
     assert unbounded.activation_bytes == 2 * finding.activation_bytes
+    # The 1 GiB serving margin keeps its field and its value, and is NOT a
+    # term in `required`; NO KV term of any size is charged (H9).
+    #
+    # CONSCIOUS REPOINT 2026-08-19, SECOND PASS (task 14 / H9). SUPERSEDED
+    # assertions, recorded VERBATIM:
+    #     # ...; the hard KV term is the viability floor (H9).
+    #     assert finding.kv_viability_floor_bytes == KV_VIABILITY_FLOOR_BYTES
+    #     assert finding.non_torch_bytes == NON_TORCH_ALLOWANCE_BYTES
+    #     assert finding.required_bytes == (int(6.5 * GIB)
+    #                                      + NON_TORCH_ALLOWANCE_BYTES
+    #                                      + finding.activation_bytes
+    #                                      + KV_VIABILITY_FLOOR_BYTES)
     assert finding.kv_floor_bytes == MINIMUM_KV_CACHE_BYTES
+    assert not hasattr(finding, 'kv_viability_floor_bytes')
+    assert finding.non_torch_bytes == NON_TORCH_MEMORY_BYTES
+    assert finding.required_bytes == (int(6.5 * GIB)
+                                      + NON_TORCH_MEMORY_BYTES
+                                      + finding.activation_bytes)
+    # The predicted KV remainder is what the budget leaves over, and the
+    # serving margin is judged against IT, not charged into `required`.
+    assert (finding.kv_headroom_bytes
+            == finding.budget_bytes - finding.required_bytes)
     assert finding.co_tenancy_bytes == CO_TENANCY_RESERVATION_BYTES['arm64_jp6']
     assert round(finding.fraction_cap, 2) == 0.80
 
