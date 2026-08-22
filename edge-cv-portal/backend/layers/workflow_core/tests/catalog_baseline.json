@@ -180,6 +180,7 @@
           "Aravis-Fake-GV01",
           "Basler-12345678"
         ],
+        "multiline": false,
         "name": "camera_id",
         "param_type": "string",
         "required": true
@@ -196,6 +197,7 @@
           4,
           10
         ],
+        "multiline": false,
         "name": "gain",
         "param_type": "int",
         "required": false
@@ -211,6 +213,7 @@
           5000000,
           16000000
         ],
+        "multiline": false,
         "name": "exposure",
         "param_type": "int",
         "required": false
@@ -344,6 +347,7 @@
           "us.amazon.nova-lite-v1:0",
           "us.amazon.nova-pro-v1:0"
         ],
+        "multiline": false,
         "name": "model",
         "param_type": "enum",
         "required": false
@@ -358,6 +362,7 @@
         "examples": [
           "Compare the input image to the reference image; is_anomalous is true when the input meaningfully differs from the reference."
         ],
+        "multiline": true,
         "name": "prompt",
         "param_type": "string",
         "required": true
@@ -371,6 +376,7 @@
           true,
           false
         ],
+        "multiline": false,
         "name": "anomaly_mode",
         "param_type": "bool",
         "required": false
@@ -386,6 +392,7 @@
           "us-east-1",
           "us-west-2"
         ],
+        "multiline": false,
         "name": "region",
         "param_type": "string",
         "required": false
@@ -402,8 +409,22 @@
           256,
           512
         ],
+        "multiline": false,
         "name": "max_tokens",
         "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional system-role instructions sent as the Bedrock Converse API 'system' parameter. Empty sends no system parameter (identical to previous behavior).",
+        "examples": [
+          "You are a meticulous visual quality inspector.\nAnswer concisely."
+        ],
+        "multiline": true,
+        "name": "system_prompt",
+        "param_type": "string",
         "required": false
       }
     ],
@@ -608,6 +629,7 @@
         "examples": [
           "/aws_dda/captures"
         ],
+        "multiline": false,
         "name": "output_path",
         "param_type": "string",
         "required": true
@@ -623,6 +645,7 @@
           0,
           10
         ],
+        "multiline": false,
         "name": "interval",
         "param_type": "int",
         "required": false
@@ -639,6 +662,7 @@
           85,
           100
         ],
+        "multiline": false,
         "name": "quality",
         "param_type": "int",
         "required": false
@@ -724,6 +748,7 @@
           "is_anomalous == true || confidence < 0.5",
           "!(is_anomalous == true)"
         ],
+        "multiline": false,
         "name": "condition",
         "param_type": "string",
         "required": true
@@ -886,6 +911,7 @@
         "examples": [
           100
         ],
+        "multiline": false,
         "name": "top",
         "param_type": "int",
         "required": false
@@ -900,6 +926,7 @@
         "examples": [
           100
         ],
+        "multiline": false,
         "name": "bottom",
         "param_type": "int",
         "required": false
@@ -914,6 +941,7 @@
         "examples": [
           50
         ],
+        "multiline": false,
         "name": "left",
         "param_type": "int",
         "required": false
@@ -928,6 +956,7 @@
         "examples": [
           50
         ],
+        "multiline": false,
         "name": "right",
         "param_type": "int",
         "required": false
@@ -1244,6 +1273,7 @@
           4,
           10
         ],
+        "multiline": false,
         "name": "gain",
         "param_type": "int",
         "required": false
@@ -1259,6 +1289,7 @@
           5000000,
           16000000
         ],
+        "multiline": false,
         "name": "exposure",
         "param_type": "int",
         "required": false
@@ -1401,6 +1432,7 @@
           "def process_frame(frame, metadata):\n    return frame",
           "def handle(frame_bytes, metadata):\n    return frame_bytes, metadata"
         ],
+        "multiline": false,
         "name": "code",
         "param_type": "code",
         "required": true
@@ -1414,6 +1446,7 @@
           "numpy==1.24.0",
           "numpy==1.24.0\nopencv-python-headless==4.8.0.74"
         ],
+        "multiline": false,
         "name": "requirements",
         "param_type": "string",
         "required": false
@@ -1432,6 +1465,7 @@
         "examples": [
           "InferenceMeta"
         ],
+        "multiline": false,
         "name": "input_port_type",
         "param_type": "enum",
         "required": true
@@ -1450,6 +1484,7 @@
         "examples": [
           "InferenceMeta"
         ],
+        "multiline": false,
         "name": "output_port_type",
         "param_type": "enum",
         "required": true
@@ -1591,6 +1626,7 @@
         "examples": [
           "def process_frame(frame, metadata):\n    return cv2.GaussianBlur(frame, (5, 5), 0)"
         ],
+        "multiline": false,
         "name": "code",
         "param_type": "code",
         "required": true
@@ -1603,6 +1639,7 @@
         "examples": [
           "scikit-image==0.24.0"
         ],
+        "multiline": false,
         "name": "requirements",
         "param_type": "string",
         "required": false
@@ -1791,6 +1828,7 @@
           "def produce_frame(context):\n    import dda_frames\n    payload = context.get(\"payload_json\") or {}\n    return dda_frames.load_image(payload[\"image_url\"])",
           "def produce_frame(context):\n    import dda_frames\n    return dda_frames.load_image(\"s3://plant-images/reference.jpg\")"
         ],
+        "multiline": false,
         "name": "code",
         "param_type": "code",
         "required": true
@@ -1803,6 +1841,7 @@
         "examples": [
           "requests==2.32.3"
         ],
+        "multiline": false,
         "name": "requirements",
         "param_type": "string",
         "required": false
@@ -1815,6 +1854,7 @@
         "examples": [
           "s3://plant-images/\nhttps://mes.local/"
         ],
+        "multiline": false,
         "name": "allowed_uri_prefixes",
         "param_type": "string",
         "required": false
@@ -1968,6 +2008,7 @@
           "fisheye",
           "barrel"
         ],
+        "multiline": false,
         "name": "mode",
         "param_type": "enum",
         "required": false
@@ -1984,6 +2025,7 @@
           0.5,
           0.8
         ],
+        "multiline": false,
         "name": "strength",
         "param_type": "float",
         "required": false
@@ -2068,6 +2110,7 @@
           7,
           18
         ],
+        "multiline": false,
         "name": "pin",
         "param_type": "int",
         "required": true
@@ -2087,6 +2130,7 @@
           "rising",
           "falling"
         ],
+        "multiline": false,
         "name": "trigger_edge",
         "param_type": "enum",
         "required": false
@@ -2103,6 +2147,7 @@
           100,
           500
         ],
+        "multiline": false,
         "name": "poll_interval_ms",
         "param_type": "int",
         "required": false
@@ -2238,6 +2283,7 @@
           5,
           12
         ],
+        "multiline": false,
         "name": "pin",
         "param_type": "int",
         "required": true
@@ -2257,6 +2303,7 @@
           "pulse",
           "high"
         ],
+        "multiline": false,
         "name": "signal_type",
         "param_type": "enum",
         "required": true
@@ -2273,6 +2320,7 @@
           100,
           250
         ],
+        "multiline": false,
         "name": "pulse_width_ms",
         "param_type": "int",
         "required": false
@@ -2290,6 +2338,7 @@
           "is_anomalous == true || confidence < 0.5",
           "!(is_anomalous == true)"
         ],
+        "multiline": false,
         "name": "condition",
         "param_type": "string",
         "required": true
@@ -2605,6 +2654,7 @@
           "/aws_dda/images/latest.jpg",
           "/aws_dda/captures"
         ],
+        "multiline": false,
         "name": "location",
         "param_type": "string",
         "required": true
@@ -2620,6 +2670,7 @@
           "*.jpg",
           "line1_*.jpg"
         ],
+        "multiline": false,
         "name": "file_pattern",
         "param_type": "string",
         "required": false
@@ -2804,6 +2855,7 @@
           "RGB",
           "GRAY8"
         ],
+        "multiline": false,
         "name": "format",
         "param_type": "enum",
         "required": true
@@ -2992,6 +3044,7 @@
           "/dev/video0",
           "/dev/video1"
         ],
+        "multiline": false,
         "name": "device",
         "param_type": "string",
         "required": true
@@ -3073,6 +3126,7 @@
           "is_anomalous == true || confidence < 0.5",
           "!(is_anomalous == true)"
         ],
+        "multiline": false,
         "name": "condition",
         "param_type": "string",
         "required": true
@@ -3131,6 +3185,7 @@
         "examples": [
           "opt-125m"
         ],
+        "multiline": false,
         "name": "modelName",
         "param_type": "model_ref",
         "required": true
@@ -3145,6 +3200,7 @@
         "examples": [
           "Summarize this inspection result: anomalous={is_anomalous}, confidence={confidence}"
         ],
+        "multiline": true,
         "name": "prompt_template",
         "param_type": "string",
         "required": true
@@ -3158,6 +3214,7 @@
           true,
           false
         ],
+        "multiline": false,
         "name": "anomaly_mode",
         "param_type": "bool",
         "required": false
@@ -3173,6 +3230,7 @@
           256,
           512
         ],
+        "multiline": false,
         "name": "max_tokens",
         "param_type": "int",
         "required": false
@@ -3189,6 +3247,7 @@
           0.7,
           0.2
         ],
+        "multiline": false,
         "name": "temperature",
         "param_type": "float",
         "required": false
@@ -3205,8 +3264,22 @@
           1.0,
           0.9
         ],
+        "multiline": false,
         "name": "top_p",
         "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional system-role instructions sent ahead of the prompt. UNLIKE prompt_template, the value is sent verbatim with no {placeholder} rendering. Empty sends no system prompt (identical to previous behavior).",
+        "examples": [
+          "You are a meticulous visual quality inspector.\nAnswer concisely."
+        ],
+        "multiline": true,
+        "name": "system_prompt",
+        "param_type": "string",
         "required": false
       }
     ],
@@ -3282,6 +3355,7 @@
           "[{\"path\": \"job_id\", \"key\": \"job_id\"}]",
           "[{\"path\": \"order.id\", \"key\": \"order_id\"}, {\"path\": \"file_path\", \"key\": \"source_file\"}]"
         ],
+        "multiline": false,
         "name": "mappings",
         "param_type": "string",
         "required": false
@@ -3296,6 +3370,7 @@
         "examples": [
           "{\"station\": \"line-1\"}"
         ],
+        "multiline": false,
         "name": "static_json",
         "param_type": "string",
         "required": false
@@ -3370,6 +3445,7 @@
           "192.168.1.30",
           "plc.local"
         ],
+        "multiline": false,
         "name": "host",
         "param_type": "string",
         "required": true
@@ -3385,6 +3461,7 @@
         "examples": [
           502
         ],
+        "multiline": false,
         "name": "port",
         "param_type": "int",
         "required": false
@@ -3401,6 +3478,7 @@
           1,
           0
         ],
+        "multiline": false,
         "name": "unit_id",
         "param_type": "int",
         "required": false
@@ -3419,6 +3497,7 @@
           "coil",
           "holding_register"
         ],
+        "multiline": false,
         "name": "register_type",
         "param_type": "enum",
         "required": true
@@ -3435,6 +3514,7 @@
           12,
           40
         ],
+        "multiline": false,
         "name": "address",
         "param_type": "int",
         "required": true
@@ -3448,6 +3528,7 @@
           "{is_anomalous}",
           "{confidence}"
         ],
+        "multiline": false,
         "name": "value_template",
         "param_type": "string",
         "required": false
@@ -3464,6 +3545,7 @@
           0,
           250
         ],
+        "multiline": false,
         "name": "pulse_ms",
         "param_type": "int",
         "required": false
@@ -3665,6 +3747,7 @@
         "examples": [
           "widget-anomaly-v3"
         ],
+        "multiline": false,
         "name": "modelName",
         "param_type": "model_ref",
         "required": true
@@ -3743,6 +3826,7 @@
           "10.0.0.12",
           "broker.local"
         ],
+        "multiline": false,
         "name": "broker_host",
         "param_type": "string",
         "required": true
@@ -3759,6 +3843,7 @@
           1883,
           8883
         ],
+        "multiline": false,
         "name": "broker_port",
         "param_type": "int",
         "required": false
@@ -3773,6 +3858,7 @@
         "examples": [
           "factory/line1/inspection"
         ],
+        "multiline": false,
         "name": "topic",
         "param_type": "string",
         "required": true
@@ -3786,6 +3872,7 @@
           "{inference_json}",
           "anomaly={is_anomalous} confidence={confidence}"
         ],
+        "multiline": true,
         "name": "payload_template",
         "param_type": "string",
         "required": false
@@ -3805,6 +3892,7 @@
           0,
           1
         ],
+        "multiline": false,
         "name": "qos",
         "param_type": "enum",
         "required": false
@@ -3817,6 +3905,7 @@
         "examples": [
           true
         ],
+        "multiline": false,
         "name": "aws_iot",
         "param_type": "bool",
         "required": false
@@ -3831,6 +3920,7 @@
         "examples": [
           "dda-edge-device-01"
         ],
+        "multiline": false,
         "name": "iot_thing_name",
         "param_type": "string",
         "required": false
@@ -3845,6 +3935,7 @@
         "examples": [
           "/greengrass/v2/rootCA.pem"
         ],
+        "multiline": false,
         "name": "iot_ca_cert_path",
         "param_type": "string",
         "required": false
@@ -3859,6 +3950,7 @@
         "examples": [
           "/greengrass/v2/thingCert.crt"
         ],
+        "multiline": false,
         "name": "iot_client_cert_path",
         "param_type": "string",
         "required": false
@@ -3873,6 +3965,7 @@
         "examples": [
           "/greengrass/v2/privKey.key"
         ],
+        "multiline": false,
         "name": "iot_private_key_path",
         "param_type": "string",
         "required": false
@@ -3974,6 +4067,7 @@
           "10.0.0.12",
           "broker.local"
         ],
+        "multiline": false,
         "name": "broker_host",
         "param_type": "string",
         "required": false
@@ -3990,6 +4084,7 @@
           1883,
           8883
         ],
+        "multiline": false,
         "name": "broker_port",
         "param_type": "int",
         "required": false
@@ -4005,6 +4100,7 @@
           "factory/line1/trigger",
           "factory/+/trigger"
         ],
+        "multiline": false,
         "name": "topic",
         "param_type": "string",
         "required": true
@@ -4024,6 +4120,7 @@
           0,
           1
         ],
+        "multiline": false,
         "name": "qos",
         "param_type": "enum",
         "required": false
@@ -4036,6 +4133,7 @@
         "examples": [
           true
         ],
+        "multiline": false,
         "name": "greengrass",
         "param_type": "bool",
         "required": false
@@ -4048,6 +4146,7 @@
         "examples": [
           true
         ],
+        "multiline": false,
         "name": "aws_iot",
         "param_type": "bool",
         "required": false
@@ -4062,6 +4161,7 @@
         "examples": [
           "dda-edge-device-01"
         ],
+        "multiline": false,
         "name": "iot_thing_name",
         "param_type": "string",
         "required": false
@@ -4076,6 +4176,7 @@
         "examples": [
           "/greengrass/v2/rootCA.pem"
         ],
+        "multiline": false,
         "name": "iot_ca_cert_path",
         "param_type": "string",
         "required": false
@@ -4090,6 +4191,7 @@
         "examples": [
           "/greengrass/v2/thingCert.crt"
         ],
+        "multiline": false,
         "name": "iot_client_cert_path",
         "param_type": "string",
         "required": false
@@ -4104,6 +4206,7 @@
         "examples": [
           "/greengrass/v2/privKey.key"
         ],
+        "multiline": false,
         "name": "iot_private_key_path",
         "param_type": "string",
         "required": false
@@ -4123,6 +4226,7 @@
           "queue",
           "drop"
         ],
+        "multiline": false,
         "name": "concurrency_policy",
         "param_type": "enum",
         "required": false
@@ -4139,6 +4243,7 @@
           10,
           100
         ],
+        "multiline": false,
         "name": "queue_depth",
         "param_type": "int",
         "required": false
@@ -4155,6 +4260,7 @@
           500,
           2000
         ],
+        "multiline": false,
         "name": "debounce_ms",
         "param_type": "int",
         "required": false
@@ -4171,6 +4277,7 @@
           0,
           5
         ],
+        "multiline": false,
         "name": "retry_limit",
         "param_type": "int",
         "required": false
@@ -4187,6 +4294,7 @@
           100,
           10
         ],
+        "multiline": false,
         "name": "priority",
         "param_type": "int",
         "required": false
@@ -4282,6 +4390,7 @@
         "examples": [
           "opc.tcp://192.168.1.20:4840"
         ],
+        "multiline": false,
         "name": "endpoint",
         "param_type": "string",
         "required": true
@@ -4296,6 +4405,7 @@
         "examples": [
           "ns=2;s=Machine1.Reject"
         ],
+        "multiline": false,
         "name": "node_id",
         "param_type": "string",
         "required": true
@@ -4312,6 +4422,7 @@
           100,
           1000
         ],
+        "multiline": false,
         "name": "sampling_interval_ms",
         "param_type": "int",
         "required": false
@@ -4330,6 +4441,7 @@
           "subscribe",
           "poll"
         ],
+        "multiline": false,
         "name": "mode",
         "param_type": "enum",
         "required": false
@@ -4346,6 +4458,7 @@
           500,
           2000
         ],
+        "multiline": false,
         "name": "poll_interval_ms",
         "param_type": "int",
         "required": false
@@ -4358,6 +4471,7 @@
         "examples": [
           "operator"
         ],
+        "multiline": false,
         "name": "username",
         "param_type": "string",
         "required": false
@@ -4370,6 +4484,7 @@
         "examples": [
           "changeit"
         ],
+        "multiline": false,
         "name": "password",
         "param_type": "string",
         "required": false
@@ -4382,6 +4497,7 @@
         "examples": [
           "Basic256Sha256"
         ],
+        "multiline": false,
         "name": "security_policy",
         "param_type": "string",
         "required": false
@@ -4395,6 +4511,7 @@
           "SignAndEncrypt",
           "Sign"
         ],
+        "multiline": false,
         "name": "security_mode",
         "param_type": "string",
         "required": false
@@ -4407,6 +4524,7 @@
         "examples": [
           "/aws_dda/opcua/client-cert.der"
         ],
+        "multiline": false,
         "name": "client_cert_path",
         "param_type": "string",
         "required": false
@@ -4419,6 +4537,7 @@
         "examples": [
           "/aws_dda/opcua/client-key.pem"
         ],
+        "multiline": false,
         "name": "client_key_path",
         "param_type": "string",
         "required": false
@@ -4431,6 +4550,7 @@
         "examples": [
           "/aws_dda/opcua/server-cert.der"
         ],
+        "multiline": false,
         "name": "server_cert_path",
         "param_type": "string",
         "required": false
@@ -4450,6 +4570,7 @@
           "queue",
           "drop"
         ],
+        "multiline": false,
         "name": "concurrency_policy",
         "param_type": "enum",
         "required": false
@@ -4466,6 +4587,7 @@
           10,
           100
         ],
+        "multiline": false,
         "name": "queue_depth",
         "param_type": "int",
         "required": false
@@ -4482,6 +4604,7 @@
           500,
           2000
         ],
+        "multiline": false,
         "name": "debounce_ms",
         "param_type": "int",
         "required": false
@@ -4498,6 +4621,7 @@
           0,
           5
         ],
+        "multiline": false,
         "name": "retry_limit",
         "param_type": "int",
         "required": false
@@ -4514,6 +4638,7 @@
           100,
           10
         ],
+        "multiline": false,
         "name": "priority",
         "param_type": "int",
         "required": false
@@ -4600,6 +4725,7 @@
         "examples": [
           "opc.tcp://192.168.1.20:4840"
         ],
+        "multiline": false,
         "name": "endpoint",
         "param_type": "string",
         "required": true
@@ -4614,6 +4740,7 @@
         "examples": [
           "ns=2;s=Machine1.Reject"
         ],
+        "multiline": false,
         "name": "node_id",
         "param_type": "string",
         "required": true
@@ -4627,6 +4754,7 @@
           "{is_anomalous}",
           "{confidence}"
         ],
+        "multiline": false,
         "name": "value_template",
         "param_type": "string",
         "required": false
@@ -4639,6 +4767,7 @@
         "examples": [
           "operator"
         ],
+        "multiline": false,
         "name": "username",
         "param_type": "string",
         "required": false
@@ -4651,6 +4780,7 @@
         "examples": [
           "changeit"
         ],
+        "multiline": false,
         "name": "password",
         "param_type": "string",
         "required": false
@@ -4663,6 +4793,7 @@
         "examples": [
           "Basic256Sha256"
         ],
+        "multiline": false,
         "name": "security_policy",
         "param_type": "string",
         "required": false
@@ -4676,6 +4807,7 @@
           "SignAndEncrypt",
           "Sign"
         ],
+        "multiline": false,
         "name": "security_mode",
         "param_type": "string",
         "required": false
@@ -4688,6 +4820,7 @@
         "examples": [
           "/aws_dda/opcua/client-cert.der"
         ],
+        "multiline": false,
         "name": "client_cert_path",
         "param_type": "string",
         "required": false
@@ -4700,6 +4833,7 @@
         "examples": [
           "/aws_dda/opcua/client-key.pem"
         ],
+        "multiline": false,
         "name": "client_key_path",
         "param_type": "string",
         "required": false
@@ -4712,6 +4846,7 @@
         "examples": [
           "/aws_dda/opcua/server-cert.der"
         ],
+        "multiline": false,
         "name": "server_cert_path",
         "param_type": "string",
         "required": false
@@ -4862,6 +4997,7 @@
           "rotate-180",
           "automatic"
         ],
+        "multiline": false,
         "name": "method",
         "param_type": "enum",
         "required": true
@@ -4903,6 +5039,7 @@
           "folder",
           "csi_camera"
         ],
+        "multiline": false,
         "name": "source_kind",
         "param_type": "enum",
         "required": true
@@ -4919,6 +5056,7 @@
           4,
           10
         ],
+        "multiline": false,
         "name": "gain",
         "param_type": "int",
         "required": false
@@ -4934,6 +5072,7 @@
           5000000,
           16000000
         ],
+        "multiline": false,
         "name": "exposure",
         "param_type": "int",
         "required": false
@@ -4949,6 +5088,7 @@
           "/dev/video0",
           "/dev/video1"
         ],
+        "multiline": false,
         "name": "device",
         "param_type": "string",
         "required": false
@@ -4964,6 +5104,7 @@
           "Aravis-Fake-GV01",
           "Basler-12345678"
         ],
+        "multiline": false,
         "name": "camera_id",
         "param_type": "string",
         "required": false
@@ -4979,6 +5120,7 @@
           "/aws_dda/images/latest.jpg",
           "/aws_dda/captures"
         ],
+        "multiline": false,
         "name": "location",
         "param_type": "string",
         "required": false
@@ -4994,6 +5136,7 @@
           "*.jpg",
           "line1_*.jpg"
         ],
+        "multiline": false,
         "name": "file_pattern",
         "param_type": "string",
         "required": false

@@ -230,6 +230,14 @@ export interface ParameterDescriptor {
    * Absent/null offers no catalog-provided examples.
    */
   examples?: JsonValue[] | null;
+  /**
+   * Multiline_Hint: when true, the configuration panel renders this
+   * string parameter's control as a user-resizable multi-line text
+   * area (Cloudscape Textarea) instead of the single-line Input.
+   * Serialized by the backend only when declared; absent means
+   * single-line (the pre-feature wire form).
+   */
+  multiline?: boolean | null;
 }
 
 /** How a node type is realized on one target architecture. */

@@ -908,6 +908,20 @@ function ParameterControl({ typeId, descriptor, value, onChange, modelOptions }:
     );
   }
 
+  // Catalog-declared Multiline_Hint: long-text string parameters
+  // (prompts, templates) edit as a user-resizable multi-line Textarea
+  // (workflow-prompt-multiline-inputs Requirements 3.1-3.3).
+  if (paramType === 'string' && descriptor.multiline === true) {
+    return (
+      <Textarea
+        rows={4}
+        value={textValue(value)}
+        onChange={({ detail }) => onChange(detail.value)}
+        ariaLabel={descriptor.name}
+      />
+    );
+  }
+
   // string (and any unknown paramType falls back to free text; the
   // constraint predicate reports unknown declared types inline).
   return (

@@ -230,7 +230,7 @@ def port_to_wire(port: PortDescriptor) -> Dict:
 
 
 def parameter_to_wire(parameter: ParameterDescriptor) -> Dict:
-    return {
+    wire = {
         'name': parameter.name,
         'paramType': parameter.param_type,
         'required': parameter.required,
@@ -240,6 +240,12 @@ def parameter_to_wire(parameter: ParameterDescriptor) -> Dict:
         'description': parameter.description,
         'examples': list(parameter.examples) if parameter.examples is not None else None
     }
+    # Multiline_Hint: serialized only when declared, so descriptors
+    # without it keep the identical pre-feature wire form
+    # (workflow-prompt-multiline-inputs Requirements 2.3, 2.4).
+    if parameter.multiline:
+        wire['multiline'] = True
+    return wire
 
 
 def mapping_to_wire(mapping: GstMapping) -> Dict:

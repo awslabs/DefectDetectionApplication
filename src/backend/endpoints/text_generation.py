@@ -153,6 +153,10 @@ def normalize_generation_request(
       - supplied reference_image failing the same image rules
         (vlm-anomaly-reference-parity Requirement 5.1), or supplied
         without a valid image (Requirement 5.4)
+      - supplied system_prompt not a string
+        (json-trigger-metadata-pipeline Requirement 8.6); JSON null and
+        the empty string are treated as absent, not findings
+        (Requirement 8.8)
 
     Omitted generation parameters are never findings: their defaults are
     applied and the request is processed (Requirement 5.8). An omitted
@@ -240,6 +244,18 @@ def normalize_generation_request(
                       "primary image",
         })
 
+    # A supplied system_prompt must be a string
+    # (json-trigger-metadata-pipeline Requirement 8.6). A JSON null
+    # arrives as Python None and is treated as absent, and an empty
+    # string is processed as absent (Requirement 8.8) — neither is a
+    # finding.
+    system_prompt = body.get("system_prompt")
+    if system_prompt is not None and not isinstance(system_prompt, str):
+        findings.append({
+            "field": "system_prompt",
+            "reason": "system_prompt must be a string when supplied",
+        })
+
     if findings:
         return findings
 
@@ -253,6 +269,8 @@ def normalize_generation_request(
         effective["image_bytes"] = image_bytes
     if reference_image_bytes is not None:
         effective["reference_image_bytes"] = reference_image_bytes
+    if isinstance(system_prompt, str) and system_prompt:
+        effective["system_prompt"] = system_prompt
     return effective
 
 
@@ -478,11 +496,14 @@ def _generate_kwargs(effective: Dict[str, Any]) -> Dict[str, Any]:
     ``image=`` only when the normalized request carries decoded image
     bytes (edge-vlm-image-inference Requirement 3.2), and
     ``reference_image=`` only when it additionally carries decoded
-    reference bytes (vlm-anomaly-reference-parity Requirement 5.2).
-    Imageless requests produce an empty dict so the runtime invocation
-    stays byte-identical to pre-feature behavior — and fakes without an
-    ``image``/``reference_image`` parameter keep working for tests that
-    do not exercise those fields (Requirements 3.3, 5.3)."""
+    reference bytes (vlm-anomaly-reference-parity Requirement 5.2), and
+    ``system_prompt=`` only when the normalized request carries a
+    non-empty system prompt (json-trigger-metadata-pipeline
+    Requirement 8.8). Requests without those fields produce an empty
+    dict so the runtime invocation stays byte-identical to pre-feature
+    behavior — and fakes without an ``image``/``reference_image``/
+    ``system_prompt`` parameter keep working for tests that do not
+    exercise those fields (Requirements 3.3, 5.3)."""
     kwargs: Dict[str, Any] = {}
     image_bytes = effective.get("image_bytes")
     if image_bytes is not None:
@@ -490,6 +511,9 @@ def _generate_kwargs(effective: Dict[str, Any]) -> Dict[str, Any]:
     reference_image_bytes = effective.get("reference_image_bytes")
     if reference_image_bytes is not None:
         kwargs["reference_image"] = reference_image_bytes
+    system_prompt = effective.get("system_prompt")
+    if system_prompt is not None:
+        kwargs["system_prompt"] = system_prompt
     return kwargs
 
 

@@ -655,7 +655,8 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                                         "filters, conditionals, and "
                                         "outputs; in freeform mode the "
                                         "prompt is sent as-is.",
-                            examples=[BEDROCK_DEFAULT_PROMPT]),
+                            examples=[BEDROCK_DEFAULT_PROMPT],
+                            multiline=True),
         # Response mode toggle: checked (default) keeps today's anomaly
         # JSON verdict contract — the executor appends the canonical
         # JSON instruction to the prompt and merges the parsed
@@ -692,6 +693,16 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                                         "generate for its JSON answer, "
                                         "e.g. 256.",
                             examples=[256, 512]),
+        ParameterDescriptor("system_prompt", "string", required=False,
+                            default="",
+                            description="Optional system-role instructions "
+                                        "sent as the Bedrock Converse API "
+                                        "'system' parameter. Empty sends no "
+                                        "system parameter (identical to "
+                                        "previous behavior).",
+                            examples=["You are a meticulous visual quality "
+                                      "inspector.\nAnswer concisely."],
+                            multiline=True),
     ],
     # Executor-level on every physical device architecture: the node has
     # no GStreamer element of its own. The compiler terminates each
@@ -790,7 +801,8 @@ LLM_INFERENCE = NodeTypeDescriptor(
                                         "rendered prompt is sent as-is.",
                             examples=["Summarize this inspection result: "
                                       "anomalous={is_anomalous}, "
-                                      "confidence={confidence}"]),
+                                      "confidence={confidence}"],
+                            multiline=True),
         # Response mode toggle, mirroring bedrock_inference's. UNLIKE
         # Bedrock (default True) this defaults FALSE — matching the
         # already-shipped executor default (absent => freeform), so
@@ -838,6 +850,18 @@ LLM_INFERENCE = NodeTypeDescriptor(
                                         "greater than 0.0 and at most 1.0, "
                                         "e.g. 1.0.",
                             examples=[1.0, 0.9]),
+        ParameterDescriptor("system_prompt", "string", required=False,
+                            default="",
+                            description="Optional system-role instructions "
+                                        "sent ahead of the prompt. UNLIKE "
+                                        "prompt_template, the value is sent "
+                                        "verbatim with no {placeholder} "
+                                        "rendering. Empty sends no system "
+                                        "prompt (identical to previous "
+                                        "behavior).",
+                            examples=["You are a meticulous visual quality "
+                                      "inspector.\nAnswer concisely."],
+                            multiline=True),
     ],
     # Executor-level realization (no GStreamer element): the compiler
     # emits an ``llm_inference`` executor binding carrying the bound
@@ -1069,7 +1093,8 @@ MQTT_PUBLISH = NodeTypeDescriptor(
                                         "{confidence}.",
                             examples=["{inference_json}",
                                       "anomaly={is_anomalous} "
-                                      "confidence={confidence}"]),
+                                      "confidence={confidence}"],
+                            multiline=True),
         ParameterDescriptor("qos", "enum", required=False, default=0,
                             constraints={"values": [0, 1, 2]},
                             description="MQTT quality of service: 0 (at "

@@ -121,6 +121,12 @@ _QWEN_VL_TWO_IMAGE_PROMPT_FALLBACK = (
     "{prompt}<|im_end|>\n<|im_start|>assistant\n"
 )
 
+#: System-role block prepended to the Qwen VL fallback forms when a
+#: system prompt is configured (json-trigger-metadata-pipeline
+#: Requirement 8.4). Absent/empty system prompt leaves the fallback
+#: strings byte-identical to the pre-feature forms (Requirement 8.5).
+_QWEN_VL_SYSTEM_PREFIX = "<|im_start|>system\n{system}<|im_end|>\n"
+
 # --- failure classification (spec jp6-vllm-kv-cache-oom-regression, ------
 # --- Decision 6; defect 1.6, expected behavior 2.6) ----------------------
 #
@@ -1298,6 +1304,7 @@ class VllmRuntimeManager:
         sampling_params: Optional[Mapping[str, Any]] = None,
         image: Optional[bytes] = None,
         reference_image: Optional[bytes] = None,
+        system_prompt: Optional[str] = None,
     ) -> str:
         """Generate to completion and return the generated text.
 
@@ -1307,6 +1314,10 @@ class VllmRuntimeManager:
         a second, reference image to the same prompt
         (vlm-anomaly-reference-parity Requirement 6.1). Text-only
         invocations are byte-identical to pre-feature behavior.
+        ``system_prompt`` optionally carries system-role instructions
+        placed ahead of the user prompt (json-trigger-metadata-pipeline
+        Requirements 8.3, 8.4, 8.7); absent/empty leaves every prompt
+        form byte-identical to pre-feature behavior (Requirement 8.5).
 
         Raises :class:`ModelUnavailableError` when the model is not READY
         (carrying its actual status) and :class:`GenerationError` when the
@@ -1315,7 +1326,8 @@ class VllmRuntimeManager:
         """
         final = None
         async for output in self._request(
-            model_name, prompt, sampling_params, image, reference_image
+            model_name, prompt, sampling_params, image, reference_image,
+            system_prompt,
         ):
             final = output
         text = self._output_text(final)
@@ -1330,6 +1342,7 @@ class VllmRuntimeManager:
         sampling_params: Optional[Mapping[str, Any]] = None,
         image: Optional[bytes] = None,
         reference_image: Optional[bytes] = None,
+        system_prompt: Optional[str] = None,
     ) -> AsyncIterator[str]:
         """Async iterator of incremental token text, in generation order.
 
@@ -1339,7 +1352,8 @@ class VllmRuntimeManager:
         decides how to signal them in-stream)."""
         previous = ""
         async for output in self._request(
-            model_name, prompt, sampling_params, image, reference_image
+            model_name, prompt, sampling_params, image, reference_image,
+            system_prompt,
         ):
             text = self._output_text(output)
             if text is None:
@@ -1356,6 +1370,7 @@ class VllmRuntimeManager:
         sampling_params: Optional[Mapping[str, Any]],
         image: Optional[bytes] = None,
         reference_image: Optional[bytes] = None,
+        system_prompt: Optional[str] = None,
     ) -> AsyncIterator[Any]:
         """Shared generate/generate_stream core: READY-check, sampling
         params construction, engine invocation, failure isolation.
@@ -1368,13 +1383,23 @@ class VllmRuntimeManager:
         ``multi_modal_data`` (one or two images,
         vlm-anomaly-reference-parity 6.1, 6.2); image + text-only model
         → logged warning, bare prompt string.
+
+        A non-empty ``system_prompt`` places system text ahead of user
+        text on every path (json-trigger-metadata-pipeline 8.3, 8.4,
+        8.7): the bare-string paths carry no role-tagged template, so
+        ordered concatenation with a blank-line separator is the defined
+        "ahead of" form; the multimodal path prepends a system-role chat
+        message. Absent/empty ⇒ byte-identical to pre-feature (8.5).
         """
         engine = self._ready_engine(model_name)
         if image is None:
-            engine_prompt: Any = prompt
+            engine_prompt: Any = (
+                "{0}\n\n{1}".format(system_prompt, prompt)
+                if system_prompt else prompt
+            )
         elif self._is_multimodal(model_name):
             engine_prompt = self._build_multimodal_prompt(
-                model_name, prompt, image, reference_image
+                model_name, prompt, image, reference_image, system_prompt
             )
         else:
             logger.warning(
@@ -1382,7 +1407,10 @@ class VllmRuntimeManager:
                 "image and generating text-only",
                 model_name,
             )
-            engine_prompt = prompt
+            engine_prompt = (
+                "{0}\n\n{1}".format(system_prompt, prompt)
+                if system_prompt else prompt
+            )
         params = self._sampling_params_factory(dict(sampling_params or {}))
         request_id = uuid.uuid4().hex
         try:
@@ -1472,11 +1500,21 @@ class VllmRuntimeManager:
         prompt: str,
         image_bytes: bytes,
         reference_bytes: Optional[bytes] = None,
+        system_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build the vLLM multimodal engine prompt: chat-templated text
         containing the model's image placeholder tokens plus
         ``multi_modal_data`` carrying the decoded image(s) (Requirement
         4.1; vlm-anomaly-reference-parity 6.1, 6.2).
+
+        A non-empty ``system_prompt`` prepends a system-role message
+        ahead of the user entry before the chat template is applied, for
+        both the single-image and the two-image forms
+        (json-trigger-metadata-pipeline Requirement 8.3); the Qwen VL
+        fallback forms gain a ``<|im_start|>system…`` block ahead of the
+        user section with the vision placeholder tokens and remainder
+        unchanged (Requirement 8.4). Absent/empty ⇒ messages and
+        fallback strings byte-identical to pre-feature (Requirement 8.5).
 
         Without ``reference_bytes`` the message and return value are
         byte-identical to the pre-reference single-image form. With a
@@ -1549,6 +1587,18 @@ class VllmRuntimeManager:
             multi_modal_data = {"image": [pil_image, pil_reference]}
 
         messages = [{"role": "user", "content": content}]
+        if system_prompt:
+            messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": system_prompt}],
+                },
+            )
+            fallback = (
+                _QWEN_VL_SYSTEM_PREFIX.replace("{system}", system_prompt)
+                + fallback
+            )
         templated = None
         tokenizer = self._resolve_tokenizer(model_name)
         apply = getattr(tokenizer, "apply_chat_template", None)

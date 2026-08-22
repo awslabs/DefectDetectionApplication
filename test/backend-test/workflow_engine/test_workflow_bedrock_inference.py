@@ -42,6 +42,7 @@ from workflow_engine.output_bindings import (
     BedrockInferenceError,
     BedrockInferenceProcessor,
     OutputBindingProcessor,
+    _default_bedrock_invoker,
     parse_bedrock_answer,
 )
 from workflow_engine.pipeline_executor import (
@@ -640,3 +641,249 @@ def output_document(bindings):
         "executorBindings": list(bindings),
         "pluginDependencies": [],
     }
+
+
+# ---------------------------------------------------------------------------
+# system_prompt: complete converse kwargs
+# (json-trigger-metadata-pipeline Requirement 7.5)
+# ---------------------------------------------------------------------------
+
+class FakeConverseClient:
+    """Captured-kwargs fake for the bedrock-runtime client: records the
+    complete kwargs of every ``converse`` call and returns a canned
+    response envelope."""
+
+    def __init__(self, answer='{"is_anomalous": true, "confidence": 0.9}'):
+        self.answer = answer
+        self.converse_kwargs = []
+
+    def converse(self, **kwargs):
+        self.converse_kwargs.append(kwargs)
+        return {"output": {"message": {"content": [{"text": self.answer}]}}}
+
+
+class ArityRecordingInvoker:
+    """Capturing invoker recording the exact (args, kwargs) of every
+    call, for asserting the processor->invoker seam arity/values."""
+
+    def __init__(self, answer='{"is_anomalous": true, "confidence": 0.9}'):
+        self.answer = answer
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self.answer
+
+
+def system_binding(**parameter_overrides):
+    """BEDROCK_BINDING with parameters overridden/extended."""
+    binding = dict(BEDROCK_BINDING)
+    binding["parameters"] = dict(BEDROCK_BINDING["parameters"],
+                                 **parameter_overrides)
+    return binding
+
+
+def expected_converse_kwargs(prompt, system=None):
+    """The complete converse kwargs the default invoker must build for
+    the two captured frames of BEDROCK_BINDING."""
+    kwargs = {
+        "modelId": "us.amazon.nova-lite-v1:0",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"text": prompt},
+                {"text": "Input image:"},
+                {"image": {"format": "jpeg",
+                           "source": {"bytes": JPEG_BYTES_IN}}},
+                {"text": "Reference image:"},
+                {"image": {"format": "jpeg",
+                           "source": {"bytes": JPEG_BYTES_REF}}},
+            ],
+        }],
+        "inferenceConfig": {"maxTokens": 256},
+    }
+    if system is not None:
+        kwargs["system"] = [{"text": system}]
+    return kwargs
+
+
+class TestDefaultBedrockInvokerConverseKwargs:
+    """_default_bedrock_invoker builds the exact converse kwargs
+    (Requirements 7.2, 7.3)."""
+
+    IMAGES = [("Input image", JPEG_BYTES_IN)]
+
+    def invoke(self, *args, **kwargs):
+        client = FakeConverseClient()
+        with patch("boto3.client", return_value=client) as factory:
+            answer = _default_bedrock_invoker(*args, **kwargs)
+        assert factory.call_args[0][0] == "bedrock-runtime"
+        assert factory.call_args[1]["region_name"] == "us-west-2"
+        assert len(client.converse_kwargs) == 1
+        return answer, client.converse_kwargs[0]
+
+    def expected(self, system=None):
+        kwargs = {
+            "modelId": "model-x",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"text": "Describe the image."},
+                    {"text": "Input image:"},
+                    {"image": {"format": "jpeg",
+                               "source": {"bytes": JPEG_BYTES_IN}}},
+                ],
+            }],
+            "inferenceConfig": {"maxTokens": 128},
+        }
+        if system is not None:
+            kwargs["system"] = [{"text": system}]
+        return kwargs
+
+    def test_non_empty_system_prompt_sends_single_system_block(self):
+        answer, kwargs = self.invoke(
+            "model-x", "Describe the image.", self.IMAGES, "us-west-2", 128,
+            "You are a quality inspector.")
+        assert kwargs == self.expected(system="You are a quality inspector.")
+        assert answer == '{"is_anomalous": true, "confidence": 0.9}'
+
+    def test_pre_feature_arity_omits_the_system_key(self):
+        # Five positional arguments: the pre-feature invocation shape.
+        _, kwargs = self.invoke(
+            "model-x", "Describe the image.", self.IMAGES, "us-west-2", 128)
+        assert kwargs == self.expected()
+        assert "system" not in kwargs
+
+    def test_empty_system_prompt_matches_the_absent_invocation(self):
+        _, absent_kwargs = self.invoke(
+            "model-x", "Describe the image.", self.IMAGES, "us-west-2", 128)
+        _, empty_kwargs = self.invoke(
+            "model-x", "Describe the image.", self.IMAGES, "us-west-2", 128,
+            "")
+        assert empty_kwargs == absent_kwargs
+        assert "system" not in empty_kwargs
+
+    def test_none_system_prompt_matches_the_absent_invocation(self):
+        _, absent_kwargs = self.invoke(
+            "model-x", "Describe the image.", self.IMAGES, "us-west-2", 128)
+        _, none_kwargs = self.invoke(
+            "model-x", "Describe the image.", self.IMAGES, "us-west-2", 128,
+            None)
+        assert none_kwargs == absent_kwargs
+
+
+class TestBedrockSystemPromptInvokerSeam:
+    """BedrockInferenceProcessor._run_one normalizes system_prompt and
+    preserves the pre-feature invoker arity (Requirements 7.2-7.4)."""
+
+    def run(self, tmp_path, **parameter_overrides):
+        write_frames(str(tmp_path))
+        invoker = ArityRecordingInvoker()
+        processor = BedrockInferenceProcessor(invoker=invoker)
+        processor.process(
+            make_document([system_binding(**parameter_overrides)]),
+            {}, str(tmp_path))
+        assert len(invoker.calls) == 1
+        return invoker.calls[0]
+
+    def test_configured_system_prompt_is_the_sixth_positional(self, tmp_path):
+        args, kwargs = self.run(
+            tmp_path, anomaly_mode=False,
+            system_prompt="You are a quality inspector.")
+        assert args == (
+            "us.amazon.nova-lite-v1:0",
+            "Compare the images.",
+            [("Input image", JPEG_BYTES_IN),
+             ("Reference image", JPEG_BYTES_REF)],
+            "us-east-1",
+            256,
+            "You are a quality inspector.",
+        )
+        assert kwargs == {}
+
+    def test_absent_parameter_keeps_pre_feature_arity(self, tmp_path):
+        args, kwargs = self.run(tmp_path, anomaly_mode=False)
+        assert len(args) == 5
+        assert kwargs == {}
+
+    def test_empty_value_keeps_pre_feature_arity(self, tmp_path):
+        args, kwargs = self.run(
+            tmp_path, anomaly_mode=False, system_prompt="")
+        assert len(args) == 5
+        assert kwargs == {}
+
+    def test_whitespace_only_value_keeps_pre_feature_arity(self, tmp_path):
+        args, kwargs = self.run(
+            tmp_path, anomaly_mode=False, system_prompt=" \t\n ")
+        assert len(args) == 5
+        assert kwargs == {}
+
+    def test_absent_parameter_works_with_a_pre_feature_fake(self, tmp_path):
+        # RecordingInvoker's fixed 5-parameter signature predates
+        # system_prompt: it must keep working unchanged.
+        write_frames(str(tmp_path))
+        invoker = RecordingInvoker()
+        processor = BedrockInferenceProcessor(invoker=invoker)
+        processor.process(make_document(), {}, str(tmp_path))
+        assert len(invoker.calls) == 1
+
+    def test_anomaly_mode_appends_to_the_user_prompt_only(self, tmp_path):
+        # anomaly_mode defaults to enabled when absent.
+        args, _ = self.run(
+            tmp_path, system_prompt="You are a quality inspector.")
+        assert args[1] == (
+            "Compare the images." + "\n\n" + BEDROCK_JSON_INSTRUCTION)
+        assert args[5] == "You are a quality inspector."
+
+
+class TestBedrockConverseKwargsEndToEnd:
+    """Processor + default invoker: the complete converse kwargs for
+    every Requirement 7.5 case, via the captured-kwargs fake client."""
+
+    def run(self, tmp_path, **parameter_overrides):
+        write_frames(str(tmp_path))
+        client = FakeConverseClient()
+        processor = BedrockInferenceProcessor()  # the real default invoker
+        with patch("boto3.client", return_value=client):
+            processor.process(
+                make_document([system_binding(**parameter_overrides)]),
+                {}, str(tmp_path))
+        assert len(client.converse_kwargs) == 1
+        return client.converse_kwargs[0]
+
+    def test_non_empty_system_prompt_with_user_prompt(self, tmp_path):
+        kwargs = self.run(
+            tmp_path, anomaly_mode=False,
+            system_prompt="You are a quality inspector.")
+        assert kwargs == expected_converse_kwargs(
+            "Compare the images.",
+            system="You are a quality inspector.")
+
+    def test_absent_system_prompt_parameter(self, tmp_path):
+        kwargs = self.run(tmp_path, anomaly_mode=False)
+        assert kwargs == expected_converse_kwargs("Compare the images.")
+        assert "system" not in kwargs
+
+    def test_empty_text_value_matches_the_absent_invocation(self, tmp_path):
+        absent = self.run(tmp_path, anomaly_mode=False)
+        empty = self.run(tmp_path, anomaly_mode=False, system_prompt="")
+        assert empty == absent
+        assert "system" not in empty
+
+    def test_whitespace_only_value_matches_the_absent_invocation(
+            self, tmp_path):
+        absent = self.run(tmp_path, anomaly_mode=False)
+        whitespace = self.run(
+            tmp_path, anomaly_mode=False, system_prompt="  \n\t ")
+        assert whitespace == absent
+        assert "system" not in whitespace
+
+    def test_anomaly_mode_with_non_empty_system_prompt(self, tmp_path):
+        # Default anomaly mode: the JSON instruction is appended to the
+        # USER prompt text; the system block carries the configured
+        # value verbatim (Requirement 7.4).
+        kwargs = self.run(
+            tmp_path, system_prompt="You are a quality inspector.")
+        assert kwargs == expected_converse_kwargs(
+            "Compare the images." + "\n\n" + BEDROCK_JSON_INSTRUCTION,
+            system="You are a quality inspector.")

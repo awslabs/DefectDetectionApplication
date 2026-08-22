@@ -166,6 +166,12 @@ class ParameterDescriptor:
     can be used verbatim. The configuration UI may offer them as
     fill-in suggestions next to the field help. None (the default)
     keeps older descriptors backward compatible.
+
+    ``multiline`` is a rendering hint for string-typed parameters — the
+    Multiline_Hint. When true, the configuration UI renders the
+    parameter's control as a user-resizable multi-line text area
+    instead of a single-line input. False (the default) keeps every
+    existing descriptor and its wire form unchanged.
     """
 
     name: str
@@ -176,6 +182,7 @@ class ParameterDescriptor:
     depends_on: str | None = None
     description: str | None = None
     examples: list | None = None
+    multiline: bool = False
 
 
 @dataclass(frozen=True)

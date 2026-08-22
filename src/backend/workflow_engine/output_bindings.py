@@ -938,12 +938,17 @@ def parse_bedrock_answer(text: str) -> Dict[str, Any]:
 
 
 def _default_bedrock_invoker(
-    model: str, prompt: str, images: List, region: str, max_tokens: int
+    model: str, prompt: str, images: List, region: str, max_tokens: int,
+    system_prompt: Optional[str] = None,
 ) -> str:
     """Invoke the Bedrock runtime converse API and return the model's
     text answer. ``images`` is a list of ``(label, jpeg_bytes)`` pairs
-    attached as image content blocks. boto3 is imported lazily so this
-    module stays importable everywhere (Requirement 13.7)."""
+    attached as image content blocks. ``system_prompt``, when non-empty,
+    is sent as the Converse API top-level ``system`` parameter; when
+    absent/empty the converse kwargs are byte-identical to the
+    pre-feature invocation (json-trigger-metadata-pipeline Requirements
+    7.2, 7.3). boto3 is imported lazily so this module stays importable
+    everywhere (Requirement 13.7)."""
     import boto3
     from botocore.config import Config as BotoConfig
 
@@ -959,11 +964,14 @@ def _default_bedrock_invoker(
     for label, data in images:
         content.append({"text": "{0}:".format(label)})
         content.append({"image": {"format": "jpeg", "source": {"bytes": data}}})
-    response = client.converse(
+    kwargs = dict(
         modelId=model,
         messages=[{"role": "user", "content": content}],
         inferenceConfig={"maxTokens": int(max_tokens)},
     )
+    if system_prompt:
+        kwargs["system"] = [{"text": system_prompt}]
+    response = client.converse(**kwargs)
     parts = (response.get("output", {}).get("message", {}).get("content", []))
     return "".join(part.get("text", "") for part in parts
                    if isinstance(part, dict))
@@ -1089,15 +1097,35 @@ class BedrockInferenceProcessor:
 
         prompt = str(parameters.get("prompt") or "")
         if anomaly_mode:
+            # Anomaly mode appends the instruction to the USER prompt
+            # only; the system prompt is never touched
+            # (json-trigger-metadata-pipeline Requirement 7.4).
             prompt = prompt + "\n\n" + BEDROCK_JSON_INSTRUCTION
 
-        answer = self._invoker(
+        # Optional system prompt: absent/empty/whitespace-only is
+        # normalized to None; a non-empty value is passed VERBATIM (not
+        # stripped) so the operator's text reaches the model unmodified
+        # (json-trigger-metadata-pipeline Requirements 7.2, 7.3).
+        raw_system = parameters.get("system_prompt")
+        system_prompt = (
+            str(raw_system)
+            if raw_system is not None and str(raw_system).strip()
+            else None
+        )
+
+        invoker_args = (
             str(parameters.get("model") or BEDROCK_DEFAULT_MODEL),
             prompt,
             images,
             str(parameters.get("region") or "us-east-1"),
             int(parameters.get("max_tokens") or 256),
         )
+        if system_prompt is not None:
+            answer = self._invoker(*invoker_args, system_prompt)
+        else:
+            # Pre-feature arity: injected fakes that predate the
+            # system_prompt parameter keep working (Requirement 7.3).
+            answer = self._invoker(*invoker_args)
         if anomaly_mode:
             # An unparseable answer raises here — the existing
             # BedrockInferenceError path — before any text is recorded
@@ -1166,6 +1194,7 @@ def _default_llm_invoker(
     parameters: Dict[str, Any],
     image_b64: Optional[str] = None,
     reference_b64: Optional[str] = None,
+    system_prompt: Optional[str] = None,
 ) -> str:
     """POST the rendered prompt to the local Text_Generation_API and
     return the generated text. ``requests`` is imported lazily so this
@@ -1182,6 +1211,11 @@ def _default_llm_invoker(
     the POST body as the API's optional ``reference_image`` field beside
     ``image``. When ``None`` the body is byte-identical to the
     reference-less request.
+
+    ``system_prompt`` (json-trigger-metadata-pipeline Requirements 8.2,
+    8.5), when non-empty, rides the POST body verbatim as the API's
+    optional ``system_prompt`` field; when ``None``/empty the body is
+    byte-identical to the pre-feature request.
 
     A ``409 {'state': 'loading'}`` response (transient model warm-up) is
     re-POSTed every :data:`LLM_LOADING_POLL_INTERVAL_SEC` seconds until
@@ -1200,6 +1234,8 @@ def _default_llm_invoker(
         body["image"] = image_b64
     if reference_b64 is not None:
         body["reference_image"] = reference_b64
+    if system_prompt:
+        body["system_prompt"] = system_prompt
     url = TEXT_GENERATION_URL.format(model_name=model_name)
     deadline = time.monotonic() + LLM_LOADING_BUDGET_SEC
     while True:
@@ -1323,6 +1359,19 @@ class LlmInferenceProcessor:
         anomaly_mode = bool(_coerce(parameters.get("anomaly_mode")))
         if anomaly_mode:
             prompt = prompt + "\n\n" + BEDROCK_JSON_INSTRUCTION
+        # Optional system prompt, normalized like Bedrock's:
+        # absent/empty/whitespace-only ⇒ None; otherwise the raw
+        # configured text verbatim (never rendered, never stripped) so
+        # the operator's text reaches the model unmodified. Anomaly
+        # mode above touches the rendered user prompt only — the system
+        # prompt is never modified (json-trigger-metadata-pipeline
+        # Requirements 8.2, 8.5, 8.9).
+        raw_system = parameters.get("system_prompt")
+        system_prompt = (
+            str(raw_system)
+            if raw_system is not None and str(raw_system).strip()
+            else None
+        )
         # Captured-frame attachment (edge-vlm-image-inference
         # Requirements 2.1, 2.2, 2.3). Three capturePaths shapes:
         # - 'in' maps to a path and the resolved file is readable →
@@ -1390,7 +1439,7 @@ class LlmInferenceProcessor:
                 # the input image — the 'in' error path above returns
                 # before the reference is read, matching the API's
                 # reference-requires-image rule.
-                text = self._invoker(
+                invoker_args = (
                     model_name, prompt, parameters, image_b64,
                     reference_b64,
                 )
@@ -1398,15 +1447,23 @@ class LlmInferenceProcessor:
                 # Input frame only: the shipped 4-argument form stays
                 # byte-identical so pre-feature injected invokers keep
                 # working unchanged (Requirements 4.2, 7.1).
-                text = self._invoker(
-                    model_name, prompt, parameters, image_b64
-                )
+                invoker_args = (model_name, prompt, parameters, image_b64)
             else:
                 # No frame: the invocation (arity included) stays
                 # byte-identical to pre-feature behavior (Requirements
                 # 2.2, 6.1) so pre-feature injected invokers keep
                 # working unchanged.
-                text = self._invoker(model_name, prompt, parameters)
+                invoker_args = (model_name, prompt, parameters)
+            if system_prompt is not None:
+                text = self._invoker(
+                    *invoker_args, system_prompt=system_prompt
+                )
+            else:
+                # Pre-feature arity: the keyword is only supplied when
+                # a system prompt is configured, so injected fakes that
+                # predate the system_prompt parameter keep working
+                # (json-trigger-metadata-pipeline Requirement 8.5).
+                text = self._invoker(*invoker_args)
         except Exception as e:  # noqa: BLE001 - recorded per 7.6, not raised
             logger.error(
                 "LLM inference node %s failed: %s; other bindings are "

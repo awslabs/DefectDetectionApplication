@@ -86,7 +86,10 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: ``prompt_template``'s description gained the anomaly-mode note, plus a
 #: second ``reference`` input port) with the vlm-anomaly-reference-parity
 #: feature; the recorded baseline was regenerated per the documented
-#: maintenance path to cover those intentional additions.
+#: maintenance path to cover those intentional additions. ``system_prompt``
+#: joined (and every parameter gained the ``multiline`` field) with the
+#: workflow-prompt-multiline-inputs feature; the baseline was regenerated
+#: again per the same maintenance path.
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",
@@ -94,6 +97,7 @@ _LLM_PRESERVED_PARAMETERS = (
     "max_tokens",
     "temperature",
     "top_p",
+    "system_prompt",
 )
 
 
