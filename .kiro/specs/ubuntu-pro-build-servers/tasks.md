@@ -168,6 +168,21 @@ Implementation proceeds pure-logic-first: flavor constants, resolution, and conf
     - Never modify, weaken, skip, or remove gate test logic; baseline value updates are the only permitted gate-related change
     - _Requirements: 7.3, 7.4, 7.6_
 
+- [x] 10. Add default flavor administration to the Build Infrastructure settings page
+  - [x] 10.1 Implement the Default Ubuntu flavor field in BuildInfrastructureSettings.tsx
+    - Add `ubuntu_flavor: 'pro' | 'standard'` (default `'standard'`) to `BuildConfigFormState` and `EMPTY_FORM` — the `EMPTY_FORM` default also covers the load-failure fallback: a failed `GET /build-config` leaves the form at `EMPTY_FORM` with the existing load-error notice and `standard` selected (Req 8.6)
+    - Map `config.ubuntu_flavor` in `toFormState()`, coercing absent or invalid stored values to `'standard'` (Req 8.1)
+    - Render a Cloudscape RadioGroup inside a FormField labeled "Default Ubuntu flavor" with constraint text and `errorText={fieldErrors.ubuntu_flavor}`, items Standard Ubuntu / Ubuntu Pro, with one always selected (Req 8.2)
+    - Add `ubuntu_flavor: form.ubuntu_flavor` to the `handleSave` update object — NOT via `textValue()`, since the value is never null (Req 8.3)
+    - `mapConfigErrors` routes per-parameter errors onto the field automatically once the key is in `EMPTY_FORM` (Req 8.4, 8.7); `applyConfig(response.config)` already reflects the stored value after a successful save (Req 8.5)
+    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7_
+
+  - [x]* 10.2 Write frontend tests for default flavor administration
+    - **Property 13: The settings page round-trips the default flavor faithfully**
+    - Extend `BuildInfrastructureSettings.test.tsx` (vitest + RTL, mocked `apiService`, following the file's existing conventions) covering Req 8.1–8.7: displayed selection reflects the loaded value (`pro`, `standard`, absent → `standard`, invalid → `standard`, load failure → `standard` with the load-error notice); the RadioGroup offers exactly the two labeled values with one always selected; every `updateBuildConfig` body carries `ubuntu_flavor` as exactly the selected string, never null, including an unchanged save; a CONFIG_INVALID rejection naming `ubuntu_flavor` renders on the field with all form state retained; a rejection naming other parameters or a plain failure leaves the selection unchanged; a successful save reflects the PUT response's stored value
+    - Tag: `# Feature: ubuntu-pro-build-servers, Property 13`
+    - **Validates: Requirements 8.1-8.7**
+
 ## Notes
 
 - Tasks marked with `*` are optional and can be skipped for faster MVP
@@ -194,7 +209,8 @@ Implementation proceeds pure-logic-first: flavor constants, resolution, and conf
     { "id": 8, "tasks": ["4.7"] },
     { "id": 9, "tasks": ["4.8"] },
     { "id": 10, "tasks": ["4.9"] },
-    { "id": 11, "tasks": ["9.1"] }
+    { "id": 11, "tasks": ["9.1"] },
+    { "id": 12, "tasks": ["10.1", "10.2"] }
   ]
 }
 ```

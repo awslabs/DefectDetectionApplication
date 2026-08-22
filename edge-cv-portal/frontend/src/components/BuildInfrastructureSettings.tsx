@@ -43,6 +43,7 @@ import {
   FormField,
   Header,
   Input,
+  RadioGroup,
   SpaceBetween,
   Spinner,
 } from '@cloudscape-design/components';
@@ -51,6 +52,7 @@ import type {
   BuildConfigValidationError,
   BuildInfrastructureConfig,
   BuildInfrastructureConfigUpdate,
+  BuildServerUbuntuFlavor,
 } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import { getErrorMessage } from '../utils/errorHandling';
@@ -64,6 +66,13 @@ interface BuildConfigFormState {
   max_runtime_hours: string;
   use_spot_for_ephemeral: boolean;
   source_ref: string;
+  /**
+   * Organization-wide default Ubuntu flavor
+   * (ubuntu-pro-build-servers Req 8.2, 8.3): a typed two-value field,
+   * unlike the page's free-text strings — never null/empty, so exactly
+   * one value is always selected.
+   */
+  ubuntu_flavor: BuildServerUbuntuFlavor;
 }
 
 /**
@@ -128,6 +137,9 @@ function toFormState(config: BuildInfrastructureConfig): BuildConfigFormState {
     // null source_ref means "the repository's default branch" and
     // renders as a blank field (never the literal string "null").
     source_ref: config.source_ref == null ? '' : String(config.source_ref),
+    // Absent or invalid stored flavor values display as 'standard'
+    // (ubuntu-pro-build-servers Req 8.1).
+    ubuntu_flavor: config.ubuntu_flavor === 'pro' ? 'pro' : 'standard',
   };
 }
 
@@ -265,6 +277,12 @@ const EMPTY_FORM: BuildConfigFormState = {
   max_runtime_hours: '',
   use_spot_for_ephemeral: false,
   source_ref: '',
+  // 'standard' also covers the load-failure path: a failed
+  // GET /build-config leaves the form at EMPTY_FORM with the load-error
+  // notice, showing 'standard' selected (Req 8.6). Presence of the key
+  // here also routes CONFIG_INVALID per-parameter ubuntu_flavor errors
+  // onto the field via mapConfigErrors (Req 8.4).
+  ubuntu_flavor: 'standard',
 };
 
 export default function BuildInfrastructureSettings() {
@@ -347,6 +365,10 @@ export default function BuildInfrastructureSettings() {
       max_runtime_hours: numericValue(form.max_runtime_hours),
       use_spot_for_ephemeral: form.use_spot_for_ephemeral,
       source_ref: textValue(form.source_ref),
+      // Deliberately NOT via textValue(): the selection is never blank
+      // and must never be sent as null — every save carries exactly
+      // 'pro' or 'standard' (ubuntu-pro-build-servers Req 8.3).
+      ubuntu_flavor: form.ubuntu_flavor,
     };
     // OPTIONAL maps: omitted while unconfigured (legacy payload
     // preserved); null reverts a previously stored map (Req 3.6).
@@ -520,6 +542,26 @@ export default function BuildInfrastructureSettings() {
               onChange={setField('source_ref')}
               placeholder="Repository default branch"
               ariaLabel="Source ref"
+            />
+          </FormField>
+
+          <FormField
+            label="Default Ubuntu flavor"
+            constraintText="The Ubuntu flavor applied when a launch omits the flavor selection. Set Ubuntu Pro to mandate compliance fleet-wide."
+            errorText={fieldErrors.ubuntu_flavor}
+          >
+            <RadioGroup
+              value={form.ubuntu_flavor}
+              onChange={({ detail }) =>
+                setForm((current) => ({
+                  ...current,
+                  ubuntu_flavor: detail.value as BuildServerUbuntuFlavor,
+                }))
+              }
+              items={[
+                { value: 'standard', label: 'Standard Ubuntu' },
+                { value: 'pro', label: 'Ubuntu Pro — extended security maintenance' },
+              ]}
             />
           </FormField>
 

@@ -50,6 +50,7 @@ flowchart TD
 | `build-fleet-stack.ts` | Comment-only update on `grantAmiParameterRead` documenting Pro path coverage |
 | `launch-arm64-build-server.sh` | New `--flavor` option; deterministic single-flavor AMI resolution replacing Pro-first-with-silent-fallback; flavor in the config summary |
 | `FleetPage.tsx` / `api.ts` | Flavor radio in the launch modal (preselected from build config), `ubuntu_flavor` in the launch body, flavor column in the fleet table |
+| `BuildInfrastructureSettings.tsx` | Default-flavor RadioGroup field on the Build_Settings_Page; `ubuntu_flavor` in every `PUT /build-config` payload; per-field error surfacing via the existing `mapConfigErrors` machinery |
 
 ## Components and Interfaces
 
@@ -299,6 +300,17 @@ async launchBuildServer(body: {
 
 **Fleet table:** a new "Ubuntu flavor" column rendering `item.ubuntu_flavor` (the backend fills `standard` for legacy records, so the cell always has the response value; Requirement 4.4). Displayed as "Pro" / "Standard".
 
+### 7. BuildInfrastructureSettings.tsx — default flavor administration
+
+Requirement 8 makes the org-wide default flavor administrable from the Build Infrastructure settings page (the Build_Settings_Page over `GET`/`PUT /build-config`). The backend needs **no change**: `ubuntu_flavor` is already an operator-settable, validated, audited parameter via `build_config.KNOWN_PARAMETERS` (sections 1 and 3), and `api.ts` already declares `ubuntu_flavor?: BuildServerUbuntuFlavor` on `BuildInfrastructureConfig`. The change is confined to `BuildInfrastructureSettings.tsx` and slots into its existing form machinery:
+
+- **Form state**: `BuildConfigFormState` gains `ubuntu_flavor: 'pro' | 'standard'` (a typed two-value field, unlike the page's free-text strings — never null/empty, so exactly one value is always selected; Req 8.2, 8.3). `EMPTY_FORM` sets it to `'standard'`, which also covers the load-failure path: a failed `GET /build-config` leaves the form at `EMPTY_FORM` with the existing load-error alert, showing `standard` selected (Req 8.6).
+- **Load**: `toFormState()` maps `config.ubuntu_flavor` to the form, coercing an absent or invalid stored value to `'standard'` — the effective value `GET /build-config` returns when unconfigured is displayed as-is (Req 8.1).
+- **Field**: a Cloudscape `RadioGroup` inside a `FormField` labeled "Default Ubuntu flavor", with constraint text describing the compliance purpose (the default applied when a launch omits the flavor) and `errorText={fieldErrors.ubuntu_flavor}` — the page's standard label/constraint/error convention (Req 8.2). Items: `standard` ("Standard Ubuntu") and `pro` ("Ubuntu Pro — extended security maintenance").
+- **Save**: `handleSave()` adds `ubuntu_flavor: form.ubuntu_flavor` to the update object alongside the existing scalar parameters — deliberately **not** through `textValue()`, since the value is never blank and must never be sent as null (Req 8.3). It is present on every save regardless of whether the selection changed.
+- **Errors**: `mapConfigErrors()` keys per-parameter CONFIG_INVALID errors on `parameter in EMPTY_FORM` — adding the key to `EMPTY_FORM` routes `ubuntu_flavor` errors onto the field automatically, with the existing atomic-reject alert and full form-state retention (Req 8.4, 8.7). No `mapConfigErrors` change.
+- **Refresh after save**: the existing `applyConfig(response.config)` call re-derives the form from the `PUT` response, so the selection reflects the stored value after a successful save (Req 8.5).
+
 ## Data Models
 
 ### BuildServers record (DynamoDB, additive)
@@ -413,6 +425,12 @@ async launchBuildServer(body: {
 
 **Validates: Requirements 6.6**
 
+### Property 13: The settings page round-trips the default flavor faithfully
+
+*For any* configuration value returned by `GET /build-config` or a `PUT /build-config` response, the Build_Settings_Page displays the returned `ubuntu_flavor` when it is exactly `pro` or `standard` and `standard` otherwise (including load failure), with exactly one value always selected; every save payload carries `ubuntu_flavor` equal to exactly the current selection (never null or empty); and *for any* rejected save, a per-parameter error naming `ubuntu_flavor` lands on the flavor field while any other failure leaves the selection unchanged — with all entered form state retained in both cases.
+
+**Validates: Requirements 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7**
+
 ## Error Handling
 
 | Failure | Behavior |
@@ -460,6 +478,8 @@ A test module drives `launch-arm64-build-server.sh` with a PATH-shimmed `aws` ex
 ### Frontend tests
 
 `FleetPage.test.tsx` extensions (React Testing Library, mocked `apiService`) covering Requirements 4.1–4.6 and 6.2: the two-value radio with one always selected, preselection from `getBuildConfig` (`pro` default, absent default, fetch failure → `standard`), `ubuntu_flavor` in the submitted body, the flavor column rendering, and error-path state retention.
+
+`BuildInfrastructureSettings.test.tsx` extensions (vitest + React Testing Library, mocked `apiService`, following the file's existing conventions) covering Requirements 8.1–8.7 / Property 13: the displayed selection reflects the loaded config value (`pro`, `standard`, absent → `standard`, invalid → `standard`, load failure → `standard` with the load-error notice); the flavor RadioGroup offers exactly the two labeled values with one always selected; every `updateBuildConfig` call body carries `ubuntu_flavor` as exactly the selected string (including a save with no changes — never null); a CONFIG_INVALID rejection naming `ubuntu_flavor` renders the message on the flavor field with all form state retained; a rejection naming other parameters or a plain request failure leaves the selection unchanged; and a successful save reflects the `PUT` response's stored value.
 
 ### Security preservation gate & integration
 

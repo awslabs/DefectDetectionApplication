@@ -317,4 +317,207 @@ describe('BuildInfrastructureSettings', () => {
       volume_size_gb_by_target: null,
     });
   });
+
+  // -------------------------------------------------------------------
+  // Feature: ubuntu-pro-build-servers, Property 13
+  // The settings page round-trips the default flavor faithfully
+  // (Requirements 8.1-8.7): default Ubuntu flavor administration.
+  // -------------------------------------------------------------------
+  describe('default Ubuntu flavor administration', () => {
+    function standardFlavorRadio() {
+      return screen.getByRole('radio', { name: 'Standard Ubuntu' });
+    }
+
+    function proFlavorRadio() {
+      return screen.getByRole('radio', {
+        name: 'Ubuntu Pro — extended security maintenance',
+      });
+    }
+
+    async function renderLoaded() {
+      setAuthRole('PortalAdmin');
+      render(<BuildInfrastructureSettings />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('ARM64 instance type')).toBeInTheDocument();
+      });
+    }
+
+    // Feature: ubuntu-pro-build-servers, Property 13 (Req 8.1)
+    it.each([
+      ['pro', 'pro'],
+      ['standard', 'standard'],
+      [undefined, 'standard'], // absent -> standard
+      ['Pro', 'standard'], // invalid stored value -> standard
+    ])(
+      'displays the loaded ubuntu_flavor %j as %s (Requirement 8.1)',
+      async (stored, displayed) => {
+        getBuildConfig.mockResolvedValue({
+          config: { ...EFFECTIVE_CONFIG, ubuntu_flavor: stored },
+        });
+        await renderLoaded();
+
+        if (displayed === 'pro') {
+          expect(proFlavorRadio()).toBeChecked();
+          expect(standardFlavorRadio()).not.toBeChecked();
+        } else {
+          expect(standardFlavorRadio()).toBeChecked();
+          expect(proFlavorRadio()).not.toBeChecked();
+        }
+      },
+    );
+
+    // Feature: ubuntu-pro-build-servers, Property 13 (Req 8.2)
+    it('offers exactly the two labeled flavor values with one always selected (Requirement 8.2)', async () => {
+      await renderLoaded();
+
+      // The flavor RadioGroup is the page's only radio control: exactly
+      // the two labeled values, one of which is selected.
+      const radios = screen.getAllByRole('radio');
+      expect(radios).toHaveLength(2);
+      expect(standardFlavorRadio()).toBeChecked();
+      expect(proFlavorRadio()).not.toBeChecked();
+
+      // Switching keeps exactly one selected.
+      fireEvent.click(proFlavorRadio());
+      expect(proFlavorRadio()).toBeChecked();
+      expect(standardFlavorRadio()).not.toBeChecked();
+    });
+
+    // Feature: ubuntu-pro-build-servers, Property 13 (Req 8.6)
+    it('shows the load-error notice and standard selected when GET /build-config fails (Requirement 8.6)', async () => {
+      setAuthRole('PortalAdmin');
+      getBuildConfig.mockRejectedValue(new Error('network unreachable'));
+      render(<BuildInfrastructureSettings />);
+
+      await waitFor(() => {
+        expect(screen.getByText('network unreachable')).toBeInTheDocument();
+      });
+      // The form is at EMPTY_FORM: standard selected, exactly one checked.
+      expect(standardFlavorRadio()).toBeChecked();
+      expect(proFlavorRadio()).not.toBeChecked();
+    });
+
+    // Feature: ubuntu-pro-build-servers, Property 13 (Req 8.3)
+    it('sends ubuntu_flavor as exactly the selected string on every save, including an unchanged save (Requirement 8.3)', async () => {
+      await renderLoaded();
+
+      // Save with no changes at all: the flavor is still present as the
+      // exact selected string, never null or empty.
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+      await waitFor(() => {
+        expect(updateBuildConfig).toHaveBeenCalledTimes(1);
+      });
+      expect(updateBuildConfig.mock.calls[0][0].ubuntu_flavor).toBe('standard');
+
+      // Select pro and save: the body carries exactly 'pro'.
+      fireEvent.click(proFlavorRadio());
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+      await waitFor(() => {
+        expect(updateBuildConfig).toHaveBeenCalledTimes(2);
+      });
+      expect(updateBuildConfig.mock.calls[1][0].ubuntu_flavor).toBe('pro');
+    });
+
+    // Feature: ubuntu-pro-build-servers, Property 13 (Req 8.4)
+    it('renders a per-parameter ubuntu_flavor error on the flavor field with all form state retained (Requirement 8.4)', async () => {
+      updateBuildConfig.mockRejectedValue(
+        Object.assign(new Error('The configuration update is invalid and was rejected in full.'), {
+          code: 'CONFIG_INVALID',
+          status: 400,
+          details: {
+            errors: [
+              {
+                rule: 'config_ubuntu_flavor_invalid',
+                parameter: 'ubuntu_flavor',
+                message:
+                  "Invalid value for ubuntu_flavor: supported values are 'pro' and 'standard'.",
+              },
+            ],
+          },
+        }),
+      );
+      await renderLoaded();
+
+      fireEvent.click(proFlavorRadio());
+      fireEvent.change(screen.getByLabelText('Region'), { target: { value: 'eu-west-1' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      await waitFor(() => {
+        expect(
+          screen.getByText(/supported values are 'pro' and 'standard'/),
+        ).toBeInTheDocument();
+      });
+      // Atomic reject: the alert notes retention, and every entered
+      // value — including the flavor selection — is kept for correction.
+      expect(screen.getByText(/rejected; the prior values are retained/)).toBeInTheDocument();
+      expect(proFlavorRadio()).toBeChecked();
+      expect(screen.getByLabelText('Region')).toHaveValue('eu-west-1');
+      expect(screen.getByLabelText('ARM64 instance type')).toHaveValue('m6g.4xlarge');
+    });
+
+    // Feature: ubuntu-pro-build-servers, Property 13 (Req 8.7)
+    it('retains the selection when the rejection names other parameters (Requirement 8.7)', async () => {
+      updateBuildConfig.mockRejectedValue(
+        Object.assign(new Error('The configuration update is invalid and was rejected in full.'), {
+          code: 'CONFIG_INVALID',
+          status: 400,
+          details: {
+            errors: [
+              {
+                rule: 'config_volume_size_invalid',
+                parameter: 'volume_size_gb',
+                message: "Invalid value for volume_size_gb: '-5' is not a positive number.",
+              },
+            ],
+          },
+        }),
+      );
+      await renderLoaded();
+
+      fireEvent.click(proFlavorRadio());
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      await waitFor(() => {
+        expect(screen.getByText(/'-5' is not a positive number/)).toBeInTheDocument();
+      });
+      expect(proFlavorRadio()).toBeChecked();
+      expect(standardFlavorRadio()).not.toBeChecked();
+    });
+
+    // Feature: ubuntu-pro-build-servers, Property 13 (Req 8.7)
+    it('retains the selection on a plain request failure (Requirement 8.7)', async () => {
+      updateBuildConfig.mockRejectedValue(new Error('service unavailable'));
+      await renderLoaded();
+
+      fireEvent.click(proFlavorRadio());
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('service unavailable')).toBeInTheDocument();
+      });
+      expect(proFlavorRadio()).toBeChecked();
+      expect(standardFlavorRadio()).not.toBeChecked();
+    });
+
+    // Feature: ubuntu-pro-build-servers, Property 13 (Req 8.5)
+    it('reflects the PUT response stored flavor after a successful save (Requirement 8.5)', async () => {
+      updateBuildConfig.mockResolvedValue({
+        config: { ...EFFECTIVE_CONFIG, ubuntu_flavor: 'pro' },
+        changes: [{ parameter: 'ubuntu_flavor', prior_value: null, new_value: 'pro' }],
+      });
+      await renderLoaded();
+
+      fireEvent.click(proFlavorRadio());
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      await waitFor(() => {
+        expect(
+          screen.getByText('Build configuration saved (1 parameter changed)'),
+        ).toBeInTheDocument();
+      });
+      // The selection is re-derived from the PUT response configuration.
+      expect(proFlavorRadio()).toBeChecked();
+      expect(standardFlavorRadio()).not.toBeChecked();
+    });
+  });
 });
