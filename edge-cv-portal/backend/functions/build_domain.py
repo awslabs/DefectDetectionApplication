@@ -918,6 +918,83 @@ def decide_cancellation(
 
 
 # ---------------------------------------------------------------------------
+# Ubuntu flavor selection (ubuntu-pro-build-servers Req 1.1, 1.2, 1.4, 3.3,
+# 6.1, 6.3, 6.4, 6.6)
+# ---------------------------------------------------------------------------
+
+# Ubuntu flavor identifiers (Requirement glossary: Ubuntu_Flavor).
+UBUNTU_FLAVOR_PRO = 'pro'
+UBUNTU_FLAVOR_STANDARD = 'standard'
+UBUNTU_FLAVORS = (UBUNTU_FLAVOR_PRO, UBUNTU_FLAVOR_STANDARD)
+
+# Validation rule identifiers (portal convention: every rejection names
+# its rule).
+RULE_UBUNTU_FLAVOR_INVALID = 'ubuntu_flavor_invalid'
+RULE_CONFIG_UBUNTU_FLAVOR_INVALID = 'config_ubuntu_flavor_invalid'
+RULE_CONFIG_DEFAULT_FLAVOR_INVALID = 'config_default_flavor_invalid'
+
+
+def resolve_effective_ubuntu_flavor(
+    requested: Any,
+    configured_default: Any,
+) -> Tuple[Optional[str], List[Dict[str, str]]]:
+    """Effective Ubuntu_Flavor for a launch request (pure).
+
+    ``requested`` is the raw ``ubuntu_flavor`` body value (None when the
+    request omits the field); ``configured_default`` is the effective
+    configuration's ``ubuntu_flavor`` value.
+
+    - ``requested`` == 'pro' or 'standard' (exact, case-sensitive): that
+      value, no errors (Req 1.1, 1.2, 6.3).
+    - ``requested`` is any other non-None value (empty string, wrong
+      case, non-string): (None, [error]) with rule
+      ``ubuntu_flavor_invalid`` naming 'pro' and 'standard' (Req 1.4).
+    - ``requested`` is None and ``configured_default`` in
+      ``UBUNTU_FLAVORS``: the configured default (Req 6.1, 6.4).
+    - ``requested`` is None and ``configured_default`` is anything else:
+      (None, [error]) with rule ``config_default_flavor_invalid``
+      identifying the invalid stored default (Req 6.6).
+
+    Returns ``(flavor_or_None, errors)``; ``errors`` is non-empty iff the
+    flavor is None (fail closed — no silent flavor substitution).
+    """
+    supported = ' and '.join(f"'{flavor}'" for flavor in UBUNTU_FLAVORS)
+    if requested is not None:
+        if requested in UBUNTU_FLAVORS:
+            return requested, []
+        return None, [{
+            'rule': RULE_UBUNTU_FLAVOR_INVALID,
+            'message': (
+                f"Invalid ubuntu_flavor '{requested}'. The supported "
+                f"Ubuntu_Flavor values are {supported} (exact, "
+                f"case-sensitive)."
+            ),
+        }]
+    if configured_default in UBUNTU_FLAVORS:
+        return configured_default, []
+    return None, [{
+        'rule': RULE_CONFIG_DEFAULT_FLAVOR_INVALID,
+        'message': (
+            f"The default ubuntu_flavor stored in the build configuration "
+            f"is '{configured_default}', which is not a supported "
+            f"Ubuntu_Flavor ({supported}). Correct the configured default "
+            f"or include an explicit ubuntu_flavor in the request."
+        ),
+    }]
+
+
+def server_ubuntu_flavor(server: Optional[Dict[str, Any]]) -> str:
+    """The Ubuntu_Flavor to report for a BuildServers record: the stored
+    ``ubuntu_flavor`` when it is a member of ``UBUNTU_FLAVORS``, else
+    'standard' (servers launched before this feature carry no field).
+    Pure — never writes back (Req 3.3)."""
+    flavor = (server or {}).get('ubuntu_flavor')
+    if flavor in UBUNTU_FLAVORS:
+        return flavor
+    return UBUNTU_FLAVOR_STANDARD
+
+
+# ---------------------------------------------------------------------------
 # Build infrastructure configuration (Requirements 9.2, 9.5)
 # ---------------------------------------------------------------------------
 
@@ -961,6 +1038,14 @@ DEFAULT_BUILD_CONFIG: Dict[str, Any] = {
     # the global volume_size_gb. Any configured JP6 entry must be at
     # least MIN_JP6_VOLUME_SIZE_GB.
     'volume_size_gb_by_target': None,
+    # Organization-wide default Ubuntu flavor applied when a launch
+    # request omits ubuntu_flavor (ubuntu-pro-build-servers Req 6.1,
+    # 6.4). 'standard' preserves existing behavior; PortalAdmins set
+    # 'pro' to mandate Ubuntu Pro fleet-wide. Present in this table so
+    # build_config.KNOWN_PARAMETERS makes it an operator-settable,
+    # audited parameter with no build_config.py change (the
+    # default_repository precedent).
+    'ubuntu_flavor': UBUNTU_FLAVOR_STANDARD,
 }
 
 #: Minimum ephemeral volume size for the JP6 target (GB): JP6 exports two
@@ -1253,6 +1338,9 @@ def validate_build_config(update: Optional[Dict[str, Any]]) -> ValidationResult:
       - ``volume_size_gb_by_target``: an OPTIONAL per-target volume-size
         map with any JP6 entry at least ``MIN_JP6_VOLUME_SIZE_GB``
         (``validate_volume_size_by_target``, Req 2.20).
+      - ``ubuntu_flavor``: exactly 'pro' or 'standard' (exact,
+        case-sensitive), else a ``config_ubuntu_flavor_invalid`` error
+        naming the supported values (ubuntu-pro-build-servers Req 6.5).
 
     A rejected update must be discarded in full (atomic reject): the caller
     keeps the stored configuration unchanged — see ``apply_config_update``.
@@ -1351,6 +1439,23 @@ def validate_build_config(update: Optional[Dict[str, Any]]) -> ValidationResult:
             and update['volume_size_gb_by_target'] is not None:
         errors.extend(validate_volume_size_by_target(
             update['volume_size_gb_by_target']))
+
+    # --- Default Ubuntu flavor exactly 'pro' or 'standard'
+    #     (ubuntu-pro-build-servers Req 6.5) ---
+    if 'ubuntu_flavor' in update and update['ubuntu_flavor'] is not None:
+        value = update['ubuntu_flavor']
+        if value not in UBUNTU_FLAVORS:
+            supported = ' and '.join(
+                f"'{flavor}'" for flavor in UBUNTU_FLAVORS)
+            errors.append({
+                'rule': RULE_CONFIG_UBUNTU_FLAVOR_INVALID,
+                'parameter': 'ubuntu_flavor',
+                'message': (
+                    f"Invalid value for ubuntu_flavor: '{value}' is not a "
+                    f"supported Ubuntu_Flavor. The supported values are "
+                    f"{supported} (exact, case-sensitive)."
+                ),
+            })
 
     if errors:
         return ValidationResult.rejected(errors)

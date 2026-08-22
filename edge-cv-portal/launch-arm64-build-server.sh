@@ -21,6 +21,8 @@
 #                            18.04 (default), 20.04, 22.04, or 24.04
 #                            (use 24.04 for JP7 build servers; see README "JetPack 7
 #                            (JP7) Build Server" section for provisioning steps)
+#   --flavor FLAVOR          Ubuntu flavor: pro (Ubuntu Pro) or standard
+#                            (default: standard)
 #   --dry-run                Show what would be created without creating
 #   --help                   Show this help message
 
@@ -37,6 +39,7 @@ VOLUME_SIZE=100
 REGION="us-east-1"
 AMI_ID=""
 UBUNTU_VERSION="18.04"
+UBUNTU_FLAVOR="standard"
 DRY_RUN=false
 
 # Parse command line arguments
@@ -82,12 +85,16 @@ while [[ $# -gt 0 ]]; do
             UBUNTU_VERSION="$2"
             shift 2
             ;;
+        --flavor)
+            UBUNTU_FLAVOR="$2"
+            shift 2
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
             ;;
         --help)
-            head -25 "$0" | tail -24
+            head -27 "$0" | tail -26
             exit 0
             ;;
         *)
@@ -96,6 +103,14 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Validate the Ubuntu flavor immediately after argument parsing, before any
+# AWS API call (ubuntu-pro-build-servers Req 5.5): only the exact values
+# 'pro' and 'standard' are accepted — no silent fallback in either direction.
+if [ "$UBUNTU_FLAVOR" != "pro" ] && [ "$UBUNTU_FLAVOR" != "standard" ]; then
+    echo "Error: Unsupported --flavor '$UBUNTU_FLAVOR' (supported values: pro, standard)"
+    exit 1
+fi
 
 # Validate required parameters
 if [ -z "$KEY_NAME" ]; then
@@ -322,34 +337,30 @@ if [ -z "$AMI_ID" ]; then
             ;;
     esac
 
-    echo "Finding latest Ubuntu Pro $UBUNTU_VERSION ARM64 AMI..."
+    # Single flavor-selected DescribeImages query (ubuntu-pro-build-servers
+    # Req 5.2, 5.3, 5.4): the selected flavor's name pattern is the only one
+    # queried — a failed lookup exits nonzero without ever querying the
+    # other flavor (no silent fallback in either direction).
+    if [ "$UBUNTU_FLAVOR" = "pro" ]; then
+        NAME_FILTER="ubuntu-pro-server/images/${UBUNTU_SSD_PATH}/ubuntu-${UBUNTU_CODENAME}-${UBUNTU_VERSION}-arm64-pro-server-*"
+    else
+        NAME_FILTER="ubuntu/images/${UBUNTU_SSD_PATH}/ubuntu-${UBUNTU_CODENAME}-${UBUNTU_VERSION}-arm64-server-*"
+    fi
+
+    echo "Finding latest Ubuntu ${UBUNTU_FLAVOR} ${UBUNTU_VERSION} ARM64 AMI..."
     AMI_ID=$(aws ec2 describe-images \
         --region "$REGION" \
         --owners 099720109477 \
         --filters \
-            "Name=name,Values=ubuntu-pro-server/images/${UBUNTU_SSD_PATH}/ubuntu-${UBUNTU_CODENAME}-${UBUNTU_VERSION}-arm64-pro-server-*" \
+            "Name=name,Values=${NAME_FILTER}" \
             "Name=architecture,Values=arm64" \
             "Name=state,Values=available" \
         --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
         --output text 2>/dev/null || echo "")
-    
+
     if [ -z "$AMI_ID" ] || [ "$AMI_ID" == "None" ]; then
-        # Fallback to standard Ubuntu ARM64
-        echo "Ubuntu Pro not found, trying standard Ubuntu $UBUNTU_VERSION ARM64..."
-        AMI_ID=$(aws ec2 describe-images \
-            --region "$REGION" \
-            --owners 099720109477 \
-            --filters \
-                "Name=name,Values=ubuntu/images/${UBUNTU_SSD_PATH}/ubuntu-${UBUNTU_CODENAME}-${UBUNTU_VERSION}-arm64-server-*" \
-                "Name=architecture,Values=arm64" \
-                "Name=state,Values=available" \
-            --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
-            --output text 2>/dev/null || echo "")
-    fi
-    
-    if [ -z "$AMI_ID" ] || [ "$AMI_ID" == "None" ]; then
-        echo "Error: Could not find Ubuntu $UBUNTU_VERSION ARM64 AMI"
-        echo "Please specify --ami-id manually"
+        echo "Error: Could not find an Ubuntu ${UBUNTU_FLAVOR} ${UBUNTU_VERSION} ARM64 AMI"
+        echo "Specify --ami-id manually, or check the flavor/release combination"
         exit 1
     fi
 fi
@@ -410,6 +421,7 @@ echo "  Subnet:           ${SUBNET_ID:-default}"
 echo "  IAM Profile:      $IAM_PROFILE"
 echo "  Volume Size:      ${VOLUME_SIZE}GB"
 echo "  Ubuntu Version:   ${UBUNTU_VERSION}"
+echo "  Ubuntu Flavor:    ${UBUNTU_FLAVOR}"
 echo "  Region:           $REGION"
 echo ""
 

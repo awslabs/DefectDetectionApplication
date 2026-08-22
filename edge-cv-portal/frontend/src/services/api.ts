@@ -164,6 +164,12 @@ export interface BuildInfrastructureConfig {
    * DDA repository.
    */
   default_repository: string;
+  /**
+   * Organization-wide default Ubuntu flavor applied when a launch
+   * omits `ubuntu_flavor` (ubuntu-pro-build-servers Req 6.1, 6.2);
+   * the documented default is `standard`.
+   */
+  ubuntu_flavor?: BuildServerUbuntuFlavor;
 }
 
 /**
@@ -224,6 +230,13 @@ export type BuildServerArchitecture = 'arm64' | 'x86_64';
 export type BuildServerUbuntuVersion = '22.04' | '24.04';
 
 /**
+ * Ubuntu flavor of a Dedicated_Build_Server (ubuntu-pro-build-servers):
+ * `pro` is Ubuntu Pro (extended security maintenance), `standard` the
+ * regular Ubuntu server offering.
+ */
+export type BuildServerUbuntuFlavor = 'pro' | 'standard';
+
+/**
  * Marker of an accepted fleet action that has not yet reached its
  * expected lifecycle state (build_fleet.py, Requirement 6.11). The
  * dispatcher reports the action failed when `deadline` (epoch ms)
@@ -258,6 +271,12 @@ export interface BuildServer {
    * hosts.
    */
   ubuntu_version?: BuildServerUbuntuVersion;
+  /**
+   * Effective Ubuntu flavor; the backend reports 'standard' for servers
+   * launched before flavor selection existed (ubuntu-pro-build-servers
+   * Req 3.3, 4.4).
+   */
+  ubuntu_flavor?: BuildServerUbuntuFlavor;
   lifecycle_state: BuildServerLifecycleState;
   /** Present iff a Build_Job is currently running on the server. */
   running_build_job_id?: string | null;
@@ -915,12 +934,15 @@ class ApiService {
    * (`build_fleet.py`, Requirement 6.5). PortalAdmin only (6.7); a 400
    * identifies the missing name or invalid architecture. An omitted
    * `ubuntu_version` means 22.04; 24.04 (the JP7 build host) is
-   * accepted for arm64 only (jetpack7-support design §10).
+   * accepted for arm64 only (jetpack7-support design §10). An omitted
+   * `ubuntu_flavor` applies the configured organization default, else
+   * standard Ubuntu (ubuntu-pro-build-servers Req 1.3, 6.1).
    */
   async launchBuildServer(body: {
     name: string;
     architecture: BuildServerArchitecture;
     ubuntu_version?: BuildServerUbuntuVersion;
+    ubuntu_flavor?: BuildServerUbuntuFlavor;
   }): Promise<{ server: BuildServer }> {
     return this.request<{ server: BuildServer }>('/build-servers', {
       method: 'POST',

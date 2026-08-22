@@ -556,8 +556,15 @@ export class BuildFleetStack extends cdk.Stack {
       }));
     };
 
-    /** Public canonical Ubuntu 22.04 AMI SSM parameters (AMI resolution
-     * in build_fleet.py / build_dispatcher.py). */
+    /** Public canonical Ubuntu AMI SSM parameters (AMI resolution in
+     * build_fleet.py / build_dispatcher.py). The
+     * `parameter/aws/service/canonical/*` ARN is a prefix of every path
+     * the resolver reads, covering BOTH the standard `ubuntu/server/...`
+     * subtree and the Ubuntu Pro `ubuntu/pro-server/...` subtree for
+     * every supported release/architecture combination — no grant change
+     * is needed for Pro AMI resolution (ubuntu-pro-build-servers Req
+     * 7.1, 7.2). The resolver's DescribeImages fallback is covered by
+     * `grantEc2Describe` above (Req 7.5). */
     const grantAmiParameterRead = (role: iam.Role) => {
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,

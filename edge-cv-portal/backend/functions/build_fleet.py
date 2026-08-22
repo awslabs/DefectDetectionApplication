@@ -187,6 +187,64 @@ UBUNTU_NAME_FILTER = {
     '24.04': UBUNTU_2404_NAME_FILTER,
 }
 
+#: Ubuntu Pro SSM public parameter paths (Canonical pro-server tree;
+#: same shape as the standard tree with server -> pro-server). Volume
+#: segment mirrors the standard tree per release: ebs-gp2 for jammy,
+#: ebs-gp3 for noble (verified against the published canonical
+#: pro-server parameter tree via
+#: `aws ssm get-parameters-by-path
+#:  --path /aws/service/canonical/ubuntu/pro-server/22.04 --recursive`;
+#: ubuntu-pro-build-servers design §2).
+UBUNTU_PRO_2204_SSM_PARAMETER = {
+    build_domain.ARCH_ARM64:
+        '/aws/service/canonical/ubuntu/pro-server/22.04/stable/current/'
+        'arm64/hvm/ebs-gp2/ami-id',
+    build_domain.ARCH_X86_64:
+        '/aws/service/canonical/ubuntu/pro-server/22.04/stable/current/'
+        'amd64/hvm/ebs-gp2/ami-id',
+}
+UBUNTU_PRO_2404_SSM_PARAMETER = {
+    build_domain.ARCH_ARM64:
+        '/aws/service/canonical/ubuntu/pro-server/24.04/stable/current/'
+        'arm64/hvm/ebs-gp3/ami-id',
+}
+
+#: Ubuntu Pro DescribeImages name filters (Canonical owner id
+#: 099720109477; ubuntu-pro-server images publish under the same
+#: hvm-ssd / hvm-ssd-gp3 segment split as the standard images).
+UBUNTU_PRO_2204_NAME_FILTER = {
+    build_domain.ARCH_ARM64:
+        'ubuntu-pro-server/images/hvm-ssd/'
+        'ubuntu-jammy-22.04-arm64-pro-server-*',
+    build_domain.ARCH_X86_64:
+        'ubuntu-pro-server/images/hvm-ssd/'
+        'ubuntu-jammy-22.04-amd64-pro-server-*',
+}
+UBUNTU_PRO_2404_NAME_FILTER = {
+    build_domain.ARCH_ARM64:
+        'ubuntu-pro-server/images/hvm-ssd-gp3/'
+        'ubuntu-noble-24.04-arm64-pro-server-*',
+}
+
+#: Flavor-keyed dispatch: the standard branch references the EXISTING
+#: constants unchanged (ubuntu-pro-build-servers Req 2.4 byte-for-byte
+#: preservation), the pro branch the new Pro tables. The two flavors
+#: carry identical (release, arch) key sets (Req 2.5).
+UBUNTU_SSM_PARAMETER_BY_FLAVOR = {
+    build_domain.UBUNTU_FLAVOR_STANDARD: UBUNTU_SSM_PARAMETER,
+    build_domain.UBUNTU_FLAVOR_PRO: {
+        '22.04': UBUNTU_PRO_2204_SSM_PARAMETER,
+        '24.04': UBUNTU_PRO_2404_SSM_PARAMETER,
+    },
+}
+UBUNTU_NAME_FILTER_BY_FLAVOR = {
+    build_domain.UBUNTU_FLAVOR_STANDARD: UBUNTU_NAME_FILTER,
+    build_domain.UBUNTU_FLAVOR_PRO: {
+        '22.04': UBUNTU_PRO_2204_NAME_FILTER,
+        '24.04': UBUNTU_PRO_2404_NAME_FILTER,
+    },
+}
+
 EC2_ARCHITECTURE = {
     build_domain.ARCH_ARM64: 'arm64',
     build_domain.ARCH_X86_64: 'x86_64',
@@ -573,35 +631,58 @@ def audit_fleet_action(user_id: str, action: str, server_id: str,
 
 # ------------------------------------------------------- GET /build-servers
 
+def present_server(server: Dict[str, Any]) -> Dict[str, Any]:
+    """Response shape of a BuildServers record: the record with
+    ``ubuntu_flavor`` filled in via ``build_domain.server_ubuntu_flavor``
+    — servers launched before flavor selection existed report
+    'standard'. Read-side defaulting only: the stored item is never
+    modified (ubuntu-pro-build-servers Req 3.2, 3.3)."""
+    return {**server,
+            'ubuntu_flavor': build_domain.server_ubuntu_flavor(server)}
+
+
 @require_builds_read()
 def list_build_servers(event: Dict, context: Any) -> Dict:
     """GET /build-servers — the fleet list with live DescribeInstances
     state reconciliation: name, instance identifier, instance type, CPU
-    architecture, lifecycle state, the running Build_Job when one exists,
-    and the time of the last state change (Req 6.1)."""
+    architecture, lifecycle state, Ubuntu flavor, the running Build_Job
+    when one exists, and the time of the last state change (Req 6.1;
+    ubuntu-pro-build-servers Req 3.2). Every listed server carries its
+    ubuntu_flavor regardless of lifecycle state, defaulted read-side to
+    'standard' for legacy records (Req 3.3)."""
     servers = [to_native(item) for item in scan_all(servers_table())]
     servers = reconcile_servers(servers)
     servers.sort(key=lambda s: (s.get('created_at') or 0,
                                 str(s.get('server_id'))), reverse=True)
-    return create_response(200, {'servers': servers})
+    return create_response(200,
+                           {'servers': [present_server(s)
+                                        for s in servers]})
 
 
 # ------------------------------------------------------ POST /build-servers
 
-def resolve_ubuntu_ami(arch: str,
-                       ubuntu_version: str = DEFAULT_UBUNTU_VERSION) -> str:
-    """Latest Ubuntu AMI id for the requested release and CPU
-    architecture: the Canonical-maintained SSM public parameter, with a
-    DescribeImages fallback (design §2). 24.04 (noble) is the JP7 build
-    host and is mapped for arm64 only (jetpack7-support design §10); an
-    unmapped release/architecture pairing fails closed with a
-    RuntimeError before any AWS call."""
-    ssm_parameter = UBUNTU_SSM_PARAMETER.get(ubuntu_version, {}).get(arch)
-    name_filter = UBUNTU_NAME_FILTER.get(ubuntu_version, {}).get(arch)
+def resolve_ubuntu_ami(
+        arch: str,
+        ubuntu_version: str = DEFAULT_UBUNTU_VERSION,
+        ubuntu_flavor: str = build_domain.UBUNTU_FLAVOR_STANDARD) -> str:
+    """Latest Ubuntu AMI id for the requested release, CPU architecture,
+    and Ubuntu_Flavor: the Canonical-maintained SSM public parameter for
+    the flavor's tree (server for standard, pro-server for pro), with a
+    DescribeImages fallback keyed to the flavor's name filter (design
+    §2; ubuntu-pro-build-servers Req 2.1, 2.2, 2.6). The flavor
+    parameter defaults to standard so every existing caller (including
+    build_dispatcher.py) is behavior-preserved. 24.04 (noble) is the JP7
+    build host and is mapped for arm64 only (jetpack7-support design
+    §10); an unmapped flavor/release/architecture pairing fails closed
+    with a RuntimeError before any AWS call."""
+    ssm_parameter = UBUNTU_SSM_PARAMETER_BY_FLAVOR.get(
+        ubuntu_flavor, {}).get(ubuntu_version, {}).get(arch)
+    name_filter = UBUNTU_NAME_FILTER_BY_FLAVOR.get(
+        ubuntu_flavor, {}).get(ubuntu_version, {}).get(arch)
     if not ssm_parameter or not name_filter:
         raise RuntimeError(
-            f'No Ubuntu {ubuntu_version} AMI mapping for architecture '
-            f'{arch}')
+            f'No Ubuntu {ubuntu_version} ({ubuntu_flavor}) AMI mapping '
+            f'for architecture {arch}')
 
     try:
         response = ssm.get_parameter(Name=ssm_parameter)
@@ -609,9 +690,9 @@ def resolve_ubuntu_ami(arch: str,
         if ami_id:
             return ami_id
     except ClientError as e:
-        logger.warning(f"Ubuntu {ubuntu_version} SSM parameter lookup "
-                       f"failed for {arch}; falling back to "
-                       f"DescribeImages: {e}")
+        logger.warning(f"Ubuntu {ubuntu_version} ({ubuntu_flavor}) SSM "
+                       f"parameter lookup failed for {arch}; falling "
+                       f"back to DescribeImages: {e}")
 
     response = ec2.describe_images(
         Owners=[CANONICAL_OWNER_ID],
@@ -625,7 +706,8 @@ def resolve_ubuntu_ami(arch: str,
                     key=lambda i: i.get('CreationDate', ''))
     if not images:
         raise RuntimeError(
-            f'No Ubuntu {ubuntu_version} AMI found for architecture {arch}')
+            f'No Ubuntu {ubuntu_version} ({ubuntu_flavor}) AMI found for '
+            f'architecture {arch}')
     return images[-1]['ImageId']
 
 
@@ -694,8 +776,11 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
     provided name with its CPU architecture (Req 6.5). An optional
     ubuntu_version selects the host release: 22.04 (default, existing
     behavior) or 24.04 — the JP7 build host, arm64 only
-    (jetpack7-support design §10). PortalAdmin only (Req 6.7, enforced
-    by the decorator)."""
+    (jetpack7-support design §10). An optional ubuntu_flavor selects
+    'pro' (Ubuntu Pro) or 'standard'; absent means the configured
+    default, else 'standard' — the pre-feature behavior
+    (ubuntu-pro-build-servers Req 1.1-1.4, 6.1). PortalAdmin only
+    (Req 6.7, enforced by the decorator)."""
     body, err = parse_body(event)
     if err:
         return err
@@ -708,6 +793,10 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
     ubuntu_version = body.get('ubuntu_version')
     if ubuntu_version is None:
         ubuntu_version = DEFAULT_UBUNTU_VERSION
+    # Ubuntu flavor selection (ubuntu-pro-build-servers Req 1.1-1.4):
+    # the raw body value; None means the field was omitted and the
+    # configured default applies (Req 6.1, 6.4).
+    requested_flavor = body.get('ubuntu_flavor')
     validation_errors = []
     if not isinstance(name, str) or not name.strip():
         validation_errors.append({
@@ -743,7 +832,27 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
                 f"{', '.join(sorted(UBUNTU_SSM_PARAMETER[ubuntu_version]))}."
             ),
         })
+    # Effective Ubuntu_Flavor: the explicit request value, else the
+    # configured default (ubuntu-pro-build-servers Req 1.1, 1.2, 6.1,
+    # 6.3). An invalid request value (Req 1.4) or an invalid stored
+    # default with a flavorless request (Req 6.6) joins the validation
+    # errors and fails the launch closed below — before any EC2 call.
+    config = effective_build_config()
+    effective_flavor, flavor_errors = \
+        build_domain.resolve_effective_ubuntu_flavor(
+            requested_flavor, config['ubuntu_flavor'])
+    validation_errors.extend(flavor_errors)
     if validation_errors:
+        # Rejected before any EC2 API call and before any BuildServers
+        # write (Req 1.6). No effective flavor was determined, so the
+        # failure audit entry carries the ubuntu_flavor exactly as
+        # submitted in the request — the raw body value (Req 3.5).
+        audit_fleet_action(
+            user['user_id'], 'launch', '', 'failure',
+            {'name': body.get('name'), 'architecture': arch,
+             'ubuntu_version': body.get('ubuntu_version'),
+             'ubuntu_flavor': requested_flavor,
+             'errors': validation_errors})
         return error_response(
             400, 'LAUNCH_REQUEST_INVALID',
             'The launch request is invalid: '
@@ -751,7 +860,6 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
             {'errors': validation_errors})
 
     name = name.strip()
-    config = effective_build_config()
     instance_type = config[INSTANCE_TYPE_CONFIG_KEY[arch]]
     volume_size_gb = config['volume_size_gb']
     server_id = f'srv-{uuid.uuid4()}'
@@ -764,7 +872,7 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
     source_ref = config.get('source_ref')
 
     try:
-        ami_id = resolve_ubuntu_ami(arch, ubuntu_version)
+        ami_id = resolve_ubuntu_ami(arch, ubuntu_version, effective_flavor)
         instance_id = run_fleet_instance(
             server_id=server_id,
             name=name,
@@ -777,10 +885,13 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
         )
     except (ClientError, RuntimeError) as e:
         logger.error(f"Fleet launch failed: {e}", exc_info=True)
+        # The effective flavor was determined before resolution began,
+        # so the failure audit entry carries it (Req 2.3, 3.4).
         audit_fleet_action(
             user['user_id'], 'launch', server_id, 'failure',
             {'name': name, 'architecture': arch,
              'ubuntu_version': ubuntu_version,
+             'ubuntu_flavor': effective_flavor,
              'instance_type': instance_type, 'error': str(e)})
         return error_response(
             502, 'LAUNCH_FAILED',
@@ -798,6 +909,12 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
         # Servers launched before this change carry no such field and
         # are 22.04 hosts.
         'ubuntu_version': ubuntu_version,
+        # The effective Ubuntu_Flavor this server was provisioned with
+        # (exactly 'pro' or 'standard'), persisted before the 201
+        # response returns (ubuntu-pro-build-servers Req 3.1). Servers
+        # launched before flavor selection carry no such field and are
+        # reported as 'standard' on read (Req 3.3, present_server).
+        'ubuntu_flavor': effective_flavor,
         # The exact directory this server's bootstrap cloned into, so the
         # dispatcher invokes the build agent from that tree instead of
         # assuming a directory of its own (Req 5.1, 5.2). Servers
@@ -824,6 +941,7 @@ def launch_build_server(event: Dict, context: Any) -> Dict:
         user['user_id'], 'launch', server_id, 'success',
         {'name': name, 'architecture': arch,
          'ubuntu_version': ubuntu_version,
+         'ubuntu_flavor': effective_flavor,
          'instance_id': instance_id, 'instance_type': instance_type,
          'volume_size_gb': volume_size_gb, 'ami_id': ami_id})
 
@@ -930,7 +1048,7 @@ def execute_fleet_action(event: Dict, context: Any, action: str) -> Dict:
          'deadline': pending_action['deadline']})
 
     server = get_server(server_id) or server
-    return create_response(200, {'server': server})
+    return create_response(200, {'server': present_server(server)})
 
 
 @super_user_only

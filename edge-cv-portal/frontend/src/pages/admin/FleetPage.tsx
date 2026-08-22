@@ -50,6 +50,7 @@ import { apiService } from '../../services/api';
 import type {
   BuildServer,
   BuildServerArchitecture,
+  BuildServerUbuntuFlavor,
   BuildServerUbuntuVersion,
 } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
@@ -118,6 +119,13 @@ interface LaunchModalProps {
  * offers the Ubuntu version: 22.04 (default) or 24.04, the JetPack 7
  * (JP7) build host (jetpack7-support design §10); the choice is
  * arm64-only, so switching to x86_64 resets it to 22.04.
+ *
+ * The Ubuntu flavor radio (ubuntu-pro-build-servers Req 4.1) always has
+ * exactly one of `standard` / `pro` selected, starting at `standard`
+ * (Req 4.2). On mount the organization default is fetched from the build
+ * configuration and preselected when it is `pro` (Req 6.2); any retrieval
+ * failure or invalid value leaves `standard` selected (Req 4.6, 6.7), and
+ * the fetch never blocks the modal.
  */
 export function LaunchServerModal({ onSuccess, onDismiss }: LaunchModalProps) {
   const [name, setName] = useState('');
@@ -126,8 +134,30 @@ export function LaunchServerModal({ onSuccess, onDismiss }: LaunchModalProps) {
   >('');
   const [ubuntuVersion, setUbuntuVersion] =
     useState<BuildServerUbuntuVersion>('22.04');
+  const [ubuntuFlavor, setUbuntuFlavor] =
+    useState<BuildServerUbuntuFlavor>('standard');
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState('');
+
+  // Preselect the configured organization default flavor; only an
+  // explicit 'pro' flips the selection — a failed fetch or any other
+  // value keeps 'standard' (Req 4.2, 4.6, 6.2, 6.7).
+  useEffect(() => {
+    let cancelled = false;
+    apiService
+      .getBuildConfig()
+      .then(({ config }) => {
+        if (!cancelled && config.ubuntu_flavor === 'pro') {
+          setUbuntuFlavor('pro');
+        }
+      })
+      .catch(() => {
+        // Standard stays selected; the launch remains possible (Req 4.6).
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const isValid = name.trim().length > 0 && architecture !== '';
 
@@ -142,6 +172,7 @@ export function LaunchServerModal({ onSuccess, onDismiss }: LaunchModalProps) {
         name: name.trim(),
         architecture: architecture as BuildServerArchitecture,
         ubuntu_version: ubuntuVersion,
+        ubuntu_flavor: ubuntuFlavor,
       });
       onSuccess(
         `Build server ${name.trim()} is launching. The build environment ` +
@@ -222,6 +253,29 @@ export function LaunchServerModal({ onSuccess, onDismiss }: LaunchModalProps) {
                 label: 'x86_64',
                 description:
                   'For x86_64 edge component builds (e.g. AMD64, AMD64 NVIDIA).',
+              },
+            ]}
+          />
+        </FormField>
+        <FormField
+          label="Ubuntu flavor"
+          description="Ubuntu Pro provides extended security maintenance for compliance-mandated fleets."
+        >
+          <RadioGroup
+            value={ubuntuFlavor}
+            onChange={({ detail }) =>
+              setUbuntuFlavor(detail.value as BuildServerUbuntuFlavor)
+            }
+            items={[
+              {
+                value: 'standard',
+                label: 'Standard',
+                description: 'Regular Ubuntu server.',
+              },
+              {
+                value: 'pro',
+                label: 'Ubuntu Pro',
+                description: 'Ubuntu Pro — extended security maintenance.',
               },
             ]}
           />
@@ -592,6 +646,15 @@ export default function FleetPage() {
             header: 'Architecture',
             cell: (item) =>
               item.cpu_architecture === 'arm64' ? 'ARM64' : 'x86_64',
+          },
+          {
+            id: 'ubuntuFlavor',
+            header: 'Ubuntu flavor',
+            // The backend fills 'standard' for legacy records, so the
+            // response value is always present (ubuntu-pro-build-servers
+            // Req 3.3, 4.4).
+            cell: (item) =>
+              item.ubuntu_flavor === 'pro' ? 'Pro' : 'Standard',
           },
           {
             id: 'lifecycleState',

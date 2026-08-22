@@ -589,7 +589,11 @@ class TestLifecycleIntegration:
 
         assert response["statusCode"] == 201, response["body"]
         # No ubuntu_version in the request: 22.04, the pre-JP7 behavior.
-        resolve.assert_called_once_with(build_domain.ARCH_ARM64, "22.04")
+        # No ubuntu_flavor and no configured default: standard, the
+        # pre-flavor behavior (ubuntu-pro-build-servers Req 1.3, 6.4).
+        resolve.assert_called_once_with(
+            build_domain.ARCH_ARM64, "22.04",
+            build_domain.UBUNTU_FLAVOR_STANDARD)
         server = json.loads(response["body"])["server"]
         server_id = server["server_id"]
 
@@ -648,7 +652,9 @@ class TestLifecycleIntegration:
                 None)
 
         assert response["statusCode"] == 201, response["body"]
-        resolve.assert_called_once_with(build_domain.ARCH_ARM64, "24.04")
+        resolve.assert_called_once_with(
+            build_domain.ARCH_ARM64, "24.04",
+            build_domain.UBUNTU_FLAVOR_STANDARD)
         server = json.loads(response["body"])["server"]
         server_id = server["server_id"]
 
@@ -684,7 +690,14 @@ class TestLifecycleIntegration:
         assert _SERVERS.scan().get("Items", []) == []
         assert len(_EC2.describe_instances()["Reservations"]) == \
             reservations_before
-        patches.handler_audit.assert_not_called()
+        # The validation rejection is audited as a launch failure
+        # carrying the ubuntu_flavor exactly as submitted — absent here,
+        # so None (ubuntu-pro-build-servers Req 3.5).
+        patches.handler_audit.assert_called_once()
+        kwargs = patches.handler_audit.call_args.kwargs
+        assert kwargs["action"] == "fleet_server_launch"
+        assert kwargs["result"] == "failure"
+        assert kwargs["details"]["ubuntu_flavor"] is None
 
     def test_launch_unknown_ubuntu_version_rejected(self):
         # Only the supported releases are accepted; anything else is an
