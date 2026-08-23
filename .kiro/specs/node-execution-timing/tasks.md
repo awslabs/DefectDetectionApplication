@@ -146,8 +146,8 @@ Add per-node execution timing to deployed-workflow runs: the `NodeStatusCollecto
   - Run the frontend suite in a node:20-alpine container via podman using the project's own node_modules (no Node on host): `podman run --rm -v "$(pwd)/src/frontend":/app -w /app -e CI=true node:20-alpine npx react-scripts test --watchAll=false`. Ensure all tests pass (including the existing preservation tests) with no modified pre-existing assertions, ask the user if questions arise.
   - _Requirements: 5.5_
 
-- [ ] 8. On-device verification (required before commit — builds.md gate)
-  - [ ] 8.1 Verify end-to-end on jetson-thor1 (JP7) from a real built+deployed component
+- [x] 8. On-device verification (required before commit — builds.md gate)
+  - [x] 8.1 Verify end-to-end on jetson-thor1 (JP7) from a real built+deployed component
     - The build dispatch is user-coordinated: builds run strictly one at a time per the builds steering (check `pgrep -af "gdk component build"` / `pgrep -af "build-custom.sh"` first), move `edge-cv-portal/infrastructure/cdk.out` aside, and confirm the security preservation guard suite is green before starting — coordinate with the user before dispatching `gdk component build` for `aws.edgeml.dda.LocalServer.arm64JP7`
     - After deploy to jetson-thor1, run a deployed workflow containing both node kinds (a pipeline path plus at least one executor binding, e.g. llm_inference or mqtt_publish) and verify: timings appear on terminal nodes in the Run_Status_Graph live during the run (polling) and after completion; the node-status endpoint returns `durationMs`; exactly one timing line per timed node appears in "View run log"; a pre-feature execution's run view still renders without error; the backend stays healthy for a sustained period (no crash/restart loop)
     - Only then commit, stating what was verified on which device
