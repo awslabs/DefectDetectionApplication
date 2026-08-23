@@ -317,14 +317,39 @@ export default function RunStatusGraph(): JSX.Element {
                       {visual.type}
                     </div>
                     <div
-                      data-testid={`node-status-${visual.id}`}
                       style={{
-                        fontSize: 12,
-                        fontWeight: 600,
-                        color: visual.color,
+                        display: "flex",
+                        alignItems: "baseline",
+                        gap: 6,
                       }}
                     >
-                      {visual.status}
+                      <div
+                        data-testid={`node-status-${visual.id}`}
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 600,
+                          color: visual.color,
+                        }}
+                      >
+                        {visual.status}
+                      </div>
+                      {/* Execution time next to the status line, only when the
+                          node visual carries a formatted duration
+                          (node-execution-timing R3.1, R3.2). Live updates come
+                          for free: nodeVisual recomputes on every react-query
+                          poll result (R3.7). */}
+                      {visual.durationText && (
+                        <span
+                          data-testid={`node-duration-${visual.id}`}
+                          style={{
+                            fontSize: 12,
+                            color: "#5f6b7a",
+                            fontWeight: 400,
+                          }}
+                        >
+                          {visual.durationText}
+                        </span>
+                      )}
                     </div>
                   </button>
                 );

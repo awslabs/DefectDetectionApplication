@@ -52,6 +52,7 @@ import * as InterfaceModule from "config/Interface";
 import { APIList, Connection } from "config/Interface";
 import * as WorkflowAPI from "api/WorkflowAPI";
 import * as AuthAPI from "api/AuthAPI";
+import * as LocalAuthAPI from "api/LocalAuthAPI";
 import * as StationAPI from "api/Station";
 import * as FeatureConfigurationAPI from "api/FeatureConfigurationAPI";
 import * as ImageSourceAPI from "api/ImageSourceAPI";
@@ -102,6 +103,10 @@ if (!(window as any).IntersectionObserver) {
 jest.mock("api/WorkflowAPI");
 // App-shell data dependencies so the real providers/layout render in jsdom.
 jest.mock("api/AuthAPI");
+// LoginGate (portal-user-manager local-auth feature) fetches GET
+// /local-auth/status at app mount; mock it at the module boundary so the
+// gate resolves "local login disabled" and route pages render as before.
+jest.mock("api/LocalAuthAPI");
 jest.mock("api/Station");
 // Used by the real EditWorkflow page.
 jest.mock("api/FeatureConfigurationAPI");
@@ -191,6 +196,10 @@ beforeEach(() => {
   (AuthAPI.fetchAuthConfig as jest.Mock).mockResolvedValue({
     auth_enabled: false,
     auth_settings: {},
+  });
+  // "Local auth disabled" -> LoginGate renders the app directly (no login).
+  (LocalAuthAPI.fetchLocalAuthStatus as jest.Mock).mockResolvedValue({
+    localLoginEnabled: false,
   });
   (StationAPI.getStation as jest.Mock).mockResolvedValue({
     name: "Test station",
@@ -528,6 +537,11 @@ describe("legacy API client and config/Interface exports (3.1, 3.3)", () => {
       getStation: `${E}/system/station`,
       getCapture: `${E}/workflows/{workflow_id}/capture-details/{capture_id}`,
       getAuthConfig: `${E}/authorization-configurations`,
+      // Observed-baseline update (suite maintenance convention): the
+      // portal-user-manager local-auth feature added these two entries to
+      // config/Interface.tsx; the baseline was re-observed and updated.
+      getLocalAuthStatus: `${E}/local-auth/status`,
+      postLocalAuthLogin: `${E}/local-auth/login`,
     });
 
     expect(Object.keys(InterfaceModule.AppDescriptions).sort()).toEqual([

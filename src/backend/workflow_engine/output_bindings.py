@@ -54,6 +54,7 @@ are imported lazily so this module stays importable everywhere.
 """
 
 import base64
+import inspect
 import json
 import logging
 import re
@@ -977,6 +978,50 @@ def _default_bedrock_invoker(
                    if isinstance(part, dict))
 
 
+def _accepts_keyword(func: Callable, name: str) -> bool:
+    """True when ``func`` accepts the keyword argument ``name``.
+
+    Mirrors the executor's handler shim: tolerates un-inspectable
+    callables by returning False, and treats a ``**kwargs`` parameter as
+    accepting any keyword. Used so ``duration_sink`` is only forwarded to
+    ``process()`` overrides that declare it (node-execution-timing R5.2
+    backward compatibility)."""
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    parameters = signature.parameters
+    if name in parameters:
+        return True
+    return any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in parameters.values()
+    )
+
+
+def _emit_duration(
+    duration_sink: Optional[Callable[[Optional[str], float], None]],
+    node_id: Optional[str],
+    elapsed_ms: float,
+) -> None:
+    """Report a binding invocation's elapsed milliseconds to
+    ``duration_sink`` (node_id, elapsed_ms), contained.
+
+    Mirrors ``OutputBindingProcessor._emit_detail``: a None sink is a
+    no-op (default behavior byte-identical to today); a raising sink is
+    caught and logged at debug, never affecting the binding outcome
+    (node-execution-timing Requirements 1.3, 1.7)."""
+    if duration_sink is None:
+        return
+    try:
+        duration_sink(node_id, elapsed_ms)
+    except Exception:  # noqa: BLE001 - timing is best-effort
+        logger.debug(
+            "Binding duration_sink raised for node %s; ignored",
+            node_id, exc_info=True,
+        )
+
+
 class BedrockInferenceProcessor:
     """Runs a compiled document's ``bedrock_inference`` bindings.
 
@@ -996,16 +1041,34 @@ class BedrockInferenceProcessor:
         ]
 
     def process(
-        self, document: dict, tag_values: dict, work_dir: Optional[str]
+        self,
+        document: dict,
+        tag_values: dict,
+        work_dir: Optional[str],
+        duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
     ) -> Dict[str, Any]:
         """Run every bedrock_inference binding and return the run's
         inference metadata with the parsed fields merged in. Raises
-        :class:`BedrockInferenceError` naming the failing node."""
+        :class:`BedrockInferenceError` naming the failing node.
+
+        ``duration_sink`` (optional; default None → behavior byte-identical
+        to today) receives ``(node_id, elapsed_ms)`` for every invocation,
+        measured with the monotonic clock and reported in a ``try/finally``
+        so error-terminated invocations are timed too, with raises
+        propagating exactly as today (node-execution-timing Requirements
+        1.3, 1.7)."""
         metadata = dict(tag_values or {})
         for binding in self.bindings(document):
             node_id = binding.get("nodeId")
             try:
-                result = self._run_one(binding, work_dir)
+                started = time.monotonic()
+                try:
+                    result = self._run_one(binding, work_dir)
+                finally:
+                    _emit_duration(
+                        duration_sink, node_id,
+                        (time.monotonic() - started) * 1000.0,
+                    )
                 # Freeform-mode results carry a nested 'bedrock' sub-dict
                 # ({node_id: {"text": ...}}): merge it into any existing
                 # 'bedrock' entry so multiple freeform nodes in one
@@ -1292,6 +1355,7 @@ class LlmInferenceProcessor:
         document: dict,
         tag_values: dict,
         work_dir: Optional[str] = None,
+        duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
     ) -> Dict[str, Any]:
         """Run every llm_inference binding and return the run's inference
         metadata with each node's outcome merged under
@@ -1316,7 +1380,12 @@ class LlmInferenceProcessor:
         metadata — exactly like Bedrock's — so downstream filters,
         conditionals, and outputs gate on them. The nested
         ``llm[nodeId]`` record stays complete (verdict keys included).
-        Flat keys follow the documented last-writer-wins convention."""
+        Flat keys follow the documented last-writer-wins convention.
+
+        ``duration_sink`` (optional; default None → behavior byte-identical
+        to today) receives ``(node_id, elapsed_ms)`` for every invocation,
+        measured with the monotonic clock and reported in a ``try/finally``
+        (node-execution-timing Requirements 1.3, 1.7)."""
         metadata = dict(tag_values or {})
         bindings = self.bindings(document)
         if not bindings:
@@ -1324,7 +1393,14 @@ class LlmInferenceProcessor:
         metadata["llm"] = dict(metadata.get("llm") or {})
         for binding in bindings:
             node_id = binding.get("nodeId")
-            outcome = self._run_one(binding, metadata, work_dir)
+            started = time.monotonic()
+            try:
+                outcome = self._run_one(binding, metadata, work_dir)
+            finally:
+                _emit_duration(
+                    duration_sink, node_id,
+                    (time.monotonic() - started) * 1000.0,
+                )
             metadata["llm"][node_id] = outcome
             for key in ("is_anomalous", "confidence"):
                 if key in outcome:
@@ -1546,8 +1622,19 @@ class OutputBindingProcessor:
         document: dict,
         tag_values: dict,
         detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
+        duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
     ) -> None:
-        self.process(registration, document, tag_values, detail_sink=detail_sink)
+        # Forward duration_sink only when one was provided AND the (possibly
+        # overridden) process() signature accepts it, so subclasses that
+        # override process() without the new keyword keep working unchanged
+        # (default None -> behavior byte-identical to today;
+        # node-execution-timing R5.2 backward compatibility).
+        kwargs: Dict[str, Any] = {"detail_sink": detail_sink}
+        if duration_sink is not None and _accepts_keyword(
+            self.process, "duration_sink"
+        ):
+            kwargs["duration_sink"] = duration_sink
+        self.process(registration, document, tag_values, **kwargs)
 
     @staticmethod
     def _emit_detail(
@@ -1577,6 +1664,7 @@ class OutputBindingProcessor:
         document: dict,
         tag_values: dict,
         detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
+        duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
     ) -> None:
         """Process every output binding independently (Requirement 13.7).
 
@@ -1585,7 +1673,15 @@ class OutputBindingProcessor:
         summaries for the output-node-sent-message feature. It is invoked only
         AROUND successful runners and on the gated/condition-skip paths, never
         alters control flow, and a raising sink is contained (Requirement
-        3.1)."""
+        3.1).
+
+        ``duration_sink`` (optional; default None → behavior byte-identical
+        to today) receives ``(node_id, elapsed_ms)`` for every binding whose
+        runner is actually invoked (after the gating checks), measured with
+        the monotonic clock and reported in a ``try/finally`` so
+        error-terminated invocations are timed too. Gated-out /
+        condition-skipped bindings and filter/conditional evaluations report
+        nothing (node-execution-timing Requirements 1.3, 1.7)."""
         bindings = document.get("executorBindings") or []
         if not bindings:
             return
@@ -1672,14 +1768,21 @@ class OutputBindingProcessor:
                 # (mark_failure already captured the error and set_detail
                 # refuses to overwrite failure details, Requirement 3.3).
                 parameters = dict(binding.get("parameters") or {})
-                if kind == BINDING_MQTT_PUBLISH:
-                    # Only mqtt_publish embeds the attached map into its
-                    # emitted payload (Requirement 7.7); opcua_write /
-                    # modbus_write / digital_output write scalars and gain
-                    # no automatic embedding.
-                    detail = runner(parameters, effective, attached)
-                else:
-                    detail = runner(parameters, effective)
+                started = time.monotonic()
+                try:
+                    if kind == BINDING_MQTT_PUBLISH:
+                        # Only mqtt_publish embeds the attached map into its
+                        # emitted payload (Requirement 7.7); opcua_write /
+                        # modbus_write / digital_output write scalars and gain
+                        # no automatic embedding.
+                        detail = runner(parameters, effective, attached)
+                    else:
+                        detail = runner(parameters, effective)
+                finally:
+                    _emit_duration(
+                        duration_sink, node_id,
+                        (time.monotonic() - started) * 1000.0,
+                    )
                 logger.info(
                     "Output binding %s (node %s) processed", kind, node_id
                 )

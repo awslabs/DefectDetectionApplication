@@ -70,6 +70,16 @@ jest.mock("api/AuthAPI", () => ({
     .mockResolvedValue({ auth_enabled: false, auth_settings: {} }),
 }));
 
+// LoginGate (portal-user-manager local-auth feature) fetches GET
+// /local-auth/status at app mount; mock it at the module boundary so the
+// gate resolves "local login disabled" and the app renders as before.
+jest.mock("api/LocalAuthAPI", () => ({
+  ...jest.requireActual("api/LocalAuthAPI"),
+  fetchLocalAuthStatus: jest
+    .fn()
+    .mockResolvedValue({ localLoginEnabled: false }),
+}));
+
 /**
  * Render the real application (router built in App.tsx) at
  * /deployed-workflows. App.tsx creates its browser router at module scope
@@ -110,6 +120,11 @@ beforeEach(() => {
   (authAPI.fetchAuthConfig as jest.Mock).mockResolvedValue({
     auth_enabled: false,
     auth_settings: {},
+  });
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const localAuthAPI = require("api/LocalAuthAPI");
+  (localAuthAPI.fetchLocalAuthStatus as jest.Mock).mockResolvedValue({
+    localLoginEnabled: false,
   });
 });
 

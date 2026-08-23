@@ -46,6 +46,7 @@ persisted to ``WorkflowExecution.node_status_json``.
 
 import json
 import logging
+import time
 from typing import Dict, Iterable, Optional
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,15 @@ class NodeStatusCollector:
         self._statuses: Dict[str, str] = {}
         # nodeId -> warning/error detail (retained for the status graph).
         self._details: Dict[str, str] = {}
+        # -- node-execution-timing state (R1.1/R1.2/R1.5) -------------------
+        # nodeId -> monotonic seconds at the node's FIRST entry into running.
+        self._running_since: Dict[str, float] = {}
+        # nodeId -> lifecycle duration in ms, recorded exactly once at the
+        # node's FIRST terminal transition (never overwritten, R1.1).
+        self._durations_ms: Dict[str, int] = {}
+        # nodeId -> executor-binding invocation duration in ms (takes
+        # precedence over the lifecycle value at serialization time, R1.4).
+        self._invocation_durations_ms: Dict[str, int] = {}
         for node_id in self._name_map.values():
             if node_id is not None and node_id not in self._statuses:
                 self._statuses[node_id] = STATUS_PENDING
@@ -103,6 +113,47 @@ class NodeStatusCollector:
         """The current status of ``node_id`` (or None if untracked)."""
         return self._statuses.get(node_id)
 
+    # -- centralized status write (node-execution-timing) -------------------
+
+    def _set_status(self, node_id: str, status: str) -> None:
+        """The single status-write path for every mutation method.
+
+        Performs the identical ``self._statuses[node_id] = status``
+        assignment the mutation paths previously did directly, then —
+        contained per R1.7 — captures lifecycle timing:
+
+        * the node's FIRST entry into ``running`` records
+          ``time.monotonic()`` (R1.2, R1.5);
+        * the node's FIRST entry into a terminal state records
+          ``max(0, round((now - start) * 1000))`` only if the node ran and
+          has no duration yet (R1.1, R1.2);
+        * later transitions never overwrite a recorded duration (R1.1);
+        * a node reaching terminal without ever running records nothing
+          (R1.6).
+
+        The timing capture is wrapped in try/except so the status
+        assignment always stands and no partial value is recorded on error
+        (R1.7); transition semantics are byte-identical to the pre-feature
+        direct assignments (R5.1).
+        """
+        self._statuses[node_id] = status
+        try:
+            if status == STATUS_RUNNING:
+                if node_id not in self._running_since:
+                    self._running_since[node_id] = time.monotonic()
+            elif status in TERMINAL_STATES:
+                if (
+                    node_id in self._running_since
+                    and node_id not in self._durations_ms
+                ):
+                    elapsed = time.monotonic() - self._running_since[node_id]
+                    self._durations_ms[node_id] = max(0, round(elapsed * 1000))
+        except Exception:  # noqa: BLE001 - timing is best-effort (R1.7)
+            logger.debug(
+                "NodeStatusCollector._set_status ignored a timing error",
+                exc_info=True,
+            )
+
     # -- live sink ----------------------------------------------------------
 
     def sink(self, element_name: str, kind: str, detail: Optional[str] = None) -> None:
@@ -121,14 +172,14 @@ class NodeStatusCollector:
                 # A warning is terminal-ish: it wins over pending/running and
                 # is not overwritten by a later success (see mark_success_all).
                 if self._statuses.get(node_id) != STATUS_FAILURE:
-                    self._statuses[node_id] = STATUS_WARNING
+                    self._set_status(node_id, STATUS_WARNING)
                     if detail:
                         self._details[node_id] = detail
             elif kind == "running":
                 # Only advance pending -> running; never downgrade a node that
                 # already reached a warning/success/failure state.
                 if self._statuses.get(node_id) == STATUS_PENDING:
-                    self._statuses[node_id] = STATUS_RUNNING
+                    self._set_status(node_id, STATUS_RUNNING)
         except Exception:  # noqa: BLE001 - collector is best-effort (R8.5)
             logger.debug("NodeStatusCollector.sink ignored an error", exc_info=True)
 
@@ -138,7 +189,7 @@ class NodeStatusCollector:
         """Advance every still-``pending`` node to ``running`` (run start)."""
         for node_id, status in self._statuses.items():
             if status == STATUS_PENDING:
-                self._statuses[node_id] = STATUS_RUNNING
+                self._set_status(node_id, STATUS_RUNNING)
 
     def mark_success_all(self) -> None:
         """Mark participating nodes ``success`` on clean completion (R3.3).
@@ -147,7 +198,7 @@ class NodeStatusCollector:
         overrides a ``failure``."""
         for node_id, status in self._statuses.items():
             if status in _NON_TERMINAL_STATES:
-                self._statuses[node_id] = STATUS_SUCCESS
+                self._set_status(node_id, STATUS_SUCCESS)
 
     def mark_failure(self, node_id: Optional[str], detail: Optional[str] = None) -> None:
         """Mark ``node_id`` as ``failure`` and retain its error ``detail``.
@@ -156,7 +207,7 @@ class NodeStatusCollector:
         no node is spuriously failed (Property 2, R3.2)."""
         if node_id is None:
             return
-        self._statuses[node_id] = STATUS_FAILURE
+        self._set_status(node_id, STATUS_FAILURE)
         if detail:
             self._details[node_id] = detail
 
@@ -179,6 +230,46 @@ class NodeStatusCollector:
             self._details[node_id] = detail
         except Exception:  # noqa: BLE001 - collector is best-effort (R8.5)
             logger.debug("NodeStatusCollector.set_detail ignored an error", exc_info=True)
+
+    # -- invocation timing (node-execution-timing) ---------------------------
+
+    def record_invocation_duration(self, node_id: Optional[str], duration_ms) -> None:
+        """Record an Executor_Binding_Node's invocation duration (R1.3/R1.4).
+
+        Contained (R8.5 style): ignores None/untracked node ids and negative
+        or non-numeric values; stores ``int(round(duration_ms))`` (R2.1).
+        Idempotent per node per run: the FIRST recorded invocation duration
+        wins and later calls never overwrite it (R1.4 precedence is then
+        applied at serialization time). Any internal error is caught so a
+        timing failure can never affect the run (R1.7)."""
+        try:
+            if node_id is None or node_id not in self._statuses:
+                return
+            if isinstance(duration_ms, bool) or not isinstance(
+                duration_ms, (int, float)
+            ):
+                return
+            if duration_ms < 0:
+                return
+            # round() raises on NaN/inf -> contained by the outer except,
+            # recording no partial value (R1.7).
+            self._invocation_durations_ms.setdefault(
+                node_id, int(round(duration_ms))
+            )
+        except Exception:  # noqa: BLE001 - timing is best-effort (R1.7)
+            logger.debug(
+                "NodeStatusCollector.record_invocation_duration ignored an error",
+                exc_info=True,
+            )
+
+    def duration_ms_of(self, node_id: str) -> Optional[int]:
+        """The duration ``to_map()`` would serialize for ``node_id``.
+
+        Invocation duration first (R1.4 precedence), else the lifecycle
+        duration, else None. Used by the executor's timing log emission."""
+        return self._invocation_durations_ms.get(
+            node_id, self._durations_ms.get(node_id)
+        )
 
     def finalize(self, failure_detail: Optional[str] = None) -> None:
         """Resolve any remaining non-terminal node to a terminal state.
@@ -203,28 +294,56 @@ class NodeStatusCollector:
         for node_id, status in self._statuses.items():
             if status in _NON_TERMINAL_STATES:
                 if unattributed_failure:
-                    self._statuses[node_id] = STATUS_WARNING
+                    self._set_status(node_id, STATUS_WARNING)
                     self._details.setdefault(
                         node_id,
                         "The run failed before this node reported a "
                         "result: {0}".format(failure_detail),
                     )
                 else:
-                    self._statuses[node_id] = STATUS_SUCCESS
+                    self._set_status(node_id, STATUS_SUCCESS)
 
     # -- serialization ------------------------------------------------------
 
     def to_map(self) -> Dict[str, dict]:
-        """The ``{nodeId: {status, detail?}}`` map."""
+        """The ``{nodeId: {status, detail?, durationMs?}}`` map.
+
+        ``durationMs`` is additive (R2.1, R2.4): a non-negative integer
+        present iff a duration was recorded for the node (R2.3), preferring
+        the invocation duration over the lifecycle duration (R1.4). The
+        existing ``status``/``detail`` fields are untouched."""
         result: Dict[str, dict] = {}
         for node_id, status in self._statuses.items():
             entry = {"status": status}
             detail = self._details.get(node_id)
             if detail:
                 entry["detail"] = detail
+            duration = self.duration_ms_of(node_id)
+            if duration is not None:
+                entry["durationMs"] = duration
             result[node_id] = entry
         return result
 
     def to_json(self) -> str:
         """The map as a JSON string for ``WorkflowExecution.node_status_json``."""
         return json.dumps(self.to_map())
+
+
+# -- duration formatting (node-execution-timing) ----------------------------
+
+
+def format_duration_ms(duration_ms: int) -> str:
+    """Format a non-negative millisecond duration for display/logging (R3.3).
+
+    ``< 1000`` -> the whole-millisecond value followed by ``" ms"``
+    (``"0 ms"`` for 0, R3.4); ``>= 1000`` -> seconds with exactly one
+    decimal place rounded to the nearest tenth followed by ``" s"``,
+    e.g. ``"3.4 s"`` (R4.2 reuses these rules for the run-log lines).
+
+    Ties at the midpoint follow Python's float formatting (round-half-even
+    on the binary value), e.g. ``3450`` -> ``"3.5 s"`` because ``3.45``
+    is represented slightly above the midpoint.
+    """
+    if duration_ms < 1000:
+        return "{0} ms".format(int(duration_ms))
+    return "{0:.1f} s".format(duration_ms / 1000.0)

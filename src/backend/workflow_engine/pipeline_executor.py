@@ -108,7 +108,7 @@ from workflow_engine.discovery import (
 from workflow_engine import gst_plugins
 from workflow_engine.gst_plugins import workflow_plugin_path
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
-from workflow_engine.node_status import NodeStatusCollector
+from workflow_engine.node_status import NodeStatusCollector, format_duration_ms
 from workflow_engine.run_log import RunLogCapture
 
 logger = logging.getLogger(__name__)
@@ -1191,6 +1191,10 @@ class WorkflowExecutor:
         session = self._session_factory()
         work_dir: Optional[str] = None
         log_capture: Optional[RunLogCapture] = None
+        # Initialized alongside log_capture so the finally block can
+        # reference the collector safely on every terminal path
+        # (node-execution-timing R4.1); reassigned by _begin_node_status.
+        collector: Optional[NodeStatusCollector] = None
         try:
             execution = session.get(WorkflowExecution, execution_id)
             if execution is None:
@@ -1597,6 +1601,13 @@ class WorkflowExecutor:
                 )
                 return
 
+            # Mid-run node-status snapshot: the pipeline finished, so
+            # pipeline nodes carry terminal statuses (and lifecycle
+            # durations) the polling node-status endpoint can serve while
+            # the run is still active (node-execution-timing R2.5).
+            # Contained best-effort write; the run proceeds on any error.
+            self._persist_node_status_snapshot(session, execution, collector)
+
             # Merge the Frame_Producer's metadata into the Run_Metadata
             # under the node's key (custom-python-source Requirement
             # 6.7) — before the trigger seeding below and therefore
@@ -1650,7 +1661,10 @@ class WorkflowExecutor:
             if self._bedrock_processor.bindings(document):
                 try:
                     tag_values = self._bedrock_processor.process(
-                        document, tag_values, work_dir
+                        document, tag_values, work_dir,
+                        **self._duration_sink_kwargs(
+                            self._bedrock_processor, collector
+                        ),
                     )
                 except Exception as e:  # noqa: BLE001 - contained per 13.7
                     failing_node_id = getattr(e, "node_id", None)
@@ -1676,6 +1690,10 @@ class WorkflowExecutor:
                     )
                     return
 
+            # Mid-run node-status snapshot after the Bedrock block
+            # (node-execution-timing R2.5). Contained best-effort write.
+            self._persist_node_status_snapshot(session, execution, collector)
+
             # LLM text-generation inference: runs after the Bedrock
             # processor (prompts can reference its merged fields) and
             # before the run is finalized and the gating/output bindings
@@ -1687,7 +1705,10 @@ class WorkflowExecutor:
             # Requirements 7.3-7.7).
             if self._llm_processor.bindings(document):
                 tag_values = self._llm_processor.process(
-                    document, tag_values, work_dir
+                    document, tag_values, work_dir,
+                    **self._duration_sink_kwargs(
+                        self._llm_processor, collector
+                    ),
                 )
                 # Truthful per-node outcomes for the llm bindings: a
                 # recorded {'error': ...} marks THAT node failed in the
@@ -1696,6 +1717,12 @@ class WorkflowExecutor:
                 # successful llm nodes are covered by mark_success_all on
                 # the success path.
                 self._mark_llm_outcomes(collector, document, tag_values)
+                # Mid-run node-status snapshot after the llm outcomes are
+                # marked (node-execution-timing R2.5). Contained
+                # best-effort write.
+                self._persist_node_status_snapshot(
+                    session, execution, collector
+                )
 
             # Output bindings run BEFORE the terminal status is
             # finalized so a binding failure surfaces into the run's
@@ -1710,6 +1737,14 @@ class WorkflowExecutor:
                     detail_sink=(
                         collector.set_detail if collector is not None else None
                     ),
+                    duration_sink=self._duration_sink(collector),
+                )
+                # Mid-run node-status snapshot after the post-run handler
+                # returned (node-execution-timing R2.5). Contained
+                # best-effort write; it can never raise, so it cannot
+                # trip the OutputBindingError handling below.
+                self._persist_node_status_snapshot(
+                    session, execution, collector
                 )
             except OutputBindingError as e:
                 failing_node_id = getattr(e, "node_id", None)
@@ -1770,6 +1805,11 @@ class WorkflowExecutor:
                 execution_id, "Workflow executor failed unexpectedly; see logs"
             )
         finally:
+            # Emit the per-node timing lines BEFORE stopping the log
+            # capture so they land inside the run's capture window exactly
+            # once on every terminal path (node-execution-timing R4.1,
+            # R4.3). Contained: a timing-log failure never affects the run.
+            self._emit_timing_logs(collector)
             if log_capture is not None:
                 log_capture.stop()
             if work_dir is not None:
@@ -1862,6 +1902,42 @@ class WorkflowExecutor:
         path — the same path every Pipeline_Configuration caller takes
         (R8.1)."""
         return collector.sink if collector is not None else None
+
+    @staticmethod
+    def _duration_sink(collector: Optional[NodeStatusCollector]):
+        """The binding-processor ``duration_sink`` for ``collector``, or None.
+
+        Maps ``(node_id, elapsed_ms)`` to
+        :meth:`NodeStatusCollector.record_invocation_duration`
+        (node-execution-timing R1.3, R1.4). None (no collector) makes the
+        processors skip timing entirely, keeping the no-collector path
+        byte-identical to today."""
+        return (
+            collector.record_invocation_duration
+            if collector is not None
+            else None
+        )
+
+    def _duration_sink_kwargs(
+        self, processor, collector: Optional[NodeStatusCollector]
+    ) -> Dict[str, Any]:
+        """The ``duration_sink=`` keyword for a directly-held processor's
+        ``process(...)`` call, or ``{}``.
+
+        Empty when there is no collector (no timing; the call is
+        byte-identical to today) or when the processor's ``process``
+        signature does not accept the keyword — injected test doubles
+        without it keep working unchanged (node-execution-timing R1.3,
+        R5.2)."""
+        duration_sink = self._duration_sink(collector)
+        if duration_sink is None:
+            return {}
+        process = getattr(processor, "process", None)
+        if process is None or not self._handler_accepts_keyword(
+            process, "duration_sink"
+        ):
+            return {}
+        return {"duration_sink": duration_sink}
 
     def _preflight_pipeline_factories(
         self,
@@ -1980,6 +2056,84 @@ class WorkflowExecutor:
                 "%s; the run's terminal status is unaffected",
                 execution.id,
             )
+
+    def _persist_node_status_snapshot(
+        self,
+        session,
+        execution: WorkflowExecution,
+        collector: Optional[NodeStatusCollector],
+    ) -> None:
+        """Persist a contained, non-finalizing mid-run snapshot of the
+        collector map to ``node_status_json`` (node-execution-timing R2.5).
+
+        Written only from the executor thread at run checkpoints (after the
+        pipeline returns, after the Bedrock block, after the LLM outcomes,
+        after the post-run handler) so nodes that already reached a terminal
+        status expose their ``durationMs`` to the polling node-status
+        endpoint while the run is still active. No status is changed and
+        nothing is finalized — the terminal :meth:`_persist_node_status`
+        remains the authoritative last write. Entirely best-effort: any
+        error is logged (debug) and swallowed, session rollback is
+        best-effort, and the run proceeds unaffected (R5.4)."""
+        if collector is None:
+            return
+        try:
+            execution.node_status_json = collector.to_json()
+            session.commit()
+        except Exception:  # noqa: BLE001 - contained per R5.4
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001 - contained
+                pass
+            logger.debug(
+                "Mid-run node_status_json snapshot failed for workflow "
+                "execution %s; the run proceeds unaffected",
+                getattr(execution, "id", None),
+                exc_info=True,
+            )
+
+    def _emit_timing_logs(
+        self, collector: Optional[NodeStatusCollector]
+    ) -> None:
+        """Emit exactly one timing log line per timed node (R4.1, R4.3).
+
+        For each node with a recorded duration, in collector insertion
+        order, emits one ``logger.info`` line —
+        ``'Node <nodeId> took <formatted>'`` (e.g. ``'Node n3 took
+        412 ms'``) — using :func:`format_duration_ms` so the run-log lines
+        follow the same formatting rules as the Run_Status_Graph (R4.2).
+        Called at the top of :meth:`execute`'s ``finally`` block, before
+        ``log_capture.stop()``, so the lines land inside the capture window
+        exactly once on every terminal path. Each line is emitted inside
+        its own ``try/except`` so one failure cannot suppress the remaining
+        lines (R4.4); a ``None`` collector emits nothing."""
+        if collector is None:
+            return
+        try:
+            node_ids = list(collector.to_map().keys())
+        except Exception:  # noqa: BLE001 - timing is best-effort (R5.4)
+            logger.debug(
+                "Could not enumerate nodes for timing log emission",
+                exc_info=True,
+            )
+            return
+        for node_id in node_ids:
+            try:
+                duration_ms = collector.duration_ms_of(node_id)
+                if duration_ms is None:
+                    continue
+                logger.info(
+                    "Node %s took %s",
+                    node_id,
+                    format_duration_ms(duration_ms),
+                )
+            except Exception:  # noqa: BLE001 - contained per R4.4
+                logger.debug(
+                    "Could not emit the timing log line for node %s; "
+                    "continuing with the remaining nodes",
+                    node_id,
+                    exc_info=True,
+                )
 
     def _mark_llm_outcomes(
         self,
@@ -2577,6 +2731,7 @@ class WorkflowExecutor:
         document: dict,
         tag_values: dict,
         detail_sink: Optional[Callable] = None,
+        duration_sink: Optional[Callable] = None,
     ) -> None:
         """Invoke the output-binding hook (task 12.4).
 
@@ -2589,15 +2744,19 @@ class WorkflowExecutor:
         ``detail_sink`` (the per-run collector's ``set_detail``, when a
         collector exists) is threaded to handlers that accept it so output
         bindings can record their sent-message / skipped-outcome details into
-        node_status_json (output-node-sent-message feature). The generic
-        ``PostRunHandler`` signature is ``(registration, document,
-        tag_values) -> None``; a handler that does not accept ``detail_sink``
+        node_status_json (output-node-sent-message feature).
+        ``duration_sink`` (the collector's ``record_invocation_duration``)
+        is threaded the same way so output bindings can report their
+        invocation durations (node-execution-timing R1.3, R1.4). The
+        generic ``PostRunHandler`` signature is ``(registration, document,
+        tag_values) -> None``; a handler that accepts neither keyword
         keeps working unchanged (backward compatibility)."""
         if self._post_run_handler is None:
             return
         try:
             self._invoke_post_run_handler(
-                registration, document, tag_values, detail_sink
+                registration, document, tag_values, detail_sink,
+                duration_sink,
             )
         except OutputBindingError:
             raise
@@ -2614,28 +2773,40 @@ class WorkflowExecutor:
         document: dict,
         tag_values: dict,
         detail_sink: Optional[Callable],
+        duration_sink: Optional[Callable] = None,
     ) -> None:
-        """Call the post-run handler, passing ``detail_sink`` only when the
-        handler accepts it (backward compatibility).
+        """Call the post-run handler, passing ``detail_sink`` and
+        ``duration_sink`` only when the handler accepts them (backward
+        compatibility).
 
         The generic ``PostRunHandler`` signature is ``(registration,
         document, tag_values) -> None``; :class:`OutputBindingProcessor`
-        additionally accepts a ``detail_sink`` keyword. Handlers that do not
-        (plain lambdas, other implementations) are invoked with the original
-        three positional arguments and keep working unchanged."""
+        additionally accepts ``detail_sink`` and ``duration_sink``
+        keywords. Handlers that do not (plain lambdas, other
+        implementations) are invoked without the keywords they don't
+        accept and keep working unchanged."""
         handler = self._post_run_handler
-        if detail_sink is not None and self._handler_accepts_detail_sink(handler):
-            handler(registration, document, tag_values, detail_sink=detail_sink)
+        kwargs: Dict[str, Any] = {}
+        if detail_sink is not None and self._handler_accepts_keyword(
+            handler, "detail_sink"
+        ):
+            kwargs["detail_sink"] = detail_sink
+        if duration_sink is not None and self._handler_accepts_keyword(
+            handler, "duration_sink"
+        ):
+            kwargs["duration_sink"] = duration_sink
+        if kwargs:
+            handler(registration, document, tag_values, **kwargs)
         else:
             handler(registration, document, tag_values)
 
     @staticmethod
-    def _handler_accepts_detail_sink(handler: Callable) -> bool:
-        """True when ``handler`` accepts a ``detail_sink`` keyword argument.
+    def _handler_accepts_keyword(handler: Callable, name: str) -> bool:
+        """True when ``handler`` accepts the keyword argument ``name``.
 
         Inspects the callable's signature (``__call__`` for instances);
         tolerates un-inspectable callables (e.g. some builtins) by returning
-        False so the original three-argument call is used."""
+        False so the original positional call is used."""
         try:
             target = handler
             if not (inspect.isfunction(handler) or inspect.ismethod(handler)):
@@ -2647,13 +2818,19 @@ class WorkflowExecutor:
         except (TypeError, ValueError):
             return False
         parameters = signature.parameters
-        if "detail_sink" in parameters:
+        if name in parameters:
             return True
         # A **kwargs-accepting handler can take the keyword too.
         return any(
             p.kind == inspect.Parameter.VAR_KEYWORD
             for p in parameters.values()
         )
+
+    @classmethod
+    def _handler_accepts_detail_sink(cls, handler: Callable) -> bool:
+        """Backward-compatible alias for the pre-generalization shim name:
+        True when ``handler`` accepts a ``detail_sink`` keyword argument."""
+        return cls._handler_accepts_keyword(handler, "detail_sink")
 
 
 def register_workflow_executor(

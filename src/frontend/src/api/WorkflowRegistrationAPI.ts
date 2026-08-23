@@ -96,6 +96,8 @@ export interface WorkflowExecutionOverlay {
 export interface NodeRunStatus {
   status: string;
   detail?: string;
+  /** Execution duration in milliseconds; additive (node-execution-timing R2.1). */
+  durationMs?: number;
 }
 
 /** Map of nodeId to its run status. */

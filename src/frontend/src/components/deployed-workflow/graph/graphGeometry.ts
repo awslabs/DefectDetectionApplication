@@ -35,6 +35,8 @@ import type {
   WorkflowGraphNode,
 } from "api/WorkflowRegistrationAPI";
 
+import { formatDuration } from "./durationFormat";
+
 /** The five recognized per-node run statuses (Node_Run_Status, R3). */
 export type RunStatus =
   | "pending"
@@ -135,6 +137,17 @@ export interface NodeVisual {
   inProgress: boolean;
   /** The error/warning detail, present only for failure/warning nodes (R7.4). */
   detail?: string;
+  /**
+   * The formatted execution duration (e.g. "412 ms", "3.4 s"), present only
+   * when the resolved status is terminal and the entry carries a valid
+   * `durationMs` (node-execution-timing R3.1, R3.2, R3.5, R3.6, R3.8).
+   */
+  durationText?: string;
+}
+
+/** True for the terminal run statuses that may display a duration (R3.1/R3.2). */
+function isTerminalStatus(status: string): boolean {
+  return status === "success" || status === "warning" || status === "failure";
 }
 
 /**
@@ -151,6 +164,11 @@ export function nodeVisual(
   const status = isRunStatus(rawStatus) ? rawStatus : "pending";
   const detail =
     shouldShowDetail(status) && entry?.detail ? entry.detail : undefined;
+  // Duration text only for terminal nodes with a valid durationMs; invalid or
+  // absent values render the node exactly as before (R3.5, R3.6, R3.8).
+  const durationText = isTerminalStatus(status)
+    ? formatDuration(entry?.durationMs) ?? undefined
+    : undefined;
   return {
     id: node.id,
     type: node.type,
@@ -161,6 +179,7 @@ export function nodeVisual(
     categoryColor: CATEGORY_COLOR[node.type] ?? UNKNOWN_CATEGORY_COLOR,
     inProgress: isInProgress(status),
     ...(detail !== undefined ? { detail } : {}),
+    ...(durationText !== undefined ? { durationText } : {}),
   };
 }
 

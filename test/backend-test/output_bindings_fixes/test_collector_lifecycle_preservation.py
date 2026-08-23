@@ -116,6 +116,34 @@ class _ReferenceCollector:
         return result
 
 
+# ---------------------------------------------------------------------------
+# Maintenance note (node-execution-timing): the node-execution-timing feature
+# added an ADDITIVE ``durationMs`` field to ``NodeStatusCollector.to_map()``
+# entries per its R2.1/R2.4 (a non-negative integer present iff a duration was
+# recorded; the existing ``status``/``detail`` fields are untouched, R5.1 —
+# every transition routes through a centralized ``_set_status`` performing the
+# identical assignments). The reference model above predates that field, so
+# the identity comparison below is restricted to the fields the ORIGINAL
+# workflow-output-bindings-fixes spec pinned: ``status`` and ``detail``. This
+# projection preserves the original Property 5 in full (status/detail
+# lifecycle identity + no downgrade); it merely ignores the intentionally
+# additive serialization field, following the same maintenance path used for
+# other intentional additive changes (see the regenerated-baseline notes in
+# edge-cv-portal/backend/layers/workflow_core/tests/
+# test_bug_catalog_preservation.py).
+# ---------------------------------------------------------------------------
+
+_PINNED_FIELDS = ("status", "detail")
+
+
+def _pinned_projection(status_map):
+    """Restrict a ``to_map()`` result to the originally-pinned fields."""
+    return {
+        node: {k: v for k, v in entry.items() if k in _PINNED_FIELDS}
+        for node, entry in status_map.items()
+    }
+
+
 def _apply_real(collector, op):
     kind = op[0]
     if kind == "sink_running":
@@ -200,14 +228,17 @@ def test_collector_lifecycle_identity(case):
     collector = NodeStatusCollector(name_map)
     reference = _ReferenceCollector(name_map)
 
-    assert collector.to_map() == reference.to_map(), (
+    # Compare only the originally-pinned status/detail fields: the additive
+    # durationMs field (node-execution-timing R2.1/R2.4) is out of scope for
+    # this preservation property (see maintenance note above).
+    assert _pinned_projection(collector.to_map()) == reference.to_map(), (
         "PRESERVATION REGRESSION (Property 5): construction seeding "
         "changed for an element-only map {0!r}".format(name_map))
 
     for index, op in enumerate(ops):
         _apply_real(collector, op)
         reference.apply(op)
-        assert collector.to_map() == reference.to_map(), (
+        assert _pinned_projection(collector.to_map()) == reference.to_map(), (
             "PRESERVATION REGRESSION (Property 5): collector diverged from "
             "today's semantics after op {0} ({1!r}):\n  actual:   {2!r}\n"
             "  expected: {3!r}".format(
