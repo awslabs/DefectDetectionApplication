@@ -163,6 +163,63 @@ class TestTerminalMapOnCompletion:
         assert result["n2"]["status"] == STATUS_SUCCESS
 
 
+class TestMarkPipelineSuccess:
+    """Pipeline_EOS terminal marking (vllm-workflow-latency-optimization,
+    Requirements 2.1, 2.2, 2.4, 2.6, 2.7)."""
+
+    def test_running_pipeline_nodes_become_success(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.mark_running_all()
+        collector.mark_pipeline_success()
+        assert collector.status_of("n1") == STATUS_SUCCESS
+        assert collector.status_of("n2") == STATUS_SUCCESS
+
+    def test_pending_pipeline_nodes_are_untouched(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.sink("videotestsrc0", "running", None)  # n1 running
+        collector.mark_pipeline_success()
+        assert collector.status_of("n1") == STATUS_SUCCESS
+        assert collector.status_of("n2") == STATUS_PENDING
+        # A pending node gets no duration at EOS (R2.7).
+        assert "durationMs" not in collector.to_map()["n2"]
+
+    def test_warning_and_failure_are_retained_with_detail(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.mark_running_all()
+        collector.sink("videotestsrc0", "warning", "flaky source")
+        collector.mark_failure("n2", "emltriton failed")
+        collector.mark_pipeline_success()
+        entries = collector.to_map()
+        assert entries["n1"]["status"] == STATUS_WARNING
+        assert entries["n1"]["detail"] == "flaky source"
+        assert entries["n2"]["status"] == STATUS_FAILURE
+        assert entries["n2"]["detail"] == "emltriton failed"
+
+    def test_binding_nodes_from_extra_node_ids_are_untouched(self):
+        collector = NodeStatusCollector(NAME_MAP, extra_node_ids=["b1"])
+        collector.mark_running_all()
+        collector.mark_pipeline_success()
+        # Pipeline nodes terminal, binding node still running (R2.4).
+        assert collector.status_of("n1") == STATUS_SUCCESS
+        assert collector.status_of("b1") == STATUS_RUNNING
+
+    def test_freezes_duration_at_eos(self):
+        collector = NodeStatusCollector(NAME_MAP)
+        collector.mark_running_all()
+        collector.mark_pipeline_success()
+        frozen = collector.to_map()["n1"]["durationMs"]
+        # Later terminal markings never overwrite the EOS duration (R2.2).
+        collector.mark_success_all()
+        collector.finalize()
+        assert collector.to_map()["n1"]["durationMs"] == frozen
+
+    def test_is_contained(self):
+        # A broken internals state must not raise out of the marking (R2.6).
+        collector = NodeStatusCollector(NAME_MAP)
+        collector._statuses = None  # force an internal error
+        collector.mark_pipeline_success()  # swallowed, no exception
+
+
 class TestTerminalMapOnFailure:
     def test_failure_attributes_exactly_the_mapped_node(self):
         collector = NodeStatusCollector(NAME_MAP)

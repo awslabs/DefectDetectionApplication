@@ -1250,6 +1250,217 @@ LLM_LOADING_BUDGET_SEC = 240
 #: Generation parameters forwarded from the compiled binding to the API.
 _LLM_GENERATION_PARAMETERS = ("max_tokens", "temperature", "top_p")
 
+#: Documented default Output_Token_Budget applied by the LLM_Binding when
+#: the node's ``max_tokens`` parameter is absent or invalid
+#: (vllm-workflow-latency-optimization Requirements 3.3, 3.4).
+DEFAULT_OUTPUT_TOKEN_BUDGET = 256
+
+
+def resolve_output_token_budget(raw: Any) -> Tuple[int, Optional[str]]:
+    """Resolve a configured ``max_tokens`` value into the effective
+    Output_Token_Budget: ``(budget, substitution_notice)``.
+
+    Valid = an integral number >= 1 (bool excluded; integral floats
+    accepted as their int value) -> ``(value, None)``. Absent (``None``)
+    -> ``(DEFAULT_OUTPUT_TOKEN_BUDGET, None)``. Anything else
+    (non-numeric, non-positive, non-integral) ->
+    ``(DEFAULT_OUTPUT_TOKEN_BUDGET, notice)`` with the notice naming the
+    rejected value (vllm-workflow-latency-optimization Requirements 3.1,
+    3.3, 3.4)."""
+    if raw is None:
+        return DEFAULT_OUTPUT_TOKEN_BUDGET, None
+    if not isinstance(raw, bool):
+        if isinstance(raw, int) and raw >= 1:
+            return raw, None
+        # ``is_integer()`` is False for inf/nan, so ``int(raw)`` below
+        # never overflows.
+        if isinstance(raw, float) and raw.is_integer() and raw >= 1:
+            return int(raw), None
+    notice = (
+        "invalid max_tokens value {0!r} (expected an integral number "
+        ">= 1); substituting the default Output_Token_Budget of "
+        "{1} tokens".format(raw, DEFAULT_OUTPUT_TOKEN_BUDGET)
+    )
+    return DEFAULT_OUTPUT_TOKEN_BUDGET, notice
+
+
+def resolve_max_image_dimension(
+    raw: Any,
+) -> Tuple[Optional[int], Optional[str]]:
+    """Resolve a configured ``max_image_dimension`` value into the
+    effective downscaling bound: ``(max_dim, invalid_notice)``.
+
+    Absent (``None``) -> ``(None, None)`` — unconfigured, silent.
+    Valid = an integral number >= 1 (bool excluded; integral floats
+    accepted as their int value, the same acceptance convention as
+    :func:`resolve_output_token_budget`) -> ``(value, None)``. Anything
+    else (non-numeric, non-positive, non-integral) -> ``(None, notice)``
+    naming the rejected value — treated as unconfigured, with the caller
+    emitting the notice as a run-log warning
+    (vllm-workflow-latency-optimization Requirement 5.8)."""
+    if raw is None:
+        return None, None
+    if not isinstance(raw, bool):
+        if isinstance(raw, int) and raw >= 1:
+            return raw, None
+        # ``is_integer()`` is False for inf/nan, so ``int(raw)`` below
+        # never overflows.
+        if isinstance(raw, float) and raw.is_integer() and raw >= 1:
+            return int(raw), None
+    notice = (
+        "invalid max_image_dimension value {0!r} (expected an integral "
+        "number >= 1); treating the image downscaling option as "
+        "unconfigured and sending captured frames unmodified".format(raw)
+    )
+    return None, notice
+
+
+def downscale_image_bytes(data: bytes, max_dim: int) -> bytes:
+    """Downscale a captured frame so its longer edge equals ``max_dim``
+    (vllm-workflow-latency-optimization Requirements 5.3, 5.7).
+
+    When the decoded image's longer edge exceeds ``max_dim``, the image
+    is resized so the longer edge equals ``max_dim`` with the aspect
+    ratio preserved (LANCZOS resampling) and re-encoded as JPEG. When
+    the longer edge is already <= ``max_dim`` the ORIGINAL bytes are
+    returned unchanged — never upscaled, byte-identical (R5.7).
+
+    Raises on decode/encode failure — the caller contains the failure
+    per R5.4 (:func:`_downscale_frame_or_original`). Pillow is imported
+    lazily so this module stays importable everywhere."""
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as image:
+        width, height = image.size
+        longer = max(width, height)
+        if longer <= max_dim:
+            return data
+        if width >= height:
+            new_size = (
+                max_dim, max(1, round(height * max_dim / float(width))))
+        else:
+            new_size = (
+                max(1, round(width * max_dim / float(height))), max_dim)
+        # Pillow >= 9.1 moved the resampling constants to
+        # ``Image.Resampling``; the fallback keeps older Pillow working.
+        resampling = getattr(Image, "Resampling", Image)
+        resized = image.resize(new_size, resampling.LANCZOS)
+    if resized.mode not in ("RGB", "L"):
+        # JPEG cannot encode e.g. RGBA/P frames; normalize to RGB.
+        resized = resized.convert("RGB")
+    buffer = io.BytesIO()
+    resized.save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def _downscale_frame_or_original(
+    data: bytes, max_dim: int, node_id: Any, port: str
+) -> bytes:
+    """Apply :func:`downscale_image_bytes` under the R5.4 containment
+    contract: a raised decode/encode failure logs one run-log WARNING
+    naming the node and the failure, and the ORIGINAL captured bytes are
+    returned so the request proceeds and the run reaches the same
+    terminal state it would reach without the downscaling failure."""
+    try:
+        return downscale_image_bytes(data, max_dim)
+    except Exception as e:  # noqa: BLE001 - downscaling is best-effort (R5.4)
+        logger.warning(
+            "LLM inference node '%s': downscaling the captured '%s' "
+            "frame to max_image_dimension %s failed (%s); sending the "
+            "original image", node_id, port, max_dim, e,
+        )
+        return data
+
+
+def _format_generation_metrics_line(
+    node_id: Any, model_name: Any, metrics: Dict[str, Any]
+) -> str:
+    """Format the run-log Generation_Phase_Breakdown line from the API's
+    ``generation_metrics`` payload dict (vllm-workflow-latency-optimization
+    Requirements 1.2, 3.5, 3.6).
+
+    The payload arrives already rendered by the manager side
+    (``GenerationPhaseBreakdown.to_payload()``): each value is an ``int``,
+    the string ``"unavailable"``, or — for the image token count of an
+    image-less request — the string ``"n/a"``. Every field is always
+    present in the line, never dropped; a missing key degrades to
+    ``"unavailable"``. The prefill label honors
+    ``prefill_includes_queueing`` (the manager-clock fallback path). The
+    truncation statement names the Output_Token_Budget exactly when the
+    payload reports ``truncated: true`` (R3.5); ``false`` renders as
+    "output not truncated" and anything else as "truncation unavailable"
+    (R3.6 — no truncation is reported)."""
+    def _ms(key: str) -> str:
+        value = metrics.get(key, "unavailable")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return "{0} ms".format(value)
+        return str(value)
+
+    def _count(key: str) -> str:
+        return str(metrics.get(key, "unavailable"))
+
+    prefill_label = (
+        "prefill (includes queueing)"
+        if metrics.get("prefill_includes_queueing") else "prefill"
+    )
+    truncated = metrics.get("truncated")
+    if truncated is True:
+        output_tokens = metrics.get("output_tokens")
+        if (isinstance(output_tokens, int)
+                and not isinstance(output_tokens, bool)):
+            truncation = ("output truncated at the output token budget "
+                          "({0})".format(output_tokens))
+        else:
+            truncation = "output truncated at the output token budget"
+    elif truncated is False:
+        truncation = "output not truncated"
+    else:
+        truncation = "truncation unavailable"
+    return (
+        "LLM generation breakdown (node {node}, model {model}): "
+        "queueing {queueing}, {prefill_label} {prefill}, "
+        "decode {decode}, prompt tokens {prompt}, image tokens {image}, "
+        "output tokens {output}; {truncation}".format(
+            node=node_id,
+            model=model_name,
+            queueing=_ms("queueing_ms"),
+            prefill_label=prefill_label,
+            prefill=_ms("prefill_ms"),
+            decode=_ms("decode_ms"),
+            prompt=_count("prompt_tokens"),
+            image=_count("image_tokens"),
+            output=_count("output_tokens"),
+            truncation=truncation,
+        )
+    )
+
+
+def _merge_generation_metrics(
+    outcome: Dict[str, Any],
+    metrics: Optional[Dict[str, Any]],
+    node_id: Any,
+) -> Dict[str, Any]:
+    """Merge a captured ``generation_metrics`` dict additively into a
+    node outcome as ``outcome["generation_metrics"]``
+    (vllm-workflow-latency-optimization Requirements 1.2, 1.5).
+
+    ``None`` (no metrics captured) is a no-op — the outcome stays
+    byte-identical to a metrics-less run. Contained: a merge failure is
+    logged at debug and the outcome is returned unchanged, never
+    affecting the node outcome shape or the run state."""
+    if metrics is None:
+        return outcome
+    try:
+        outcome["generation_metrics"] = metrics
+    except Exception:  # noqa: BLE001 - metrics are best-effort
+        logger.debug(
+            "LLM inference node %s: generation-metrics outcome merge "
+            "failed; ignored", node_id, exc_info=True,
+        )
+    return outcome
+
 
 def _default_llm_invoker(
     model_name: str,
@@ -1258,6 +1469,8 @@ def _default_llm_invoker(
     image_b64: Optional[str] = None,
     reference_b64: Optional[str] = None,
     system_prompt: Optional[str] = None,
+    *,
+    metrics_sink: Optional[Callable[[dict], None]] = None,
 ) -> str:
     """POST the rendered prompt to the local Text_Generation_API and
     return the generated text. ``requests`` is imported lazily so this
@@ -1279,6 +1492,14 @@ def _default_llm_invoker(
     8.5), when non-empty, rides the POST body verbatim as the API's
     optional ``system_prompt`` field; when ``None``/empty the body is
     byte-identical to the pre-feature request.
+
+    ``metrics_sink`` (vllm-workflow-latency-optimization Requirements
+    1.2, 1.5), when provided, receives the 200 response's additive
+    ``generation_metrics`` payload (``payload.get("generation_metrics")``,
+    which is ``None`` for a metrics-less response) before the generated
+    text is returned. The call is contained: a raising sink is logged at
+    debug and never disturbs the generated-text return or the request
+    semantics.
 
     A ``409 {'state': 'loading'}`` response (transient model warm-up) is
     re-POSTed every :data:`LLM_LOADING_POLL_INTERVAL_SEC` seconds until
@@ -1308,7 +1529,19 @@ def _default_llm_invoker(
             timeout=LLM_GENERATION_TIMEOUT_SEC,
         )
         if response.status_code == 200:
-            return str(response.json().get("generated_text", ""))
+            payload = response.json()
+            if metrics_sink is not None:
+                # Generation-metrics return path (R1.2), contained
+                # (R1.5): a sink failure never disturbs the generated
+                # text or the request semantics.
+                try:
+                    metrics_sink(payload.get("generation_metrics"))
+                except Exception:  # noqa: BLE001 - metrics are best-effort
+                    logger.debug(
+                        "generation_metrics sink raised for model %s; "
+                        "ignored", model_name, exc_info=True,
+                    )
+            return str(payload.get("generated_text", ""))
         try:
             payload = response.json()
         except ValueError:
@@ -1448,6 +1681,20 @@ class LlmInferenceProcessor:
             if raw_system is not None and str(raw_system).strip()
             else None
         )
+        # Image downscaling option (vllm-workflow-latency-optimization
+        # Requirements 5.3-5.8), resolved once per binding. Unconfigured
+        # (absent/None) ⇒ the downscaling code path below is skipped
+        # entirely, so the encoded bytes and request body stay
+        # byte-identical to pre-feature behavior (R5.6). An invalid
+        # configured value (non-positive, non-numeric, bool,
+        # non-integral) is treated as unconfigured with one run-log
+        # WARNING naming the rejected value (R5.8). No captured image ⇒
+        # no downscaling attempt (R5.5).
+        max_image_dimension, dimension_notice = resolve_max_image_dimension(
+            parameters.get("max_image_dimension"))
+        if dimension_notice is not None:
+            logger.warning(
+                "LLM inference node %s: %s", node_id, dimension_notice)
         # Captured-frame attachment (edge-vlm-image-inference
         # Requirements 2.1, 2.2, 2.3). Three capturePaths shapes:
         # - 'in' maps to a path and the resolved file is readable →
@@ -1466,7 +1713,7 @@ class LlmInferenceProcessor:
                 path = path.replace("{work_dir}", work_dir)
             try:
                 with open(path, "rb") as f:
-                    image_b64 = base64.b64encode(f.read()).decode("ascii")
+                    frame_bytes = f.read()
             except OSError as e:
                 logger.error(
                     "LLM inference node %s failed: could not read the "
@@ -1480,6 +1727,13 @@ class LlmInferenceProcessor:
                             node_id, port, path, e)
                     )
                 }
+            if max_image_dimension is not None:
+                # Downscale after the read, before base64 encoding
+                # (R5.3); a failure logs a WARNING and sends the
+                # original bytes (R5.4).
+                frame_bytes = _downscale_frame_or_original(
+                    frame_bytes, max_image_dimension, node_id, port)
+            image_b64 = base64.b64encode(frame_bytes).decode("ascii")
         # Reference-frame attachment (vlm-anomaly-reference-parity
         # Requirements 4.1, 4.2) with Bedrock's OPTIONAL semantics —
         # unlike the 'in' frame above, a missing/unreadable reference is
@@ -1500,13 +1754,46 @@ class LlmInferenceProcessor:
                     "{work_dir}", work_dir)
             try:
                 with open(reference_path, "rb") as f:
-                    reference_b64 = base64.b64encode(
-                        f.read()).decode("ascii")
+                    reference_bytes = f.read()
             except OSError as e:
                 logger.warning(
                     "LLM inference node '%s': could not read the "
                     "captured 'reference' frame from %s (%s); performing "
                     "single-image inference", node_id, reference_path, e)
+            else:
+                if max_image_dimension is not None:
+                    # Same downscaling treatment as the 'in' frame
+                    # (R5.3, R5.4): both captured images the request
+                    # sends contribute image tokens to prefill.
+                    reference_bytes = _downscale_frame_or_original(
+                        reference_bytes, max_image_dimension, node_id,
+                        "reference")
+                reference_b64 = base64.b64encode(
+                    reference_bytes).decode("ascii")
+        # Output_Token_Budget resolution (vllm-workflow-latency-
+        # optimization Requirements 3.1, 3.3, 3.4): every LLM_Binding
+        # invocation carries an explicit ``max_tokens`` — the configured
+        # value when valid, the documented 256-token default otherwise.
+        # A substitution is logged at WARNING (run-log capture is active
+        # during binding processing) naming the rejected value, so a
+        # previously-invalid configured value no longer fails the node —
+        # it generates with the documented default.
+        budget, budget_notice = resolve_output_token_budget(
+            parameters.get("max_tokens"))
+        if budget_notice is not None:
+            logger.warning(
+                "LLM inference node %s: %s", node_id, budget_notice)
+        parameters["max_tokens"] = budget
+        # Generation-metrics capture (vllm-workflow-latency-optimization
+        # Requirements 1.2, 1.5): the sink collects the invoker's 200
+        # ``generation_metrics`` payload. Only dict payloads are kept —
+        # a metrics-less response delivers None and stays a no-op.
+        captured_metrics: List[Dict[str, Any]] = []
+
+        def _capture_metrics(metrics: Any) -> None:
+            if isinstance(metrics, dict):
+                captured_metrics.append(metrics)
+
         try:
             model_name = str(parameters.get("modelName") or "")
             if image_b64 is not None and reference_b64 is not None:
@@ -1530,22 +1817,43 @@ class LlmInferenceProcessor:
                 # 2.2, 6.1) so pre-feature injected invokers keep
                 # working unchanged.
                 invoker_args = (model_name, prompt, parameters)
+            # Pre-feature arity: keywords are only supplied when needed
+            # (system_prompt when configured — json-trigger-metadata-
+            # pipeline Requirement 8.5) or accepted (metrics_sink only
+            # when the possibly-injected invoker declares it — the
+            # _accepts_keyword pattern), so injected fakes that predate
+            # either parameter keep working unchanged.
+            invoker_kwargs: Dict[str, Any] = {}
             if system_prompt is not None:
-                text = self._invoker(
-                    *invoker_args, system_prompt=system_prompt
-                )
-            else:
-                # Pre-feature arity: the keyword is only supplied when
-                # a system prompt is configured, so injected fakes that
-                # predate the system_prompt parameter keep working
-                # (json-trigger-metadata-pipeline Requirement 8.5).
-                text = self._invoker(*invoker_args)
+                invoker_kwargs["system_prompt"] = system_prompt
+            if _accepts_keyword(self._invoker, "metrics_sink"):
+                invoker_kwargs["metrics_sink"] = _capture_metrics
+            text = self._invoker(*invoker_args, **invoker_kwargs)
         except Exception as e:  # noqa: BLE001 - recorded per 7.6, not raised
             logger.error(
                 "LLM inference node %s failed: %s; other bindings are "
                 "unaffected", node_id, e,
             )
             return {"error": str(e)}
+        # Generation-metrics emission and merge (vllm-workflow-latency-
+        # optimization Requirements 1.2, 1.5, 3.5, 3.6): with a captured
+        # metrics dict, emit one INFO run-log line (run-log capture is
+        # active during binding processing) and merge the dict additively
+        # into the node outcome below. Both steps are contained — a
+        # failure logs at debug and leaves the node outcome and run
+        # state exactly as a metrics-less run.
+        generation_metrics: Optional[Dict[str, Any]] = (
+            captured_metrics[-1] if captured_metrics else None
+        )
+        if generation_metrics is not None:
+            try:
+                logger.info(_format_generation_metrics_line(
+                    node_id, model_name, generation_metrics))
+            except Exception:  # noqa: BLE001 - metrics are best-effort
+                logger.debug(
+                    "LLM inference node %s: generation-metrics run-log "
+                    "emission failed; ignored", node_id, exc_info=True,
+                )
         if anomaly_mode:
             try:
                 verdict = parse_bedrock_answer(text)
@@ -1558,13 +1866,17 @@ class LlmInferenceProcessor:
                     "LLM inference node %s failed: %s; other bindings "
                     "are unaffected", node_id, e,
                 )
-                return {"error": str(e), "generated_text": text}
+                return _merge_generation_metrics(
+                    {"error": str(e), "generated_text": text},
+                    generation_metrics, node_id)
             logger.info("LLM inference binding (node %s) processed", node_id)
             outcome = {"generated_text": text}
             outcome.update(verdict)
-            return outcome
+            return _merge_generation_metrics(
+                outcome, generation_metrics, node_id)
         logger.info("LLM inference binding (node %s) processed", node_id)
-        return {"generated_text": text}
+        return _merge_generation_metrics(
+            {"generated_text": text}, generation_metrics, node_id)
 
 
 # ---------------------------------------------------------------------------

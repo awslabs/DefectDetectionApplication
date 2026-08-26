@@ -32,7 +32,11 @@ The runtime dependency is injectable: app.py provides the started
 ``VllmRuntimeManager`` through :func:`set_runtime`, and tests override
 the FastAPI dependency :func:`get_runtime` with a fake exposing the
 same surface (``state``, ``list_models``, ``engine_args``, ``generate``,
-``generate_stream``).
+``generate_stream``). ``generate_with_breakdown`` is optional on that
+surface: when the runtime exposes it, the non-streaming handler uses it
+to add the additive ``generation_metrics`` response field; fakes
+without it keep working and simply produce no metrics
+(vllm-workflow-latency-optimization Requirements 1.1, 9.2).
 """
 
 # System Modules
@@ -564,6 +568,15 @@ async def generate_text(
     up to the configured limit under one wall-clock timeout. All request
     state is function-local, so concurrent requests are independent
     (Requirement 5.10).
+
+    When the runtime exposes ``generate_with_breakdown`` it is invoked
+    instead of ``generate`` — same arguments, same text, same error
+    surface — and a captured Generation_Phase_Breakdown adds the single
+    additive 200-response field ``generation_metrics``
+    (vllm-workflow-latency-optimization Requirements 1.1, 9.2).
+    Runtimes without the method (injected pre-feature fakes) are served
+    through ``generate`` exactly as before and produce no metrics, so
+    their response bodies stay byte-identical to pre-feature behavior.
     """
     effective = _validate(runtime, model_name, body)
     if isinstance(effective, JSONResponse):
@@ -576,6 +589,8 @@ async def generate_text(
     prompt = effective["prompt"]
     sampling_params = _sampling_params(effective)
     generate_kwargs = _generate_kwargs(effective)
+    generate_with_breakdown = getattr(
+        runtime, "generate_with_breakdown", None)
     retry_limit = get_retry_limit()
     timeout_seconds = get_timeout_seconds()
     loop = asyncio.get_running_loop()
@@ -587,12 +602,23 @@ async def generate_text(
         if remaining <= 0:
             return _timeout_response(model_name, timeout_seconds)
         try:
-            text = await asyncio.wait_for(
-                runtime.generate(
-                    model_name, prompt, sampling_params, **generate_kwargs
-                ),
-                timeout=remaining,
-            )
+            breakdown = None
+            if callable(generate_with_breakdown):
+                text, breakdown = await asyncio.wait_for(
+                    generate_with_breakdown(
+                        model_name, prompt, sampling_params,
+                        **generate_kwargs
+                    ),
+                    timeout=remaining,
+                )
+            else:
+                text = await asyncio.wait_for(
+                    runtime.generate(
+                        model_name, prompt, sampling_params,
+                        **generate_kwargs
+                    ),
+                    timeout=remaining,
+                )
             response = {"model_name": model_name, "generated_text": text}
             if generate_kwargs:
                 # Image-carrying requests report whether the model
@@ -600,6 +626,12 @@ async def generate_text(
                 # Requirement 3.6); text-only responses stay
                 # byte-identical (no new keys).
                 response["image_used"] = _image_used(runtime, model_name)
+            if breakdown is not None:
+                # Single additive metrics field; requests served without
+                # a breakdown return the pre-feature body byte-identically
+                # (vllm-workflow-latency-optimization Requirements 1.1,
+                # 9.2).
+                response["generation_metrics"] = breakdown.to_payload()
             return response
         except asyncio.TimeoutError:
             # Wall-clock expiry over the whole call, retries included

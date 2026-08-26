@@ -73,10 +73,23 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, Mapping, Optional, Union
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 from vllm_runtime import memory_budget
 from vllm_runtime.constants import UNLOAD_TOMBSTONE_NAME, VLLM_MODEL_DIR
+from vllm_runtime.generation_metrics import (
+    GenerationPhaseBreakdown,
+    build_breakdown,
+)
 from vllm_runtime.memory_budget import (
     MINIMUM_KV_CACHE_BYTES,
     PREFLIGHT_REFUSED_MARKER,
@@ -540,6 +553,29 @@ class _ManagedModel:
     #: Cached multimodal-capability answer for the loaded engine
     #: (``None`` until first queried; edge-vlm-image-inference 4.2).
     multimodal: Optional[bool] = None
+    #: Cached image placeholder token id read best-effort from the loaded
+    #: engine's model config (vllm-workflow-latency-optimization R5.1).
+    #: ``image_token_id_resolved`` distinguishes "not yet queried" from
+    #: "queried and unreadable" (``None`` is a legitimate cached answer).
+    image_token_id: Optional[int] = None
+    image_token_id_resolved: bool = False
+
+
+@dataclass
+class _GenerationCapture:
+    """Best-effort instrumentation slots for one Generation_Call
+    (vllm-workflow-latency-optimization R1.1, R1.3).
+
+    ``_request`` fills these — ``time.monotonic()`` captures just before
+    ``engine.generate``, at the first yielded output and at the last, plus
+    the final ``RequestOutput`` — inside try/except shells that never
+    disturb the yield stream (R1.5). A slot left ``None`` simply marks
+    that measurement unavailable downstream."""
+
+    t_submit: Optional[float] = None
+    t_first: Optional[float] = None
+    t_last: Optional[float] = None
+    final_output: Any = None
 
 
 def _default_engine_factory(engine_args: Mapping[str, Any]) -> Any:
@@ -891,6 +927,17 @@ class VllmRuntimeManager:
             entry.engine = engine
             entry.status = ModelStatus(ModelState.READY)
         logger.info("vLLM model '%s' is READY", model_name)
+        # Prefix_Caching load-time log (vllm-workflow-latency-optimization
+        # R4.1, R4.6): the model.json -> AsyncEngineArgs passthrough already
+        # delivers `enable_prefix_caching` to the engine unchanged; this only
+        # RECORDS that the successfully loaded engine has it active. Falsy or
+        # absent: no line, no behavior change.
+        if engine_args.get("enable_prefix_caching"):
+            logger.info(
+                "vLLM model '%s' was loaded with Prefix_Caching active "
+                "(enable_prefix_caching set in its engine arguments)",
+                model_name,
+            )
         # READY is still READY: this only adds a WARNING when the engine's
         # own KV sizing says the load is one retry from failing (2.7).
         self._warn_on_thin_kv_margin(model_name, engine)
@@ -1323,17 +1370,69 @@ class VllmRuntimeManager:
         (carrying its actual status) and :class:`GenerationError` when the
         engine reports a failure — logged with the model name and backend
         error, other models untouched (Requirements 4.6, 8.8).
+
+        Delegates to :meth:`generate_with_breakdown` and discards the
+        Generation_Phase_Breakdown, so both share one code path and this
+        method's signature and semantics stay untouched
+        (vllm-workflow-latency-optimization R9.1).
         """
+        text, _ = await self.generate_with_breakdown(
+            model_name, prompt, sampling_params, image, reference_image,
+            system_prompt,
+        )
+        return text
+
+    async def generate_with_breakdown(
+        self,
+        model_name: str,
+        prompt: str,
+        sampling_params: Optional[Mapping[str, Any]] = None,
+        image: Optional[bytes] = None,
+        reference_image: Optional[bytes] = None,
+        system_prompt: Optional[str] = None,
+    ) -> Tuple[str, Optional[GenerationPhaseBreakdown]]:
+        """Generate to completion; return the generated text together with
+        the Generation_Phase_Breakdown for the call, when one could be
+        captured (vllm-workflow-latency-optimization R1.1, R1.3, R1.4).
+
+        Additive beside :meth:`generate` (which delegates here — R9.1):
+        the text and every error path (:class:`ModelUnavailableError`,
+        :class:`GenerationError`) are exactly :meth:`generate`'s. A
+        ``None`` breakdown means capture failed or produced nothing
+        usable; the text is returned regardless — a measurement error
+        never escapes to the caller (R1.5).
+        """
+        capture = _GenerationCapture()
         final = None
         async for output in self._request(
             model_name, prompt, sampling_params, image, reference_image,
-            system_prompt,
+            system_prompt, capture=capture,
         ):
             final = output
         text = self._output_text(final)
         if text is None:
             raise GenerationError(model_name, "engine produced no output")
-        return text
+        breakdown: Optional[GenerationPhaseBreakdown] = None
+        try:
+            if capture.t_submit is not None:
+                breakdown = build_breakdown(
+                    t_submit=capture.t_submit,
+                    t_first=capture.t_first,
+                    t_last=capture.t_last,
+                    final_output=capture.final_output,
+                    image_supplied=image is not None,
+                    image_placeholder_token_id=(
+                        self._image_placeholder_token_id(model_name)
+                    ),
+                )
+        except Exception:  # noqa: BLE001 - measurement containment (R1.5)
+            logger.debug(
+                "Generation_Phase_Breakdown construction failed for model "
+                "'%s'; returning text without metrics", model_name,
+                exc_info=True,
+            )
+            breakdown = None
+        return text, breakdown
 
     async def generate_stream(
         self,
@@ -1371,9 +1470,17 @@ class VllmRuntimeManager:
         image: Optional[bytes] = None,
         reference_image: Optional[bytes] = None,
         system_prompt: Optional[str] = None,
+        capture: Optional[_GenerationCapture] = None,
     ) -> AsyncIterator[Any]:
         """Shared generate/generate_stream core: READY-check, sampling
         params construction, engine invocation, failure isolation.
+
+        When ``capture`` is supplied (the ``generate_with_breakdown``
+        path), monotonic timestamps and the final ``RequestOutput`` are
+        recorded into it best-effort: every capture statement sits inside
+        a try/except shell, so an instrumentation failure records nothing
+        and never disturbs the yield stream or the existing error paths
+        (vllm-workflow-latency-optimization R1.3, R1.5).
 
         Engine prompt trichotomy (edge-vlm-image-inference 4.1, 4.3, 4.4,
         6.3): no image → the bare prompt string exactly as pre-feature
@@ -1413,11 +1520,25 @@ class VllmRuntimeManager:
             )
         params = self._sampling_params_factory(dict(sampling_params or {}))
         request_id = uuid.uuid4().hex
+        if capture is not None:
+            try:
+                capture.t_submit = time.monotonic()
+            except Exception:  # noqa: BLE001 - capture is best-effort (R1.5)
+                capture = None
         try:
             stream = engine.generate(engine_prompt, params, request_id)
             if inspect.isawaitable(stream):
                 stream = await stream
             async for output in stream:
+                if capture is not None:
+                    try:
+                        now = time.monotonic()
+                        if capture.t_first is None:
+                            capture.t_first = now
+                        capture.t_last = now
+                        capture.final_output = output
+                    except Exception:  # noqa: BLE001 - best-effort (R1.5)
+                        capture = None
                 yield output
         except Exception as err:  # noqa: BLE001 - serve-failure isolation (4.6)
             logger.error(
@@ -1469,6 +1590,54 @@ class VllmRuntimeManager:
             if entry is not None:
                 entry.multimodal = result
         return result
+
+    def _image_placeholder_token_id(self, model_name: str) -> Optional[int]:
+        """The loaded model's image placeholder token id, read best-effort
+        from the engine's model config and cached per :class:`_ManagedModel`
+        like the ``multimodal`` flag (a reload re-reads). ``None`` means
+        unreadable — the breakdown's image token count is then honestly
+        marked unavailable (vllm-workflow-latency-optimization R1.4,
+        R5.1)."""
+        with self._lock:
+            entry = self._models.get(model_name)
+            if entry is None:
+                return None
+            if entry.image_token_id_resolved:
+                return entry.image_token_id
+            engine = entry.engine
+        result = self._read_image_token_id(engine)
+        with self._lock:
+            entry = self._models.get(model_name)
+            if entry is not None:
+                entry.image_token_id = result
+                entry.image_token_id_resolved = True
+        return result
+
+    @staticmethod
+    def _read_image_token_id(engine: Any) -> Optional[int]:
+        """Best-effort ``image_token_id`` from the engine's model config —
+        the Qwen2-VL / Qwen2.5-VL / Qwen3-VL family exposes it on the
+        hf_config. Same :func:`_safe_attr` discipline as
+        :func:`_default_kv_margin_reader`: no exception escapes, an
+        unreadable id is ``None``."""
+        try:
+            inner = _safe_attr(engine, "engine") or engine
+            model_config = _safe_attr(inner, "model_config")
+            if model_config is None:
+                model_config = _safe_attr(engine, "model_config")
+            if model_config is None:
+                return None
+            for source in (model_config, _safe_attr(model_config,
+                                                    "hf_config")):
+                if source is None:
+                    continue
+                value = _safe_attr(source, "image_token_id")
+                if (not isinstance(value, bool) and isinstance(value, int)
+                        and value >= 0):
+                    return value
+            return None
+        except Exception:  # noqa: BLE001 - introspection is best-effort
+            return None
 
     @staticmethod
     def _detect_multimodal(engine: Any) -> bool:

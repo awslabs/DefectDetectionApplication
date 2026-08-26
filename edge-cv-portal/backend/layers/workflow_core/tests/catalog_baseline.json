@@ -3225,7 +3225,7 @@
         },
         "default": 256,
         "depends_on": null,
-        "description": "Maximum tokens the model may generate for its answer, e.g. 256.",
+        "description": "Maximum tokens the model may generate for its answer, e.g. 256. The default of 256 bounds the decode phase, so it caps worst-case generation latency; longer answers are truncated at the budget. Decode time grows with the number of generated tokens, so short verdict-style answers (e.g. anomaly mode's JSON verdict) need only 20-30 tokens and finish much faster than the 256-token default allows.",
         "examples": [
           256,
           512
@@ -3280,6 +3280,22 @@
         "multiline": true,
         "name": "system_prompt",
         "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Optional maximum pixel dimension for the longer edge of captured frames sent to the model. Larger frames are downscaled (aspect preserved) before inference to cut image-token prefill cost; smaller frames are never upscaled. Empty sends frames unmodified.",
+        "examples": [
+          1024,
+          640
+        ],
+        "multiline": false,
+        "name": "max_image_dimension",
+        "param_type": "int",
         "required": false
       }
     ],

@@ -32,6 +32,9 @@ Lifecycle over a run (design §3.3):
 * :meth:`mark_running_all` (on run start) and the ``status_sink`` drive
   ``running``/``warning`` live when the pipeline reports per-element bus
   signals;
+* at Pipeline_EOS :meth:`mark_pipeline_success` transitions exactly the
+  name_map-derived pipeline nodes that are ``running`` to ``success``,
+  freezing their durations at EOS (vllm-workflow-latency-optimization R2);
 * on clean completion :meth:`mark_success_all` marks participating nodes
   ``success`` (but never downgrades a ``warning``);
 * on failure :meth:`mark_failure` marks the mapped failing node ``failure``
@@ -92,6 +95,13 @@ class NodeStatusCollector:
         for node_id in self._name_map.values():
             if node_id is not None and node_id not in self._statuses:
                 self._statuses[node_id] = STATUS_PENDING
+        # The name_map-derived Pipeline_Nodes (nodes with a pipeline
+        # element). Binding nodes seeded via ``extra_node_ids`` below are,
+        # by construction, not in it — mark_pipeline_success only ever
+        # touches this set (R2.4).
+        self._pipeline_node_ids = {
+            nid for nid in self._name_map.values() if nid is not None
+        }
         # Additional participating nodes with no pipeline element — the
         # compiled document's executorBindings node ids (llm_inference,
         # mqtt_publish, opcua_write, digital_output, bedrock_inference,
@@ -199,6 +209,24 @@ class NodeStatusCollector:
         for node_id, status in self._statuses.items():
             if status in _NON_TERMINAL_STATES:
                 self._set_status(node_id, STATUS_SUCCESS)
+
+    def mark_pipeline_success(self) -> None:
+        """Pipeline_EOS terminal marking (R2.1). For exactly the pipeline
+        nodes (name_map-derived): ``running`` -> ``success`` via
+        :meth:`_set_status` (freezing the lifecycle duration at EOS, R2.2);
+        ``warning`` retained with detail; ``failure`` retained; ``pending``
+        untouched (R2.7). Binding nodes (``extra_node_ids``) untouched
+        (R2.4). Fully contained so an EOS-marking error can never fail a
+        run (R2.6, collector best-effort discipline)."""
+        try:
+            for node_id in self._pipeline_node_ids:
+                if self._statuses.get(node_id) == STATUS_RUNNING:
+                    self._set_status(node_id, STATUS_SUCCESS)
+        except Exception:  # noqa: BLE001 - collector is best-effort (R2.6)
+            logger.debug(
+                "NodeStatusCollector.mark_pipeline_success ignored an error",
+                exc_info=True,
+            )
 
     def mark_failure(self, node_id: Optional[str], detail: Optional[str] = None) -> None:
         """Mark ``node_id`` as ``failure`` and retain its error ``detail``.

@@ -1601,6 +1601,17 @@ class WorkflowExecutor:
                 )
                 return
 
+            # Pipeline_EOS terminal marking: run_pipeline returned cleanly,
+            # so every running pipeline node is transitioned to success now,
+            # freezing its lifecycle duration at EOS instead of at run end
+            # (vllm-workflow-latency-optimization R2.1, R2.3, R2.5). The
+            # failure/timeout handlers above return before this point, so
+            # the existing finalize rules apply unchanged on those paths.
+            # Contained internally per the collector's best-effort
+            # discipline (R2.6).
+            if collector is not None:
+                collector.mark_pipeline_success()
+
             # Mid-run node-status snapshot: the pipeline finished, so
             # pipeline nodes carry terminal statuses (and lifecycle
             # durations) the polling node-status endpoint can serve while

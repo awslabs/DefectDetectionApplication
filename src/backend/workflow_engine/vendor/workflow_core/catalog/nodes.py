@@ -836,7 +836,18 @@ LLM_INFERENCE = NodeTypeDescriptor(
         ParameterDescriptor("max_tokens", "int", required=False, default=256,
                             constraints={"min": 1},
                             description="Maximum tokens the model may "
-                                        "generate for its answer, e.g. 256.",
+                                        "generate for its answer, e.g. 256. "
+                                        "The default of 256 bounds the "
+                                        "decode phase, so it caps worst-case "
+                                        "generation latency; longer answers "
+                                        "are truncated at the budget. "
+                                        "Decode time grows with the number "
+                                        "of generated tokens, so short "
+                                        "verdict-style answers (e.g. anomaly "
+                                        "mode's JSON verdict) need only "
+                                        "20-30 tokens and finish much "
+                                        "faster than the 256-token default "
+                                        "allows.",
                             examples=[256, 512]),
         ParameterDescriptor("temperature", "float", required=False, default=0.7,
                             constraints={"min": 0.0, "max": 2.0},
@@ -862,6 +873,25 @@ LLM_INFERENCE = NodeTypeDescriptor(
                             examples=["You are a meticulous visual quality "
                                       "inspector.\nAnswer concisely."],
                             multiline=True),
+        # Appended (additive — vllm-workflow-latency-optimization
+        # Requirements 3.8, 5.3): optional image-downscaling lever. The
+        # compiler copies node parameters into the executor binding's
+        # ``parameters`` untouched; the LocalServer LLM binding resolves
+        # the value and downscales captured frames before the generate
+        # request. Absent/empty means unconfigured — the executor skips
+        # the downscaling code path entirely and sends frames unmodified.
+        ParameterDescriptor("max_image_dimension", "int", required=False,
+                            default=None,
+                            constraints={"min": 1},
+                            description="Optional maximum pixel dimension "
+                                        "for the longer edge of captured "
+                                        "frames sent to the model. Larger "
+                                        "frames are downscaled (aspect "
+                                        "preserved) before inference to cut "
+                                        "image-token prefill cost; smaller "
+                                        "frames are never upscaled. Empty "
+                                        "sends frames unmodified.",
+                            examples=[1024, 640]),
     ],
     # Executor-level realization (no GStreamer element): the compiler
     # emits an ``llm_inference`` executor binding carrying the bound

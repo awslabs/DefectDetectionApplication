@@ -89,7 +89,10 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: maintenance path to cover those intentional additions. ``system_prompt``
 #: joined (and every parameter gained the ``multiline`` field) with the
 #: workflow-prompt-multiline-inputs feature; the baseline was regenerated
-#: again per the same maintenance path.
+#: again per the same maintenance path. ``max_image_dimension`` joined (and
+#: ``max_tokens``'s description gained the latency/verdict guidance) with
+#: the vllm-workflow-latency-optimization feature; the baseline was
+#: regenerated again per the same maintenance path.
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",
@@ -98,6 +101,7 @@ _LLM_PRESERVED_PARAMETERS = (
     "temperature",
     "top_p",
     "system_prompt",
+    "max_image_dimension",
 )
 
 
