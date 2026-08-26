@@ -308,9 +308,11 @@ export interface VllmRegistrationFinding {
 
 /** One engine setting of `GET /api/v1/models/vllm/engine-spec`. */
 export interface VllmEngineSettingSpec {
-  default: string | number | boolean;
-  type: 'string' | 'number' | 'integer' | 'boolean';
+  default: string | number | boolean | Record<string, number>;
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'object';
   accepted_values?: string[];
+  /** Sub-keys an `object` setting accepts (e.g. `limit_mm_per_prompt`). */
+  accepted_keys?: string[];
   range?: string;
   description: string;
 }
@@ -349,7 +351,10 @@ export interface VllmPublishedComponent {
  * enforce_eager). Returned on the model detail response (Requirement 1.2)
  * and by the engine-configuration update endpoint (Requirement 2.4).
  */
-export type VllmEngineConfiguration = Record<string, string | number | boolean>;
+export type VllmEngineConfiguration = Record<
+  string,
+  string | number | boolean | Record<string, number>
+>;
 
 /**
  * One per-architecture finding of a preflight Fit_Check evaluation.
@@ -2984,7 +2989,7 @@ class ApiService {
     model_version: string;
     huggingface_model_id?: string;
     s3_model_artifact?: string;
-    engine_configuration?: Record<string, string | number | boolean>;
+    engine_configuration?: VllmEngineConfiguration;
     description?: string;
   }): Promise<{
     training_id: string;

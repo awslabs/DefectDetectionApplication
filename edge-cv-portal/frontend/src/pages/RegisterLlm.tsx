@@ -31,6 +31,7 @@ import {
 import {
   apiService,
   ApiError,
+  VllmEngineConfiguration,
   VllmEngineSpec,
   VllmRegistrationFinding,
 } from '../services/api';
@@ -42,14 +43,34 @@ type SourceType = 'huggingface' | 's3';
 const SOURCE_XOR_FIELD = 'huggingface_model_id | s3_model_artifact';
 
 /**
+ * Render one engine value for display in a text input / constraint hint.
+ * `object`-typed settings (e.g. `limit_mm_per_prompt`) must be shown as
+ * JSON — `String({image: 1})` yields "[object Object]", which is neither
+ * readable nor re-authorable.
+ */
+export function engineDisplayValue(
+  value: string | number | boolean | Record<string, number> | null | undefined
+): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+/**
  * Convert one engine form value (kept as a string / boolean in the UI)
  * into the JSON value the API expects. Non-numeric strings are passed
  * through untouched so the backend produces its per-field finding.
+ *
+ * `object` settings are parsed from the authored JSON text: the API
+ * validates a real object (`limit_mm_per_prompt` is rejected outright when
+ * it arrives as a string), so anything that is not a JSON object — bad
+ * syntax, an array, a scalar — passes through unparsed to keep producing
+ * the backend's per-field finding rather than a silent client-side pass.
  */
 export function toEngineJsonValue(
   specType: string,
   value: string | boolean
-): string | number | boolean {
+): string | number | boolean | Record<string, number> {
   if (typeof value === 'boolean') return value;
   if (specType === 'integer') {
     return /^-?\d+$/.test(value.trim()) ? parseInt(value.trim(), 10) : value;
@@ -57,6 +78,17 @@ export function toEngineJsonValue(
   if (specType === 'number') {
     const parsed = Number(value.trim());
     return value.trim() !== '' && !Number.isNaN(parsed) ? parsed : value;
+  }
+  if (specType === 'object') {
+    try {
+      const parsed = JSON.parse(value.trim());
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, number>;
+      }
+    } catch {
+      // Unparseable text falls through untouched (backend finding).
+    }
+    return value;
   }
   return value;
 }
@@ -105,7 +137,7 @@ export default function RegisterLlm() {
           defaults[key] =
             setting.type === 'boolean'
               ? Boolean(setting.default)
-              : String(setting.default);
+              : engineDisplayValue(setting.default);
         });
         setEngineValues(defaults);
       } catch (err) {
@@ -150,7 +182,7 @@ export default function RegisterLlm() {
     setError(null);
     setFieldErrors({});
 
-    const engineConfiguration: Record<string, string | number | boolean> = {};
+    const engineConfiguration: VllmEngineConfiguration = {};
     if (engineSpec) {
       Object.entries(engineValues).forEach(([key, value]) => {
         const setting = engineSpec.settings[key];
@@ -267,15 +299,21 @@ export default function RegisterLlm() {
         description={setting.description}
         constraintText={
           setting.range
-            ? `Accepted range: ${setting.range} (default: ${setting.default})`
-            : `Default: ${setting.default}`
+            ? `Accepted range: ${setting.range} (default: ${engineDisplayValue(setting.default)})`
+            : `Default: ${engineDisplayValue(setting.default)}`
         }
         errorText={engineFieldError(key)}
       >
         <Input
           value={String(value ?? '')}
           onChange={({ detail }) => onChange(detail.value)}
-          inputMode={setting.type === 'integer' ? 'numeric' : 'decimal'}
+          inputMode={
+            setting.type === 'integer'
+              ? 'numeric'
+              : setting.type === 'object'
+                ? 'text'
+                : 'decimal'
+          }
         />
       </FormField>
     );

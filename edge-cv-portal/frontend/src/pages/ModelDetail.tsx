@@ -32,7 +32,7 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import CompilationTab from '../components/CompilationTab';
 import VllmPackagePublishSection from '../components/vllm-publish/VllmPackagePublishSection';
-import { toEngineJsonValue } from './RegisterLlm';
+import { engineDisplayValue, toEngineJsonValue } from './RegisterLlm';
 import { TrainingJob } from '../types';
 
 interface Model {
@@ -232,9 +232,11 @@ export default function ModelDetail() {
 
   // Render a stored engine setting value verbatim (booleans included) so
   // the display shows exactly what the device will load with
-  // (Requirement 1.3).
-  const formatEngineSettingValue = (value: string | number | boolean): string =>
-    String(value);
+  // (Requirement 1.3). Object settings (limit_mm_per_prompt) render as JSON
+  // rather than "[object Object]".
+  const formatEngineSettingValue = (
+    value: string | number | boolean | Record<string, number>
+  ): string => engineDisplayValue(value);
 
   // --- Engine_Configuration inline edit (Requirements 2.5, 3.5) ---
 
@@ -273,11 +275,11 @@ export default function ModelDetail() {
         values[key] =
           setting.type === 'boolean'
             ? Boolean(setting.default)
-            : String(setting.default);
+            : engineDisplayValue(setting.default);
       });
     }
     Object.entries(model?.engine_configuration || {}).forEach(([key, value]) => {
-      values[key] = typeof value === 'boolean' ? value : String(value);
+      values[key] = typeof value === 'boolean' ? value : engineDisplayValue(value);
     });
     setEngineValues(values);
     setEditingEngineConfig(true);
@@ -301,9 +303,17 @@ export default function ModelDetail() {
     // per-field finding (same rule as RegisterLlm).
     const engineConfiguration: VllmEngineConfiguration = {};
     Object.entries(engineValues).forEach(([key, value]) => {
+      const stored = model.engine_configuration?.[key];
+      // Fall back to the stored value's own shape when the spec is
+      // unavailable, so an object setting still round-trips as an object
+      // instead of being submitted as its JSON text.
       const specType =
         engineSpec?.settings[key]?.type ??
-        (typeof model.engine_configuration?.[key] === 'number' ? 'number' : 'string');
+        (typeof stored === 'number'
+          ? 'number'
+          : stored !== null && typeof stored === 'object'
+            ? 'object'
+            : 'string');
       engineConfiguration[key] = toEngineJsonValue(specType, value);
     });
 
@@ -410,9 +420,9 @@ export default function ModelDetail() {
         description={setting?.description}
         constraintText={
           setting?.range
-            ? `Accepted range: ${setting.range} (default: ${setting.default})`
+            ? `Accepted range: ${setting.range} (default: ${engineDisplayValue(setting.default)})`
             : setting
-              ? `Default: ${setting.default}`
+              ? `Default: ${engineDisplayValue(setting.default)}`
               : undefined
         }
         errorText={engineFieldError(key)}
@@ -420,7 +430,13 @@ export default function ModelDetail() {
         <Input
           value={String(value ?? '')}
           onChange={({ detail }) => onChange(detail.value)}
-          inputMode={setting?.type === 'integer' ? 'numeric' : 'decimal'}
+          inputMode={
+            setting?.type === 'integer'
+              ? 'numeric'
+              : setting?.type === 'object'
+                ? 'text'
+                : 'decimal'
+          }
         />
       </FormField>
     );
