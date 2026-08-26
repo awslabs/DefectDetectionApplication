@@ -2,5 +2,5 @@
   "src/backend/gstreamer/pipeline_builder.py": "9255c3a7beb1a4650a880c955bb6a92f197ca3f09b7048d5383a250d2073d301",
   "src/backend/workflow_engine/csi_capture.py": "193cdfcd558f2fc569ea99cdd45d89a3a9da9ca13058410a65eec88fdd7b32ee",
   "src/backend/workflow_engine/pipeline_executor.py": "56440527e5f232bbd6bc12f33c7f8b27fdcd6ce439018b3ce5e8a4f01527a16f",
-  "src/backend/workflow_engine/vendor/workflow_core/catalog/nodes.py": "b286e21d633719bcea9730263da85aeb4ab85cf6f6a54192ab74595bc170246d"
+  "src/backend/workflow_engine/vendor/workflow_core/catalog/nodes.py": "14f164b69fd3a25d1ac6b73b6fa30a676b6d1ddc695453d9693f0317e80477c5"
 }

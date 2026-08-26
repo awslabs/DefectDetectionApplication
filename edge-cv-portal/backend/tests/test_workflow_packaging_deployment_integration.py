@@ -667,8 +667,16 @@ class TestCustomPythonArtifacts:
 
             manifest = json.loads(zf.read("manifest.json"))
             assert manifest["customPythonNodeIds"] == ["pynode"]
-            # The emlpython bridge plugin ships alongside the code.
-            assert "plugins/x86_64/dda-emlpython.so" in names
+            # NO emlpython plugin ships: there is no compiled GStreamer
+            # plugin behind the `emlpython` factory. The executor's
+            # Python_Bridge rewrites the element into an appsink/appsrc
+            # pair before launch, so the catalog declares no
+            # `dda-emlpython` dependency and the packager must not go
+            # looking for one. Note the fake library above DOES seed the
+            # artifact, so this also pins that a seeded-but-undeclared
+            # plugin is never shipped.
+            assert "plugins/x86_64/dda-emlpython.so" not in names
+            assert not [n for n in names if n.startswith("plugins/")]
 
     def test_custom_python_preprocess_ships_in_every_arch_zip(
             self, env, packaging, deployments, monkeypatch):
@@ -707,8 +715,13 @@ class TestCustomPythonArtifacts:
 
                 manifest = json.loads(zf.read("manifest.json"))
                 assert manifest["customPythonNodeIds"] == ["prenode"]
-                # The emlpython bridge plugin ships alongside the code.
-                assert f"plugins/{arch}/dda-emlpython.so" in names
+                # No emlpython plugin ships, on any architecture — see the
+                # note in test_custom_python_code_and_requirements_ship_in_artifacts.
+                # This is the regression guard for the packaging failure
+                # "Plugin artifact 'dda-emlpython' for architecture
+                # '<arch>' was not found in the plugin library".
+                assert f"plugins/{arch}/dda-emlpython.so" not in names
+                assert not [n for n in names if n.startswith("plugins/")]
 
 
 # ==========================================================================

@@ -541,12 +541,15 @@ CUSTOM_PYTHON_PREPROCESS = NodeTypeDescriptor(
                                         "form.",
                             examples=["scikit-image==0.24.0"]),
     ],
-    # Same emlpython bridge element and packaged plugin dependency as the
-    # custom_python post-processing node (Requirement 1.4); the compiler
-    # derives {python_handler_path} per node id, so no compiler changes.
+    # Same emlpython bridge element as the custom_python post-processing
+    # node (Requirement 1.4); the compiler derives {python_handler_path}
+    # per node id, so no compiler changes.
+    #
+    # Like custom_python, NO plugin dependency is declared: the executor's
+    # Python_Bridge replaces the `emlpython` element with an appsink/appsrc
+    # pair, so there is no `.so` to deliver. See the note on CUSTOM_PYTHON.
     mappings=_same_on_all_archs(
         element_chain=[_element("emlpython", **{"handler-path": "{python_handler_path}"})],
-        plugin_dependencies=["dda-emlpython"],
     ),
     hardware_dependent=False,
 )
@@ -975,10 +978,22 @@ CUSTOM_PYTHON = NodeTypeDescriptor(
                             examples=[PORT_TYPE_INFERENCE_META]),
     ],
     # emlpython bridge element invoking user code (appsink/appsrc pair
-    # managed by the executor); delivered as a packaged dependency.
+    # managed by the executor).
+    #
+    # NO plugin dependency is declared, deliberately. There is no compiled
+    # GStreamer plugin behind the `emlpython` factory: the executor's
+    # Python_Bridge (`src/backend/workflow_engine/python_bridge.py`)
+    # rewrites every `emlpython` element into an
+    # `appsink name=py_in_{nodeId}` / `appsrc name=py_out_{nodeId}` pair
+    # before the launch string reaches Gst.parse_launch, so the factory is
+    # never instantiated on device. Declaring `dda-emlpython` here made the
+    # Component_Packager resolve it against the curated plugin library
+    # (`workflow-plugins/{arch}/dda-emlpython.so`), which has never existed
+    # for any architecture — every workflow containing a Custom Python node
+    # failed packaging with "Plugin artifact 'dda-emlpython' ... was not
+    # found in the plugin library". Do NOT re-add it.
     mappings=_same_on_all_archs(
         element_chain=[_element("emlpython", **{"handler-path": "{python_handler_path}"})],
-        plugin_dependencies=["dda-emlpython"],
     ),
     hardware_dependent=False,
 )

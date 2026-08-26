@@ -1319,9 +1319,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "x86_64_nvidia",
@@ -1334,9 +1332,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "arm64_jp4",
@@ -1349,9 +1345,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "arm64_jp5",
@@ -1364,9 +1358,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "arm64_jp6",
@@ -1379,9 +1371,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "arm64_jp7",
@@ -1394,9 +1384,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "sim",
@@ -1409,9 +1397,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       }
     ],
     "outputs": [
@@ -1514,9 +1500,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "x86_64_nvidia",
@@ -1529,9 +1513,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "arm64_jp4",
@@ -1544,9 +1526,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "arm64_jp5",
@@ -1559,9 +1539,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "arm64_jp6",
@@ -1574,9 +1552,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "arm64_jp7",
@@ -1589,9 +1565,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       },
       {
         "arch": "sim",
@@ -1604,9 +1578,7 @@
           }
         ],
         "executor_binding": null,
-        "plugin_dependencies": [
-          "dda-emlpython"
-        ]
+        "plugin_dependencies": []
       }
     ],
     "outputs": [

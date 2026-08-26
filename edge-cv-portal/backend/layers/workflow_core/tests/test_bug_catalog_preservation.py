@@ -93,6 +93,17 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: ``max_tokens``'s description gained the latency/verdict guidance) with
 #: the vllm-workflow-latency-optimization feature; the baseline was
 #: regenerated again per the same maintenance path.
+#:
+#: The two Custom Python descriptors (``custom_python``,
+#: ``custom_python_preprocess``) had their ``plugin_dependencies`` cleared
+#: from ``["dda-emlpython"]`` to ``[]`` — there is no compiled GStreamer
+#: plugin behind the ``emlpython`` factory (the executor's Python_Bridge
+#: rewrites it into an appsink/appsrc pair), so the declared dependency made
+#: the Component_Packager fail every Custom Python workflow on every
+#: architecture looking for a ``dda-emlpython.so`` that has never existed.
+#: Their baseline entries were regenerated per the same maintenance path;
+#: ONLY ``plugin_dependencies`` moved (element_chain, arch set and every
+#: non-mapping field are byte-identical to the previous recording).
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",
