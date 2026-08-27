@@ -94,13 +94,19 @@ class TestDeviceCompilation:
             "{work_dir}/bedrock_frame_cam.jpg",
             "{work_dir}/bedrock_frame_ref.jpg",
         ]
-        # Synthetic (nodeId null) capture chains: videoconvert ! jpegenc
-        # ! multifilesink at the end of each feeding branch.
+        # Synthetic (nodeId null) capture chains: videoconvert !
+        # capsfilter(I420) ! jpegenc ! multifilesink at the end of each
+        # feeding branch. The I420 pin joined with the Custom Python
+        # pipeline-stall fix: without it a Bayer camera source hands
+        # jpegenc RGBx and the run fails with "Output state was not
+        # configured" (measured on jetson-thor1, JP7 / GStreamer 1.24).
         for segment in document.segments:
             factories = [e["factory"] for e in segment["elements"]]
-            assert factories[-3:] == ["videoconvert", "jpegenc",
-                                      "multifilesink"]
-            for element in segment["elements"][-3:]:
+            assert factories[-4:] == ["videoconvert", "capsfilter",
+                                      "jpegenc", "multifilesink"]
+            capsfilter = segment["elements"][-3]
+            assert capsfilter["args"] == {"caps": "video/x-raw,format=I420"}
+            for element in segment["elements"][-4:]:
                 assert element["nodeId"] is None
 
     def test_binding_carries_parameters_and_capture_paths(self):
@@ -211,8 +217,8 @@ class TestDeviceCompilation:
             tuple(e["factory"] for e in branch["elements"])
             for branch in branches
         )
-        assert ("queue", "videoconvert", "jpegenc", "multifilesink") in \
-            branch_factory_lists
+        assert ("queue", "videoconvert", "capsfilter", "jpegenc",
+                "multifilesink") in branch_factory_lists
         # Every node still referenced exactly once.
         assert sorted(document.referenced_node_ids()) == [
             "bedrock", "cam", "cap", "mqtt", "ref"]
@@ -258,8 +264,8 @@ class TestDeviceCompilation:
             for branch in branches
         )
         assert any(
-            [e["factory"] for e in branch["elements"][-3:]]
-            == ["videoconvert", "jpegenc", "multifilesink"]
+            [e["factory"] for e in branch["elements"][-4:]]
+            == ["videoconvert", "capsfilter", "jpegenc", "multifilesink"]
             for branch in branches
         )
         assert sorted(document.referenced_node_ids()) == [

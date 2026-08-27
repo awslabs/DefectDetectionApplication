@@ -1288,6 +1288,17 @@ def bridge_specs(document: Dict) -> List[BridgeSpec]:
     return specs
 
 
+#: Caps pinned on every bridge appsink. Without a constraint the appsink
+#: negotiates whatever upstream proposes; measured on jetson-thor1
+#: (JP7, GStreamer 1.24) the unconstrained bridge appsink settled on
+#: RGBA64_LE caps over a 1-byte/pixel buffer, and Bayer camera sources
+#: delivered RGBx — a format the handler runtime's FORMAT_CHANNELS
+#: rejects before the user's code ever runs. Pinning RGB makes the
+#: upstream videoconvert do the conversion and guarantees the pump hands
+#: handlers a format the process_frame contract supports.
+BRIDGE_APPSINK_CAPS = "video/x-raw,format=RGB"
+
+
 def _appsink_element(node_id: str) -> Dict:
     return {
         "nodeId": node_id,
@@ -1297,6 +1308,7 @@ def _appsink_element(node_id: str) -> Dict:
             "emit-signals": True,
             "sync": False,
             "max-buffers": 1,
+            "caps": BRIDGE_APPSINK_CAPS,
         },
     }
 
@@ -1358,6 +1370,23 @@ def _split_segment(segment: Dict) -> List[Dict]:
             current["elements"].append(element)
     if segment.get("linkTo"):
         current["linkTo"] = segment["linkTo"]
+    elif (
+        current["elements"]
+        and current["elements"][-1].get("factory") == "appsrc"
+        and str(
+            current["elements"][-1].get("args", {}).get("name", "")
+        ).startswith("py_out_")
+    ):
+        # A trailing bridge appsrc with nothing downstream (a Custom
+        # Python node whose only consumers are executor bindings, e.g.
+        # mqtt_publish). An unlinked appsrc src pad fails the pipeline
+        # with "Internal data stream error / streaming stopped, reason
+        # not-linked" the moment the pump pushes into it — measured on
+        # jetson-thor1 once the preroll deadlock below was fixed.
+        # Terminate it so the pumped buffer has somewhere to go.
+        current["elements"].append(
+            {"nodeId": None, "factory": "fakesink", "args": {"sync": False}}
+        )
     parts.append(current)
     return parts
 
@@ -1552,12 +1581,32 @@ def run_bridged_pipeline(
         if message.type != Gst.MessageType.TAG:
             loop.quit()
 
-    def make_on_new_sample(bridge, src_element, caps_applied):
-        def on_new_sample(sink):
-            sample = sink.emit("pull-sample")
-            if sample is None:
-                return Gst.FlowReturn.OK
+    def make_bridge_handlers(bridge, src_element, caps_applied):
+        """The ``new-preroll`` + ``new-sample`` handler pair for one
+        bridge appsink, sharing a single pump.
+
+        BOTH signals must pump (the preroll deadlock, measured on
+        jetson-thor1): pipelines whose sinks sit downstream of a bridge
+        appsrc cannot finish prerolling until the bridge pushes a
+        buffer, but ``new-sample`` only fires in PLAYING, which the
+        pipeline cannot reach until every sink prerolls. Interrogating
+        the stalled pipeline showed it wedged in the PAUSED->PLAYING
+        async transition with un-pulled preroll samples sitting in both
+        bridge appsinks and the downstream multifilesink starved —
+        the 120 s "no EOS/ERROR" watchdog timeout every Custom Python
+        workflow hit. Pumping the preroll sample breaks the cycle; the
+        same buffer is then re-delivered as the first ``new-sample`` in
+        PLAYING, so the pump dedups on buffer identity.
+        """
+        pumped_ids = []
+
+        def pump(sample):
             buffer = sample.get_buffer()
+            identity = (buffer.pts, buffer.offset, buffer.get_size())
+            if identity in pumped_ids:
+                return Gst.FlowReturn.OK
+            pumped_ids.append(identity)
+            del pumped_ids[:-8]  # bounded: dedup only needs recent history
             ok, mapinfo = buffer.map(Gst.MapFlags.READ)
             if not ok:
                 GLib.idle_add(
@@ -1602,7 +1651,19 @@ def run_bridged_pipeline(
             src_element.emit("push-buffer", out_buffer)
             return Gst.FlowReturn.OK
 
-        return on_new_sample
+        def on_new_preroll(sink):
+            sample = sink.emit("pull-preroll")
+            if sample is None:
+                return Gst.FlowReturn.OK
+            return pump(sample)
+
+        def on_new_sample(sink):
+            sample = sink.emit("pull-sample")
+            if sample is None:
+                return Gst.FlowReturn.OK
+            return pump(sample)
+
+        return on_new_preroll, on_new_sample
 
     try:
         # Start every handler subprocess first: a missing/broken handler
@@ -1647,9 +1708,13 @@ def run_bridged_pipeline(
                     "bridge elements {0}/{1} missing from the "
                     "pipeline".format(bridge.sink_name, bridge.src_name),
                 )
-            sink.connect(
-                "new-sample", make_on_new_sample(bridge, src, [])
-            )
+            on_preroll, on_sample = make_bridge_handlers(bridge, src, [])
+            # BOTH signals pump (see make_bridge_handlers: the preroll
+            # deadlock). new-preroll fires during the PAUSED transition,
+            # new-sample in PLAYING; the shared dedup keeps the buffer
+            # that is delivered on both from being processed twice.
+            sink.connect("new-preroll", on_preroll)
+            sink.connect("new-sample", on_sample)
             # Propagate upstream EOS through the bridge boundary.
             sink.connect(
                 "eos",

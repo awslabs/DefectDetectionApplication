@@ -277,10 +277,16 @@ class TestRewriteDocument:
         rewritten = rewrite_document(BRIDGED_DOC)
 
         launch = rendering.render_launch_string(rewritten)
+        # ``caps=video/x-raw,format=RGB`` on the appsink joined with the
+        # pipeline-stall fix (test_python_bridge_pipeline_stall.py):
+        # unconstrained bridge appsinks negotiated formats the handler
+        # runtime rejects (RGBx from Bayer sources, RGBA64_LE observed
+        # on jetson-thor1). The pin was regenerated per the launch-string
+        # maintenance path; every other element is byte-identical.
         assert launch == (
             "videotestsrc num-buffers=1 ! "
             "appsink name=py_in_pynode emit-signals=true sync=false "
-            "max-buffers=1 "
+            "max-buffers=1 caps=video/x-raw,format=RGB "
             "appsrc name=py_out_pynode is-live=true format=time block=true "
             "! fakesink"
         )

@@ -745,9 +745,17 @@ def _capture_chain(path: str) -> List[dict]:
     """The synthetic frame-capture sink chain terminating a bedrock
     feeder branch: raw frames converted, JPEG-encoded, and written to
     ``path`` (multifilesink without a printf index rewrites the same
-    file per buffer, so the latest frame persists for the executor)."""
+    file per buffer, so the latest frame persists for the executor).
+
+    The I420 capsfilter between videoconvert and jpegenc is REQUIRED:
+    without it the branch inherits whatever format upstream negotiated,
+    and on a Bayer camera source that is bayer2rgb's RGBx — measured on
+    jetson-thor1 (JP7, GStreamer 1.24), jpegenc then fails the run with
+    "Output state was not configured". Pinning I420 makes the branch's
+    own videoconvert do the conversion; I420 is always encodable."""
     return [
         _synthetic("videoconvert"),
+        _synthetic("capsfilter", {"caps": "video/x-raw,format=I420"}),
         _synthetic("jpegenc"),
         _synthetic("multifilesink", {"location": path}),
     ]
