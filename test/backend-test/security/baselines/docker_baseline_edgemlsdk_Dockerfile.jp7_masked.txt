@@ -62,6 +62,17 @@ RUN NCPU=$(nproc) && \
 # is to be installed"). So the FULL tensorrt-dev dependency closure — dev,
 # headers, and the versioned runtime packages, verified against the repo's
 # Packages index at 10.14.1.48-1+cuda13.0 — is pinned explicitly below.
+#
+# The `tensorrt-dev` METApackage itself is deliberately NOT installed
+# (2026-08-27): NVIDIA republished the x86_64 repo's metadata for
+# 10.14.1.48 with a new hard dependency on
+# `libnvinfer-win-builder-resource10 (= 10.14.1.48-1+cuda13.0)` — a
+# Windows-builder resource the repo only carries at 10.16.1.11, making
+# the metapackage unsatisfiable ("you have held broken packages"; the
+# sbsa/arm64 repo's stanza for the same version is clean, so the
+# backend image is unaffected). tensorrt-dev contains no files of its
+# own: every real package it pulls in is already pinned individually
+# in this list, so dropping the metapackage changes nothing installed.
 ARG CUDNN_PKG_VERSION=9.14.0.64-1
 ARG TENSORRT_PKG_VERSION=10.14.1.48-1+cuda13.0
 RUN apt-get update && \
@@ -69,7 +80,6 @@ RUN apt-get update && \
     libcudnn9-cuda-13=${CUDNN_PKG_VERSION} \
     libcudnn9-dev-cuda-13=${CUDNN_PKG_VERSION} \
     libcudnn9-headers-cuda-13=${CUDNN_PKG_VERSION} \
-    tensorrt-dev=${TENSORRT_PKG_VERSION} \
     libnvinfer-dev=${TENSORRT_PKG_VERSION} \
     libnvinfer-lean-dev=${TENSORRT_PKG_VERSION} \
     libnvinfer-dispatch-dev=${TENSORRT_PKG_VERSION} \
