@@ -159,6 +159,7 @@ class TritonPythonModel:
     TASK_ANOMALY = "anomaly"
     TASK_OBJECT_DETECTION = "object_detection"
     CLASS_NAMES_MANIFEST_KEY = "class_names"
+    DETECTION_MANIFEST_KEY = "detection"
 
     def initialize(self, args):
         """`initialize` is called only once when the model is being loaded.
@@ -519,7 +520,20 @@ class TritonPythonModel:
                     dataset_details[TritonPythonModel.DATASET_IMAGE_HEIGHT_MANIFEST_KEY],
                 )
         log.debug(f"loaded model dataset_details = {dataset_image_dimensions}")
+        model_graph = manifest[TritonPythonModel.MODEL_GRAPH_MANIFEST_KEY]
+        # The converter writes the detection decode config (score_threshold,
+        # iou_threshold, class_names, network_input, ...) as a TOP-LEVEL
+        # manifest block, but ModelGraphFactory constructs each stage's
+        # postprocessor from the per-stage dict only. Merge the block into the
+        # stages so detection postprocessors see their configured thresholds
+        # instead of silently falling back to their defaults.
+        detection_config = manifest.get(TritonPythonModel.DETECTION_MANIFEST_KEY)
+        if isinstance(detection_config, dict):
+            for stage in model_graph.get("stages", []):
+                stage.setdefault(
+                    TritonPythonModel.DETECTION_MANIFEST_KEY, detection_config
+                )
         return (
-            ModelConfig(manifest[TritonPythonModel.MODEL_GRAPH_MANIFEST_KEY]),
+            ModelConfig(model_graph),
             dataset_image_dimensions,
         )
