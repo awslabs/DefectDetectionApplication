@@ -24,6 +24,9 @@ not modified:
 - ``GET  /workflows/registrations`` — list discovered registrations
 - ``GET  /workflows/registrations/{registration_id}`` — one registration
   with its executions (status)
+- ``GET  /workflows/registrations/{registration_id}/executions`` — the
+  most recent runs of one registration, newest first, bounded by
+  ``limit`` (HMI polling, quality-station-hmi Requirement 3.6)
 - ``POST /workflows/registrations/{registration_id}/trigger`` — trigger a
   run; invalid registrations are rejected (never runnable, 13.3)
 - ``GET  /workflows/executions/{execution_id}`` — run status
@@ -179,6 +182,44 @@ def get_workflow_registration(
     if health:
         payload["triggerHealth"] = health
     return payload
+
+
+#: Bounds for the recent-executions ``limit`` query parameter (HMI polling,
+#: Requirement 3.6): out-of-range values are clamped rather than rejected so
+#: the route never fails on a malformed-but-parseable limit.
+EXECUTIONS_LIMIT_DEFAULT = 10
+EXECUTIONS_LIMIT_MIN = 1
+EXECUTIONS_LIMIT_MAX = 50
+
+
+@router.get("/workflows/registrations/{registration_id}/executions")
+def list_registration_executions(
+    registration_id: str,
+    limit: int = EXECUTIONS_LIMIT_DEFAULT,
+    db: Session = Depends(get_db),
+) -> List[dict]:
+    """Most recent executions of one registration, newest first.
+
+    Additive route for bounded run polling (Requirement 3.6): returns
+    executions of this registration only, ordered ``started_at`` DESC with
+    ``id`` DESC as tiebreak, at most ``limit`` entries (default 10, clamped
+    to 1..50). Reuses ``execution_to_dict`` — no new response shape. 404
+    for an unknown registration. No existing route or shape changes.
+    """
+    _get_registration_or_404(registration_id, db)
+    bounded_limit = max(
+        EXECUTIONS_LIMIT_MIN, min(limit, EXECUTIONS_LIMIT_MAX)
+    )
+    executions = (
+        db.query(WorkflowExecution)
+        .filter(WorkflowExecution.registration_id == registration_id)
+        .order_by(
+            WorkflowExecution.started_at.desc(), WorkflowExecution.id.desc()
+        )
+        .limit(bounded_limit)
+        .all()
+    )
+    return [execution_to_dict(execution) for execution in executions]
 
 
 @router.post("/workflows/registrations/{registration_id}/trigger")

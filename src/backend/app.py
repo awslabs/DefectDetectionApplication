@@ -39,6 +39,7 @@ from alembic.config import Config
 # Fast api
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from asgi_correlation_id import CorrelationIdMiddleware
 from panorama import trace as emltriton_trace
@@ -186,6 +187,20 @@ app.include_router(health.router)
 # pre-feature router set (Requirements 4.1, 8.3).
 if VLLM_AVAILABLE:
     app.include_router(text_generation.router)
+
+# Quality Station HMI static bundle (quality-station-hmi, Requirement 6.7):
+# serve the pre-built HMI single-page app same-origin with the API it
+# consumes, so the kiosk browser needs nothing beyond static assets. The
+# mount carries no auth dependency — static assets hold no secrets, and
+# every data route the HMI calls still requires the Session_Token. Guarded
+# by directory existence so devices without the HMI bundle behave
+# byte-identically to today (no mount, no route changes).
+HMI_DIST_DIR = os.environ.get(
+    "HMI_DIST_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "hmi", "dist"),
+)
+if os.path.isdir(HMI_DIST_DIR):
+    app.mount("/hmi", StaticFiles(directory=HMI_DIST_DIR, html=True), name="hmi")
 
 
 def cleanup_workflow_digital_inputs():
