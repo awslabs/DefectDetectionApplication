@@ -296,9 +296,13 @@ def test_mixed_bedrock_and_llm_document_merges_sanely():
         llm = LlmInferenceProcessor(invoker=RecordingInvoker(text=llm_answer))
         metadata = llm.process(document, metadata)
 
-        # Bedrock's nested record survives; llm's nested record is
+        # Bedrock's nested record survives (now carrying the nested
+        # verdict keys — detection-guided-bedrock-inspection
+        # Requirement 4.1, mirroring llm's); llm's nested record is
         # complete; the flat verdict is the llm node's (last writer).
-        assert metadata["bedrock"] == {"bedrock1": {"text": bedrock_answer}}
+        assert metadata["bedrock"] == {"bedrock1": {
+            "text": bedrock_answer,
+            "is_anomalous": False, "confidence": 0.4}}
         assert metadata["bedrock_text"] == bedrock_answer
         assert metadata["llm"] == {"llm1": {
             "generated_text": llm_answer,

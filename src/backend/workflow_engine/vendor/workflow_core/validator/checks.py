@@ -188,6 +188,23 @@ CODE_W1_UNUSED_OUTPUT_PORT = "W1_UNUSED_OUTPUT_PORT"
 # configured with only static JSON gets none.
 CODE_W2_METADATA_NO_TRIGGER = "W2_METADATA_NO_TRIGGER"
 
+# Detection-guided Bedrock inspection checks
+# (detection-guided-bedrock-inspection Requirements 3.6, 6.2, 6.3): a
+# ``bedrock_inference`` node's ``reference_payload_path`` and a fed
+# ``reference`` frame port are mutually exclusive reference sources
+# (error); ``crop_detection_index`` without any ``model_inference`` node
+# in the graph can never resolve a detection (warning); and
+# ``reference_payload_path`` without any CATEGORY_TRIGGER node has no
+# trigger payload to resolve against at runtime (warning). Range
+# violations (a negative ``crop_detection_index``, a
+# ``crop_margin_percent`` outside 0-100) are deliberately NOT
+# re-implemented here: the catalog descriptors carry ``min``/``max``
+# constraints, so V4 reports them through the existing
+# descriptor-constraint mechanism (Requirement 6.4).
+CODE_BEDROCK_REFERENCE_CONFLICT = "BEDROCK_REFERENCE_CONFLICT"
+CODE_BEDROCK_CROP_NO_MODEL = "BEDROCK_CROP_NO_MODEL"
+CODE_BEDROCK_PAYLOAD_NO_TRIGGER = "BEDROCK_PAYLOAD_NO_TRIGGER"
+
 # Model-reference resolution against a registry snapshot
 # (vllm-triton-inference Requirements 6.5, 6.12): the reference names no
 # record in the snapshot, or the record's model type does not match the
@@ -218,6 +235,21 @@ TYPE_OPCUA_SUBSCRIBE = "opcua_subscribe"
 #: Requirement 6). V10 and W2 fire only on nodes of this type, so
 #: metadata-free graphs produce identical findings (Requirement 8.1).
 TYPE_METADATA = "metadata"
+
+#: Inference node type calling the Bedrock Converse API; the
+#: detection-guided inspection checks fire only on nodes of this type,
+#: so Bedrock-free graphs produce identical findings.
+TYPE_BEDROCK_INFERENCE = "bedrock_inference"
+
+#: Inference node type running the deployed vision model; its presence
+#: is what populates the run's detection list, so ``crop_detection_index``
+#: is meaningless without it (Requirement 6.2).
+TYPE_MODEL_INFERENCE = "model_inference"
+
+#: The reference-image input port on ``bedrock_inference`` nodes; a fed
+#: reference port and ``reference_payload_path`` are mutually exclusive
+#: reference sources (Requirement 3.6).
+BEDROCK_REFERENCE_PORT = "reference"
 
 #: The subscription trigger node types whose presence engages the V9
 #: mixed-activation-model rule (``digital_input`` is deliberately absent:
@@ -305,6 +337,7 @@ def validate(
     findings.extend(_check_v9(graph, typed_nodes))
     findings.extend(_check_v10_metadata(graph, typed_nodes))
     findings.extend(_check_w2_metadata_no_trigger(graph, typed_nodes))
+    findings.extend(_check_bedrock_inspection(graph, typed_nodes))
     if model_registry is not None:
         findings.extend(_check_model_references(graph, typed_nodes, model_registry))
 
@@ -1067,4 +1100,103 @@ def _check_w2_metadata_no_trigger(graph: WorkflowGraph, typed_nodes: Dict[str, N
             "runtime".format(node.id, len(mappings)),
             node_id=node.id,
         ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# Detection-guided Bedrock inspection checks
+# (detection-guided-bedrock-inspection Requirements 3.6, 6.2, 6.3, 6.4)
+# --------------------------------------------------------------------------
+
+def _check_bedrock_inspection(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """Validate the detection-guided inspection parameters on every
+    ``bedrock_inference`` node — at most one finding per rule per node.
+
+    Three rules:
+
+    - ``BEDROCK_REFERENCE_CONFLICT`` (error, Requirement 3.6): the node
+      sets ``reference_payload_path`` AND its ``reference`` input port is
+      fed by at least one connection. The two reference sources are
+      mutually exclusive on one node — the executor cannot honor both.
+    - ``BEDROCK_CROP_NO_MODEL`` (warning, Requirement 6.2): the node sets
+      ``crop_detection_index`` in a graph with no ``model_inference``
+      node, so no detection model can populate the Detection_List the
+      index selects from at runtime.
+    - ``BEDROCK_PAYLOAD_NO_TRIGGER`` (warning, Requirement 6.3): the node
+      sets ``reference_payload_path`` in a graph with no
+      ``CATEGORY_TRIGGER`` node, so no trigger payload will exist to
+      resolve the dotted path against at runtime (mirroring W2's
+      trigger-presence rule for metadata mappings).
+
+    Range constraints — a negative ``crop_detection_index`` or a
+    ``crop_margin_percent`` outside 0-100 (Requirement 6.4) — are
+    deliberately NOT re-implemented here: the catalog descriptors carry
+    ``min``/``max`` constraints, so V4 already reports them through the
+    existing descriptor-constraint mechanism.
+
+    The check fires only on ``bedrock_inference``-typed nodes with a
+    known descriptor, so graphs without the new parameters produce
+    identical findings (Requirement 7 posture: purely additive).
+    """
+    fed_reference_nodes = {
+        connection.target.node
+        for connection in graph.connections
+        if connection.target.port == BEDROCK_REFERENCE_PORT
+    }
+    has_model_inference = any(
+        node.type == TYPE_MODEL_INFERENCE for node in graph.nodes
+    )
+    has_trigger = any(
+        descriptor.category == CATEGORY_TRIGGER
+        for descriptor in typed_nodes.values()
+    )
+
+    findings = []
+    for node in graph.nodes:
+        if node.type != TYPE_BEDROCK_INFERENCE:
+            continue
+        descriptor = typed_nodes.get(node.id)
+        if descriptor is None:
+            continue
+        values = {
+            parameter.name: _effective_value(node, parameter)
+            for parameter in descriptor.parameters
+        }
+        payload_path = values.get("reference_payload_path")
+        has_payload_path = (
+            isinstance(payload_path, str) and payload_path.strip() != ""
+        )
+        has_crop_index = values.get("crop_detection_index") is not None
+
+        if has_payload_path and node.id in fed_reference_nodes:
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_BEDROCK_REFERENCE_CONFLICT,
+                "Node '{0}': 'reference_payload_path' is set and the "
+                "'reference' input port is connected — the two reference "
+                "sources are mutually exclusive on one node".format(node.id),
+                node_id=node.id,
+            ))
+
+        if has_crop_index and not has_model_inference:
+            findings.append(ValidationFinding(
+                SEVERITY_WARNING,
+                CODE_BEDROCK_CROP_NO_MODEL,
+                "Node '{0}': 'crop_detection_index' is set but the "
+                "workflow has no 'model_inference' node, so no detection "
+                "model can populate the detection list it selects "
+                "from".format(node.id),
+                node_id=node.id,
+            ))
+
+        if has_payload_path and not has_trigger:
+            findings.append(ValidationFinding(
+                SEVERITY_WARNING,
+                CODE_BEDROCK_PAYLOAD_NO_TRIGGER,
+                "Node '{0}': 'reference_payload_path' is set but the "
+                "workflow has no trigger node, so no trigger payload will "
+                "exist to resolve the path against at "
+                "runtime".format(node.id),
+                node_id=node.id,
+            ))
     return findings

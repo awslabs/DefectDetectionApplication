@@ -162,7 +162,12 @@ class TestSingleAvailablePrimaryImageIsSufficient:
         # (bedrock-response-mode Requirement 5): anomaly mode now ALSO
         # records the raw answer text as bedrock_text /
         # bedrock.{nodeId}.text.
+        # Intended contract change (detection-guided-bedrock-inspection
+        # Requirement 4.1): the anomaly verdict ALSO lands nested under
+        # bedrock.{nodeId}.is_anomalous / .confidence.
         assert metadata == {
             "existing": "kept", "is_anomalous": True, "confidence": 0.9,
             "bedrock_text": invoker.answer,
-            "bedrock": {"bedrock1": {"text": invoker.answer}}}
+            "bedrock": {"bedrock1": {
+                "text": invoker.answer,
+                "is_anomalous": True, "confidence": 0.9}}}

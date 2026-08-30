@@ -267,6 +267,21 @@ def node_parameters_strategy(draw, descriptor, forced: Optional[Dict[str, Any]] 
             or has_broker_host
         ):
             parameters["greengrass"] = True
+
+    # detection-guided-bedrock-inspection (Requirements 3.6, 6.2, 6.3):
+    # the graph builders always feed a generated bedrock_inference node's
+    # 'reference' input port (see add_bedrock_node), so a drawn non-empty
+    # reference_payload_path would make the graph genuinely invalid
+    # (BEDROCK_REFERENCE_CONFLICT error — the two reference sources are
+    # mutually exclusive), and a drawn crop_detection_index in a graph
+    # without a model_inference node (or reference_payload_path without
+    # a trigger) draws warning findings the valid-graph properties do
+    # not expect. Valid-graph generation therefore omits the
+    # detection-inspection parameters; the dedicated validator tests
+    # exercise them directly.
+    if getattr(descriptor, "type_id", None) == "bedrock_inference":
+        parameters.pop("crop_detection_index", None)
+        parameters.pop("reference_payload_path", None)
     return parameters
 
 

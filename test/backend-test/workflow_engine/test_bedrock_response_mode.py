@@ -164,12 +164,19 @@ def test_anomaly_mode_appends_canonical_instruction(
         assert len(invoker.calls) == 1
         assert invoker.calls[0]["prompt"] == (
             prompt + "\n\n" + BEDROCK_JSON_INSTRUCTION)
+        # Intended contract change (detection-guided-bedrock-inspection
+        # Requirement 4.1): the anomaly verdict ALSO lands nested under
+        # bedrock.{nodeId}.is_anomalous / .confidence.
         assert metadata == {
             "existing": "kept",
             "is_anomalous": is_anomalous,
             "confidence": confidence,
             "bedrock_text": answer,
-            "bedrock": {"bedrock1": {"text": answer}},
+            "bedrock": {"bedrock1": {
+                "text": answer,
+                "is_anomalous": is_anomalous,
+                "confidence": confidence,
+            }},
         }
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -244,9 +251,15 @@ def test_anomaly_mode_records_full_raw_answer(
         # Verdict merged as today (5.1).
         assert metadata["is_anomalous"] is is_anomalous
         assert metadata["confidence"] == confidence
-        # The FULL raw answer recorded — prose and all (5.1).
+        # The FULL raw answer recorded — prose and all (5.1) — beside
+        # the nested per-node verdict keys
+        # (detection-guided-bedrock-inspection Requirement 4.1).
+        assert metadata["bedrock"] == {"bedrock1": {
+            "text": answer,
+            "is_anomalous": is_anomalous,
+            "confidence": confidence,
+        }}
         assert metadata["bedrock_text"] == answer
-        assert metadata["bedrock"] == {"bedrock1": {"text": answer}}
         # {bedrock_text} is a working template placeholder (5.2).
         assert render_template("{bedrock_text}", metadata) == answer
     finally:
@@ -388,6 +401,10 @@ def test_mixed_modes_merge_verdict_and_text(tmp_path):
     assert metadata["confidence"] == 0.8
     assert metadata["bedrock_text"] == \
         "The part looks scratched near the top edge."
+    # The anomaly node's nested entry also carries its verdict keys
+    # (detection-guided-bedrock-inspection Requirement 4.1); the
+    # freeform node's entry is text-only as today.
     assert metadata["bedrock"] == {
-        "verdict-node": {"text": verdict_answer},
+        "verdict-node": {"text": verdict_answer,
+                         "is_anomalous": True, "confidence": 0.8},
         "text-node": {"text": "The part looks scratched near the top edge."}}

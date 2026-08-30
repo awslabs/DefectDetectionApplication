@@ -207,10 +207,14 @@ class TestBedrockInferenceProcessor:
         metadata = processor.process(
             make_document(), {"existing": "kept"}, str(tmp_path))
 
+        # Intended contract change (detection-guided-bedrock-inspection
+        # Requirement 4.1): the anomaly verdict ALSO lands nested under
+        # bedrock.{nodeId}.is_anomalous / .confidence.
         assert metadata == {
             "existing": "kept", "is_anomalous": True, "confidence": 0.9,
             "bedrock_text": answer,
-            "bedrock": {"bedrock1": {"text": answer}}}
+            "bedrock": {"bedrock1": {
+                "text": answer, "is_anomalous": True, "confidence": 0.9}}}
         assert len(invoker.calls) == 1
         call = invoker.calls[0]
         assert call["model"] == "us.amazon.nova-lite-v1:0"
@@ -270,7 +274,9 @@ class TestBedrockInferenceProcessor:
         assert metadata == {
             "is_anomalous": True, "confidence": 0.9,
             "bedrock_text": invoker.answer,
-            "bedrock": {"bedrock1": {"text": invoker.answer}}}
+            "bedrock": {"bedrock1": {
+                "text": invoker.answer,
+                "is_anomalous": True, "confidence": 0.9}}}
         assert len(invoker.calls) == 1
         assert invoker.calls[0]["images"] == [("Input image", JPEG_BYTES_IN)]
 
@@ -292,7 +298,9 @@ class TestBedrockInferenceProcessor:
         assert metadata == {
             "is_anomalous": True, "confidence": 0.9,
             "bedrock_text": invoker.answer,
-            "bedrock": {"bedrock1": {"text": invoker.answer}}}
+            "bedrock": {"bedrock1": {
+                "text": invoker.answer,
+                "is_anomalous": True, "confidence": 0.9}}}
         assert len(invoker.calls) == 1
         assert invoker.calls[0]["images"] == [("Input image", JPEG_BYTES_IN)]
 
@@ -445,7 +453,8 @@ class TestExecutorIntegration:
         assert received == [{
             "is_anomalous": True, "confidence": 0.93,
             "bedrock_text": answer,
-            "bedrock": {"bedrock1": {"text": answer}},
+            "bedrock": {"bedrock1": {
+                "text": answer, "is_anomalous": True, "confidence": 0.93}},
             "trigger": {}}]
         row = get_execution(session_factory)
         assert row.status == EXECUTION_STATUS_COMPLETED

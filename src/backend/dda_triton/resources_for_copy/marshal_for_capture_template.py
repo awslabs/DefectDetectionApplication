@@ -237,6 +237,35 @@ class TritonPythonModel:
             )
         return overlay
 
+    @staticmethod
+    def _write_detections_sidecar(capture_folder, capture_id, detection_data):
+        """Best-effort atomic write of ``{capture_folder}/{capture_id}.
+        detections.json`` carrying ``detection_data`` (the exact
+        ``{"detections": {...}}`` payload the capture-record block encodes).
+
+        Written temp-then-rename in the destination directory so readers
+        never observe a partial file. ANY failure (missing/unwritable
+        folder, serialization error) is logged and swallowed — the sidecar
+        must never fail inference (workflow-engine Requirement 1.8
+        containment posture)."""
+        try:
+            if not capture_folder or not capture_id:
+                return
+            final_path = os.path.join(
+                capture_folder, "{0}.detections.json".format(capture_id)
+            )
+            tmp_path = "{0}.tmp".format(final_path)
+            with open(tmp_path, "w") as sidecar_file:
+                json.dump(detection_data, sidecar_file)
+            os.rename(tmp_path, final_path)
+        except Exception:  # noqa: BLE001 - best-effort, never fail inference
+            log.warning(
+                "Could not write detections sidecar for capture %s in %s",
+                capture_id,
+                capture_folder,
+                exc_info=True,
+            )
+
     def _generate_capture_meta_data(
         self,
         capture_meta_data,
@@ -438,6 +467,21 @@ class TritonPythonModel:
                 }
                 idx += 1
             detection_data = {"detections": det_map}
+            # Detections sidecar (detection-guided-bedrock-inspection,
+            # design Risk 1 fallback): the capture record only lands at
+            # {output_dir}/{capture_id}.jsonl when a terminal emlcapture
+            # element publishes the broker file targets — a graph WITHOUT a
+            # capture node never routes them, so the workflow engine's
+            # read_detections would find nothing. Persist the same
+            # detections map directly from the marshal, keyed by capture
+            # id, so the reader has a marshal-owned source that does not
+            # depend on capture-node routing. Best-effort: a sidecar write
+            # failure must never fail inference.
+            self._write_detections_sidecar(
+                capture_meta_data.get("capture_folder", ""),
+                capture_id,
+                detection_data,
+            )
             detection_str = json.dumps(detection_data)
             detection_str_encoded = base64.b64encode(detection_str.encode()).decode()
             ret["deviceFleetAuxiliaryOutputs"].append(

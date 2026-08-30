@@ -215,10 +215,17 @@ def test_both_frames_call_shape_and_merge_unchanged(
         }], ("PRESERVATION REGRESSION (Property 2): the both-frames "
              "invoker call changed: {0!r}".format(invoker.calls))
         expected = dict(tag_values)
+        # Intended contract change (detection-guided-bedrock-inspection
+        # Requirement 4.1): the anomaly verdict ALSO lands nested under
+        # bedrock.{nodeId}.is_anomalous / .confidence; the flat keys
+        # and the invoker call shape stay pinned above.
         expected.update({
             "is_anomalous": is_anomalous, "confidence": confidence,
             "bedrock_text": answer,
-            "bedrock": {node_id: {"text": answer}},
+            "bedrock": {node_id: {
+                "text": answer,
+                "is_anomalous": is_anomalous, "confidence": confidence,
+            }},
         })
         assert metadata == expected, (
             "PRESERVATION REGRESSION (Property 2): merged metadata "

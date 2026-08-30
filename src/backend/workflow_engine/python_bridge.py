@@ -62,12 +62,17 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
+
+from workflow_engine import detections
 
 logger = logging.getLogger(__name__)
 
 #: Factory name the compiler emits for custom_python nodes.
 BRIDGE_FACTORY = "emlpython"
+#: Factory name the compiler emits for model_inference nodes (the
+#: proprietary Triton inference element).
+MODEL_INFERENCE_FACTORY = "emltriton"
 #: Element argument carrying the handler path (relative to the
 #: Workflow_Component artifact directory).
 HANDLER_PATH_ARG = "handler-path"
@@ -1485,6 +1490,168 @@ def build_producer_bridge(feed, artifact_path: str) -> CustomPythonBridge:
 
 
 # ---------------------------------------------------------------------------
+# Detections injection for stream-downstream custom nodes
+# (detection-guided-bedrock-inspection, Requirement 1.10)
+# ---------------------------------------------------------------------------
+
+#: Poll budget for the bridge pump's detections read: the marshal writes
+#: the capture record while ``emltriton`` processes the buffer — before
+#: that same buffer reaches the bridge appsink — but the broker file
+#: write may be asynchronous, so the pump waits a bounded time for the
+#: record to land (design Risk 2). Budget exhaustion is a degraded path
+#: (metadata keys absent, warning in the run log), never a failure.
+DETECTIONS_POLL_BUDGET_SEC = 2.0
+#: Interval between detections poll attempts.
+DETECTIONS_POLL_INTERVAL_SEC = 0.05
+
+
+def detection_downstream_node_ids(document: Dict) -> FrozenSet[str]:
+    """The custom-python node ids stream-downstream of a
+    ``model_inference`` element in the compiled document.
+
+    Determined from segment element order: within a segment, a bridge
+    (``emlpython``) element is downstream when an ``emltriton`` element
+    precedes it; the state propagates across segment links — a segment
+    ``from`` a tee inherits the state at the tee's position, and a
+    funnel is downstream when any segment feeding it (``linkTo``) ends
+    downstream. Computed to fixpoint so segment order in the document
+    does not matter.
+
+    Covers both ``custom_python`` and ``custom_python_preprocess``
+    nodes — the compiler emits the same ``emlpython`` factory for both.
+    """
+    segments = [
+        segment
+        for segment in (document or {}).get("segments", [])
+        if isinstance(segment, dict)
+    ]
+    downstream_nodes: set = set()
+    named_state: Dict[str, bool] = {}  # element name -> downstream there
+    link_state: Dict[str, bool] = {}  # funnel name -> a feeder is downstream
+    changed = True
+    while changed:
+        changed = False
+        for segment in segments:
+            state = bool(named_state.get(segment.get("from"), False))
+            for element in segment.get("elements", []):
+                if not isinstance(element, dict):
+                    continue
+                factory = element.get("factory")
+                if factory == BRIDGE_FACTORY and state:
+                    node_id = element.get("nodeId")
+                    if node_id is not None and node_id not in downstream_nodes:
+                        downstream_nodes.add(node_id)
+                        changed = True
+                if factory == MODEL_INFERENCE_FACTORY:
+                    state = True
+                name = (element.get("args") or {}).get("name")
+                if name:
+                    # A funnel merges streams: downstream when any
+                    # feeding segment ends downstream.
+                    state = state or bool(link_state.get(name, False))
+                    if state and not named_state.get(name, False):
+                        named_state[name] = True
+                        changed = True
+            link_to = segment.get("linkTo")
+            if link_to and state and not link_state.get(link_to, False):
+                link_state[link_to] = True
+                changed = True
+    return frozenset(downstream_nodes)
+
+
+class DetectionsInjector:
+    """Builds the per-frame metadata the bridge pump hands to custom
+    node handlers, injecting the run's Detection_List for nodes
+    stream-downstream of ``model_inference`` (Requirement 1.10).
+
+    For a downstream node the injector polls
+    ``detections.read_detections`` (via ``detections.merge_detections``)
+    up to ``poll_budget_sec`` with ``poll_interval_sec`` between
+    attempts, then merges ``detections``/``detection_count``
+    (Detection_IDs included) into the frame metadata. The Detection_List
+    is built through the **shared run-state cache** — the same ``cache``
+    dict the executor passes to its post-pipeline
+    ``detections.merge_detections`` call — so the handler and every
+    post-pipeline consumer see identical entries with identical
+    Detection_IDs (design Property 1).
+
+    Budget exhaustion is a degraded path: the metadata keys stay absent
+    and a warning lands in the run log — never a failure. Nodes NOT
+    downstream of ``model_inference`` get byte-identical metadata to
+    today's (the empty dict), with no poll and no file access.
+
+    Constructed by the executor per run (the executor owns
+    ``output_dir``/``capture_id``, the registration's graph document,
+    and the run-state cache) and handed to :func:`run_bridged_pipeline`
+    via its optional ``detections_injector`` parameter.
+    """
+
+    def __init__(
+        self,
+        downstream_node_ids,
+        output_dir: Optional[str],
+        capture_id: Optional[str],
+        graph_document: Optional[dict] = None,
+        cache: Optional[dict] = None,
+        poll_budget_sec: float = DETECTIONS_POLL_BUDGET_SEC,
+        poll_interval_sec: float = DETECTIONS_POLL_INTERVAL_SEC,
+    ) -> None:
+        self._downstream_node_ids = frozenset(downstream_node_ids or ())
+        self._output_dir = output_dir
+        self._capture_id = capture_id
+        self._graph_document = graph_document
+        #: The shared run-state cache (``detections.CACHE_KEY_DETECTIONS``):
+        #: the executor passes the SAME dict to its post-pipeline
+        #: ``merge_detections`` call, pinning ID identity (Property 1).
+        self.cache = cache if cache is not None else {}
+        self._poll_budget_sec = poll_budget_sec
+        self._poll_interval_sec = poll_interval_sec
+        self._exhausted = False
+
+    def metadata_for(self, node_id: Optional[str]) -> Dict[str, Any]:
+        """The metadata dict for one frame dispatch to ``node_id``.
+
+        Downstream nodes get ``{"detections": [...], "detection_count":
+        N}`` when the run's detections are (or become, within the poll
+        budget) readable; otherwise — and for every non-downstream
+        node — the empty dict, byte-identical to today's dispatch.
+        """
+        metadata: Dict[str, Any] = {}
+        if node_id not in self._downstream_node_ids:
+            return metadata
+        deadline = time.monotonic() + self._poll_budget_sec
+        while True:
+            merged = detections.merge_detections(
+                metadata,
+                self._output_dir,
+                self._capture_id,
+                self._graph_document,
+                self.cache,
+            )
+            if merged is not None:
+                return metadata
+            if self._exhausted:
+                # The budget was already spent for this run; do not
+                # stall subsequent frames (one cheap read per frame in
+                # case the record lands late).
+                return metadata
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(self._poll_interval_sec, remaining))
+        self._exhausted = True
+        logger.warning(
+            "Custom Python node '%s': the run's detections were not "
+            "readable within the %.1fs poll budget; dispatching frames "
+            "without 'detections'/'detection_count' metadata "
+            "(Requirement 1.10 degraded path)",
+            node_id,
+            self._poll_budget_sec,
+        )
+        return metadata
+
+
+# ---------------------------------------------------------------------------
 # GStreamer wiring (lazy gi import; mirrors GstPipelineManager.run_pipeline)
 # ---------------------------------------------------------------------------
 
@@ -1512,6 +1679,7 @@ def run_bridged_pipeline(
     bridges: List[CustomPythonBridge],
     latency_metrics=None,
     frame_data: Optional[Dict[str, Any]] = None,
+    detections_injector: Optional[DetectionsInjector] = None,
 ) -> dict:
     """Run a rewritten launch string, pumping each appsink through its
     node's subprocess and into the paired appsrc.
@@ -1530,6 +1698,13 @@ def run_bridged_pipeline(
     ``GstPipelineManager.run_pipeline`` implements (Requirement 7.4).
     ``frame_data=None`` (every pre-existing caller) changes nothing
     (Requirement 11.1).
+
+    ``detections_injector`` (optional) supplies the per-node frame
+    metadata: the pump asks it — before each frame dispatch — for the
+    node's metadata, injecting the run's Detection_List for custom
+    nodes stream-downstream of ``model_inference`` (Requirement 1.10).
+    ``detections_injector=None`` (every pre-existing caller) keeps the
+    dispatched metadata byte-identical to today's empty dict.
     """
     import gi
 
@@ -1633,10 +1808,20 @@ def run_bridged_pipeline(
                 if not caps_applied:
                     src_element.set_property("caps", caps)
                     caps_applied.append(True)
+            # Detections injection before frame dispatch (Requirement
+            # 1.10): downstream nodes get the run's Detection_List
+            # (bounded poll inside metadata_for); every other node —
+            # and every injector-less run — gets today's empty dict.
+            if detections_injector is not None:
+                frame_metadata = detections_injector.metadata_for(
+                    bridge.node_id
+                )
+            else:
+                frame_metadata = {}
             try:
                 out_bytes, _out_meta = bridge.process_frame(
                     data,
-                    metadata={},
+                    metadata=frame_metadata,
                     width=width,
                     height=height,
                     frame_format=frame_format,
