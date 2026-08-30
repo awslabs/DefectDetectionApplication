@@ -231,7 +231,7 @@ the existing smoke test.
   - `PYTHONPATH=src/backend:test/backend-test pytest test/backend-test/workflow_engine/` fully green, including all property tests from tasks 1, 7, 9, 10 and the vendored-mirror smoke test
   - _Requirements: all edge-side_
 
-- [ ] 14. USER ACTION: JP7 component build + thor1 end-to-end verification
+- [x] 14. USER ACTION: JP7 component build + thor1 end-to-end verification
   - Follow the builds steering rule (no concurrent builds, preservation guard suite green first, cdk.out moved aside); build `aws.edgeml.dda.LocalServer.arm64JP7`, deploy to jetson-thor1
   - Verify end-to-end: publish an MQTT trigger message with a 3-reference payload (S3 URIs and a base64 entry), confirm the run captures a live Basler frame, yolo-world detects the plates, three Detection_Crops persist with Detection_IDs, three Bedrock verdicts land under nested keys, three Greengrass MQTT messages publish as results complete (observe staggering), errored-branch behavior (payload with a bad reference), and sustained backend health (no crash/restart) afterwards
   - State in the commit/PR what was verified on which device
