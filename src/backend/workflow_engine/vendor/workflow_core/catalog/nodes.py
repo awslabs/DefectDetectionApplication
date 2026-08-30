@@ -573,6 +573,39 @@ MODEL_INFERENCE = NodeTypeDescriptor(
                                         "from the models registered for the "
                                         "selected use case.",
                             examples=["widget-anomaly-v3"]),
+        # Executor-read detection ordering
+        # (detection-guided-bedrock-inspection Requirement 1.4). The
+        # parameter deliberately appears in no element chain: the node
+        # compiles to GStreamer elements with no executor binding, so
+        # the compiled document never carries it — the LocalServer
+        # executor reads it from the registration artifact's
+        # workflow.json instead.
+        ParameterDescriptor("detection_sort_order", "enum", required=False,
+                            default="left_to_right",
+                            constraints={"values": ["left_to_right",
+                                                    "right_to_left",
+                                                    "top_to_bottom",
+                                                    "bottom_to_top",
+                                                    "confidence_desc"]},
+                            description="Deterministic ordering of the "
+                                        "object-detection results merged "
+                                        "into the run metadata as "
+                                        "'detections', computed on bounding "
+                                        "box centers: left_to_right "
+                                        "(default), right_to_left, "
+                                        "top_to_bottom, bottom_to_top, or "
+                                        "confidence_desc; ties break on the "
+                                        "orthogonal axis ascending "
+                                        "(confidence ties by "
+                                        "left_to_right). Downstream "
+                                        "bedrock_inference nodes select a "
+                                        "detection by its position "
+                                        "(crop_detection_index) in this "
+                                        "order. Read by the device "
+                                        "executor from the registered "
+                                        "workflow definition — never "
+                                        "compiled into the pipeline.",
+                            examples=["left_to_right", "confidence_desc"]),
     ],
     # Mirrors pipeline_builder._add_inference_plugins: preceding RGB
     # capsfilter, then emltriton with the Triton repo/server paths
@@ -706,6 +739,75 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                             examples=["You are a meticulous visual quality "
                                       "inspector.\nAnswer concisely."],
                             multiline=True),
+        # Detection-guided inspection parameters
+        # (detection-guided-bedrock-inspection Requirements 2.1, 2.3,
+        # 3.1, 3.4). Carried on the compiled binding through the
+        # existing untouched-parameter-copy mechanism; the LocalServer
+        # executor interprets them at Bedrock-invocation time.
+        ParameterDescriptor("crop_detection_index", "int", required=False,
+                            default=None,
+                            constraints={"min": 0},
+                            description="Optional 0-based index into the "
+                                        "run's detection list: the "
+                                        "captured input frame is cropped "
+                                        "to that detection's bounding box "
+                                        "— detections ordered per the "
+                                        "model_inference node's "
+                                        "detection_sort_order — and the "
+                                        "crop is sent as the input image. "
+                                        "When the run has that many "
+                                        "detections or fewer, the node "
+                                        "records an error outcome (gating "
+                                        "its downstream outputs) without "
+                                        "failing the run. Empty keeps "
+                                        "today's whole-frame behavior.",
+                            examples=[0, 1, 2]),
+        ParameterDescriptor("crop_margin_percent", "int", required=False,
+                            default=0,
+                            constraints={"min": 0, "max": 100},
+                            description="Margin added on every side of the "
+                                        "detection crop, as a percentage "
+                                        "(0-100) of the bounding box's own "
+                                        "width/height, clamped to the "
+                                        "frame bounds; e.g. 10. Only used "
+                                        "together with "
+                                        "crop_detection_index.",
+                            examples=[0, 10]),
+        ParameterDescriptor("reference_payload_path", "string", required=False,
+                            default="",
+                            constraints={},
+                            description="Optional dotted path resolved "
+                                        "against the trigger payload's "
+                                        "parsed JSON — dict keys and "
+                                        "integer list indices, e.g. "
+                                        "refs.0.image — selecting this "
+                                        "node's reference image: an "
+                                        "s3:// URI, an http(s):// URL, or "
+                                        "base64-encoded image data (bare "
+                                        "or a data: URL). Mutually "
+                                        "exclusive with a connected "
+                                        "reference frame port; a "
+                                        "resolution, fetch, or decode "
+                                        "failure records an error outcome "
+                                        "for this node (never a "
+                                        "single-image fallback). Empty "
+                                        "keeps today's reference-port "
+                                        "behavior.",
+                            examples=["refs.0.image", "reference.image_url"]),
+        ParameterDescriptor("allowed_uri_prefixes", "string", required=False,
+                            default="",
+                            constraints={},
+                            description="Optional newline-separated list of "
+                                        "URI prefixes that "
+                                        "reference_payload_path fetches "
+                                        "may target, e.g. "
+                                        "s3://plant-images/; empty permits "
+                                        "any source. The restriction "
+                                        "applies only to URI fetches "
+                                        "(s3:// and http(s)://) — "
+                                        "base64-encoded payload data "
+                                        "needs no gate.",
+                            examples=["s3://plant-images/\nhttps://mes.local/"]),
     ],
     # Executor-level on every physical device architecture: the node has
     # no GStreamer element of its own. The compiler terminates each

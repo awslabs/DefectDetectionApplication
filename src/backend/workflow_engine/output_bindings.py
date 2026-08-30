@@ -57,13 +57,26 @@ import base64
 import inspect
 import json
 import logging
+import math
+import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from workflow_engine.branching import bedrock_branches
+from workflow_engine.detections import METADATA_KEY_DETECTIONS
 from workflow_engine.llm_inference import (
     UnresolvedPlaceholderError,
     render_prompt,
+)
+from workflow_engine.payload_fetch import (
+    PayloadReferenceError,
+    describe_reference_source,
+    fetch_reference_bytes,
+    resolve_payload_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,7 +124,7 @@ _TOKEN = re.compile(r"""
         (?P<op>&&|\|\||==|!=|>=|<=|>|<|\(|\)|!)
       | (?P<number>-?\d+(?:\.\d+)?)
       | (?P<string>"[^"]*"|'[^']*')
-      | (?P<word>[A-Za-z_][A-Za-z0-9_]*)
+      | (?P<word>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)
     )""", re.VERBOSE)
 
 _OPERATORS = ("==", "!=", ">=", "<=", ">", "<")
@@ -210,8 +223,17 @@ class _Parser:
             return float(token) if "." in token else int(token)
         except ValueError:
             pass
-        # Identifier: resolve from the inference metadata.
+        # Identifier: resolve from the inference metadata. A dotted
+        # identifier ("bedrock.bedrock_1.is_anomalous") resolves segment
+        # by segment against nested dicts/lists, so conditionals and
+        # inference filters can reference per-node verdict keys
+        # (detection-guided-bedrock-inspection Requirement 4.4). Flat
+        # identifiers keep today's exact lookup byte-identical.
         if token not in self.metadata:
+            if "." in token:
+                found, value = resolve_field_path(self.metadata, token)
+                if found:
+                    return _coerce(value)
             raise ValueError(
                 "Unknown metadata field {0!r} in condition".format(token))
         return self.metadata[token]
@@ -266,6 +288,14 @@ def evaluate_condition(condition: str, metadata: Dict[str, Any]) -> bool:
 
 _SINGLE_PLACEHOLDER = re.compile(r"^\{(\w+)\}$")
 
+#: A dotted placeholder ("{bedrock.bedrock_1.is_anomalous}") inside a
+#: payload/value template: resolved segment by segment against the
+#: nested run metadata (detection-guided-bedrock-inspection Requirement
+#: 4.3). Requires at least one dot, so flat placeholders keep today's
+#: rendering byte-identical.
+_DOTTED_PLACEHOLDER = re.compile(
+    r"\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)\}")
+
 
 class _LenientDict(dict):
     """Leaves unknown ``{placeholder}`` tokens intact instead of raising,
@@ -293,6 +323,34 @@ def render_template(template: Any, metadata: Dict[str, Any]) -> Any:
     match = _SINGLE_PLACEHOLDER.match(template)
     if match and match.group(1) in values:
         return values[match.group(1)]
+    # Dotted per-node keys (detection-guided-bedrock-inspection
+    # Requirement 4.3): "{bedrock.bedrock_1.is_anomalous}" resolves
+    # segment by segment against the nested metadata (an exact
+    # dotted-named key wins over traversal). A template that is exactly
+    # one dotted placeholder keeps the value's native type, mirroring
+    # the flat single-placeholder rule; inside mixed templates dotted
+    # placeholders substitute as strings; an unresolved dotted
+    # placeholder degrades to a literal exactly like an unknown flat
+    # one. Templates without dotted placeholders render byte-identical
+    # to today.
+    match = _DOTTED_PLACEHOLDER.fullmatch(template)
+    if match:
+        if match.group(1) in values:
+            return values[match.group(1)]
+        found, value = resolve_field_path(values, match.group(1))
+        if found:
+            return value
+
+    def _resolve_dotted(placeholder: "re.Match") -> str:
+        name = placeholder.group(1)
+        if name in values:
+            return str(values[name])
+        found, resolved = resolve_field_path(values, name)
+        if found:
+            return str(resolved)
+        return "{{" + name + "}}"
+
+    template = _DOTTED_PLACEHOLDER.sub(_resolve_dotted, template)
     return template.format_map(_LenientDict(values))
 
 
@@ -1022,6 +1080,192 @@ def _emit_duration(
         )
 
 
+# ---------------------------------------------------------------------------
+# Detection crops (detection-guided-bedrock-inspection Requirement 2)
+#
+# A Bedrock_Binding carrying ``crop_detection_index`` = k inspects entry k
+# of the run's merged Detection_List instead of the whole captured frame:
+# the captured 'in' JPEG is sliced to the entry's source-pixel bounding
+# box (expanded by ``crop_margin_percent`` per side, clamped to the frame
+# bounds, defensively scaled when captured and source dimensions differ),
+# re-encoded, persisted as a run artifact, and sent as the Converse
+# request's "Input image" content block. Every crop-path failure is a
+# RECORDED error outcome at ``bedrock.{nodeId}.error`` — the run and the
+# sibling bindings proceed (Requirement 2.4), unlike the legacy
+# whole-frame path whose failures raise ``BedrockInferenceError``.
+# ---------------------------------------------------------------------------
+
+#: JPEG re-encode quality of a Detection_Crop (design Decision 2).
+CROP_JPEG_QUALITY = 95
+
+#: Run-artifact filename of a persisted Detection_Crop, named to include
+#: the selected entry's Detection_ID (Requirement 2.5).
+CROP_ARTIFACT_TEMPLATE = "{capture_id}.crop.{detection_id}.jpg"
+
+
+def compute_crop_box(
+    box: Tuple[float, float, float, float],
+    frame_width: int,
+    frame_height: int,
+    margin_percent: float,
+    source_dimensions: Optional[Tuple[float, float]] = None,
+) -> Optional[Tuple[int, int, int, int]]:
+    """The integer pixel crop rectangle ``(x0, y0, x1, y1)`` of a
+    detection ``box`` within the captured frame, or ``None`` when the
+    crop would be degenerate/empty (design Property 3: never a zero-size
+    crop — the caller records an error instead).
+
+    ``box`` is the detection's ``(x_min, y_min, x_max, y_max)`` in
+    source-frame pixels. ``source_dimensions`` (``(width, height)`` of
+    the source frame, from the capture record's input image) enables the
+    defensive mapping: when the captured frame's dimensions differ from
+    the source's, the box is scaled by ``frame / source`` per axis
+    (Requirement 2.6 — the capture sink chain performs no scaling, so
+    this normally degenerates to a clamp). ``margin_percent`` expands the
+    box on every side by that percentage of the box's own width/height
+    (Requirement 2.3); the result is clamped to the frame bounds.
+    """
+    try:
+        x_min, y_min, x_max, y_max = (float(value) for value in box)
+        frame_width = int(frame_width)
+        frame_height = int(frame_height)
+        margin = float(margin_percent or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if frame_width <= 0 or frame_height <= 0:
+        return None
+    if margin < 0:
+        margin = 0.0
+    if source_dimensions is not None:
+        try:
+            source_width, source_height = (
+                float(value) for value in source_dimensions
+            )
+        except (TypeError, ValueError):
+            source_width = source_height = 0.0
+        if (
+            source_width > 0
+            and source_height > 0
+            and (source_width != frame_width or source_height != frame_height)
+        ):
+            scale_x = frame_width / source_width
+            scale_y = frame_height / source_height
+            x_min, x_max = x_min * scale_x, x_max * scale_x
+            y_min, y_max = y_min * scale_y, y_max * scale_y
+    if x_max <= x_min or y_max <= y_min:
+        # A degenerate or inverted box never yields a crop: the margin
+        # is a percentage of the box's own dimensions, so a non-positive
+        # dimension would SHRINK the margined rectangle (and floor/ceil
+        # rounding could still leave a spurious 1-pixel band on the
+        # margin-free path). Design Property 3: a degenerate box is a
+        # recorded error, never a zero-size or rounding-artifact crop.
+        return None
+    margin_x = (x_max - x_min) * margin / 100.0
+    margin_y = (y_max - y_min) * margin / 100.0
+    x0 = max(0, int(math.floor(x_min - margin_x)))
+    y0 = max(0, int(math.floor(y_min - margin_y)))
+    x1 = min(frame_width, int(math.ceil(x_max + margin_x)))
+    y1 = min(frame_height, int(math.ceil(y_max + margin_y)))
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return None
+    return x0, y0, x1, y1
+
+
+def _capture_record_source_dimensions(
+    output_dir: Optional[str], capture_id: Optional[str]
+) -> Optional[Tuple[int, int]]:
+    """The ``(width, height)`` of the capture record's input image, or
+    ``None`` (best-effort, never raises).
+
+    The Marshal_Model's capture record (``{output_dir}/{capture_id}.jsonl``)
+    references the frame ``emltriton`` actually processed under
+    ``deviceFleetAuxiliaryInputs`` (``data-ref: file://...``); its
+    dimensions are the source-pixel space the detection boxes live in.
+    ``None`` (no record, no input reference, unreadable image) means the
+    caller treats captured and source dimensions as identical — the normal
+    case, since the capture sink chain performs no scaling."""
+    if not output_dir or not capture_id:
+        return None
+    path = os.path.join(output_dir, "{0}.jsonl".format(capture_id))
+    try:
+        with open(path, "r") as jsonl_file:
+            lines = [
+                line for line in jsonl_file.read().splitlines()
+                if line.strip()
+            ]
+        if not lines:
+            return None
+        record = json.loads(lines[-1])
+        inputs = record.get("deviceFleetAuxiliaryInputs") or []
+    except Exception:  # noqa: BLE001 - best-effort, never fail the crop
+        logger.debug(
+            "Could not read the capture record at %s for source "
+            "dimensions", path, exc_info=True,
+        )
+        return None
+    if not isinstance(inputs, list):
+        return None
+    for entry in inputs:
+        if not isinstance(entry, dict):
+            continue
+        ref = entry.get("data-ref")
+        if not isinstance(ref, str) or not ref.startswith("file://"):
+            continue
+        image_path = ref[len("file://"):]
+        try:
+            import cv2  # lazy: keeps this module importable everywhere
+
+            frame = cv2.imread(image_path)
+        except Exception:  # noqa: BLE001 - best-effort
+            logger.debug(
+                "Could not load the capture record's input image at %s",
+                image_path, exc_info=True,
+            )
+            return None
+        if frame is None:
+            return None
+        height, width = frame.shape[:2]
+        return width, height
+    return None
+
+
+@dataclass(frozen=True)
+class RunContext:
+    """Per-run context the executor threads into the Bedrock processor
+    (detection-guided-bedrock-inspection Requirement 7.1).
+
+    Carries what the crop / payload-reference / nested-verdict paths
+    need beyond the compiled binding itself:
+
+    - ``tag_values``: the run's metadata dict (Run_Metadata) — the
+      merged Detection_List (``detections``) and the Trigger_Context
+      (``trigger.payload_json``) are resolved from it;
+    - ``output_dir`` / ``capture_id``: where run artifacts (capture
+      record, Detection_Crops) live and how they are keyed;
+    - ``graph_document``: the registration's ``workflow.json`` graph
+      (Detection_Sort_Order resolution);
+    - ``node_status``: the run's NodeStatusCollector, for recorded
+      per-node error outcomes.
+
+    Every field defaults to ``None`` so partially-populated contexts
+    (and the absent-context legacy path) degrade to today's behavior.
+    """
+
+    tag_values: Optional[Dict[str, Any]] = None
+    output_dir: Optional[str] = None
+    capture_id: Optional[str] = None
+    graph_document: Optional[dict] = None
+    node_status: Optional[Any] = None
+
+
+#: Upper bound on the Bedrock branch thread pool
+#: (detection-guided-bedrock-inspection Requirement 5.2): binding work
+#: is network-I/O-bound (Bedrock Converse, S3 fetch, MQTT publish) with
+#: 30 s read timeouts; a small pool bounds memory. The effective pool
+#: size is ``min(len(bindings), BEDROCK_MAX_POOL_WORKERS)``.
+BEDROCK_MAX_POOL_WORKERS = 4
+
+
 class BedrockInferenceProcessor:
     """Runs a compiled document's ``bedrock_inference`` bindings.
 
@@ -1029,10 +1273,24 @@ class BedrockInferenceProcessor:
     before the run is finalized (so the merged metadata reaches the
     post-run output bindings). The invoker is injectable so tests run
     without boto3 or network access.
+
+    ``output_processor`` (optional; default None → the sequential
+    legacy path, byte-identical to today for every existing
+    caller/test) is the run's :class:`OutputBindingProcessor`. When the
+    executor injects it, ``process`` fans the bindings out to a thread
+    pool and, as each outcome lands, merges it under a shared lock and
+    runs that branch's output bindings through
+    :meth:`OutputBindingProcessor.process_subset` — publish-on-completion
+    (detection-guided-bedrock-inspection Requirements 5.2, 5.3).
     """
 
-    def __init__(self, invoker: Optional[Callable] = None) -> None:
+    def __init__(
+        self,
+        invoker: Optional[Callable] = None,
+        output_processor: Optional["OutputBindingProcessor"] = None,
+    ) -> None:
         self._invoker = invoker or _default_bedrock_invoker
+        self._output_processor = output_processor
 
     def bindings(self, document: dict) -> List[dict]:
         return [
@@ -1046,6 +1304,8 @@ class BedrockInferenceProcessor:
         tag_values: dict,
         work_dir: Optional[str],
         duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
+        run_context: Optional[RunContext] = None,
+        detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
     ) -> Dict[str, Any]:
         """Run every bedrock_inference binding and return the run's
         inference metadata with the parsed fields merged in. Raises
@@ -1056,14 +1316,57 @@ class BedrockInferenceProcessor:
         measured with the monotonic clock and reported in a ``try/finally``
         so error-terminated invocations are timed too, with raises
         propagating exactly as today (node-execution-timing Requirements
-        1.3, 1.7)."""
+        1.3, 1.7).
+
+        ``run_context`` (optional; default None → behavior byte-identical
+        to today) is the executor-supplied :class:`RunContext`; it is
+        forwarded to each ``_run_one`` for the detection-crop /
+        payload-reference / nested-verdict paths
+        (detection-guided-bedrock-inspection Requirement 7.1).
+
+        ``detail_sink`` (optional; default None) receives ``(node_id,
+        detail)`` sent-message summaries from the per-branch output
+        bindings on the concurrent path; it is forwarded to
+        :meth:`OutputBindingProcessor.process_subset` and never consulted
+        on the sequential legacy path.
+
+        With no ``output_processor`` configured (every pre-feature
+        caller), the bindings run sequentially in ``executorBindings``
+        order — the legacy path, byte-identical to today. With one, the
+        bindings fan out to a
+        ``ThreadPoolExecutor(max_workers=min(len(bindings), 4))`` and
+        each completion merges under a shared lock, then runs its
+        branch's output bindings on the spot — publish-on-completion
+        (detection-guided-bedrock-inspection Requirements 5.2-5.6)."""
+        bindings = self.bindings(document)
+        if self._output_processor is None:
+            return self._process_sequential(
+                bindings, tag_values, work_dir, duration_sink, run_context)
+        return self._process_concurrent(
+            document, bindings, tag_values, work_dir, duration_sink,
+            detail_sink, run_context)
+
+    def _process_sequential(
+        self,
+        bindings: List[dict],
+        tag_values: dict,
+        work_dir: Optional[str],
+        duration_sink: Optional[Callable[[Optional[str], float], None]],
+        run_context: Optional[RunContext],
+    ) -> Dict[str, Any]:
+        """The pre-feature sequential path, verbatim: bindings run one
+        after another in ``executorBindings`` order and the first raise
+        aborts the loop (later bindings never run) — byte-identical to
+        today for every caller without an ``output_processor``
+        (Requirement 7.1, Property 7)."""
         metadata = dict(tag_values or {})
-        for binding in self.bindings(document):
+        for binding in bindings:
             node_id = binding.get("nodeId")
             try:
                 started = time.monotonic()
                 try:
-                    result = self._run_one(binding, work_dir)
+                    result = self._run_one(
+                        binding, work_dir, run_context=run_context)
                 finally:
                     _emit_duration(
                         duration_sink, node_id,
@@ -1095,57 +1398,288 @@ class BedrockInferenceProcessor:
                 ) from e
         return metadata
 
-    def _run_one(self, binding: dict, work_dir: Optional[str]) -> Dict[str, Any]:
+    def _process_concurrent(
+        self,
+        document: dict,
+        bindings: List[dict],
+        tag_values: dict,
+        work_dir: Optional[str],
+        duration_sink: Optional[Callable[[Optional[str], float], None]],
+        detail_sink: Optional[Callable[[Optional[str], str], None]],
+        run_context: Optional[RunContext],
+    ) -> Dict[str, Any]:
+        """Fan the bindings out to a thread pool with per-completion
+        merge + branch publishing (detection-guided-bedrock-inspection
+        Requirements 5.2-5.6).
+
+        Each worker runs ``_run_one``; on completion, under the shared
+        merge lock, its outcome merges into the metadata (nested + flat
+        keys; flat writes keep dict-update semantics — last COMPLETION
+        wins, the concurrent analogue of today's last-binding-wins,
+        design Risk 4) and, when the document's branch plan
+        (``branching.bedrock_branches``) names output bindings for that
+        node, a metadata snapshot runs through
+        ``OutputBindingProcessor.process_subset`` on the spot — each
+        inspection's outputs publish as its result lands (Requirement
+        5.3), serialized by the lock so branch publishes never interleave
+        their metadata views.
+
+        - An errored branch (recorded error outcome at
+          ``bedrock.{nodeId}.error``) skips its output bindings — the
+          node status was already set by ``_recorded_error`` — and the
+          sibling branches proceed (Requirements 5.4, 5.5).
+        - ``process`` returns only after ALL futures complete (join),
+          with every outcome merged (Requirement 5.6).
+        - A legacy-path raise (``BedrockInferenceError``) is re-raised
+          AFTER the join — the first in ``executorBindings`` order when
+          several — preserving today's run-failure semantics
+          (Requirement 7.1). Unlike the sequential path, sibling
+          bindings have already run by then (they were in flight
+          concurrently); their branch publishes stand (Requirement 5.4).
+        - Branch output-binding failures are collected per branch and
+          surfaced through the existing :class:`OutputBindingError`
+          aggregation after the join; other branches are unaffected
+          (design Error Handling table). A ``BedrockInferenceError``
+          takes precedence when both occurred.
+        """
+        metadata = dict(tag_values or {})
+        if not bindings:
+            return metadata
+        branch_plans = bedrock_branches(document)
+        merge_lock = threading.Lock()
+        #: index-in-bindings-order -> BedrockInferenceError (legacy raises).
+        raised: Dict[int, BedrockInferenceError] = {}
+        #: One entry per failed branch-subset invocation:
+        #: (failing node ids, aggregated message).
+        output_failures: List[Tuple[List[Any], str]] = []
+
+        def run_branch(index: int, binding: dict) -> None:
+            node_id = binding.get("nodeId")
+            try:
+                started = time.monotonic()
+                try:
+                    result = self._run_one(
+                        binding, work_dir, run_context=run_context)
+                finally:
+                    # Elapsed time is measured here (error-terminated
+                    # invocations are timed too, exactly as the
+                    # sequential path), but the sink INVOCATION is
+                    # routed through the shared merge lock so concurrent
+                    # workers never interleave duration_sink calls with
+                    # each other or with the detail/duration sinks the
+                    # branch publishes fire inside ``process_subset``
+                    # (which already runs under this lock) —
+                    # detection-guided-bedrock-inspection Requirement
+                    # 5.6, design "Thread safety inventory".
+                    elapsed_ms = (time.monotonic() - started) * 1000.0
+                    with merge_lock:
+                        _emit_duration(duration_sink, node_id, elapsed_ms)
+            except BedrockInferenceError as error:
+                with merge_lock:
+                    raised[index] = error
+                return
+            except Exception as error:  # noqa: BLE001 - wrapped as today
+                wrapped = BedrockInferenceError(
+                    node_id,
+                    "Bedrock inference node '{0}' failed: {1}".format(
+                        node_id, error),
+                )
+                wrapped.__cause__ = error
+                with merge_lock:
+                    raised[index] = wrapped
+                return
+            # Completion path: merge + branch publish under the shared
+            # lock. The nested-``bedrock`` merge REPLACES
+            # metadata["bedrock"] with a fresh dict (never mutates the
+            # previous one), so a shallow ``dict(metadata)`` snapshot
+            # taken here stays stable while sibling completions keep
+            # merging.
+            with merge_lock:
+                nested = result.pop("bedrock", None)
+                metadata.update(result)
+                if nested:
+                    merged = dict(metadata.get("bedrock") or {})
+                    merged.update(nested)
+                    metadata["bedrock"] = merged
+                logger.info(
+                    "Bedrock inference binding (node %s) processed", node_id
+                )
+                plan = branch_plans.get(node_id)
+                if plan is None or not plan.binding_ids:
+                    return
+                errored = (
+                    isinstance(nested, dict)
+                    and isinstance(nested.get(node_id), dict)
+                    and "error" in nested[node_id]
+                )
+                if errored:
+                    # Recorded error outcome: the branch's output
+                    # bindings are skipped entirely (the node status was
+                    # set by _recorded_error); siblings proceed
+                    # (Requirements 5.4, 5.5).
+                    logger.info(
+                        "Bedrock branch %s recorded an error; skipping "
+                        "its %d branch output binding(s)",
+                        node_id, len(plan.binding_ids),
+                    )
+                    return
+                snapshot = dict(metadata)
+                subset_kwargs: Dict[str, Any] = {}
+                if detail_sink is not None:
+                    subset_kwargs["detail_sink"] = detail_sink
+                if duration_sink is not None:
+                    subset_kwargs["duration_sink"] = duration_sink
+                try:
+                    self._output_processor.process_subset(
+                        document, snapshot, list(plan.binding_ids),
+                        **subset_kwargs)
+                except OutputBindingError as error:
+                    # process_subset already aggregated this branch's
+                    # binding failures (every branch binding was still
+                    # attempted); collect for the post-join surfacing.
+                    output_failures.append(
+                        (list(error.node_ids), str(error)))
+                except Exception as error:  # noqa: BLE001 - contained
+                    logger.exception(
+                        "Bedrock branch %s output bindings failed; other "
+                        "branches are unaffected", node_id,
+                    )
+                    output_failures.append(
+                        ([node_id],
+                         "branch {0} output bindings failed: {1}".format(
+                             node_id, error)))
+
+        pool_size = min(len(bindings), BEDROCK_MAX_POOL_WORKERS)
+        with ThreadPoolExecutor(
+            max_workers=pool_size,
+            thread_name_prefix="bedrock-branch",
+        ) as pool:
+            futures = [
+                pool.submit(run_branch, index, binding)
+                for index, binding in enumerate(bindings)
+            ]
+            # Join: process returns (or raises) only after every future
+            # has completed and merged (Requirement 5.6). run_branch
+            # contains its own failures, so result() re-raises nothing
+            # in practice — the loop still surfaces a defect loudly
+            # rather than swallowing it.
+            for future in futures:
+                future.result()
+
+        if raised:
+            # Today's run-failure semantics, deterministically: the
+            # failure of the earliest binding in executorBindings order
+            # (the one the sequential path would have raised).
+            raise raised[min(raised)]
+        if output_failures:
+            failing_ids = [
+                failing_id
+                for ids, _ in output_failures
+                for failing_id in ids
+                if failing_id is not None
+            ]
+            summary = "; ".join(message for _, message in output_failures)
+            raise OutputBindingError(failing_ids, summary)
+        return metadata
+
+    def _run_one(
+        self,
+        binding: dict,
+        work_dir: Optional[str],
+        run_context: Optional[RunContext] = None,
+    ) -> Dict[str, Any]:
+        # ``run_context`` (default None → byte-identical legacy path)
+        # carries the run state the detection-crop path resolves against
+        # (detection-guided-bedrock-inspection Requirement 7.1); the
+        # payload-reference path lands separately.
         node_id = binding.get("nodeId")
         parameters = dict(binding.get("parameters") or {})
         capture_paths = binding.get("capturePaths") or {}
         images = []
 
-        # The 'in' (primary) frame is required: a missing path or an
-        # unreadable file fails the node with the existing surfacing.
-        port = "in"
-        path = capture_paths.get(port)
-        if not path:
-            raise BedrockInferenceError(
-                node_id,
-                "Bedrock inference node '{0}' has no captured frame for "
-                "its '{1}' input (the port is not fed by any video "
-                "source)".format(node_id, port))
-        if work_dir:
-            path = path.replace("{work_dir}", work_dir)
-        try:
-            with open(path, "rb") as f:
-                images.append(("Input image", f.read()))
-        except OSError as e:
-            raise BedrockInferenceError(
-                node_id,
-                "Bedrock inference node '{0}' could not read the "
-                "captured '{1}' frame from {2}: {3}".format(
-                    node_id, port, path, e)) from e
-
-        # The 'reference' frame is optional: the portal compiler emits
-        # capturePaths.reference = None when the port is not fed by any
-        # video source. When the reference frame is unavailable for any
-        # reason, log the omission and proceed with single-image
-        # inference on the primary frame alone.
-        reference_path = capture_paths.get("reference")
-        if not reference_path:
-            logger.warning(
-                "Bedrock inference node '%s': reference port not fed by "
-                "any video source; performing single-image inference",
-                node_id)
+        # Detection crop (Requirement 2): a binding carrying
+        # ``crop_detection_index`` sends the Detection_Crop as its
+        # "Input image" instead of the whole captured frame. Every
+        # crop-path failure (missing/out-of-range Detection_List entry,
+        # missing/unreadable captured frame, degenerate crop) is a
+        # RECORDED error outcome — the run and sibling bindings proceed
+        # (Requirement 2.4) — unlike the legacy whole-frame path below,
+        # whose failures keep raising ``BedrockInferenceError``
+        # byte-identically (Requirements 2.1, 7.1).
+        detection_id: Optional[str] = None
+        crop_raw = parameters.get("crop_detection_index")
+        if crop_raw is not None and str(crop_raw).strip() != "":
+            crop_error, detection_id, crop_bytes = self._detection_crop(
+                node_id, parameters, capture_paths, work_dir, run_context)
+            if crop_error is not None:
+                return self._recorded_error(node_id, crop_error, run_context)
+            images.append(("Input image", crop_bytes))
         else:
+            # The 'in' (primary) frame is required: a missing path or an
+            # unreadable file fails the node with the existing surfacing.
+            port = "in"
+            path = capture_paths.get(port)
+            if not path:
+                raise BedrockInferenceError(
+                    node_id,
+                    "Bedrock inference node '{0}' has no captured frame for "
+                    "its '{1}' input (the port is not fed by any video "
+                    "source)".format(node_id, port))
             if work_dir:
-                reference_path = reference_path.replace(
-                    "{work_dir}", work_dir)
+                path = path.replace("{work_dir}", work_dir)
             try:
-                with open(reference_path, "rb") as f:
-                    images.append(("Reference image", f.read()))
+                with open(path, "rb") as f:
+                    images.append(("Input image", f.read()))
             except OSError as e:
+                raise BedrockInferenceError(
+                    node_id,
+                    "Bedrock inference node '{0}' could not read the "
+                    "captured '{1}' frame from {2}: {3}".format(
+                        node_id, port, path, e)) from e
+
+        # Payload_Reference (Requirement 3): a binding carrying
+        # ``reference_payload_path`` resolves its reference image from
+        # the run's Trigger_Context ``payload_json`` instead of a
+        # captured reference frame. ANY failure (missing trigger
+        # payload, unresolvable path, prefix denial, fetch failure,
+        # size cap, timeout, non-image bytes) is a RECORDED error
+        # outcome — NEVER the single-image fallback the frame-port path
+        # below uses (Requirement 3.5, design Property 4). An absent
+        # parameter keeps today's reference-port behavior
+        # byte-identical (Requirement 3.1).
+        reference_raw = parameters.get("reference_payload_path")
+        if reference_raw is not None and str(reference_raw).strip() != "":
+            reference_error, reference_bytes = self._payload_reference(
+                node_id, parameters, run_context)
+            if reference_error is not None:
+                return self._recorded_error(
+                    node_id, reference_error, run_context)
+            images.append(("Reference image", reference_bytes))
+        else:
+            # The 'reference' frame is optional: the portal compiler
+            # emits capturePaths.reference = None when the port is not
+            # fed by any video source. When the reference frame is
+            # unavailable for any reason, log the omission and proceed
+            # with single-image inference on the primary frame alone.
+            reference_path = capture_paths.get("reference")
+            if not reference_path:
                 logger.warning(
-                    "Bedrock inference node '%s': could not read the "
-                    "captured 'reference' frame from %s (%s); performing "
-                    "single-image inference", node_id, reference_path, e)
+                    "Bedrock inference node '%s': reference port not fed "
+                    "by any video source; performing single-image "
+                    "inference", node_id)
+            else:
+                if work_dir:
+                    reference_path = reference_path.replace(
+                        "{work_dir}", work_dir)
+                try:
+                    with open(reference_path, "rb") as f:
+                        images.append(("Reference image", f.read()))
+                except OSError as e:
+                    logger.warning(
+                        "Bedrock inference node '%s': could not read the "
+                        "captured 'reference' frame from %s (%s); "
+                        "performing single-image inference",
+                        node_id, reference_path, e)
 
         # Response mode: anomaly (default — absent/None) demands the JSON
         # verdict and gets the canonical instruction appended; freeform
@@ -1189,18 +1723,300 @@ class BedrockInferenceProcessor:
             # Pre-feature arity: injected fakes that predate the
             # system_prompt parameter keep working (Requirement 7.3).
             answer = self._invoker(*invoker_args)
+        # The nested per-node entry ``bedrock.{nodeId}.*`` (merged by
+        # ``process``): the answer ``text`` (freeform's existing key,
+        # recorded in both modes) plus, when a Detection_Crop was
+        # inspected, the selected entry's Detection_ID so each verdict
+        # is attributable to the exact detection it judged (Requirement
+        # 2.7); anomaly mode adds ``is_anomalous``/``confidence`` below
+        # (Requirement 4.1). ``detection_id`` is None on the legacy
+        # whole-frame path — freeform entries stay byte-identical to
+        # today's, and every nested key is additive (Requirement 7.1).
+        nested_entry: Dict[str, Any] = {"text": answer}
+        if detection_id is not None:
+            nested_entry["detection_id"] = detection_id
         if anomaly_mode:
             # An unparseable answer raises here — the existing
             # BedrockInferenceError path — before any text is recorded
             # (Requirement 5.3: the error message carries the excerpt).
             verdict = parse_bedrock_answer(answer)
             verdict["bedrock_text"] = answer
-            verdict["bedrock"] = {node_id: {"text": answer}}
+            # Nested per-node verdict keys (Requirement 4.1): the
+            # anomaly verdict ALSO lands under
+            # ``bedrock.{nodeId}.is_anomalous`` /
+            # ``bedrock.{nodeId}.confidence`` beside the nested ``text``
+            # (and ``detection_id`` when a Detection_Crop was
+            # inspected), merged through the same nested-``bedrock``
+            # mechanism freeform mode uses, so parallel inspections in
+            # one run never overwrite each other. The FLAT
+            # ``is_anomalous``/``confidence`` keys in ``verdict`` keep
+            # today's last-writer-wins behavior byte-identical
+            # (Requirements 4.1, 4.5, 7.1).
+            nested_entry["is_anomalous"] = verdict["is_anomalous"]
+            nested_entry["confidence"] = verdict["confidence"]
+            verdict["bedrock"] = {node_id: nested_entry}
             return verdict
         return {
             "bedrock_text": answer,
-            "bedrock": {node_id: {"text": answer}},
+            "bedrock": {node_id: nested_entry},
         }
+
+    def _recorded_error(
+        self,
+        node_id: Optional[str],
+        message: str,
+        run_context: Optional[RunContext],
+    ) -> Dict[str, Any]:
+        """Record a per-node error outcome and return the result dict
+        (Requirements 2.4, 4.2).
+
+        The error lands at ``bedrock.{nodeId}.error`` through the
+        existing nested-``bedrock`` merge in :meth:`process` and on the
+        run's node status (gating semantics identical to a failed
+        condition: the node is marked failed, its downstream outputs are
+        gated, and the run and the sibling bindings proceed — this path
+        NEVER raises ``BedrockInferenceError``)."""
+        logger.error("Bedrock inference recorded error: %s", message)
+        if run_context is not None and run_context.node_status is not None:
+            try:
+                run_context.node_status.mark_failure(node_id, message)
+            except Exception:  # noqa: BLE001 - recording is best-effort
+                logger.debug(
+                    "Could not record the node status failure for node %s",
+                    node_id, exc_info=True,
+                )
+        return {"bedrock": {node_id: {"error": message}}}
+
+    def _payload_reference(
+        self,
+        node_id: Optional[str],
+        parameters: Dict[str, Any],
+        run_context: Optional[RunContext],
+    ) -> Tuple[Optional[str], Optional[bytes]]:
+        """Resolve the binding's ``reference_payload_path`` to
+        reference-image bytes: ``(error_message, reference_bytes)``
+        (Requirements 3.2, 3.3, 3.4, 3.7).
+
+        The dotted path resolves against the run's Trigger_Context
+        ``payload_json`` (``tag_values["trigger"]["payload_json"]``);
+        the resolved value fetches/decodes through
+        :mod:`workflow_engine.payload_fetch`, gated by the binding's
+        newline-separated ``allowed_uri_prefixes``. On success the
+        error message is ``None``. On ANY failure (missing trigger
+        payload, unresolvable path, prefix denial, fetch failure, size
+        cap, timeout, non-image bytes) the error message is set naming
+        the node and the reason and the caller records it — never
+        raises, never falls back to single-image inference (Requirement
+        3.5, design Property 4). Only the resolved source string (the
+        URI or ``"base64 payload data"``) is ever logged — never the
+        decoded bytes (Requirement 3.8)."""
+        dotted_path = str(
+            parameters.get("reference_payload_path") or "").strip()
+        trigger = None
+        if run_context is not None and isinstance(
+            run_context.tag_values, dict
+        ):
+            trigger = run_context.tag_values.get("trigger")
+        payload_json = (
+            trigger.get("payload_json") if isinstance(trigger, dict)
+            else None
+        )
+        if payload_json is None:
+            return (
+                "Bedrock inference node '{0}' requested "
+                "reference_payload_path '{1}' but the run has no trigger "
+                "payload_json to resolve it against".format(
+                    node_id, dotted_path),
+                None)
+        raw_prefixes = parameters.get("allowed_uri_prefixes")
+        allowed_prefixes: Tuple[str, ...] = ()
+        if isinstance(raw_prefixes, str):
+            allowed_prefixes = tuple(
+                line.strip() for line in raw_prefixes.splitlines()
+                if line.strip()
+            )
+        try:
+            value = resolve_payload_path(payload_json, dotted_path)
+            # The run log records the resolved source string — the URI
+            # or "base64 payload data" — never the decoded bytes
+            # (Requirement 3.8).
+            logger.info(
+                "Bedrock inference node '%s': resolving Payload_Reference "
+                "'%s' from %s", node_id, dotted_path,
+                describe_reference_source(value))
+            data = fetch_reference_bytes(value, allowed_prefixes)
+        except PayloadReferenceError as e:
+            return (
+                "Bedrock inference node '{0}' could not load its "
+                "Payload_Reference: {1}".format(node_id, e),
+                None)
+        except Exception as e:  # noqa: BLE001 - contained per Req. 3.5
+            return (
+                "Bedrock inference node '{0}' could not load its "
+                "Payload_Reference: {1}".format(node_id, e),
+                None)
+        return None, data
+
+    def _detection_crop(
+        self,
+        node_id: Optional[str],
+        parameters: Dict[str, Any],
+        capture_paths: Dict[str, Any],
+        work_dir: Optional[str],
+        run_context: Optional[RunContext],
+    ) -> Tuple[Optional[str], Optional[str], Optional[bytes]]:
+        """Resolve the binding's ``crop_detection_index`` to a
+        Detection_Crop: ``(error_message, detection_id, crop_bytes)``
+        (Requirements 2.2-2.6).
+
+        On success the error message is ``None`` and the crop bytes are
+        the re-encoded JPEG slice of the captured 'in' frame, already
+        persisted as a run artifact. On ANY failure the error message is
+        set (naming the node and, where applicable, the requested index
+        and the available detection count) and the caller records it —
+        never raises, never falls back to the whole frame."""
+        detections = None
+        if run_context is not None and isinstance(
+            run_context.tag_values, dict
+        ):
+            detections = run_context.tag_values.get(METADATA_KEY_DETECTIONS)
+        available = len(detections) if isinstance(detections, list) else 0
+        raw_index = parameters.get("crop_detection_index")
+        try:
+            index = int(str(raw_index).strip())
+        except (TypeError, ValueError):
+            return (
+                "Bedrock inference node '{0}' has an invalid "
+                "crop_detection_index {1!r} (expected an integer >= 0); "
+                "{2} detection(s) available".format(
+                    node_id, raw_index, available),
+                None, None)
+        if not isinstance(detections, list):
+            return (
+                "Bedrock inference node '{0}' requested "
+                "crop_detection_index {1} but the run has no "
+                "Detection_List (0 detections available)".format(
+                    node_id, index),
+                None, None)
+        if index < 0 or index >= available:
+            return (
+                "Bedrock inference node '{0}' requested "
+                "crop_detection_index {1} but only {2} detection(s) are "
+                "available".format(node_id, index, available),
+                None, None)
+        entry = detections[index]
+        try:
+            detection_id = str(entry["id"])
+            box = (
+                float(entry["x_min"]), float(entry["y_min"]),
+                float(entry["x_max"]), float(entry["y_max"]),
+            )
+        except (TypeError, KeyError, ValueError):
+            return (
+                "Bedrock inference node '{0}': Detection_List entry {1} "
+                "of {2} is malformed (missing id or bounding box): "
+                "{3!r}".format(node_id, index, available, entry),
+                None, None)
+
+        # The captured 'in' frame: on the crop path its absence is a
+        # recorded error, not a raise (a graph without a capture node
+        # lands no captured .jpg on disk — the run must proceed).
+        path = capture_paths.get("in")
+        if not path:
+            return (
+                "Bedrock inference node '{0}' requested "
+                "crop_detection_index {1} but has no captured frame for "
+                "its 'in' input (the port is not fed by any video "
+                "source)".format(node_id, index),
+                None, None)
+        if work_dir:
+            path = path.replace("{work_dir}", work_dir)
+        try:
+            import cv2  # lazy: keeps this module importable everywhere
+        except Exception:  # noqa: BLE001 - contained per Requirement 2.4
+            return (
+                "Bedrock inference node '{0}' could not produce the "
+                "Detection_Crop: cv2 is unavailable".format(node_id),
+                None, None)
+        frame = cv2.imread(path)
+        if frame is None:
+            return (
+                "Bedrock inference node '{0}' could not read or decode "
+                "the captured 'in' frame from {1} for the "
+                "Detection_Crop".format(node_id, path),
+                None, None)
+        frame_height, frame_width = frame.shape[:2]
+
+        source_dimensions = None
+        if run_context is not None:
+            source_dimensions = _capture_record_source_dimensions(
+                run_context.output_dir, run_context.capture_id)
+        margin_raw = parameters.get("crop_margin_percent")
+        try:
+            margin = float(margin_raw) if margin_raw is not None else 0.0
+        except (TypeError, ValueError):
+            logger.warning(
+                "Bedrock inference node '%s': invalid crop_margin_percent "
+                "%r; using 0", node_id, margin_raw)
+            margin = 0.0
+        crop_box = compute_crop_box(
+            box, frame_width, frame_height, margin, source_dimensions)
+        if crop_box is None:
+            return (
+                "Bedrock inference node '{0}': detection {1} (index {2}, "
+                "box [{3}, {4}, {5}, {6}]) yields an empty crop within "
+                "the {7}x{8} captured frame".format(
+                    node_id, detection_id, index,
+                    box[0], box[1], box[2], box[3],
+                    frame_width, frame_height),
+                None, None)
+        x0, y0, x1, y1 = crop_box
+        ok, encoded = cv2.imencode(
+            ".jpg", frame[y0:y1, x0:x1],
+            [int(cv2.IMWRITE_JPEG_QUALITY), CROP_JPEG_QUALITY])
+        if not ok:
+            return (
+                "Bedrock inference node '{0}' could not re-encode the "
+                "Detection_Crop for detection {1}".format(
+                    node_id, detection_id),
+                None, None)
+        crop_bytes = bytes(encoded.tobytes())
+        self._persist_crop(node_id, detection_id, crop_bytes, run_context)
+        return None, detection_id, crop_bytes
+
+    @staticmethod
+    def _persist_crop(
+        node_id: Optional[str],
+        detection_id: str,
+        crop_bytes: bytes,
+        run_context: Optional[RunContext],
+    ) -> None:
+        """Persist the Detection_Crop as
+        ``{output_dir}/{capture_id}.crop.{detection_id}.jpg`` alongside
+        the existing captured frames (Requirement 2.5).
+
+        Best-effort: a missing output_dir/capture_id or a write failure
+        is logged and never affects the inspection outcome."""
+        output_dir = run_context.output_dir if run_context else None
+        capture_id = run_context.capture_id if run_context else None
+        if not output_dir or not capture_id:
+            logger.warning(
+                "Bedrock inference node '%s': no output_dir/capture_id in "
+                "the run context; the Detection_Crop for detection %s was "
+                "not persisted", node_id, detection_id)
+            return
+        path = os.path.join(
+            output_dir,
+            CROP_ARTIFACT_TEMPLATE.format(
+                capture_id=capture_id, detection_id=detection_id),
+        )
+        try:
+            with open(path, "wb") as crop_file:
+                crop_file.write(crop_bytes)
+        except OSError:
+            logger.warning(
+                "Bedrock inference node '%s': could not persist the "
+                "Detection_Crop at %s", node_id, path, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1993,8 +2809,54 @@ class OutputBindingProcessor:
         the monotonic clock and reported in a ``try/finally`` so
         error-terminated invocations are timed too. Gated-out /
         condition-skipped bindings and filter/conditional evaluations report
-        nothing (node-execution-timing Requirements 1.3, 1.7)."""
+        nothing (node-execution-timing Requirements 1.3, 1.7).
+
+        Delegates to :meth:`process_subset` with the full binding list
+        (detection-guided-bedrock-inspection Requirement 5.7): the
+        pre-refactor body lives there unchanged, so behavior is
+        byte-identical to the pre-refactor ``process``."""
         bindings = document.get("executorBindings") or []
+        self.process_subset(
+            document,
+            tag_values,
+            [binding.get("nodeId") for binding in bindings],
+            detail_sink=detail_sink,
+            duration_sink=duration_sink,
+        )
+
+    def process_subset(
+        self,
+        document: dict,
+        tag_values: dict,
+        binding_ids: List[Any],
+        detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
+        duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
+    ) -> None:
+        """Process only the executor bindings named by ``binding_ids``
+        (detection-guided-bedrock-inspection, Requirement 5.7).
+
+        The pre-refactor ``process`` body, verbatim, over a filtered
+        binding list: the named bindings run through the exact same
+        gating (inference filters, conditionals), metadata attachment,
+        condition evaluation, template rendering, and runner dispatch
+        code paths, in ``executorBindings`` emission order.
+
+        ``binding_ids`` are ``nodeId`` values; a binding whose node id is
+        not named is not evaluated at all — a branch's filter/conditional
+        gates and metadata bindings travel with the branch (see
+        ``branching.bedrock_branches``). ``process`` delegates here with
+        the full binding list; the Bedrock processor's per-branch
+        completion path calls it with one branch's binding ids so each
+        inspection's outputs publish as its result lands.
+
+        ``detail_sink`` / ``duration_sink`` are documented on
+        :meth:`process` and behave identically here."""
+        wanted = set(binding_ids or [])
+        bindings = [
+            binding
+            for binding in (document.get("executorBindings") or [])
+            if binding.get("nodeId") in wanted
+        ]
         if not bindings:
             return
         metadata = {

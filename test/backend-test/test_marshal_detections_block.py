@@ -288,3 +288,95 @@ def test_missing_label_falls_back_to_coco_or_index_string():
     assert det_map["1"]["class_index"] == "999"
     # Unknown index falls back to the index string.
     assert det_map["1"]["class_label"] == "999"
+
+
+# ---------------------------------------------------------------------------
+# Detections sidecar (detection-guided-bedrock-inspection, design Risk 1
+# fallback): for any detection capture the marshal ALSO persists
+# ``{capture_folder}/{capture_id}.detections.json`` carrying the exact
+# ``{"detections": {...}}`` payload the base64 block encodes, so graphs
+# without a capture node (whose broker file targets never land the .jsonl
+# record) still surface detections to the workflow engine's reader.
+# ---------------------------------------------------------------------------
+
+
+def _call_generate_with_folder(instance, inference_anomalies, capture_folder):
+    """``_call_generate`` with a real, writable capture_folder so the
+    sidecar write path is observable."""
+    capture_meta_data = {
+        "capture_id": "test_capture",
+        "capture_folder": capture_folder,
+        "workflow_id": "wf",
+        "event_id": "test_capture",
+        "device_fleet_name": "fleet",
+    }
+    return instance._generate_capture_meta_data(
+        capture_meta_data=capture_meta_data,
+        inference_output=np.uint8(1),
+        time_str="2025-01-01T00:00:00",
+        inference_confidence=np.float32(0.5),
+        inference_mask=np.zeros((4, 4, 3)),
+        inference_anomalies=inference_anomalies,
+        inference_score=np.float32(0.5),
+        input_image=np.zeros((4, 4, 3)),
+    )
+
+
+def test_detection_capture_writes_sidecar_matching_block(tmp_path):
+    """The sidecar lands at {capture_folder}/{capture_id}.detections.json,
+    its content equals the decoded Detections_Block payload, and no .tmp
+    temp file is left behind (atomic temp-then-rename)."""
+    instance = _make_marshal_instance()
+    detections = [
+        {"bounding_box": [1, 2, 3, 4], "class": "16", "confidence": 0.9},
+        {"bounding_box": [5, 6, 7, 8], "class": "0", "class_label": "widget",
+         "confidence": 0.4},
+    ]
+    ret = _call_generate_with_folder(instance, detections, str(tmp_path))
+
+    sidecar_path = os.path.join(str(tmp_path), "test_capture.detections.json")
+    assert os.path.isfile(sidecar_path)
+    with open(sidecar_path) as sidecar_file:
+        sidecar_payload = json.load(sidecar_file)
+    assert sidecar_payload == _extract_detections_block(ret)
+    assert not os.path.exists(sidecar_path + ".tmp")
+
+
+def test_zero_object_sentinel_writes_empty_sidecar(tmp_path):
+    """The zero-object sentinel persists a sidecar with an empty
+    detections map — 'ran with no detections' stays distinguishable."""
+    instance = _make_marshal_instance()
+    sentinel = [
+        {"bounding_box": [], "class": "", "class_label": "",
+         "confidence": 0.0, "no_objects": True}
+    ]
+    _call_generate_with_folder(instance, sentinel, str(tmp_path))
+
+    sidecar_path = os.path.join(str(tmp_path), "test_capture.detections.json")
+    with open(sidecar_path) as sidecar_file:
+        assert json.load(sidecar_file) == {"detections": {}}
+
+
+def test_sidecar_write_failure_never_fails_inference(tmp_path):
+    """Containment: an unwritable capture_folder must not raise — the
+    capture metadata (incl. the Detections_Block) is still produced."""
+    instance = _make_marshal_instance()
+    detections = [
+        {"bounding_box": [1, 2, 3, 4], "class": "16", "confidence": 0.9},
+    ]
+    missing_folder = os.path.join(str(tmp_path), "does", "not", "exist")
+    ret = _call_generate_with_folder(instance, detections, missing_folder)
+    assert _extract_detections_block(ret) is not None
+
+
+def test_anomaly_capture_writes_no_sidecar(tmp_path):
+    """Non-detection (anomaly) captures never produce a sidecar."""
+    instance = _make_marshal_instance()
+    anomalies = [
+        {"name": "scratch", "hex_color": "#FF0000",
+         "total_percentage_area": 1.5}
+    ]
+    _call_generate_with_folder(instance, anomalies, str(tmp_path))
+    assert not os.path.exists(
+        os.path.join(str(tmp_path), "test_capture.detections.json")
+    )

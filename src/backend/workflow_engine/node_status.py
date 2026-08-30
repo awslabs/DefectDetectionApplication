@@ -49,6 +49,7 @@ persisted to ``WorkflowExecution.node_status_json``.
 
 import json
 import logging
+import threading
 import time
 from typing import Dict, Iterable, Optional
 
@@ -77,6 +78,15 @@ class NodeStatusCollector:
         name_map: Optional[Dict[str, Optional[str]]] = None,
         extra_node_ids: Optional[Iterable[str]] = None,
     ) -> None:
+        # Internal mutation lock (detection-guided-bedrock-inspection
+        # Requirement 5.6, design "Thread safety inventory"): concurrent
+        # Bedrock branches report status/detail/duration from pool worker
+        # threads, so every setter's read-modify-write sequence is guarded.
+        # A reentrant lock keeps the public mutators free to share
+        # ``_set_status`` without re-acquisition deadlocks. Single-writer
+        # callers (every pre-feature path) are unaffected — purely
+        # additive.
+        self._lock = threading.RLock()
         # element-name -> nodeId (synthetic elements map to None).
         self._name_map: Dict[str, Optional[str]] = dict(name_map or {})
         # nodeId -> status; only distinct non-None nodeIds participate.
@@ -145,24 +155,33 @@ class NodeStatusCollector:
         assignment always stands and no partial value is recorded on error
         (R1.7); transition semantics are byte-identical to the pre-feature
         direct assignments (R5.1).
+
+        Guarded by the internal reentrant lock so the assignment and its
+        first-transition timing capture form one atomic step under
+        concurrent Bedrock-branch writers (detection-guided-bedrock-
+        inspection Requirement 5.6).
         """
-        self._statuses[node_id] = status
-        try:
-            if status == STATUS_RUNNING:
-                if node_id not in self._running_since:
-                    self._running_since[node_id] = time.monotonic()
-            elif status in TERMINAL_STATES:
-                if (
-                    node_id in self._running_since
-                    and node_id not in self._durations_ms
-                ):
-                    elapsed = time.monotonic() - self._running_since[node_id]
-                    self._durations_ms[node_id] = max(0, round(elapsed * 1000))
-        except Exception:  # noqa: BLE001 - timing is best-effort (R1.7)
-            logger.debug(
-                "NodeStatusCollector._set_status ignored a timing error",
-                exc_info=True,
-            )
+        with self._lock:
+            self._statuses[node_id] = status
+            try:
+                if status == STATUS_RUNNING:
+                    if node_id not in self._running_since:
+                        self._running_since[node_id] = time.monotonic()
+                elif status in TERMINAL_STATES:
+                    if (
+                        node_id in self._running_since
+                        and node_id not in self._durations_ms
+                    ):
+                        elapsed = (
+                            time.monotonic() - self._running_since[node_id]
+                        )
+                        self._durations_ms[node_id] = max(
+                            0, round(elapsed * 1000))
+            except Exception:  # noqa: BLE001 - timing is best-effort (R1.7)
+                logger.debug(
+                    "NodeStatusCollector._set_status ignored a timing error",
+                    exc_info=True,
+                )
 
     # -- live sink ----------------------------------------------------------
 
@@ -178,18 +197,20 @@ class NodeStatusCollector:
             node_id = self._name_map.get(element_name)
             if node_id is None:
                 return
-            if kind == "warning":
-                # A warning is terminal-ish: it wins over pending/running and
-                # is not overwritten by a later success (see mark_success_all).
-                if self._statuses.get(node_id) != STATUS_FAILURE:
-                    self._set_status(node_id, STATUS_WARNING)
-                    if detail:
-                        self._details[node_id] = detail
-            elif kind == "running":
-                # Only advance pending -> running; never downgrade a node that
-                # already reached a warning/success/failure state.
-                if self._statuses.get(node_id) == STATUS_PENDING:
-                    self._set_status(node_id, STATUS_RUNNING)
+            with self._lock:
+                if kind == "warning":
+                    # A warning is terminal-ish: it wins over pending/running
+                    # and is not overwritten by a later success (see
+                    # mark_success_all).
+                    if self._statuses.get(node_id) != STATUS_FAILURE:
+                        self._set_status(node_id, STATUS_WARNING)
+                        if detail:
+                            self._details[node_id] = detail
+                elif kind == "running":
+                    # Only advance pending -> running; never downgrade a node
+                    # that already reached a warning/success/failure state.
+                    if self._statuses.get(node_id) == STATUS_PENDING:
+                        self._set_status(node_id, STATUS_RUNNING)
         except Exception:  # noqa: BLE001 - collector is best-effort (R8.5)
             logger.debug("NodeStatusCollector.sink ignored an error", exc_info=True)
 
@@ -197,18 +218,20 @@ class NodeStatusCollector:
 
     def mark_running_all(self) -> None:
         """Advance every still-``pending`` node to ``running`` (run start)."""
-        for node_id, status in self._statuses.items():
-            if status == STATUS_PENDING:
-                self._set_status(node_id, STATUS_RUNNING)
+        with self._lock:
+            for node_id, status in self._statuses.items():
+                if status == STATUS_PENDING:
+                    self._set_status(node_id, STATUS_RUNNING)
 
     def mark_success_all(self) -> None:
         """Mark participating nodes ``success`` on clean completion (R3.3).
 
         Does NOT downgrade a ``warning`` (its detail is retained) and never
         overrides a ``failure``."""
-        for node_id, status in self._statuses.items():
-            if status in _NON_TERMINAL_STATES:
-                self._set_status(node_id, STATUS_SUCCESS)
+        with self._lock:
+            for node_id, status in self._statuses.items():
+                if status in _NON_TERMINAL_STATES:
+                    self._set_status(node_id, STATUS_SUCCESS)
 
     def mark_pipeline_success(self) -> None:
         """Pipeline_EOS terminal marking (R2.1). For exactly the pipeline
@@ -219,9 +242,10 @@ class NodeStatusCollector:
         (R2.4). Fully contained so an EOS-marking error can never fail a
         run (R2.6, collector best-effort discipline)."""
         try:
-            for node_id in self._pipeline_node_ids:
-                if self._statuses.get(node_id) == STATUS_RUNNING:
-                    self._set_status(node_id, STATUS_SUCCESS)
+            with self._lock:
+                for node_id in self._pipeline_node_ids:
+                    if self._statuses.get(node_id) == STATUS_RUNNING:
+                        self._set_status(node_id, STATUS_SUCCESS)
         except Exception:  # noqa: BLE001 - collector is best-effort (R2.6)
             logger.debug(
                 "NodeStatusCollector.mark_pipeline_success ignored an error",
@@ -235,9 +259,10 @@ class NodeStatusCollector:
         no node is spuriously failed (Property 2, R3.2)."""
         if node_id is None:
             return
-        self._set_status(node_id, STATUS_FAILURE)
-        if detail:
-            self._details[node_id] = detail
+        with self._lock:
+            self._set_status(node_id, STATUS_FAILURE)
+            if detail:
+                self._details[node_id] = detail
 
     def set_detail(self, node_id: Optional[str], detail: Optional[str]) -> None:
         """Record ``detail`` for ``node_id`` WITHOUT changing its status.
@@ -251,11 +276,12 @@ class NodeStatusCollector:
         try:
             if node_id is None or not detail:
                 return
-            if node_id not in self._statuses:
-                return
-            if self._statuses.get(node_id) == STATUS_FAILURE:
-                return
-            self._details[node_id] = detail
+            with self._lock:
+                if node_id not in self._statuses:
+                    return
+                if self._statuses.get(node_id) == STATUS_FAILURE:
+                    return
+                self._details[node_id] = detail
         except Exception:  # noqa: BLE001 - collector is best-effort (R8.5)
             logger.debug("NodeStatusCollector.set_detail ignored an error", exc_info=True)
 
@@ -281,9 +307,10 @@ class NodeStatusCollector:
                 return
             # round() raises on NaN/inf -> contained by the outer except,
             # recording no partial value (R1.7).
-            self._invocation_durations_ms.setdefault(
-                node_id, int(round(duration_ms))
-            )
+            with self._lock:
+                self._invocation_durations_ms.setdefault(
+                    node_id, int(round(duration_ms))
+                )
         except Exception:  # noqa: BLE001 - timing is best-effort (R1.7)
             logger.debug(
                 "NodeStatusCollector.record_invocation_duration ignored an error",
@@ -316,20 +343,21 @@ class NodeStatusCollector:
         map would contradict the failed run outcome (R3.6/R6.6 "coloring
         consistent with the run outcome"), while ``warning`` keeps Property 2
         intact (no node is spuriously marked ``failure``)."""
-        unattributed_failure = failure_detail is not None and not any(
-            status == STATUS_FAILURE for status in self._statuses.values()
-        )
-        for node_id, status in self._statuses.items():
-            if status in _NON_TERMINAL_STATES:
-                if unattributed_failure:
-                    self._set_status(node_id, STATUS_WARNING)
-                    self._details.setdefault(
-                        node_id,
-                        "The run failed before this node reported a "
-                        "result: {0}".format(failure_detail),
-                    )
-                else:
-                    self._set_status(node_id, STATUS_SUCCESS)
+        with self._lock:
+            unattributed_failure = failure_detail is not None and not any(
+                status == STATUS_FAILURE for status in self._statuses.values()
+            )
+            for node_id, status in self._statuses.items():
+                if status in _NON_TERMINAL_STATES:
+                    if unattributed_failure:
+                        self._set_status(node_id, STATUS_WARNING)
+                        self._details.setdefault(
+                            node_id,
+                            "The run failed before this node reported a "
+                            "result: {0}".format(failure_detail),
+                        )
+                    else:
+                        self._set_status(node_id, STATUS_SUCCESS)
 
     # -- serialization ------------------------------------------------------
 

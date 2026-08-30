@@ -104,6 +104,16 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: Their baseline entries were regenerated per the same maintenance path;
 #: ONLY ``plugin_dependencies`` moved (element_chain, arch set and every
 #: non-mapping field are byte-identical to the previous recording).
+#:
+#: The detection-guided-bedrock-inspection feature appended
+#: ``detection_sort_order`` to ``model_inference`` and
+#: ``crop_detection_index`` / ``crop_margin_percent`` /
+#: ``reference_payload_path`` / ``allowed_uri_prefixes`` to
+#: ``bedrock_inference``; both baseline entries were regenerated per the
+#: same maintenance path. ONLY parameters were appended (prior parameter
+#: order preserved as a prefix; ports, mappings, and every non-parameter
+#: field byte-identical to the previous recording) — the additivity is
+#: pinned by ``test_catalog_detection_inspection.py``.
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",

@@ -426,6 +426,67 @@
         "name": "system_prompt",
         "param_type": "string",
         "required": false
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Optional 0-based index into the run's detection list: the captured input frame is cropped to that detection's bounding box \u2014 detections ordered per the model_inference node's detection_sort_order \u2014 and the crop is sent as the input image. When the run has that many detections or fewer, the node records an error outcome (gating its downstream outputs) without failing the run. Empty keeps today's whole-frame behavior.",
+        "examples": [
+          0,
+          1,
+          2
+        ],
+        "multiline": false,
+        "name": "crop_detection_index",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 100,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Margin added on every side of the detection crop, as a percentage (0-100) of the bounding box's own width/height, clamped to the frame bounds; e.g. 10. Only used together with crop_detection_index.",
+        "examples": [
+          0,
+          10
+        ],
+        "multiline": false,
+        "name": "crop_margin_percent",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional dotted path resolved against the trigger payload's parsed JSON \u2014 dict keys and integer list indices, e.g. refs.0.image \u2014 selecting this node's reference image: an s3:// URI, an http(s):// URL, or base64-encoded image data (bare or a data: URL). Mutually exclusive with a connected reference frame port; a resolution, fetch, or decode failure records an error outcome for this node (never a single-image fallback). Empty keeps today's reference-port behavior.",
+        "examples": [
+          "refs.0.image",
+          "reference.image_url"
+        ],
+        "multiline": false,
+        "name": "reference_payload_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional newline-separated list of URI prefixes that reference_payload_path fetches may target, e.g. s3://plant-images/; empty permits any source. The restriction applies only to URI fetches (s3:// and http(s)://) \u2014 base64-encoded payload data needs no gate.",
+        "examples": [
+          "s3://plant-images/\nhttps://mes.local/"
+        ],
+        "multiline": false,
+        "name": "allowed_uri_prefixes",
+        "param_type": "string",
+        "required": false
       }
     ],
     "type_id": "bedrock_inference"
@@ -3739,6 +3800,28 @@
         "name": "modelName",
         "param_type": "model_ref",
         "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            "left_to_right",
+            "right_to_left",
+            "top_to_bottom",
+            "bottom_to_top",
+            "confidence_desc"
+          ]
+        },
+        "default": "left_to_right",
+        "depends_on": null,
+        "description": "Deterministic ordering of the object-detection results merged into the run metadata as 'detections', computed on bounding box centers: left_to_right (default), right_to_left, top_to_bottom, bottom_to_top, or confidence_desc; ties break on the orthogonal axis ascending (confidence ties by left_to_right). Downstream bedrock_inference nodes select a detection by its position (crop_detection_index) in this order. Read by the device executor from the registered workflow definition \u2014 never compiled into the pipeline.",
+        "examples": [
+          "left_to_right",
+          "confidence_desc"
+        ],
+        "multiline": false,
+        "name": "detection_sort_order",
+        "param_type": "enum",
+        "required": false
       }
     ],
     "type_id": "model_inference"

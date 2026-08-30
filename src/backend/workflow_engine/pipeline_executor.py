@@ -85,7 +85,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from workflow_engine import csi_capture
+from workflow_engine import branching, csi_capture, detections, run_artifacts
 from workflow_engine import executor as executor_hook
 from workflow_engine import python_bridge, rendering
 from workflow_engine.aravis_feed import AravisFeedError, plan_aravis_feeds
@@ -99,11 +99,13 @@ from workflow_engine.output_bindings import (
     BedrockInferenceProcessor,
     LlmInferenceProcessor,
     OutputBindingError,
+    RunContext,
 )
 from workflow_engine.discovery import (
     COMPILED_PIPELINE_FILE,
     MANIFEST_FILE,
     STATUS_REGISTERED,
+    WORKFLOW_FILE,
 )
 from workflow_engine import gst_plugins
 from workflow_engine.gst_plugins import workflow_plugin_path
@@ -672,7 +674,33 @@ class WorkflowExecutor:
         # input frames; the processor calls the Bedrock runtime and
         # merges {is_anomalous, confidence} into the tag values the
         # post-run handler gates on. Injectable for tests without boto3.
-        self._bedrock_processor = bedrock_processor or BedrockInferenceProcessor()
+        # When the post-run handler is the run's OutputBindingProcessor
+        # (it exposes ``process_subset``), it is injected as the Bedrock
+        # processor's ``output_processor`` seam, activating the
+        # concurrent publish-on-completion path — each Bedrock branch's
+        # output bindings run as its result lands (detection-guided-
+        # bedrock-inspection Requirements 5.2, 5.3). Handlers without
+        # ``process_subset`` (plain lambdas, other implementations) keep
+        # the sequential legacy path byte-identical to today.
+        if bedrock_processor is None:
+            output_processor = (
+                post_run_handler
+                if callable(getattr(post_run_handler, "process_subset", None))
+                else None
+            )
+            bedrock_processor = BedrockInferenceProcessor(
+                output_processor=output_processor
+            )
+        self._bedrock_processor = bedrock_processor
+        # Branch-scoped output bindings publish inside the Bedrock
+        # processor's completion path exactly when it holds an output
+        # processor; the post-run handler must then exclude them so they
+        # never run twice, while non-branch bindings keep today's
+        # post-run ordering (Requirement 5.7).
+        self._bedrock_branch_publish = (
+            getattr(self._bedrock_processor, "_output_processor", None)
+            is not None
+        )
         # Runs llm_inference bindings after the Bedrock processor and
         # before the output bindings: renders each binding's
         # Prompt_Template from the run metadata, calls the device
@@ -1321,6 +1349,16 @@ class WorkflowExecutor:
             # pair before rendering; the pair keeps the node's id so
             # failures map back to it.
             bridge_specs = python_bridge.bridge_specs(document)
+            # Custom nodes stream-downstream of a model_inference element
+            # get the run's Detection_List injected by the bridge pump
+            # (detection-guided-bedrock-inspection Requirement 1.10);
+            # computed BEFORE the rewrite replaces the emlpython elements
+            # the topology scan discriminates on.
+            detection_downstream_ids = (
+                python_bridge.detection_downstream_node_ids(document)
+                if bridge_specs
+                else frozenset()
+            )
             if bridge_specs:
                 document = python_bridge.rewrite_document(document)
 
@@ -1414,6 +1452,18 @@ class WorkflowExecutor:
             capture_id = "{0}-{1}".format(
                 registration.workflow_id, execution_id
             )
+
+            # The registration's workflow.json graph document — the
+            # executor-read source of model_inference's
+            # ``detection_sort_order`` (the parameter never reaches the
+            # compiled document) — and the run-state detections cache:
+            # the Detection_List is built exactly once per run through
+            # this dict, shared between the bridge pump's injector and
+            # the post-pipeline merge below, so every consumer sees the
+            # same entries with the same Detection_IDs (detection-guided-
+            # bedrock-inspection design Property 1).
+            graph_document = self._load_graph_document(registration)
+            detections_cache: Dict[str, Any] = {}
 
             # Supply the METADATA input the DDA ensemble models' marshal
             # step requires (capture id / capture-data path / fleet name);
@@ -1537,12 +1587,24 @@ class WorkflowExecutor:
                         # bridges run in the same pipeline
                         # (custom-python-source Requirement 7.4);
                         # frame_data=None (every pre-existing bridged
-                        # run) keeps today's exact call shape.
+                        # run) keeps today's exact call shape. The
+                        # detections injector (None for documents with
+                        # no custom node downstream of model_inference —
+                        # the byte-identical pre-feature path) hands the
+                        # pump the run's Detection_List through the
+                        # shared run-state cache (Requirement 1.10).
                         tag_values = self._run_bridged(
                             registration,
                             bridge_specs,
                             launch_string,
                             frame_data=python_frame_data,
+                            detections_injector=self._detections_injector(
+                                detection_downstream_ids,
+                                output_dir,
+                                capture_id,
+                                graph_document,
+                                detections_cache,
+                            ),
                         )
                     elif frame_data is not None:
                         # Frame_Feed (Aravis grab or Custom Python
@@ -1662,19 +1724,56 @@ class WorkflowExecutor:
             # contained/best-effort (R8.5).
             self._repair_capture_artifacts(execution)
 
+            # Detections into the Run_Metadata (detection-guided-bedrock-
+            # inspection Requirements 1.1, 1.5, 1.8, 1.9): merge the
+            # run's Detection_List (sorted, Detection_ID'd) and
+            # ``detection_count`` AFTER the capture artifacts are
+            # repaired and BEFORE the Bedrock processor block, so crops
+            # and conditions resolve against it. Built through the SAME
+            # run-state cache the bridge pump's injector used, so the
+            # handler-visible and post-pipeline lists carry identical
+            # Detection_IDs (design Property 1). Contained: a run
+            # without a detections record (non-detection model, no
+            # record) leaves the metadata unchanged and never fails
+            # (Requirement 1.8).
+            try:
+                detections.merge_detections(
+                    tag_values, output_dir, capture_id, graph_document,
+                    detections_cache,
+                )
+            except Exception:  # noqa: BLE001 - contained per 13.7 / R1.8
+                logger.exception(
+                    "Workflow execution %s could not merge detections into "
+                    "the run metadata; the run continues without them",
+                    execution_id,
+                )
+
             # Bedrock comparison inference: runs BEFORE the run is
             # finalized and before the gating/output bindings evaluate.
             # The parsed {is_anomalous, confidence} fields merge into
             # the tag values so downstream filters/conditionals/outputs
             # see them; a failure (network, credentials, unparseable
             # response) marks THIS run failed with the node identified
-            # and touches nothing else (Requirement 13.7).
+            # and touches nothing else (Requirement 13.7). The
+            # ``run_context`` (run metadata, artifact location, graph
+            # document, node-status collector) feeds the detection-crop /
+            # payload-reference / nested-verdict paths (detection-guided-
+            # bedrock-inspection Requirement 7.1); processors whose
+            # ``process`` doesn't accept it (injected doubles) are called
+            # exactly as today.
             if self._bedrock_processor.bindings(document):
+                run_context = RunContext(
+                    tag_values=tag_values,
+                    output_dir=output_dir,
+                    capture_id=capture_id,
+                    graph_document=graph_document,
+                    node_status=collector,
+                )
                 try:
                     tag_values = self._bedrock_processor.process(
                         document, tag_values, work_dir,
-                        **self._duration_sink_kwargs(
-                            self._bedrock_processor, collector
+                        **self._bedrock_process_kwargs(
+                            collector, run_context
                         ),
                     )
                 except Exception as e:  # noqa: BLE001 - contained per 13.7
@@ -1741,7 +1840,12 @@ class WorkflowExecutor:
             # binding is still attempted (Requirement 13.7); the handler
             # collects failures and raises OutputBindingError naming the
             # failing node id(s), and only its outcome decides the
-            # terminal status.
+            # terminal status. Branch-scoped binding ids already ran in
+            # the Bedrock processor's completion path (publish-on-
+            # completion) and are excluded here so they never run twice;
+            # non-branch bindings keep today's post-run ordering
+            # (detection-guided-bedrock-inspection Requirement 5.7) —
+            # the exclusion set is empty on every non-concurrent run.
             try:
                 self._run_post_run_handler(
                     registration, document, tag_values,
@@ -1749,6 +1853,9 @@ class WorkflowExecutor:
                         collector.set_detail if collector is not None else None
                     ),
                     duration_sink=self._duration_sink(collector),
+                    exclude_node_ids=self._branch_scoped_binding_ids(
+                        document
+                    ),
                 )
                 # Mid-run node-status snapshot after the post-run handler
                 # returned (node-execution-timing R2.5). Contained
@@ -1949,6 +2056,109 @@ class WorkflowExecutor:
         ):
             return {}
         return {"duration_sink": duration_sink}
+
+    def _bedrock_process_kwargs(
+        self,
+        collector: Optional[NodeStatusCollector],
+        run_context: RunContext,
+    ) -> Dict[str, Any]:
+        """The keyword arguments for the Bedrock processor's
+        ``process(...)`` call (detection-guided-bedrock-inspection
+        Requirement 7.1).
+
+        Extends :meth:`_duration_sink_kwargs` with ``run_context`` (the
+        crop / payload-reference / nested-verdict paths) and
+        ``detail_sink`` (branch publishes record their sent-message
+        details on the concurrent path). Each keyword is passed only
+        when the processor's ``process`` signature accepts it, so
+        injected test doubles predating them keep working unchanged —
+        the no-keyword call is byte-identical to today."""
+        kwargs = self._duration_sink_kwargs(self._bedrock_processor, collector)
+        process = getattr(self._bedrock_processor, "process", None)
+        if process is None:
+            return kwargs
+        if self._handler_accepts_keyword(process, "run_context"):
+            kwargs["run_context"] = run_context
+        if collector is not None and self._handler_accepts_keyword(
+            process, "detail_sink"
+        ):
+            kwargs["detail_sink"] = collector.set_detail
+        return kwargs
+
+    def _branch_scoped_binding_ids(self, document: dict) -> set:
+        """The binding node ids the post-run handler must skip because
+        they already ran in the Bedrock processor's per-branch completion
+        path (detection-guided-bedrock-inspection Requirement 5.7).
+
+        Empty — the exact pre-feature post-run call — whenever the
+        Bedrock processor has no output seam (sequential legacy path:
+        nothing published per-branch, so everything still runs post-run)
+        or the document plans no branches. Contained: a planner error
+        yields the empty set (running a binding twice is preferable to
+        silently dropping it)."""
+        if not self._bedrock_branch_publish:
+            return set()
+        try:
+            plans = branching.bedrock_branches(document)
+        except Exception:  # noqa: BLE001 - contained per 13.7
+            logger.exception(
+                "Bedrock branch planning failed; no post-run bindings "
+                "are excluded"
+            )
+            return set()
+        excluded: set = set()
+        for plan in plans.values():
+            excluded.update(plan.binding_ids)
+        return excluded
+
+    @staticmethod
+    def _load_graph_document(
+        registration: WorkflowRegistration,
+    ) -> Optional[dict]:
+        """The registration's ``workflow.json`` graph document, or None.
+
+        The executor-read source of ``model_inference``'s
+        ``detection_sort_order`` (the parameter never reaches the
+        compiled document — detection-guided-bedrock-inspection
+        Requirement 1.4). Best-effort and contained: any failure yields
+        None and the Detection_Sort_Order falls back to the default."""
+        try:
+            return run_artifacts.read_workflow_graph(
+                os.path.join(registration.artifact_path, WORKFLOW_FILE)
+            )
+        except Exception:  # noqa: BLE001 - best-effort
+            logger.debug(
+                "Could not load the workflow graph document for %s",
+                getattr(registration, "id", None),
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _detections_injector(
+        downstream_ids,
+        output_dir: str,
+        capture_id: str,
+        graph_document: Optional[dict],
+        cache: dict,
+    ):
+        """The bridged run's :class:`python_bridge.DetectionsInjector`,
+        or None (detection-guided-bedrock-inspection Requirement 1.10).
+
+        None — the byte-identical pre-feature pump — when no custom node
+        is stream-downstream of ``model_inference``. ``cache`` is the
+        run-state detections cache the post-pipeline
+        ``detections.merge_detections`` call shares (design Property 1).
+        """
+        if not downstream_ids:
+            return None
+        return python_bridge.DetectionsInjector(
+            downstream_ids,
+            output_dir,
+            capture_id,
+            graph_document=graph_document,
+            cache=cache,
+        )
 
     def _preflight_pipeline_factories(
         self,
@@ -2364,7 +2574,8 @@ class WorkflowExecutor:
             )
 
     def _run_bridged(
-        self, registration, bridge_specs, launch_string, frame_data=None
+        self, registration, bridge_specs, launch_string, frame_data=None,
+        detections_injector=None,
     ) -> dict:
         """Run a launch string containing Custom_Python_Node bridges.
 
@@ -2380,20 +2591,31 @@ class WorkflowExecutor:
         same pipeline (custom-python-source Requirement 7.4); ``None``
         (every pre-existing bridged run) keeps the runner invocation
         bit-identical to today (Requirement 11.1).
+
+        ``detections_injector`` (a ``python_bridge.DetectionsInjector``)
+        supplies the pump's per-node frame metadata — the run's
+        Detection_List for custom nodes stream-downstream of
+        ``model_inference`` (detection-guided-bedrock-inspection
+        Requirement 1.10). It is forwarded only when non-None AND the
+        runner accepts the keyword, so injected runner doubles predating
+        it keep working unchanged.
         """
         bridges = python_bridge.build_bridges(
             bridge_specs, registration.artifact_path
         )
         try:
+            kwargs: Dict[str, Any] = {}
             if frame_data is not None:
-                return self._bridged_pipeline_runner(
-                    launch_string,
-                    bridges,
-                    latency_metrics=_NullLatencyMetrics(),
-                    frame_data=frame_data,
-                )
+                kwargs["frame_data"] = frame_data
+            if detections_injector is not None and self._handler_accepts_keyword(
+                self._bridged_pipeline_runner, "detections_injector"
+            ):
+                kwargs["detections_injector"] = detections_injector
             return self._bridged_pipeline_runner(
-                launch_string, bridges, latency_metrics=_NullLatencyMetrics()
+                launch_string,
+                bridges,
+                latency_metrics=_NullLatencyMetrics(),
+                **kwargs,
             )
         finally:
             for bridge in bridges:
@@ -2743,6 +2965,7 @@ class WorkflowExecutor:
         tag_values: dict,
         detail_sink: Optional[Callable] = None,
         duration_sink: Optional[Callable] = None,
+        exclude_node_ids: Optional[set] = None,
     ) -> None:
         """Invoke the output-binding hook (task 12.4).
 
@@ -2761,14 +2984,42 @@ class WorkflowExecutor:
         invocation durations (node-execution-timing R1.3, R1.4). The
         generic ``PostRunHandler`` signature is ``(registration, document,
         tag_values) -> None``; a handler that accepts neither keyword
-        keeps working unchanged (backward compatibility)."""
+        keeps working unchanged (backward compatibility).
+
+        ``exclude_node_ids`` (detection-guided-bedrock-inspection
+        Requirement 5.7) names the branch-scoped bindings that already
+        ran in the Bedrock processor's per-branch completion path. When
+        non-empty — only ever on the concurrent publish-on-completion
+        path, whose activation requires a handler with
+        ``process_subset`` — the handler runs the REMAINING bindings
+        through ``process_subset`` (same code paths, ``executorBindings``
+        order preserved) so branch outputs never publish twice.
+        None/empty keeps the exact pre-feature handler invocation."""
         if self._post_run_handler is None:
             return
         try:
-            self._invoke_post_run_handler(
-                registration, document, tag_values, detail_sink,
-                duration_sink,
+            handler_subset = (
+                getattr(self._post_run_handler, "process_subset", None)
+                if exclude_node_ids
+                else None
             )
+            if callable(handler_subset):
+                remaining = [
+                    binding.get("nodeId")
+                    for binding in (document.get("executorBindings") or [])
+                    if binding.get("nodeId") not in exclude_node_ids
+                ]
+                kwargs: Dict[str, Any] = {}
+                if detail_sink is not None:
+                    kwargs["detail_sink"] = detail_sink
+                if duration_sink is not None:
+                    kwargs["duration_sink"] = duration_sink
+                handler_subset(document, tag_values, remaining, **kwargs)
+            else:
+                self._invoke_post_run_handler(
+                    registration, document, tag_values, detail_sink,
+                    duration_sink,
+                )
         except OutputBindingError:
             raise
         except Exception:  # noqa: BLE001 - contained per 13.7
