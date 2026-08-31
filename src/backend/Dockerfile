@@ -29,23 +29,18 @@ COPY dda_triton/model_conversion_requirements.txt ./model_conversion_requirement
 
 COPY edge_ml1_p_camera_management ./edge_ml1_p_camera_management
 COPY edgeagent ./edgeagent
-# Pre-build the PINNED awscrt==0.14.7 (transitive dep of awsiotsdk==1.11.9) so its
-# vendored aws-lc is linked correctly. awscrt 0.14.7 always builds and statically
-# links its own bundled aws-lc (BoringSSL) — it has no flag to opt out — but on
-# this image the system OpenSSL static archive (/usr/lib/<triplet>/libcrypto.a,
-# from libssl-dev) sits EARLIER on the linker search path than awscrt's vendored
-# libcrypto.a, so the final `_awscrt*.so` link resolves `-l:libcrypto.a` against
-# system OpenSSL, which lacks the AWS-LC AEAD API. Result at import:
-# `undefined symbol: EVP_aead_aes_128_gcm_tls13`. Temporarily move the system
-# static archive aside (its .so + headers stay in place for every other build)
-# while awscrt compiles so the linker falls through to the vendored aws-lc lib,
-# then restore it. This pre-install satisfies awsiotsdk's pin so prereqs_install.sh
-# below does not rebuild awscrt. The awscrt/awsiotsdk versions are unchanged.
-RUN ARCH_TRIPLET="$(gcc -dumpmachine)" && LC="/usr/lib/${ARCH_TRIPLET}/libcrypto.a" && \
-    if [ -f "$LC" ]; then mv "$LC" "${LC}.bak"; fi && \
-    python3 -m pip install --no-cache-dir --no-binary :all: awscrt==0.14.7 && \
-    if [ -f "${LC}.bak" ]; then mv "${LC}.bak" "$LC"; fi && \
-    python3 -c "import awscrt.mqtt; print('awscrt vendored aws-lc link OK')"
+# Pre-install the PINNED awscrt==0.36.1 (the exact transitive dep of
+# awsiotsdk==1.31.0) from its official manylinux wheel. The old JetPack-4-era
+# awscrt==0.14.7 source-build (with the libcrypto.a shuffle to dodge the
+# vendored aws-lc / system OpenSSL link collision) is gone: modern awscrt
+# ships prebuilt wheels for this platform, and 0.14.7's aws-c-event-stream
+# carried the fatal "Continuation ref count has gone negative" abort that
+# crash-looped the backend over Greengrass IPC (awscrt-event-stream-crash
+# fix). --only-binary guarantees the wheel is used (no source build, no
+# OpenSSL trap). This pre-install satisfies awsiotsdk's pin so
+# prereqs_install.sh below does not re-resolve awscrt.
+RUN python3 -m pip install --no-cache-dir --only-binary :all: awscrt==0.36.1 && \
+    python3 -c "import awscrt.mqtt, awscrt.eventstream; print('awscrt wheel OK')"
 RUN ./edge_ml1_p_camera_management/prereqs_install.sh 
 # Bake the pinned model conversion dependencies into the image at build time so they
 # are already present and importable at container startup, removing the need for a
