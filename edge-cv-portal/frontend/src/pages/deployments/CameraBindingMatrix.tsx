@@ -154,6 +154,14 @@ function BindingCellControl({
         disabled={cameras.length === 0}
         empty="No cameras registered for this device"
         ariaLabel={`Camera binding for node ${node.node_id} on device ${device}`}
+        // The matrix renders inside a Table whose horizontally scrollable
+        // wrapper establishes a clipping context, so an inline-rendered
+        // dropdown is cut off at the cell/table edge — the camera list was
+        // effectively unreadable in the last row (and unusable on the
+        // Revise Deployment screen). Portalling the dropdown to the body
+        // escapes that clipping; this matches every other Select in the
+        // portal (Labeling, Models, Training, Components, UseCases).
+        expandToViewport
       />
       <Button
         variant="inline-link"
