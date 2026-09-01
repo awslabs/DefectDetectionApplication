@@ -25,6 +25,7 @@ Requirements: 3.2, 3.3, 3.4, 3.5, 3.7, 3.8
 import base64
 import io
 import itertools
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -484,3 +485,131 @@ def test_describe_reference_source():
     ) == BASE64_SOURCE
     assert describe_reference_source("bm90IGEgdXJp") == BASE64_SOURCE
     assert describe_reference_source(12) == BASE64_SOURCE
+
+
+# ---------------------------------------------------------------------------
+# file:// local references. The value comes from the run's Trigger_Context
+# (untrusted MQTT input) and the bytes are sent to a cloud model, so the
+# allow-list is MANDATORY here, the path is canonicalized before the
+# prefix re-check (no ../ or symlink escape), and only regular files are
+# read.
+# ---------------------------------------------------------------------------
+
+def test_file_uri_reads_an_allowed_local_image(tmp_path):
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(PNG_BYTES)
+    prefixes = ("file://{0}/".format(tmp_path),)
+    assert fetch_reference_bytes(
+        "file://{0}".format(ref), prefixes
+    ) == PNG_BYTES
+
+
+def test_file_uri_accepts_localhost_authority(tmp_path):
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(PNG_BYTES)
+    prefixes = ("file://{0}/".format(tmp_path),)
+    assert fetch_reference_bytes(
+        "file://localhost{0}".format(ref), prefixes
+    ) == PNG_BYTES
+
+
+def test_file_uri_denied_when_allow_list_is_empty(tmp_path):
+    """Empty permits every REMOTE source but never a local file."""
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(PNG_BYTES)
+    for prefixes in ((), None):
+        with pytest.raises(PayloadReferenceError) as e:
+            fetch_reference_bytes("file://{0}".format(ref), prefixes)
+        assert "allowed URI prefixes" in str(e.value)
+
+
+def test_file_uri_denied_when_only_remote_prefixes_configured(tmp_path):
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(PNG_BYTES)
+    with pytest.raises(PayloadReferenceError):
+        fetch_reference_bytes(
+            "file://{0}".format(ref), ("s3://bucket/", "https://host/")
+        )
+
+
+def test_file_uri_traversal_cannot_escape_the_allowed_root(tmp_path):
+    allowed = tmp_path / "refs"
+    allowed.mkdir()
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(PNG_BYTES)
+    prefixes = ("file://{0}/".format(allowed),)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(
+            "file://{0}/../secret.png".format(allowed), prefixes
+        )
+    assert "outside" in str(e.value)
+
+
+def test_file_uri_symlink_cannot_escape_the_allowed_root(tmp_path):
+    allowed = tmp_path / "refs"
+    allowed.mkdir()
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(PNG_BYTES)
+    link = allowed / "sneaky.png"
+    link.symlink_to(secret)
+    prefixes = ("file://{0}/".format(allowed),)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes("file://{0}".format(link), prefixes)
+    assert "outside" in str(e.value)
+
+
+def test_file_uri_rejects_a_directory(tmp_path):
+    prefixes = ("file://{0}/".format(tmp_path),)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes("file://{0}".format(tmp_path), prefixes)
+    assert "not a regular file" in str(e.value) or "outside" in str(e.value)
+
+
+def test_file_uri_rejects_a_non_regular_file(tmp_path):
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    prefixes = ("file://{0}/".format(tmp_path),)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes("file://{0}".format(fifo), prefixes)
+    assert "not a regular file" in str(e.value)
+
+
+def test_file_uri_missing_file_names_the_source(tmp_path):
+    prefixes = ("file://{0}/".format(tmp_path),)
+    missing = "file://{0}/nope.png".format(tmp_path)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(missing, prefixes)
+    assert missing in str(e.value)
+
+
+def test_file_uri_size_cap_enforced(tmp_path, monkeypatch):
+    monkeypatch.setattr(payload_fetch, "MAX_REFERENCE_BYTES", 16)
+    big = tmp_path / "big.png"
+    big.write_bytes(b"x" * 64)
+    prefixes = ("file://{0}/".format(tmp_path),)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes("file://{0}".format(big), prefixes)
+    assert "size cap" in str(e.value)
+
+
+def test_file_uri_non_image_rejected_without_bytes(tmp_path):
+    notes = tmp_path / "notes.txt"
+    notes.write_bytes(b"definitely not an image")
+    prefixes = ("file://{0}/".format(tmp_path),)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes("file://{0}".format(notes), prefixes)
+    message = str(e.value)
+    assert "not a decodable image" in message
+    assert "definitely not an image" not in message
+
+
+def test_file_uri_malformed_rejected():
+    for bad in ("file://", "file:///", "file://remotehost/refs/a.png"):
+        with pytest.raises(PayloadReferenceError):
+            fetch_reference_bytes(bad, ("file:///refs/",))
+
+
+def test_describe_reference_source_reports_file_uris_by_value():
+    assert describe_reference_source(
+        "file:///aws_dda/refs/a.png"
+    ) == "file:///aws_dda/refs/a.png"

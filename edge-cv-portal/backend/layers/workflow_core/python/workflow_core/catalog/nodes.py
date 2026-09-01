@@ -782,9 +782,11 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                                         "integer list indices, e.g. "
                                         "refs.0.image — selecting this "
                                         "node's reference image: an "
-                                        "s3:// URI, an http(s):// URL, or "
-                                        "base64-encoded image data (bare "
-                                        "or a data: URL). Mutually "
+                                        "s3:// URI, an http(s):// URL, a "
+                                        "file:// path to an image already "
+                                        "on the device, or base64-encoded "
+                                        "image data (bare or a data: "
+                                        "URL). Mutually "
                                         "exclusive with a connected "
                                         "reference frame port; a "
                                         "resolution, fetch, or decode "
@@ -804,10 +806,18 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                                         "s3://plant-images/; empty permits "
                                         "any source. The restriction "
                                         "applies only to URI fetches "
-                                        "(s3:// and http(s)://) — "
-                                        "base64-encoded payload data "
-                                        "needs no gate.",
-                            examples=["s3://plant-images/\nhttps://mes.local/"]),
+                                        "(s3://, http(s):// and file://) "
+                                        "— base64-encoded payload data "
+                                        "needs no gate. A file:// "
+                                        "reference is the exception to "
+                                        "'empty permits any source': "
+                                        "reading images off the device "
+                                        "requires an explicit file:// "
+                                        "entry here, and paths are "
+                                        "resolved before the check so "
+                                        "they cannot escape it.",
+                            examples=["s3://plant-images/\nhttps://mes.local/",
+                                      "file:///aws_dda/reference-images/"]),
     ],
     # Executor-level on every physical device architecture: the node has
     # no GStreamer element of its own. The compiler terminates each
