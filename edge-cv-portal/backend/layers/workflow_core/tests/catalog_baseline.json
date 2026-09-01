@@ -371,7 +371,7 @@
         "constraints": {},
         "default": true,
         "depends_on": null,
-        "description": "Checked: anomaly mode \u2014 the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs. Unchecked: freeform mode \u2014 the prompt is sent as-is and the raw model text is recorded in the run metadata as bedrock_text (and bedrock.{nodeId}.text), with no JSON parsing.",
+        "description": "Checked: anomaly mode — the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs. Unchecked: freeform mode — the prompt is sent as-is and the raw model text is recorded in the run metadata as bedrock_text (and bedrock.{nodeId}.text), with no JSON parsing.",
         "examples": [
           true,
           false
@@ -433,7 +433,7 @@
         },
         "default": null,
         "depends_on": null,
-        "description": "Optional 0-based index into the run's detection list: the captured input frame is cropped to that detection's bounding box \u2014 detections ordered per the model_inference node's detection_sort_order \u2014 and the crop is sent as the input image. When the run has that many detections or fewer, the node records an error outcome (gating its downstream outputs) without failing the run. Empty keeps today's whole-frame behavior.",
+        "description": "Optional 0-based index into the run's detection list: the captured input frame is cropped to that detection's bounding box — detections ordered per the model_inference node's detection_sort_order — and the crop is sent as the input image. When the run has that many detections or fewer, the node records an error outcome (gating its downstream outputs) without failing the run. Empty keeps today's whole-frame behavior.",
         "examples": [
           0,
           1,
@@ -465,7 +465,7 @@
         "constraints": {},
         "default": "",
         "depends_on": null,
-        "description": "Optional dotted path resolved against the trigger payload's parsed JSON \u2014 dict keys and integer list indices, e.g. refs.0.image \u2014 selecting this node's reference image: an s3:// URI, an http(s):// URL, or base64-encoded image data (bare or a data: URL). Mutually exclusive with a connected reference frame port; a resolution, fetch, or decode failure records an error outcome for this node (never a single-image fallback). Empty keeps today's reference-port behavior.",
+        "description": "Optional dotted path resolved against the trigger payload's parsed JSON — dict keys and integer list indices, e.g. refs.0.image — selecting this node's reference image: an s3:// URI, an http(s):// URL, a file:// path to an image already on the device, or base64-encoded image data (bare or a data: URL). Mutually exclusive with a connected reference frame port; a resolution, fetch, or decode failure records an error outcome for this node (never a single-image fallback). Empty keeps today's reference-port behavior.",
         "examples": [
           "refs.0.image",
           "reference.image_url"
@@ -479,9 +479,10 @@
         "constraints": {},
         "default": "",
         "depends_on": null,
-        "description": "Optional newline-separated list of URI prefixes that reference_payload_path fetches may target, e.g. s3://plant-images/; empty permits any source. The restriction applies only to URI fetches (s3:// and http(s)://) \u2014 base64-encoded payload data needs no gate.",
+        "description": "Optional newline-separated list of URI prefixes that reference_payload_path fetches may target, e.g. s3://plant-images/; empty permits any source. The restriction applies only to URI fetches (s3://, http(s):// and file://) — base64-encoded payload data needs no gate. A file:// reference is the exception to 'empty permits any source': reading images off the device requires an explicit file:// entry here, and paths are resolved before the check so they cannot escape it.",
         "examples": [
-          "s3://plant-images/\nhttps://mes.local/"
+          "s3://plant-images/\nhttps://mes.local/",
+          "file:///aws_dda/reference-images/"
         ],
         "multiline": false,
         "name": "allowed_uri_prefixes",
@@ -1856,7 +1857,7 @@
         },
         "default": null,
         "depends_on": null,
-        "description": "Python run once per workflow run to produce the run's frame. Define produce_frame(context) and return the frame; context is the trigger context that started the run: for MQTT triggers the keys topic, payload, payload_json, qos and timestamp (payload_json is the payload parsed as JSON, or None when it does not parse); for OPC UA triggers the keys endpoint, node_id, value and source_timestamp; an empty dict for manual runs. Return a NumPy uint8 array (rows x cols grayscale, rows x cols x 3 BGR, or rows x cols x 4 BGRA \u2014 OpenCV channel order), or {'array': arr, 'format': 'RGB'|'RGBA'|'GRAY8'} to use the array's bytes without channel conversion, or {'data': bytes, 'width': W, 'height': H, 'format': ...} for raw bytes; returning None fails the run. cv2/np are pre-imported. Helpers: import dda_frames for load_image(source) -> BGR uint8 array and load_bytes(source) -> raw bytes, for local paths, s3://bucket/key URIs, and http(s):// URLs.",
+        "description": "Python run once per workflow run to produce the run's frame. Define produce_frame(context) and return the frame; context is the trigger context that started the run: for MQTT triggers the keys topic, payload, payload_json, qos and timestamp (payload_json is the payload parsed as JSON, or None when it does not parse); for OPC UA triggers the keys endpoint, node_id, value and source_timestamp; an empty dict for manual runs. Return a NumPy uint8 array (rows x cols grayscale, rows x cols x 3 BGR, or rows x cols x 4 BGRA — OpenCV channel order), or {'array': arr, 'format': 'RGB'|'RGBA'|'GRAY8'} to use the array's bytes without channel conversion, or {'data': bytes, 'width': W, 'height': H, 'format': ...} for raw bytes; returning None fails the run. cv2/np are pre-imported. Helpers: import dda_frames for load_image(source) -> BGR uint8 array and load_bytes(source) -> raw bytes, for local paths, s3://bucket/key URIs, and http(s):// URLs.",
         "examples": [
           "def produce_frame(context):\n    import dda_frames\n    payload = context.get(\"payload_json\") or {}\n    return dda_frames.load_image(payload[\"image_url\"])",
           "def produce_frame(context):\n    import dda_frames\n    return dda_frames.load_image(\"s3://plant-images/reference.jpg\")"
@@ -1883,7 +1884,7 @@
         "constraints": {},
         "default": "",
         "depends_on": null,
-        "description": "Optional newline-separated list of URI prefixes that dda_frames.load_image and load_bytes may fetch from, e.g. s3://plant-images/; empty permits any source. The restriction applies only to fetches made through the dda_frames helpers \u2014 it is not a sandbox boundary.",
+        "description": "Optional newline-separated list of URI prefixes that dda_frames.load_image and load_bytes may fetch from, e.g. s3://plant-images/; empty permits any source. The restriction applies only to fetches made through the dda_frames helpers — it is not a sandbox boundary.",
         "examples": [
           "s3://plant-images/\nhttps://mes.local/"
         ],
@@ -3243,7 +3244,7 @@
         "constraints": {},
         "default": false,
         "depends_on": null,
-        "description": "Checked: anomaly mode \u2014 the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs; an unparseable answer is recorded as the node's error without failing the run. Unchecked (default): freeform mode \u2014 the prompt is sent as-is and the raw model text is recorded in the run metadata at llm.{nodeId}.generated_text, with no JSON parsing.",
+        "description": "Checked: anomaly mode — the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs; an unparseable answer is recorded as the node's error without failing the run. Unchecked (default): freeform mode — the prompt is sent as-is and the raw model text is recorded in the run metadata at llm.{nodeId}.generated_text, with no JSON parsing.",
         "examples": [
           true,
           false
@@ -3814,7 +3815,7 @@
         },
         "default": "left_to_right",
         "depends_on": null,
-        "description": "Deterministic ordering of the object-detection results merged into the run metadata as 'detections', computed on bounding box centers: left_to_right (default), right_to_left, top_to_bottom, bottom_to_top, or confidence_desc; ties break on the orthogonal axis ascending (confidence ties by left_to_right). Downstream bedrock_inference nodes select a detection by its position (crop_detection_index) in this order. Read by the device executor from the registered workflow definition \u2014 never compiled into the pipeline.",
+        "description": "Deterministic ordering of the object-detection results merged into the run metadata as 'detections', computed on bounding box centers: left_to_right (default), right_to_left, top_to_bottom, bottom_to_top, or confidence_desc; ties break on the orthogonal axis ascending (confidence ties by left_to_right). Downstream bedrock_inference nodes select a detection by its position (crop_detection_index) in this order. Read by the device executor from the registered workflow definition — never compiled into the pipeline.",
         "examples": [
           "left_to_right",
           "confidence_desc"
@@ -4201,7 +4202,7 @@
         "constraints": {},
         "default": false,
         "depends_on": null,
-        "description": "Publish through the device's Greengrass-managed MQTT (the Greengrass nucleus's AWS IoT Core connection) instead of a plain broker or your own AWS IoT credentials. Zero configuration: only the topic is required \u2014 no broker host or port and no certificate paths.",
+        "description": "Publish through the device's Greengrass-managed MQTT (the Greengrass nucleus's AWS IoT Core connection) instead of a plain broker or your own AWS IoT credentials. Zero configuration: only the topic is required — no broker host or port and no certificate paths.",
         "examples": [
           true
         ],
@@ -4293,7 +4294,7 @@
         },
         "default": "queue",
         "depends_on": null,
-        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce \u2014 coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
+        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce — coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
         "examples": [
           "queue",
           "drop"
@@ -4637,7 +4638,7 @@
         },
         "default": "queue",
         "depends_on": null,
-        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce \u2014 coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
+        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce — coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
         "examples": [
           "queue",
           "drop"

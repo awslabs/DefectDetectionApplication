@@ -161,7 +161,7 @@ describe('CameraBindingMatrix', () => {
     // Each synced-device cell offers the registered cameras as a dropdown.
     const select = createWrapper(bodyCell(container, 2, 2).getElement()).findSelect()!;
     select.openDropdown();
-    const options = select.findDropdown().findOptions().map((o) => o.getElement().textContent);
+    const options = select.findDropdown({ expandToViewport: true }).findOptions().map((o) => o.getElement().textContent);
     expect(options).toHaveLength(2);
     expect(options[0]).toContain('Line 1 inspection cam');
     expect(options[0]).toContain('/dev/video0');
@@ -185,7 +185,7 @@ describe('CameraBindingMatrix', () => {
     // Re-selecting emits a user-made (non-suggested) camera cell.
     const select = createWrapper(hintedCell).findSelect()!;
     select.openDropdown();
-    select.selectOptionByValue('cfg-2');
+    select.selectOptionByValue('cfg-2', { expandToViewport: true });
     expect(props.onCellChange).toHaveBeenCalledWith('thing-1', 'cam_in_1', {
       mode: 'camera',
       cameraSourceId: 'cfg-2',
@@ -357,7 +357,7 @@ describe('CameraBindingMatrix', () => {
     const aravisSelect = createWrapper(aravisCell).findSelect()!;
     aravisSelect.openDropdown();
     const aravisOptions = aravisSelect
-      .findDropdown()
+      .findDropdown({ expandToViewport: true })
       .findOptions()
       .map((o) => o.getElement().textContent);
     expect(aravisOptions).toHaveLength(2);
@@ -373,7 +373,7 @@ describe('CameraBindingMatrix', () => {
     // The camera_source row still offers every registered entry.
     const cameraSelect = createWrapper(bodyCell(container, 2, 2).getElement()).findSelect()!;
     cameraSelect.openDropdown();
-    expect(cameraSelect.findDropdown().findOptions()).toHaveLength(4);
+    expect(cameraSelect.findDropdown({ expandToViewport: true }).findOptions()).toHaveLength(4);
   });
 
   it('shows the empty state for a context without Camera_Input_Nodes (Requirement 8.9 contract)', () => {

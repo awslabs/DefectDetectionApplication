@@ -28,6 +28,10 @@ reference-image bytes:
   device);
 - ``http(s)://`` URLs fetch through urllib with a bounded network
   timeout (:data:`REFERENCE_FETCH_TIMEOUT_SEC`, Requirement 3.7);
+- ``file://`` URIs read the device's own filesystem, gated harder than
+  the remote schemes: a non-empty ``file://`` allow-list entry is
+  MANDATORY, the path is canonicalized before the prefix re-check, and
+  only regular files are read (see :data:`FILE_SCHEME`);
 - ``data:`` URLs and bare base64 strings decode locally (no gate — the
   bytes are already in the payload).
 
@@ -50,6 +54,8 @@ helpers live in a subprocess source string and cannot be shared.
 
 import base64
 import logging
+import os
+import stat
 import urllib.request
 from typing import Any, Iterable, Optional, Sequence
 
@@ -75,7 +81,18 @@ BASE64_SOURCE = "base64 payload data"
 #: accumulates so an oversized object is abandoned early.
 _S3_CHUNK_BYTES = 1 << 20
 
-_URI_SCHEMES = ("s3://", "http://", "https://")
+#: The local-file scheme. UNLIKE every other accepted source, a
+#: ``file://`` reference reads the device's own filesystem, and the value
+#: is resolved from the run's Trigger_Context — untrusted external input.
+#: It is therefore gated harder than the remote schemes: a NON-EMPTY
+#: ``allowed_uri_prefixes`` is MANDATORY (an empty allow-list permits
+#: every remote source but DENIES every local file), the path is
+#: canonicalized before the prefix is re-checked so ``..`` and symlinks
+#: cannot escape the allowed directory, and only regular files are read
+#: (never a directory, device node, or FIFO).
+FILE_SCHEME = "file://"
+
+_URI_SCHEMES = ("s3://", "http://", "https://", FILE_SCHEME)
 
 _s3_client = None
 
@@ -179,7 +196,11 @@ def fetch_reference_bytes(
             "an s3://, http(s):// URI, a data: URL, or base64 image "
             "data".format(type(value).__name__)
         )
-    if value.startswith(_URI_SCHEMES):
+    if value.startswith(FILE_SCHEME):
+        # Stricter gate than the remote schemes (see FILE_SCHEME).
+        data = _fetch_file(value, allowed_prefixes)
+        source = value
+    elif value.startswith(_URI_SCHEMES):
         _check_allowed(value, allowed_prefixes)
         if value.startswith("s3://"):
             data = _fetch_s3(value, s3_client)
@@ -301,6 +322,105 @@ def _fetch_s3(source: str, s3_client=None) -> bytes:
             "could not fetch reference '{0}': {1}".format(source, e)
         )
     return b"".join(chunks)
+
+
+def _local_path(source: str) -> str:
+    """The absolute local path a ``file://`` reference names.
+
+    Accepts ``file:///abs/path`` (empty authority) and ``file://
+    localhost/abs/path``; any other authority is refused — a remote host
+    is not a local file and must not be silently read from disk."""
+    remainder = source[len(FILE_SCHEME):]
+    authority, sep, tail = remainder.partition("/")
+    if authority not in ("", "localhost"):
+        raise PayloadReferenceError(
+            "malformed local reference URI '{0}': only file:/// or "
+            "file://localhost/ are supported (got authority "
+            "'{1}')".format(source, authority)
+        )
+    path = "/" + tail if sep else ""
+    if not path or path == "/":
+        raise PayloadReferenceError(
+            "malformed local reference URI '{0}' (expected "
+            "file:///absolute/path)".format(source)
+        )
+    return path
+
+
+def _allowed_file_roots(allowed_prefixes):
+    """The canonicalized directory roots ``file://`` reads are confined
+    to, taken from the node's ``allowed_uri_prefixes`` entries that name
+    the file scheme. Empty means nothing is permitted."""
+    roots = []
+    for prefix in (allowed_prefixes or ()):
+        text = str(prefix).strip()
+        if not text.startswith(FILE_SCHEME):
+            continue
+        raw = text[len(FILE_SCHEME):]
+        if raw.startswith("localhost/"):
+            raw = raw[len("localhost"):]
+        if not raw.startswith("/"):
+            continue
+        roots.append(os.path.realpath(raw))
+    return roots
+
+
+def _fetch_file(source: str, allowed_prefixes) -> bytes:
+    """Read a local reference image named by a ``file://`` URI.
+
+    The allow-list is MANDATORY here: with no ``file://`` prefix
+    configured the fetch is refused, because the URI comes from the
+    run's Trigger_Context (untrusted MQTT input) and the bytes are sent
+    to a cloud model. The path is canonicalized with ``realpath`` before
+    the prefix check, so ``..`` segments and symlinks cannot escape the
+    allowed root, and only regular files are read.
+    """
+    path = _local_path(source)
+    roots = _allowed_file_roots(allowed_prefixes)
+    if not roots:
+        raise PayloadReferenceError(
+            "local reference fetch of '{0}' denied: reading device files "
+            "requires an explicit file:// entry in the node's allowed "
+            "URI prefixes (an empty allow-list permits remote sources "
+            "but never local files)".format(source)
+        )
+    resolved = os.path.realpath(path)
+    if not any(
+        resolved == root or resolved.startswith(root.rstrip("/") + "/")
+        for root in roots
+    ):
+        raise PayloadReferenceError(
+            "local reference fetch of '{0}' denied: the resolved path is "
+            "outside the node's allowed file:// prefixes".format(source)
+        )
+    try:
+        st = os.stat(resolved)
+    except OSError as e:
+        raise PayloadReferenceError(
+            "could not read local reference '{0}': {1}".format(
+                source, e.strerror or e
+            )
+        )
+    if not stat.S_ISREG(st.st_mode):
+        raise PayloadReferenceError(
+            "local reference '{0}' is not a regular file".format(source)
+        )
+    if st.st_size > MAX_REFERENCE_BYTES:
+        raise PayloadReferenceError(
+            "reference from '{0}' exceeds the {1}-byte size cap".format(
+                source, MAX_REFERENCE_BYTES
+            )
+        )
+    try:
+        with open(resolved, "rb") as handle:
+            data = handle.read(MAX_REFERENCE_BYTES + 1)
+    except OSError as e:
+        raise PayloadReferenceError(
+            "could not read local reference '{0}': {1}".format(
+                source, e.strerror or e
+            )
+        )
+    return data
 
 
 def _decode_data_url(value: str) -> bytes:
