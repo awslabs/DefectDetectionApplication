@@ -52,7 +52,7 @@
   - Pay attention to the sibling suites that pin adjacent behavior: `test_python_bridge_pipeline_stall.py`, `test_workflow_aravis_executor.py`, `test_workflow_python_source_executor.py`, `test_workflow_python_bridge.py`, `test_property_aravis_free_execution_identity.py`, `test_property_python_source_free_identity.py`
   - **EXPECTED OUTCOME**: All green
 
-- [-] 5. Checkpoint - Ensure all tests pass
+- [x] 5. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise
   - Commit the fix + tests together, stating in the commit what was proven on-device (hot-patch validation) and that component-build verification follows
 
