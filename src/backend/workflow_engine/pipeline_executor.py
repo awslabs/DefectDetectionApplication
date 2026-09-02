@@ -1583,21 +1583,30 @@ class WorkflowExecutor:
                         registration.artifact_path,
                     )
                     if bridge_specs:
-                        # A produced Frame_Feed and pumped emlpython
-                        # bridges run in the same pipeline
-                        # (custom-python-source Requirement 7.4);
-                        # frame_data=None (every pre-existing bridged
-                        # run) keeps today's exact call shape. The
-                        # detections injector (None for documents with
-                        # no custom node downstream of model_inference —
-                        # the byte-identical pre-feature path) hands the
+                        # The merged Frame_Feed (Aravis camera grab OR
+                        # Custom Python Produced_Frame — frame_data
+                        # carries whichever the document planned) and
+                        # pumped emlpython bridges run in the same
+                        # pipeline (custom-python-source Requirement
+                        # 7.4). Forwarding the merged frame_data (not
+                        # the unmerged python_frame_data, which is None
+                        # for camera-fed documents) fixes the
+                        # camera+bridges 120s stall where the grabbed
+                        # frame was dropped and the fed appsrc starved
+                        # (bridged-pipeline-camera-frame-feed-stall
+                        # Requirements 2.1–2.3); frame_data=None (every
+                        # feed-free bridged run) keeps today's exact
+                        # call shape (Requirement 3.2). The detections
+                        # injector (None for documents with no custom
+                        # node downstream of model_inference — the
+                        # byte-identical pre-feature path) hands the
                         # pump the run's Detection_List through the
                         # shared run-state cache (Requirement 1.10).
                         tag_values = self._run_bridged(
                             registration,
                             bridge_specs,
                             launch_string,
-                            frame_data=python_frame_data,
+                            frame_data=frame_data,
                             detections_injector=self._detections_injector(
                                 detection_downstream_ids,
                                 output_dir,
