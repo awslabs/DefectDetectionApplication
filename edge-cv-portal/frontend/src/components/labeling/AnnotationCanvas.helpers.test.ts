@@ -7,8 +7,37 @@ import { describe, it, expect } from 'vitest';
 import {
   encodeRleColumnMajor,
   decodeRleColumnMajor,
+  parseRleCounts,
   clampBoxToImage,
 } from './AnnotationCanvas';
+
+describe('parseRleCounts', () => {
+  it('parses the backend space-separated counts string', () => {
+    expect(parseRleCounts('4 1 4')).toEqual([4, 1, 4]);
+  });
+
+  it('parses a real SAM-style counts string with large runs', () => {
+    expect(parseRleCounts('8238 8 754 25 3 4')).toEqual([
+      8238, 8, 754, 25, 3, 4,
+    ]);
+  });
+
+  it('tolerates extra whitespace', () => {
+    expect(parseRleCounts('  4  1 4 ')).toEqual([4, 1, 4]);
+  });
+
+  it('passes numeric arrays through unchanged', () => {
+    expect(parseRleCounts([4, 1, 4])).toEqual([4, 1, 4]);
+  });
+
+  it('round-trips a string prelabel through decode without character iteration', () => {
+    // 3x3 with only the centre pixel set: "4 1 4". Iterating the string
+    // itself (the old bug) would walk 5 characters instead of 3 counts
+    // and corrupt the mask.
+    const mask = decodeRleColumnMajor(parseRleCounts('4 1 4'), 3, 3);
+    expect(Array.from(mask)).toEqual([0, 0, 0, 0, 1, 0, 0, 0, 0]);
+  });
+});
 
 describe('encodeRleColumnMajor / decodeRleColumnMajor', () => {
   it('encodes an empty bitmap as a single zero-run', () => {

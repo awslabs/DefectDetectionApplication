@@ -39,6 +39,7 @@ import {
   Table,
 } from '@cloudscape-design/components';
 import {
+  ApiError,
   apiService,
   DdaAnnotation,
   LabelerJobSummary,
@@ -193,22 +194,33 @@ export default function LabelerWorkspace() {
    * screen — the canvas is not remounted because the task is unchanged.
    */
   const handleSubmit = async (annotation: DdaAnnotation) => {
-    const taskId = nextTask?.task?.task_id;
+    const taskId = nextTask?.task_id;
     if (!activeJobId || !taskId) {
       return;
     }
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await apiService.submitTask(taskId, annotation);
+      await apiService.submitTask(taskId, activeJobId, annotation);
       await loadNextTask(activeJobId);
     } catch (err) {
       console.error('Failed to submit annotation:', err);
+      // Incomplete-annotation rejections (Req 7.8) identify each missing
+      // element in validation_errors, riding along on ApiError.details —
+      // show those instead of only the generic header.
+      const details = err instanceof ApiError ? err.details : undefined;
+      const validationErrors = Array.isArray(details?.validation_errors)
+        ? (details.validation_errors as Array<{ message?: string }>)
+            .map((e) => e?.message)
+            .filter((m): m is string => Boolean(m))
+        : [];
       setSubmitError(
-        getErrorMessage(
-          err,
-          'Your submission was not saved. Your annotation is still on screen — please try again.'
-        )
+        validationErrors.length
+          ? validationErrors.join(' • ')
+          : getErrorMessage(
+              err,
+              'Your submission was not saved. Your annotation is still on screen — please try again.'
+            )
       );
     } finally {
       setSubmitting(false);
@@ -222,12 +234,12 @@ export default function LabelerWorkspace() {
    * never stuck on an unpresentable image.
    */
   const handlePresentationFailure = async (reason: string) => {
-    const taskId = nextTask?.task?.task_id;
+    const taskId = nextTask?.task_id;
     if (!activeJobId || !taskId) {
       return;
     }
     try {
-      await apiService.reportPresentationFailure(taskId, reason);
+      await apiService.reportPresentationFailure(taskId, activeJobId, reason);
     } catch (err) {
       console.error('Failed to report presentation failure:', err);
     }
@@ -312,12 +324,23 @@ export default function LabelerWorkspace() {
   // ---------------------------------------------------------------- //
   // Labeling view
   // ---------------------------------------------------------------- //
-  const task = nextTask?.task;
+  // Task fields are flat on the next-task payload (see
+  // LabelerNextTaskResponse); a payload with a task_id carries a
+  // presentable task, the completion payload carries none.
+  const task =
+    nextTask && !nextTask.complete && nextTask.task_id && nextTask.image_url
+      ? {
+          task_id: nextTask.task_id,
+          image_url: nextTask.image_url,
+          image_url_expires_at: nextTask.image_url_expires_at,
+          prelabel: nextTask.prelabel,
+        }
+      : undefined;
   const submittedCount = nextTask?.submitted_count ?? 0;
   const remainingCount = nextTask?.remaining_count ?? 0;
   const withheldCount = nextTask?.withheld_count ?? 0;
-  const goodExamples = nextTask?.good_example_urls ?? [];
-  const badExamples = nextTask?.bad_example_urls ?? [];
+  const goodExamples = nextTask?.example_images?.good ?? [];
+  const badExamples = nextTask?.example_images?.bad ?? [];
   const instructions = nextTask?.instructions;
   const hasRail =
     Boolean(instructions) || goodExamples.length > 0 || badExamples.length > 0;
@@ -338,7 +361,7 @@ export default function LabelerWorkspace() {
           ) : undefined
         }
       >
-        {activeJob?.job_name ?? nextTask?.task?.job_id ?? 'Labeling'}
+        {activeJob?.job_name ?? nextTask?.job_id ?? 'Labeling'}
       </Header>
 
       {taskError && (
@@ -413,7 +436,7 @@ export default function LabelerWorkspace() {
               submitting={submitting}
               onSubmit={handleSubmit}
               onImageUrlRefresh={() =>
-                apiService.refreshTaskImageUrl(task.task_id)
+                apiService.refreshTaskImageUrl(task.task_id, activeJobId)
               }
               onPresentationFailure={handlePresentationFailure}
             />
