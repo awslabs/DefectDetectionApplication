@@ -563,8 +563,13 @@ export interface DdaBoundingBox {
 export interface DdaMaskRegion {
   /** Label_Set class; null for unclassified SAM proposals. */
   class: string | null;
-  /** Run-length-encoded bitmap of the region. */
-  rle: number[];
+  /**
+   * Run-length-encoded bitmap of the region as the backend's canonical
+   * space-separated counts string (column-major, starting with the
+   * zero-run) — e.g. "4 1 4". This is the shape the submit validator
+   * requires and the SAM pre-label worker produces.
+   */
+  rle: string;
 }
 
 /**
@@ -573,12 +578,23 @@ export interface DdaMaskRegion {
  * (dda-data-labeling Requirements 7.3–7.5, 7.7, 8.3).
  */
 export interface DdaAnnotation {
+  /**
+   * The job's labeling modality ('Classification' | 'Segmentation' |
+   * 'ObjectDetection'). Required on submissions: the server rejects any
+   * annotation whose modality does not match the job's task type.
+   */
+  modality?: string;
   /** Binary_Classification selection: 'normal' | 'anomaly'. */
   label?: string;
   /** Object_Detection boxes (pixel coordinates within image bounds). */
   boxes?: DdaBoundingBox[];
   /** Semantic_Segmentation regions (RLE-encoded, label-indexed). */
   regions?: DdaMaskRegion[];
+  /**
+   * Image bounds for ObjectDetection submissions; the server validates
+   * every box against these dimensions.
+   */
+  image_size?: { width: number; height: number };
   /** Image pixel dimensions the regions/boxes are expressed against. */
   image_width?: number;
   image_height?: number;
@@ -594,20 +610,22 @@ export interface DdaAnnotation {
 export interface LabelerNextTaskResponse {
   /** True when the labeler has no presentable unsubmitted tasks left. */
   complete: boolean;
-  task?: {
-    task_id: string;
-    job_id: string;
-    image_url: string;
-    /** Epoch seconds when the presigned image URL expires. */
-    image_url_expires_at?: number;
-    prelabel?: DdaAnnotation;
-    prelabel_status?: string;
-  };
+  /**
+   * Task fields are flat on the payload (not nested under a `task`
+   * object) — the shape is pinned by the backend's labeler API tests.
+   * All are absent on the completion payload (`complete: true`).
+   */
+  task_id?: string;
+  job_id?: string;
+  image_url?: string;
+  /** Epoch seconds when the presigned image URL expires. */
+  image_url_expires_at?: number;
+  prelabel?: DdaAnnotation;
   task_type?: string;
   label_set?: string[];
   instructions?: string;
-  good_example_urls?: string[];
-  bad_example_urls?: string[];
+  /** Presigned example-image URLs; kinds with none stored are omitted. */
+  example_images?: { good?: string[]; bad?: string[] };
   submitted_count: number;
   remaining_count: number;
   withheld_count?: number;
@@ -1874,15 +1892,19 @@ class ApiService {
    */
   async submitTask(
     taskId: string,
+    jobId: string,
     annotation: DdaAnnotation
   ): Promise<{
     message: string;
     submitted_count?: number;
     remaining_count?: number;
   }> {
+    // job_id is required in the body: task ids are only unique within a
+    // job (both are table keys), so the route cannot resolve the task
+    // without it.
     return this.request(`/labeler/tasks/${encodeURIComponent(taskId)}/submit`, {
       method: 'POST',
-      body: JSON.stringify({ annotation }),
+      body: JSON.stringify({ job_id: jobId, annotation }),
     });
   }
 
@@ -1893,13 +1915,14 @@ class ApiService {
    */
   async reportPresentationFailure(
     taskId: string,
+    jobId: string,
     reason: string
   ): Promise<{ message: string }> {
     return this.request(
       `/labeler/tasks/${encodeURIComponent(taskId)}/presentation-failure`,
       {
         method: 'POST',
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({ job_id: jobId, reason }),
       }
     );
   }
@@ -1909,12 +1932,18 @@ class ApiService {
    * prior URL expires; client-side annotation state is untouched
    * (dda-data-labeling Requirement 12.7).
    */
-  async refreshTaskImageUrl(taskId: string): Promise<{
+  async refreshTaskImageUrl(
+    taskId: string,
+    jobId?: string
+  ): Promise<{
     image_url: string;
     image_url_expires_at?: number;
   }> {
+    // job_id disambiguates when the caller has same-numbered tasks in
+    // more than one job (task ids are only unique within a job).
+    const query = jobId ? `?job_id=${encodeURIComponent(jobId)}` : '';
     return this.request(
-      `/labeler/tasks/${encodeURIComponent(taskId)}/image-url`
+      `/labeler/tasks/${encodeURIComponent(taskId)}/image-url${query}`
     );
   }
 

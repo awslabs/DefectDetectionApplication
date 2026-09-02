@@ -13,6 +13,7 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as iot from 'aws-cdk-lib/aws-iot';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -1847,7 +1848,13 @@ export class ComputeStack extends cdk.Stack {
     // Team-member resolution (member identities/emails come from Cognito):
     // the handler validates the Data_Labeler role on add-member and the
     // worker resolves recipient emails for notifications.
-    for (const fn of [ddaLabelingHandler, ddaLabelingWorker]) {
+    //
+    // labelingHandler needs the same grant: POST /labeling runs there and
+    // delegates in-process to create_dda_job, which re-resolves every team
+    // member's Data_Labeler role from Cognito at creation time (Req 4.8).
+    // Without it every member lookup fails closed and job creation is
+    // rejected with "no members with the Data_Labeler role".
+    for (const fn of [labelingHandler, ddaLabelingHandler, ddaLabelingWorker]) {
       fn.addToRolePolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
@@ -1907,14 +1914,52 @@ export class ComputeStack extends cdk.Stack {
     const deploySamWorker =
       deploySamWorkerContext === true || deploySamWorkerContext === 'true';
     if (deploySamWorker) {
+      // The bundled model is overridable per deployment
+      // (-c samModelArchiveUrl=<zip-with-onnx-exports>). The Dockerfile
+      // default is MobileSAM (fast, coarse); sam_vit_b_01ec64.zip from
+      // the same HuggingFace repo is a substantially better fit when
+      // pre-label quality matters. ViT-L/ViT-H exports exceed the
+      // autolabel worker's 120 s per-image invocation bound (Req 8.5)
+      // on CPU and must not be deployed here.
+      const samModelArchiveUrl =
+        this.node.tryGetContext('samModelArchiveUrl') as string | undefined;
+
+      // Image platform and function architecture are pinned together and
+      // explicitly: with neither set, the image inherits the build host's
+      // architecture while the function silently stays x86_64, so building
+      // on an ARM host (e.g. the arm64 build server this repo ships)
+      // produces a function that fails every invoke with
+      // Runtime.InvalidEntrypoint / ProcessSpawnFailed. Pinning amd64
+      // keeps the SAM worker consistent with every other Lambda in this
+      // stack; on an ARM build host the image is produced through qemu
+      // emulation, which is slower but correct.
       const ddaSamWorker = new lambda.DockerImageFunction(this, 'DdaSamWorker', {
         code: lambda.DockerImageCode.fromImageAsset(
           path.join(__dirname, '../../backend/sam-worker'),
+          {
+            platform: ecrAssets.Platform.LINUX_AMD64,
+            ...(samModelArchiveUrl
+              ? { buildArgs: { SAM_MODEL_ARCHIVE_URL: samModelArchiveUrl } }
+              : {}),
+          },
         ),
+        architecture: lambda.Architecture.X86_64,
         description:
           'DDA labeling SAM pre-label worker (CPU ONNX SAM region proposals)',
         memorySize: 10240,
         timeout: cdk.Duration.seconds(300),
+        // Automatic-mask-generation tuning (read by handler.py, all
+        // env-var overridable). Denser prompt grid + stricter IoU keep
+        // than the handler defaults (8 / 0.7): small-defect datasets
+        // need the extra prompts to hit thin regions, and the stricter
+        // keep discards the junk proposals a denser grid also produces.
+        // The lower area floor admits thin structures (cracks/gaps)
+        // that a 0.05% floor would drop.
+        environment: {
+          SAM_POINTS_PER_SIDE: '16',
+          SAM_PRED_IOU_THRESHOLD: '0.88',
+          SAM_MIN_AREA_FRACTION: '0.0002',
+        },
       });
 
       // Synchronous invoke from the autolabel worker (bounded at 120 s

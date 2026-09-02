@@ -115,6 +115,22 @@ export function encodeRleColumnMajor(
 }
 
 /**
+ * Parse an RLE value from the API into numeric counts. The backend's
+ * canonical form is the space-separated counts string ("4 1 4"); a
+ * numeric array is tolerated for robustness. Iterating the string
+ * directly must never happen — that walks characters, not counts.
+ */
+export function parseRleCounts(rle: string | number[]): number[] {
+  if (Array.isArray(rle)) {
+    return rle;
+  }
+  return rle
+    .split(/\s+/)
+    .filter((token) => token.length > 0)
+    .map(Number);
+}
+
+/**
  * Decode COCO-style column-major RLE counts into a binary mask stored in
  * row-major order (1 where the region is present). Inverse of
  * {@link encodeRleColumnMajor}.
@@ -351,7 +367,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
               region.class !== null && region.class !== undefined
                 ? labelSet.indexOf(region.class)
                 : -1;
-            const mask = decodeRleColumnMajor(region.rle, width, height);
+            const mask = decodeRleColumnMajor(
+              parseRleCounts(region.rle), width, height);
             if (classIndex >= 0) {
               for (let p = 0; p < mask.length; p++) {
                 if (mask[p]) bitmap[p] = classIndex + 1;
@@ -622,16 +639,24 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
 
     /* ---------------- annotation assembly / validation ------------- */
     const buildAnnotation = useCallback((): DdaAnnotation => {
+      // Every submission is modality-tagged: the server rejects
+      // annotations whose modality does not match the job's task type
+      // (Req 7.8), so taskType always rides along.
       if (taskType === 'Classification') {
-        return { label: classification ?? undefined };
+        return { modality: taskType, label: classification ?? undefined };
       }
       if (taskType === 'ObjectDetection') {
         return {
+          modality: taskType,
           boxes: boxes.map(({ id: _id, ...box }) =>
             imageSize
               ? { class: box.class, ...clampBoxToImage(box, imageSize.width, imageSize.height) }
               : box
           ),
+          // The server validates box bounds against image_size.
+          ...(imageSize
+            ? { image_size: { width: imageSize.width, height: imageSize.height } }
+            : {}),
           image_width: imageSize?.width,
           image_height: imageSize?.height,
         };
@@ -648,17 +673,20 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           if (present.has(i + 1)) {
             regions.push({
               class: className,
+              // The submit validator requires the canonical
+              // space-separated counts string, not a counts array.
               rle: encodeRleColumnMajor(
                 bitmap,
                 imageSize.width,
                 imageSize.height,
                 i + 1
-              ),
+              ).join(' '),
             });
           }
         });
       }
       return {
+        modality: taskType,
         regions,
         image_width: imageSize?.width,
         image_height: imageSize?.height,

@@ -16,9 +16,9 @@ backend switch, task 5.1, will):
   missing/empty team, instructions length, example image count/format
 - Fixed ['normal','anomaly'] Label_Set for Classification (Req 4.3)
 - Dataset enumeration with nested prefixes via get_s3_client_for_bucket
-  (single-account direct fallback); empty prefix and non-image objects
-  rejected identifying each offending object (Req 4.5, 4.6, 4.7,
-  12.1-12.3)
+  (single-account direct fallback); non-image objects skipped and counted
+  rather than rejected, a prefix yielding zero images rejected (Req 4.5,
+  4.6, 4.7, 12.1-12.3)
 - Auto-label model/modality compatibility matrix (Req 8.1, 8.8)
 - Skip-verification: admin-only (403 + audit for non-admins, Req 9.1),
   Bedrock model + per-label prompts covering every label (Req 9.2, 9.3)
@@ -485,17 +485,42 @@ class TestDatasetEnumeration:
         assert body["dataset_prefix"] == env.prefix
         env.assert_nothing_persisted()
 
-    def test_non_image_objects_rejected_identifying_each(self, env):
-        """Req 4.7: unsupported objects rejected, each offender
-        identified; nothing persisted."""
-        env.put_images(["a.jpg", "notes.txt", "nested/video.mp4"])
+    def test_non_image_objects_skipped_not_rejected(self, env):
+        """Req 4.7: unsupported objects are skipped, the job is created
+        over the images alone, and the skipped count is reported."""
+        env.put_images(["a.jpg", "b.png", "notes.txt", "nested/video.mp4"])
+        status, body = env.create()
+        assert status == 201
+        assert body["image_count"] == 2
+        assert body["skipped_object_count"] == 2
+
+    def test_manifest_beside_images_still_creates_job(self, env):
+        """Req 4.7: the common layout of a manifest living under the image
+        prefix must not block job creation."""
+        env.put_images(["a.jpg", "manifests/train.manifest"])
+        status, body = env.create()
+        assert status == 201
+        assert body["image_count"] == 1
+        assert body["skipped_object_count"] == 1
+
+    def test_skipped_count_persisted_on_job(self, env):
+        """Req 4.7: image_count stays explainable via the persisted
+        skipped_object_count."""
+        env.put_images(["a.jpg", "notes.txt"])
+        status, body = env.create()
+        assert status == 201
+        job = env.get_job(body["job_id"])
+        assert job["image_count"] == 1
+        assert job["skipped_object_count"] == 1
+
+    def test_prefix_with_only_non_image_objects_rejected(self, env):
+        """Req 4.6/4.7: skipping everything leaves zero images, which is
+        still a rejection — and it says why."""
+        env.put_images(["notes.txt", "nested/video.mp4"])
         status, body = env.create()
         assert status == 400
-        offending = {obj["key"] for obj in body["invalid_objects"]}
-        assert offending == {f"{env.prefix}notes.txt",
-                             f"{env.prefix}nested/video.mp4"}
-        assert all(obj["reason"] == "unsupported_format"
-                   for obj in body["invalid_objects"])
+        assert env.prefix in body["error"]
+        assert body["skipped_object_count"] == 2
         env.assert_nothing_persisted()
 
     def test_folder_placeholders_ignored(self, env):

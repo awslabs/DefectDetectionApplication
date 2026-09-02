@@ -19,7 +19,7 @@ import {
 } from '@cloudscape-design/components';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { S3Dataset } from '../types';
-import { apiService, LabelingTeam } from '../services/api';
+import { apiService, ApiError, LabelingTeam } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
 import { useAuth } from '../contexts/AuthContext';
 import S3Browser from '../components/S3Browser';
@@ -621,7 +621,24 @@ export default function CreateLabelingJob() {
 
       navigate('/labeling');
     } catch (err) {
-      setError(getErrorMessage(err, 'Failed to create labeling job. Please try again.'));
+      // The DDA create endpoint reports each rejected parameter in a
+      // `validation_errors` list alongside the generic top-level error
+      // (dda-data-labeling Req 4.9). The parsed body rides along as
+      // ApiError.details, so surface the specific messages instead of
+      // just "Labeling job validation failed".
+      const details = err instanceof ApiError ? err.details : undefined;
+
+      const validationErrors = Array.isArray(details?.validation_errors)
+        ? (details.validation_errors as Array<{ message?: string }>)
+            .map((e) => e?.message)
+            .filter((m): m is string => Boolean(m))
+        : [];
+
+      setError(
+        validationErrors.length
+          ? validationErrors.join(' • ')
+          : getErrorMessage(err, 'Failed to create labeling job. Please try again.')
+      );
       console.error('Failed to create labeling job:', err);
       scrollToTop();
     } finally {
@@ -658,7 +675,9 @@ export default function CreateLabelingJob() {
               value: 'GroundTruth',
               label: 'SageMaker Ground Truth',
               description:
-                'The existing SageMaker workflow using Ground Truth work teams and the worker portal',
+                'The existing SageMaker workflow using Ground Truth work teams and the worker portal. ' +
+                'Note: no longer accessible to new users as of July 30, 2026 — ' +
+                'we recommend the DDA Data Labeling System instead.',
             },
           ]}
         />
