@@ -339,7 +339,9 @@ See Manifest Generator section for the exact per-modality JSON Lines shapes; the
 
 ### Property 1: Invalid job submissions are rejected and persist nothing
 
-*For any* DDA Labeling_Job submission containing at least one invalid element — a missing or unknown Labeling_Backend, a missing required parameter, a name outside 1–63 characters or duplicating an existing job in the Use_Case, an invalid Label_Set (empty, >10 classes, duplicate/empty/oversized names), instructions over 5,000 characters, more than 10 good or bad example images, an empty dataset prefix, a non-image or inaccessible object under the prefix, an empty team without Skip_Verification_Mode, or a Skip_Verification_Mode submission missing the Bedrock model or missing/empty Per_Label_Prompts — the submission SHALL be rejected with an error identifying each offending element, and afterwards the jobs and tasks tables SHALL be unchanged and no S3 or SageMaker resources created.
+*For any* DDA Labeling_Job submission containing at least one invalid element — a missing or unknown Labeling_Backend, a missing required parameter, a name outside 1–63 characters or duplicating an existing job in the Use_Case, an invalid Label_Set (empty, >10 classes, duplicate/empty/oversized names), instructions over 5,000 characters, more than 10 good or bad example images, a dataset prefix containing no images or one that cannot be accessed, an empty team without Skip_Verification_Mode, or a Skip_Verification_Mode submission missing the Bedrock model or missing/empty Per_Label_Prompts — the submission SHALL be rejected with an error identifying each offending element, and afterwards the jobs and tasks tables SHALL be unchanged and no S3 or SageMaker resources created.
+
+Non-image objects under the prefix are *not* an invalid element: they are skipped during enumeration (req 4.7), so a prefix holding images alongside sidecar files such as manifests still creates a job over its images.
 
 **Validates: Requirements 1.6, 4.1, 4.2, 4.4, 4.6, 4.7, 4.8, 4.9, 4.10, 9.2, 9.3**
 
@@ -474,6 +476,8 @@ See Manifest Generator section for the exact per-modality JSON Lines shapes; the
 | Failure | Behavior | Requirements |
 |---|---|---|
 | Invalid job/team/membership input | 400 enumerating every offending element; no writes performed (validation precedes all persistence and enumeration) | 1.6, 3.2, 3.4, 3.5, 4.9, 4.10, 9.3 |
+| Non-image object under the dataset prefix | Skipped during enumeration and excluded from `image_count`; count reported as `skipped_object_count` on the job | 4.7 |
+| Dataset prefix inaccessible | 400 identifying the location and the S3 error code; no writes performed | 4.7 |
 | Authorization failures | 403 via `@rbac_check` / ownership checks, empty of resource data, `unauthorized_access`/`labeler_access_denied` audit event | 2.3, 2.6, 3.7, 9.1 |
 | Task creation shortfall during distribution | Job → `Failed` with `failure_reason`; written tasks marked `Inactive`; nothing labelable | 5.6 |
 | Rebalancing failure mid-apply | Conditional-write inverse restores prior assignments; API error to the administrator; membership unchanged | 5.7 |

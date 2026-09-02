@@ -1241,10 +1241,17 @@ def _team_data_labeler_members(team_id: str, usecase_id: str) -> List[Dict]:
 
 def _enumerate_dataset_images(s3_client, bucket: str, prefix: str) -> tuple:
     """Enumerate every object under the dataset prefix, nested prefixes
-    included (Req 4.5). Returns (image keys, invalid objects) where each
-    invalid object identifies the offending key and reason (Req 4.7)."""
+    included (Req 4.5).
+
+    Objects that are not supported images are skipped rather than
+    rejected (Req 4.7): datasets routinely carry sidecar files such as
+    manifests next to (or under) the images, and those must not block
+    job creation. Returns (image keys, skipped objects) where each
+    skipped entry identifies the key and why it was skipped, for
+    reporting and observability.
+    """
     images: List[str] = []
-    invalid: List[Dict] = []
+    skipped: List[Dict] = []
     paginator = s3_client.get_paginator('list_objects_v2')
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get('Contents', []):
@@ -1254,8 +1261,8 @@ def _enumerate_dataset_images(s3_client, bucket: str, prefix: str) -> tuple:
             if key.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS):
                 images.append(key)
             else:
-                invalid.append({'key': key, 'reason': 'unsupported_format'})
-    return images, invalid
+                skipped.append({'key': key, 'reason': 'unsupported_format'})
+    return images, skipped
 
 
 def _invoke_labeling_worker(payload: Dict) -> None:
@@ -1500,7 +1507,7 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
         try:
             s3_client = get_s3_client_for_bucket(
                 usecase, dataset_bucket, 'dda-labeling-create')
-            images, invalid_objects = _enumerate_dataset_images(
+            images, skipped_objects = _enumerate_dataset_images(
                 s3_client, dataset_bucket, dataset_prefix)
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
@@ -1515,21 +1522,27 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                 'reason': error_code,
             })
 
-        if invalid_objects:
-            return create_response(400, {
-                'error': 'Dataset prefix contains objects that are not '
-                         'supported JPEG/PNG images',
-                'dataset_bucket': dataset_bucket,
-                'dataset_prefix': dataset_prefix,
-                'invalid_objects': invalid_objects,
-            })
+        # Req 4.7: non-image objects are skipped, not rejected. Log them so
+        # an unexpectedly low image count can be explained after the fact.
+        if skipped_objects:
+            logger.info(
+                f"Skipped {len(skipped_objects)} non-image object(s) under "
+                f"s3://{dataset_bucket}/{dataset_prefix}: "
+                f"{[o['key'] for o in skipped_objects[:10]]}"
+                f"{' ...' if len(skipped_objects) > 10 else ''}")
 
         if not images:
+            # Req 4.6. When the prefix held only skipped objects, say so —
+            # otherwise "no images found" reads as an empty prefix.
             return create_response(400, {
                 'error': f"No image objects found under dataset prefix "
-                         f"'{dataset_prefix}'",
+                         f"'{dataset_prefix}'"
+                         + (f" ({len(skipped_objects)} object(s) under the "
+                            f"prefix are not JPEG or PNG images)"
+                            if skipped_objects else ''),
                 'dataset_bucket': dataset_bucket,
                 'dataset_prefix': dataset_prefix,
+                'skipped_object_count': len(skipped_objects),
             })
 
         # --- persistence (Req 4.11, 11.3, 12.8) ---
@@ -1546,6 +1559,9 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
             'dataset_prefix': dataset_prefix,
             'dataset_bucket': dataset_bucket,
             'image_count': len(images),
+            # Req 4.7: non-image objects under the prefix are skipped;
+            # recording the count keeps image_count explainable.
+            'skipped_object_count': len(skipped_objects),
             'instructions': instructions,
             'example_images': example_images,
             'auto_label': {
@@ -1593,6 +1609,9 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
             'status': 'InProgress',
             'labeling_backend': 'DDA',
             'image_count': len(images),
+            # Req 4.7: reported so the caller can reconcile image_count
+            # against the object count under the prefix.
+            'skipped_object_count': len(skipped_objects),
             'message': 'DDA labeling job created successfully',
         })
 
