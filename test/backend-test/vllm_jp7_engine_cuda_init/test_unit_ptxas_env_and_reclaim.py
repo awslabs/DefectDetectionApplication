@@ -19,7 +19,7 @@ Durable regression guards, deliberately overlapping exploration cases
 historical bug-condition record; this one is the long-lived unit
 suite):
 
-* The JP7 image contract: ``ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas``
+* The JP7 image contract: ``ENV TRITON_PTXAS_PATH=/opt/dda/cuda-bin/ptxas``
   appears exactly once in ``src/backend/Dockerfile.jp7`` and NOWHERE
   else (compose — shared with JP6 — recipe variants, Dockerfile.jp6,
   Dockerfile.jp5): triton's BUNDLED ptxas (CUDA 12.8) cannot codegen
@@ -58,7 +58,7 @@ DOCKER_COMPOSE = REPO_ROOT / "src" / "docker-compose.yaml"
 RECIPE_VARIANTS = sorted(REPO_ROOT.glob("recipe*.yaml"))
 
 TRITON_PTXAS_ENV_LINE = re.compile(
-    r"^\s*ENV\s+TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas\s*$",
+    r"^\s*ENV\s+TRITON_PTXAS_PATH=/opt/dda/cuda-bin/ptxas\s*$",
     re.MULTILINE,
 )
 
@@ -100,7 +100,7 @@ class TestTritonPtxasPathImageContract:
         matches = TRITON_PTXAS_ENV_LINE.findall(DOCKERFILE_JP7.read_text())
         assert len(matches) == 1, (
             "Dockerfile.jp7 must declare 'ENV "
-            "TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas' exactly once "
+            "TRITON_PTXAS_PATH=/opt/dda/cuda-bin/ptxas' exactly once "
             "(found {}): without it triton's bundled CUDA 12.8 ptxas "
             "rejects Thor's sm_110a and any Triton-JIT-compiling vLLM "
             "model dies with PTXASError during the engine's profile "
