@@ -118,10 +118,34 @@ def _get_sessions() -> Tuple[object, object]:
     return _SESSIONS
 
 
+def _encoder_expects_hwc(encoder) -> bool:
+    """
+    Whether the encoder takes a rank-3 HWC image rather than a rank-4
+    NCHW tensor.
+
+    samexporter-style exports (the MobileSAM bundle this image ships by
+    default) declare `input_image: ['image_height', 'image_width', 3]`
+    and perform normalization and square padding *inside* the graph, so
+    they take the resized RGB image as-is. Exports without baked-in
+    preprocessing declare `[1, 3, S, S]` and need the caller to
+    normalize, pad and transpose.
+    """
+    return len(encoder.get_inputs()[0].shape) == 3
+
+
 def _encoder_input_size(encoder) -> int:
-    """Encoder square input resolution, from the graph or the default."""
+    """
+    Encoder square input resolution, from the graph or the default.
+
+    Layout matters here: for a rank-3 HWC input the trailing dimension is
+    the channel count, so reading the last two dims would mistake the 3
+    channels for the resolution and shrink every image to 3 pixels. The
+    spatial dims are leading for HWC and trailing for NCHW; when they are
+    dynamic (as in the samexporter exports) the default applies.
+    """
     shape = encoder.get_inputs()[0].shape
-    for dim in shape[-2:]:
+    spatial = shape[:2] if len(shape) == 3 else shape[-2:]
+    for dim in spatial:
         if isinstance(dim, int) and dim > 0:
             return dim
     return DEFAULT_ENCODER_SIZE
@@ -161,11 +185,21 @@ def _decode_image(image_bytes: bytes):
     return np.asarray(image, dtype=np.uint8)
 
 
-def _preprocess(image_rgb, encoder_size: int):
+def _preprocess(image_rgb, encoder_size: int, expects_hwc: bool = False):
     """
-    Resize the longest side to the encoder resolution, pad bottom/right
-    to a square, normalize with SAM pixel statistics, and return the
-    NCHW float32 tensor plus the resize scale.
+    Resize the longest side to the encoder resolution and return the
+    encoder input tensor plus the resize scale.
+
+    Two export conventions are supported (see `_encoder_expects_hwc`):
+
+    - `expects_hwc`: the graph normalizes and pads internally, so the
+      resized RGB image is returned unchanged as rank-3 HWC float32.
+      Normalizing or padding here would corrupt the input.
+    - otherwise: pad bottom/right to a square, normalize with the SAM
+      pixel statistics, and return a rank-4 NCHW float32 tensor.
+
+    Point prompts are scaled into the resized frame by the returned
+    `scale` in both cases.
     """
     import numpy as np
     from PIL import Image
@@ -179,6 +213,10 @@ def _preprocess(image_rgb, encoder_size: int):
         Image.fromarray(image_rgb).resize((new_w, new_h), Image.BILINEAR),
         dtype=np.float32,
     )
+
+    if expects_hwc:
+        return resized, scale
+
     mean = np.asarray(PIXEL_MEAN, dtype=np.float32)
     std = np.asarray(PIXEL_STD, dtype=np.float32)
     normalized = (resized - mean) / std
@@ -243,7 +281,8 @@ def _generate_candidates(image_rgb, max_prompts: Optional[int] = None) -> List[D
     encoder_size = _encoder_input_size(encoder)
     height, width = image_rgb.shape[:2]
 
-    tensor, scale = _preprocess(image_rgb, encoder_size)
+    tensor, scale = _preprocess(
+        image_rgb, encoder_size, _encoder_expects_hwc(encoder))
     encoder_input_name = encoder.get_inputs()[0].name
     embeddings = encoder.run(None, {encoder_input_name: tensor})[0]
 

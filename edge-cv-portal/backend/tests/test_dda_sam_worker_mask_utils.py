@@ -232,3 +232,61 @@ class TestHandlerInputValidation:
             handler.lambda_handler(
                 {'image_bytes_base64': 'AA==', 'max_regions': 'lots'}
             )
+
+# ---------------------------------------------------------------------------
+# Encoder input layout detection (no numpy/onnxruntime needed: these read
+# only the declared ONNX graph shape)
+# ---------------------------------------------------------------------------
+
+class _FakeInput:
+    def __init__(self, shape, name='input_image'):
+        self.shape = shape
+        self.name = name
+
+
+class _FakeEncoder:
+    def __init__(self, shape):
+        self._inputs = [_FakeInput(shape)]
+
+    def get_inputs(self):
+        return self._inputs
+
+
+class TestEncoderInputLayout:
+    def _handler(self):
+        import handler
+        return handler
+
+    def test_hwc_export_detected(self):
+        """samexporter MobileSAM declares a rank-3 HWC input."""
+        handler = self._handler()
+        encoder = _FakeEncoder(['image_height', 'image_width', 3])
+        assert handler._encoder_expects_hwc(encoder) is True
+
+    def test_nchw_export_not_hwc(self):
+        handler = self._handler()
+        encoder = _FakeEncoder([1, 3, 1024, 1024])
+        assert handler._encoder_expects_hwc(encoder) is False
+
+    def test_hwc_dynamic_dims_fall_back_to_default_size(self):
+        """The trailing 3 is the channel count, not the resolution — a
+        rank-3 dynamic shape must not yield an encoder size of 3."""
+        handler = self._handler()
+        encoder = _FakeEncoder(['image_height', 'image_width', 3])
+        size = handler._encoder_input_size(encoder)
+        assert size == handler.DEFAULT_ENCODER_SIZE
+        assert size != 3
+
+    def test_nchw_static_dims_use_trailing_spatial_dims(self):
+        handler = self._handler()
+        assert handler._encoder_input_size(_FakeEncoder([1, 3, 1024, 1024])) == 1024
+        assert handler._encoder_input_size(_FakeEncoder([1, 3, 512, 512])) == 512
+
+    def test_hwc_static_dims_use_leading_spatial_dims(self):
+        handler = self._handler()
+        assert handler._encoder_input_size(_FakeEncoder([1024, 1024, 3])) == 1024
+
+    def test_nchw_dynamic_dims_fall_back_to_default_size(self):
+        handler = self._handler()
+        encoder = _FakeEncoder([1, 3, 'height', 'width'])
+        assert handler._encoder_input_size(encoder) == handler.DEFAULT_ENCODER_SIZE
