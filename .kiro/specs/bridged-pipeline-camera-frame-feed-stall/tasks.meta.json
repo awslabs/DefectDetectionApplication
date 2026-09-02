@@ -1,0 +1,142 @@
+{
+  "pbtResults": {
+    "1. Write bug condition exploration test": {
+      "status": "passed",
+      "failingExample": "Exploration test FAILED on unfixed code as expected (confirms the bug). Counterexample: for a camera+bridges document (Aravis binding point, grab succeeded, emlpython bridge, no Custom Python source), the bridged pipeline runner was invoked WITHOUT the frame_data keyword — kwargs actually received: ['latency_metrics'] only. AssertionError: \"bridged runner was invoked WITHOUT the frame_data keyword — the grabbed camera frame was dropped (fed_source stays None; no buffer/EOS ever pushed; 120s watchdog stall). kwargs actually received: ['latency_metrics']\" — assert 'frame_data' in {'latency_metrics': <_NullLatencyMetrics>}. Matches on-device diagnosis (executions ed3b60aa / 1aed6b7f / f7e430b7 on jetson-thor1, 120s watchdog).",
+      "lastRunTimestamp": 1788307812039
+    },
+    "3.2 Verify bug condition exploration test now passes": {
+      "status": "passed",
+      "lastRunTimestamp": 1788308303901
+    },
+    "3.3 Verify preservation tests still pass": {
+      "status": "passed",
+      "lastRunTimestamp": 1788308318328
+    }
+  },
+  "executionHistory": {
+    "1. Write bug condition exploration test": [
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307432295
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307464542
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307847081
+      }
+    ],
+    "2. Write preservation property tests (BEFORE implementing fix)": [
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307434896
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307853982
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788308107438
+      }
+    ],
+    "3.1 Implement the fix": [
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307437029
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788308115935
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788308252442
+      }
+    ],
+    "3.2 Verify bug condition exploration test now passes": [
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307439571
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788308262206
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788308341104
+      }
+    ],
+    "3.3 Verify preservation tests still pass": [
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307442138
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788308348551
+      }
+    ],
+    "4. Run the workflow_engine backend test suite for regressions": [
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307444155
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788308359094
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788308601913
+      }
+    ],
+    "5. Checkpoint - Ensure all tests pass": [
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307446239
+      },
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788308610517
+      }
+    ],
+    "6. Component build (JP7 1.0.17), deploy to thor1, on-device verification": [
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788307448767
+      }
+    ],
+    "3. Fix the bridged branch frame feed in pipeline_executor.py": [
+      {
+        "executionId": "cd4c90b5-4dfc-434a-904e-453b698d3f2d",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1788308350884
+      }
+    ]
+  }
+}
