@@ -30,7 +30,7 @@ reworked 2026-08-15):
 
 * Case 1 — the causal configuration of the validated fix:
   ``src/backend/Dockerfile.jp7`` declares
-  ``ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas`` exactly once,
+  ``ENV TRITON_PTXAS_PATH=/opt/dda/cuda-bin/ptxas`` exactly once,
   pointing triton at the image's system CUDA 13.x ptxas (which accepts
   ``sm_110a``); no other config source (compose — shared with JP6 — or
   the recipe variants) sets the variable. FAILED on unfixed code (the
@@ -84,7 +84,7 @@ DOCKER_COMPOSE = REPO_ROOT / "src" / "docker-compose.yaml"
 RECIPE_VARIANTS = sorted(REPO_ROOT.glob("recipe*.yaml"))
 
 TRITON_PTXAS_ENV_LINE = re.compile(
-    r"^\s*ENV\s+TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas\s*$",
+    r"^\s*ENV\s+TRITON_PTXAS_PATH=/opt/dda/cuda-bin/ptxas\s*$",
     re.MULTILINE,
 )
 
@@ -138,7 +138,7 @@ class TestCase1TritonPtxasPathDeclaredForJp7:
     """Case 1 — the causal configuration of the validated ptxas fix.
 
     FAILED ON UNFIXED CODE: Dockerfile.jp7 did not declare
-    ``ENV TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas``, so triton fell
+    ``ENV TRITON_PTXAS_PATH=/opt/dda/cuda-bin/ptxas``, so triton fell
     back to its BUNDLED CUDA 12.8 ptxas, which cannot codegen for Thor's
     ``sm_110a`` — any Triton-JIT-compiling vLLM model died with
     PTXASError during profile_run. Passes on the fixed tree.
@@ -151,7 +151,7 @@ class TestCase1TritonPtxasPathDeclaredForJp7:
         matches = TRITON_PTXAS_ENV_LINE.findall(content)
         assert len(matches) == 1, (
             "Dockerfile.jp7 must declare 'ENV "
-            "TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas' exactly once "
+            "TRITON_PTXAS_PATH=/opt/dda/cuda-bin/ptxas' exactly once "
             "(found {}): without it triton uses its BUNDLED CUDA 12.8 "
             "ptxas, which rejects Thor's sm_110a ('ptxas fatal : Value "
             "'sm_110a' is not defined for option 'gpu-name''), so any "
