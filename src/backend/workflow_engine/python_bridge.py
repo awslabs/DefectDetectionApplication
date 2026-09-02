@@ -65,6 +65,7 @@ import time
 from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 from workflow_engine import detections
+from workflow_engine.gst_plugins import FORK_REGISTRY_LOCK
 
 logger = logging.getLogger(__name__)
 
@@ -988,15 +989,26 @@ class CustomPythonBridge:
             # values take precedence.
             for key, value in _THREAD_CAP_ENV.items():
                 env.setdefault(key, value)
-        self._process = subprocess.Popen(
-            [self._python_executable, "-c", RUNNER_SOURCE, self._handler_path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            preexec_fn=_memory_limit_preexec(self._memory_limit_bytes),
-            close_fds=True,
-            env=env,
-        )
+        # ``preexec_fn`` forces the fork(+exec) spawn path, and CPython's
+        # before-fork handlers acquire the import lock — which a sibling
+        # thread's gi/Gst registry scan can hold while waiting on
+        # GLib-internal locks. FORK_REGISTRY_LOCK serializes this fork
+        # against those registry sections (see its docstring in
+        # workflow_engine.gst_plugins for the production deadlock this
+        # prevents). Lock ordering: we already hold the instance
+        # ``self._lock`` here and acquire the global lock inside it; the
+        # registry sections never touch instance locks, so no cycle.
+        with FORK_REGISTRY_LOCK:
+            self._process = subprocess.Popen(
+                [self._python_executable, "-c", RUNNER_SOURCE,
+                 self._handler_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=_memory_limit_preexec(self._memory_limit_bytes),
+                close_fds=True,
+                env=env,
+            )
         logger.info(
             "Custom Python node '%s': handler subprocess %s started "
             "(wall-clock %.1fs/frame, memory %s bytes)",

@@ -63,11 +63,43 @@ importable (and the executor testable) without ``gi``.
 import hashlib
 import logging
 import os
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Iterator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+#: Process-wide lock serializing the two critical sections that can
+#: deadlock each other via the CPython import lock:
+#:
+#: 1. The gi/GStreamer registry sections in this module (``import gi``
+#:    + ``Gst.init`` + registry scans/queries): the gi import machinery
+#:    holds the CPython **import lock** while calling into
+#:    GStreamer/GLib internals, which take their own locks (and can
+#:    fork registry helper children).
+#: 2. ``CustomPythonBridge._start_locked``'s ``subprocess.Popen`` in
+#:    :mod:`workflow_engine.python_bridge`: its ``preexec_fn`` forces
+#:    the fork(+exec) path, and CPython's before-fork handlers acquire
+#:    the import lock.
+#:
+#: When a handler-subprocess fork overlaps a concurrent registry scan
+#: in a sibling thread, the two lock orders invert and the whole
+#: backend wedges. Observed in production (jetson-thor1, LocalServer
+#: 1.0.17): three workflow executions triggered by one MQTT publish
+#: deadlocked — one thread blocked inside ``subprocess.Popen`` of a
+#: Custom Python handler, two blocked in ``_scan_registry`` under
+#: ``missing_factories``, identical py-spy stacks 15 minutes apart.
+#:
+#: Both sides acquire this lock only around the short import/scan/
+#: registry-query and fork sections — never during pipeline execution —
+#: so the serialization cost is negligible.
+#:
+#: Lock ordering: ``_start_locked`` runs under the bridge instance's
+#: ``self._lock`` and acquires this global lock inside it; the registry
+#: sections never touch any bridge instance lock, so no new cycle is
+#: possible.
+FORK_REGISTRY_LOCK = threading.Lock()
 
 GST_PLUGIN_PATH_ENV = "GST_PLUGIN_PATH"
 
@@ -249,15 +281,20 @@ def _scan_registry(plugin_dir: str) -> bool:
     Failures are contained: a component with a broken plugin directory
     produces a normal pipeline error for that run instead of taking the
     process down (Requirement 13.7).
+
+    The gi import + init + scan runs under :data:`FORK_REGISTRY_LOCK`
+    so it can never overlap a handler-subprocess fork (see the lock's
+    docstring for the deadlock this prevents).
     """
     try:
-        import gi
+        with FORK_REGISTRY_LOCK:
+            import gi
 
-        gi.require_version("Gst", "1.0")
-        from gi.repository import Gst
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
 
-        Gst.init(None)
-        changed = bool(Gst.Registry.get().scan_path(plugin_dir))
+            Gst.init(None)
+            changed = bool(Gst.Registry.get().scan_path(plugin_dir))
         logger.info(
             "Scanned workflow plugin directory %s (registry changed: %s)",
             plugin_dir,
@@ -376,21 +413,29 @@ def missing_factories(
     :func:`_scan_registry`: any error (including GStreamer being
     unavailable, e.g. in tests) disables the guard by reporting nothing
     missing — the pipeline parse remains the authority (Requirement 13.7).
+
+    The gi import/init and registry queries run under
+    :data:`FORK_REGISTRY_LOCK` (released across the nested
+    :func:`_scan_registry` calls, which take it themselves — the lock
+    is not reentrant) so they can never overlap a handler-subprocess
+    fork (see the lock's docstring).
     """
     try:
-        import gi
+        with FORK_REGISTRY_LOCK:
+            import gi
 
-        gi.require_version("Gst", "1.0")
-        from gi.repository import Gst
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
 
-        Gst.init(None)
+            Gst.init(None)
         for directory in scan_dirs or ():
             if directory and os.path.isdir(directory):
                 _scan_registry(directory)
-        return [
-            name for name in factories
-            if Gst.ElementFactory.find(name) is None
-        ]
+        with FORK_REGISTRY_LOCK:
+            return [
+                name for name in factories
+                if Gst.ElementFactory.find(name) is None
+            ]
     except Exception:  # noqa: BLE001 - preflight must never fail a run itself
         logger.debug(
             "Pipeline factory preflight unavailable; skipping", exc_info=True
@@ -411,28 +456,33 @@ def provided_elements(
     Diagnostic companion to :func:`missing_factories`: when a declared
     custom-node factory is missing, these are the names the delivered
     plugin actually registers. Contained: any error yields ``[]``.
+
+    The gi import/init and registry queries run under
+    :data:`FORK_REGISTRY_LOCK` so they can never overlap a
+    handler-subprocess fork (see the lock's docstring).
     """
     dirs = _verified_scan_dirs(plugin_dir, manifest, artifact_path, plugins_root)
     if not dirs:
         return []
     try:
-        import gi
+        with FORK_REGISTRY_LOCK:
+            import gi
 
-        gi.require_version("Gst", "1.0")
-        from gi.repository import Gst
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
 
-        Gst.init(None)
-        roots = tuple(os.path.abspath(d) for d in dirs)
-        registry = Gst.Registry.get()
-        names = set()
-        for plugin in registry.get_plugin_list():
-            filename = plugin.get_filename() or ""
-            if os.path.dirname(os.path.abspath(filename)) not in roots:
-                continue
-            for feature in registry.get_feature_list_by_plugin(
-                plugin.get_name()
-            ):
-                names.add(feature.get_name())
+            Gst.init(None)
+            roots = tuple(os.path.abspath(d) for d in dirs)
+            registry = Gst.Registry.get()
+            names = set()
+            for plugin in registry.get_plugin_list():
+                filename = plugin.get_filename() or ""
+                if os.path.dirname(os.path.abspath(filename)) not in roots:
+                    continue
+                for feature in registry.get_feature_list_by_plugin(
+                    plugin.get_name()
+                ):
+                    names.add(feature.get_name())
         return sorted(names)
     except Exception:  # noqa: BLE001 - diagnostics must never fail a run
         logger.debug(
