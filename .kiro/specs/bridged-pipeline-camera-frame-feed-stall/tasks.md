@@ -56,7 +56,7 @@
   - Ensure all tests pass, ask the user if questions arise
   - Commit the fix + tests together, stating in the commit what was proven on-device (hot-patch validation) and that component-build verification follows
 
-- [~] 6. Component build (JP7 1.0.17), deploy to thor1, on-device verification
+- [x] 6. Component build (JP7 1.0.17), deploy to thor1, on-device verification
   - **IMPORTANT: Execute with user coordination, NOT autonomously** - builds take ~1-2h and deploys touch a shared device
   - Pre-build gates (per the repo builds rule - do ALL of these BEFORE dispatching the build):
     - Confirm no build is already running: `pgrep -af "gdk component build"` and `pgrep -af "build-custom.sh"`
