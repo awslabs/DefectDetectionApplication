@@ -47,10 +47,20 @@ const MAX_DDA_JOB_NAME_LENGTH = 63;
  * at job creation (dda-data-labeling Requirement 8.8; the backend
  * re-validates). SAM is class-agnostic geometry — Segmentation and
  * ObjectDetection only; Bedrock vision models answer classification and
- * detection prompts — Classification and ObjectDetection only.
+ * detection prompts — Classification and ObjectDetection only;
+ * prompt-guided LLM models return coordinate guidance convertible to any
+ * modality (llm-auto-labeling Requirement 1.3).
  */
 export const SAM_MODALITIES = ['Segmentation', 'ObjectDetection'];
 export const BEDROCK_MODALITIES = ['Classification', 'ObjectDetection'];
+export const LLM_MODALITIES = [
+  'Classification',
+  'Segmentation',
+  'ObjectDetection',
+];
+
+/** Detection_Prompt length limit (llm-auto-labeling Requirements 2.1, 2.2). */
+export const MAX_DETECTION_PROMPT_LENGTH = 2000;
 
 /** True when the auto-label model value is usable with the modality. */
 export function isAutoLabelModelCompatible(
@@ -58,6 +68,7 @@ export function isAutoLabelModelCompatible(
   taskType: string
 ): boolean {
   if (modelValue === 'sam') return SAM_MODALITIES.includes(taskType);
+  if (modelValue.startsWith('llm:')) return LLM_MODALITIES.includes(taskType);
   if (modelValue.startsWith('bedrock:'))
     return BEDROCK_MODALITIES.includes(taskType);
   return false;
@@ -131,6 +142,9 @@ export default function CreateLabelingJob() {
   const [badExampleFiles, setBadExampleFiles] = useState<File[]>([]);
   const [autoLabelEnabled, setAutoLabelEnabled] = useState(false);
   const [autoLabelModel, setAutoLabelModel] = useState('');
+  // Detection_Prompt for prompt-guided LLM auto-labeling
+  // (llm-auto-labeling Requirements 2.1, 2.2).
+  const [detectionPrompt, setDetectionPrompt] = useState('');
   const [skipVerification, setSkipVerification] = useState(false);
   const [skipVerificationModelId, setSkipVerificationModelId] = useState('');
   const [perLabelPrompts, setPerLabelPrompts] = useState<Record<string, string>>({});
@@ -289,17 +303,49 @@ export default function CreateLabelingJob() {
     : trimmedDdaLabels;
 
   // Auto_Labeler options per the compatibility matrix (Requirements 8.1, 8.8).
-  const autoLabelOptions: SelectProps.Option[] = [
-    ...(SAM_MODALITIES.includes(modality)
-      ? [{ label: 'Segment Anything (SAM)', value: 'sam' }]
-      : []),
-    ...(BEDROCK_MODALITIES.includes(modality)
+  // The prompt-guided LLM entries (`llm:<id>`, llm-auto-labeling
+  // Requirements 1.1, 1.2) are grouped apart from the plain Bedrock
+  // entries so both modes stay reachable for the same catalog model.
+  const samAutoLabelOptions: SelectProps.Option[] = SAM_MODALITIES.includes(
+    modality
+  )
+    ? [{ label: 'Segment Anything (SAM)', value: 'sam' }]
+    : [];
+  const bedrockAutoLabelOptions: SelectProps.Option[] =
+    BEDROCK_MODALITIES.includes(modality)
       ? bedrockModels.map((m) => ({
           label: `Bedrock: ${m.label}`,
           value: `bedrock:${m.id}`,
         }))
+      : [];
+  const llmAutoLabelOptions: SelectProps.Option[] = LLM_MODALITIES.includes(
+    modality
+  )
+    ? bedrockModels.map((m) => ({
+        label: `${m.label} (prompt-guided)`,
+        value: `llm:${m.id}`,
+      }))
+    : [];
+  const flatAutoLabelOptions: SelectProps.Option[] = [
+    ...samAutoLabelOptions,
+    ...bedrockAutoLabelOptions,
+    ...llmAutoLabelOptions,
+  ];
+  const autoLabelOptions: SelectProps.Options = [
+    ...samAutoLabelOptions,
+    ...(bedrockAutoLabelOptions.length > 0
+      ? [{ label: 'Bedrock vision models', options: bedrockAutoLabelOptions }]
+      : []),
+    ...(llmAutoLabelOptions.length > 0
+      ? [
+          {
+            label: 'Prompt-guided LLM models',
+            options: llmAutoLabelOptions,
+          },
+        ]
       : []),
   ];
+  const isLlmAutoLabelModel = autoLabelModel.startsWith('llm:');
 
   const taskTypeOptions = [
     { label: 'Image Classification', value: 'Classification' },
@@ -362,6 +408,17 @@ export default function CreateLabelingJob() {
       }
       if (!isAutoLabelModelCompatible(autoLabelModel, modality)) {
         return 'The selected auto-label model does not support this task type';
+      }
+      // Detection_Prompt gating for the prompt-guided LLM family:
+      // emptiness is judged on the trimmed prompt, length on the raw one
+      // (llm-auto-labeling Requirements 2.1, 2.2; the backend re-validates).
+      if (autoLabelModel.startsWith('llm:')) {
+        if (!detectionPrompt.trim()) {
+          return 'A detection prompt is required for prompt-guided auto-labeling';
+        }
+        if (detectionPrompt.length > MAX_DETECTION_PROMPT_LENGTH) {
+          return `The detection prompt exceeds ${MAX_DETECTION_PROMPT_LENGTH.toLocaleString()} characters`;
+        }
       }
     }
     if (skipVerification) {
@@ -566,7 +623,18 @@ export default function CreateLabelingJob() {
               }
             : { team_id: selectedTeam?.value as string }),
           ...(autoLabelEnabled && autoLabelModel
-            ? { auto_label: { enabled: true, model: autoLabelModel } }
+            ? {
+                auto_label: {
+                  enabled: true,
+                  model: autoLabelModel,
+                  // The Detection_Prompt travels character-for-character as
+                  // entered (llm-auto-labeling Requirement 2.5), only for
+                  // the prompt-guided LLM family.
+                  ...(autoLabelModel.startsWith('llm:')
+                    ? { detection_prompt: detectionPrompt }
+                    : {}),
+                },
+              }
             : {}),
         });
 
@@ -1112,12 +1180,13 @@ export default function CreateLabelingJob() {
         {autoLabelEnabled && (
           <FormField
             label="Auto-label model"
-            description="SAM supports segmentation and object detection; Bedrock models support classification and object detection"
+            description="SAM supports segmentation and object detection; Bedrock models support classification and object detection; prompt-guided LLM models support all three"
             constraintText="Required"
           >
             <Select
               selectedOption={
-                autoLabelOptions.find((o) => o.value === autoLabelModel) || null
+                flatAutoLabelOptions.find((o) => o.value === autoLabelModel) ||
+                null
               }
               onChange={({ detail }) =>
                 setAutoLabelModel((detail.selectedOption.value as string) || '')
@@ -1128,7 +1197,7 @@ export default function CreateLabelingJob() {
                   ? 'Select an auto-label model'
                   : 'Select a task type first'
               }
-              disabled={!taskType || autoLabelOptions.length === 0}
+              disabled={!taskType || flatAutoLabelOptions.length === 0}
               empty="No compatible auto-label models for this task type"
               selectedAriaLabel="Selected"
             />
@@ -1137,6 +1206,49 @@ export default function CreateLabelingJob() {
                 Bedrock model options could not be loaded.
               </Box>
             )}
+            {bedrockModelsUnavailable && LLM_MODALITIES.includes(modality) && (
+              <Box padding={{ top: 'xxs' }}>
+                <Box color="text-status-inactive" padding={{ bottom: 'xxs' }}>
+                  The model catalog is unavailable. Enter a model identifier
+                  to use prompt-guided auto-labeling.
+                </Box>
+                <Input
+                  value={
+                    isLlmAutoLabelModel
+                      ? autoLabelModel.slice('llm:'.length)
+                      : ''
+                  }
+                  onChange={({ detail }) =>
+                    setAutoLabelModel(
+                      detail.value ? `llm:${detail.value}` : ''
+                    )
+                  }
+                  placeholder="e.g., us.amazon.nova-pro-v1:0"
+                  ariaLabel="Prompt-guided model identifier"
+                />
+              </Box>
+            )}
+          </FormField>
+        )}
+
+        {autoLabelEnabled && isLlmAutoLabelModel && (
+          <FormField
+            label="Detection prompt"
+            description="Describe the objects or defects the model should locate in each image"
+            constraintText={`Required, 1-${MAX_DETECTION_PROMPT_LENGTH.toLocaleString()} characters (${detectionPrompt.length.toLocaleString()} used)`}
+            errorText={
+              detectionPrompt.length > MAX_DETECTION_PROMPT_LENGTH
+                ? `The detection prompt exceeds ${MAX_DETECTION_PROMPT_LENGTH.toLocaleString()} characters`
+                : undefined
+            }
+          >
+            <Textarea
+              value={detectionPrompt}
+              onChange={({ detail }) => setDetectionPrompt(detail.value)}
+              placeholder="e.g., Find surface scratches and dents on the metal panel..."
+              rows={4}
+              ariaLabel="Detection prompt"
+            />
           </FormField>
         )}
 
@@ -1318,10 +1430,22 @@ export default function CreateLabelingJob() {
                 {autoLabelEnabled && autoLabelModel
                   ? autoLabelModel === 'sam'
                     ? 'Segment Anything (SAM)'
-                    : autoLabelModel.replace(/^bedrock:/, 'Bedrock: ')
+                    : autoLabelModel.startsWith('llm:')
+                      ? `Prompt-guided: ${autoLabelModel.slice('llm:'.length)}`
+                      : autoLabelModel.replace(/^bedrock:/, 'Bedrock: ')
                   : 'Disabled'}
               </Box>
             </Box>
+            {autoLabelEnabled && isLlmAutoLabelModel && (
+              <Box>
+                <Box variant="awsui-key-label">Detection Prompt</Box>
+                <Box>
+                  <span style={{ whiteSpace: 'pre-wrap' }}>
+                    {detectionPrompt || '-'}
+                  </span>
+                </Box>
+              </Box>
+            )}
             <Box>
               <Box variant="awsui-key-label">Skip Verification</Box>
               <Box>

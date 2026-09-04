@@ -567,7 +567,8 @@ export interface DdaMaskRegion {
    * Run-length-encoded bitmap of the region as the backend's canonical
    * space-separated counts string (column-major, starting with the
    * zero-run) — e.g. "4 1 4". This is the shape the submit validator
-   * requires and the SAM pre-label worker produces.
+   * requires and the SAM pre-label worker produces; the LLM auto-label
+   * backend likewise writes and validates a string.
    */
   rle: string;
 }
@@ -1705,7 +1706,7 @@ class ApiService {
     label_set?: string[];
     team_id?: string;
     example_images?: { good: string[]; bad: string[] };
-    auto_label?: { enabled: boolean; model: string };
+    auto_label?: { enabled: boolean; model?: string; detection_prompt?: string };
     skip_verification?: boolean;
     bedrock_model_id?: string;
     per_label_prompts?: Record<string, string>;
@@ -1762,6 +1763,18 @@ class ApiService {
       skip_verification?: boolean;
       review_ready?: boolean;
       stopped_at?: number;
+      // Pre-label progress counts over active tasks (llm-auto-labeling
+      // Requirements 10.1, 10.3).
+      prelabel_available_count?: number;
+      prelabel_failed_count?: number;
+      // Auto-label configuration persisted on the job item and returned
+      // as-is; `detection_prompt` is present only for the `llm:` family
+      // (llm-auto-labeling Requirement 10.1).
+      auto_label?: {
+        enabled?: boolean;
+        model?: string;
+        detection_prompt?: string;
+      };
     };
   }> {
     return this.request(`/labeling/${jobId}`);

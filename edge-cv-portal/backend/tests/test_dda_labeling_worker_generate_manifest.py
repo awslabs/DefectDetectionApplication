@@ -27,6 +27,26 @@ items directly in DynamoDB and invoking the worker handler with
 - S3 write failure: status Failed with failure_reason, no manifest
   URI, annotations untouched (Req 10.9, 12.5)
 - Validation failure is generation failure (Req 10.6)
+
+Feature: llm-auto-labeling (task 16.1) — manifest indistinguishability
+end to end, against real dda_llm_guidance-built Pre_Labels:
+
+- A Segmentation team job whose submissions originate from LLM
+  pre-labels (image_width/image_height, no image_size — the LLM
+  pre-label shape) renders PNG masks through the job-wide color map,
+  exercising the task 8 _canonical_annotation normalization
+  (Req 8.1, 8.3, 8.6)
+- A Segmentation skip-verification job whose accepted results are LLM
+  pre-labels generates a manifest through the pre-label ->
+  _canonical_annotation -> render_mask_png path (Req 8.1, 8.3, 8.5)
+- ObjectDetection and Classification LLM jobs generate manifests that
+  pass _validate_manifest_lines untransformed, with no LLM-specific
+  attributes in any entry (Req 8.2, 8.4)
+- A team job where every pre-label failed and every task was labeled
+  from scratch still produces one entry per submission (Req 8.6)
+- Skip-verification includes exactly the accepted images and excludes
+  rejected ones; team submissions record human-annotated 'yes' and
+  accepted skip-verification results 'no' (Req 8.5, 8.6)
 """
 import json
 import sys
@@ -37,6 +57,7 @@ import boto3
 import pytest
 from boto3.dynamodb.conditions import Attr, Key
 
+import dda_llm_guidance
 import dda_manifest
 
 REGION = "us-east-1"
@@ -482,3 +503,319 @@ class TestFailureAtomicity:
         with pytest.raises(env.s3.exceptions.NoSuchKey):
             env.s3.get_object(Bucket=OUTPUT_BUCKET,
                               Key=f"labeled/{job_id}/output.manifest")
+
+
+# ------------------------------------------- llm auto-label origin (16.1)
+
+LLM_MODEL = "llm:us.amazon.nova-pro-v1:0"
+LLM_AUTO_LABEL = {"enabled": True, "model": LLM_MODEL,
+                  "detection_prompt": "Find every scratch and dent."}
+
+# Entry key sets of a manifest generated without any LLM involvement
+# (the existing tests above) — LLM-origin entries must carry exactly
+# these and nothing more (Req 8.4).
+CLASSIFICATION_ENTRY_KEYS = {"source-ref", "anomaly-label",
+                             "anomaly-label-metadata"}
+SEGMENTATION_ENTRY_KEYS = CLASSIFICATION_ENTRY_KEYS | {
+    "anomaly-mask-ref", "anomaly-mask-ref-metadata"}
+DETECTION_ENTRY_KEYS = {"source-ref", "bounding-box",
+                        "bounding-box-metadata"}
+
+
+def llm_prelabel(modality, label_set, width, height, wire_detections):
+    """Build a Pre_Label exactly as the LLM consumer writes it: the
+    model's wire-format guidance through parse_guidance and
+    guidance_to_prelabel (the real production layer, not a fixture
+    imitation)."""
+    detections = dda_llm_guidance.parse_guidance(
+        json.dumps({"detections": wire_detections}),
+        label_set, width, height)
+    return dda_llm_guidance.guidance_to_prelabel(
+        detections, modality, label_set, width, height)
+
+
+def pixels_by_class(regions, width, height):
+    """Per-class foreground pixel union of RLE regions, as bytes —
+    render_mask_png paints per class, so same-class regions union in
+    the rendered mask while staying separate in the Pre_Label."""
+    union = {}
+    for region in regions:
+        mask = bytes(dda_manifest.rle_decode(region["rle"], width, height))
+        name = region["class"]
+        if name in union:
+            union[name] = bytes(a | b for a, b in zip(union[name], mask))
+        else:
+            union[name] = mask
+    return union
+
+
+def raw_manifest_lines(env, job_id):
+    """The manifest exactly as stored, line by line, untransformed."""
+    body = env.s3.get_object(
+        Bucket=OUTPUT_BUCKET,
+        Key=f"labeled/{job_id}/output.manifest")["Body"].read()
+    return [line for line in body.decode().split("\n") if line.strip()]
+
+
+class TestLlmSegmentationTeamJob:
+    WIDTH, HEIGHT = 8, 6
+    LABELS = ["scratch", "dent"]
+
+    def prelabel(self, wire_detections):
+        return llm_prelabel("Segmentation", self.LABELS,
+                            self.WIDTH, self.HEIGHT, wire_detections)
+
+    def test_llm_prelabel_submissions_render_masks(self, env):
+        """Req 8.1/8.3/8.6: a Segmentation team job whose submissions
+        are LLM pre-labels (image_width/image_height, no image_size)
+        generates a manifest with PNG masks rendered through the
+        job-wide color map — the task 8 _canonical_annotation
+        normalization bridging the LLM pre-label shape into mask
+        rendering. Team submissions are human-annotated 'yes'."""
+        job_id = env.put_job(task_type="Segmentation",
+                             label_set=self.LABELS, image_count=2,
+                             auto_label=LLM_AUTO_LABEL)
+        prelabels = [
+            self.prelabel([
+                {"class": "scratch",
+                 "box": {"left": 0, "top": 0, "width": 2, "height": 2}},
+                # Same class twice: separate regions in the Pre_Label,
+                # union in the rendered mask.
+                {"class": "scratch",
+                 "box": {"left": 5, "top": 3, "width": 2, "height": 2}},
+                {"class": "dent",
+                 "polygon": [[2, 2], [6, 2], [2, 5]]},
+            ]),
+            self.prelabel([
+                {"class": "dent",
+                 "box": {"left": 1, "top": 1, "width": 3, "height": 2}},
+            ]),
+        ]
+        tasks = []
+        for i, prelabel in enumerate(prelabels):
+            # The LLM pre-label shape: dimension fields, no image_size
+            # — precisely what the task 8 normalization must bridge.
+            assert "image_size" not in prelabel
+            assert prelabel["image_width"] == self.WIDTH
+            assert prelabel["image_height"] == self.HEIGHT
+            # The labeler accepted the pre-label unchanged; the
+            # submission persists through annotation_s3_key (the
+            # segmentation submit path's shape).
+            tasks.append(env.submitted_task(
+                job_id, i, annotation=prelabel, inline=False,
+                prelabel_status="Available"))
+
+        result = env.generate(job_id)
+        assert result["status"] == "Completed"
+        assert result["entry_count"] == 2
+
+        color_map = dda_manifest.build_color_map(self.LABELS)
+        entries = env.manifest_entries(job_id)
+        by_ref = {entry["source-ref"]: entry for entry in entries}
+        for i, task in enumerate(tasks):
+            entry = by_ref[task["image_s3_uri"]]
+            # Structure identical to a non-LLM segmentation entry, no
+            # LLM-specific attributes (Req 8.4).
+            assert set(entry) == SEGMENTATION_ENTRY_KEYS
+            assert entry["anomaly-label"] == 1
+            assert (entry["anomaly-label-metadata"]["human-annotated"]
+                    == "yes")
+            mask_metadata = entry["anomaly-mask-ref-metadata"]
+            assert mask_metadata["internal-color-map"] == color_map
+            assert mask_metadata["human-annotated"] == "yes"
+            mask_uri = entry["anomaly-mask-ref"]
+            assert mask_uri.startswith(
+                f"s3://{OUTPUT_BUCKET}/labeled/{job_id}/masks/")
+
+            # Decode the rendered PNG back through the job color map:
+            # pixel-identical to the LLM pre-label's regions (Req 8.3).
+            mask_key = mask_uri[len(f"s3://{OUTPUT_BUCKET}/"):]
+            png = env.s3.get_object(Bucket=OUTPUT_BUCKET,
+                                    Key=mask_key)["Body"].read()
+            decoded_regions, width, height = dda_manifest.decode_mask_png(
+                png, color_map)
+            assert (width, height) == (self.WIDTH, self.HEIGHT)
+            assert pixels_by_class(decoded_regions, width, height) == \
+                pixels_by_class(prelabels[i]["regions"], width, height)
+
+        # The whole manifest passes the validation gate untransformed
+        # (Req 8.2).
+        assert env.worker._validate_manifest_lines(
+            raw_manifest_lines(env, job_id), "Segmentation") == []
+
+    def test_llm_skip_verification_accepted_prelabels(self, env):
+        """Req 8.1/8.3/8.5: a Segmentation skip-verification job whose
+        accepted results are LLM pre-labels generates the manifest
+        through the pre-label -> _canonical_annotation ->
+        render_mask_png path; exactly the accepted images are included
+        (rejected and failed excluded), human-annotated 'no'."""
+        job_id = env.put_job(task_type="Segmentation",
+                             label_set=self.LABELS, image_count=3,
+                             skip_verification=True, team_id=None,
+                             auto_label=LLM_AUTO_LABEL)
+        accepted_prelabel = self.prelabel([
+            {"class": "dent",
+             "box": {"left": 2, "top": 1, "width": 4, "height": 3}},
+        ])
+        accepted = env.auto_task(job_id, 0, decision="accepted",
+                                 prelabel=accepted_prelabel)
+        rejected = env.auto_task(job_id, 1, decision="rejected",
+                                 prelabel=self.prelabel([
+                                     {"class": "scratch",
+                                      "box": {"left": 0, "top": 0,
+                                              "width": 1, "height": 1}},
+                                 ]))
+        failed = env.auto_task(job_id, 2, failed=True)
+
+        result = env.generate(job_id)
+        assert result["status"] == "Completed"
+        assert result["entry_count"] == 1
+
+        entries = env.manifest_entries(job_id)
+        assert {entry["source-ref"] for entry in entries} == {
+            accepted["image_s3_uri"]}
+        assert rejected["image_s3_uri"] not in {
+            entry["source-ref"] for entry in entries}
+        assert failed["image_s3_uri"] not in {
+            entry["source-ref"] for entry in entries}
+
+        entry = entries[0]
+        assert set(entry) == SEGMENTATION_ENTRY_KEYS
+        assert entry["anomaly-label-metadata"]["human-annotated"] == "no"
+        assert (entry["anomaly-mask-ref-metadata"]["human-annotated"]
+                == "no")
+
+        color_map = dda_manifest.build_color_map(self.LABELS)
+        mask_key = entry["anomaly-mask-ref"][len(f"s3://{OUTPUT_BUCKET}/"):]
+        png = env.s3.get_object(Bucket=OUTPUT_BUCKET,
+                                Key=mask_key)["Body"].read()
+        decoded_regions, width, height = dda_manifest.decode_mask_png(
+            png, color_map)
+        assert (width, height) == (self.WIDTH, self.HEIGHT)
+        assert pixels_by_class(decoded_regions, width, height) == \
+            pixels_by_class(accepted_prelabel["regions"], width, height)
+
+        assert env.worker._validate_manifest_lines(
+            raw_manifest_lines(env, job_id), "Segmentation") == []
+
+
+class TestLlmObjectDetectionAndClassification:
+    def test_object_detection_manifest_passes_validation(self, env):
+        """Req 8.2/8.4: an ObjectDetection LLM job's manifest passes
+        _validate_manifest_lines untransformed, with the GT
+        bounding-box structure (a polygon detection collapsed to its
+        axis-aligned hull) and no LLM-specific attributes."""
+        label_set = ["scratch", "dent"]
+        job_id = env.put_job(task_type="ObjectDetection",
+                             label_set=label_set, image_count=1,
+                             auto_label=LLM_AUTO_LABEL)
+        prelabel = llm_prelabel("ObjectDetection", label_set, 100, 80, [
+            {"class": "scratch",
+             "box": {"left": 10, "top": 20, "width": 30, "height": 40}},
+            {"class": "dent",
+             "polygon": [[0, 0], [5, 0], [5, 5], [0, 5]]},
+        ])
+        # The LLM pre-label shape: dimension fields, no image_size.
+        assert "image_size" not in prelabel
+        # Guidance coordinates are floats; the submission persists
+        # through S3 exactly as the pre-label was written.
+        task = env.submitted_task(job_id, 0, annotation=prelabel,
+                                  inline=False,
+                                  prelabel_status="Available")
+
+        result = env.generate(job_id)
+        assert result["status"] == "Completed"
+
+        assert env.worker._validate_manifest_lines(
+            raw_manifest_lines(env, job_id), "ObjectDetection") == []
+
+        entries = env.manifest_entries(job_id)
+        assert len(entries) == 1
+        entry = entries[0]
+        assert set(entry) == DETECTION_ENTRY_KEYS
+        assert entry["source-ref"] == task["image_s3_uri"]
+        assert entry["bounding-box"] == {
+            "image_size": [{"width": 100, "height": 80, "depth": 3}],
+            "annotations": [
+                {"class_id": 0, "left": 10, "top": 20,
+                 "width": 30, "height": 40},
+                # The polygon detection, collapsed to its hull.
+                {"class_id": 1, "left": 0, "top": 0,
+                 "width": 5, "height": 5},
+            ],
+        }
+        metadata = entry["bounding-box-metadata"]
+        assert metadata["class-map"] == {"0": "scratch", "1": "dent"}
+        assert metadata["human-annotated"] == "yes"
+
+    def test_classification_manifest_passes_validation(self, env):
+        """Req 8.2/8.4: a Classification LLM job's manifest passes
+        _validate_manifest_lines untransformed — a detection-bearing
+        result maps to anomaly (1), a valid empty result to normal
+        (0) — with no LLM-specific attributes."""
+        job_id = env.put_job(image_count=2, auto_label=LLM_AUTO_LABEL)
+        labels = ["normal", "anomaly"]
+        prelabels = [
+            llm_prelabel("Classification", labels, 64, 48, [
+                {"class": "anomaly",
+                 "box": {"left": 4, "top": 4, "width": 8, "height": 8}},
+            ]),
+            llm_prelabel("Classification", labels, 64, 48, []),
+        ]
+        assert [p["label"] for p in prelabels] == ["anomaly", "normal"]
+        tasks = [env.submitted_task(job_id, i, annotation=prelabel,
+                                    prelabel_status="Available")
+                 for i, prelabel in enumerate(prelabels)]
+
+        result = env.generate(job_id)
+        assert result["status"] == "Completed"
+        assert result["entry_count"] == 2
+
+        assert env.worker._validate_manifest_lines(
+            raw_manifest_lines(env, job_id), "Classification") == []
+
+        entries = env.manifest_entries(job_id)
+        by_ref = {entry["source-ref"]: entry for entry in entries}
+        assert by_ref[tasks[0]["image_s3_uri"]]["anomaly-label"] == 1
+        assert by_ref[tasks[1]["image_s3_uri"]]["anomaly-label"] == 0
+        for entry in entries:
+            assert set(entry) == CLASSIFICATION_ENTRY_KEYS
+            metadata = entry["anomaly-label-metadata"]
+            assert metadata["human-annotated"] == "yes"
+            assert metadata["creation-date"]
+
+
+class TestLlmAllPrelabelsFailed:
+    def test_from_scratch_submissions_all_emitted(self, env):
+        """Req 8.6: a team job where every LLM pre-label failed and
+        every task was labeled from scratch still produces one manifest
+        entry per submission, human-annotated 'yes'."""
+        job_id = env.put_job(image_count=3, auto_label=LLM_AUTO_LABEL)
+        labels = ["anomaly", "normal", "anomaly"]
+        tasks = [
+            env.submitted_task(
+                job_id, i,
+                annotation={"modality": "Classification",
+                            "label": labels[i]},
+                prelabel_status="Failed",
+                prelabel_error="model error: simulated model failure")
+            for i in range(3)
+        ]
+
+        result = env.generate(job_id)
+        assert result["status"] == "Completed"
+        assert result["entry_count"] == 3
+
+        entries = env.manifest_entries(job_id)
+        assert len(entries) == 3
+        by_ref = {entry["source-ref"]: entry for entry in entries}
+        assert set(by_ref) == {task["image_s3_uri"] for task in tasks}
+        for i, task in enumerate(tasks):
+            entry = by_ref[task["image_s3_uri"]]
+            assert entry["anomaly-label"] == (
+                1 if labels[i] == "anomaly" else 0)
+            assert (entry["anomaly-label-metadata"]["human-annotated"]
+                    == "yes")
+
+        assert env.worker._validate_manifest_lines(
+            raw_manifest_lines(env, job_id), "Classification") == []

@@ -296,6 +296,83 @@ class TestIncompleteAnnotationsRejected:
         assert_unsubmitted(env.get_task(job_id, "task-0000000"))
 
 
+# ------------------------------------ failed pre-label from-scratch (12.2)
+
+class TestFailedPrelabelSubmission:
+    """Feature: llm-auto-labeling, task 12.2 (Req 7.5): a task whose
+    LLM pre-label generation Failed is labeled from scratch and its
+    submission is validated by the same per-modality completeness
+    rules as any other task."""
+
+    LLM_AUTO_LABEL = {
+        "enabled": True,
+        "model": "llm:us.amazon.nova-pro-v1:0",
+        "detection_prompt": "Find every scratch",
+    }
+
+    def put_failed_task(self, env, job_id, task_id):
+        env.put_task(job_id, task_id, env.labeler["user_id"],
+                     prelabel_status="Failed",
+                     prelabel_error="model error: guidance did not parse")
+
+    def test_incomplete_submission_rejected_same_rules(self, env):
+        """An incomplete annotation on a Failed-prelabel task is a 400
+        identifying the missing element, with the task left
+        unsubmitted and its failure record intact."""
+        job_id = env.put_job(image_count=1,
+                             auto_label=self.LLM_AUTO_LABEL)
+        self.put_failed_task(env, job_id, "task-0000000")
+
+        status, body = env.submit("task-0000000", job_id,
+                                  {"modality": "Classification"})
+        assert status == 400
+        assert any(error["parameter"] == "label"
+                   for error in body["validation_errors"])
+        task = env.get_task(job_id, "task-0000000")
+        assert_unsubmitted(task)
+        # The retained failure record survives the rejection (Req 10.2).
+        assert task["prelabel_status"] == "Failed"
+        assert task["prelabel_error"].startswith("model error:")
+
+    def test_incomplete_segmentation_rejected_same_rules(self, env):
+        """The same gating holds per modality: a Segmentation region
+        without RLE data on a Failed-prelabel task is rejected."""
+        job_id = env.put_job(task_type="Segmentation",
+                             label_set=["scratch"], image_count=1,
+                             auto_label=self.LLM_AUTO_LABEL)
+        self.put_failed_task(env, job_id, "task-0000000")
+
+        status, body = env.submit(
+            "task-0000000", job_id,
+            {"modality": "Segmentation",
+             "regions": [{"class": "scratch"}]})
+        assert status == 400
+        assert any(error["parameter"] == "regions"
+                   and "RLE" in error["message"]
+                   for error in body["validation_errors"])
+        assert_unsubmitted(env.get_task(job_id, "task-0000000"))
+
+    def test_complete_submission_accepted_human_annotated(self, env):
+        """A complete from-scratch annotation on a Failed-prelabel
+        task submits like any other task, recorded human-annotated."""
+        job_id = env.put_job(image_count=2,
+                             auto_label=self.LLM_AUTO_LABEL)
+        self.put_failed_task(env, job_id, "task-0000000")
+
+        status, body = env.submit("task-0000000", job_id,
+                                  CLASSIFICATION_OK)
+        assert status == 200
+        assert body["status"] == "Submitted"
+
+        task = env.get_task(job_id, "task-0000000")
+        assert task["status"] == "Submitted"
+        assert task["annotation"] == CLASSIFICATION_OK
+        assert task["human_annotated"] is True
+        # The failure record stays on the task record (Req 10.2).
+        assert task["prelabel_status"] == "Failed"
+        assert task["prelabel_error"].startswith("model error:")
+
+
 # ------------------------------------------------- stopped / double-submit
 
 class TestSubmissionRejections:

@@ -116,9 +116,12 @@ class ReviewEnv:
         return job_id
 
     def auto_task(self, job_id, index, prelabel=None, decision=None,
-                  failed=False):
+                  failed=False, error=None):
         """A skip-verification result item as the auto-label worker
-        (and the review-decision API) leave it."""
+        (and the review-decision API) leave it. `error` mirrors the
+        LLM worker's _mark_task, which records the failure reason as
+        prelabel_error (and autolabel_error in skip-verification
+        mode)."""
         task_id = f"task-{index:06d}"
         image_key = f"datasets/x/img-{index:03d}.jpg"
         item = {
@@ -134,7 +137,11 @@ class ReviewEnv:
         }
         if failed:
             item["prelabel_status"] = "Failed"
-            item["autolabel_error"] = "model failure"
+            if error is not None:
+                item["prelabel_error"] = error
+                item["autolabel_error"] = error
+            else:
+                item["autolabel_error"] = "model failure"
         else:
             key = (f"labeling/{self.usecase_id}/{job_id}/"
                    f"prelabels/{task_id}.json")
@@ -468,6 +475,104 @@ class TestFinalize:
         assert status == 409
         assert "finalized" in body["error"]
         assert len(invocations) == 1
+
+
+# ----------------------------------------- LLM failure visibility (12.2)
+
+class TestLlmFailureVisibility:
+    """Feature: llm-auto-labeling, task 12.2 (Req 7.5, 7.6, 7.7, 10.4,
+    10.5): every image of an LLM skip-verification job is listed with
+    its succeeded/failed status, a failed image carries its
+    prelabel_status/prelabel_error reason and cannot be accepted, and
+    finalize with zero accepted results is still rejected."""
+
+    LLM_AUTO_LABEL = {
+        "enabled": True,
+        "model": "llm:us.amazon.nova-pro-v1:0",
+        "detection_prompt": "Find every scratch",
+    }
+
+    def test_every_image_listed_with_prelabel_status_and_reason(self, env):
+        """Req 7.6/10.4: succeeded items carry prelabel_status
+        Available (no error); a failed item carries prelabel_status
+        Failed with the retained prelabel_error reason."""
+        job_id = env.put_job(image_count=3,
+                             auto_label=self.LLM_AUTO_LABEL)
+        reason = "model invocation timed out after 60s"
+        env.auto_task(job_id, 0)
+        env.auto_task(job_id, 1)
+        env.auto_task(job_id, 2, failed=True, error=reason)
+
+        status, body = env.get_review(job_id)
+        assert status == 200
+        assert body["count"] == 3
+        items = {item["task_id"]: item for item in body["items"]}
+        assert set(items) == {"task-000000", "task-000001", "task-000002"}
+
+        for task_id in ("task-000000", "task-000001"):
+            item = items[task_id]
+            assert item["status"] == "succeeded"
+            assert item["prelabel_status"] == "Available"
+            assert "prelabel_error" not in item
+            assert "prelabel" in item
+
+        failed = items["task-000002"]
+        assert failed["status"] == "failed"
+        assert failed["prelabel_status"] == "Failed"
+        assert failed["prelabel_error"] == reason
+        assert failed["autolabel_error"] == reason
+        assert "prelabel" not in failed
+
+    def test_failed_llm_image_cannot_be_accepted(self, env):
+        """Req 7.7: a Failed LLM image is ineligible for acceptance —
+        the 400 identifies it and nothing in the batch persists;
+        rejecting it stays allowed."""
+        job_id = env.put_job(image_count=2,
+                             auto_label=self.LLM_AUTO_LABEL)
+        env.auto_task(job_id, 0)
+        env.auto_task(job_id, 1, failed=True,
+                      error="model error: guidance did not parse")
+
+        status, body = env.post_decisions(job_id, {
+            "task-000000": "accepted",
+            "task-000001": "accepted",
+        })
+        assert status == 400
+        assert body["ineligible_task_ids"] == ["task-000001"]
+        assert "review_decision" not in env.get_task(job_id, "task-000000")
+        assert "review_decision" not in env.get_task(job_id, "task-000001")
+
+        status, _ = env.post_decisions(job_id, {"task-000001": "rejected"})
+        assert status == 200
+        assert env.get_task(
+            job_id, "task-000001")["review_decision"] == "rejected"
+
+    def test_all_images_failed_lists_all_and_finalize_rejected(self, env):
+        """Req 10.5/7.7: a job where every image failed still lists
+        every image with its Failed status and reason; finalize is a
+        400 for zero accepted results and the job stays open, not
+        terminal."""
+        job_id = env.put_job(image_count=3,
+                             auto_label=self.LLM_AUTO_LABEL)
+        for index in range(3):
+            env.auto_task(job_id, index, failed=True,
+                          error=f"model error: image {index}")
+
+        status, body = env.get_review(job_id)
+        assert status == 200
+        assert body["count"] == 3
+        for item in body["items"]:
+            assert item["status"] == "failed"
+            assert item["prelabel_status"] == "Failed"
+            assert item["prelabel_error"].startswith("model error:")
+
+        status, body = env.finalize(job_id)
+        assert status == 400
+        assert body["accepted_count"] == 0
+
+        job = env.get_job(job_id)
+        assert not job.get("review_finalized")
+        assert job["status"] == "InProgress"
 
 
 # ------------------------------------------------------------ authorization

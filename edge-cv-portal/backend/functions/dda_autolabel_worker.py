@@ -21,6 +21,15 @@ Auto_Labeler model and resolves the task's `prelabel_status`:
   120 s and retries disabled (Req 8.5). The response is strictly
   validated: any class outside the Label_Set, malformed geometry, or an
   out-of-bounds box is a generation failure for that image (Req 8.2).
+- **LLM path** (model `llm:<model_identifier>`, llm-auto-labeling): a
+  single Converse request per image with the image block and a
+  prompt built by `dda_llm_guidance.build_detection_prompt` (the job's
+  Detection_Prompt verbatim, the Label_Set, the pixel dimensions, and
+  in skip-verification mode the Per_Label_Prompts). The strict
+  `parse_guidance` validates the returned Coordinate_Guidance JSON and
+  `guidance_to_prelabel` converts it to the modality's existing
+  Pre_Label shape. A timeout is recorded distinguishably from a model
+  error, and only image and prompt content are sent to the model.
 - **SAM path** (model `sam`): synchronous invoke of the dda_sam_worker
   container Lambda (env SAM_WORKER_FUNCTION_NAME) with a 15-minute
   presigned image URL; the `{regions: [{class: null, rle}],
@@ -59,7 +68,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.config import Config as BotoConfig
-from botocore.exceptions import ClientError
+from botocore.exceptions import (
+    ClientError,
+    ConnectTimeoutError,
+    ReadTimeoutError,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -72,6 +85,12 @@ from bedrock_common import (
     build_inference_config,
     get_bedrock_client,
     get_bedrock_configuration,
+)
+from dda_llm_guidance import (
+    GuidanceError,
+    build_detection_prompt,
+    guidance_to_prelabel,
+    parse_guidance,
 )
 
 # AWS clients
@@ -95,6 +114,10 @@ SAM_MAX_TIMEOUT_SECONDS = 120
 # 15-minute presigned URL for the SAM worker's image fetch (Req 12.6
 # convention for time-limited single-object grants).
 PRESIGNED_URL_EXPIRY_SECONDS = 900
+
+# Model family whose pre-label storage failures are terminal (Req 6.2,
+# 6.5): see _process_message.
+LLM_MODEL_PREFIX = 'llm:'
 
 MODALITY_CLASSIFICATION = 'Classification'
 MODALITY_SEGMENTATION = 'Segmentation'
@@ -399,6 +422,86 @@ def _generate_bedrock_prelabel(message: Dict, job: Dict,
 
 
 # ---------------------------------------------------------------------------
+# LLM guidance path (llm-auto-labeling; Req 3.1, 3.3, 3.4, 4.2, 5.x)
+# ---------------------------------------------------------------------------
+
+def _generate_llm_prelabel(message: Dict, job: Dict, model_id: str) -> Dict:
+    """Prompt-guided LLM Pre_Label: one Converse call asking for
+    Coordinate_Guidance JSON, converted to the modality's Pre_Label.
+
+    Only the image bytes and prompt content are sent to the model — no
+    dataset credentials, no portal secrets (Req 9.7).
+    """
+    modality = message['modality']
+    label_set = message['label_set']
+
+    # Cross-account read with the direct-access fallback (Req 9.5, 9.6).
+    image_bytes, image_key = _read_image_bytes(job, message['image_s3_uri'])
+
+    # Req 3.3: undeterminable dimensions fail the image before any
+    # model invocation is attempted.
+    dimensions = _image_dimensions(image_bytes)
+    if not dimensions:
+        raise GenerationFailure(
+            'unsupported image content: could not determine image '
+            'dimensions for coordinate guidance')
+    width, height = dimensions
+
+    # Detection_Prompt from the message, falling back to the job item so
+    # messages already in flight across a deployment still process.
+    detection_prompt = (message.get('detection_prompt')
+                        or (job.get('auto_label') or {}).get('detection_prompt')
+                        or '')
+    if not detection_prompt.strip():
+        raise GenerationFailure('job has no detection prompt configured')
+
+    # Per_Label_Prompts apply only in skip-verification mode (Req 2.6).
+    per_label_prompts = None
+    if job.get('skip_verification'):
+        per_label_prompts = (message.get('per_label_prompts')
+                             or job.get('per_label_prompts') or {})
+
+    prompt = build_detection_prompt(modality, label_set, detection_prompt,
+                                    width, height, per_label_prompts)
+
+    # Client via bedrock_common: read timeout equals the invocation
+    # timeout capped at 120 s, retries disabled — so exactly one request
+    # per image and no re-invocation (Req 3.1, 3.4).
+    config = get_bedrock_configuration()
+    timeout = min(int(config['timeout_seconds']), BEDROCK_MAX_TIMEOUT_SECONDS)
+    client = get_bedrock_client(config['region'], timeout)
+    try:
+        response = client.converse(
+            modelId=model_id,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {'image': {'format': _image_format(image_key),
+                               'source': {'bytes': image_bytes}}},
+                    {'text': prompt},
+                ],
+            }],
+            inferenceConfig=build_inference_config(config),
+        )
+    except (ReadTimeoutError, ConnectTimeoutError) as exc:
+        # Req 3.4: timeout is distinguishable from a model error.
+        raise GenerationFailure(
+            f'model invocation timed out after {timeout}s') from exc
+    except Exception as exc:  # noqa: BLE001 — model error (Req 3.4)
+        raise GenerationFailure(f'model error: {exc}') from exc
+
+    # Strict parse + modality conversion; the GuidanceError reason
+    # reaches prelabel_error unchanged (Req 4.2, 6.3).
+    try:
+        detections = parse_guidance(_response_text(response),
+                                    label_set, width, height)
+        return guidance_to_prelabel(detections, modality, label_set,
+                                    width, height)
+    except GuidanceError as exc:
+        raise GenerationFailure(str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
 # SAM path (Req 8.2: class-agnostic geometry pre-labels)
 # ---------------------------------------------------------------------------
 
@@ -589,6 +692,10 @@ def _generate_prelabel(message: Dict, job: Dict) -> Dict:
         model_id = model.split(':', 1)[1]
         if model_id:
             return _generate_bedrock_prelabel(message, job, model_id)
+    if isinstance(model, str) and model.startswith('llm:'):
+        model_id = model.split(':', 1)[1]
+        if model_id:
+            return _generate_llm_prelabel(message, job, model_id)
     raise GenerationFailure(f'unsupported auto-label model {model!r}')
 
 
@@ -601,10 +708,30 @@ def _process_message(message: Dict) -> None:
         raise MalformedMessage(f'labeling job {job_id!r} does not exist')
     skip_verification = bool(job.get('skip_verification'))
 
+    # Storage-failure semantics are scoped per model family (Req 6.2,
+    # 6.5, 1.7): for the LLM family a _write_prelabel failure is a
+    # terminal resolution (the task is marked Failed with a storage
+    # reason), while sam / bedrock: keep today's transient behavior
+    # (the exception escapes, the record is reported as a batch item
+    # failure, and the task stays Pending for SQS redrive).
+    storage_failure_is_terminal = (
+        str(message.get('model', '')).startswith(LLM_MODEL_PREFIX))
+
     try:
         prelabel = _generate_prelabel(message, job)
-        prelabel_key = _write_prelabel(
-            job['usecase_id'], job_id, task_id, prelabel)
+        try:
+            prelabel_key = _write_prelabel(
+                job['usecase_id'], job_id, task_id, prelabel)
+        except Exception as exc:  # noqa: BLE001 — storage failure
+            if not storage_failure_is_terminal:
+                raise  # today's transient/retry behavior (sam, bedrock:)
+            # Deliberate tradeoff: an LLM image hit by a transient S3
+            # error is marked Failed rather than retried. That is
+            # acceptable because a Failed task is still labelable from
+            # scratch, while a task left permanently Pending is
+            # withheld from labelers forever.
+            raise GenerationFailure(
+                f'pre-label storage failed: {exc}') from exc
         resolved = _mark_task(job_id, task_id, 'Available',
                               prelabel_s3_key=prelabel_key)
     except GenerationFailure as exc:
