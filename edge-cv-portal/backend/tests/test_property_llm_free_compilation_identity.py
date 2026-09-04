@@ -155,11 +155,14 @@ def _synthetic_capture_sinks(document):
             if element["factory"] != "multifilesink":
                 continue
             sinks.append(element)
-            # Pre-feature chain shape: videoconvert ! jpegenc !
-            # multifilesink, all synthetic (nodeId null).
-            chain = elements[index - 2:index + 1]
+            # Pre-feature chain shape on this branch: videoconvert !
+            # capsfilter(I420) ! jpegenc ! multifilesink, all synthetic
+            # (nodeId null). The I420 capsfilter is required for Bayer
+            # camera sources (see _frame_capture_sink_chain in
+            # workflow_core.compiler.compiler).
+            chain = elements[index - 3:index + 1]
             assert [e["factory"] for e in chain] == \
-                ["videoconvert", "jpegenc", "multifilesink"]
+                ["videoconvert", "capsfilter", "jpegenc", "multifilesink"]
             for member in chain:
                 assert member["nodeId"] is None
     return sinks

@@ -148,7 +148,9 @@ def compile_definition(definition_json):
 def capture_sink_locations(document):
     """Every ``multifilesink`` location in the document's segments that
     terminates a synthetic frame-capture chain (immediately preceded by
-    ``videoconvert -> jpegenc``)."""
+    ``videoconvert -> capsfilter(I420) -> jpegenc``; the capsfilter is
+    required for Bayer camera sources, see _capture_chain in
+    workflow_core.compiler.compiler)."""
     locations = []
     for segment in document["segments"]:
         elements = segment["elements"]
@@ -156,9 +158,10 @@ def capture_sink_locations(document):
             if element["factory"] != "multifilesink":
                 continue
             if (
-                position >= 2
+                position >= 3
                 and elements[position - 1]["factory"] == "jpegenc"
-                and elements[position - 2]["factory"] == "videoconvert"
+                and elements[position - 2]["factory"] == "capsfilter"
+                and elements[position - 3]["factory"] == "videoconvert"
             ):
                 locations.append(element["args"]["location"])
     return locations
@@ -207,9 +210,16 @@ class TestLlmCapturePathEmission:
             assert "capturePaths" in binding, (
                 "llm binding '{0}' carries no capturePaths".format(llm_id))
             capture_paths = binding["capturePaths"]
-            assert set(capture_paths) == {"in"}, (
-                "llm binding '{0}' capturePaths must map exactly the 'in' "
-                "port, got {1!r}".format(llm_id, capture_paths))
+            # On this branch llm_inference also has a 'reference' input
+            # port (vlm reference parity); the generators never feed it,
+            # so it must map to None (Requirement 1.2).
+            assert set(capture_paths) == {"in", "reference"}, (
+                "llm binding '{0}' capturePaths must map exactly the "
+                "descriptor's input ports, got {1!r}".format(
+                    llm_id, capture_paths))
+            assert capture_paths["reference"] is None, (
+                "llm binding '{0}' (unfed 'reference' port) must map to "
+                "None, got {1!r}".format(llm_id, capture_paths["reference"]))
 
             path = capture_paths["in"]
             if mode == "unfed":
