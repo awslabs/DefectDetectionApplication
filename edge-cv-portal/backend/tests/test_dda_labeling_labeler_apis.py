@@ -137,7 +137,8 @@ class LabelerEnv:
         return job_id
 
     def put_task(self, job_id, task_id, assignee, status="Assigned",
-                 prelabel_status=None, prelabel_s3_key=None):
+                 prelabel_status=None, prelabel_s3_key=None,
+                 prelabel_error=None):
         image_key = f"images/{job_id}/{task_id}.jpg"
         item = {
             "job_id": job_id,
@@ -152,6 +153,8 @@ class LabelerEnv:
             item["prelabel_status"] = prelabel_status
         if prelabel_s3_key is not None:
             item["prelabel_s3_key"] = prelabel_s3_key
+        if prelabel_error is not None:
+            item["prelabel_error"] = prelabel_error
         self.stack.tables.labeling_tasks.put_item(Item=item)
         return item
 
@@ -382,6 +385,48 @@ class TestNextTaskGating:
         status, body = env.next_task(job_id)
         assert status == 200
         assert "prelabel" not in body
+
+    def test_failed_task_served_bare_with_status_and_reason(self, env):
+        """Feature: llm-auto-labeling, task 12.2 (Req 7.5, 10.4): a
+        task whose LLM pre-label generation Failed is presented to a
+        team labeler as a bare image — no prelabel payload — carrying
+        its prelabel_status and retained failure reason."""
+        caller = env.labeler["user_id"]
+        job_id = env.put_job(
+            auto_label={"enabled": True,
+                        "model": "llm:us.amazon.nova-pro-v1:0",
+                        "detection_prompt": "Find every scratch"})
+        reason = "model error: guidance did not parse"
+        env.put_task(job_id, "task-0000000", caller,
+                     prelabel_status="Failed", prelabel_error=reason)
+
+        status, body = env.next_task(job_id)
+        assert status == 200
+        assert body["complete"] is False
+        assert body["task_id"] == "task-0000000"
+        assert "prelabel" not in body
+        assert body["prelabel_status"] == "Failed"
+        assert body["prelabel_error"] == reason
+        # Still a normal presentable task: image URL and label set ride
+        # along for annotation from scratch.
+        assert f"images/{job_id}/task-0000000.jpg" in body["image_url"]
+        assert body["label_set"] == ["normal", "anomaly"]
+
+    def test_available_task_carries_no_prelabel_error(self, env):
+        """Req 10.4 counterpart: an Available pre-label rides along
+        with prelabel_status Available and no error field."""
+        caller = env.labeler["user_id"]
+        job_id = env.put_job()
+        prelabel = {"modality": "Classification", "label": "anomaly"}
+        key = env.put_prelabel(job_id, "task-0000000", prelabel)
+        env.put_task(job_id, "task-0000000", caller,
+                     prelabel_status="Available", prelabel_s3_key=key)
+
+        status, body = env.next_task(job_id)
+        assert status == 200
+        assert body["prelabel"] == prelabel
+        assert body["prelabel_status"] == "Available"
+        assert "prelabel_error" not in body
 
     def test_instructions_and_example_urls_included(self, env):
         """Req 7.2: stored instructions and good/bad example images are

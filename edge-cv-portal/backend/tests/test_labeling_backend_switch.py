@@ -23,6 +23,11 @@ shared_utils, synthetic API Gateway events with Cognito claims):
   rounded to the nearest whole number, per-member submitted/remaining
   counts, unassigned count, blocked flag, notification state, and the
   skip-verification progress substitution (Req 11.1, 11.2, 11.10)
+- GET /labeling/{id} pre-label outcome counts and LLM auto-label
+  surfacing (llm-auto-labeling, task 11.2, Req 10.1, 10.3):
+  prelabel_available_count / prelabel_failed_count over active tasks
+  only, zeros without auto-labeling, and the model identifier plus the
+  full untruncated Detection_Prompt returned on the job item
 
 DDA job/task/team rows are seeded directly in DynamoDB (moto) — the
 tests do not depend on create_dda_job. SageMaker is a recording fake
@@ -443,3 +448,99 @@ class TestDdaJobDetail:
         status, response = env.get_job(job_id)
         assert status == 200
         assert response["job"]["labeling_backend"] == "GroundTruth"
+
+
+# ---------------------------------------- DDA job detail pre-label counts
+
+class TestDdaJobDetailPrelabelCounts:
+    """Feature: llm-auto-labeling, task 11.2 (Req 10.1, 10.3).
+
+    prelabel_available_count / prelabel_failed_count on the DDA job
+    detail view, derived from active tasks only, plus the model
+    identifier and full untruncated Detection_Prompt on the job item.
+    """
+
+    def test_mixed_statuses_produce_the_two_counts(self, env):
+        """Req 10.3: Pending / Available / Failed / absent mix across
+        active tasks yields the right Available and Failed counts."""
+        member = f"labeler-{uuid.uuid4().hex[:8]}"
+        team_id = env.put_team([member])
+        job_id = env.put_job(
+            labeling_backend="DDA", team_id=team_id,
+            task_type="ObjectDetection", image_count=6,
+            auto_label={"enabled": True, "model": "llm:us.amazon.nova-pro-v1:0",
+                        "detection_prompt": "find scratches"})
+        env.put_task(job_id, 0, member, prelabel_status="Pending")
+        env.put_task(job_id, 1, member, prelabel_status="Available")
+        env.put_task(job_id, 2, member, prelabel_status="Available")
+        env.put_task(job_id, 3, member, prelabel_status="Available")
+        env.put_task(job_id, 4, member, prelabel_status="Failed",
+                     prelabel_error="model error: boom")
+        env.put_task(job_id, 5, member)  # no prelabel_status at all
+
+        status, response = env.get_job(job_id)
+        assert status == 200
+        job = response["job"]
+        assert job["prelabel_available_count"] == 3
+        assert job["prelabel_failed_count"] == 1
+
+    def test_inactive_tasks_are_excluded_from_the_counts(self, env):
+        """Req 10.3: Inactive tasks (deactivated after a distribution
+        shortfall) never count, whatever their prelabel_status."""
+        member = f"labeler-{uuid.uuid4().hex[:8]}"
+        team_id = env.put_team([member])
+        job_id = env.put_job(
+            labeling_backend="DDA", team_id=team_id,
+            task_type="Segmentation", image_count=2,
+            auto_label={"enabled": True, "model": "llm:model-x",
+                        "detection_prompt": "p"})
+        env.put_task(job_id, 0, member, prelabel_status="Available")
+        env.put_task(job_id, 1, member, prelabel_status="Failed")
+        env.put_task(job_id, 2, member, status="Inactive",
+                     prelabel_status="Available")
+        env.put_task(job_id, 3, member, status="Inactive",
+                     prelabel_status="Failed")
+
+        status, response = env.get_job(job_id)
+        assert status == 200
+        job = response["job"]
+        assert job["prelabel_available_count"] == 1
+        assert job["prelabel_failed_count"] == 1
+
+    def test_job_without_auto_labeling_reports_zeros(self, env):
+        """Req 10.3: a plain team job with no auto-labeling (no
+        prelabel_status on any task) reports both counts as zero."""
+        member = f"labeler-{uuid.uuid4().hex[:8]}"
+        team_id = env.put_team([member])
+        job_id = env.put_job(
+            labeling_backend="DDA", team_id=team_id,
+            task_type="Classification", image_count=2)
+        env.put_task(job_id, 0, member)
+        env.put_task(job_id, 1, member, status="Submitted")
+
+        status, response = env.get_job(job_id)
+        assert status == 200
+        job = response["job"]
+        assert job["prelabel_available_count"] == 0
+        assert job["prelabel_failed_count"] == 0
+
+    def test_detail_carries_model_and_untruncated_prompt(self, env):
+        """Req 10.1: the response carries the model identifier and the
+        stored Detection_Prompt byte-for-byte — including leading and
+        trailing whitespace, newlines, quotes, and braces — at full
+        length, untruncated."""
+        prompt = ("  Find every defect.\n"
+                  'Report {"detections": [...]} with "box" entries.\n'
+                  + ("x" * 1900) + "\n  ")
+        model = "llm:us.amazon.nova-pro-v1:0"
+        job_id = env.put_job(
+            labeling_backend="DDA", task_type="ObjectDetection",
+            image_count=1,
+            auto_label={"enabled": True, "model": model,
+                        "detection_prompt": prompt})
+        status, response = env.get_job(job_id)
+        assert status == 200
+        auto_label = response["job"]["auto_label"]
+        assert auto_label["model"] == model
+        assert auto_label["detection_prompt"] == prompt
+        assert len(auto_label["detection_prompt"]) == len(prompt)

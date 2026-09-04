@@ -422,10 +422,15 @@ def _enqueue_autolabel_messages(job: Dict, task_ids: List[str],
         return
 
     skip_verification = bool(job.get('skip_verification'))
-    if skip_verification:
-        model = f"bedrock:{job['bedrock_model_id']}"
-    else:
-        model = (job.get('auto_label') or {}).get('model')
+    # The LLM family takes precedence over the skip-verification
+    # Bedrock hardwire, so a skip-verification job can be LLM-driven
+    # (Req 2.6). Only fall back to bedrock:{bedrock_model_id} when the
+    # model is not an llm: value and the job is skip-verification.
+    auto_label = job.get('auto_label') or {}
+    model = auto_label.get('model')
+    if not (isinstance(model, str) and model.startswith('llm:')):
+        model = (f"bedrock:{job['bedrock_model_id']}"
+                 if skip_verification else model)
 
     entries = []
     for task_id, image_key in zip(task_ids, images):
@@ -437,6 +442,12 @@ def _enqueue_autolabel_messages(job: Dict, task_ids: List[str],
             'label_set': list(job.get('label_set') or []),
             'model': model,
         }
+        if isinstance(model, str) and model.startswith('llm:'):
+            # Req 3.1: the consumer falls back to the job item when a
+            # message lacks detection_prompt, so in-flight messages
+            # across a deployment still process.
+            message['detection_prompt'] = (
+                auto_label.get('detection_prompt') or '')
         if skip_verification:
             message['per_label_prompts'] = dict(
                 job.get('per_label_prompts') or {})
@@ -1003,7 +1014,7 @@ def _canonical_annotation(annotation: Any, modality: str) -> Dict:
         raise ManifestGenerationError(
             f"persisted annotation is not an object: {annotation!r}")
     annotation = _plain(annotation)
-    if (modality == 'ObjectDetection'
+    if (modality in ('ObjectDetection', 'Segmentation')
             and 'image_size' not in annotation
             and annotation.get('image_width') is not None
             and annotation.get('image_height') is not None):

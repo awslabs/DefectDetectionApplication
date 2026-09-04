@@ -443,6 +443,128 @@ class TestAutolabelFanout:
         assert len(env.tasks(job_id)) == 2
 
 
+# ------------------------------------------------- LLM auto-label fan-out
+
+class TestLlmAutolabelFanout:
+    """llm-auto-labeling task 7.2 (Req 2.6, 3.1): the fan-out carries
+    the Detection_Prompt for the llm: family, LLM model choice takes
+    precedence over the skip-verification Bedrock hardwire, and the
+    existing SAM / Bedrock message bodies are unchanged."""
+
+    LLM_MODEL = "llm:us.amazon.nova-pro-v1:0"
+    PROMPT = "  Find every scratch on the metal surface.\n"
+    PER_LABEL = {"normal": "Is it normal?", "anomaly": "Is it anomalous?"}
+
+    def test_llm_team_job_carries_detection_prompt(self, env, monkeypatch):
+        """Req 3.1: an LLM team job enqueues model='llm:<id>' with the
+        stored detection_prompt verbatim and no per_label_prompts."""
+        url = env.make_queue(monkeypatch)
+        env.add_labeler()
+        env.put_images(count=3)
+        job_id = env.create_job(
+            auto_label={"enabled": True,
+                        "model": self.LLM_MODEL,
+                        "detection_prompt": self.PROMPT})
+        env.distribute(job_id)
+
+        tasks = env.tasks(job_id)
+        messages = env.queue_messages(url)
+        assert len(messages) == 3
+        by_task = {message["task_id"]: message for message in messages}
+        assert set(by_task) == {task["task_id"] for task in tasks}
+        for task in tasks:
+            assert by_task[task["task_id"]] == {
+                "job_id": job_id,
+                "task_id": task["task_id"],
+                "image_s3_uri": task["image_s3_uri"],
+                "modality": "Classification",
+                "label_set": ["normal", "anomaly"],
+                "model": self.LLM_MODEL,
+                "detection_prompt": self.PROMPT,
+            }
+
+    def test_llm_skip_verification_precedence_over_bedrock_hardwire(
+            self, env, monkeypatch):
+        """Req 2.6: an LLM skip-verification job enqueues the llm:
+        model (not bedrock:{bedrock_model_id}) with both the
+        detection_prompt and the per_label_prompts."""
+        url = env.make_queue(monkeypatch)
+        env.put_images(count=2)
+        job_id = env.create_job(
+            user=env.make_user(role="PortalAdmin"),
+            team_id=None,
+            skip_verification=True,
+            bedrock_model_id="anthropic.claude-3-haiku",
+            per_label_prompts=dict(self.PER_LABEL),
+            auto_label={"enabled": True,
+                        "model": self.LLM_MODEL,
+                        "detection_prompt": self.PROMPT})
+        env.distribute(job_id)
+
+        messages = env.queue_messages(url)
+        assert len(messages) == 2
+        for message in messages:
+            assert message["model"] == self.LLM_MODEL
+            assert message["detection_prompt"] == self.PROMPT
+            assert message["per_label_prompts"] == self.PER_LABEL
+
+    def test_bedrock_skip_verification_body_unchanged(self, env,
+                                                      monkeypatch):
+        """Req 2.6 boundary: a Bedrock skip-verification job still
+        enqueues bedrock:{bedrock_model_id} with per_label_prompts and
+        no detection_prompt (byte-identical to today's body)."""
+        url = env.make_queue(monkeypatch)
+        env.put_images(count=2)
+        job_id = env.create_job(
+            user=env.make_user(role="PortalAdmin"),
+            team_id=None,
+            skip_verification=True,
+            bedrock_model_id="anthropic.claude-3-haiku",
+            per_label_prompts=dict(self.PER_LABEL))
+        env.distribute(job_id)
+
+        tasks = env.tasks(job_id)
+        messages = env.queue_messages(url)
+        assert len(messages) == 2
+        by_task = {message["task_id"]: message for message in messages}
+        for task in tasks:
+            assert by_task[task["task_id"]] == {
+                "job_id": job_id,
+                "task_id": task["task_id"],
+                "image_s3_uri": task["image_s3_uri"],
+                "modality": "Classification",
+                "label_set": ["normal", "anomaly"],
+                "model": "bedrock:anthropic.claude-3-haiku",
+                "per_label_prompts": self.PER_LABEL,
+            }
+
+    def test_sam_team_job_body_unchanged(self, env, monkeypatch):
+        """Req 1.7 by construction: a SAM job's message body carries
+        neither detection_prompt nor per_label_prompts."""
+        url = env.make_queue(monkeypatch)
+        env.add_labeler()
+        env.put_images(count=2)
+        job_id = env.create_job(
+            task_type="Segmentation",
+            label_set=["scratch"],
+            auto_label={"enabled": True, "model": "sam"})
+        env.distribute(job_id)
+
+        tasks = env.tasks(job_id)
+        messages = env.queue_messages(url)
+        assert len(messages) == 2
+        by_task = {message["task_id"]: message for message in messages}
+        for task in tasks:
+            assert by_task[task["task_id"]] == {
+                "job_id": job_id,
+                "task_id": task["task_id"],
+                "image_s3_uri": task["image_s3_uri"],
+                "modality": "Segmentation",
+                "label_set": ["scratch"],
+                "model": "sam",
+            }
+
+
 # ------------------------------------------------------------- shortfall
 
 class TestShortfall:

@@ -27,6 +27,33 @@ for dda_sam_worker):
   9.10)
 - Per-record isolation: one bad record in a batch neither fails the
   batch nor blocks the remaining records
+
+Feature: llm-auto-labeling (task 9.2) — the `llm:<id>` path:
+
+- Dispatch reaches _generate_llm_prelabel for `llm:<id>`; an empty
+  identifier (`llm:`) stays an unsupported model (Req 3.1)
+- Exactly one Converse call per image carrying the image bytes, the
+  key-derived format, the verbatim Detection_Prompt, every Label_Set
+  name, and the pixel dimensions (Req 3.1, 9.5)
+- Undeterminable dimensions fail the task before any model call
+  (Req 3.3); ReadTimeoutError vs generic errors give distinguishable
+  reasons (Req 3.4)
+- Unparseable output, out-of-Label_Set class, out-of-bounds box, and
+  101 detections each mark Failed with one reason and no pre-label
+  object (Req 4.2, 4.4, 4.5, 4.7)
+- Success paths for all three modalities write the pre-label and mark
+  Available with prelabel_s3_key; a valid empty result is a success
+  with empty regions/boxes (Req 5.5, 6.1, 6.3)
+- An image whose S3 read fails marks Failed with the access reason
+  (Req 9.6)
+
+Feature: llm-auto-labeling (task 10.2) — storage-failure scoping:
+
+- An LLM job whose artifacts put_object raises marks the task Failed
+  with the storage reason, sets no prelabel_s3_key, and reports no
+  batch item failure (Req 6.2)
+- SAM and Bedrock jobs whose put_object raises still surface a batch
+  item failure and leave prelabel_status Pending (Req 1.7)
 """
 import io
 import json
@@ -53,6 +80,13 @@ def png_bytes(width, height):
     chunk = (struct.pack(">I", len(ihdr)) + b"IHDR" + ihdr
              + struct.pack(">I", zlib.crc32(b"IHDR" + ihdr)))
     return signature + chunk
+
+
+def jpeg_bytes(width, height):
+    """A minimal JPEG (SOI + SOF0) carrying the given dimensions,
+    enough for header-based dimension parsing."""
+    return (b"\xff\xd8\xff\xc0" + struct.pack(">H", 11) + b"\x08"
+            + struct.pack(">HH", height, width))
 
 
 # ------------------------------------------------------------- fake clients
@@ -138,9 +172,10 @@ class AutolabelEnv:
         })
 
     # ------------------------------------------------------------ setup
-    def put_image(self, key, width=100, height=80):
-        self.s3.put_object(Bucket=DATASET_BUCKET, Key=key,
-                           Body=png_bytes(width, height))
+    def put_image(self, key, width=100, height=80, body=None):
+        self.s3.put_object(
+            Bucket=DATASET_BUCKET, Key=key,
+            Body=png_bytes(width, height) if body is None else body)
         return f"s3://{DATASET_BUCKET}/{key}"
 
     def make_job(self, task_type="Classification", label_set=None,
@@ -202,7 +237,8 @@ class AutolabelEnv:
     # ------------------------------------------------------------ invoke
     @staticmethod
     def record(job_id, task_id, image_uri, modality, label_set, model,
-               per_label_prompts=None, body_override=None):
+               per_label_prompts=None, body_override=None,
+               detection_prompt=None):
         body = body_override if body_override is not None else json.dumps({
             "job_id": job_id,
             "task_id": task_id,
@@ -212,6 +248,8 @@ class AutolabelEnv:
             "model": model,
             **({"per_label_prompts": per_label_prompts}
                if per_label_prompts else {}),
+            **({"detection_prompt": detection_prompt}
+               if detection_prompt is not None else {}),
         })
         return {"messageId": f"msg-{uuid.uuid4().hex[:8]}", "body": body}
 
@@ -563,3 +601,353 @@ class TestBatchIsolation:
             f"s3://{DATASET_BUCKET}/img.png", "Classification",
             ["normal", "anomaly"], "bedrock:test-model-id")])
         assert result == {"batchItemFailures": []}
+
+
+# ------------------------------------------------------- LLM guidance path
+
+class TestLlmPath:
+    """llm-auto-labeling task 9.2: the `llm:<id>` dispatch branch and
+    _generate_llm_prelabel (Req 3.1, 3.3, 3.4, 3.6, 4.2, 4.4, 4.5, 4.7,
+    5.5, 6.1, 6.3, 9.5, 9.6)."""
+
+    MODEL = "llm:us.amazon.nova-pro-v1:0"
+    MODEL_ID = "us.amazon.nova-pro-v1:0"
+    LABELS = ["scratch", "dent"]
+    # Deliberately awkward: leading/trailing whitespace, quotes, braces,
+    # and an embedded newline must survive verbatim (Req 3.1).
+    PROMPT = '  Find every "scratch" {and dent}\n  on the panel.  '
+
+    @staticmethod
+    def guidance(detections):
+        return json.dumps({"detections": detections})
+
+    @staticmethod
+    def box(cls="scratch", left=10, top=5, width=30, height=20):
+        return {"class": cls,
+                "box": {"left": left, "top": top,
+                        "width": width, "height": height}}
+
+    def _run_llm(self, env, modality, reply=None, error=None,
+                 label_set=None, image_body=None, image_key=None,
+                 image_uri=None, model=None):
+        """One llm-model job + task + record through the handler."""
+        label_set = label_set if label_set is not None else self.LABELS
+        model = model or self.MODEL
+        job_id = env.make_job(task_type=modality, label_set=label_set,
+                              model=model)
+        if image_uri is None:
+            key = image_key or f"imgs/{uuid.uuid4()}.png"
+            image_uri = env.put_image(key, width=100, height=80,
+                                      body=image_body)
+        task_id = env.make_task(job_id, image_uri)
+        bedrock, recorded = env.use_bedrock(
+            replies=[reply] if reply is not None else None, error=error)
+        result = env.run([env.record(job_id, task_id, image_uri, modality,
+                                     label_set, model,
+                                     detection_prompt=self.PROMPT)])
+        return SimpleNamespace(job_id=job_id, task_id=task_id,
+                               bedrock=bedrock, recorded=recorded,
+                               result=result)
+
+    # ------------------------------------------------------------ dispatch
+
+    def test_empty_identifier_is_unsupported_model(self, env):
+        """Req 3.1: `llm:` with an empty identifier never reaches the
+        LLM path — the task fails as an unsupported model with zero
+        converse calls."""
+        run = self._run_llm(env, "ObjectDetection", model="llm:")
+        assert run.result == {"batchItemFailures": []}
+        task = env.get_task(run.job_id, run.task_id)
+        assert task["prelabel_status"] == "Failed"
+        assert "unsupported auto-label model" in task["prelabel_error"]
+        assert len(run.bedrock.calls) == 0
+        assert not env.prelabel_exists(run.job_id, run.task_id)
+
+    def test_single_converse_call_carries_image_prompt_and_dimensions(self, env):
+        """Req 3.1, 9.5: exactly one converse call per image, with the
+        image bytes, the key-derived format, the verbatim
+        Detection_Prompt, every Label_Set name, and the pixel
+        dimensions; the model id keeps its embedded colon."""
+        run = self._run_llm(env, "ObjectDetection",
+                            reply=self.guidance([self.box()]))
+        assert run.result == {"batchItemFailures": []}
+        assert len(run.bedrock.calls) == 1
+        call = run.bedrock.calls[0]
+        assert call["modelId"] == self.MODEL_ID
+        content = call["messages"][0]["content"]
+        image_block = content[0]["image"]
+        assert image_block["format"] == "png"
+        assert image_block["source"]["bytes"].startswith(b"\x89PNG")
+        prompt = content[1]["text"]
+        assert self.PROMPT in prompt          # verbatim, unaltered
+        for label in self.LABELS:
+            assert label in prompt
+        assert "100 pixels wide" in prompt
+        assert "80 pixels tall" in prompt
+
+    def test_jpeg_key_derives_jpeg_format(self, env):
+        """Req 3.1: the image format sent to the model is derived from
+        the object key."""
+        run = self._run_llm(env, "ObjectDetection",
+                            reply=self.guidance([self.box()]),
+                            image_key=f"imgs/{uuid.uuid4()}.jpg",
+                            image_body=jpeg_bytes(100, 80))
+        assert len(run.bedrock.calls) == 1
+        image_block = run.bedrock.calls[0]["messages"][0]["content"][0]["image"]
+        assert image_block["format"] == "jpeg"
+        assert image_block["source"]["bytes"].startswith(b"\xff\xd8")
+        assert env.get_task(run.job_id,
+                            run.task_id)["prelabel_status"] == "Available"
+
+    # ------------------------------------------------- pre-invocation gates
+
+    def test_undeterminable_dimensions_fail_without_model_call(self, env):
+        """Req 3.3: a body that is neither PNG nor JPEG fails with the
+        unsupported-content reason and makes zero converse calls."""
+        run = self._run_llm(env, "ObjectDetection",
+                            image_body=b"definitely not an image")
+        assert run.result == {"batchItemFailures": []}
+        task = env.get_task(run.job_id, run.task_id)
+        assert task["prelabel_status"] == "Failed"
+        assert "unsupported image content" in task["prelabel_error"]
+        assert len(run.bedrock.calls) == 0
+        assert not env.prelabel_exists(run.job_id, run.task_id)
+
+    def test_unreadable_image_marks_failed_with_access_reason(self, env):
+        """Req 9.6: an image whose S3 read fails marks the task Failed
+        with the access reason."""
+        missing_uri = f"s3://{DATASET_BUCKET}/missing/{uuid.uuid4()}.png"
+        run = self._run_llm(env, "ObjectDetection", image_uri=missing_uri)
+        task = env.get_task(run.job_id, run.task_id)
+        assert task["prelabel_status"] == "Failed"
+        assert "not accessible" in task["prelabel_error"]
+        assert len(run.bedrock.calls) == 0
+
+    # --------------------------------------------------- invocation failure
+
+    def test_read_timeout_and_model_error_reasons_are_distinct(self, env):
+        """Req 3.4: a ReadTimeoutError yields a timeout reason and a
+        generic exception a model-error reason, with distinguishable
+        substrings."""
+        from botocore.exceptions import ReadTimeoutError
+
+        timeout_run = self._run_llm(
+            env, "ObjectDetection",
+            error=ReadTimeoutError(endpoint_url="https://bedrock.test"))
+        timeout_reason = env.get_task(
+            timeout_run.job_id, timeout_run.task_id)["prelabel_error"]
+        assert "timed out" in timeout_reason
+        assert len(timeout_run.bedrock.calls) == 1
+
+        error_run = self._run_llm(env, "ObjectDetection",
+                                  error=RuntimeError("kaboom"))
+        error_reason = env.get_task(
+            error_run.job_id, error_run.task_id)["prelabel_error"]
+        assert "model error" in error_reason
+        assert "kaboom" in error_reason
+
+        # The two reasons are distinguishable substrings.
+        assert "timed out" not in error_reason
+        assert "model error" not in timeout_reason
+        for run in (timeout_run, error_run):
+            assert env.get_task(run.job_id,
+                                run.task_id)["prelabel_status"] == "Failed"
+            assert not env.prelabel_exists(run.job_id, run.task_id)
+
+    # ------------------------------------------------------ guidance gates
+
+    def _assert_failed(self, env, run, reason_substring):
+        assert run.result == {"batchItemFailures": []}
+        task = env.get_task(run.job_id, run.task_id)
+        assert task["prelabel_status"] == "Failed"
+        assert reason_substring in task["prelabel_error"]
+        assert "prelabel_s3_key" not in task
+        assert not env.prelabel_exists(run.job_id, run.task_id)
+
+    def test_unparseable_output_marks_failed(self, env):
+        """Req 4.2: no parseable JSON in the response is one failure."""
+        run = self._run_llm(env, "ObjectDetection",
+                            reply="I could not find anything to report.")
+        self._assert_failed(env, run, "parseable JSON")
+
+    def test_class_outside_label_set_marks_failed(self, env):
+        """Req 4.4: a class not in the Label_Set fails the document."""
+        run = self._run_llm(env, "ObjectDetection",
+                            reply=self.guidance([self.box(cls="crack")]))
+        self._assert_failed(env, run, "crack")
+
+    def test_out_of_bounds_box_marks_failed(self, env):
+        """Req 4.5: a box overflowing the 100x80 frame fails."""
+        run = self._run_llm(env, "ObjectDetection",
+                            reply=self.guidance(
+                                [self.box(left=90, width=30)]))  # 90+30 > 100
+        self._assert_failed(env, run, "bounds")
+
+    def test_101_detections_mark_failed_with_cap_reason(self, env):
+        """Req 4.7: more than 100 detections rejects the document with
+        the cap reason."""
+        run = self._run_llm(env, "ObjectDetection",
+                            reply=self.guidance([self.box()] * 101))
+        self._assert_failed(env, run, "at most 100")
+
+    # ------------------------------------------------------- success paths
+
+    def _assert_available(self, env, run):
+        assert run.result == {"batchItemFailures": []}
+        task = env.get_task(run.job_id, run.task_id)
+        assert task["prelabel_status"] == "Available"
+        assert task["prelabel_s3_key"] == (
+            f"labeling/{env.usecase_id}/{run.job_id}/prelabels/"
+            f"{run.task_id}.json")
+        return env.prelabel_json(run.job_id, run.task_id)
+
+    def test_segmentation_success_writes_rle_prelabel(self, env):
+        """Req 5.1, 6.1: a Segmentation guidance detection becomes one
+        RLE region in the stored pre-label."""
+        run = self._run_llm(env, "Segmentation",
+                            reply=self.guidance([self.box()]))
+        prelabel = self._assert_available(env, run)
+        assert prelabel["modality"] == "Segmentation"
+        assert prelabel["image_width"] == 100
+        assert prelabel["image_height"] == 80
+        assert len(prelabel["regions"]) == 1
+        region = prelabel["regions"][0]
+        assert region["class"] == "scratch"
+        assert isinstance(region["rle"], str) and region["rle"]
+
+    def test_object_detection_success_keeps_coordinates(self, env):
+        """Req 5.3, 6.1: box detections keep their validated
+        coordinates verbatim in the stored pre-label."""
+        run = self._run_llm(env, "ObjectDetection",
+                            reply=self.guidance(
+                                [self.box(left=10, top=5,
+                                          width=30, height=20)]))
+        prelabel = self._assert_available(env, run)
+        assert prelabel["modality"] == "ObjectDetection"
+        assert prelabel["image_width"] == 100
+        assert prelabel["image_height"] == 80
+        assert prelabel["boxes"] == [
+            {"class": "scratch", "left": 10.0, "top": 5.0,
+             "width": 30.0, "height": 20.0}]
+
+    def test_classification_success_derives_label(self, env):
+        """Req 5.4, 6.1: one or more detections mean the anomaly class."""
+        run = self._run_llm(env, "Classification",
+                            label_set=["normal", "anomaly"],
+                            reply=self.guidance([self.box(cls="anomaly")]))
+        prelabel = self._assert_available(env, run)
+        assert prelabel == {"modality": "Classification", "label": "anomaly"}
+
+    def test_empty_guidance_is_success_with_empty_lists(self, env):
+        """Req 5.5: a valid empty result is a success — an empty
+        regions/boxes list, not a failure."""
+        seg = self._run_llm(env, "Segmentation", reply=self.guidance([]))
+        seg_prelabel = self._assert_available(env, seg)
+        assert seg_prelabel["regions"] == []
+
+        det = self._run_llm(env, "ObjectDetection", reply=self.guidance([]))
+        det_prelabel = self._assert_available(env, det)
+        assert det_prelabel["boxes"] == []
+
+
+# ------------------------------------------- storage-failure scoping (10.2)
+
+class _RaisingPutObjectS3:
+    """Stub for the worker's artifacts s3_client whose put_object always
+    raises, exercising the real _write_prelabel wrapper at the
+    put_object level."""
+
+    def __init__(self, exc):
+        self.exc = exc
+        self.calls = 0
+
+    def put_object(self, **kwargs):
+        self.calls += 1
+        raise self.exc
+
+
+class TestStorageFailureScoping:
+    """llm-auto-labeling task 10.2: a _write_prelabel put_object failure
+    is terminal for the LLM family (task Failed with the storage
+    reason, no batch item failure) but stays transient for sam and
+    bedrock: (batch item failure, task still Pending) (Req 6.2, 1.7)."""
+
+    LLM_MODEL = "llm:us.amazon.nova-pro-v1:0"
+    STORAGE_EXC = RuntimeError("S3 outage: put_object refused")
+
+    def _break_put_object(self, env):
+        stub = _RaisingPutObjectS3(self.STORAGE_EXC)
+        env.monkeypatch.setattr(env.worker, "s3_client", stub)
+        return stub
+
+    def test_llm_storage_failure_is_terminal(self, env):
+        """Req 6.2: an LLM job whose put_object raises marks the task
+        Failed with the storage reason, sets no prelabel_s3_key, and
+        reports no batch item failure."""
+        job_id = env.make_job(task_type="ObjectDetection",
+                              label_set=["scratch"], model=self.LLM_MODEL)
+        image_uri = env.put_image(f"imgs/{uuid.uuid4()}.png")
+        task_id = env.make_task(job_id, image_uri)
+        env.use_bedrock(replies=[json.dumps({"detections": [
+            {"class": "scratch",
+             "box": {"left": 10, "top": 5, "width": 30, "height": 20}}]})])
+        stub = self._break_put_object(env)
+
+        result = env.run([env.record(
+            job_id, task_id, image_uri, "ObjectDetection", ["scratch"],
+            self.LLM_MODEL, detection_prompt="Find every scratch.")])
+
+        assert result == {"batchItemFailures": []}
+        assert stub.calls == 1
+        task = env.get_task(job_id, task_id)
+        assert task["prelabel_status"] == "Failed"
+        assert "pre-label storage failed" in task["prelabel_error"]
+        assert "put_object refused" in task["prelabel_error"]
+        assert "prelabel_s3_key" not in task
+
+    def test_sam_storage_failure_stays_transient(self, env):
+        """Req 1.7: a SAM job whose put_object raises surfaces a batch
+        item failure and leaves prelabel_status Pending."""
+        job_id = env.make_job(task_type="Segmentation",
+                              label_set=["scratch"], model="sam")
+        image_uri = env.put_image(f"imgs/{uuid.uuid4()}.png")
+        task_id = env.make_task(job_id, image_uri)
+        env.use_sam(payload={
+            "regions": [{"class": None, "rle": "12 5 3 5"}],
+            "image_width": 100,
+            "image_height": 80,
+        })
+        stub = self._break_put_object(env)
+
+        record = env.record(job_id, task_id, image_uri, "Segmentation",
+                            ["scratch"], "sam")
+        result = env.run([record])
+
+        assert result == {"batchItemFailures": [
+            {"itemIdentifier": record["messageId"]}]}
+        assert stub.calls == 1
+        task = env.get_task(job_id, task_id)
+        assert task["prelabel_status"] == "Pending"
+        assert "prelabel_error" not in task
+        assert "prelabel_s3_key" not in task
+
+    def test_bedrock_storage_failure_stays_transient(self, env):
+        """Req 1.7: a Bedrock job whose put_object raises surfaces a
+        batch item failure and leaves prelabel_status Pending."""
+        job_id = env.make_job(task_type="Classification")
+        image_uri = env.put_image(f"imgs/{uuid.uuid4()}.png")
+        task_id = env.make_task(job_id, image_uri)
+        env.use_bedrock(replies=['{"label": "anomaly"}'])
+        stub = self._break_put_object(env)
+
+        record = env.record(job_id, task_id, image_uri, "Classification",
+                            ["normal", "anomaly"], "bedrock:test-model-id")
+        result = env.run([record])
+
+        assert result == {"batchItemFailures": [
+            {"itemIdentifier": record["messageId"]}]}
+        assert stub.calls == 1
+        task = env.get_task(job_id, task_id)
+        assert task["prelabel_status"] == "Pending"
+        assert "prelabel_error" not in task
+        assert "prelabel_s3_key" not in task

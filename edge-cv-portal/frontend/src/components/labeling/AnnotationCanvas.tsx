@@ -117,13 +117,22 @@ export function encodeRleColumnMajor(
 /**
  * Decode COCO-style column-major RLE counts into a binary mask stored in
  * row-major order (1 where the region is present). Inverse of
- * {@link encodeRleColumnMajor}.
+ * {@link encodeRleColumnMajor}. Accepts either a counts array or the
+ * backend's canonical space-separated counts string (the shape
+ * `DdaMaskRegion.rle` actually carries at runtime).
  */
 export function decodeRleColumnMajor(
-  counts: number[],
+  rle: number[] | string,
   width: number,
   height: number
 ): Uint8Array {
+  const counts =
+    typeof rle === 'string'
+      ? rle
+          .split(/\s+/)
+          .filter((token) => token.length > 0)
+          .map(Number)
+      : rle;
   const mask = new Uint8Array(width * height);
   let value = 0;
   let index = 0; // column-major pixel index
@@ -648,12 +657,14 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           if (present.has(i + 1)) {
             regions.push({
               class: className,
+              // The backend validates rle as a non-empty space-separated
+              // counts string, so join the counts for submission.
               rle: encodeRleColumnMajor(
                 bitmap,
                 imageSize.width,
                 imageSize.height,
                 i + 1
-              ),
+              ).join(' '),
             });
           }
         });

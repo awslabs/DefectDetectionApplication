@@ -27,6 +27,23 @@ backend switch, task 5.1, will):
   (Req 4.11, 11.3, 12.8); job_created audit event (Req 11.7);
   async worker invoke {action: distribute, job_id} guarded on the
   DDA_LABELING_WORKER_FUNCTION_NAME env var
+
+Feature: llm-auto-labeling (task 6.2) adds, against the same stack:
+
+- 'llm:<id>' accepted for Classification, Segmentation, and
+  ObjectDetection (Req 1.3); identifier rejections (empty, 257 chars,
+  embedded space, control char) each naming the model parameter and
+  persisting no job or task items (Req 1.5)
+- detection_prompt rejections (absent, empty, whitespace-only, 2001
+  chars) each naming the prompt, persisting nothing (Req 2.2-2.4);
+  the accepted prompt stored byte-identical (Req 2.5, 1.6)
+- job_created audit details carry auto_label_model and auto_label_mode
+  ('llm' | 'sam' | 'bedrock' | 'none') (Req 9.4)
+- skip-verification with an llm: model still requires per-label
+  prompts (Req 2.6), still 403s non-admins with the unauthorized_access
+  audit event before validation errors are assembled (Req 9.3, 9.1),
+  and a caller without the create permission is rejected through the
+  existing rbac_check gate with nothing persisted (Req 9.2)
 """
 import json
 import os
@@ -152,6 +169,9 @@ class CreateJobEnv:
         })
         self.creator = self.make_user(role="DataScientist")
         self.team_id = self.make_team(with_labeler=True)
+        # Baseline of the (shared) tasks table so rejections can assert
+        # zero task items were added (llm-auto-labeling Req 1.5, 2.3, 2.4).
+        self._task_baseline = self._count_task_items()
 
     # ------------------------------------------------------------ setup
     def make_user(self, role="DataScientist"):
@@ -232,8 +252,21 @@ class CreateJobEnv:
                 and item.get("details", {}).get("usecase_id")
                 == self.usecase_id]
 
+    def _count_task_items(self):
+        count = 0
+        kwargs = {"Select": "COUNT"}
+        while True:
+            response = self.stack.tables.labeling_tasks.scan(**kwargs)
+            count += response["Count"]
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                return count
+            kwargs["ExclusiveStartKey"] = last_key
+
     def assert_nothing_persisted(self):
+        """Zero job items for the use case AND zero new task items."""
         assert self.usecase_jobs() == []
+        assert self._count_task_items() == self._task_baseline
 
 
 def messages(body):
@@ -643,3 +676,266 @@ class TestSkipVerification:
         status, _ = env.create(user=env.make_user(role="PortalAdmin"),
                                **self.valid_skip_body())
         assert status == 201
+
+
+# --------------------------------------------- LLM auto-label (task 6.2)
+# Feature: llm-auto-labeling
+
+LLM_MODEL = "llm:us.amazon.nova-pro-v1:0"
+LLM_PROMPT = "Find every visible surface defect"
+
+
+def llm_auto_label(prompt=LLM_PROMPT, model=LLM_MODEL):
+    """An auto_label body for the llm: family. prompt=None omits the
+    detection_prompt key entirely (the 'absent' rejection case)."""
+    auto_label = {"enabled": True, "model": model}
+    if prompt is not None:
+        auto_label["detection_prompt"] = prompt
+    return auto_label
+
+
+class TestLlmAutoLabel:
+    @pytest.mark.parametrize("task_type,label_set", [
+        ("Classification", None),
+        ("Segmentation", ["scratch", "dent"]),
+        ("ObjectDetection", ["scratch"]),
+    ])
+    def test_llm_accepted_for_each_modality(self, env, task_type,
+                                            label_set):
+        """Req 1.3, 1.6, 2.2: llm:<id> is accepted for all three
+        modalities; the model identifier and prompt are persisted on the
+        job record."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(task_type=task_type, label_set=label_set,
+                                  auto_label=llm_auto_label())
+        assert status == 201
+        job = env.get_job(body["job_id"])
+        assert job["auto_label"] == {
+            "enabled": True,
+            "model": LLM_MODEL,
+            "detection_prompt": LLM_PROMPT,
+        }
+
+    @pytest.mark.parametrize("bad_model", [
+        "llm:",                    # empty identifier
+        "llm:" + "x" * 257,        # over the 256-char cap
+        "llm:us.nova pro-v1:0",    # embedded space
+        "llm:us.nova\x01pro",      # control character
+    ])
+    def test_invalid_identifier_rejected_naming_model(self, env, bad_model):
+        """Req 1.5: each invalid identifier is rejected with an error
+        naming the model parameter; no job or task items persisted."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(auto_label=llm_auto_label(model=bad_model))
+        assert status == 400
+        model_errors = [err for err in body["validation_errors"]
+                        if "model identifier" in err["message"]]
+        assert len(model_errors) == 1
+        assert model_errors[0]["parameter"] == "auto_label"
+        assert model_errors[0]["model"] == bad_model
+        env.assert_nothing_persisted()
+
+    @pytest.mark.parametrize("bad_prompt", [
+        None,           # detection_prompt key absent
+        "",             # empty
+        "   \t\n  ",    # whitespace-only
+        "x" * 2001,     # over the 2000-char cap
+    ])
+    def test_invalid_prompt_rejected_naming_prompt(self, env, bad_prompt):
+        """Req 2.2, 2.3, 2.4: absent/empty/whitespace-only and over-length
+        prompts are rejected with an error naming the prompt; no job or
+        task items persisted."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(auto_label=llm_auto_label(bad_prompt))
+        assert status == 400
+        assert "detection_prompt" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_over_length_prompt_error_reports_length(self, env):
+        """Req 2.4: the length violation is distinct from the missing
+        prompt error and carries the offending length."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(auto_label=llm_auto_label("x" * 2001))
+        assert status == 400
+        assert "at most 2000 characters" in messages(body)
+        assert "required" not in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_identifier_and_prompt_errors_enumerated_together(self, env):
+        """Req 1.5, 2.3: an invalid identifier and a missing prompt are
+        both reported in the single 400 (validation joins the shared
+        pre-enumeration error list)."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(
+            auto_label=llm_auto_label(prompt="", model="llm:"))
+        assert status == 400
+        assert "model identifier" in messages(body)
+        assert "detection_prompt" in messages(body)
+        env.assert_nothing_persisted()
+
+    def test_prompt_stored_byte_identical(self, env):
+        """Req 2.5: the prompt is stored character-for-character —
+        leading/trailing whitespace, embedded newlines, and quote/brace
+        characters all survive."""
+        prompt = ('  Find "cracks" and {holes}\n'
+                  '\tignore [reflections]; keep \'sliver\' defects\r\n  ')
+        env.put_images(["a.jpg"])
+        status, body = env.create(auto_label=llm_auto_label(prompt))
+        assert status == 201
+        assert env.get_job(body["job_id"])["auto_label"][
+            "detection_prompt"] == prompt
+
+
+# ---------------------------------------- job_created audit (Req 9.4)
+
+class TestJobCreatedAuditDetails:
+    def details(self, env):
+        events = env.audit_events("job_created")
+        assert len(events) == 1
+        return events[0]["details"]
+
+    def test_llm_job_records_model_and_llm_mode(self, env):
+        env.put_images(["a.jpg"])
+        status, _ = env.create(auto_label=llm_auto_label())
+        assert status == 201
+        details = self.details(env)
+        assert details["auto_label_model"] == LLM_MODEL
+        assert details["auto_label_mode"] == "llm"
+
+    def test_sam_job_records_sam_mode(self, env):
+        env.put_images(["a.jpg"])
+        status, _ = env.create(task_type="Segmentation",
+                               label_set=["scratch"],
+                               auto_label={"enabled": True, "model": "sam"})
+        assert status == 201
+        details = self.details(env)
+        assert details["auto_label_model"] == "sam"
+        assert details["auto_label_mode"] == "sam"
+
+    def test_bedrock_job_records_bedrock_mode(self, env):
+        env.put_images(["a.jpg"])
+        status, _ = env.create(auto_label={
+            "enabled": True, "model": "bedrock:anthropic.claude-3-haiku"})
+        assert status == 201
+        details = self.details(env)
+        assert details["auto_label_model"] == (
+            "bedrock:anthropic.claude-3-haiku")
+        assert details["auto_label_mode"] == "bedrock"
+
+    def test_no_auto_label_records_none_mode_without_model(self, env):
+        env.put_images(["a.jpg"])
+        status, _ = env.create()
+        assert status == 201
+        details = self.details(env)
+        assert details["auto_label_mode"] == "none"
+        assert "auto_label_model" not in details
+
+
+# ------------------------------- skip-verification with an llm: model
+
+class TestSkipVerificationWithLlm:
+    def skip_llm_body(self, **auto_label_kwargs):
+        return dict(
+            team_id=None,
+            skip_verification=True,
+            bedrock_model_id="anthropic.claude-3-haiku",
+            per_label_prompts={"normal": "Is it normal?",
+                               "anomaly": "Is it anomalous?"},
+            auto_label=llm_auto_label(**auto_label_kwargs),
+        )
+
+    def test_admin_creates_llm_skip_job(self, env):
+        """Req 2.6: an admin skip-verification job with an llm: model
+        persists both the detection_prompt and the per-label prompts."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(user=env.make_user(role="PortalAdmin"),
+                                  **self.skip_llm_body())
+        assert status == 201
+        job = env.get_job(body["job_id"])
+        assert job["skip_verification"] is True
+        assert job["auto_label"]["model"] == LLM_MODEL
+        assert job["auto_label"]["detection_prompt"] == LLM_PROMPT
+        assert job["per_label_prompts"] == {
+            "normal": "Is it normal?", "anomaly": "Is it anomalous?"}
+
+    def test_missing_per_label_prompt_still_rejected(self, env):
+        """Req 2.6, 9.1: the llm: model does not relax the per-label
+        prompt requirement — every label still needs a non-empty
+        prompt, each offender identified."""
+        env.put_images(["a.jpg"])
+        overrides = self.skip_llm_body()
+        overrides["task_type"] = "ObjectDetection"
+        overrides["label_set"] = ["scratch", "dent"]
+        overrides["per_label_prompts"] = {"scratch": "Find scratches",
+                                          "dent": "   "}
+        status, body = env.create(user=env.make_user(role="PortalAdmin"),
+                                  **overrides)
+        assert status == 400
+        offending = {err.get("label") for err in body["validation_errors"]
+                     if err["parameter"] == "per_label_prompts"}
+        assert offending == {"dent"}
+        env.assert_nothing_persisted()
+
+    def test_non_admin_rejected_403_before_validation(self, env):
+        """Req 9.3, 9.1: a non-admin submitting a skip-verification llm
+        job gets the 403 with the unauthorized_access audit event before
+        any validation errors are assembled — even when the llm config
+        itself is invalid."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(
+            user=env.make_user(role="DataScientist"),
+            **self.skip_llm_body(prompt=None, model="llm:"))
+        assert status == 403
+        assert "administrator" in body["error"]
+        assert "validation_errors" not in body
+        assert len(env.audit_events("unauthorized_access")) == 1
+        env.assert_nothing_persisted()
+
+
+# ------------------------------------ create permission gate (Req 9.2)
+
+class TestCreatePermission:
+    def test_caller_without_create_permission_rejected(self, env):
+        """Req 9.2: a caller without the labeling job creation permission
+        is rejected by the existing rbac_check gate (the permission set
+        that authorizes POST /labeling) with nothing persisted."""
+        import shared_utils
+        sys.modules.pop("rbac_middleware", None)
+        import rbac_middleware
+
+        env.put_images(["a.jpg"])
+        labeler = env.make_user(role="DataLabeler")
+        request_body = env.body(auto_label=llm_auto_label())
+
+        # Mirror labeling.py's delegation, guarded by the existing
+        # create permission (Requirement 9.1: no new access paths).
+        @rbac_middleware.rbac_check(
+            [shared_utils.Permission.CREATE_LABELING_JOBS])
+        def create_route(event, context):
+            return env.dda.module.create_dda_job(
+                json.loads(event["body"]),
+                shared_utils.get_user_from_event(event))
+
+        response = create_route({
+            "httpMethod": "POST",
+            "resource": "/labeling",
+            "path": "/labeling",
+            "pathParameters": None,
+            "queryStringParameters": {"usecase_id": env.usecase_id},
+            "body": json.dumps(request_body),
+            "requestContext": {
+                "authorizer": {
+                    "claims": {
+                        "sub": labeler["user_id"],
+                        "email": labeler["email"],
+                        "cognito:username": labeler["username"],
+                        "custom:role": labeler["role"],
+                    }
+                }
+            },
+        }, None)
+
+        assert response["statusCode"] == 403
+        assert json.loads(response["body"])["error"] == (
+            "Insufficient permissions")
+        env.assert_nothing_persisted()

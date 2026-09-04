@@ -225,6 +225,20 @@ export default function LabelingDetail() {
       rawJob.member_progress || [];
     const notificationFailures = rawJob.notification_failures || [];
     const unassignedCount = rawJob.unassigned_count || 0;
+    // LLM auto-label configuration (llm-auto-labeling Requirement 10.1):
+    // the model identifier and the full stored Detection_Prompt render
+    // only for `llm:` jobs; non-LLM jobs show neither.
+    const autoLabelModel = rawJob.auto_label?.model;
+    const llmModelId =
+      typeof autoLabelModel === 'string' && autoLabelModel.startsWith('llm:')
+        ? autoLabelModel.slice('llm:'.length)
+        : null;
+    // Pre-label outcome counts (Requirement 10.3): shown once at least
+    // one task has resolved (Available or Failed), omitted entirely
+    // before that.
+    const prelabelAvailable = rawJob.prelabel_available_count ?? 0;
+    const prelabelFailed = rawJob.prelabel_failed_count ?? 0;
+    const prelabelResolved = prelabelAvailable + prelabelFailed > 0;
 
     return (
       <>
@@ -387,6 +401,59 @@ export default function LabelingDetail() {
               </ColumnLayout>
             </SpaceBetween>
           </Container>
+
+          {(llmModelId !== null || prelabelResolved) && (
+            <Container header={<Header variant="h2">Auto-Labeling</Header>}>
+              <SpaceBetween size="l">
+                {llmModelId !== null && (
+                  <KeyValuePairs
+                    columns={1}
+                    items={[
+                      { label: 'Model', value: llmModelId },
+                      {
+                        label: 'Detection Prompt',
+                        value: (
+                          // Full stored prompt, untruncated, newlines and
+                          // whitespace preserved (Requirement 10.1).
+                          <Box fontSize="body-s">
+                            <span style={{ whiteSpace: 'pre-wrap' }}>
+                              {rawJob.auto_label?.detection_prompt ?? ''}
+                            </span>
+                          </Box>
+                        ),
+                      },
+                    ]}
+                  />
+                )}
+                {prelabelResolved && (
+                  <ColumnLayout columns={2} variant="text-grid">
+                    <div>
+                      <Box variant="awsui-key-label">
+                        Pre-Labels Available
+                      </Box>
+                      <Box
+                        fontSize="heading-xl"
+                        fontWeight="bold"
+                        color="text-status-success"
+                      >
+                        {prelabelAvailable.toLocaleString()}
+                      </Box>
+                    </div>
+                    <div>
+                      <Box variant="awsui-key-label">Pre-Labels Failed</Box>
+                      <Box
+                        fontSize="heading-xl"
+                        fontWeight="bold"
+                        color="text-status-error"
+                      >
+                        {prelabelFailed.toLocaleString()}
+                      </Box>
+                    </div>
+                  </ColumnLayout>
+                )}
+              </SpaceBetween>
+            </Container>
+          )}
 
           {rawJob.team_id && (
             <Container

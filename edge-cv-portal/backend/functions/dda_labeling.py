@@ -106,6 +106,9 @@ from shared_utils import (
 )
 from rbac_middleware import rbac_check
 from labeling_distribution import rebalance
+# LLM auto-labeling model identifier validation shared with the
+# per-image consumer (llm-auto-labeling Requirement 1.5).
+from dda_llm_guidance import validate_model_identifier
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -151,10 +154,16 @@ VALID_MODALITIES = ('Classification', 'Segmentation', 'ObjectDetection')
 # Auto_Labeler model/modality compatibility matrix (Requirement 8.8):
 # SAM is geometry-only (masks/boxes); Bedrock vision models answer
 # classification and bounding-box prompts but do not paint masks.
+# Prompt-guided LLM auto-labeling covers all three modalities
+# (llm-auto-labeling Requirement 1.3).
 AUTO_LABEL_MODEL_MODALITIES = {
     'sam': ('Segmentation', 'ObjectDetection'),
     'bedrock': ('Classification', 'ObjectDetection'),
+    'llm': ('Classification', 'Segmentation', 'ObjectDetection'),
 }
+# Detection_Prompt bounds for the llm: family (llm-auto-labeling
+# Requirement 2: 1-2000 characters, length judged on the raw string).
+DETECTION_PROMPT_MAX_LENGTH = 2000
 # Skip_Verification_Mode is admin-only (Requirement 9.1).
 SKIP_VERIFICATION_ADMIN_ROLES = ('UseCaseAdmin', 'PortalAdmin')
 # Sentinel assignee for unsubmitted tasks left behind when a team's
@@ -1442,6 +1451,8 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
             auto_label = {}
         auto_label_enabled = bool(auto_label.get('enabled'))
         auto_label_model = auto_label.get('model')
+        model_family = None
+        detection_prompt = None
         if auto_label_enabled:
             if auto_label_model == 'sam':
                 model_family = 'sam'
@@ -1449,8 +1460,39 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                     and auto_label_model.startswith('bedrock:')
                     and auto_label_model.split(':', 1)[1]):
                 model_family = 'bedrock'
+            elif (isinstance(auto_label_model, str)
+                    and auto_label_model.startswith('llm:')):
+                # llm-auto-labeling Requirement 1.5: split on the first
+                # colon only — model identifiers legitimately contain
+                # colons (e.g. 'us.amazon.nova-pro-v1:0').
+                model_family = 'llm'
+                identifier_error = validate_model_identifier(
+                    auto_label_model.split(':', 1)[1])
+                if identifier_error:
+                    errors.append(_validation_error(
+                        'auto_label',
+                        f'Auto-label {identifier_error}',
+                        model=auto_label_model))
+                # llm-auto-labeling Requirement 2: Detection_Prompt is
+                # required (emptiness judged on the stripped value) and
+                # at most DETECTION_PROMPT_MAX_LENGTH characters
+                # (length judged on the raw value). The raw string is
+                # what gets persisted (Req 2.5: character-for-character).
+                raw_prompt = auto_label.get('detection_prompt')
+                if not isinstance(raw_prompt, str) or not raw_prompt.strip():
+                    errors.append(_validation_error(
+                        'auto_label',
+                        'A non-empty detection_prompt is required for '
+                        'LLM auto-labeling'))
+                elif len(raw_prompt) > DETECTION_PROMPT_MAX_LENGTH:
+                    errors.append(_validation_error(
+                        'auto_label',
+                        f'detection_prompt must be at most '
+                        f'{DETECTION_PROMPT_MAX_LENGTH} characters',
+                        detection_prompt_length=len(raw_prompt)))
+                else:
+                    detection_prompt = raw_prompt
             else:
-                model_family = None
                 errors.append(_validation_error(
                     'auto_label',
                     f"Auto-label model must be 'sam' or "
@@ -1551,6 +1593,10 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
             'auto_label': {
                 'enabled': auto_label_enabled,
                 **({'model': auto_label_model} if auto_label_enabled else {}),
+                # llm-auto-labeling Req 2.5: the raw prompt, stored
+                # character-for-character as entered.
+                **({'detection_prompt': detection_prompt}
+                   if model_family == 'llm' else {}),
             },
             'skip_verification': skip_verification,
             'submitted_count': 0,
@@ -1581,6 +1627,12 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                 'task_type': modality,
                 'image_count': len(images),
                 'skip_verification': skip_verification,
+                # llm-auto-labeling Req 9.4: model identifier (absent
+                # when auto-labeling is off) and auto-label mode.
+                **({'auto_label_model': auto_label_model}
+                   if auto_label_enabled else {}),
+                'auto_label_mode': model_family if auto_label_enabled
+                                   else 'none',
             },
         )
 
@@ -1918,6 +1970,14 @@ def get_next_labeler_task(event, context):
             prelabel = _load_prelabel(task)
             if prelabel is not None:
                 payload['prelabel'] = prelabel
+
+        # Failure visibility (Req 7.5, 10.4): a Failed task is
+        # presented as a bare image for annotation from scratch,
+        # carrying its status and retained failure reason.
+        if task.get('prelabel_status'):
+            payload['prelabel_status'] = task['prelabel_status']
+        if task.get('prelabel_error'):
+            payload['prelabel_error'] = task['prelabel_error']
 
         return create_response(200, payload)
 
@@ -2521,6 +2581,13 @@ def _review_item_payload(job: Dict, task: Dict) -> Dict:
         'image_key': task.get('image_key'),
         'status': 'succeeded' if succeeded else 'failed',
     }
+    # Failure visibility (Req 7.6, 7.7, 10.4): the raw per-task
+    # generation status and retained failure reason ride along so a
+    # failed image displays why; decision gating is unchanged.
+    if task.get('prelabel_status'):
+        item['prelabel_status'] = task['prelabel_status']
+    if task.get('prelabel_error'):
+        item['prelabel_error'] = task['prelabel_error']
     if succeeded:
         prelabel = _load_prelabel(task)
         if prelabel is not None:
