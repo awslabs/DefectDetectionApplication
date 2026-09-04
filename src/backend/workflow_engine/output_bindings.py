@@ -1102,6 +1102,184 @@ CROP_JPEG_QUALITY = 95
 #: the selected entry's Detection_ID (Requirement 2.5).
 CROP_ARTIFACT_TEMPLATE = "{capture_id}.crop.{detection_id}.jpg"
 
+#: ADDITIVE (imts-triple-inspection-hmi Requirement 4.4): run-artifact
+#: filename of an Inspection's Original_Image — the exact crop bytes sent
+#: to Bedrock, written in the port-generic node-frame naming
+#: ``{capture_id}.node.{sanitizedNodeId}.{port}.jpg`` that
+#: ``run_artifacts.list_node_images`` keys on, so the new ``original``
+#: port is listed by ``GET .../results`` and served by
+#: ``GET .../node-image`` with zero LocalServer changes.
+ORIGINAL_FRAME_ARTIFACT_TEMPLATE = (
+    "{capture_id}.node.{safe_node_id}.original.jpg"
+)
+
+#: ADDITIVE (imts-triple-inspection-hmi Requirements 4.4, 4.12):
+#: run-artifact filename of an Inspection's Annotated_Image — the same
+#: crop bytes with the Bedrock answer's Defect_Object boxes drawn on
+#: them, in the same port-generic node-frame naming so the new
+#: ``annotated`` port is listed and served with zero LocalServer
+#: changes.
+ANNOTATED_FRAME_ARTIFACT_TEMPLATE = (
+    "{capture_id}.node.{safe_node_id}.annotated.jpg"
+)
+
+#: Filename-unsafe characters in a node id — the very same discipline
+#: ``PipelineExecutor._UNSAFE_NODE_ID_CHARS`` applies when it persists
+#: node frames, so the filenames written here always parse back to the
+#: same (``nodeId``, ``port``) pair ``list_node_images`` reports.
+_UNSAFE_NODE_ID_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def sanitize_node_id_for_artifact(node_id: Optional[str]) -> str:
+    """The filename-safe form of ``node_id`` used in node-frame artifact
+    names, mirroring ``PipelineExecutor._UNSAFE_NODE_ID_CHARS`` exactly
+    (unsafe characters replaced by ``_``, empty ids becoming ``node``)."""
+    return _UNSAFE_NODE_ID_CHARS.sub("_", str(node_id or "")) or "node"
+
+
+#: Box outline/label colors of an Annotated_Image, in OpenCV BGR order:
+#: red for a NOK Defect_Object, green for an OK one (design Decision 2 —
+#: visually distinct per ``qc``).
+_DEFECT_NOK_COLOR = (0, 0, 255)
+_DEFECT_OK_COLOR = (0, 200, 0)
+
+
+def extract_defect_objects(text: str) -> Optional[List[Any]]:
+    """ADDITIVE (imts-triple-inspection-hmi Requirement 4.12): the
+    Bedrock answer's ``objects`` list, or ``None`` when the answer
+    yields no parseable one.
+
+    Tolerant in the :func:`parse_bedrock_answer` style — fenced code
+    blocks (``` / ```json) and surrounding prose are accepted and the
+    first JSON object carrying an ``objects`` list wins. Entries are
+    returned verbatim (including malformed ones); the annotated-frame
+    draw skips the entries it cannot use. A parseable but empty
+    ``objects: []`` list returns ``[]`` (a clean part), which is
+    deliberately distinct from ``None`` (no Annotated_Image at all).
+
+    Purely additive: never raises, and never touches the existing
+    ``is_anomalous``/``confidence`` parse or its failure behavior.
+    """
+    try:
+        candidates = [
+            match.group(1) for match in _FENCED_BLOCK.finditer(text or "")
+        ]
+        candidates.append(text or "")
+        for candidate in candidates:
+            start = candidate.find("{")
+            end = candidate.rfind("}")
+            if start < 0 or end <= start:
+                continue
+            try:
+                parsed = json.loads(candidate[start:end + 1])
+            except ValueError:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            objects = parsed.get("objects")
+            if isinstance(objects, list):
+                return list(objects)
+    except Exception:  # noqa: BLE001 - extraction is best-effort
+        logger.debug(
+            "Could not extract the answer's Defect_Objects", exc_info=True)
+    return None
+
+
+def clamp_defect_box(
+    bounding_box: Any,
+    width: int,
+    height: int,
+) -> Optional[Tuple[int, int, int, int]]:
+    """The integer pixel rectangle ``(x0, y0, x1, y1)`` of a
+    Defect_Object's ``bounding_box`` clamped to a ``width`` x ``height``
+    image, or ``None`` when the box is missing, malformed, or empty after
+    clamping (imts-triple-inspection-hmi Requirement 4.12).
+
+    Coordinates are read in the pixel space of the image sent to Bedrock
+    — i.e. the detection crop itself — so no coordinate-space
+    translation is involved. Mins floor and maxes ceil, so a box with a
+    non-empty intersection never collapses to an empty rectangle through
+    rounding alone.
+    """
+    if not isinstance(bounding_box, dict):
+        return None
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    values = []
+    for key in ("x_min", "y_min", "x_max", "y_max"):
+        value = bounding_box.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value = float(value)
+        if math.isnan(value) or math.isinf(value):
+            return None
+        values.append(value)
+    x_min, y_min, x_max, y_max = values
+    x0 = int(math.floor(max(0.0, min(float(width), x_min))))
+    y0 = int(math.floor(max(0.0, min(float(height), y_min))))
+    x1 = int(math.ceil(max(0.0, min(float(width), x_max))))
+    y1 = int(math.ceil(max(0.0, min(float(height), y_max))))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
+
+
+def draw_defect_objects(
+    frame: Any,
+    objects: List[Any],
+) -> List[Tuple[int, int, int, int]]:
+    """Draw every valid Defect_Object of ``objects`` onto ``frame`` in
+    place and return the drawn rectangles in draw order
+    (imts-triple-inspection-hmi Requirement 4.12).
+
+    Each box is the clamped intersection of the entry's ``bounding_box``
+    with the frame bounds (:func:`clamp_defect_box`), rendered as a
+    rectangle outline plus the entry's ``name``/``qc`` label — red for
+    NOK, green for OK. Entries whose box is missing, malformed, or empty
+    after clamping are skipped without affecting the valid entries.
+    """
+    import cv2
+
+    drawn: List[Tuple[int, int, int, int]] = []
+    if not isinstance(objects, list) or frame is None:
+        return drawn
+    height, width = frame.shape[:2]
+    thickness = max(2, int(round(min(height, width) / 240.0)))
+    for entry in objects:
+        if not isinstance(entry, dict):
+            continue
+        box = clamp_defect_box(entry.get("bounding_box"), width, height)
+        if box is None:
+            continue
+        x0, y0, x1, y1 = box
+        qc = entry.get("qc")
+        qc_text = str(qc).strip() if qc is not None else ""
+        color = (
+            _DEFECT_OK_COLOR if qc_text.upper() == "OK"
+            else _DEFECT_NOK_COLOR
+        )
+        cv2.rectangle(frame, (x0, y0), (x1 - 1, y1 - 1), color, thickness)
+        name = entry.get("name")
+        name_text = str(name).strip() if name is not None else ""
+        label = " ".join(part for part in (name_text, qc_text) if part)
+        if label:
+            scale = max(0.4, min(height, width) / 600.0)
+            baseline = y0 - max(4, thickness * 2)
+            if baseline < int(20 * scale):
+                baseline = min(height - 2, y1 + int(20 * scale))
+            cv2.putText(
+                frame, label, (x0, int(baseline)),
+                cv2.FONT_HERSHEY_SIMPLEX, scale, color,
+                max(1, thickness - 1), cv2.LINE_AA,
+            )
+        drawn.append(box)
+    return drawn
+
 
 def compute_crop_box(
     box: Tuple[float, float, float, float],
@@ -1607,6 +1785,12 @@ class BedrockInferenceProcessor:
         # whose failures keep raising ``BedrockInferenceError``
         # byte-identically (Requirements 2.1, 7.1).
         detection_id: Optional[str] = None
+        # ADDITIVE (imts-triple-inspection-hmi Requirements 4.4, 4.12):
+        # the crop bytes are retained past the invocation so the
+        # Annotated_Image can be drawn onto a copy of them once the
+        # answer arrives. None on the legacy whole-frame path — no
+        # per-inspection artifacts are produced there.
+        crop_bytes: Optional[bytes] = None
         crop_raw = parameters.get("crop_detection_index")
         if crop_raw is not None and str(crop_raw).strip() != "":
             crop_error, detection_id, crop_bytes = self._detection_crop(
@@ -1755,11 +1939,21 @@ class BedrockInferenceProcessor:
             nested_entry["is_anomalous"] = verdict["is_anomalous"]
             nested_entry["confidence"] = verdict["confidence"]
             verdict["bedrock"] = {node_id: nested_entry}
-            return verdict
-        return {
-            "bedrock_text": answer,
-            "bedrock": {node_id: nested_entry},
-        }
+            result: Dict[str, Any] = verdict
+        else:
+            result = {
+                "bedrock_text": answer,
+                "bedrock": {node_id: nested_entry},
+            }
+        # ADDITIVE (imts-triple-inspection-hmi Requirements 4.4, 4.12):
+        # the Inspection's Annotated_Image, drawn from the answer's
+        # Defect_Objects onto a copy of the crop. Runs AFTER the existing
+        # parse and the result assembly, is entirely contained, and never
+        # merges anything into the returned metadata — the metadata shape
+        # stays byte-identical to today.
+        self._persist_annotated_frame(
+            run_context, node_id, crop_bytes, answer)
+        return result
 
     def _recorded_error(
         self,
@@ -1982,6 +2176,7 @@ class BedrockInferenceProcessor:
                 None, None)
         crop_bytes = bytes(encoded.tobytes())
         self._persist_crop(node_id, detection_id, crop_bytes, run_context)
+        self._persist_original_frame(run_context, node_id, crop_bytes)
         return None, detection_id, crop_bytes
 
     @staticmethod
@@ -2017,6 +2212,149 @@ class BedrockInferenceProcessor:
             logger.warning(
                 "Bedrock inference node '%s': could not persist the "
                 "Detection_Crop at %s", node_id, path, exc_info=True)
+
+    @staticmethod
+    def _persist_original_frame(
+        run_context: Optional[RunContext],
+        node_id: Optional[str],
+        crop_bytes: Optional[bytes],
+    ) -> None:
+        """ADDITIVE (imts-triple-inspection-hmi Requirement 4.4): beside
+        the existing ``{capture_id}.crop.{detection_id}.jpg`` artifact,
+        persist the exact crop bytes sent to Bedrock as
+        ``{capture_id}.node.{sanitizedNodeId}.original.jpg`` — the
+        Inspection's Original_Image.
+
+        Called at crop time (beside :meth:`_persist_crop`). The node id
+        is sanitized with the executor's ``_UNSAFE_NODE_ID_CHARS``
+        discipline, so the filename parses back to the same
+        (``nodeId``, ``port``) pair ``run_artifacts.list_node_images``
+        reports: filename-pattern compatibility alone makes the new
+        ``original`` port listable in ``GET .../results`` and servable by
+        ``GET .../node-image`` with zero LocalServer changes.
+
+        Entirely best-effort in the
+        ``pipeline_executor._persist_node_frames`` containment style: a
+        missing output_dir/capture_id, empty bytes, or any write failure
+        is logged and swallowed — the run status, the node outcome, and
+        the ``is_anomalous``/``confidence`` metadata merge are
+        untouched."""
+        try:
+            output_dir = run_context.output_dir if run_context else None
+            capture_id = run_context.capture_id if run_context else None
+            if not output_dir or not capture_id or not crop_bytes:
+                logger.debug(
+                    "Bedrock inference node '%s': no output_dir/capture_id "
+                    "or no crop bytes; the Inspection's Original_Image was "
+                    "not persisted", node_id)
+                return
+            path = os.path.join(
+                output_dir,
+                ORIGINAL_FRAME_ARTIFACT_TEMPLATE.format(
+                    capture_id=capture_id,
+                    safe_node_id=sanitize_node_id_for_artifact(node_id),
+                ),
+            )
+            with open(path, "wb") as frame_file:
+                frame_file.write(crop_bytes)
+        except Exception:  # noqa: BLE001 - contained; never affects the run
+            logger.warning(
+                "Bedrock inference node '%s': could not persist the "
+                "Inspection's Original_Image; the inspection outcome and "
+                "the run status are unaffected", node_id, exc_info=True)
+
+    @staticmethod
+    def _persist_annotated_frame(
+        run_context: Optional[RunContext],
+        node_id: Optional[str],
+        crop_bytes: Optional[bytes],
+        answer_text: Optional[str],
+    ) -> None:
+        """ADDITIVE (imts-triple-inspection-hmi Requirements 4.4, 4.12):
+        persist the Inspection's Annotated_Image as
+        ``{capture_id}.node.{sanitizedNodeId}.annotated.jpg`` — the crop
+        sent to Bedrock with the answer's Defect_Object boxes drawn on
+        it.
+
+        Called after the Bedrock invocation returns and after the
+        existing ``is_anomalous``/``confidence`` parse, once the answer
+        text is available. The answer's ``objects`` list is extracted
+        tolerantly (:func:`extract_defect_objects`); the extraction is
+        purely additive and never affects the existing parse or its
+        failure behavior, and the parsed list is deliberately NOT merged
+        into run metadata (the raw answer is already recorded at
+        ``bedrock.{nodeId}.text``, so the metadata shape stays
+        byte-identical to today).
+
+        IF the answer yields no parseable ``objects`` list, nothing is
+        persisted — the HMI then shows its no-annotated-image
+        placeholder (Requirement 4.10). A parseable but empty
+        ``objects: []`` list persists the crop unchanged with zero boxes
+        (a clean part).
+
+        Entirely best-effort in the
+        ``pipeline_executor._persist_node_frames`` containment style: a
+        missing output_dir/capture_id, an undecodable crop, a cv2 or
+        write failure — anything at all — is logged and swallowed, never
+        affecting the run status, the node outcome, or the
+        ``is_anomalous``/``confidence`` metadata merge."""
+        try:
+            output_dir = run_context.output_dir if run_context else None
+            capture_id = run_context.capture_id if run_context else None
+            if not output_dir or not capture_id or not crop_bytes:
+                logger.debug(
+                    "Bedrock inference node '%s': no output_dir/capture_id "
+                    "or no crop bytes; the Inspection's Annotated_Image "
+                    "was not persisted", node_id)
+                return
+            objects = extract_defect_objects(answer_text or "")
+            if objects is None:
+                # No parseable ``objects`` list: no Annotated_Image is
+                # produced for this Inspection (Requirements 4.10, 4.12).
+                logger.debug(
+                    "Bedrock inference node '%s': the answer carries no "
+                    "parseable objects list; no Annotated_Image was "
+                    "persisted", node_id)
+                return
+
+            import cv2
+            import numpy as np
+
+            frame = cv2.imdecode(
+                np.frombuffer(crop_bytes, dtype=np.uint8),
+                cv2.IMREAD_COLOR)
+            if frame is None:
+                logger.warning(
+                    "Bedrock inference node '%s': could not decode the crop "
+                    "bytes for the Inspection's Annotated_Image", node_id)
+                return
+            drawn = draw_defect_objects(frame, objects)
+            ok, encoded = cv2.imencode(
+                ".jpg", frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), CROP_JPEG_QUALITY])
+            if not ok:
+                logger.warning(
+                    "Bedrock inference node '%s': could not encode the "
+                    "Inspection's Annotated_Image", node_id)
+                return
+            path = os.path.join(
+                output_dir,
+                ANNOTATED_FRAME_ARTIFACT_TEMPLATE.format(
+                    capture_id=capture_id,
+                    safe_node_id=sanitize_node_id_for_artifact(node_id),
+                ),
+            )
+            with open(path, "wb") as frame_file:
+                frame_file.write(bytes(encoded.tobytes()))
+            logger.debug(
+                "Bedrock inference node '%s': persisted the Inspection's "
+                "Annotated_Image with %d defect box(es) of %d answer "
+                "object(s)", node_id, len(drawn), len(objects))
+        except Exception:  # noqa: BLE001 - contained; never affects the run
+            logger.warning(
+                "Bedrock inference node '%s': could not persist the "
+                "Inspection's Annotated_Image; the inspection outcome and "
+                "the run status are unaffected", node_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------

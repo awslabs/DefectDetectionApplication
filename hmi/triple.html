@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>IMTS Triple Inspection HMI</title>
+  </head>
+  <!--
+    `data-triple-kiosk` marks this document as the kiosk entry: `main.ts`
+    auto-starts the app only for a page carrying it, so importing the module
+    elsewhere (the wiring tests) starts nothing.
+  -->
+  <body data-triple-kiosk="true">
+    <div id="app"></div>
+    <script type="module" src="/src/triple/main.ts"></script>
+  </body>
+</html>

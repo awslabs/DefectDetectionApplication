@@ -1,3 +1,4 @@
+import fc from "fast-check";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   clearRetainedCredentials,
@@ -11,6 +12,7 @@ import {
   SESSION_STORAGE_KEY,
   startupScreen,
   type SessionStorageLike,
+  type StoredSession,
 } from "./session";
 
 // Unit tests for session management (design Decision 4).
@@ -28,6 +30,67 @@ function makeStorage(initial: Record<string, string> = {}): SessionStorageLike &
     removeItem: (key) => void data.delete(key),
   };
 }
+
+/**
+ * Property test for the startup screen decision, shared by both kiosk entries
+ * (`/hmi/index.html` and `/hmi/triple.html`).
+ *
+ * **Feature: quality-station-hmi, Property 1: Startup session decision**
+ *
+ * **Feature: imts-triple-inspection-hmi, Property 1: Startup session decision**
+ *
+ * **Validates: Requirements 1.1, 1.5**
+ *
+ * The Triple_HMI reuses `auth/session.ts` unchanged and resumes from the same
+ * `localStorage["hmi.session"]` namespace (design "Session storage ... default
+ * is the shared key"), so the storage-key composition is exercised here for
+ * both entries with no separate key generator.
+ */
+
+/** Epoch-second instants, including 0 and negatives, around a realistic clock. */
+const epochSeconds = fc.oneof(
+  fc.integer({ min: -10_000, max: 10_000 }),
+  fc.integer({ min: 1_700_000_000, max: 1_900_000_000 }),
+);
+
+/** Stored session state: absent, or a token with any `expiresAt`. */
+const storedSession: fc.Arbitrary<StoredSession | null> = fc.oneof(
+  { arbitrary: fc.constant(null), weight: 1 },
+  {
+    arbitrary: fc.record({
+      token: fc.string({ minLength: 1 }),
+      expiresAt: epochSeconds,
+    }),
+    weight: 3,
+  },
+);
+
+describe("Property 1: Startup session decision", () => {
+  it("is 'login' iff no token is stored or expiresAt <= now", () => {
+    fc.assert(
+      fc.property(storedSession, epochSeconds, (session, now) => {
+        const decision = decideStartupScreen(session, now);
+        const mustLogin = session === null || session.expiresAt <= now;
+        expect(decision).toBe(mustLogin ? "login" : "app");
+      }),
+    );
+  });
+
+  it("holds through the shared hmi.session storage key both entries read", () => {
+    fc.assert(
+      fc.property(storedSession, epochSeconds, (session, now) => {
+        const storage = makeStorage();
+        if (session !== null) saveSession(session, storage);
+        // Both the single-inspection and triple entries resume through this
+        // one key, so the persisted round trip decides identically.
+        expect(storage.data.has(SESSION_STORAGE_KEY)).toBe(session !== null);
+        expect(startupScreen(storage, now)).toBe(
+          decideStartupScreen(session, now),
+        );
+      }),
+    );
+  });
+});
 
 describe("decideStartupScreen", () => {
   const now = 1_736_950_000; // epoch seconds
