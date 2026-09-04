@@ -107,6 +107,21 @@ if [ "$OS_RELEASE" = "24.04" ]; then
     PIP_BREAK_FLAG='--break-system-packages'
 fi
 
+echo "▶ Hardening apt against IPv6-only regional mirrors..."
+# Fresh EC2 instances get sources pointing at the regional mirror
+# (e.g. us-east-1.ec2.ports.ubuntu.com / us-east-1.ec2.archive.ubuntu.com).
+# Those hostnames can resolve to IPv6 addresses only; on a subnet without
+# IPv6 egress apt-get update then hangs indefinitely and the whole
+# bootstrap stalls before any tool is installed (observed on arm64/JP6
+# build servers). Repoint to the canonical hosts and force IPv4 so apt
+# can never block on an unreachable AAAA record.
+echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99dda-force-ipv4 >/dev/null
+for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+    [ -f "$f" ] || continue
+    sudo sed -i -E 's@[a-z0-9-]+\.ec2\.(ports|archive)\.ubuntu\.com@\1.ubuntu.com@g' "$f"
+done
+echo "✓ apt sources repointed to canonical mirrors, IPv4 forced"
+
 echo "▶ Updating package manager..."
 run_cmd "sudo apt-get update" || true
 
