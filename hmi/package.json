@@ -9,10 +9,13 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest --run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:layout": "playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "1.49.1",
     "fast-check": "3.23.1",
+    "jsdom": "25.0.1",
     "typescript": "5.6.3",
     "vite": "5.4.11",
     "vitest": "2.1.8"

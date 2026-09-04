@@ -1,3 +1,5 @@
+import fc from "fast-check";
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   apiFetch,
@@ -5,6 +7,12 @@ import {
   login,
   resetApiClient,
 } from "./client";
+import {
+  executionMetadataUrl,
+  executionResultsUrl,
+  registrationExecutionsUrl,
+  registrationsUrl,
+} from "./routes";
 import {
   clearRetainedCredentials,
   retainCredentials,
@@ -280,5 +288,222 @@ describe("login response handling (1.2, 1.6, 1.7)", () => {
     const requests = setup(() => jsonResponse(401));
     await login({ username: "op", password: "pw" });
     expect(requests).toHaveLength(1);
+  });
+});
+
+// --------------------------------------------------------------------------
+// **Feature: imts-triple-inspection-hmi, Property 2: Single re-login on 401**
+// **Validates: Requirements 1.4**
+//
+// For any scripted sequence of API responses containing 401s, `apiFetch`
+// performs at most one `POST /local-auth/login` (using only the in-memory
+// credentials) and at most one retry of the original request per 401; whenever
+// the single re-login fails or no credentials are retained, the stored
+// Session_Token is discarded and the resulting state is the login screen.
+//
+// Task 9.3 of the imts-triple-inspection-hmi spec: the route generator below
+// covers every authenticated non-image route the triple entry calls —
+// `GET /local-auth/status` (new for the triple entry, Requirement 1.8),
+// `GET /workflows/registrations`, the bounded recent-executions route, and a
+// run's `/results` and `/metadata`. The node-image URL is deliberately absent:
+// it is loaded through `<img src>` with the token in query, never through
+// `apiFetch`, so it is outside this property's scope (Requirement 4.5).
+// `api/client.ts` and `api/routes.ts` are unchanged.
+// --------------------------------------------------------------------------
+
+/**
+ * `GET /local-auth/status` — the startup local-login probe the triple entry
+ * calls. There is no builder for it in `api/routes.ts` (which stays
+ * unchanged), so the path is spelled out here.
+ */
+const LOCAL_AUTH_STATUS_URL = "/local-auth/status";
+
+/** The authenticated non-image routes the triple entry drives through apiFetch. */
+const tripleCallSite = fc.oneof(
+  fc.constant(LOCAL_AUTH_STATUS_URL),
+  fc.constant(registrationsUrl()),
+  fc
+    .string({ minLength: 1, maxLength: 12 })
+    .map((id) => registrationExecutionsUrl(id, 10)),
+  fc.string({ minLength: 1, maxLength: 12 }).map((id) => executionResultsUrl(id)),
+  fc.string({ minLength: 1, maxLength: 12 }).map((id) => executionMetadataUrl(id)),
+);
+
+/** Status codes a LocalServer route can answer with, 401 included. */
+const routeStatus = fc.constantFrom(200, 401, 401, 404, 500, 503);
+
+/** The scripted outcome of the single re-login attempt. */
+const loginOutcome = fc.constantFrom<
+  "success" | "credentials-rejected" | "disabled" | "server-error" | "network"
+>("success", "credentials-rejected", "disabled", "server-error", "network");
+
+interface Scenario {
+  url: string;
+  /** Response statuses the target route serves, in request order. */
+  routeStatuses: number[];
+  loginOutcome: "success" | "credentials-rejected" | "disabled" | "server-error" | "network";
+  hasStoredToken: boolean;
+  hasCredentials: boolean;
+}
+
+const scenarioArb: fc.Arbitrary<Scenario> = fc.record({
+  url: tripleCallSite,
+  routeStatuses: fc.array(routeStatus, { minLength: 2, maxLength: 2 }),
+  loginOutcome,
+  hasStoredToken: fc.boolean(),
+  hasCredentials: fc.boolean(),
+});
+
+interface Observation {
+  requests: RecordedRequest[];
+  result: Awaited<ReturnType<typeof apiFetch>>;
+  tokenStored: boolean;
+  authExpiredCalls: number;
+}
+
+async function runScenario(scenario: Scenario): Promise<Observation> {
+  // Per-iteration isolation: fresh storage, cleared credentials, cleared latch.
+  resetApiClient();
+  clearRetainedCredentials();
+  const iterationStorage = makeStorage();
+  let expiredCalls = 0;
+
+  if (scenario.hasStoredToken) {
+    saveSession({ token: "stored-token", expiresAt: 9e9 }, iterationStorage);
+  }
+  if (scenario.hasCredentials) {
+    retainCredentials({ username: "op", password: "pw" });
+  }
+
+  let routeCall = 0;
+  const { fetchFn, requests } = makeFetch((request) => {
+    if (request.url === "/local-auth/login") {
+      switch (scenario.loginOutcome) {
+        case "success":
+          return jsonResponse(200, { token: "fresh-token", expiresAt: 9e9 });
+        case "credentials-rejected":
+          return jsonResponse(401);
+        case "disabled":
+          return jsonResponse(403);
+        case "server-error":
+          return jsonResponse(500);
+        case "network":
+          return "network-error";
+      }
+    }
+    const status = scenario.routeStatuses[routeCall] ?? 200;
+    routeCall += 1;
+    return jsonResponse(status);
+  });
+
+  configureApiClient({
+    fetchFn,
+    storage: iterationStorage,
+    onAuthExpired: () => {
+      expiredCalls += 1;
+    },
+  });
+
+  const result = await apiFetch(scenario.url);
+  return {
+    requests,
+    result,
+    tokenStored: iterationStorage.data.has(SESSION_STORAGE_KEY),
+    authExpiredCalls: expiredCalls,
+  };
+}
+
+describe("Property 2: Single re-login on 401 (1.4)", () => {
+  it("performs at most one re-login and one retry per 401, discarding the token when re-login fails", async () => {
+    await fc.assert(
+      fc.asyncProperty(scenarioArb, async (scenario) => {
+        const observed = await runScenario(scenario);
+        const loginCalls = observed.requests.filter(
+          (r) => r.url === "/local-auth/login",
+        );
+        const routeCalls = observed.requests.filter(
+          (r) => r.url === scenario.url,
+        );
+
+        // At most one login attempt and at most one retry of the original
+        // request, for every call site the triple entry uses.
+        expect(loginCalls.length).toBeLessThanOrEqual(1);
+        expect(routeCalls.length).toBeLessThanOrEqual(2);
+        expect(observed.requests).toHaveLength(
+          loginCalls.length + routeCalls.length,
+        );
+
+        // The login body carries only the in-memory credentials.
+        for (const call of loginCalls) {
+          expect(JSON.parse(call.body!)).toEqual({
+            username: "op",
+            password: "pw",
+          });
+        }
+
+        const firstIs401 = scenario.routeStatuses[0] === 401;
+        if (!firstIs401) {
+          // No 401 → no re-login interception at all.
+          expect(loginCalls).toHaveLength(0);
+          expect(routeCalls).toHaveLength(1);
+          expect(observed.authExpiredCalls).toBe(0);
+          expect(observed.tokenStored).toBe(scenario.hasStoredToken);
+          return;
+        }
+
+        if (!scenario.hasCredentials) {
+          // No credentials retained → no login attempt, token discarded, and
+          // the login screen surfaced exactly once.
+          expect(loginCalls).toHaveLength(0);
+          expect(routeCalls).toHaveLength(1);
+          expect(observed.tokenStored).toBe(false);
+          expect(observed.authExpiredCalls).toBe(1);
+          expect(observed.result).toEqual({
+            ok: false,
+            kind: "http-401",
+            status: 401,
+          });
+          return;
+        }
+
+        // Credentials retained → exactly one re-login attempt.
+        expect(loginCalls).toHaveLength(1);
+
+        if (scenario.loginOutcome !== "success") {
+          // The single re-login failed: no retry, token discarded, login screen.
+          expect(routeCalls).toHaveLength(1);
+          expect(observed.tokenStored).toBe(false);
+          expect(observed.authExpiredCalls).toBe(1);
+          expect(observed.result).toEqual({
+            ok: false,
+            kind: "http-401",
+            status: 401,
+          });
+          return;
+        }
+
+        // Re-login succeeded: exactly one retry, carrying the fresh token.
+        expect(routeCalls).toHaveLength(2);
+        expect(routeCalls[1]!.authorization).toBe("Bearer fresh-token");
+
+        const retryStatus = scenario.routeStatuses[1];
+        if (retryStatus === 401) {
+          // Still unauthorized after a fresh token: no further attempts, token
+          // discarded, login screen surfaced.
+          expect(observed.tokenStored).toBe(false);
+          expect(observed.authExpiredCalls).toBe(1);
+          expect(observed.result).toEqual({
+            ok: false,
+            kind: "http-401",
+            status: 401,
+          });
+        } else {
+          // The retry outcome is returned as-is; the fresh token is kept.
+          expect(observed.tokenStored).toBe(true);
+          expect(observed.authExpiredCalls).toBe(0);
+          expect(observed.result.ok).toBe(retryStatus === 200);
+        }
+      }),
+    );
   });
 });

@@ -56,6 +56,21 @@ session/startup decisions) is unit- and property-tested; the API client and
 auth flow are tested with injected fakes. Tests run in Node — no browser
 needed.
 
+The Triple Inspection kiosk layout (`/hmi/triple.html`) additionally has a
+Playwright suite, because its requirements are about rendered geometry — slot
+widths, image panel aspect, verdict text height, overflow at 1280 and 1920 px
+— which jsdom cannot measure:
+
+```bash
+cd hmi
+npx playwright install chromium   # once per machine
+npm run test:layout               # builds dist/, then measures triple.html
+```
+
+The suite serves the built bundle and every stubbed LocalServer response
+through request interception, so it needs no server, no device, and no
+network. It is a `.spec.ts` file, so `npm test` (Vitest) never picks it up.
+
 ## Local development
 
 `npm run dev` starts the Vite dev server, but the app calls its API
