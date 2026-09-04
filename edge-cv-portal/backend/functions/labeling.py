@@ -873,6 +873,13 @@ def _get_dda_labeling_job(job: Dict):
     job.setdefault('notifications_skipped', False)
     job.setdefault('notification_failures', [])
 
+    # Pre-label outcome counts derived from the already-queried active
+    # tasks — Inactive tasks excluded (Requirements 10.1, 10.3).
+    job['prelabel_available_count'] = sum(
+        1 for t in active_tasks if t.get('prelabel_status') == 'Available')
+    job['prelabel_failed_count'] = sum(
+        1 for t in active_tasks if t.get('prelabel_status') == 'Failed')
+
     # Per-member submitted/remaining counts for team jobs (Req 11.2).
     member_progress = []
     if job.get('team_id'):
