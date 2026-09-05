@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Container,
   Header,
@@ -19,10 +19,17 @@ import {
 } from '@cloudscape-design/components';
 import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { S3Dataset } from '../types';
-import { apiService, ApiError, LabelingTeam } from '../services/api';
+import {
+  apiService,
+  ApiError,
+  LabelingTeam,
+  PreviewFewShotExample,
+} from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
 import { useAuth } from '../contexts/AuthContext';
 import S3Browser from '../components/S3Browser';
+import PromptTuningPreview from '../components/labeling/PromptTuningPreview';
+import type { LabelingModality } from '../components/labeling/AnnotationCanvas';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
@@ -61,6 +68,58 @@ export const LLM_MODALITIES = [
 
 /** Detection_Prompt length limit (llm-auto-labeling Requirements 2.1, 2.2). */
 export const MAX_DETECTION_PROMPT_LENGTH = 2000;
+
+/**
+ * Model_Image_Limit fallback when the model catalog carries no
+ * `image_limit` for the selected model — the same default the backend
+ * resolves (llm-autolabel-prompt-tuning Requirement 7.1). The backend
+ * stays authoritative for what is actually attached; this only drives
+ * the wizard's attach/omit hint.
+ */
+export const MODEL_IMAGE_LIMIT_DEFAULT = 20;
+
+/**
+ * Attached/omitted Few_Shot_Example split for `total` stored example
+ * images under a Model_Image_Limit of `limit`
+ * (llm-autolabel-prompt-tuning Requirements 7.2, 7.4, 7.5). One image
+ * slot is always reserved for the target image, so a limit of 1 attaches
+ * nothing.
+ */
+export function fewShotAttachmentCounts(
+  total: number,
+  limit: number
+): { attached: number; omitted: number } {
+  const usable = Math.max(0, (Number.isInteger(limit) && limit >= 1
+    ? limit
+    : MODEL_IMAGE_LIMIT_DEFAULT) - 1);
+  const attached = Math.min(total, usable);
+  return { attached, omitted: total - attached };
+}
+
+/**
+ * The ordered Few_Shot_Example set for the uploaded example image
+ * references: good examples in upload order first, then bad examples,
+ * each carrying its designation and its position *within* that
+ * designation — the shape persisted with the Labeling_Job record
+ * (llm-autolabel-prompt-tuning Requirement 6.4).
+ */
+export function fewShotExamplesFromRefs(exampleImages: {
+  good: string[];
+  bad: string[];
+}): PreviewFewShotExample[] {
+  return [
+    ...exampleImages.good.map((ref, position) => ({
+      ref,
+      designation: 'good' as const,
+      position,
+    })),
+    ...exampleImages.bad.map((ref, position) => ({
+      ref,
+      designation: 'bad' as const,
+      position,
+    })),
+  ];
+}
 
 /** True when the auto-label model value is usable with the modality. */
 export function isAutoLabelModelCompatible(
@@ -148,7 +207,12 @@ export default function CreateLabelingJob() {
   const [skipVerification, setSkipVerification] = useState(false);
   const [skipVerificationModelId, setSkipVerificationModelId] = useState('');
   const [perLabelPrompts, setPerLabelPrompts] = useState<Record<string, string>>({});
-  const [bedrockModels, setBedrockModels] = useState<{ id: string; label: string }[]>([]);
+  // Few_Shot_Option — per-job, disabled by default, offered only for the
+  // prompt-guided LLM family (llm-autolabel-prompt-tuning Req 6.1, 10.5).
+  const [fewShotEnabled, setFewShotEnabled] = useState(false);
+  const [bedrockModels, setBedrockModels] = useState<
+    { id: string; label: string; image_limit?: number }[]
+  >([]);
   const [bedrockModelsUnavailable, setBedrockModelsUnavailable] = useState(false);
 
   // Load use cases on mount
@@ -289,6 +353,12 @@ export default function CreateLabelingJob() {
         !isAutoLabelModelCompatible(autoLabelModel, taskType.value as string)) {
       setAutoLabelModel('');
     }
+    // The Few_Shot_Option belongs to the `llm:` family only: any other
+    // selection (including a cleared one) submits it disabled
+    // (llm-autolabel-prompt-tuning Req 6.9, 10.5).
+    if (!autoLabelModel.startsWith('llm:')) {
+      setFewShotEnabled(false);
+    }
   }, [taskType, autoLabelModel]);
 
   const isDda = labelingBackend === 'DDA';
@@ -346,6 +416,31 @@ export default function CreateLabelingJob() {
       : []),
   ];
   const isLlmAutoLabelModel = autoLabelModel.startsWith('llm:');
+
+  // Few_Shot_Option surfaces only alongside a prompt-guided LLM model
+  // (Req 1.2, 6.1, 10.5).
+  const showFewShotControls = autoLabelEnabled && isLlmAutoLabelModel;
+
+  // Model_Image_Limit of the selected model, from the catalog payload with
+  // the shared fallback (Req 7.1). The attach/omit counts recompute
+  // whenever the model or either example list changes (Req 7.5).
+  const selectedModelImageLimit = isLlmAutoLabelModel
+    ? bedrockModels.find((m) => m.id === autoLabelModel.slice('llm:'.length))
+        ?.image_limit ?? MODEL_IMAGE_LIMIT_DEFAULT
+    : MODEL_IMAGE_LIMIT_DEFAULT;
+  const exampleImageCount = goodExampleFiles.length + badExampleFiles.length;
+  const { attached: fewShotAttachedCount, omitted: fewShotOmittedCount } =
+    fewShotAttachmentCounts(exampleImageCount, selectedModelImageLimit);
+
+  // Dataset prefix for the Prompt_Tuning_Preview listing and sample scope:
+  // the wizard's dataset S3 URI with the bucket stripped, the same
+  // derivation job submission applies (llm-autolabel-prompt-tuning Req
+  // 2.1). Empty until the URI is a well-formed `s3://bucket/prefix`, which
+  // leaves the preview's listing idle rather than calling the API.
+  const datasetPrefix = useMemo(() => {
+    const match = datasetS3Uri.trim().match(/^s3:\/\/[^/]+\/(.+)$/);
+    return match ? match[1] : '';
+  }, [datasetS3Uri]);
 
   const taskTypeOptions = [
     { label: 'Image Classification', value: 'Classification' },
@@ -418,6 +513,11 @@ export default function CreateLabelingJob() {
         }
         if (detectionPrompt.length > MAX_DETECTION_PROMPT_LENGTH) {
           return `The detection prompt exceeds ${MAX_DETECTION_PROMPT_LENGTH.toLocaleString()} characters`;
+        }
+        // The Few_Shot_Option is meaningless without an example image
+        // (llm-autolabel-prompt-tuning Req 6.2; the backend re-validates).
+        if (fewShotEnabled && exampleImageCount === 0) {
+          return 'At least one example image is required for the few-shot examples option';
         }
       }
     }
@@ -515,7 +615,10 @@ export default function CreateLabelingJob() {
    * (Requirement 4.4). Throws on any failed upload so no job is created
    * with dangling example references.
    */
-  const uploadExampleImages = async (): Promise<{ good: string[]; bad: string[] }> => {
+  const uploadExampleImages = useCallback(async (): Promise<{
+    good: string[];
+    bad: string[];
+  }> => {
     if (goodExampleFiles.length === 0 && badExampleFiles.length === 0) {
       return { good: [], bad: [] };
     }
@@ -561,7 +664,48 @@ export default function CreateLabelingJob() {
       good: await uploadKind(goodExampleFiles, 'good'),
       bad: await uploadKind(badExampleFiles, 'bad'),
     };
-  };
+  }, [goodExampleFiles, badExampleFiles, jobName, selectedUseCase]);
+
+  /**
+   * Identity of the current example file set: two uploads of the same
+   * files never happen, and changing any file invalidates the cache.
+   */
+  const exampleFilesKey = useMemo(
+    () =>
+      JSON.stringify(
+        [goodExampleFiles, badExampleFiles].map((files) =>
+          files.map((f) => [f.name, f.size, f.type, f.lastModified])
+        )
+      ),
+    [goodExampleFiles, badExampleFiles]
+  );
+
+  const exampleUploadCache = useRef<{
+    key: string;
+    uris: { good: string[]; bad: string[] };
+  } | null>(null);
+
+  /**
+   * Upload the example images at most once per file set and hand back the
+   * stored S3 URIs. A Preview_Run with Few_Shot_Examples and the job
+   * submission therefore reference the *same* uploaded objects
+   * (llm-autolabel-prompt-tuning Req 6.6): whichever runs first pays for
+   * the upload, the other reuses the cached references. Editing either
+   * example list invalidates the cache, so the next call uploads the new
+   * set. Throws on any failed upload, naming the file.
+   */
+  const ensureExampleImagesUploaded = useCallback(async (): Promise<{
+    good: string[];
+    bad: string[];
+  }> => {
+    const cached = exampleUploadCache.current;
+    if (cached && cached.key === exampleFilesKey) {
+      return cached.uris;
+    }
+    const uris = await uploadExampleImages();
+    exampleUploadCache.current = { key: exampleFilesKey, uris };
+    return uris;
+  }, [exampleFilesKey, uploadExampleImages]);
 
   const handleSubmit = async () => {
     setCreating(true);
@@ -598,7 +742,7 @@ export default function CreateLabelingJob() {
       if (labelingBackend === 'DDA') {
         // DDA branch (Requirements 1.3, 4.1-4.4, 8.1, 9.2): upload the
         // example images first, then submit with labeling_backend='DDA'.
-        const exampleImages = await uploadExampleImages();
+        const exampleImages = await ensureExampleImagesUploaded();
         const promptsForLabels: Record<string, string> = {};
         if (skipVerification) {
           for (const label of effectiveLabelSet) {
@@ -615,6 +759,17 @@ export default function CreateLabelingJob() {
           label_set: effectiveLabelSet,
           instructions: ddaInstructions || undefined,
           example_images: exampleImages,
+          // Few_Shot_Option as it stands in the form at submission time,
+          // regardless of what any completed Preview_Run used (Req 5.5).
+          // A non-`llm:` selection always submits it disabled (Req 6.9);
+          // designations and positions match the persisted shape (Req 6.4).
+          few_shot:
+            autoLabelEnabled && isLlmAutoLabelModel && fewShotEnabled
+              ? {
+                  enabled: true,
+                  examples: fewShotExamplesFromRefs(exampleImages),
+                }
+              : { enabled: false, examples: [] },
           ...(skipVerification
             ? {
                 skip_verification: true,
@@ -1252,6 +1407,66 @@ export default function CreateLabelingJob() {
           </FormField>
         )}
 
+        {/* Few_Shot_Option: prompt-guided LLM family only, disabled by
+            default (Req 1.2, 6.1, 10.5). */}
+        {showFewShotControls && (
+          <FormField
+            label="Few-shot examples"
+            description="Attach the good and bad example images above to every model request as labeled examples alongside the detection prompt"
+            errorText={
+              fewShotEnabled && exampleImageCount === 0
+                ? 'At least one example image is required for the few-shot examples option'
+                : undefined
+            }
+          >
+            <SpaceBetween size="xs">
+              <Toggle
+                checked={fewShotEnabled}
+                onChange={({ detail }) => setFewShotEnabled(detail.checked)}
+              >
+                Attach example images as few-shot examples
+              </Toggle>
+              {fewShotEnabled && exampleImageCount > 0 && (
+                <Box color="text-status-inactive">
+                  {/* Attach/omit counts for the selected model's image
+                      limit, recomputed on every model or example change
+                      (Req 7.5). */}
+                  {fewShotAttachedCount} of {exampleImageCount} example
+                  {exampleImageCount === 1 ? '' : 's'} will be attached
+                  {fewShotOmittedCount > 0
+                    ? `, ${fewShotOmittedCount} omitted`
+                    : ', 0 omitted'}{' '}
+                  (this model accepts {selectedModelImageLimit} image
+                  {selectedModelImageLimit === 1 ? '' : 's'} per request,
+                  one reserved for the dataset image).
+                </Box>
+              )}
+            </SpaceBetween>
+          </FormField>
+        )}
+
+        {/* Prompt_Tuning_Preview: offered inside the creation flow for the
+            prompt-guided LLM family only, so `sam`, `bedrock:` and a cleared
+            selection render nothing new (Req 1.1, 1.2, 10.5). The component
+            is fed entirely from wizard state and never writes back to it, so
+            the job stays submittable whether or not a Preview_Run has been
+            started, and prompt/model/few-shot edits flow straight into the
+            next run (Req 1.5, 5.1). */}
+        {autoLabelEnabled && isLlmAutoLabelModel && (
+          <PromptTuningPreview
+            usecaseId={selectedUseCase?.usecase_id || ''}
+            datasetPrefix={datasetPrefix}
+            model={autoLabelModel}
+            detectionPrompt={detectionPrompt}
+            taskType={modality as LabelingModality}
+            labelSet={effectiveLabelSet}
+            fewShotEnabled={fewShotEnabled}
+            goodExampleCount={goodExampleFiles.length}
+            badExampleCount={badExampleFiles.length}
+            ensureExampleImagesUploaded={ensureExampleImagesUploaded}
+          />
+        )}
+
         {isAdmin && (
           <SpaceBetween size="m">
             <FormField
@@ -1437,14 +1652,24 @@ export default function CreateLabelingJob() {
               </Box>
             </Box>
             {autoLabelEnabled && isLlmAutoLabelModel && (
-              <Box>
-                <Box variant="awsui-key-label">Detection Prompt</Box>
+              <>
                 <Box>
-                  <span style={{ whiteSpace: 'pre-wrap' }}>
-                    {detectionPrompt || '-'}
-                  </span>
+                  <Box variant="awsui-key-label">Detection Prompt</Box>
+                  <Box>
+                    <span style={{ whiteSpace: 'pre-wrap' }}>
+                      {detectionPrompt || '-'}
+                    </span>
+                  </Box>
                 </Box>
-              </Box>
+                <Box>
+                  <Box variant="awsui-key-label">Few-Shot Examples</Box>
+                  <Box>
+                    {fewShotEnabled
+                      ? `Enabled (${fewShotAttachedCount} attached, ${fewShotOmittedCount} omitted)`
+                      : 'Disabled'}
+                  </Box>
+                </Box>
+              </>
             )}
             <Box>
               <Box variant="awsui-key-label">Skip Verification</Box>

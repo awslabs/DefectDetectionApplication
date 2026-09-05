@@ -680,6 +680,26 @@ export class ComputeStack extends cdk.Stack {
       COMPONENT_BUCKET_PREFIX: 'dda-component',
     };
 
+    // Per-model Model_Image_Limit overrides for `llm:` auto-label requests
+    // (llm-autolabel-prompt-tuning Req 7.1): a JSON object keyed by model
+    // identifier, e.g. {"us.amazon.nova-pro-v1:0": 20, "tighter.model": 4}.
+    // Set with -c llmModelImageLimits='{"model-id": 4}'; the default of {}
+    // means every model resolves the shared default of 20. A missing,
+    // non-integer or < 1 entry also resolves to the default in
+    // resolve_model_image_limit, so configuration can never widen the bound
+    // or drive it to zero images. Only the three handlers that build or
+    // report `llm:` requests (DdaLabelingHandler preview, DdaAutolabelWorker
+    // labeling time, DataAccountsHandler model options) carry this, so it is
+    // deliberately not part of lambdaEnvironment.
+    const llmModelImageLimitsContext =
+      this.node.tryGetContext('llmModelImageLimits');
+    const llmModelImageLimits =
+      typeof llmModelImageLimitsContext === 'string'
+        ? llmModelImageLimitsContext
+        : llmModelImageLimitsContext
+          ? JSON.stringify(llmModelImageLimitsContext)
+          : '{}';
+
     // ---------------------------------------------------------------------
     // Station Quick Setup Lambdas (Requirements 4.4, 5.1, 8.1)
     //
@@ -1246,6 +1266,10 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         DATA_ACCOUNTS_TABLE: props.dataAccountsTable.tableName,
+        // list_bedrock_model_options reports the resolved Model_Image_Limit
+        // per option so the wizard's attach/omit hint uses the same source
+        // the request paths do (llm-autolabel-prompt-tuning Req 7.1, 7.5).
+        LLM_MODEL_IMAGE_LIMITS: llmModelImageLimits,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(30),
@@ -1826,15 +1850,72 @@ export class ComputeStack extends cdk.Stack {
         ...lambdaEnvironment,
         CODE_VERSION: '2026-02-27-dda-labeling',
         DDA_LABELING_WORKER_FUNCTION_NAME: ddaLabelingWorker.functionName,
+        // Per-model Model_Image_Limit for few-shot attachment in
+        // Prompt_Tuning_Preview requests (llm-autolabel-prompt-tuning
+        // Req 7.1) — the same value the autolabel worker resolves, so
+        // preview and labeling time attach the same example subset.
+        LLM_MODEL_IMAGE_LIMITS: llmModelImageLimits,
       },
       layers: [sharedLayer],
-      timeout: cdk.Duration.seconds(30),
+      // 900 s is a cap, not a reservation: the HTTP routes still answer in
+      // well under a second, but the same function also runs the async
+      // Prompt_Tuning_Preview executor, which is up to 5 sequential model
+      // invocations at 120 s each plus S3 reads
+      // (llm-autolabel-prompt-tuning Req 3.3).
+      timeout: cdk.Duration.seconds(900),
     });
     this.ddaLabelingHandler = ddaLabelingHandler;
 
     // Job creation / membership changes async-invoke the worker
     // ({action: 'distribute'|'generate_manifest'}).
     ddaLabelingWorker.grantInvoke(ddaLabelingHandler);
+
+    // Prompt_Tuning_Preview: POST /labeling-preview/runs validates and
+    // returns 202, then async-invokes THIS function with
+    // {action: 'execute_preview_run'} to run the samples past API Gateway's
+    // 29 s integration bound (llm-autolabel-prompt-tuning Req 3.3). The
+    // executor resolves its own name from context.function_name — an
+    // environment variable would be a CloudFormation self-reference.
+    //
+    // The self-invoke grant CANNOT go through grantInvoke: that statement
+    // lands in a policy owned by the role construct, and the Lambda function
+    // depends on its role's whole subtree, so a policy referencing the
+    // function's ARN closes a dependency cycle
+    // (policy -> function -> policy) and the template becomes undeployable.
+    // A standalone policy attached to the same role is a sibling of the
+    // function instead of a child of the role, so the only edge left is
+    // policy -> function.
+    new iam.Policy(this, 'DdaLabelingSelfInvokePolicy', {
+      roles: [ddaLabelingHandler.role!],
+      statements: [
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['lambda:InvokeFunction'],
+          resources: [
+            ddaLabelingHandler.functionArn,
+            `${ddaLabelingHandler.functionArn}:*`,
+          ],
+        }),
+      ],
+    });
+
+    // Bedrock vision pre-labeling for preview runs, with the same
+    // foundation-model + inference-profile resource scope the autolabel
+    // worker uses (the model id is request configuration, not a fixed ARN).
+    // Preview calls the identical shared invocation path the Auto_Labeler
+    // does, so it needs the identical grant
+    // (llm-autolabel-prompt-tuning Req 3.3).
+    ddaLabelingHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        'arn:aws:bedrock:*::foundation-model/*',
+        `arn:aws:bedrock:*:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
 
     // labeling.py delegates DDA job creation in-process to
     // dda_labeling.create_dda_job (import, same Lambda), which async-invokes
@@ -1876,6 +1957,10 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2026-02-27-dda-labeling',
+        // Per-model Model_Image_Limit bounding few-shot example attachment
+        // at labeling time (llm-autolabel-prompt-tuning Req 7.1); shared
+        // with the preview path so both attach the same example subset.
+        LLM_MODEL_IMAGE_LIMITS: llmModelImageLimits,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(300),

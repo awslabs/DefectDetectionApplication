@@ -656,6 +656,130 @@ export interface ReviewResponse {
   review_finalized?: boolean;
 }
 
+// Prompt_Tuning_Preview types (llm-autolabel-prompt-tuning).
+
+/**
+ * The single category assigned to a failed Preview_Result
+ * (llm-autolabel-prompt-tuning Requirement 9.6). The first three are
+ * produced by the shared invocation module the Auto_Labeler also uses;
+ * the last three are produced by the executor's pre-invocation steps and
+ * imply zero model invocations for that Sample_Image.
+ */
+export type PreviewFailureCategory =
+  | 'model_error'
+  | 'timeout'
+  | 'unusable_model_output'
+  | 'image_access_failure'
+  | 'unsupported_image_content'
+  | 'unreadable_example_image';
+
+/**
+ * One Few_Shot_Example reference in stored order: `position` is per
+ * designation, matching the wizard's per-kind upload order, so the
+ * attachment order is recoverable independently of list ordering
+ * (llm-autolabel-prompt-tuning Requirement 6.4).
+ */
+export interface PreviewFewShotExample {
+  /** `s3://bucket/key` inside the Use_Case data bucket. */
+  ref: string;
+  designation: 'good' | 'bad';
+  position: number;
+}
+
+/**
+ * Body of `POST /labeling-preview/runs`: one Preview_Run over 1..5
+ * Sample_Images with one model, one Detection_Prompt, one modality, one
+ * Label_Set and one Few_Shot_Option value (llm-autolabel-prompt-tuning
+ * Requirement 1.3). A 400 enumerates every violated rule, a 403 carries
+ * the fixed `{error: 'Not authorized'}` body, and a 409 indicates another
+ * Preview_Run is already in flight for the caller and Use_Case.
+ */
+export interface StartPreviewRunRequest {
+  usecase_id: string;
+  dataset_prefix: string;
+  /** `llm:<model_identifier>` — the only family the Preview_API accepts. */
+  model: string;
+  /** Sent character-for-character; 1..2000 characters after trimming. */
+  detection_prompt: string;
+  task_type: 'Classification' | 'Segmentation' | 'ObjectDetection';
+  label_set: string[];
+  /** 1..5 entries, each a bare object key or an `s3://` URI. */
+  sample_images: string[];
+  few_shot: {
+    enabled: boolean;
+    /** At most 10 per designation; omitted refs are never read. */
+    examples: PreviewFewShotExample[];
+  };
+}
+
+/** 202 response of `POST /labeling-preview/runs`. */
+export interface StartPreviewRunResponse {
+  run_id: string;
+  sample_count: number;
+  status: 'Running';
+}
+
+/** Lifecycle state of a Preview_Run. */
+export type PreviewRunStatus = 'Running' | 'Completed' | 'Failed';
+
+/** Resolution state of one Sample_Image within a Preview_Run. */
+export type PreviewSampleState = 'Pending' | 'Succeeded' | 'Failed';
+
+/**
+ * One per-Sample_Image entry of the run status response, in request order
+ * for the life of the run (llm-autolabel-prompt-tuning Requirements 3.5,
+ * 4.6). Failure category and reason are duplicated here so a failure
+ * renders without fetching the payload; `result_url` is a presigned GET
+ * for the result payload and is present only once the sample resolves.
+ */
+export interface PreviewResultEntry {
+  index: number;
+  sample_key: string;
+  state: PreviewSampleState;
+  result_url?: string;
+  /** Lifetime of `result_url` in seconds. */
+  result_url_expires_in?: number;
+  failure_category?: PreviewFailureCategory;
+  failure_reason?: string;
+}
+
+/**
+ * Response of `GET /labeling-preview/runs/{runId}`: the run status plus
+ * exactly one entry per requested Sample_Image. A 404 means the run id is
+ * unknown or the run belongs to another user.
+ */
+export interface PreviewRunResponse {
+  run_id: string;
+  status: PreviewRunStatus;
+  sample_count: number;
+  /** Attached/omitted Few_Shot_Example counts actually applied (7.5). */
+  few_shot: {
+    enabled: boolean;
+    attached: number;
+    omitted: number;
+  };
+  results: PreviewResultEntry[];
+}
+
+/**
+ * The result payload fetched once per resolved sample from its
+ * `result_url`. It is not a pipeline Pre_Label artifact: it lives under an
+ * ephemeral `labeling-previews/` prefix and expires after one day
+ * (llm-autolabel-prompt-tuning Requirements 1.6, 3.5). `raw_model_output`
+ * is the model's text character-for-character and is present only for
+ * `unusable_model_output` failures (9.3, 9.8).
+ */
+export interface PreviewResultPayload {
+  sample_key: string;
+  state: PreviewSampleState;
+  prelabel?: DdaAnnotation;
+  image_width?: number;
+  image_height?: number;
+  failure_category?: PreviewFailureCategory;
+  failure_reason?: string;
+  raw_model_output?: string;
+}
+
 // Asynchronous workflow generation types (workflow-manager-gaps).
 
 /**
@@ -1081,6 +1205,15 @@ class ApiService {
     prefix: string;
     limit?: number;
     offset?: number;
+    /**
+     * Comma-separated extensions restricting the listing (e.g.
+     * 'jpg,jpeg,png'), matched case-insensitively against the object key
+     * suffix. When omitted the backend's default six-extension set
+     * applies unchanged, and `total_found` / `has_more` / paging span
+     * exactly the filtered set (llm-autolabel-prompt-tuning
+     * Requirements 2.1, 2.7).
+     */
+    extensions?: string;
   }): Promise<{
     prefix: string;
     bucket: string;
@@ -1102,6 +1235,7 @@ class ApiService {
       prefix: params.prefix,
       ...(params.limit && { limit: params.limit.toString() }),
       ...(params.offset !== undefined && { offset: params.offset.toString() }),
+      ...(params.extensions && { extensions: params.extensions }),
     });
     return this.request(`/datasets/preview?${queryParams}`);
   }
@@ -1707,6 +1841,14 @@ class ApiService {
     team_id?: string;
     example_images?: { good: string[]; bad: string[] };
     auto_label?: { enabled: boolean; model?: string; detection_prompt?: string };
+    /**
+     * Few_Shot_Option for the `llm:` auto-label family
+     * (llm-autolabel-prompt-tuning Requirements 6.4, 6.9, 10.6). Persisted
+     * as `auto_label.few_shot`; `enabled: false` is the outcome for a
+     * non-`llm:` selection and omitting the field keeps the pre-feature
+     * job record byte-identical.
+     */
+    few_shot?: { enabled: boolean; examples?: PreviewFewShotExample[] };
     skip_verification?: boolean;
     bedrock_model_id?: string;
     per_label_prompts?: Record<string, string>;
@@ -2008,6 +2150,44 @@ class ApiService {
     return this.request(
       `/labeling/${encodeURIComponent(jobId)}/review/finalize`,
       { method: 'POST' }
+    );
+  }
+
+  // Prompt_Tuning_Preview endpoints (llm-autolabel-prompt-tuning).
+  // A Preview_Run is asynchronous: this route starts it and returns its
+  // identifier, and the caller short-polls getPreviewRun for progressive
+  // per-sample results.
+
+  /**
+   * Start a Preview_Run over the selected Sample_Images with the currently
+   * configured model, Detection_Prompt, modality, Label_Set and
+   * Few_Shot_Option (llm-autolabel-prompt-tuning Requirement 1.3). No
+   * Labeling_Job, Task_Assignment or pipeline Pre_Label is created (1.6).
+   * A 400 enumerates every violated validation rule, a 403 carries the
+   * fixed `{error: 'Not authorized'}` body whether or not the Use_Case or
+   * referenced objects exist, and a 409 indicates a Preview_Run is already
+   * in progress for this user and Use_Case.
+   */
+  async startPreviewRun(
+    body: StartPreviewRunRequest
+  ): Promise<StartPreviewRunResponse> {
+    return this.request<StartPreviewRunResponse>('/labeling-preview/runs', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Poll a Preview_Run: its status plus exactly one entry per requested
+   * Sample_Image in request order, each carrying its state and — once
+   * resolved — the failure category and reason plus a presigned
+   * `result_url` for its `PreviewResultPayload`
+   * (llm-autolabel-prompt-tuning Requirements 3.5, 4.6, 9.6). A 404 means
+   * the run id is unknown or the run belongs to another user.
+   */
+  async getPreviewRun(runId: string): Promise<PreviewRunResponse> {
+    return this.request<PreviewRunResponse>(
+      `/labeling-preview/runs/${encodeURIComponent(runId)}`
     );
   }
 
@@ -3323,8 +3503,12 @@ class ApiService {
   // models) for the settings-page model dropdown. An empty list with a
   // 'permissions' hint means the backend lacks the bedrock list
   // permissions and the UI should fall back to free-text entry.
+  // `image_limit` is the model's Model_Image_Limit resolved from the
+  // backend's configuration (default 20), used by the labeling-job
+  // wizard's few-shot attach/omit hint (llm-autolabel-prompt-tuning
+  // Requirements 7.1, 7.5).
   async getBedrockModels(): Promise<{
-    models: { id: string; label: string }[];
+    models: { id: string; label: string; image_limit?: number }[];
     region: string;
     permissions?: string;
   }> {

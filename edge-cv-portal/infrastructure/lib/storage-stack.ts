@@ -687,6 +687,11 @@ export class StorageStack extends cdk.Stack {
     // LabelingTasks Table - DDA labeling task assignments (dda-data-labeling).
     // One item per (job, image): task_id is 'task-<zero-padded index>';
     // assignee_user_id is a Cognito sub, 'UNASSIGNED', or 'AUTO' (skip-verification).
+    // Also holds Prompt_Tuning_Preview run state (llm-autolabel-prompt-tuning):
+    // 'PREVIEW#{run_id}' run/sample items and 'PREVIEWLOCK#{usecase_id}'
+    // in-flight locks, which carry a 'ttl'. TTL is cleanup only — expiry
+    // correctness stays with the explicit 'expires_at' comparisons in the
+    // conditional lock claim and in reads (Req 8.8).
     this.labelingTasksTable = new dynamodb.Table(this, 'LabelingTasksTable', {
       tableName: 'dda-portal-labeling-tasks',
       partitionKey: {
@@ -701,6 +706,7 @@ export class StorageStack extends cdk.Stack {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: true,
       },
+      timeToLiveAttribute: 'ttl',
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -750,6 +756,19 @@ export class StorageStack extends cdk.Stack {
           // Multipart uploads read each part's ETag from the response.
           exposedHeaders: ['ETag'],
           maxAge: 3600,
+        },
+      ],
+      lifecycleRules: [
+        {
+          // 'labeling-previews/' holds ephemeral Prompt_Tuning_Preview result
+          // payloads (llm-autolabel-prompt-tuning, Req 1.6/3.5) — they are not
+          // pipeline Pre_Label artifacts and are referenced by no Labeling_Job,
+          // so they are expired a day after a preview run writes them.
+          id: 'ExpireLabelingPreviews',
+          prefix: 'labeling-previews/',
+          enabled: true,
+          expiration: cdk.Duration.days(1),
+          noncurrentVersionExpiration: cdk.Duration.days(1),
         },
       ],
     });

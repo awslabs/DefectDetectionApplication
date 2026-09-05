@@ -40,6 +40,10 @@ from shared_utils import (
     validate_required_fields, assume_cross_account_role as assume_role,
     require_super_user, rbac_manager, Permission
 )
+# Model_Image_Limit resolution (llm-autolabel-prompt-tuning Requirement 7.1).
+# The same shared-layer function the Preview_API and the Auto_Labeler use, so
+# the model dropdown reports exactly the bound the request paths apply.
+from dda_llm_request import resolve_model_image_limit
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -875,6 +879,27 @@ def _get_bedrock_control_client(region: str):
     return client
 
 
+def _llm_model_image_limits() -> Dict[str, Any]:
+    """
+    The Model_Image_Limit configuration mapping from LLM_MODEL_IMAGE_LIMITS
+    (llm-autolabel-prompt-tuning Requirement 7.1).
+
+    Read per call so the environment stays authoritative. An absent, blank,
+    malformed, or non-object value resolves to an empty mapping, in which case
+    every model resolves the shared default of 20 rather than erroring.
+    """
+    raw = (os.environ.get('LLM_MODEL_IMAGE_LIMITS') or '').strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning('LLM_MODEL_IMAGE_LIMITS is not valid JSON; '
+                       'using the default Model_Image_Limit for every model')
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _is_access_denied(error: ClientError) -> bool:
     code = error.response.get('Error', {}).get('Code', '')
     return code in ('AccessDenied', 'AccessDeniedException', 'UnauthorizedOperation')
@@ -913,6 +938,12 @@ def list_bedrock_model_options(event: Dict, user: Dict) -> Dict:
     fronts) and sorted anthropic-first, then alphabetically. When the
     Lambda lacks the bedrock list permissions, returns an empty list plus
     a 'permissions' hint so the UI can fall back to free-text entry.
+
+    Each option also carries an additive 'image_limit': the model's
+    Model_Image_Limit resolved from LLM_MODEL_IMAGE_LIMITS through the
+    shared resolve_model_image_limit (default 20), for the labeling-job
+    wizard's few-shot attach/omit hint (llm-autolabel-prompt-tuning
+    Requirements 7.1, 7.5).
     """
     try:
         query = event.get('queryStringParameters') or {}
@@ -980,6 +1011,16 @@ def list_bedrock_model_options(event: Dict, user: Dict) -> Dict:
                 seen.add(option['id'])
                 options.append(option)
         options.sort(key=sort_key)
+
+        # Additive per-option Model_Image_Limit so the labeling-job wizard's
+        # few-shot attach/omit hint reads the same configuration the request
+        # paths resolve (llm-autolabel-prompt-tuning Requirements 7.1, 7.5).
+        # Every other field of every option is left exactly as it was, so
+        # consumers that ignore image_limit are unaffected.
+        image_limits = _llm_model_image_limits()
+        for option in options:
+            option['image_limit'] = resolve_model_image_limit(
+                option['id'], image_limits)
 
         payload: Dict[str, Any] = {'models': options, 'region': region}
         if access_denied:

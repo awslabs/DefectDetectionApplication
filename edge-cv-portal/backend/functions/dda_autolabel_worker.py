@@ -21,7 +21,10 @@ Auto_Labeler model and resolves the task's `prelabel_status`:
   120 s and retries disabled (Req 8.5). The response is strictly
   validated: any class outside the Label_Set, malformed geometry, or an
   out-of-bounds box is a generation failure for that image (Req 8.2).
-- **LLM path** (model `llm:<model_identifier>`, llm-auto-labeling): a
+- **LLM path** (model `llm:<model_identifier>`, llm-auto-labeling):
+  delegated to `dda_llm_prelabel.generate_llm_prelabel`, the one
+  implementation the Prompt_Tuning_Preview also calls
+  (llm-autolabel-prompt-tuning Req 3.1, 3.2) — a
   single Converse request per image with the image block and a
   prompt built by `dda_llm_guidance.build_detection_prompt` (the job's
   Detection_Prompt verbatim, the Label_Set, the pixel dimensions, and
@@ -68,11 +71,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.config import Config as BotoConfig
-from botocore.exceptions import (
-    ClientError,
-    ConnectTimeoutError,
-    ReadTimeoutError,
-)
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -86,11 +85,19 @@ from bedrock_common import (
     get_bedrock_client,
     get_bedrock_configuration,
 )
-from dda_llm_guidance import (
-    GuidanceError,
-    build_detection_prompt,
-    guidance_to_prelabel,
-    parse_guidance,
+# The one implementation of the `llm:` family model invocation, shared
+# with the Prompt_Tuning_Preview (llm-autolabel-prompt-tuning Req 3.1,
+# 3.2). Same functions bundle, so it is imported directly.
+import dda_llm_prelabel
+from dda_llm_prelabel import LlmPrelabelError, generate_llm_prelabel
+# Few_Shot_Example selection and the Model_Image_Limit contract live in
+# the shared layer, so labeling time and the Prompt_Tuning_Preview
+# attach the same subset in the same order
+# (llm-autolabel-prompt-tuning Req 7.2, 7.3, 7.4, 7.6).
+from dda_llm_request import (
+    image_format_for_key,
+    resolve_model_image_limit,
+    select_few_shot_examples,
 )
 
 # AWS clients
@@ -245,6 +252,115 @@ def _read_image_bytes(job: Dict, image_s3_uri: str) -> Tuple[bytes, str]:
         raise GenerationFailure(
             f'image s3://{bucket}/{key} is not accessible: {exc}') from exc
     return body, key
+
+
+# ---------------------------------------------------------------------------
+# Few_Shot_Examples (llm-autolabel-prompt-tuning Req 6.5, 6.7, 7.1-7.4, 10.3)
+# ---------------------------------------------------------------------------
+
+def _llm_model_image_limits() -> Dict[str, Any]:
+    """The Model_Image_Limit configuration mapping from
+    LLM_MODEL_IMAGE_LIMITS (Req 7.1).
+
+    Read per call so the environment stays authoritative. An absent,
+    blank, malformed or non-object value resolves to an empty mapping,
+    in which case every model resolves the shared default of 20 rather
+    than erroring — configuration can never widen or zero the bound.
+    """
+    raw = (os.environ.get('LLM_MODEL_IMAGE_LIMITS') or '').strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning('LLM_MODEL_IMAGE_LIMITS is not valid JSON; using '
+                       'the default Model_Image_Limit for every model')
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _few_shot_ref_location(ref: str) -> Tuple[Optional[str], Optional[str]]:
+    """(bucket, key) for one stored example reference. References are
+    portal artifacts bucket keys (the wizard's presigned-PUT uploads) or
+    full s3:// URIs — the two spellings the job record carries."""
+    if not isinstance(ref, str) or not ref:
+        return None, None
+    if ref.startswith('s3://'):
+        remainder = ref[len('s3://'):]
+        bucket, _, key = remainder.partition('/')
+        return (bucket or None), (key or None)
+    return (PORTAL_ARTIFACTS_BUCKET or None), ref
+
+
+def _resolve_few_shot_images(job: Dict,
+                            model_identifier: str) -> Tuple[List[Dict], int]:
+    """The Few_Shot_Example images to attach for this job, plus the
+    resolved Model_Image_Limit.
+
+    Few-shot state comes from the job record (`auto_label.few_shot`), so
+    no SQS message schema change is needed and messages already in
+    flight across a deployment keep processing. An absent, `null`,
+    non-dict or `enabled`-falsy document, and an empty or malformed
+    `examples` list, all resolve to *disabled* — no attachment and no
+    failure attributed to the configuration (Req 10.3).
+
+    When enabled, the attached subset is
+    `select_few_shot_examples(stored examples, resolved limit)` — the
+    deterministic good-then-bad, stored-order prefix the preview path
+    computes from the same references (Req 7.2, 7.3, 7.4, 7.6) — and
+    only those refs are read, through the same
+    `get_s3_client_for_bucket` mechanism the dataset image uses. Omitted
+    references are never fetched.
+
+    Raises:
+        GenerationFailure: an attached example that cannot be read,
+            naming the reference (Req 6.7). It fails only this dataset
+            image; the batch loop continues.
+    """
+    limit = resolve_model_image_limit(model_identifier,
+                                      _llm_model_image_limits())
+
+    few_shot = (job.get('auto_label') or {}).get('few_shot')
+    if not isinstance(few_shot, dict) or not few_shot.get('enabled'):
+        return [], limit
+    stored = few_shot.get('examples')
+    if not isinstance(stored, list):
+        return [], limit
+    # Only well-formed references participate; a document whose entries
+    # are all malformed is indistinguishable from the option being off.
+    candidates = [example for example in stored
+                  if isinstance(example, dict)
+                  and isinstance(example.get('ref'), str)
+                  and example['ref']]
+    if not candidates:
+        return [], limit
+
+    attached, _omitted = select_few_shot_examples(candidates, limit)
+
+    clients: Dict[str, Any] = {}
+    images: List[Dict] = []
+    for example in attached:
+        ref = example['ref']
+        bucket, key = _few_shot_ref_location(ref)
+        if not bucket or not key:
+            raise GenerationFailure(
+                f'few-shot example image {ref} is not accessible: '
+                f'the reference could not be resolved to an S3 object')
+        if bucket not in clients:
+            clients[bucket] = _dataset_s3_client(job, bucket)
+        try:
+            body = clients[bucket].get_object(
+                Bucket=bucket, Key=key)['Body'].read()
+        except Exception as exc:  # noqa: BLE001 — unreadable example (Req 6.7)
+            raise GenerationFailure(
+                f'few-shot example image {ref} is not accessible: '
+                f'{exc}') from exc
+        images.append({
+            'bytes': body,
+            'format': image_format_for_key(key),
+            'designation': example.get('designation'),
+        })
+    return images, limit
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +545,18 @@ def _generate_llm_prelabel(message: Dict, job: Dict, model_id: str) -> Dict:
     """Prompt-guided LLM Pre_Label: one Converse call asking for
     Coordinate_Guidance JSON, converted to the modality's Pre_Label.
 
+    Request construction, invocation and response handling live in
+    `dda_llm_prelabel.generate_llm_prelabel` — the same implementation
+    the Prompt_Tuning_Preview calls, so a preview predicts what this
+    worker does rather than imitating it (llm-autolabel-prompt-tuning
+    Req 3.1, 3.2). What stays here is what is worker-specific: the
+    cross-account image read, the pixel-dimension gate, the
+    Detection_Prompt / Per_Label_Prompts resolution from the message
+    with the job item as fallback, the Few_Shot_Example resolution from
+    the job record, and the `GenerationFailure` translation that keeps
+    `prelabel_error` byte-identical for every failure mode (Req 3.10,
+    3.11).
+
     Only the image bytes and prompt content are sent to the model — no
     dataset credentials, no portal secrets (Req 9.7).
     """
@@ -461,44 +589,39 @@ def _generate_llm_prelabel(message: Dict, job: Dict, model_id: str) -> Dict:
         per_label_prompts = (message.get('per_label_prompts')
                              or job.get('per_label_prompts') or {})
 
-    prompt = build_detection_prompt(modality, label_set, detection_prompt,
-                                    width, height, per_label_prompts)
+    # Few_Shot_Examples from the job record, read after the target image
+    # so an unreadable example can never mask an unreadable target
+    # (llm-autolabel-prompt-tuning Req 6.5, 6.7, 10.3). With the option
+    # off this is ([], resolved limit) and the request is exactly the
+    # pre-feature one (Req 10.2).
+    few_shot_images, model_image_limit = _resolve_few_shot_images(
+        job, model_id)
 
-    # Client via bedrock_common: read timeout equals the invocation
-    # timeout capped at 120 s, retries disabled — so exactly one request
-    # per image and no re-invocation (Req 3.1, 3.4).
-    config = get_bedrock_configuration()
-    timeout = min(int(config['timeout_seconds']), BEDROCK_MAX_TIMEOUT_SECONDS)
-    client = get_bedrock_client(config['region'], timeout)
+    # This module's `get_bedrock_client` stays the single Bedrock client
+    # seam for every model family the worker drives, so the shared
+    # invocation module builds its client through the same binding.
+    dda_llm_prelabel.get_bedrock_client = get_bedrock_client
     try:
-        response = client.converse(
-            modelId=model_id,
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {'image': {'format': _image_format(image_key),
-                               'source': {'bytes': image_bytes}}},
-                    {'text': prompt},
-                ],
-            }],
-            inferenceConfig=build_inference_config(config),
+        return generate_llm_prelabel(
+            model_identifier=model_id,
+            modality=modality,
+            label_set=label_set,
+            detection_prompt=detection_prompt,
+            per_label_prompts=per_label_prompts,
+            image_bytes=image_bytes,
+            image_key=image_key,
+            width=width,
+            height=height,
+            few_shot_images=few_shot_images,
+            model_image_limit=model_image_limit,
         )
-    except (ReadTimeoutError, ConnectTimeoutError) as exc:
-        # Req 3.4: timeout is distinguishable from a model error.
-        raise GenerationFailure(
-            f'model invocation timed out after {timeout}s') from exc
-    except Exception as exc:  # noqa: BLE001 — model error (Req 3.4)
-        raise GenerationFailure(f'model error: {exc}') from exc
-
-    # Strict parse + modality conversion; the GuidanceError reason
-    # reaches prelabel_error unchanged (Req 4.2, 6.3).
-    try:
-        detections = parse_guidance(_response_text(response),
-                                    label_set, width, height)
-        return guidance_to_prelabel(detections, modality, label_set,
-                                    width, height)
-    except GuidanceError as exc:
-        raise GenerationFailure(str(exc)) from exc
+    except LlmPrelabelError as exc:
+        # Every category carries the reason string this worker has
+        # always recorded — timeout, model error, and unusable model
+        # output alike (Req 3.10, 3.11) — so prelabel_error /
+        # autolabel_error and the autolabel_pending accounting are
+        # unchanged.
+        raise GenerationFailure(exc.reason) from exc
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,8 @@ export interface DdaLabelingApiStackProps extends cdk.NestedStackProps {
  * - GET    /labeling/{id}/review                          (auto-label results)
  * - POST   /labeling/{id}/review/decisions                (batch accept/reject)
  * - POST   /labeling/{id}/review/finalize                 (finalize + manifest)
+ * - POST   /labeling-preview/runs                         (start a Preview_Run)
+ * - GET    /labeling-preview/runs/{runId}                 (Preview_Run status)
  */
 export class DdaLabelingApiStack extends cdk.NestedStack {
   constructor(scope: Construct, id: string, props: DdaLabelingApiStackProps) {
@@ -197,6 +199,23 @@ export class DdaLabelingApiStack extends cdk.NestedStack {
     addMethod(reviewResource.addResource('finalize'), 'POST');
 
     // ------------------------------------------------------------------
+    // Prompt Tuning Preview (llm-autolabel-prompt-tuning, task 7.2).
+    // A Preview_Run is asynchronous: POST starts it and returns 202 with a
+    // run id, the wizard short-polls the status route. Both routes land on
+    // DdaLabelingHandler and enforce MANAGE_LABELING_JOBS via @rbac_check
+    // inside the handler (Requirements 1.3, 8.1).
+    // ------------------------------------------------------------------
+    const previewResource = api.root.addResource('labeling-preview', {
+      defaultCorsPreflightOptions: corsOptions,
+    });
+    const previewRunsResource = previewResource.addResource('runs');
+    // POST /labeling-preview/runs — validate, claim the in-flight lock,
+    // create the run and async self-invoke the executor
+    addMethod(previewRunsResource, 'POST');
+    // GET /labeling-preview/runs/{runId} — run status + per-sample state
+    addMethod(previewRunsResource.addResource('{runId}'), 'GET');
+
+    // ------------------------------------------------------------------
     // Deployment re-pointing the existing stage so the routes above go
     // live. The logical id is salted with the route table: any route
     // change creates a new deployment (a deployment snapshots the whole
@@ -229,5 +248,6 @@ export class DdaLabelingApiStack extends cdk.NestedStack {
     deployment.node.addDependency(labelerResource);
     deployment.node.addDependency(stopResource);
     deployment.node.addDependency(reviewResource);
+    deployment.node.addDependency(previewResource);
   }
 }

@@ -80,6 +80,7 @@ import base64
 import json
 import os
 import logging
+import struct
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -109,6 +110,32 @@ from labeling_distribution import rebalance
 # LLM auto-labeling model identifier validation shared with the
 # per-image consumer (llm-auto-labeling Requirement 1.5).
 from dda_llm_guidance import validate_model_identifier
+# Few_Shot_Example designations, shared with the request builder both
+# the Preview_API and the Auto_Labeler call
+# (llm-autolabel-prompt-tuning Requirement 6.4). The selection and
+# limit-resolution functions are the same ones the Auto_Labeler calls,
+# so a Preview_Run reports exactly the example subset labeling time will
+# attach (Requirements 7.1, 7.2, 7.6).
+from dda_llm_request import (
+    FEW_SHOT_BAD,
+    FEW_SHOT_GOOD,
+    image_format_for_key,
+    resolve_model_image_limit,
+    select_few_shot_examples,
+)
+# The one implementation of the `llm:` family model invocation, shared
+# with the Auto_Labeler (llm-autolabel-prompt-tuning Req 3.1, 3.2): the
+# Preview_Run executor calls exactly the function
+# `dda_autolabel_worker._generate_llm_prelabel` calls, with the same
+# argument construction, so a preview predicts labeling-time behavior
+# rather than imitating it. Same functions bundle, so it is imported
+# directly, and `bedrock_common.get_bedrock_client` is rebound onto it
+# per call for the same reason the worker rebinds its own binding: the
+# Bedrock client seam stays this module's, so a stubbed client in tests
+# reaches the shared invocation.
+import dda_llm_prelabel
+from bedrock_common import get_bedrock_client
+from dda_llm_prelabel import LlmPrelabelError, generate_llm_prelabel
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -185,6 +212,18 @@ REVIEW_DECISIONS = ('accepted', 'rejected')
 def handler(event, context):
     """Main Lambda handler for DDA labeling operations."""
     try:
+        # Non-HTTP entry, deliberately ahead of the HTTP dispatch: the
+        # Preview_Run executor is *this same function*, self-invoked
+        # asynchronously by POST /labeling-preview/runs with
+        # {'action': 'execute_preview_run', 'run_id': ...} (task 8.2,
+        # llm-autolabel-prompt-tuning Req 8.1). An action payload carries
+        # no httpMethod and no resource, so it must be recognized before
+        # any routing on those fields — mirroring dda_labeling_worker's
+        # action dispatcher.
+        action = (event or {}).get('action')
+        if action:
+            return _handle_preview_action(action, event, context)
+
         http_method = event.get('httpMethod')
         resource = event.get('resource', '')
         path = event.get('path', '')
@@ -252,6 +291,19 @@ def handler(event, context):
                     and resource
                     == '/labeler/tasks/{taskId}/presentation-failure'):
                 return report_presentation_failure(event, context)
+
+        # Prompt_Tuning_Preview routes (task 8.2 start; task 8.3 status).
+        # The Use_Case scope for @rbac_check comes from the request body
+        # (POST) or the run record (GET), injected inside each route so the
+        # authorization check runs before every other validation
+        # (llm-autolabel-prompt-tuning Req 8.6).
+        if resource.startswith('/labeling-preview/runs'):
+            if (http_method == 'POST'
+                    and resource == '/labeling-preview/runs'):
+                return start_preview_run(event, context)
+            if (http_method == 'GET'
+                    and resource == '/labeling-preview/runs/{runId}'):
+                return get_preview_run(event, context)
 
         # Skip-verification Admin_Review routes (task 11.3). Like the
         # team routes, the job's usecase_id is injected so @rbac_check
@@ -1232,6 +1284,72 @@ def _validate_example_refs(example_images: Any) -> tuple:
     return validated, errors
 
 
+def _few_shot_examples_from_refs(
+        example_images: Dict[str, List[str]]) -> List[Dict]:
+    """Derive the ordered Few_Shot_Example set from the job's uploaded
+    example image references (llm-autolabel-prompt-tuning Req 6.4).
+
+    The derived list is a copy: good example references in stored (wizard
+    upload) order first, then bad example references in their stored
+    order, each carrying its good-or-bad designation and its position
+    *within that designation*. `example_images` itself is never
+    modified — it keeps its labeler-instruction role untouched
+    (Req 10.6).
+    """
+    examples: List[Dict] = []
+    for designation in (FEW_SHOT_GOOD, FEW_SHOT_BAD):
+        for position, ref in enumerate(example_images.get(designation) or []):
+            examples.append({
+                'ref': ref,
+                'designation': designation,
+                'position': position,
+            })
+    return examples
+
+
+def _resolve_few_shot_document(auto_label: Dict, body: Dict,
+                               example_images: Dict) -> tuple:
+    """The `auto_label.few_shot` sub-document to persist for an `llm:`
+    job, plus any validation errors (llm-autolabel-prompt-tuning
+    Req 6.2, 6.3, 6.4, 10.4, 10.6).
+
+    Returns (document or None, [validation errors]). `None` means write
+    no `few_shot` key at all — the outcome for a submission that carries
+    no Few_Shot_Option, so a pre-feature submission produces a
+    byte-identical job record (Req 10.4) and the Auto_Labeler's
+    "absent means disabled" contract covers it (Req 10.3).
+    """
+    raw = auto_label.get('few_shot')
+    if raw is None:
+        # The wizard nests the option under auto_label; accept a
+        # top-level key too so either shape persists identically.
+        raw = body.get('few_shot')
+    if raw is None:
+        return None, []
+
+    if isinstance(raw, bool):
+        enabled = raw
+    elif isinstance(raw, dict):
+        enabled = bool(raw.get('enabled'))
+    else:
+        return None, [_validation_error(
+            'few_shot',
+            "few_shot must be an object like {'enabled': true}")]
+
+    if not enabled:
+        return {'enabled': False}, []
+
+    # Req 6.2/6.3: the option is meaningless without at least one
+    # example image, and the error joins the enumerated list.
+    examples = _few_shot_examples_from_refs(example_images)
+    if not examples:
+        return None, [_validation_error(
+            'few_shot',
+            'At least one example image is required for the few-shot '
+            'examples option')]
+    return {'enabled': True, 'examples': examples}, []
+
+
 def _team_data_labeler_members(team_id: str, usecase_id: str) -> List[Dict]:
     """Team members currently holding the Data_Labeler role (Req 4.8 —
     roles are re-resolved at job creation, not trusted from add time)."""
@@ -1515,6 +1633,17 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                     model=auto_label_model,
                     task_type=modality))
 
+        # --- Few_Shot_Option (llm-autolabel-prompt-tuning Req 6.2-6.4,
+        #     10.1, 10.4, 10.6) ---
+        # Scoped to the `llm:` family: sam / bedrock: jobs get no
+        # few_shot key at all, so their records and request construction
+        # are untouched (Req 10.1).
+        few_shot_document = None
+        if model_family == 'llm':
+            few_shot_document, few_shot_errors = _resolve_few_shot_document(
+                auto_label, body, example_images)
+            errors.extend(few_shot_errors)
+
         # --- dataset prefix + use case (needed for enumeration) ---
         dataset_prefix = body.get('dataset_prefix')
         if not dataset_prefix:
@@ -1613,6 +1742,12 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                 # character-for-character as entered.
                 **({'detection_prompt': detection_prompt}
                    if model_family == 'llm' else {}),
+                # llm-autolabel-prompt-tuning Req 6.4/10.6: the
+                # Few_Shot_Option and, when enabled, the derived example
+                # set in attachment order. Absent for sam / bedrock:
+                # jobs and for submissions that carry no option at all.
+                **({'few_shot': few_shot_document}
+                   if few_shot_document is not None else {}),
             },
             'skip_verification': skip_verification,
             'submitted_count': 0,
@@ -2914,3 +3049,1680 @@ def finalize_admin_review(event, context):
                      exc_info=True)
         return create_response(500, {
             'error': 'Failed to finalize the admin review'})
+
+
+# ---------------------------------------------------------------------------
+# Preview_Run state helpers (task 8.1 — llm-autolabel-prompt-tuning
+# Requirements 1.6, 3.5, 8.7, 8.8)
+# ---------------------------------------------------------------------------
+# A Prompt_Tuning_Preview run keeps all of its state in resources that
+# already exist, so no new table and no new GSI are introduced:
+#
+#   dda-portal-labeling-tasks   PREVIEW#{run_id}      / RUN
+#                               PREVIEW#{run_id}      / IMAGE#{i:03d}
+#                               PREVIEWLOCK#{usecase} / USER#{user_sub}
+#   portal artifacts bucket     labeling-previews/{usecase_id}/{run_id}/{i}.json
+#
+# IMPORTANT: preview items deliberately carry **no `assignee_user_id`
+# attribute**. The tasks table's `assignee-index` GSI is keyed on
+# assignee_user_id, and DynamoDB only projects an item into a GSI when
+# the item has the index's key attributes — so preview items are
+# invisible to `_query_caller_tasks` and therefore to every labeler API,
+# by construction rather than by a filter that could be forgotten
+# (Req 1.6: a Preview_Run creates no Task_Assignment a labeler can see).
+#
+# Item expiry is enforced by comparing `expires_at` explicitly, both in
+# the lock's conditional write and in every read. The `ttl` attribute
+# (the tasks table's TTL attribute, enabled in storage-stack.ts) is
+# cleanup only — correctness never depends on DynamoDB reaping an item.
+
+PREVIEW_RUN_PK_PREFIX = 'PREVIEW#'
+PREVIEW_RUN_SK = 'RUN'
+PREVIEW_SAMPLE_SK_PREFIX = 'IMAGE#'
+PREVIEW_LOCK_PK_PREFIX = 'PREVIEWLOCK#'
+PREVIEW_LOCK_SK_PREFIX = 'USER#'
+
+# Run statuses on the RUN item.
+PREVIEW_STATUS_RUNNING = 'Running'
+PREVIEW_STATUS_COMPLETED = 'Completed'
+PREVIEW_STATUS_FAILED = 'Failed'
+# Per-sample states on the IMAGE#{i} items.
+PREVIEW_SAMPLE_PENDING = 'Pending'
+PREVIEW_SAMPLE_SUCCEEDED = 'Succeeded'
+PREVIEW_SAMPLE_FAILED = 'Failed'
+
+# Sample_Image count bounds for one Preview_Run (Req 8.4).
+PREVIEW_SAMPLE_MIN = 1
+PREVIEW_SAMPLE_MAX = 5
+# Per-Sample_Image model invocation bound, matching the Auto_Labeler's
+# (Req 3.3) — also the unit the lock TTL is derived from.
+PREVIEW_PER_SAMPLE_SECONDS = 120
+# Lock slack (start-up, S3 reads) and the Lambda timeout ceiling.
+PREVIEW_LOCK_SLACK_SECONDS = 60
+PREVIEW_LOCK_TTL_MAX_SECONDS = 900
+# Grace period between the logical `expires_at` and the DynamoDB `ttl`
+# reap time, so an item stays readable for diagnosis after it expires.
+PREVIEW_ITEM_TTL_GRACE_SECONDS = 3600
+# Preview result payloads: ephemeral, artifacts-bucket-only, expired by
+# a bucket lifecycle rule after one day (Req 1.6, 3.5).
+PREVIEW_RESULT_PREFIX = 'labeling-previews/'
+PREVIEW_RESULT_URL_EXPIRY_SECONDS = 900
+# Exactly one of these categories is attributed to a failed
+# Preview_Result (Req 9.6). The first three come from
+# dda_llm_prelabel.LlmPrelabelError (shared with the Auto_Labeler); the
+# last three are raised by the executor before any invocation.
+PREVIEW_FAILURE_CATEGORIES = (
+    'model_error',
+    'timeout',
+    'unusable_model_output',
+    'image_access_failure',
+    'unsupported_image_content',
+    'unreadable_example_image',
+)
+
+
+def _now_epoch() -> int:
+    """Current time as whole epoch seconds — the unit every preview
+    `expires_at` / `ttl` comparison uses."""
+    return int(datetime.utcnow().timestamp())
+
+
+def _new_preview_run_id() -> str:
+    """A fresh Preview_Run identifier (`preview-<8 hex>`), following the
+    portal's `labeling-<8 hex>` job id convention."""
+    return f"preview-{uuid.uuid4().hex[:8]}"
+
+
+def _preview_run_pk(run_id: str) -> str:
+    """Partition key shared by a run's RUN and IMAGE#{i} items."""
+    return f'{PREVIEW_RUN_PK_PREFIX}{run_id}'
+
+
+def _preview_sample_sk(index: int) -> str:
+    """Sort key of the sample at `index`. Zero-padded to three digits so
+    a Query returns samples in request order without a client-side
+    sort (Req 3.5, 4.6: one entry per Sample_Image, in request order)."""
+    return f'{PREVIEW_SAMPLE_SK_PREFIX}{index:03d}'
+
+
+def _preview_sample_index(task_id: str) -> int:
+    """The integer index encoded in an `IMAGE#{i:03d}` sort key."""
+    return int(task_id[len(PREVIEW_SAMPLE_SK_PREFIX):])
+
+
+def _preview_lock_ttl_seconds(sample_count: int) -> int:
+    """`min(sample_count * 120 + 60, 900)` (Req 8.8).
+
+    The claim can never outlive the executor: the run itself is bounded
+    by `sample_count` invocations of at most 120 s each, and the
+    executor's own Lambda timeout is 900 s. So a crashed or timed-out
+    executor self-heals within one run bound and the next request from
+    the same user succeeds — no reaper process is needed and no lock can
+    wedge a Use_Case permanently.
+    """
+    return min(
+        max(int(sample_count), 0) * PREVIEW_PER_SAMPLE_SECONDS
+        + PREVIEW_LOCK_SLACK_SECONDS,
+        PREVIEW_LOCK_TTL_MAX_SECONDS,
+    )
+
+
+def _claim_preview_lock(usecase_id: str, user_sub: str, run_id: str,
+                        sample_count: int) -> bool:
+    """Claim the per-user, per-Use_Case in-flight lock (Req 8.8).
+
+    Returns True when the claim succeeded and False when this user
+    already has a Preview_Run in flight in this Use_Case. The whole
+    guard is one conditional write, so two concurrent requests can never
+    both win:
+
+        attribute_not_exists(task_id) OR expires_at < :now
+
+    `expires_at` is compared explicitly rather than relying on the
+    table's TTL, because TTL deletion is asynchronous and best-effort —
+    an expired-but-not-yet-reaped lock must not block a new run.
+
+    The caller answers 409 on False and, per Req 8.8, reads no object
+    and invokes no model on that path.
+    """
+    now = _now_epoch()
+    expires_at = now + _preview_lock_ttl_seconds(sample_count)
+    try:
+        labeling_tasks_table.put_item(
+            Item={
+                'job_id': f'{PREVIEW_LOCK_PK_PREFIX}{usecase_id}',
+                'task_id': f'{PREVIEW_LOCK_SK_PREFIX}{user_sub}',
+                'run_id': run_id,
+                'claimed_at': now,
+                'expires_at': expires_at,
+                'ttl': expires_at + PREVIEW_ITEM_TTL_GRACE_SECONDS,
+            },
+            ConditionExpression=('attribute_not_exists(task_id) '
+                                 'OR expires_at < :now'),
+            ExpressionAttributeValues={':now': now},
+        )
+        return True
+    except ClientError as e:
+        if (e.response.get('Error', {}).get('Code')
+                == 'ConditionalCheckFailedException'):
+            return False
+        raise
+
+
+def _release_preview_lock(usecase_id: str, user_sub: str) -> None:
+    """Release the in-flight lock unconditionally (Req 8.8).
+
+    Unconditional on purpose: the executor calls this on every terminal
+    path, including unexpected exceptions, and a release must never fail
+    because the lock was already reaped by TTL or overwritten by a
+    later claim. Deleting a key that does not exist is a no-op in
+    DynamoDB.
+    """
+    labeling_tasks_table.delete_item(
+        Key={
+            'job_id': f'{PREVIEW_LOCK_PK_PREFIX}{usecase_id}',
+            'task_id': f'{PREVIEW_LOCK_SK_PREFIX}{user_sub}',
+        },
+    )
+
+
+def _read_preview_lock(usecase_id: str, user_sub: str) -> Optional[Dict]:
+    """The user's *active* lock item for this Use_Case, or None.
+
+    A lock whose `expires_at` has passed reads as absent — the same
+    explicit comparison the conditional write makes, so reads and writes
+    can never disagree about whether a run is still in flight.
+    """
+    item = labeling_tasks_table.get_item(
+        Key={
+            'job_id': f'{PREVIEW_LOCK_PK_PREFIX}{usecase_id}',
+            'task_id': f'{PREVIEW_LOCK_SK_PREFIX}{user_sub}',
+        },
+    ).get('Item')
+    if not item:
+        return None
+    if int(item.get('expires_at', 0)) < _now_epoch():
+        return None
+    return item
+
+
+def _preview_stored_examples(examples: List[Any]) -> List[Dict]:
+    """The Few_Shot_Example references to record on the RUN item, in
+    stored order (task 9.1).
+
+    Normalized to the persisted job-record shape — `{ref, designation,
+    position}` — so the executor feeds `select_few_shot_examples` exactly
+    what the Auto_Labeler feeds it from `auto_label.few_shot.examples`
+    (Req 6.6, 7.6). Order is preserved verbatim: it is the ordering the
+    selection depends on, and it is the ordering the start route already
+    used to compute the attached/omitted counts.
+
+    Entries that could not be attached at all (no usable reference) are
+    dropped, which by the time this runs is unreachable — the request
+    validation rejects them — but keeps the recorded set and the counts
+    describing the same references.
+    """
+    stored: List[Dict] = []
+    for index, example in enumerate(examples or []):
+        if not isinstance(example, dict):
+            continue
+        ref = example.get('ref')
+        if not isinstance(ref, str) or not ref.strip():
+            continue
+        position = example.get('position')
+        stored.append({
+            'ref': ref.strip(),
+            'designation': (example.get('designation')
+                            if example.get('designation')
+                            in (FEW_SHOT_GOOD, FEW_SHOT_BAD)
+                            else FEW_SHOT_BAD),
+            'position': (int(position)
+                         if isinstance(position, int)
+                         and not isinstance(position, bool)
+                         else index),
+        })
+    return stored
+
+
+def _write_preview_run_item(run_id: str, usecase_id: str, created_by: str,
+                            model: str, task_type: str,
+                            label_set: List[str], detection_prompt: str,
+                            sample_count: int, few_shot_enabled: bool,
+                            attached_example_count: int,
+                            omitted_example_count: int = 0,
+                            few_shot_examples: Optional[List[Dict]] = None
+                            ) -> Dict:
+    """Write the `PREVIEW#{run_id}` / `RUN` item in status Running.
+
+    Carries everything the status route needs to answer without
+    re-reading the request, and no `assignee_user_id` — see the module
+    note above on why that keeps the item out of `assignee-index`
+    (Req 1.6).
+
+    `attached_example_count` / `omitted_example_count` are both recorded
+    (task 8.3) because they are the two halves of one
+    `select_few_shot_examples` result computed at start time: storing the
+    omitted count rather than re-deriving it from a total keeps the
+    status route's attached/omitted report consistent with what the
+    executor actually attaches, by construction (Req 7.2, 7.5, 7.6).
+
+    `few_shot_examples` (task 9.1) carries the *validated* example
+    references in stored order, so the executor attaches the same set the
+    request asked for without the request body being kept anywhere else —
+    the same relationship the Auto_Labeler has with
+    `auto_label.few_shot.examples` on the job record (Req 6.6, 7.6). The
+    key is written only when there is something to attach, so a run
+    without Few_Shot_Examples produces exactly the item shape task 8.2
+    wrote.
+    """
+    now = _now_epoch()
+    expires_at = now + _preview_lock_ttl_seconds(sample_count)
+    item = {
+        'job_id': _preview_run_pk(run_id),
+        'task_id': PREVIEW_RUN_SK,
+        'usecase_id': usecase_id,
+        'created_by': created_by,
+        'model': model,
+        'task_type': task_type,
+        'label_set': label_set,
+        'detection_prompt': detection_prompt,
+        'few_shot_enabled': bool(few_shot_enabled),
+        'attached_example_count': int(attached_example_count),
+        'omitted_example_count': int(omitted_example_count),
+        'sample_count': int(sample_count),
+        'status': PREVIEW_STATUS_RUNNING,
+        'created_at': now,
+        'expires_at': expires_at,
+        'ttl': expires_at + PREVIEW_ITEM_TTL_GRACE_SECONDS,
+    }
+    if few_shot_examples:
+        item['few_shot_examples'] = few_shot_examples
+    labeling_tasks_table.put_item(Item=item)
+    return item
+
+
+def _write_preview_sample_items(run_id: str,
+                                sample_keys: List[str]) -> None:
+    """Write one `IMAGE#{i:03d}` item per requested Sample_Image in
+    state Pending (Req 3.5, 4.6).
+
+    Every requested sample gets its item up front, so the status route
+    returns exactly one entry per Sample_Image for the whole life of the
+    run — including before the executor has reached it.
+    """
+    now = _now_epoch()
+    expires_at = now + _preview_lock_ttl_seconds(len(sample_keys))
+    with labeling_tasks_table.batch_writer() as batch:
+        for index, sample_key in enumerate(sample_keys):
+            batch.put_item(Item={
+                'job_id': _preview_run_pk(run_id),
+                'task_id': _preview_sample_sk(index),
+                'sample_key': sample_key,
+                'state': PREVIEW_SAMPLE_PENDING,
+                'created_at': now,
+                'ttl': expires_at + PREVIEW_ITEM_TTL_GRACE_SECONDS,
+            })
+
+
+def _read_preview_run_item(run_id: str) -> Optional[Dict]:
+    """The run's `RUN` item, or None for an unknown run id."""
+    return labeling_tasks_table.get_item(
+        Key={'job_id': _preview_run_pk(run_id),
+             'task_id': PREVIEW_RUN_SK},
+    ).get('Item')
+
+
+def _read_preview_sample_items(run_id: str) -> List[Dict]:
+    """The run's sample items ordered by request index.
+
+    The `IMAGE#` sort-key prefix excludes the `RUN` item, and the
+    zero-padded index makes DynamoDB's lexicographic sort order the
+    request order (Req 3.5, 4.6).
+    """
+    items: List[Dict] = []
+    kwargs: Dict[str, Any] = {
+        'KeyConditionExpression':
+            'job_id = :pk AND begins_with(task_id, :sk)',
+        'ExpressionAttributeValues': {
+            ':pk': _preview_run_pk(run_id),
+            ':sk': PREVIEW_SAMPLE_SK_PREFIX,
+        },
+    }
+    while True:
+        response = labeling_tasks_table.query(**kwargs)
+        items.extend(response.get('Items', []))
+        last_key = response.get('LastEvaluatedKey')
+        if not last_key:
+            break
+        kwargs['ExclusiveStartKey'] = last_key
+    return sorted(items, key=lambda item: item['task_id'])
+
+
+def _update_preview_sample_state(
+        run_id: str, index: int, state: str,
+        failure_category: Optional[str] = None,
+        failure_reason: Optional[str] = None,
+        result_s3_key: Optional[str] = None) -> None:
+    """Resolve one sample to Succeeded or Failed.
+
+    Written immediately as each sample resolves, so the wizard's polling
+    renders progressively and a per-sample failure is recorded without
+    disturbing any other sample (Req 3.7).
+    """
+    updates = ['#state = :state', 'resolved_at = :now']
+    values: Dict[str, Any] = {':state': state, ':now': _now_epoch()}
+    if failure_category is not None:
+        updates.append('failure_category = :category')
+        values[':category'] = failure_category
+    if failure_reason is not None:
+        updates.append('failure_reason = :reason')
+        values[':reason'] = failure_reason
+    if result_s3_key is not None:
+        updates.append('result_s3_key = :result_key')
+        values[':result_key'] = result_s3_key
+    labeling_tasks_table.update_item(
+        Key={'job_id': _preview_run_pk(run_id),
+             'task_id': _preview_sample_sk(index)},
+        UpdateExpression='SET ' + ', '.join(updates),
+        # `state` is a DynamoDB reserved word.
+        ExpressionAttributeNames={'#state': 'state'},
+        ExpressionAttributeValues=values,
+    )
+
+
+def _update_preview_run_status(run_id: str, status: str,
+                               run_error: Optional[str] = None) -> None:
+    """Move the run to a terminal status (Completed or Failed).
+
+    A run whose every sample failed still reaches Completed — the run
+    itself succeeded in producing an outcome per sample. Failed is for
+    the run as a whole (e.g. the async invoke never landed).
+    """
+    updates = ['#status = :status', 'updated_at = :now']
+    values: Dict[str, Any] = {':status': status, ':now': _now_epoch()}
+    if run_error is not None:
+        updates.append('run_error = :run_error')
+        values[':run_error'] = run_error
+    labeling_tasks_table.update_item(
+        Key={'job_id': _preview_run_pk(run_id),
+             'task_id': PREVIEW_RUN_SK},
+        UpdateExpression='SET ' + ', '.join(updates),
+        # `status` is a DynamoDB reserved word.
+        ExpressionAttributeNames={'#status': 'status'},
+        ExpressionAttributeValues=values,
+    )
+
+
+def _preview_result_key(usecase_id: str, run_id: str, index: int) -> str:
+    """`labeling-previews/{usecase_id}/{run_id}/{i}.json`.
+
+    Deliberately **not** under `labeling/{usecase_id}/{job_id}/prelabels/`:
+    a Preview_Run must produce no pipeline Pre_Label artifact (Req 1.6,
+    3.5). This prefix is referenced by no Labeling_Job and no
+    Task_Assignment, is readable only through the run's own presigned
+    URL, and is expired by the artifacts bucket lifecycle rule after one
+    day.
+    """
+    return f'{PREVIEW_RESULT_PREFIX}{usecase_id}/{run_id}/{index}.json'
+
+
+def _preview_success_payload(sample_key: str, prelabel: Dict,
+                             width: int, height: int) -> Dict:
+    """Result payload for a Sample_Image that produced a Pre_Label."""
+    return {
+        'sample_key': sample_key,
+        'state': PREVIEW_SAMPLE_SUCCEEDED,
+        'prelabel': prelabel,
+        'image_width': int(width),
+        'image_height': int(height),
+    }
+
+
+def _preview_failure_payload(sample_key: str, failure_category: str,
+                             failure_reason: str,
+                             raw_model_output: Optional[str] = None) -> Dict:
+    """Result payload for a failed Sample_Image (Req 9.1-9.6).
+
+    `raw_model_output` is included verbatim, with no truncation and no
+    normalization, only when a model response was actually received —
+    that is what lets the wizard show the complete raw text for an
+    `unusable_model_output` result (Req 9.3, 9.8).
+    """
+    payload = {
+        'sample_key': sample_key,
+        'state': PREVIEW_SAMPLE_FAILED,
+        'failure_category': failure_category,
+        'failure_reason': failure_reason,
+    }
+    if raw_model_output is not None:
+        payload['raw_model_output'] = raw_model_output
+    return payload
+
+
+def _write_preview_result_payload(usecase_id: str, run_id: str, index: int,
+                                  payload: Dict) -> str:
+    """Persist one result payload to the portal artifacts bucket and
+    return its key.
+
+    Payloads live in S3 rather than on the DynamoDB item because a
+    Segmentation Pre_Label carries an RLE counts string per region and
+    raw model output must be kept character-for-character, either of
+    which can exceed the 400 KB item limit.
+    """
+    key = _preview_result_key(usecase_id, run_id, index)
+    s3_client.put_object(
+        Bucket=PORTAL_ARTIFACTS_BUCKET,
+        Key=key,
+        Body=json.dumps(payload).encode('utf-8'),
+        ContentType='application/json',
+    )
+    return key
+
+
+def _presign_preview_result(result_s3_key: Optional[str]) -> Optional[str]:
+    """A read-only presigned GET URL for one result payload, or None.
+
+    Scoped to exactly one object and valid for 15 minutes, matching the
+    labeler image-grant bound. Returns None when the sample has not
+    resolved yet or the URL cannot be produced, so the status route
+    degrades to state-only rather than failing.
+    """
+    if not result_s3_key or not PORTAL_ARTIFACTS_BUCKET:
+        return None
+    try:
+        return s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': PORTAL_ARTIFACTS_BUCKET, 'Key': result_s3_key},
+            ExpiresIn=PREVIEW_RESULT_URL_EXPIRY_SECONDS,
+        )
+    except Exception as e:  # noqa: BLE001 — degrade to no URL
+        logger.warning(f"Could not presign preview result "
+                       f"{result_s3_key}: {e}")
+        return None
+
+
+def _resolve_sample_reference(reference: Any,
+                              default_bucket: Optional[str]) -> tuple:
+    """`(bucket, key)` for a Sample_Image reference (Req 8.7).
+
+    Resolution happens *before* any scope comparison, so the two
+    spellings of the same object classify identically:
+
+        'training-images/a.jpg'                  -> (default_bucket, key)
+        's3://uc-bucket/training-images/a.jpg'   -> ('uc-bucket', key)
+
+    A bare key resolves against the Use_Case's dataset bucket. Note
+    `_parse_s3_uri` alone is not enough here: fed a bare key it would
+    read the first path segment as a bucket name, which would let
+    `training-images/a.jpg` masquerade as bucket `training-images` — so
+    the `s3://` scheme is tested explicitly first.
+
+    Returns `(None, '')` for anything that is not a non-empty string,
+    which the caller reports as an out-of-scope reference rather than
+    dereferencing.
+    """
+    if not isinstance(reference, str) or not reference.strip():
+        return None, ''
+    candidate = reference.strip()
+    if candidate.startswith('s3://'):
+        bucket, key = _parse_s3_uri(candidate)
+        return (bucket or None), key
+    return default_bucket, candidate.lstrip('/')
+
+
+def _is_reference_in_scope(bucket: Optional[str], key: str,
+                           expected_bucket: Optional[str],
+                           expected_prefix: str = '') -> bool:
+    """Whether a resolved `(bucket, key)` lies inside the expected
+    bucket and prefix (Req 8.3, 8.7).
+
+    Applied to already-resolved locations only, so a bare key and its
+    `s3://` spelling always reach the same verdict. An empty
+    `expected_prefix` means "anywhere in the bucket", which is what the
+    Few_Shot_Example check needs (examples live under the Use_Case data
+    bucket but not under the dataset prefix).
+    """
+    if not bucket or not key or not expected_bucket:
+        return False
+    if bucket != expected_bucket:
+        return False
+    return key.startswith(expected_prefix or '')
+
+
+# ---------------------------------------------------------------------------
+# POST /labeling-preview/runs (task 8.2 — llm-autolabel-prompt-tuning
+# Requirements 1.3, 1.6, 3.5, 3.8, 6.3, 8.1-8.8)
+# ---------------------------------------------------------------------------
+# The order of operations is fixed and is the whole security model of the
+# route:
+#
+#   1. authorization       @rbac_check([MANAGE_LABELING_JOBS]) scoped to
+#                          the *body's* usecase_id, answering one fixed
+#                          403 body (Req 8.2, 8.6)
+#   2. request validation  every rule evaluated together, so the response
+#                          enumerates every violation (Req 8.3-8.5, 6.3)
+#   3. scope resolution    each Sample_Image reference resolved to
+#                          (bucket, key) *before* being compared against
+#                          the Use_Case dataset location (Req 8.7)
+#   4. concurrency claim   one conditional write per user and Use_Case
+#                          (Req 8.8)
+#
+# No S3 object is read and no model is invoked on any rejection path: the
+# route only ever writes DynamoDB state and fires the async self-invoke.
+# The executor (task 9.1) is the first code that touches an image.
+
+# Only the prompt-guided LLM family may be previewed (Req 8.5).
+PREVIEW_MODEL_PREFIX = 'llm:'
+# Fixed response strings. The 403 body carries no dataset content and no
+# existence information, so it reads identically whether or not the
+# Use_Case or any referenced object exists (Req 8.2).
+PREVIEW_NOT_AUTHORIZED_MESSAGE = 'Not authorized'
+PREVIEW_VALIDATION_FAILED_MESSAGE = 'Preview run validation failed'
+PREVIEW_IN_PROGRESS_MESSAGE = ('A preview run is already in progress for '
+                               'this use case')
+# The executor action this function dispatches to when self-invoked.
+PREVIEW_EXECUTOR_ACTION = 'execute_preview_run'
+
+
+def _llm_model_image_limits() -> Dict[str, Any]:
+    """The Model_Image_Limit configuration from LLM_MODEL_IMAGE_LIMITS
+    (Req 7.1).
+
+    Read per call so the environment stays authoritative. An absent,
+    blank, malformed or non-object value resolves to an empty mapping,
+    in which case every model resolves the shared default of 20 rather
+    than erroring — configuration can never widen or zero the bound.
+    """
+    raw = (os.environ.get('LLM_MODEL_IMAGE_LIMITS') or '').strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning('LLM_MODEL_IMAGE_LIMITS is not valid JSON; using '
+                       'the default Model_Image_Limit for every model')
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _preview_request_body(event: Dict) -> Dict:
+    """The request body as a dict; an absent or unparseable body reads as
+    an empty object so validation reports the missing elements rather
+    than failing with a parse error."""
+    try:
+        body = json.loads((event or {}).get('body') or '{}')
+    except (ValueError, TypeError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _inject_preview_usecase_scope(event: Dict, body: Dict) -> None:
+    """Make the **body's** usecase_id the @rbac_check scope (Req 8.6).
+
+    The value is written (not `setdefault`) so a query string cannot
+    nominate a different Use_Case than the one the run will actually
+    execute against — authorization and execution always agree on the
+    scope.
+
+    A missing, blank or non-string usecase_id pins the scope to 'global'
+    instead: the permission check still runs first (so an unauthorized
+    caller gets the same 403 either way and learns nothing), and the
+    missing parameter is then reported as a validation error to callers
+    who do hold the permission. Pinning also keeps a non-string body
+    value out of the permission lookup.
+    """
+    params = event.get('queryStringParameters') or {}
+    raw = body.get('usecase_id')
+    params['usecase_id'] = (raw.strip()
+                            if isinstance(raw, str) and raw.strip()
+                            else 'global')
+    event['queryStringParameters'] = params
+
+
+def _validate_preview_few_shot(examples: List[Any],
+                               data_bucket: Optional[str]) -> List[Dict]:
+    """Validate the Few_Shot_Example references of an enabled
+    Few_Shot_Option (Req 6.3, 8.4).
+
+    Rules: at least one example, at most EXAMPLE_IMAGES_MAX per
+    designation, every reference a JPEG or PNG carrying a good/bad
+    designation, and every reference resolving inside the Use_Case data
+    bucket. The bucket check has no prefix constraint — example images
+    live under `labeling-examples/` in the Use_Case data bucket, not
+    under the dataset prefix.
+
+    Every violated rule contributes its own entry; nothing
+    short-circuits.
+    """
+    errors: List[Dict] = []
+    if not examples:
+        errors.append(_validation_error(
+            'few_shot',
+            'At least one example image is required for the few-shot '
+            'examples option'))
+        return errors
+
+    counts = {FEW_SHOT_GOOD: 0, FEW_SHOT_BAD: 0}
+    for index, example in enumerate(examples):
+        ref = example.get('ref') if isinstance(example, dict) else None
+        designation = (example.get('designation')
+                       if isinstance(example, dict) else None)
+        if not isinstance(ref, str) or not ref.strip():
+            errors.append(_validation_error(
+                'few_shot',
+                f'Few-shot example {index} must carry an image reference',
+                example_index=index))
+            continue
+        if designation not in (FEW_SHOT_GOOD, FEW_SHOT_BAD):
+            errors.append(_validation_error(
+                'few_shot',
+                f"Few-shot example image '{ref}' must be designated "
+                f"'{FEW_SHOT_GOOD}' or '{FEW_SHOT_BAD}'",
+                example_ref=ref))
+        else:
+            counts[designation] += 1
+        if not ref.lower().endswith(SUPPORTED_IMAGE_EXTENSIONS):
+            errors.append(_validation_error(
+                'few_shot',
+                f"Few-shot example image '{ref}' is not a JPEG or PNG "
+                f'image',
+                example_ref=ref))
+        # Undecidable without a resolved Use_Case data bucket; that case
+        # is already reported against usecase_id.
+        if data_bucket:
+            bucket, key = _resolve_sample_reference(ref, data_bucket)
+            if not _is_reference_in_scope(bucket, key, data_bucket):
+                errors.append(_validation_error(
+                    'few_shot',
+                    f"Few-shot example image '{ref}' is outside the use "
+                    f"case data bucket '{data_bucket}'",
+                    example_ref=ref))
+
+    for designation, count in counts.items():
+        if count > EXAMPLE_IMAGES_MAX:
+            errors.append(_validation_error(
+                'few_shot',
+                f'At most {EXAMPLE_IMAGES_MAX} {designation} example '
+                f'images can be attached as few-shot examples',
+                designation=designation, example_count=count))
+    return errors
+
+
+def _validate_preview_run_request(body: Dict) -> tuple:
+    """Validate a Preview_Run request in full and return
+    `(config, errors)`.
+
+    Every rule is evaluated — nothing short-circuits on the first
+    violation — so one 400 response tells the Job_Creator everything that
+    is wrong with the request (Req 8.4). Rules that cannot be decided
+    (sample scope with no resolvable dataset bucket) are skipped rather
+    than guessed; the reason they are undecidable is itself already
+    reported.
+
+    Only DynamoDB/Use_Case metadata is read here: no dataset object is
+    fetched and no model is invoked, on this path or on any path that
+    leads to a rejection (Req 8.4, 8.5).
+    """
+    errors: List[Dict] = []
+
+    # --- Use_Case and its dataset bucket -------------------------------
+    # Reached only from inside the @rbac_check'd implementation, so an
+    # unauthorized caller can never use "use case not found" as an
+    # existence oracle (Req 8.2, 8.6).
+    raw_usecase_id = body.get('usecase_id')
+    usecase_id = (raw_usecase_id.strip()
+                  if isinstance(raw_usecase_id, str) else '')
+    usecase = None
+    dataset_bucket = None
+    if not usecase_id:
+        errors.append(_validation_error(
+            'usecase_id', 'usecase_id is required'))
+    else:
+        try:
+            usecase = get_usecase(usecase_id)
+        except ValueError:
+            errors.append(_validation_error(
+                'usecase_id', 'Use case not found', usecase_id=usecase_id))
+        if usecase:
+            dataset_bucket = (usecase.get('data_s3_bucket')
+                              or usecase.get('s3_bucket'))
+            if not dataset_bucket:
+                errors.append(_validation_error(
+                    'usecase_id', 'Use case has no data bucket configured'))
+
+    # --- model: the llm: family only (Req 8.5) -------------------------
+    raw_model = body.get('model')
+    model = raw_model if isinstance(raw_model, str) else ''
+    model_identifier = None
+    if not model.startswith(PREVIEW_MODEL_PREFIX):
+        errors.append(_validation_error(
+            'model',
+            f"Preview runs require a prompt-guided LLM auto-label model "
+            f"identifier of the form '{PREVIEW_MODEL_PREFIX}<model_id>'",
+            model=model))
+    else:
+        # Split on the first colon only: model identifiers legitimately
+        # contain colons (e.g. 'us.amazon.nova-pro-v1:0').
+        candidate = model.split(':', 1)[1]
+        identifier_error = validate_model_identifier(candidate)
+        if identifier_error:
+            errors.append(_validation_error(
+                'model', f'Auto-label {identifier_error}', model=model))
+        else:
+            model_identifier = candidate
+
+    # --- Detection_Prompt (Req 8.4) ------------------------------------
+    # Emptiness judged on the stripped value, length on the raw value;
+    # the raw string is what the run carries, character-for-character.
+    raw_prompt = body.get('detection_prompt')
+    detection_prompt = None
+    if not isinstance(raw_prompt, str) or not raw_prompt.strip():
+        errors.append(_validation_error(
+            'detection_prompt',
+            'A non-empty detection_prompt is required for a preview run'))
+    elif len(raw_prompt) > DETECTION_PROMPT_MAX_LENGTH:
+        errors.append(_validation_error(
+            'detection_prompt',
+            f'detection_prompt must be at most '
+            f'{DETECTION_PROMPT_MAX_LENGTH} characters',
+            detection_prompt_length=len(raw_prompt)))
+    else:
+        detection_prompt = raw_prompt
+
+    # --- Labeling_Modality and Label_Set (Req 8.4) ---------------------
+    # Deliberately the same rules create_dda_job applies, including the
+    # fixed binary Label_Set for Classification, so a request the preview
+    # accepts is a request the job creation flow accepts.
+    modality = body.get('task_type') or body.get('modality')
+    label_set: Optional[List[str]] = None
+    if modality not in VALID_MODALITIES:
+        errors.append(_validation_error(
+            'task_type',
+            f"Labeling modality must be one of "
+            f"{', '.join(VALID_MODALITIES)}",
+            task_type=modality))
+    elif modality == 'Classification':
+        label_set = list(CLASSIFICATION_LABEL_SET)
+    else:
+        label_set, label_errors = _validate_label_set(body.get('label_set'))
+        errors.extend(label_errors)
+
+    # --- dataset prefix: what the Sample_Images are scoped to ----------
+    raw_prefix = body.get('dataset_prefix')
+    dataset_prefix = raw_prefix if isinstance(raw_prefix, str) else ''
+    if not dataset_prefix:
+        errors.append(_validation_error(
+            'dataset_prefix',
+            'dataset_prefix is required to scope the sample images to the '
+            'use case dataset'))
+
+    # --- Sample_Images: count, then resolved scope (Req 8.3, 8.4, 8.7) -
+    raw_samples = body.get('sample_images')
+    samples = raw_samples if isinstance(raw_samples, list) else []
+    if (not isinstance(raw_samples, list)
+            or not PREVIEW_SAMPLE_MIN <= len(samples) <= PREVIEW_SAMPLE_MAX):
+        errors.append(_validation_error(
+            'sample_images',
+            f'Between {PREVIEW_SAMPLE_MIN} and {PREVIEW_SAMPLE_MAX} sample '
+            f'images must be selected for a preview run',
+            sample_count=len(samples)))
+
+    sample_keys: List[str] = []
+    for reference in samples:
+        # Req 8.7: resolve to (bucket, key) *first*, so 'a/b.jpg' and
+        # 's3://bucket/a/b.jpg' always reach the same verdict, and an
+        # out-of-scope reference is classified without being dereferenced.
+        bucket, key = _resolve_sample_reference(reference, dataset_bucket)
+        if not dataset_bucket:
+            continue  # undecidable; already reported against usecase_id
+        if not _is_reference_in_scope(bucket, key, dataset_bucket,
+                                      dataset_prefix):
+            printable = (reference if isinstance(reference, str)
+                         else str(reference))
+            errors.append(_validation_error(
+                'sample_images',
+                f"Sample image '{printable}' is outside the use case "
+                f"dataset location s3://{dataset_bucket}/{dataset_prefix}",
+                sample_image=printable))
+            continue
+        sample_keys.append(key)
+
+    # --- Few_Shot_Option (Req 6.3) -------------------------------------
+    few_shot_enabled = False
+    few_shot_examples: List[Any] = []
+    raw_few_shot = body.get('few_shot')
+    if raw_few_shot is None:
+        pass  # absent means disabled — the pre-feature request shape
+    elif isinstance(raw_few_shot, bool):
+        few_shot_enabled = raw_few_shot
+    elif isinstance(raw_few_shot, dict):
+        few_shot_enabled = bool(raw_few_shot.get('enabled'))
+        raw_examples = raw_few_shot.get('examples')
+        few_shot_examples = (raw_examples if isinstance(raw_examples, list)
+                             else [])
+    else:
+        errors.append(_validation_error(
+            'few_shot',
+            "few_shot must be an object like {'enabled': true, "
+            "'examples': [...]}"))
+
+    if few_shot_enabled:
+        errors.extend(_validate_preview_few_shot(
+            few_shot_examples, dataset_bucket))
+
+    config = {
+        'usecase_id': usecase_id,
+        'usecase': usecase,
+        'dataset_bucket': dataset_bucket,
+        'dataset_prefix': dataset_prefix,
+        'model': model,
+        'model_identifier': model_identifier,
+        'detection_prompt': detection_prompt,
+        'task_type': modality,
+        'label_set': label_set,
+        'sample_keys': sample_keys,
+        'few_shot_enabled': few_shot_enabled,
+        'few_shot_examples': few_shot_examples,
+    }
+    return config, errors
+
+
+def _invoke_preview_executor(run_id: str, context) -> Optional[str]:
+    """Async self-invoke of the Preview_Run executor.
+
+    The function name comes from the invocation context (with the Lambda
+    runtime's own AWS_LAMBDA_FUNCTION_NAME as a fallback) rather than
+    from a configured environment variable: a stack that passed its own
+    function name to itself would be a CloudFormation self-reference.
+
+    Returns None when the executor was started, or a reason string when
+    the invoke failed — in which case the caller flips the run to Failed
+    and releases the lock, so the wizard's poll surfaces the failure and
+    the user is not left holding an in-flight claim (Req 4.7, 8.8).
+
+    An environment with no resolvable function name (unit tests) is
+    logged and treated as "not started" without failing the run, the
+    same guard `_invoke_labeling_worker` uses.
+    """
+    function_name = (getattr(context, 'function_name', None)
+                     or os.environ.get('AWS_LAMBDA_FUNCTION_NAME'))
+    if not function_name:
+        logger.warning('No Lambda function name available; skipping the '
+                       f'preview executor invoke for run {run_id}')
+        return None
+    try:
+        lambda_client.invoke(
+            FunctionName=function_name,
+            InvocationType='Event',
+            Payload=json.dumps({'action': PREVIEW_EXECUTOR_ACTION,
+                                'run_id': run_id}),
+        )
+        return None
+    except Exception as e:  # noqa: BLE001 — reported on the run item
+        logger.error(f"Failed to async-invoke the preview executor "
+                     f"({function_name}) for run {run_id}: {e}")
+        return f'The preview run could not be started: {e}'
+
+
+def start_preview_run(event, context):
+    """POST /labeling-preview/runs
+
+    Body (design's Preview_API section):
+
+        {usecase_id, dataset_prefix, model, detection_prompt, task_type,
+         label_set, sample_images: [1..5 keys or s3:// URIs],
+         few_shot: {enabled, examples: [{ref, designation, position}]}}
+
+    Responses:
+        202 {run_id, sample_count, status: 'Running'}
+        400 {error: 'Preview run validation failed', validation_errors: []}
+        403 {error: 'Not authorized'}
+        409 {error: 'A preview run is already in progress for this use case'}
+
+    This wrapper exists for Requirement 8.2: the authorization decision
+    must be indistinguishable for every unauthorized caller. @rbac_check's
+    own 403 body echoes the required permissions and the resolved scope,
+    so it is replaced here by one fixed body. The decorator's
+    `unauthorized_access` audit event is what records the denial.
+    """
+    body = _preview_request_body(event)
+    _inject_preview_usecase_scope(event, body)
+    response = _start_preview_run(event, context)
+    if response.get('statusCode') == 403:
+        # The implementation below never answers 403 itself, so this can
+        # only be the authorization gate.
+        return create_response(403, {
+            'error': PREVIEW_NOT_AUTHORIZED_MESSAGE})
+    return response
+
+
+@rbac_check([Permission.MANAGE_LABELING_JOBS], allow_global=True)
+def _start_preview_run(event, context):
+    """The authorized body of POST /labeling-preview/runs.
+
+    Everything here runs *after* the permission check, which is what
+    makes "use case not found" and every other validation message safe
+    to return (Req 8.6). `allow_global=True` only matters for a request
+    that names no Use_Case at all: the check still runs (unauthorized
+    callers get the same 403) and the missing parameter is then reported
+    as a validation error.
+    """
+    usecase_id = ''
+    user_sub = ''
+    lock_claimed = False
+    try:
+        body = _preview_request_body(event)
+        user = get_user_from_event(event)
+        user_sub = user['user_id']
+
+        config, errors = _validate_preview_run_request(body)
+        if errors:
+            # Req 8.4: one response, every violation, nothing touched.
+            return create_response(400, {
+                'error': PREVIEW_VALIDATION_FAILED_MESSAGE,
+                'validation_errors': errors,
+            })
+
+        usecase_id = config['usecase_id']
+        sample_keys = config['sample_keys']
+        sample_count = len(sample_keys)
+        run_id = _new_preview_run_id()
+
+        # Req 8.8: one in-flight run per user and Use_Case. The claim is a
+        # single conditional write, so concurrent requests cannot both
+        # win, and the rejected request reads no object and invokes no
+        # model.
+        if not _claim_preview_lock(usecase_id, user_sub, run_id,
+                                   sample_count):
+            return create_response(409, {
+                'error': PREVIEW_IN_PROGRESS_MESSAGE})
+        lock_claimed = True
+
+        # The attached count is recorded on the run so the status route
+        # can report attached/omitted without re-resolving anything. It
+        # comes from the same shared selection the Auto_Labeler uses, so
+        # the counts describe exactly what the executor will attach
+        # (Req 7.2, 7.5, 7.6).
+        attached: List[Dict] = []
+        omitted: List[Dict] = []
+        stored_examples: List[Dict] = []
+        if config['few_shot_enabled']:
+            stored_examples = _preview_stored_examples(
+                config['few_shot_examples'])
+            attached, omitted = select_few_shot_examples(
+                stored_examples,
+                resolve_model_image_limit(config['model_identifier'],
+                                          _llm_model_image_limits()))
+
+        _write_preview_run_item(
+            run_id=run_id,
+            usecase_id=usecase_id,
+            created_by=user_sub,
+            model=config['model'],
+            task_type=config['task_type'],
+            label_set=config['label_set'] or [],
+            detection_prompt=config['detection_prompt'],
+            sample_count=sample_count,
+            few_shot_enabled=config['few_shot_enabled'],
+            attached_example_count=len(attached),
+            omitted_example_count=len(omitted),
+            # Recorded so the executor attaches this exact reference set
+            # (Req 6.6, 7.6); absent when the option is off.
+            few_shot_examples=stored_examples,
+        )
+        # Every requested sample gets its Pending item up front, so the
+        # status route answers with one entry per Sample_Image from the
+        # moment the run exists (Req 3.5, 4.6).
+        _write_preview_sample_items(run_id, sample_keys)
+
+        # Req 3.8: requesting identity, Use_Case, model identifier and
+        # Sample_Image count.
+        log_audit_event(
+            user_id=user_sub,
+            action='preview_run',
+            resource_type='labeling_preview',
+            resource_id=run_id,
+            result='success',
+            details={
+                'usecase_id': usecase_id,
+                'model': config['model'],
+                'sample_count': sample_count,
+                'task_type': config['task_type'],
+                'few_shot_enabled': config['few_shot_enabled'],
+                'attached_example_count': len(attached),
+            },
+        )
+
+        response: Dict[str, Any] = {
+            'run_id': run_id,
+            'sample_count': sample_count,
+            'status': PREVIEW_STATUS_RUNNING,
+        }
+
+        # The run is recorded before the executor is started, so a failed
+        # invoke is reported on the run itself rather than losing the
+        # request: the run flips to Failed with its reason and the lock is
+        # released immediately (Req 4.7, 8.8). The response stays 202 —
+        # the run exists and the wizard polls it — but reports the actual
+        # status instead of claiming Running.
+        invoke_error = _invoke_preview_executor(run_id, context)
+        if invoke_error:
+            _update_preview_run_status(
+                run_id, PREVIEW_STATUS_FAILED, run_error=invoke_error)
+            _release_preview_lock(usecase_id, user_sub)
+            lock_claimed = False
+            response['status'] = PREVIEW_STATUS_FAILED
+            response['run_error'] = invoke_error
+
+        return create_response(202, response)
+
+    except Exception as e:
+        logger.error(f"Error starting preview run: {str(e)}", exc_info=True)
+        if lock_claimed and usecase_id and user_sub:
+            # Never leave a claim behind for a run that will not execute.
+            try:
+                _release_preview_lock(usecase_id, user_sub)
+            except Exception as release_error:  # noqa: BLE001
+                logger.warning(f"Could not release the preview lock for "
+                               f"{usecase_id}/{user_sub}: {release_error}")
+        return create_response(500, {
+            'error': 'Failed to start the preview run'})
+
+
+# ---------------------------------------------------------------------------
+# GET /labeling-preview/runs/{runId} (task 8.3 — llm-autolabel-prompt-tuning
+# Requirements 3.5, 4.6, 9.6)
+# ---------------------------------------------------------------------------
+# The status route is the wizard's only view of a run: it answers the run
+# status, the Sample_Image count, the few-shot attached/omitted counts and
+# exactly one result entry per requested Sample_Image, in request order,
+# for the whole life of the run (Req 3.5, 4.6). Per-sample failure
+# category and reason are duplicated onto this response so a failure
+# renders without fetching its payload; the payload adds the verbatim raw
+# model output (Req 9.6).
+#
+# One fixed 404 body covers both an unknown run id and a run created by
+# another user, so a run belonging to someone else is indistinguishable
+# from one that never existed and no run data leaks with the denial.
+PREVIEW_RUN_NOT_FOUND_MESSAGE = 'Preview run not found'
+
+
+def _preview_int(value: Any, default: int = 0) -> int:
+    """A DynamoDB numeric attribute as a plain int.
+
+    Number attributes come back as Decimal; the wire shape is integers,
+    so they are narrowed here rather than relying on the response
+    encoder's float fallback.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _inject_preview_run_usecase_scope(event: Dict, run_id: str) -> None:
+    """Make the run's usecase_id the @rbac_check scope for the status
+    route.
+
+    Same shape as `_inject_job_usecase_scope`: when the run cannot be
+    resolved the scope falls back to 'global' (allow_global) so the
+    permission check still runs *first* and the handler answers 404
+    afterwards — resolving the scope must never become an existence
+    oracle that answers ahead of authorization.
+    """
+    if not run_id:
+        return
+    try:
+        run = _read_preview_run_item(run_id)
+    except Exception as e:  # noqa: BLE001 — scope falls back to global
+        logger.warning(f"Could not resolve usecase scope for preview run "
+                       f"{run_id}: {e}")
+        return
+    if run and run.get('usecase_id'):
+        params = event.get('queryStringParameters') or {}
+        params.setdefault('usecase_id', run['usecase_id'])
+        event['queryStringParameters'] = params
+
+
+def _preview_result_entry(item: Dict) -> Dict[str, Any]:
+    """One `results` entry for one Sample_Image item.
+
+    `state` is always present. Failure category/reason and the presigned
+    result-payload URL appear only once the sample has resolved, so a
+    Pending entry carries no half-populated outcome. The presigned URL is
+    generated per request (never stored) and is scoped to that one
+    payload object; when it cannot be produced the entry degrades to
+    state-only rather than failing the whole response.
+    """
+    entry: Dict[str, Any] = {
+        'index': _preview_sample_index(item['task_id']),
+        'sample_key': item.get('sample_key', ''),
+        'state': item.get('state', PREVIEW_SAMPLE_PENDING),
+    }
+    if entry['state'] == PREVIEW_SAMPLE_PENDING:
+        return entry
+
+    if item.get('failure_category'):
+        entry['failure_category'] = item['failure_category']
+    if item.get('failure_reason'):
+        entry['failure_reason'] = item['failure_reason']
+    if item.get('resolved_at') is not None:
+        entry['resolved_at'] = _preview_int(item.get('resolved_at'))
+    result_url = _presign_preview_result(item.get('result_s3_key'))
+    if result_url:
+        entry['result_url'] = result_url
+        entry['result_url_expires_in'] = PREVIEW_RESULT_URL_EXPIRY_SECONDS
+    return entry
+
+
+def get_preview_run(event, context):
+    """GET /labeling-preview/runs/{runId}
+
+    Responses:
+        200 {run_id, status, sample_count, few_shot, results: [...]}
+        403 {error: 'Not authorized'}
+        404 {error: 'Preview run not found'}
+
+    The 403 body is flattened for the same reason `start_preview_run`
+    flattens it: @rbac_check's own body echoes the required permissions
+    and the resolved scope, which would describe the run's Use_Case to a
+    caller who is not allowed to see it.
+    """
+    run_id = ((event or {}).get('pathParameters') or {}).get('runId') or ''
+    _inject_preview_run_usecase_scope(event, run_id)
+    response = _get_preview_run(event, context)
+    if response.get('statusCode') == 403:
+        # The implementation below never answers 403 itself.
+        return create_response(403, {
+            'error': PREVIEW_NOT_AUTHORIZED_MESSAGE})
+    return response
+
+
+@rbac_check([Permission.MANAGE_LABELING_JOBS], allow_global=True)
+def _get_preview_run(event, context):
+    """The authorized body of GET /labeling-preview/runs/{runId}.
+
+    Ownership is enforced here, after the permission check: a run whose
+    `created_by` is not the caller answers the *same* 404 body as an
+    unknown run id, carrying no run data at all — the two cases are
+    indistinguishable.
+    """
+    try:
+        run_id = ((event or {}).get('pathParameters') or {}).get('runId') or ''
+        user_sub = get_user_from_event(event)['user_id']
+
+        run = _read_preview_run_item(run_id) if run_id else None
+        if not run or run.get('created_by') != user_sub:
+            return create_response(404, {
+                'error': PREVIEW_RUN_NOT_FOUND_MESSAGE})
+
+        # One entry per requested Sample_Image, in request order: the
+        # items were written Pending up front by the start route and the
+        # zero-padded IMAGE#{i:03d} sort key makes DynamoDB's ordering the
+        # request ordering (Req 3.5, 4.6).
+        results = [_preview_result_entry(item)
+                   for item in _read_preview_sample_items(run_id)]
+
+        response: Dict[str, Any] = {
+            'run_id': run_id,
+            'status': run.get('status', PREVIEW_STATUS_RUNNING),
+            'sample_count': _preview_int(run.get('sample_count'),
+                                         len(results)),
+            'few_shot': {
+                'enabled': bool(run.get('few_shot_enabled')),
+                # Recorded by the start route from the same
+                # select_few_shot_examples call the executor's attachment
+                # follows, so these counts always describe what is
+                # actually attached (Req 7.5, 7.6).
+                'attached': _preview_int(run.get('attached_example_count')),
+                'omitted': _preview_int(run.get('omitted_example_count')),
+            },
+            'results': results,
+        }
+        if run.get('run_error'):
+            # A run that failed as a whole (e.g. the executor invoke never
+            # landed) reports why, so the wizard can surface the failure
+            # and re-enable the controls (Req 4.7).
+            response['run_error'] = run['run_error']
+        return create_response(200, response)
+
+    except Exception as e:
+        logger.error(f"Error reading preview run: {str(e)}", exc_info=True)
+        return create_response(500, {
+            'error': 'Failed to read the preview run'})
+
+
+def _handle_preview_action(action: str, event: Dict, context):
+    """Non-HTTP action dispatch, entered from `handler` ahead of the HTTP
+    routing (task 8.2).
+
+    `POST /labeling-preview/runs` self-invokes this same function with
+    `{'action': 'execute_preview_run', 'run_id': ...}`; the executor that
+    answers it is task 9.1.
+    """
+    if action == PREVIEW_EXECUTOR_ACTION:
+        return execute_preview_run((event or {}).get('run_id'))
+
+    message = f"Unknown dda_labeling action: {action!r}"
+    logger.error(message)
+    return {'error': message}
+
+
+# ---------------------------------------------------------------------------
+# Preview_Run executor (task 9.1 — llm-autolabel-prompt-tuning
+# Requirements 1.6, 3.1-3.3, 3.5-3.7, 3.9-3.11, 6.6, 6.8, 7.2, 7.6,
+# 9.1-9.6)
+# ---------------------------------------------------------------------------
+# Entered only through the non-HTTP `action` branch of `handler`, from the
+# async self-invoke the start route fires. For each Sample_Image, in
+# request order:
+#
+#   1. read the bytes through `get_s3_client_for_bucket` — the same
+#      cross-account mechanism, including its single-account direct-access
+#      fallback, the Auto_Labeler uses (Req 3.6)
+#   2. decode the pixel dimensions from the PNG/JPEG header (Req 3.9)
+#   3. read the attached Few_Shot_Example bytes (Req 6.6, 6.8)
+#   4. call `dda_llm_prelabel.generate_llm_prelabel` — *the identical
+#      call the Auto_Labeler makes*, with the same argument construction,
+#      so exactly one Converse request is issued per sample and the
+#      Coordinate_Guidance parsing, validation and Pre_Label conversion
+#      are literally the same code (Req 3.1, 3.2, 3.3, 3.10, 3.11)
+#
+# Each outcome is written the moment it resolves — payload JSON to
+# `labeling-previews/{usecase_id}/{run_id}/{i}.json`, state plus category
+# and reason onto the `IMAGE#{i}` item — so the wizard's polling renders
+# progressively and a per-sample failure never disturbs another sample
+# (Req 3.5, 3.7). Steps 1-3 fail without any invocation, which is what
+# makes `image_access_failure`, `unsupported_image_content` and
+# `unreadable_example_image` "zero model invocations" categories
+# (Req 3.9, 6.8, 9.4, 9.5).
+#
+# The run reaches Completed after the last sample even when every sample
+# failed — "Failed" is reserved for a run that could produce no per-sample
+# results at all — and the in-flight lock is released on every terminal
+# path, including an unexpected exception (Req 8.8).
+#
+# Nothing here writes a Labeling_Job record, a Task_Assignment item, a
+# pipeline Pre_Label artifact under `labeling/{usecase_id}/`, or a labeler
+# notification (Req 1.6, 3.5).
+
+# The three categories the executor produces itself, before any model
+# invocation. The other three come from `LlmPrelabelError.category`
+# unchanged, so their reasons are the strings the Auto_Labeler records.
+PREVIEW_CATEGORY_IMAGE_ACCESS = 'image_access_failure'
+PREVIEW_CATEGORY_UNSUPPORTED_IMAGE = 'unsupported_image_content'
+PREVIEW_CATEGORY_UNREADABLE_EXAMPLE = 'unreadable_example_image'
+# The Auto_Labeler's reason for an undecodable image, verbatim.
+PREVIEW_UNSUPPORTED_IMAGE_REASON = (
+    'unsupported image content: could not determine image dimensions for '
+    'coordinate guidance')
+
+
+class PreviewSampleFailure(Exception):
+    """One Sample_Image's failure, carrying exactly one category from
+    PREVIEW_FAILURE_CATEGORIES (Req 9.6).
+
+    Raised by every step of `_run_preview_sample`, so a sample always
+    resolves to precisely one category with one reason and, when a model
+    response was received, the raw model output character-for-character
+    (Req 9.3).
+    """
+
+    def __init__(self, category: str, reason: str,
+                 raw_model_output: Optional[str] = None):
+        super().__init__(reason)
+        self.category = category
+        self.reason = reason
+        self.raw_model_output = raw_model_output
+
+
+def _preview_image_dimensions(image_bytes: bytes) -> Optional[tuple]:
+    """(width, height) parsed from PNG IHDR / JPEG SOF headers, or None.
+
+    A literal copy of `dda_autolabel_worker._image_dimensions`: the
+    dimensions feed the prompt text, so the preview must decode them the
+    same way the Auto_Labeler does or the two requests would differ for
+    the same image (Req 3.1). It is duplicated rather than imported
+    because the worker is a separate Lambda entry point in the same
+    bundle — moving it to the shared layer would touch the worker's own
+    code path, which this feature keeps byte-identical.
+
+    Kept dependency-free (no Pillow in the functions bundle).
+    """
+    if image_bytes[:8] == b'\x89PNG\r\n\x1a\n' and len(image_bytes) >= 24:
+        width, height = struct.unpack('>II', image_bytes[16:24])
+        return (width, height) if width and height else None
+    if image_bytes[:2] == b'\xff\xd8':
+        index = 2
+        while index + 9 <= len(image_bytes):
+            if image_bytes[index] != 0xFF:
+                index += 1
+                continue
+            marker = image_bytes[index + 1]
+            # Padding / standalone markers carry no length segment.
+            if marker in (0xFF, 0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
+                index += 2
+                continue
+            if index + 4 > len(image_bytes):
+                break
+            segment_length = struct.unpack(
+                '>H', image_bytes[index + 2:index + 4])[0]
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                if index + 9 <= len(image_bytes):
+                    height, width = struct.unpack(
+                        '>HH', image_bytes[index + 5:index + 9])
+                    return (width, height) if width and height else None
+                break
+            index += 2 + segment_length
+    return None
+
+
+def _preview_s3_client(clients: Dict[str, Any], usecase: Dict, bucket: str):
+    """Cached S3 client for one bucket, through the Use_Case's
+    cross-account role with the single-account direct-access fallback
+    (Req 3.6).
+
+    `get_s3_client_for_bucket` is the same entry point the Auto_Labeler's
+    `_dataset_s3_client` uses, so the preview reads Sample_Images and
+    example images over exactly the mechanism labeling time reads them
+    over — including the fallback. Clients are cached per bucket for the
+    life of the run: credentials, never bytes, so per-sample reads stay
+    independent.
+    """
+    if bucket not in clients:
+        clients[bucket] = get_s3_client_for_bucket(
+            usecase, bucket, 'dda-labeling-preview')
+    return clients[bucket]
+
+
+def _read_preview_object(clients: Dict[str, Any], usecase: Dict,
+                         bucket: str, key: str) -> bytes:
+    """One object's bytes, or raise the caller's failure category."""
+    return _preview_s3_client(clients, usecase, bucket).get_object(
+        Bucket=bucket, Key=key)['Body'].read()
+
+
+def _resolve_preview_few_shot_images(run: Dict, clients: Dict[str, Any],
+                                     usecase: Dict,
+                                     dataset_bucket: Optional[str],
+                                     model_identifier: str) -> tuple:
+    """`(images, model_image_limit)` for one Sample_Image's request
+    (Req 6.6, 6.8, 7.2, 7.6).
+
+    The mirror of `dda_autolabel_worker._resolve_few_shot_images`: the
+    same `select_few_shot_examples(stored, resolve_model_image_limit(...))`
+    selection over the same stored reference shape, the same
+    `{'bytes', 'format', 'designation'}` image dicts in the same order,
+    and only the attached references are read — an omitted reference is
+    never fetched. The one difference is where the references come from:
+    the RUN item for a preview, the job record at labeling time.
+
+    A disabled option (or a run with no recorded references) returns
+    `([], limit)`, which is the pre-feature request shape (Req 10.2).
+
+    Raises:
+        PreviewSampleFailure: `unreadable_example_image`, naming the
+            reference, when an attached example cannot be read. It fails
+            only this Sample_Image (Req 6.8).
+    """
+    limit = resolve_model_image_limit(model_identifier,
+                                      _llm_model_image_limits())
+    if not run.get('few_shot_enabled'):
+        return [], limit
+    stored = run.get('few_shot_examples')
+    if not isinstance(stored, list):
+        return [], limit
+    candidates = [example for example in stored
+                  if isinstance(example, dict)
+                  and isinstance(example.get('ref'), str)
+                  and example['ref']]
+    if not candidates:
+        return [], limit
+
+    attached, _omitted = select_few_shot_examples(candidates, limit)
+
+    images: List[Dict] = []
+    for example in attached:
+        ref = example['ref']
+        # Resolved the same way the request validation resolved it, so an
+        # example is read from the location it was scope-checked against
+        # (Req 8.7).
+        bucket, key = _resolve_sample_reference(ref, dataset_bucket)
+        if not bucket or not key:
+            raise PreviewSampleFailure(
+                PREVIEW_CATEGORY_UNREADABLE_EXAMPLE,
+                f'few-shot example image {ref} is not accessible: '
+                f'the reference could not be resolved to an S3 object')
+        try:
+            body = _read_preview_object(clients, usecase, bucket, key)
+        except Exception as exc:  # noqa: BLE001 — unreadable example (6.8)
+            raise PreviewSampleFailure(
+                PREVIEW_CATEGORY_UNREADABLE_EXAMPLE,
+                f'few-shot example image {ref} is not accessible: '
+                f'{exc}') from exc
+        images.append({
+            'bytes': body,
+            'format': image_format_for_key(key),
+            'designation': example.get('designation'),
+        })
+    return images, limit
+
+
+def _run_preview_sample(run: Dict, clients: Dict[str, Any], usecase: Dict,
+                        dataset_bucket: str, sample_key: str) -> tuple:
+    """Produce one Sample_Image's Pre_Label, or raise its single
+    categorized failure.
+
+    Total by construction: every step maps its own errors onto exactly
+    one category, so a sample can never resolve without a category and
+    can never carry two (Req 9.6).
+
+    Returns:
+        `(prelabel, width, height)`
+    """
+    # 1. Sample_Image bytes — cross-account with the direct fallback.
+    try:
+        image_bytes = _read_preview_object(
+            clients, usecase, dataset_bucket, sample_key)
+    except Exception as exc:  # noqa: BLE001 — Req 9.4, no invocation
+        raise PreviewSampleFailure(
+            PREVIEW_CATEGORY_IMAGE_ACCESS,
+            f'image s3://{dataset_bucket}/{sample_key} is not '
+            f'accessible: {exc}') from exc
+
+    # 2. Pixel dimensions: they are part of the prompt, so an image whose
+    #    header cannot be read fails before any invocation (Req 9.5).
+    try:
+        dimensions = _preview_image_dimensions(image_bytes)
+    except Exception:  # noqa: BLE001 — undecodable header
+        dimensions = None
+    if not dimensions:
+        raise PreviewSampleFailure(
+            PREVIEW_CATEGORY_UNSUPPORTED_IMAGE,
+            PREVIEW_UNSUPPORTED_IMAGE_REASON)
+    width, height = dimensions
+
+    model = run.get('model') or ''
+    # The Converse modelId is the part after the `llm:` prefix, split on
+    # the first colon only — model identifiers legitimately contain
+    # colons (e.g. 'us.amazon.nova-pro-v1:0').
+    model_identifier = model.split(':', 1)[1] if ':' in model else model
+
+    # 3. Few_Shot_Examples, read *after* the target image so an
+    #    unreadable example can never mask an unreadable target — the
+    #    Auto_Labeler's ordering (Req 6.8).
+    few_shot_images, model_image_limit = _resolve_preview_few_shot_images(
+        run, clients, usecase, dataset_bucket, model_identifier)
+
+    # 4. The identical call the Auto_Labeler makes (Req 3.1, 3.2). The
+    #    Bedrock client seam is rebound onto the shared module for the
+    #    same reason the worker rebinds it: this module stays the single
+    #    place a client is obtained from.
+    label_set = [str(label) for label in (run.get('label_set') or [])]
+    dda_llm_prelabel.get_bedrock_client = get_bedrock_client
+    try:
+        prelabel = generate_llm_prelabel(
+            model_identifier=model_identifier,
+            modality=run.get('task_type'),
+            label_set=label_set,
+            detection_prompt=run.get('detection_prompt') or '',
+            # Per_Label_Prompts are a skip-verification job setting; a
+            # Preview_Run has no job, so it never carries them.
+            per_label_prompts=None,
+            image_bytes=image_bytes,
+            image_key=sample_key,
+            width=width,
+            height=height,
+            few_shot_images=few_shot_images,
+            model_image_limit=model_image_limit,
+        )
+    except LlmPrelabelError as exc:
+        # 'timeout' | 'model_error' | 'unusable_model_output', with the
+        # reason string the Auto_Labeler records for the same response
+        # and the raw model text character-for-character (Req 3.10,
+        # 3.11, 9.1, 9.2, 9.3).
+        raise PreviewSampleFailure(exc.category, exc.reason,
+                                   raw_model_output=exc.raw_text) from exc
+    except Exception as exc:  # noqa: BLE001 — Req 9.1: still one category
+        raise PreviewSampleFailure(
+            'model_error', f'model error: {exc}') from exc
+    return prelabel, width, height
+
+
+def _resolve_preview_dataset_location(usecase_id: str) -> tuple:
+    """`(usecase, dataset_bucket, error)` for the run's Use_Case.
+
+    Resolved once per run. When it cannot be resolved, `error` explains
+    why and every sample resolves as an `image_access_failure` naming it
+    — the run still returns one categorized outcome per requested
+    Sample_Image rather than collapsing into a run-level failure
+    (Req 3.5, 9.4).
+    """
+    try:
+        usecase = get_usecase(usecase_id)
+    except Exception as exc:  # noqa: BLE001 — unknown / unreadable
+        return None, None, f'use case {usecase_id!r} could not be read: {exc}'
+    dataset_bucket = (usecase.get('data_s3_bucket')
+                      or usecase.get('s3_bucket'))
+    if not dataset_bucket:
+        return usecase, None, (f'use case {usecase_id!r} has no data bucket '
+                               f'configured')
+    return usecase, dataset_bucket, None
+
+
+def execute_preview_run(run_id: Optional[str]) -> Dict[str, Any]:
+    """Execute a Preview_Run's Sample_Images (task 9.1).
+
+    Sequential by design: one Sample_Image at a time, each resolved and
+    written before the next begins, so the per-sample bound of 120 s
+    composes into the run bound the lock TTL is derived from and the
+    wizard sees results appear one by one.
+
+    Idempotent against a duplicated async delivery: a run that is no
+    longer Running is not re-executed, and an already-resolved sample is
+    not re-invoked, so no Sample_Image can ever receive a second model
+    invocation (Req 3.1).
+    """
+    run = _read_preview_run_item(run_id) if run_id else None
+    if not run:
+        logger.error(f"Preview run {run_id!r} not found; nothing to execute")
+        return {'run_id': run_id, 'action': PREVIEW_EXECUTOR_ACTION,
+                'error': 'preview run not found'}
+
+    usecase_id = run.get('usecase_id') or ''
+    user_sub = run.get('created_by') or ''
+    status = run.get('status')
+    if status != PREVIEW_STATUS_RUNNING:
+        logger.warning(f"Preview run {run_id} is {status}, not "
+                       f"{PREVIEW_STATUS_RUNNING}; skipping execution")
+        return {'run_id': run_id, 'action': PREVIEW_EXECUTOR_ACTION,
+                'status': status, 'skipped': True}
+
+    succeeded = 0
+    failed = 0
+    try:
+        samples = _read_preview_sample_items(run_id)
+        usecase, dataset_bucket, location_error = (
+            _resolve_preview_dataset_location(usecase_id))
+        # Credentials cache, per bucket, for the life of the run.
+        clients: Dict[str, Any] = {}
+
+        for item in samples:
+            index = _preview_sample_index(item['task_id'])
+            sample_key = item.get('sample_key') or ''
+            if item.get('state') != PREVIEW_SAMPLE_PENDING:
+                continue
+
+            payload: Dict[str, Any]
+            failure: Optional[PreviewSampleFailure] = None
+            try:
+                if location_error:
+                    raise PreviewSampleFailure(
+                        PREVIEW_CATEGORY_IMAGE_ACCESS,
+                        f'image {sample_key} is not accessible: '
+                        f'{location_error}')
+                prelabel, width, height = _run_preview_sample(
+                    run, clients, usecase, dataset_bucket, sample_key)
+                payload = _preview_success_payload(
+                    sample_key, prelabel, width, height)
+            except PreviewSampleFailure as sample_failure:
+                failure = sample_failure
+                payload = _preview_failure_payload(
+                    sample_key, sample_failure.category,
+                    sample_failure.reason,
+                    raw_model_output=sample_failure.raw_model_output)
+
+            # Written immediately, payload first: the item's
+            # `result_s3_key` never points at an object that is not there
+            # yet (Req 3.5, 3.7).
+            result_key = _write_preview_result_payload(
+                usecase_id, run_id, index, payload)
+            if failure is None:
+                succeeded += 1
+                _update_preview_sample_state(
+                    run_id, index, PREVIEW_SAMPLE_SUCCEEDED,
+                    result_s3_key=result_key)
+            else:
+                failed += 1
+                _update_preview_sample_state(
+                    run_id, index, PREVIEW_SAMPLE_FAILED,
+                    failure_category=failure.category,
+                    failure_reason=failure.reason,
+                    result_s3_key=result_key)
+
+        # Req 3.7: the run completes once every sample has an outcome,
+        # including a run in which every sample failed.
+        _update_preview_run_status(run_id, PREVIEW_STATUS_COMPLETED)
+        return {'run_id': run_id, 'action': PREVIEW_EXECUTOR_ACTION,
+                'status': PREVIEW_STATUS_COMPLETED,
+                'sample_count': len(samples),
+                'succeeded': succeeded, 'failed': failed}
+
+    except Exception as e:
+        # Only a failure that prevents per-sample results at all reaches
+        # here (e.g. a DynamoDB or artifacts-bucket write failure); the
+        # per-sample outcomes are categorized above and never abort the
+        # loop.
+        logger.error(f"Preview run {run_id} failed: {str(e)}", exc_info=True)
+        try:
+            _update_preview_run_status(
+                run_id, PREVIEW_STATUS_FAILED,
+                run_error=f'The preview run could not be completed: {e}')
+        except Exception as status_error:  # noqa: BLE001
+            logger.warning(f"Could not mark preview run {run_id} failed: "
+                           f"{status_error}")
+        return {'run_id': run_id, 'action': PREVIEW_EXECUTOR_ACTION,
+                'status': PREVIEW_STATUS_FAILED, 'error': str(e),
+                'succeeded': succeeded, 'failed': failed}
+
+    finally:
+        # Every terminal path releases the claim, including an unexpected
+        # exception, so a user is never left unable to start a new run
+        # (Req 8.8). The release is unconditional and a no-op when the
+        # lock has already expired or been reaped.
+        if usecase_id and user_sub:
+            try:
+                _release_preview_lock(usecase_id, user_sub)
+            except Exception as release_error:  # noqa: BLE001
+                logger.warning(f"Could not release the preview lock for "
+                               f"{usecase_id}/{user_sub}: {release_error}")
