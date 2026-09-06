@@ -45,6 +45,11 @@ from utils.common import CameraStatusEnum
 from data_models.common import CameraStatusModel
 import time
 from exceptions.api.aravis_camera_exception import AravisCameraException
+from utils.static_image_camera import (
+    STATIC_IMAGE_CAMERA_ID,
+    StaticImageUnavailableError,
+    get_store as get_static_image_store,
+)
 
 from threading import Lock
 
@@ -607,6 +612,15 @@ def get_all_camera_statuses():
     return status_objs
 
 def get_camera_status(camera_id):
+    # Static_Image_Camera short-circuit (feature: static-image-camera-source):
+    # the virtual camera is "connected" exactly while a Pinned_Image exists.
+    # Never touches camera_objects.
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        pinned = get_static_image_store().is_pinned()
+        return CameraStatusModel(
+            status=CameraStatusEnum.CONNECTED if pinned else CameraStatusEnum.DISCONNECTED,
+            lastUpdatedTime=time.time(),
+        )
     camera = camera_objects.get(camera_id) 
     if camera:
         return camera.get_status()
@@ -615,6 +629,18 @@ def get_camera_status(camera_id):
 def connect_camera(camera_id):
     if not camera_id:
         raise AravisCameraException("Camera ID is required")
+
+    # Static_Image_Camera short-circuit: "connecting" is an existence check on
+    # the Pinned_Image; never construct a manager_base.Camera for the static
+    # id (there is no device to open).
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        if get_static_image_store().is_pinned():
+            return True
+        raise AravisCameraException(
+            f"Static image camera '{STATIC_IMAGE_CAMERA_ID}' is not available "
+            f"because no image is pinned. Pin an image through the static "
+            f"image pin API before using this camera."
+        )
 
     if camera_id in camera_objects:
         disconnect_camera(camera_id)
@@ -642,6 +668,11 @@ def get_camera_feature_bounds(camera_id):
     if not camera_id:
         raise AravisCameraException("Camera ID is required")
 
+    # Static_Image_Camera short-circuit: no GenICam feature map exists and the
+    # static id must never be "connected on demand" — explicit empty bounds.
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        return {}
+
     camera = camera_objects.get(camera_id)
     if camera is None:
         return {}
@@ -659,6 +690,13 @@ def apply_camera_features(camera_id, features):
     """
     if not camera_id:
         raise AravisCameraException("Camera ID is required")
+
+    # Static_Image_Camera short-circuit: advanced GenICam features are
+    # meaningless for the virtual camera — accepted and ignored (Req 3.4
+    # spirit), and never connect anything.
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        return {}
+
     if not features:
         return {}
 
@@ -677,6 +715,10 @@ def _disconnect_camera(camera_id):
         camera.disconnect()
 
 def disconnect_camera(camera_id):
+    # Static_Image_Camera short-circuit: nothing is ever held open for the
+    # static id, so disconnect is a successful no-op.
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        return True
     logger.info(f'Deleting camera: {camera_id}')
     if camera_id in camera_objects:
         _disconnect_camera(camera_id)
@@ -728,6 +770,18 @@ def get_camera_frame(camera_id, camera_config=None):
     raises ``Exception`` on no-frame/failure (the contract ``digital_input_*`` /
     ``workflow`` / capture / preview callers rely on to surface an HTTP error).
     """
+    # Static_Image_Camera short-circuit (feature: static-image-camera-source):
+    # serve the decoded Pinned_Image BEFORE touching get_frame_lock,
+    # camera_objects, or connect_camera, so physical acquisitions are
+    # structurally undisturbed (Req 3.6, 5.7, 7.4). Acquisition config
+    # (gain/exposure/advancedSettings) is accepted and ignored (Req 3.4).
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        try:
+            return get_static_image_store().get_frame()
+        except StaticImageUnavailableError as err:
+            raise Exception(
+                f"Unable to get camera frame for camera id: {camera_id}: {err}"
+            ) from err
     get_frame_lock.acquire()
     if camera_id not in camera_objects:
         logger.error("Attempting to create camera object")

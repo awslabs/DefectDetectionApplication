@@ -55,6 +55,11 @@ import logging.config
 
 from exceptions.api.aravis_camera_not_found import AravisCameraNotFound
 from exceptions.api.aravis_camera_open_error import AravisCameraOpenError
+from utils.static_image_camera import (
+    STATIC_IMAGE_CAMERA_ID,
+    STATIC_IMAGE_CAMERA_IDENTITY,
+    get_store,
+)
 
 # LOG LEVELS
 # CRITICAL 50
@@ -98,6 +103,21 @@ def getCameras():
 
         camera = Camera(id, model, address, physical_id, protocol, serial, vendor)
         cameras.append(camera)
+
+    # Static_Image_Camera (feature: static-image-camera-source): while a
+    # Pinned_Image exists, append exactly one synthetic entry with the fixed
+    # identity so the virtual camera enumerates like any GenICam camera
+    # (Requirements 1.2, 2.1, 2.2, 2.3, 2.5, 2.6). rescan_cameras() inherits
+    # this by calling getCameras(). Any store failure must never break the
+    # physical enumeration (Requirement 2.7).
+    try:
+        if get_store().is_pinned():
+            cameras.append(Camera(**STATIC_IMAGE_CAMERA_IDENTITY))
+    except Exception as err:
+        log.error(
+            "Static image camera enumeration entry could not be constructed; "
+            "returning physical cameras only: %s", err,
+        )
     return cameras
 
 
@@ -128,7 +148,39 @@ def rescan_cameras():
         return getCameras()
 
 
+class _StaticImageCameraHandle:
+    """Truthy sentinel for the Static_Image_Camera returned by getCamera().
+
+    The connect endpoint uses getCamera() purely as an existence check, but
+    the Image_Source accessor's default-configuration path also calls
+    get_vendor_name()/get_model_name() on the returned camera to auto-select
+    a known camera config. Expose the static camera's fixed identity fields
+    so that path resolves to the "default" configuration exactly like an
+    unknown physical vendor/model (Requirement 4.1 — Image_Source creation
+    works through the same interface with no special-casing in consumers).
+    """
+
+    def get_vendor_name(self):
+        return STATIC_IMAGE_CAMERA_IDENTITY["vendor"]
+
+    def get_model_name(self):
+        return STATIC_IMAGE_CAMERA_IDENTITY["model"]
+
+
 def getCamera(cameraId):
+    # Static_Image_Camera short-circuit: return a truthy sentinel handle when
+    # a Pinned_Image exists and a not-found error mentioning the pin
+    # requirement when none does. Physical ids take the Aravis path below
+    # untouched.
+    if cameraId == STATIC_IMAGE_CAMERA_ID:
+        if get_store().is_pinned():
+            return _StaticImageCameraHandle()
+        raise AravisCameraNotFound(
+            f"Static image camera '{STATIC_IMAGE_CAMERA_ID}' is not available "
+            f"because no image is pinned. Pin an image through the static "
+            f"image pin API before using this camera."
+        )
+
     # Enable Fake camera
     Aravis.enable_interface("Fake")
     # Refresh camera list and discover new cameras, if any
