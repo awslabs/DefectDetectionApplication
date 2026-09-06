@@ -55,6 +55,18 @@ same stack:
   is byte-identical to a pre-feature record (Req 10.6); never written
   for `sam` or `bedrock:` jobs, even when planted on the submission
   (Req 10.4)
+
+Feature: grounded-sam-autolabel (task 2.3) adds, against the same
+stack (new tests only — every pre-existing assertion untouched):
+
+- 'grounded-sam' + Classification rejected with a validation error
+  identifying the model value and the modality, persisting nothing
+  (Req 1.6)
+- job_created audit details carry auto_label_model 'grounded-sam' and
+  auto_label_mode 'grounded-sam' (Req 1.7)
+- creation accepted while no grounded-sam worker is deployed — job
+  creation has no worker dependency, whatever the worker env says
+  (Req 5.4)
 """
 import json
 import os
@@ -1052,3 +1064,100 @@ class TestLlmSizingPersistence:
         assert status == 201
         assert env.get_job(body["job_id"])["auto_label"] == {
             "enabled": True, "model": model}
+
+
+# ------------------------------- grounded-sam family (task 2.3)
+# Feature: grounded-sam-autolabel
+
+
+def grounded_sam_auto_label(**extra):
+    """An auto_label body for the grounded-sam family."""
+    auto_label = {"enabled": True, "model": "grounded-sam"}
+    auto_label.update(extra)
+    return auto_label
+
+
+class TestGroundedSamClassificationRejected:
+    def test_classification_rejected_identifying_model_and_modality(
+            self, env):
+        """Req 1.6: grounded-sam + Classification is rejected with a
+        validation error identifying the model value and the modality;
+        nothing persisted."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(task_type="Classification",
+                                  auto_label=grounded_sam_auto_label())
+        assert status == 400
+        matrix_errors = [err for err in body["validation_errors"]
+                         if "does not support" in err["message"]]
+        assert len(matrix_errors) == 1
+        error = matrix_errors[0]
+        assert error["model"] == "grounded-sam"
+        assert error["task_type"] == "Classification"
+        assert "'grounded-sam'" in error["message"]
+        assert "Classification" in error["message"]
+        env.assert_nothing_persisted()
+
+
+class TestGroundedSamAuditDetails:
+    def details(self, env):
+        events = env.audit_events("job_created")
+        assert len(events) == 1
+        return events[0]["details"]
+
+    @pytest.mark.parametrize("task_type,label_set", [
+        ("Segmentation", ["scratch", "dent"]),
+        ("ObjectDetection", ["scratch"]),
+    ])
+    def test_grounded_sam_job_records_model_and_mode(self, env, task_type,
+                                                     label_set):
+        """Req 1.7: the job_created audit details carry
+        auto_label_model 'grounded-sam' and auto_label_mode
+        'grounded-sam'."""
+        env.put_images(["a.jpg"])
+        status, _ = env.create(task_type=task_type, label_set=label_set,
+                               auto_label=grounded_sam_auto_label())
+        assert status == 201
+        details = self.details(env)
+        assert details["auto_label_model"] == "grounded-sam"
+        assert details["auto_label_mode"] == "grounded-sam"
+
+
+class TestGroundedSamNoWorkerDependency:
+    @pytest.mark.parametrize("task_type,label_set", [
+        ("Segmentation", ["scratch", "dent"]),
+        ("ObjectDetection", ["scratch"]),
+    ])
+    def test_created_while_no_worker_deployed(self, env, monkeypatch,
+                                              task_type, label_set):
+        """Req 5.4: job creation has no worker dependency — a
+        grounded-sam job is accepted while no grounded-sam worker is
+        deployed (no worker function name in the environment)."""
+        monkeypatch.delenv("GROUNDED_SAM_WORKER_FUNCTION_NAME",
+                           raising=False)
+        monkeypatch.delenv("SAM_WORKER_FUNCTION_NAME", raising=False)
+        env.put_images(["a.jpg"])
+        status, body = env.create(task_type=task_type, label_set=label_set,
+                                  auto_label=grounded_sam_auto_label())
+        assert status == 201
+        job = env.get_job(body["job_id"])
+        assert job["status"] == "InProgress"
+        assert job["auto_label"] == {"enabled": True,
+                                     "model": "grounded-sam"}
+
+    def test_creation_never_invokes_the_worker(self, env, monkeypatch):
+        """Req 5.4: even with a grounded-sam worker name planted in the
+        environment, creation only fan-outs to the distribution worker —
+        the grounded-sam worker is never touched at creation time."""
+        monkeypatch.setenv("GROUNDED_SAM_WORKER_FUNCTION_NAME",
+                           "planted-gsam-worker")
+        monkeypatch.setenv("DDA_LABELING_WORKER_FUNCTION_NAME",
+                           "test-dda-worker")
+        env.dda.lambda_client.invocations.clear()
+        env.put_images(["a.jpg"])
+        status, _ = env.create(task_type="Segmentation",
+                               label_set=["scratch"],
+                               auto_label=grounded_sam_auto_label())
+        assert status == 201
+        invoked = [inv["FunctionName"]
+                   for inv in env.dda.lambda_client.invocations]
+        assert invoked == ["test-dda-worker"]

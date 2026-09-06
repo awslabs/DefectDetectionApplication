@@ -322,9 +322,10 @@ describe('CreateLabelingJob — Picker_Search', () => {
 
     const select = modelSelect(container);
     select.openDropdown();
-    // The full capability-filtered list: sam + {bedrock:, llm:} × {Nova,
-    // Claude}; the Text_Only Titan is excluded up front (Req 2.1).
-    expect(displayedOptionCount(select)).toBe(5);
+    // The full capability-filtered list: sam + grounded-sam + {bedrock:,
+    // llm:} × {Nova, Claude}; the Text_Only Titan is excluded up front
+    // (Req 2.1). Count includes the grounded-sam-autolabel static entry.
+    expect(displayedOptionCount(select)).toBe(6);
 
     // Label fragment: both families' Nova entries and nothing else.
     typeSearch(select, 'nova');
@@ -381,8 +382,9 @@ describe('CreateLabelingJob — Picker_Search', () => {
 
     // Clearing restores the full set of offered entries — still the
     // capability-filtered set, never the excluded Titan (Req 3.5, 3.6).
+    // Count includes the grounded-sam-autolabel static entry.
     typeSearch(select, '');
-    expect(displayedOptionCount(select)).toBe(5);
+    expect(displayedOptionCount(select)).toBe(6);
     expect(optionByValue(select, `llm:${TITAN_EMBED.id}`)).toBeNull();
     select.closeDropdown();
     expect(triggerText(select)).toContain('Nova Pro (prompt-guided)');
@@ -454,7 +456,8 @@ describe('CreateLabelingJob — auto-label family capability filtering', () => {
     expect(optionByValue(select, `llm:${NOVA.id}`)).not.toBeNull();
     expect(optionByValue(select, `bedrock:${TITAN_TEXT.id}`)).toBeNull();
     expect(optionByValue(select, `llm:${TITAN_TEXT.id}`)).toBeNull();
-    expect(displayedOptionCount(select)).toBe(5);
+    // Count includes the grounded-sam-autolabel static entry.
+    expect(displayedOptionCount(select)).toBe(6);
   });
 
   it('keeps sam offered when every catalog model is Text_Only (Req 2.3)', async () => {
@@ -468,10 +471,11 @@ describe('CreateLabelingJob — auto-label family capability filtering', () => {
     const select = modelSelect(container);
     select.openDropdown();
 
-    // The sam entry derives from the modality matrix alone; both catalog
-    // families are empty.
+    // The sam and grounded-sam entries derive from the modality matrix
+    // alone; both catalog families are empty. Count includes the
+    // grounded-sam-autolabel static entry.
     expect(optionByValue(select, 'sam')).not.toBeNull();
-    expect(displayedOptionCount(select)).toBe(1);
+    expect(displayedOptionCount(select)).toBe(2);
   });
 
   it('shows the all-Text_Only indication whose free-text entry drives the llm: selection (Req 2.4)', async () => {

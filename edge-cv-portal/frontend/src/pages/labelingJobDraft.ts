@@ -103,6 +103,14 @@ export interface LabelingJobDraft {
   previewSelectedKeys: string[];
   /** Most recently started Preview_Run (Requirement 2.4). */
   previewRun: PreviewRunReference | null;
+  /**
+   * Grounded-SAM per-label Prompt_Override entries — the
+   * grounded-sam-autolabel spec's additive-optional field (its
+   * Requirement 6.1). Absent in every draft saved before that feature;
+   * absence is not malformation. Consumers default at the read site
+   * (`draft.groundedSamPromptOverrides ?? {}`).
+   */
+  groundedSamPromptOverrides?: Record<string, string>;
 }
 
 /** Wizard step bounds used to clamp a restored `activeStepIndex`. */
@@ -272,6 +280,18 @@ function conformingDraft(parsed: unknown, usecaseId: string): LabelingJobDraft |
   const previewSelectedKeys = asStringArray(record.previewSelectedKeys);
   const previewRun = asPreviewRun(record.previewRun);
 
+  // grounded-sam-autolabel additive-optional field: validated only when
+  // present; present-but-malformed rejects the whole draft (the module's
+  // established rule, that spec's Requirement 6.4); absence is preserved
+  // as absence below so pre-feature drafts normalize byte-identically
+  // (Requirement 6.3).
+  const rawOverrides = record.groundedSamPromptOverrides;
+  const groundedSamPromptOverrides =
+    rawOverrides === undefined ? undefined : asStringRecord(rawOverrides);
+  if (rawOverrides !== undefined && groundedSamPromptOverrides === undefined) {
+    return null;
+  }
+
   if (
     savedAtMs === undefined ||
     draftUsecaseId === undefined ||
@@ -340,6 +360,9 @@ function conformingDraft(parsed: unknown, usecaseId: string): LabelingJobDraft |
     exampleRefs,
     previewSelectedKeys,
     previewRun,
+    // Absence preserved: no `{}` injected for an absent key, keeping the
+    // storage round-trip deep equality for pre-feature drafts.
+    ...(groundedSamPromptOverrides !== undefined ? { groundedSamPromptOverrides } : {}),
   };
 }
 
@@ -520,7 +543,10 @@ export function draftsEquivalent(a: LabelingJobDraft, b: LabelingJobDraft): bool
     stringArraysEqual(a.exampleRefs.good, b.exampleRefs.good) &&
     stringArraysEqual(a.exampleRefs.bad, b.exampleRefs.bad) &&
     stringArraysEqual(a.previewSelectedKeys, b.previewSelectedKeys) &&
-    previewRunsEqual
+    previewRunsEqual &&
+    // grounded-sam-autolabel Requirement 6.5: absent ≡ empty for the save
+    // gate; an override edit makes the state Draft_Worthy.
+    stringRecordsEqual(a.groundedSamPromptOverrides ?? {}, b.groundedSamPromptOverrides ?? {})
   );
 }
 

@@ -215,10 +215,16 @@ function imageCapableOracle(m: { image_input?: boolean }): boolean {
 /**
  * The pre-feature modality compatibility matrix, restated from the
  * dda-data-labeling / llm-auto-labeling acceptance criteria (Requirement
- * 4.7 keeps it unchanged).
+ * 4.7 keeps it unchanged). The `groundedSam` row is the one permitted
+ * mechanical "+1 static entry" extension (grounded-sam-autolabel
+ * Requirement 7.2, task 4.7).
  */
-const ORACLE_MODALITIES: Record<'sam' | 'bedrock' | 'llm', string[]> = {
+const ORACLE_MODALITIES: Record<
+  'sam' | 'groundedSam' | 'bedrock' | 'llm',
+  string[]
+> = {
   sam: ['Segmentation', 'ObjectDetection'],
+  groundedSam: ['Segmentation', 'ObjectDetection'],
   bedrock: ['Classification', 'ObjectDetection'],
   llm: ['Classification', 'Segmentation', 'ObjectDetection'],
 };
@@ -251,8 +257,15 @@ function expectedAutoLabelOptions(modality: string, catalog: CatalogModel[]) {
   const samEntries = ORACLE_MODALITIES.sam.includes(modality)
     ? [{ label: 'Segment Anything (SAM)', value: 'sam' }]
     : [];
+  // The one permitted mechanical "+1 static entry": the grounded-sam
+  // entry sits immediately after SAM, gated on its own modality list —
+  // exactly the shipped composition (grounded-sam-autolabel Req 7.2).
+  const groundedSamEntries = ORACLE_MODALITIES.groundedSam.includes(modality)
+    ? [{ label: 'Grounded-SAM (text-prompted)', value: 'grounded-sam' }]
+    : [];
   const grouped: unknown[] = [
     ...samEntries,
+    ...groundedSamEntries,
     ...(bedrockFamily.length > 0
       ? [{ label: 'Bedrock vision models', options: bedrockFamily }]
       : []),
@@ -262,6 +275,7 @@ function expectedAutoLabelOptions(modality: string, catalog: CatalogModel[]) {
   ];
   const flat: Array<[string, string]> = [
     ...samEntries.map((o) => [o.value, o.label] as [string, string]),
+    ...groundedSamEntries.map((o) => [o.value, o.label] as [string, string]),
     ...bedrockFamily.map((o) => [o.value, o.label] as [string, string]),
     ...llmFamily.map((o) => [o.value, o.label] as [string, string]),
   ];

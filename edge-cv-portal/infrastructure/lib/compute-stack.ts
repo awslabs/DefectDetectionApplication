@@ -2175,6 +2175,91 @@ export class ComputeStack extends cdk.Stack {
       ddaSamWorker.grantInvoke(ddaAutolabelWorker);
     }
 
+    // Grounded-SAM worker (dda_grounded_sam_worker): container-image Lambda
+    // bundling CPU ONNX Grounding DINO + a SAM mask model
+    // (backend/grounded-sam-worker/Dockerfile). Building the image downloads
+    // the DINO model, its tokenizer, and the SAM archive and produces a
+    // multi-GB Docker build, so it is gated behind the
+    // `deployGroundedSamWorker` CDK context flag
+    // (-c deployGroundedSamWorker=true; default OFF) — ordinary portal
+    // deployments must not require Docker or the model downloads. When
+    // disabled, GROUNDED_SAM_WORKER_FUNCTION_NAME is simply absent from the
+    // autolabel worker environment and grounded-sam jobs report pre-label
+    // failures instead.
+    const deployGroundedSamWorkerContext =
+      this.node.tryGetContext('deployGroundedSamWorker');
+    const deployGroundedSamWorker =
+      deployGroundedSamWorkerContext === true ||
+      deployGroundedSamWorkerContext === 'true';
+    if (deployGroundedSamWorker) {
+      // The baked models are overridable per deployment
+      // (-c groundedSamDinoModelUrl=... / -c groundedSamDinoTokenizerUrl=...
+      // / -c groundedSamModelArchiveUrl=...). Each build arg is passed only
+      // when its context value is set, so the Dockerfile's pinned defaults
+      // (grounding-dino-tiny ONNX, its tokenizer.json, and the MobileSAM
+      // archive) stay in force otherwise.
+      const dinoModelUrl =
+        this.node.tryGetContext('groundedSamDinoModelUrl') as string | undefined;
+      const dinoTokenizerUrl =
+        this.node.tryGetContext('groundedSamDinoTokenizerUrl') as string | undefined;
+      const samArchiveUrl =
+        this.node.tryGetContext('groundedSamModelArchiveUrl') as string | undefined;
+
+      // Image platform and function architecture are pinned together and
+      // explicitly: with neither set, the image inherits the build host's
+      // architecture while the function silently stays x86_64, so building
+      // on an ARM host (e.g. the arm64 build server this repo ships)
+      // produces a function that fails every invoke with
+      // Runtime.InvalidEntrypoint / ProcessSpawnFailed. Pinning amd64
+      // keeps the Grounded-SAM worker consistent with every other Lambda
+      // in this stack; on an ARM build host the image is produced through
+      // qemu emulation, which is slower but correct.
+      const ddaGroundedSamWorker = new lambda.DockerImageFunction(
+        this,
+        'DdaGroundedSamWorker',
+        {
+          code: lambda.DockerImageCode.fromImageAsset(
+            path.join(__dirname, '../../backend/grounded-sam-worker'),
+            {
+              platform: ecrAssets.Platform.LINUX_AMD64,
+              buildArgs: {
+                ...(dinoModelUrl
+                  ? { GROUNDING_DINO_MODEL_URL: dinoModelUrl }
+                  : {}),
+                ...(dinoTokenizerUrl
+                  ? { GROUNDING_DINO_TOKENIZER_URL: dinoTokenizerUrl }
+                  : {}),
+                ...(samArchiveUrl
+                  ? { SAM_MODEL_ARCHIVE_URL: samArchiveUrl }
+                  : {}),
+              },
+            },
+          ),
+          architecture: lambda.Architecture.X86_64,
+          description:
+            'DDA labeling Grounded-SAM pre-label worker (CPU ONNX Grounding DINO + SAM)',
+          memorySize: 10240,
+          timeout: cdk.Duration.seconds(300),
+          // No threshold environment block: the handler's own defaults
+          // (box 0.35, text 0.25, NMS IoU 0.8, max detections 20) are the
+          // intended values for this worker — contrast DdaSamWorker, whose
+          // tuned grid values differ from its handler defaults. Retuning
+          // is a Lambda env-var change, not a redeploy.
+        },
+      );
+
+      // Synchronous invoke from the autolabel worker (bounded at 240 s
+      // wall-clock in dda_autolabel_worker.py — CPU Grounding DINO latency;
+      // the sam family's 120 s bound is untouched). The image is passed as
+      // a presigned URL, so the grounded-sam worker needs no S3/table
+      // grants of its own.
+      ddaAutolabelWorker.addEnvironment(
+        'GROUNDED_SAM_WORKER_FUNCTION_NAME',
+        ddaGroundedSamWorker.functionName,
+      );
+      ddaGroundedSamWorker.grantInvoke(ddaAutolabelWorker);
+    }
+
     // ------------------------------------------------------------------
     // Workflow Manager Lambda functions
     // Handler modules (workflows.py, workflow_validation.py,

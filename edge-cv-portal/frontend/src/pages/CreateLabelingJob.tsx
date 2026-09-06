@@ -82,6 +82,19 @@ export const LLM_MODALITIES = [
   'Segmentation',
   'ObjectDetection',
 ];
+/**
+ * Grounded-SAM produces classified geometry (text-prompted boxes, and
+ * masks for segmentation) — Segmentation and ObjectDetection only, never
+ * Classification (grounded-sam-autolabel Requirements 1.1, 1.2, 1.3).
+ */
+export const GROUNDED_SAM_MODALITIES = ['Segmentation', 'ObjectDetection'];
+
+/**
+ * Prompt_Override length limit for the Grounded-SAM family, judged on the
+ * raw entered value (grounded-sam-autolabel Requirement 2.6; the backend
+ * re-validates).
+ */
+export const MAX_PROMPT_OVERRIDE_LENGTH = 256;
 
 /** Detection_Prompt length limit (llm-auto-labeling Requirements 2.1, 2.2). */
 export const MAX_DETECTION_PROMPT_LENGTH = 2000;
@@ -164,6 +177,8 @@ export function isAutoLabelModelCompatible(
   taskType: string
 ): boolean {
   if (modelValue === 'sam') return SAM_MODALITIES.includes(taskType);
+  if (modelValue === 'grounded-sam')
+    return GROUNDED_SAM_MODALITIES.includes(taskType);
   if (modelValue.startsWith('llm:')) return LLM_MODALITIES.includes(taskType);
   if (modelValue.startsWith('bedrock:'))
     return BEDROCK_MODALITIES.includes(taskType);
@@ -254,6 +269,11 @@ export default function CreateLabelingJob() {
   // Detection_Prompt for prompt-guided LLM auto-labeling
   // (llm-auto-labeling Requirements 2.1, 2.2).
   const [detectionPrompt, setDetectionPrompt] = useState('');
+  // Prompt_Override entries for the Grounded-SAM family, keyed by label
+  // name; every entry is optional and the label name itself is the
+  // default text prompt (grounded-sam-autolabel Requirement 2.1).
+  const [groundedSamPromptOverrides, setGroundedSamPromptOverrides] =
+    useState<Record<string, string>>({});
   const [skipVerification, setSkipVerification] = useState(false);
   const [skipVerificationModelId, setSkipVerificationModelId] = useState('');
   const [perLabelPrompts, setPerLabelPrompts] = useState<Record<string, string>>({});
@@ -552,6 +572,13 @@ export default function CreateLabelingJob() {
   )
     ? [{ label: 'Segment Anything (SAM)', value: 'sam' }]
     : [];
+  // Grounded_SAM_Entry: a static entry beside SAM, offered for exactly
+  // the Grounded-SAM modalities and never for Classification
+  // (grounded-sam-autolabel Requirements 1.1, 1.2, 7.2).
+  const groundedSamAutoLabelOptions: SelectProps.Option[] =
+    GROUNDED_SAM_MODALITIES.includes(modality)
+      ? [{ label: 'Grounded-SAM (text-prompted)', value: 'grounded-sam' }]
+      : [];
   // The auto-label families offer only the models not positively known to
   // be text-only; everything else (catalog-unavailable detection, per-model
   // lookups, the Skip_Verification select) keeps reading the raw
@@ -578,11 +605,13 @@ export default function CreateLabelingJob() {
     : [];
   const flatAutoLabelOptions: SelectProps.Option[] = [
     ...samAutoLabelOptions,
+    ...groundedSamAutoLabelOptions,
     ...bedrockAutoLabelOptions,
     ...llmAutoLabelOptions,
   ];
   const autoLabelOptions: SelectProps.Options = [
     ...samAutoLabelOptions,
+    ...groundedSamAutoLabelOptions,
     ...(bedrockAutoLabelOptions.length > 0
       ? [{ label: 'Bedrock vision models', options: bedrockAutoLabelOptions }]
       : []),
@@ -677,6 +706,10 @@ export default function CreateLabelingJob() {
     // capability-filtered picker's current entries (Req 2.2, 3.5).
     setAutoLabelModel(draft.autoLabelModel);
     setDetectionPrompt(draft.detectionPrompt);
+    // Prompt_Override entries restore exactly as saved; a pre-feature
+    // draft (field absent) restores with zero entries
+    // (grounded-sam-autolabel Requirements 6.2, 6.3).
+    setGroundedSamPromptOverrides(draft.groundedSamPromptOverrides ?? {});
     setFewShotEnabled(draft.fewShotEnabled);
     setDownscaleMaxEdge(draft.downscaleMaxEdge);
     setTokenBudget(draft.tokenBudget);
@@ -829,6 +862,20 @@ export default function CreateLabelingJob() {
       }
       if (!isAutoLabelModelCompatible(autoLabelModel, modality)) {
         return 'The selected auto-label model does not support this task type';
+      }
+      // Prompt_Override gating for the Grounded-SAM family: every entry
+      // is optional, but none may exceed the length limit, judged on the
+      // raw value (grounded-sam-autolabel Requirement 2.6; the backend
+      // re-validates).
+      if (autoLabelModel === 'grounded-sam') {
+        const overlongLabel = effectiveLabelSet.find(
+          (label) =>
+            (groundedSamPromptOverrides[label] || '').length >
+            MAX_PROMPT_OVERRIDE_LENGTH
+        );
+        if (overlongLabel !== undefined) {
+          return `The text prompt for label "${overlongLabel}" exceeds ${MAX_PROMPT_OVERRIDE_LENGTH} characters`;
+        }
       }
       // Detection_Prompt gating for the prompt-guided LLM family:
       // emptiness is judged on the trimmed prompt, length on the raw one
@@ -1086,6 +1133,7 @@ export default function CreateLabelingJob() {
       autoLabelEnabled,
       autoLabelModel,
       detectionPrompt,
+      groundedSamPromptOverrides,
       fewShotEnabled,
       downscaleMaxEdge,
       tokenBudget,
@@ -1118,6 +1166,7 @@ export default function CreateLabelingJob() {
     autoLabelEnabled,
     autoLabelModel,
     detectionPrompt,
+    groundedSamPromptOverrides,
     fewShotEnabled,
     downscaleMaxEdge,
     tokenBudget,
@@ -1270,6 +1319,32 @@ export default function CreateLabelingJob() {
                           ? { token_budget: tokenBudgetSelection }
                           : {}),
                       }
+                    : {}),
+                  // Prompt_Overrides for the Grounded-SAM family: exactly
+                  // the entries non-empty after trimming whose label is in
+                  // the submitted Label_Set, each raw value transmitted
+                  // character-for-character; the key is omitted entirely
+                  // when none survive, and every other family attaches no
+                  // key (grounded-sam-autolabel Requirements 2.3, 2.8).
+                  ...(autoLabelModel === 'grounded-sam'
+                    ? (() => {
+                        const entries = effectiveLabelSet
+                          .filter(
+                            (l) =>
+                              (groundedSamPromptOverrides[l] || '').trim() !==
+                              ''
+                          )
+                          .map(
+                            (l) =>
+                              [l, groundedSamPromptOverrides[l]] as [
+                                string,
+                                string,
+                              ]
+                          );
+                        return entries.length > 0
+                          ? { prompt_overrides: Object.fromEntries(entries) }
+                          : {};
+                      })()
                     : {}),
                 },
               }
@@ -1835,7 +1910,7 @@ export default function CreateLabelingJob() {
         {autoLabelEnabled && (
           <FormField
             label="Auto-label model"
-            description="SAM supports segmentation and object detection; Bedrock models support classification and object detection; prompt-guided LLM models support all three"
+            description="SAM supports segmentation and object detection; Bedrock models support classification and object detection; prompt-guided LLM models support all three; Grounded-SAM turns label names into text prompts for segmentation and object detection"
             constraintText="Required"
           >
             <Select
@@ -1920,6 +1995,48 @@ export default function CreateLabelingJob() {
                 </Box>
               )}
           </FormField>
+        )}
+
+        {/* Prompt_Override entries: Grounded-SAM family only — one
+            optional single-line entry per effective Label_Set label, the
+            label name as the placeholder (and the default prompt when the
+            entry stays empty); no other selection renders the block
+            (grounded-sam-autolabel Requirements 2.1, 2.2, 2.6). */}
+        {autoLabelEnabled && autoLabelModel === 'grounded-sam' && (
+          <SpaceBetween size="m">
+            {effectiveLabelSet.length === 0 ? (
+              <Alert type="info">
+                Define the label set above to enter per-label text prompts.
+              </Alert>
+            ) : (
+              effectiveLabelSet.map((label) => (
+                <FormField
+                  key={label}
+                  label={`Text prompt for "${label}"`}
+                  description="Optional. Sent to Grounding DINO instead of the label name."
+                  constraintText="Optional, at most 256 characters"
+                  errorText={
+                    (groundedSamPromptOverrides[label] || '').length >
+                    MAX_PROMPT_OVERRIDE_LENGTH
+                      ? `The text prompt for label "${label}" exceeds ${MAX_PROMPT_OVERRIDE_LENGTH} characters`
+                      : undefined
+                  }
+                >
+                  <Input
+                    value={groundedSamPromptOverrides[label] || ''}
+                    placeholder={label}
+                    onChange={({ detail }) =>
+                      setGroundedSamPromptOverrides((current) => ({
+                        ...current,
+                        [label]: detail.value,
+                      }))
+                    }
+                    ariaLabel={`Text prompt for ${label}`}
+                  />
+                </FormField>
+              ))
+            )}
+          </SpaceBetween>
         )}
 
         {autoLabelEnabled && isLlmAutoLabelModel && (

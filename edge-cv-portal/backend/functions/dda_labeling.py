@@ -6,7 +6,12 @@ DdaLabelingApiStack. Task 4.1 implements the Labeling_Team management
 routes (Requirements 3.1-3.8); task 5.3 adds `create_dda_job` (invoked
 by labeling.py's backend switch, Requirements 4.1-4.11, 8.1, 8.8,
 9.1-9.3, 11.3, 11.7, 12.1-12.3); later tasks add the labeler APIs and
-the skip-verification admin review on this same handler.
+the skip-verification admin review on this same handler. The
+grounded-sam-autolabel spec adds the `grounded-sam` auto-label model
+family to job creation: a Segmentation/ObjectDetection matrix entry and
+optional per-label text Prompt_Overrides validated and persisted under
+`auto_label.prompt_overrides` (that spec's Requirements 1.5-1.7,
+2.4-2.6, 2.8).
 
 Team management routes (permission: labeling-teams:manage —
 UseCaseAdmin / PortalAdmin, enforced per request via @rbac_check):
@@ -213,15 +218,22 @@ VALID_MODALITIES = ('Classification', 'Segmentation', 'ObjectDetection')
 # SAM is geometry-only (masks/boxes); Bedrock vision models answer
 # classification and bounding-box prompts but do not paint masks.
 # Prompt-guided LLM auto-labeling covers all three modalities
-# (llm-auto-labeling Requirement 1.3).
+# (llm-auto-labeling Requirement 1.3). Grounded-SAM produces geometry
+# already classified from text prompts, so it covers the two geometry
+# modalities but — like sam — never Classification (grounded-sam-
+# autolabel Requirements 1.5, 1.6).
 AUTO_LABEL_MODEL_MODALITIES = {
     'sam': ('Segmentation', 'ObjectDetection'),
+    'grounded-sam': ('Segmentation', 'ObjectDetection'),
     'bedrock': ('Classification', 'ObjectDetection'),
     'llm': ('Classification', 'Segmentation', 'ObjectDetection'),
 }
 # Detection_Prompt bounds for the llm: family (llm-auto-labeling
 # Requirement 2: 1-2000 characters, length judged on the raw string).
 DETECTION_PROMPT_MAX_LENGTH = 2000
+# Prompt_Override bound for the grounded-sam family (grounded-sam-
+# autolabel Requirement 2.6: length judged on the raw string).
+PROMPT_OVERRIDE_MAX_LENGTH = 256
 # Skip_Verification_Mode is admin-only (Requirement 9.1).
 SKIP_VERIFICATION_ADMIN_ROLES = ('UseCaseAdmin', 'PortalAdmin')
 # Sentinel assignee for unsubmitted tasks left behind when a team's
@@ -1458,6 +1470,12 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
     with status InProgress (Req 4.11, 11.3), a job_created audit event
     is written (Req 11.7), and dda_labeling_worker is async-invoked with
     {action: 'distribute', job_id}.
+
+    The `grounded-sam` auto-label family (spec grounded-sam-autolabel)
+    is accepted for Segmentation/ObjectDetection with optional per-label
+    Prompt_Overrides persisted under `auto_label.prompt_overrides`
+    (that spec's Req 1.5-1.7, 2.4-2.6, 2.8); other families' records
+    never carry the key.
     """
     try:
         errors: List[Dict] = []
@@ -1615,9 +1633,52 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
         auto_label_model = auto_label.get('model')
         model_family = None
         detection_prompt = None
+        prompt_overrides: Dict[str, str] = {}
         if auto_label_enabled:
             if auto_label_model == 'sam':
                 model_family = 'sam'
+            elif auto_label_model == 'grounded-sam':
+                # grounded-sam-autolabel Requirement 1.5: exact-match
+                # family value, judged compatible with Segmentation and
+                # ObjectDetection through the matrix check below (1.6).
+                model_family = 'grounded-sam'
+                # grounded-sam-autolabel Requirements 2.4-2.6: optional
+                # per-label Prompt_Overrides. Accepted absent; when
+                # present the value must be an object whose keys belong
+                # to the submitted Label_Set and whose values are
+                # strings of raw length <= PROMPT_OVERRIDE_MAX_LENGTH.
+                # Values empty after trimming are dropped; survivors are
+                # kept character-for-character (Req 2.4).
+                raw_overrides = auto_label.get('prompt_overrides')
+                if raw_overrides is not None and not isinstance(
+                        raw_overrides, dict):
+                    errors.append(_validation_error(
+                        'auto_label',
+                        'prompt_overrides must be an object mapping '
+                        'label names to prompt strings'))
+                    raw_overrides = None
+                for key, value in (raw_overrides or {}).items():
+                    if key not in (label_set or []):
+                        errors.append(_validation_error(
+                            'auto_label',
+                            f"prompt_overrides key '{key}' is not a "
+                            f"label of this job's label set",
+                            label=key))
+                    elif not isinstance(value, str):
+                        errors.append(_validation_error(
+                            'auto_label',
+                            f"The prompt override for label '{key}' "
+                            f'must be text',
+                            label=key))
+                    elif len(value) > PROMPT_OVERRIDE_MAX_LENGTH:
+                        errors.append(_validation_error(
+                            'auto_label',
+                            f"The prompt override for label '{key}' "
+                            f'must be at most '
+                            f'{PROMPT_OVERRIDE_MAX_LENGTH} characters',
+                            label=key))
+                    elif value.strip():
+                        prompt_overrides[key] = value
             elif (isinstance(auto_label_model, str)
                     and auto_label_model.startswith('bedrock:')
                     and auto_label_model.split(':', 1)[1]):
@@ -1655,10 +1716,13 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                 else:
                     detection_prompt = raw_prompt
             else:
+                # grounded-sam-autolabel: grounded-sam is PREPENDED so
+                # the substring "'sam' or 'bedrock:<model_id>'" pinned
+                # by test_dda_labeling_create_job.py stays intact.
                 errors.append(_validation_error(
                     'auto_label',
-                    f"Auto-label model must be 'sam' or "
-                    f"'bedrock:<model_id>'",
+                    f"Auto-label model must be 'grounded-sam', "
+                    f"'sam' or 'bedrock:<model_id>'",
                     model=auto_label_model))
             if (model_family and modality in VALID_MODALITIES
                     and modality not in
@@ -1824,6 +1888,15 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                    if downscale_max_edge is not None else {}),
                 **({'token_budget': token_budget}
                    if token_budget is not None else {}),
+                # grounded-sam-autolabel Req 2.4/2.8: the surviving
+                # Prompt_Overrides, character-for-character, grounded-sam
+                # family only. The key is absent for every other family
+                # and for override-free grounded-sam jobs, so records of
+                # the other families stay byte-identical to pre-feature
+                # records (Req 7.1).
+                **({'prompt_overrides': prompt_overrides}
+                   if model_family == 'grounded-sam' and prompt_overrides
+                   else {}),
             },
             'skip_verification': skip_verification,
             'submitted_count': 0,

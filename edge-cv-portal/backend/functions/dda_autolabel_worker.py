@@ -45,6 +45,20 @@ Auto_Labeler model and resolves the task's `prelabel_status`:
   presigned image URL; the `{regions: [{class: null, rle}],
   image_width, image_height}` response is stored as a class-agnostic
   pre-label. The invocation wall clock is bounded at 120 s.
+- **Grounded-SAM path** (model `grounded-sam`, grounded-sam-autolabel
+  spec): synchronous invoke of the dda_grounded_sam_worker container
+  Lambda (env GROUNDED_SAM_WORKER_FUNCTION_NAME) with a 15-minute
+  presigned image URL, the Prompt_Map derived from the message's
+  Label_Set and the job record's `auto_label.prompt_overrides` (a
+  label's override is used when it is a non-empty string after
+  trimming, otherwise the label name itself), and the modality. Unlike
+  `sam`, the returned regions carry Label_Set classes, so the stored
+  Pre_Label is classified: Segmentation stores `{regions: [{class,
+  rle, score?}], image_width, image_height}`; ObjectDetection maps the
+  worker's per-region `box` to the Bedrock-shape `{boxes: [{class,
+  left, top, width, height}], image_width, image_height}` (score
+  dropped). The invocation wall clock is bounded at 240 s (CPU
+  Grounding DINO latency; the sam family keeps its 120 s bound).
 
 Successful generations write the pre-label JSON to the portal artifacts
 bucket at `labeling/{usecase_id}/{job_id}/prelabels/{task_id}.json` and
@@ -126,6 +140,8 @@ LABELING_TASKS_TABLE = os.environ.get(
     'LABELING_TASKS_TABLE', 'dda-portal-labeling-tasks')
 PORTAL_ARTIFACTS_BUCKET = os.environ.get('PORTAL_ARTIFACTS_BUCKET')
 SAM_WORKER_FUNCTION_NAME = os.environ.get('SAM_WORKER_FUNCTION_NAME')
+GROUNDED_SAM_WORKER_FUNCTION_NAME = os.environ.get(
+    'GROUNDED_SAM_WORKER_FUNCTION_NAME', '')
 # Portal settings table holding the persisted Model_Token_Limits item —
 # the same table bedrock_common already reads the Bedrock_Configuration
 # from (llm-model-token-and-image-sizing Req 1.6, 1.8).
@@ -138,6 +154,11 @@ tasks_table = dynamodb.Table(LABELING_TASKS_TABLE)
 # seconds is a Pre_Label generation failure).
 BEDROCK_MAX_TIMEOUT_SECONDS = 120
 SAM_MAX_TIMEOUT_SECONDS = 120
+# Grounded-SAM family bound (grounded-sam-autolabel Req 4.3): 240 s —
+# Grounding DINO on Lambda CPU runs tens of seconds per forward, and
+# the Segmentation mask pass adds more; a distinct constant keeps the
+# sam family's 120 s bound byte-identical (Req 7.4).
+GROUNDED_SAM_MAX_TIMEOUT_SECONDS = 240
 # 15-minute presigned URL for the SAM worker's image fetch (Req 12.6
 # convention for time-limited single-object grants).
 PRESIGNED_URL_EXPIRY_SECONDS = 900
@@ -151,11 +172,17 @@ MODALITY_SEGMENTATION = 'Segmentation'
 MODALITY_OBJECT_DETECTION = 'ObjectDetection'
 BEDROCK_MODALITIES = (MODALITY_CLASSIFICATION, MODALITY_OBJECT_DETECTION)
 SAM_MODALITIES = (MODALITY_SEGMENTATION, MODALITY_OBJECT_DETECTION)
+GROUNDED_SAM_MODALITIES = (MODALITY_SEGMENTATION, MODALITY_OBJECT_DETECTION)
 
 # Test injection point: when set, used instead of a boto3 Lambda client
 # for synchronous SAM worker invocations.
 sam_lambda_client = None
 _cached_sam_lambda_client = None
+
+# Test injection point: when set, used instead of a boto3 Lambda client
+# for synchronous Grounded-SAM worker invocations.
+grounded_sam_lambda_client = None
+_cached_grounded_sam_lambda_client = None
 
 
 class MalformedMessage(Exception):
@@ -858,6 +885,185 @@ def _generate_sam_prelabel(message: Dict, job: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Grounded-SAM path (grounded-sam-autolabel Req 4.x: classified
+# text-prompted pre-labels)
+# ---------------------------------------------------------------------------
+
+def _get_grounded_sam_lambda_client():
+    """Lambda client bounding the synchronous Grounded-SAM invocation
+    wall clock at 240 s (read timeout, retries disabled — Req 4.3)."""
+    global _cached_grounded_sam_lambda_client
+    if grounded_sam_lambda_client is not None:
+        return grounded_sam_lambda_client
+    if _cached_grounded_sam_lambda_client is None:
+        _cached_grounded_sam_lambda_client = boto3.client(
+            'lambda',
+            config=BotoConfig(
+                connect_timeout=10,
+                read_timeout=GROUNDED_SAM_MAX_TIMEOUT_SECONDS,
+                retries={'max_attempts': 0},
+            ),
+        )
+    return _cached_grounded_sam_lambda_client
+
+
+def _grounded_sam_prompts(label_set: List[str],
+                          overrides: Any) -> List[Dict[str, str]]:
+    """The Prompt_Map (Req 2.7): one `{label, prompt}` pair per
+    Label_Set label in Label_Set order. A label's prompt is its
+    Prompt_Override when the override is a string that is non-empty
+    after trimming, otherwise the label name itself.
+
+    Pure and total over malformed `overrides` (None, non-dict, or
+    non-string values all degrade to the label-name fallback) — a
+    malformed job record never fails the image here (Req 7.6).
+    """
+    if not isinstance(overrides, dict):
+        overrides = {}
+    prompts = []
+    for label in label_set:
+        override = overrides.get(label)
+        if isinstance(override, str) and override.strip():
+            prompt = override
+        else:
+            prompt = label
+        prompts.append({'label': label, 'prompt': prompt})
+    return prompts
+
+
+def _generate_grounded_sam_prelabel(message: Dict, job: Dict) -> Dict:
+    modality = message['modality']
+    label_set = message['label_set']
+    if modality not in GROUNDED_SAM_MODALITIES:
+        raise GenerationFailure(
+            f'Grounded-SAM auto-labeling does not support the {modality} '
+            f'modality')
+    if not GROUNDED_SAM_WORKER_FUNCTION_NAME:
+        raise GenerationFailure(
+            'Grounded-SAM worker function is not configured')
+
+    bucket, key = _parse_s3_uri(message['image_s3_uri'])
+    dataset_s3 = _dataset_s3_client(job, bucket)
+    presigned_url = dataset_s3.generate_presigned_url(
+        'get_object',
+        Params={'Bucket': bucket, 'Key': key},
+        ExpiresIn=PRESIGNED_URL_EXPIRY_SECONDS,
+    )
+
+    # Prompt_Overrides ride the job record, not the fan-out message
+    # (Req 4.1): the record is fetched per message anyway, so in-flight
+    # messages across a deployment process correctly by construction.
+    prompt_overrides = (job.get('auto_label') or {}).get('prompt_overrides')
+    payload_out = {
+        'image_s3_presigned_url': presigned_url,
+        'prompts': _grounded_sam_prompts(label_set, prompt_overrides),
+        'modality': modality,
+    }
+
+    try:
+        response = _get_grounded_sam_lambda_client().invoke(
+            FunctionName=GROUNDED_SAM_WORKER_FUNCTION_NAME,
+            InvocationType='RequestResponse',
+            Payload=json.dumps(payload_out),
+        )
+        payload_bytes = response['Payload'].read()
+    except Exception as exc:  # noqa: BLE001 — invocation error/timeout
+        raise GenerationFailure(
+            f'Grounded-SAM worker invocation failed: {exc}') from exc
+
+    if response.get('FunctionError'):
+        raise GenerationFailure(
+            f'Grounded-SAM worker failed: '
+            f"{payload_bytes.decode('utf-8', errors='replace')[:512]}")
+    try:
+        payload = json.loads(payload_bytes)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise GenerationFailure(
+            f'Grounded-SAM worker returned unparseable output: {exc}') from exc
+
+    regions = payload.get('regions') if isinstance(payload, dict) else None
+    image_width = payload.get('image_width') if isinstance(payload, dict) else None
+    image_height = payload.get('image_height') if isinstance(payload, dict) else None
+    if (not isinstance(regions, list)
+            or not isinstance(image_width, int)
+            or not isinstance(image_height, int)):
+        raise GenerationFailure(
+            'Grounded-SAM worker returned a malformed response')
+
+    # Unlike sam, every region is classified: its class must be a
+    # member of the message's Label_Set (Req 4.5).
+    if modality == MODALITY_SEGMENTATION:
+        prelabel_regions = []
+        for region in regions:
+            if not isinstance(region, dict):
+                raise GenerationFailure(
+                    'Grounded-SAM worker returned a malformed region entry')
+            class_name = region.get('class')
+            if not isinstance(class_name, str) or class_name not in label_set:
+                raise GenerationFailure(
+                    f'Grounded-SAM worker returned class {class_name!r}, '
+                    f"which is not in the job's label set {label_set}")
+            if not region.get('rle'):
+                raise GenerationFailure(
+                    'Grounded-SAM worker returned a region without RLE '
+                    'geometry')
+            prelabel_region = {'class': class_name, 'rle': region['rle']}
+            if region.get('score') is not None:
+                prelabel_region['score'] = region['score']
+            prelabel_regions.append(prelabel_region)
+        return {
+            'modality': modality,
+            'regions': prelabel_regions,
+            'image_width': image_width,
+            'image_height': image_height,
+        }
+
+    # ObjectDetection: the worker nests geometry under `box`; the
+    # stored Pre_Label is the Bedrock shape byte-exactly (Req 4.7) —
+    # `{class, left, top, width, height}` floats, score dropped —
+    # validated with the _validate_boxes rules (Req 4.5).
+    boxes = []
+    for region in regions:
+        if not isinstance(region, dict):
+            raise GenerationFailure(
+                'Grounded-SAM worker returned a malformed region entry')
+        class_name = region.get('class')
+        if not isinstance(class_name, str) or class_name not in label_set:
+            raise GenerationFailure(
+                f'Grounded-SAM worker returned class {class_name!r}, '
+                f"which is not in the job's label set {label_set}")
+        box = region.get('box')
+        if not isinstance(box, dict):
+            raise GenerationFailure(
+                'Grounded-SAM worker returned a region without box geometry')
+        geometry = {}
+        for field in ('left', 'top', 'width', 'height'):
+            value = box.get(field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise GenerationFailure(
+                    f"malformed box geometry: '{field}' is {value!r}")
+            geometry[field] = float(value)
+        if geometry['width'] <= 0 or geometry['height'] <= 0:
+            raise GenerationFailure(
+                'malformed box geometry: width and height must be positive')
+        if geometry['left'] < 0 or geometry['top'] < 0:
+            raise GenerationFailure(
+                'malformed box geometry: negative coordinates')
+        if (geometry['left'] + geometry['width'] > image_width
+                or geometry['top'] + geometry['height'] > image_height):
+            raise GenerationFailure(
+                f'box {geometry} lies outside the '
+                f'{image_width}x{image_height} image bounds')
+        boxes.append({'class': class_name, **geometry})
+    return {
+        'modality': modality,
+        'boxes': boxes,
+        'image_width': image_width,
+        'image_height': image_height,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Persistence: pre-label object + task/job state
 # ---------------------------------------------------------------------------
 
@@ -958,6 +1164,8 @@ def _generate_prelabel(message: Dict, job: Dict) -> Dict:
     model = message['model']
     if model == 'sam':
         return _generate_sam_prelabel(message, job)
+    if model == 'grounded-sam':
+        return _generate_grounded_sam_prelabel(message, job)
     if isinstance(model, str) and model.startswith('bedrock:'):
         model_id = model.split(':', 1)[1]
         if model_id:

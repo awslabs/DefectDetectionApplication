@@ -1890,6 +1890,15 @@ class ApiService {
        * the default (Requirements 3.6, 3.10).
        */
       token_budget?: number;
+      /**
+       * Per-label Grounding DINO text prompt overrides for the
+       * `grounded-sam` family only: keys are a subset of the submitted
+       * label_set, values transmitted character-for-character as
+       * entered, and the key is omitted entirely when no override
+       * survives trimming (grounded-sam-autolabel Requirements 2.3,
+       * 2.4).
+       */
+      prompt_overrides?: Record<string, string>;
     };
     /**
      * Few_Shot_Option for the `llm:` auto-label family
@@ -1966,6 +1975,14 @@ class ApiService {
         enabled?: boolean;
         model?: string;
         detection_prompt?: string;
+        /**
+         * Per-label Grounding DINO text prompt overrides persisted for
+         * the `grounded-sam` family only: keys are a subset of the
+         * job's label_set, values held verbatim as entered; absent for
+         * every other family and for override-free grounded-sam jobs
+         * (grounded-sam-autolabel Requirements 2.3, 2.4).
+         */
+        prompt_overrides?: Record<string, string>;
       };
     };
   }> {
