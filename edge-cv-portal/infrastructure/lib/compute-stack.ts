@@ -18,7 +18,7 @@ import { Construct } from 'constructs';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { execFileSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import { ApiGatewayStack } from './api-gateway-stack';
 import { CameraRegistryApiStack } from './camera-registry-api-stack';
 import { UserAdminApiStack } from './user-admin-api-stack';
@@ -1796,14 +1796,60 @@ export class ComputeStack extends cdk.Stack {
     // Requirements: 6.5, 8.1, 12.8
     // ------------------------------------------------------------------
 
-    // Pillow imaging layer for the labeling worker's segmentation mask
-    // rendering (dda_manifest.render_mask_png). Reuses the existing
-    // backend/layers/imaging asset (Pillow 10.4.0, built by
-    // backend/layers/imaging/build.sh — same convention as the jwt layer);
-    // the SyntheticDataStack bundles the same directory as its own
-    // LayerVersion, so no new layer source is introduced here.
+    // Pillow imaging layer for the labeling functions (mask rendering,
+    // Image_Downscaler, dimension probes): bundled at synth time via CDK
+    // asset bundling.
+    //
+    // BUGFIX (dda-imaging-layer-empty): this asset was previously the raw
+    // backend/layers/imaging directory, relying on build.sh having been
+    // run manually to create python/ before deploy — when it wasn't, an
+    // EMPTY layer (only build.sh + requirements.txt) synthesized and
+    // deployed cleanly, and the DDA labeling functions failed at runtime
+    // with "No module named 'PIL'". Bundling makes synth itself produce
+    // the populated layer: the local tryBundle path runs pip on the host
+    // with the same manylinux wheel targeting as build.sh (fast, no Docker
+    // needed); if it fails, CDK falls back to the Docker bundling image.
+    // The bundling options mirror the SyntheticDataStack's
+    // SyntheticImagingLayer byte-for-byte so both stacks stage one
+    // identical asset (equal Content.S3Key). build.sh remains valid for
+    // manual/standalone layer builds.
+    const imagingLayerSourceDir = path.join(__dirname, '../../backend/layers/imaging');
     const imagingLayer = new lambda.LayerVersion(this, 'ImagingLayer', {
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/imaging')),
+      code: lambda.Code.fromAsset(imagingLayerSourceDir, {
+        bundling: {
+          image: lambda.Runtime.PYTHON_3_11.bundlingImage,
+          command: [
+            'bash',
+            '-c',
+            'pip install -r requirements.txt -t /asset-output/python',
+          ],
+          local: {
+            tryBundle(outputDir: string): boolean {
+              try {
+                // Same wheel targeting as build.sh: Pillow ships native
+                // extensions, so force the manylinux wheel matching the
+                // Lambda runtime (Python 3.11, x86_64) regardless of host.
+                execSync(
+                  [
+                    'pip install',
+                    `-r ${path.join(imagingLayerSourceDir, 'requirements.txt')}`,
+                    `-t ${path.join(outputDir, 'python')}`,
+                    '--platform manylinux2014_x86_64',
+                    '--implementation cp',
+                    '--python-version 3.11',
+                    '--only-binary=:all:',
+                  ].join(' '),
+                  { stdio: ['ignore', 'pipe', 'pipe'] }
+                );
+                return true;
+              } catch {
+                // Fall back to the Docker bundling image.
+                return false;
+              }
+            },
+          },
+        },
+      }),
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
       description:
         'Pillow imaging layer for DDA labeling mask rendering (built by ' +

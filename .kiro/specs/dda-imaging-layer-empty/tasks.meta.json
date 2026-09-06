@@ -1,0 +1,22 @@
+{
+  "pbtResults": {
+    "1. Write bug condition exploration test": {
+      "status": "passed",
+      "failingExample": "Exploration test FAILED on unfixed code as expected (bug confirmed). Counterexamples from the jest diff: (1) staged compute ImagingLayer asset root = ['build.sh', 'python', 'requirements.txt'] — raw source directory staged verbatim with build tooling (expected bundling output: ['python'] only; 'python' present only because build.sh was run on this host); (2) cross-stack asset divergence: compute Content.S3Key = a3b504b0b4d72001dc3b5e88472c7c084e1c2ed01528071eb944d44055bbbd88.zip (raw source fingerprint) ≠ synthetic SyntheticImagingLayer Content.S3Key = 5ad606b3bed9fb34746890229fce445dbfaa2c7355538c369f906a30d499deb6.zip (bundled asset hash) — the same divergence the pinned cross-stack test currently fails on; (3) PIL checks (Image.py, ImageDraw.py, _imaging*.so) passed by host accident, confirming the host-state caveat that made structural assertions necessary.",
+      "lastRunTimestamp": 1788664002030
+    },
+    "2. Write preservation property tests (BEFORE implementing fix)": {
+      "status": "passed",
+      "lastRunTimestamp": 1788664537210
+    },
+    "3.2 Verify bug condition exploration test now passes": {
+      "status": "passed",
+      "lastRunTimestamp": 1788665081079
+    },
+    "3.3 Verify preservation tests still pass": {
+      "status": "passed",
+      "lastRunTimestamp": 1788665087920
+    }
+  },
+  "executionHistory": {}
+}
