@@ -67,6 +67,19 @@ stack (new tests only — every pre-existing assertion untouched):
 - creation accepted while no grounded-sam worker is deployed — job
   creation has no worker dependency, whatever the worker env says
   (Req 5.4)
+
+Feature: grounded-sam-prompt-guardrails-and-prelabel-retry (task 1.5)
+adds, against the same stack (new tests only — every pre-existing
+assertion untouched):
+
+- a period-bearing Prompt_Override rejected with the caption-separator
+  message naming the label, nothing persisted (Req 2.1)
+- a period-bearing label name whose Prompt_Override is absent or blank
+  rejected with the label-source message (Req 2.2)
+- commas, question marks, exclamation points, and semicolons accepted
+  — they do not split caption spans (Req 2.4)
+- a trailing-dot override rejected — stricter than the worker's
+  build_caption (which strips trailing dots), deliberately
 """
 import json
 import os
@@ -1161,3 +1174,82 @@ class TestGroundedSamNoWorkerDependency:
         invoked = [inv["FunctionName"]
                    for inv in env.dda.lambda_client.invocations]
         assert invoked == ["test-dda-worker"]
+
+
+# ------------------------- grounded-sam prompt guardrail (task 1.5)
+# Feature: grounded-sam-prompt-guardrails-and-prelabel-retry
+
+
+class TestGroundedSamPromptGuardrail:
+    def test_period_bearing_override_rejected_naming_label(self, env):
+        """Req 2.1: an instruction-style override containing an inner
+        period is rejected with the caption-separator message naming
+        the label; nothing persisted."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(
+            task_type="Segmentation", label_set=["scratch"],
+            auto_label=grounded_sam_auto_label(
+                prompt_overrides={"scratch": "a scratch. long and thin"}))
+        assert status == 400
+        guard_errors = [err for err in body["validation_errors"]
+                        if "contains a period" in err["message"]]
+        assert len(guard_errors) == 1
+        assert guard_errors[0]["label"] == "scratch"
+        assert "'scratch'" in guard_errors[0]["message"]
+        assert ("periods separate labels in the detection caption"
+                in guard_errors[0]["message"])
+        env.assert_nothing_persisted()
+
+    @pytest.mark.parametrize("overrides", [
+        None,                        # prompt_overrides key absent
+        {},                          # no entry for the label
+        {"v1.2 defect": "   \t "},   # entry blank after trimming
+    ])
+    def test_period_bearing_label_without_override_rejected(
+            self, env, overrides):
+        """Req 2.2: a label name containing a period whose
+        Prompt_Override is absent or blank after trimming is rejected
+        with the label-source message — the label name itself would be
+        the text prompt; nothing persisted."""
+        env.put_images(["a.jpg"])
+        extra = {} if overrides is None else {"prompt_overrides": overrides}
+        status, body = env.create(
+            task_type="Segmentation", label_set=["v1.2 defect"],
+            auto_label=grounded_sam_auto_label(**extra))
+        assert status == 400
+        guard_errors = [err for err in body["validation_errors"]
+                        if "has no text prompt" in err["message"]]
+        assert len(guard_errors) == 1
+        assert guard_errors[0]["label"] == "v1.2 defect"
+        assert "'v1.2 defect'" in guard_errors[0]["message"]
+        env.assert_nothing_persisted()
+
+    def test_safe_punctuation_accepted(self, env):
+        """Req 2.4: commas, question marks, exclamation points, and
+        semicolons do not split caption spans — an override carrying
+        all four is accepted and persisted character-for-character."""
+        env.put_images(["a.jpg"])
+        overrides = {"scratch": "scratch, dent; wide? yes!"}
+        status, body = env.create(
+            task_type="Segmentation", label_set=["scratch"],
+            auto_label=grounded_sam_auto_label(prompt_overrides=overrides))
+        assert status == 201
+        assert env.get_job(body["job_id"])["auto_label"] == {
+            "enabled": True,
+            "model": "grounded-sam",
+            "prompt_overrides": overrides,
+        }
+
+    def test_trailing_dot_override_rejected(self, env):
+        """Stricter than the worker, deliberately: build_caption strips
+        trailing dots so 'scratch.' would actually work, but the
+        no-periods rule is judged on the raw override; nothing
+        persisted."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(
+            task_type="Segmentation", label_set=["scratch"],
+            auto_label=grounded_sam_auto_label(
+                prompt_overrides={"scratch": "scratch."}))
+        assert status == 400
+        assert "contains a period" in messages(body)
+        env.assert_nothing_persisted()

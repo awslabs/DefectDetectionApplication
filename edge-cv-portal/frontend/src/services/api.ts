@@ -1963,11 +1963,29 @@ class ApiService {
       notification_failures?: LabelingNotificationFailure[];
       skip_verification?: boolean;
       review_ready?: boolean;
+      /**
+       * Set once a Skip_Verification job's admin review has been
+       * finalized; a truthy value makes the job ineligible for the
+       * re-run pre-labels action
+       * (grounded-sam-prompt-guardrails-and-prelabel-retry
+       * Requirements 7.1, 7.2).
+       */
+      review_finalized?: boolean;
       stopped_at?: number;
       // Pre-label progress counts over active tasks (llm-auto-labeling
       // Requirements 10.1, 10.3).
       prelabel_available_count?: number;
       prelabel_failed_count?: number;
+      /**
+       * Failure_Reason_Summary: the distinct `prelabel_error` values
+       * among the job's active Failed pre-label tasks, each with its
+       * occurrence count, ordered by descending count and capped at 5
+       * distinct reasons; present only when at least one Failed
+       * pre-label task exists
+       * (grounded-sam-prompt-guardrails-and-prelabel-retry
+       * Requirements 4.1, 4.2).
+       */
+      prelabel_failure_reasons?: { reason: string; count: number }[];
       // Auto-label configuration persisted on the job item and returned
       // as-is; `detection_prompt` is present only for the `llm:` family
       // (llm-auto-labeling Requirement 10.1).
@@ -2082,6 +2100,31 @@ class ApiService {
     return this.request(`/labeling/${encodeURIComponent(jobId)}/stop`, {
       method: 'POST',
     });
+  }
+
+  /**
+   * Re-run Pre_Label generation for a DDA Labeling_Job's Failed
+   * pre-label tasks, optionally replacing a grounded-sam job's
+   * `prompt_overrides` in the same request; the body field is omitted
+   * for a pure retry (grounded-sam-prompt-guardrails-and-prelabel-retry
+   * Requirements 5.1, 7.5). A 4xx indicates an ineligible job or a
+   * prompt-guardrail violation; a 202 carries the retried task count.
+   */
+  async rerunPrelabels(
+    jobId: string,
+    body?: { prompt_overrides?: Record<string, string> }
+  ): Promise<{
+    job_id: string;
+    retried_count: number;
+    message?: string;
+  }> {
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/rerun-prelabels`,
+      {
+        method: 'POST',
+        ...(body !== undefined && { body: JSON.stringify(body) }),
+      }
+    );
   }
 
   /**

@@ -55,6 +55,7 @@ export interface DdaLabelingApiStackProps extends cdk.NestedStackProps {
  * - GET    /labeling/{id}/review                          (auto-label results)
  * - POST   /labeling/{id}/review/decisions                (batch accept/reject)
  * - POST   /labeling/{id}/review/finalize                 (finalize + manifest)
+ * - POST   /labeling/{id}/rerun-prelabels                 (re-run failed pre-labels)
  * - POST   /labeling-preview/runs                         (start a Preview_Run)
  * - GET    /labeling-preview/runs/{runId}                 (Preview_Run status)
  */
@@ -198,6 +199,15 @@ export class DdaLabelingApiStack extends cdk.NestedStack {
     // manifest generation (req 9.7–9.9)
     addMethod(reviewResource.addResource('finalize'), 'POST');
 
+    // POST /labeling/{id}/rerun-prelabels — re-run Failed pre-label tasks,
+    // optionally updating a grounded-sam job's prompt_overrides
+    // (grounded-sam-prompt-guardrails-and-prelabel-retry, Req 5.1).
+    // MANAGE_LABELING_JOBS is enforced via @rbac_check in dda_labeling.py.
+    const rerunPrelabelsResource = labelingJobResource.addResource('rerun-prelabels', {
+      defaultCorsPreflightOptions: corsOptions,
+    });
+    addMethod(rerunPrelabelsResource, 'POST');
+
     // ------------------------------------------------------------------
     // Prompt Tuning Preview (llm-autolabel-prompt-tuning, task 7.2).
     // A Preview_Run is asynchronous: POST starts it and returns 202 with a
@@ -241,13 +251,14 @@ export class DdaLabelingApiStack extends cdk.NestedStack {
     // Every resource/method (including the CORS preflight OPTIONS methods)
     // and the authorizer must exist before the deployment snapshot is
     // taken; construct dependencies cover each resource subtree created
-    // here (the /labeling/{id} parent is imported, so its two subtrees are
-    // added individually).
+    // here (the /labeling/{id} parent is imported, so its three subtrees
+    // are added individually).
     deployment.node.addDependency(authorizer);
     deployment.node.addDependency(teamsResource);
     deployment.node.addDependency(labelerResource);
     deployment.node.addDependency(stopResource);
     deployment.node.addDependency(reviewResource);
+    deployment.node.addDependency(rerunPrelabelsResource);
     deployment.node.addDependency(previewResource);
   }
 }

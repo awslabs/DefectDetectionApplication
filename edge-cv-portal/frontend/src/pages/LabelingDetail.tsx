@@ -15,11 +15,20 @@ import {
   Link,
   Modal,
   Table,
+  FormField,
+  Input,
 } from '@cloudscape-design/components';
 import { useParams, useNavigate } from 'react-router-dom';
 import { LabelingJob } from '../types';
 import { apiService, LabelingMemberProgress } from '../services/api';
 import ManifestTransformer from '../components/ManifestTransformer';
+import {
+  ALIGNMENT_BREAKING_PATTERN,
+  PROMPT_GUIDANCE_CONSTRAINT,
+  PromptGuidanceContent,
+  findPromptGuardrailViolation,
+  promptGuardrailMessage,
+} from './promptOverrideGuardrails';
 
 /** Raw `GET /labeling/{id}` job payload, including DDA-only fields. */
 type ApiLabelingJob = Awaited<
@@ -70,6 +79,92 @@ export function canStopDdaJob(job: {
   return job.labeling_backend === 'DDA' && job.status === 'InProgress';
 }
 
+/**
+ * Prompt_Override length limit for the re-run dialog's entries, judged on
+ * the raw entered value — a local mirror of the wizard's exported
+ * `MAX_PROMPT_OVERRIDE_LENGTH` (CreateLabelingJob.tsx) so the detail page
+ * does not import the whole wizard module; the error message shape is
+ * the wizard's pinned one (grounded-sam-autolabel Requirement 2.6;
+ * grounded-sam-prompt-guardrails-and-prelabel-retry Requirement 7.3).
+ */
+const MAX_PROMPT_OVERRIDE_LENGTH = 256;
+
+/**
+ * The Re-run pre-labels action applies only to Retry_Eligible_Jobs: DDA
+ * jobs in InProgress status with auto-labeling on (`auto_label.enabled`
+ * or Skip_Verification_Mode), review not finalized, and at least one
+ * Failed pre-label task
+ * (grounded-sam-prompt-guardrails-and-prelabel-retry Requirements 7.1,
+ * 7.2; the backend re-checks the same gates).
+ */
+export function canRerunPrelabels(job: {
+  labeling_backend?: string;
+  status?: string;
+  auto_label?: { enabled?: boolean };
+  skip_verification?: boolean;
+  review_finalized?: boolean;
+  prelabel_failed_count?: number;
+}): boolean {
+  return (
+    job.labeling_backend === 'DDA' &&
+    job.status === 'InProgress' &&
+    Boolean(job.auto_label?.enabled || job.skip_verification) &&
+    !job.review_finalized &&
+    (job.prelabel_failed_count ?? 0) >= 1
+  );
+}
+
+/**
+ * Own-keys string-record equality: same key set, character-identical
+ * values. Decides whether the re-run dialog's pruned override map equals
+ * the job record's persisted map — the `prompt_overrides` body field is
+ * omitted exactly when it does, making a no-op edit a pure retry
+ * (grounded-sam-prompt-guardrails-and-prelabel-retry Requirement 7.5).
+ */
+function promptOverrideMapsEqual(
+  a: Record<string, string>,
+  b: Record<string, string>
+): boolean {
+  const aKeys = Object.keys(a);
+  return (
+    aKeys.length === Object.keys(b).length &&
+    aKeys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(b, key) && a[key] === b[key]
+    )
+  );
+}
+
+/**
+ * Messages of a rejected Retry_Request's `validation_errors` list (the
+ * creation-shaped 400 body rides on the thrown ApiError's `details`),
+ * empty when the error carries none
+ * (grounded-sam-prompt-guardrails-and-prelabel-retry Requirement 7.7).
+ * Duck-typed so any Error-shaped rejection is handled.
+ */
+function extractValidationErrorMessages(error: unknown): string[] {
+  const details =
+    error && typeof error === 'object' && 'details' in error
+      ? (error as { details?: unknown }).details
+      : undefined;
+  const validationErrors =
+    details && typeof details === 'object' && 'validation_errors' in details
+      ? (details as { validation_errors?: unknown }).validation_errors
+      : undefined;
+  if (!Array.isArray(validationErrors)) {
+    return [];
+  }
+  return validationErrors.flatMap((entry) => {
+    if (entry && typeof entry === 'object') {
+      const message = (entry as { message?: unknown }).message;
+      if (typeof message === 'string') {
+        return [message];
+      }
+    }
+    return [];
+  });
+}
+
 export default function LabelingDetail() {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
@@ -82,6 +177,19 @@ export default function LabelingDetail() {
   const [showStopModal, setShowStopModal] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
+  // Re-run pre-labels flow
+  // (grounded-sam-prompt-guardrails-and-prelabel-retry Requirements
+  // 7.3-7.7): the dialog's per-label override entries, seeded from the
+  // job record's persisted map when the dialog opens, and its inline
+  // error state (message plus the response's validation_errors, when
+  // any).
+  const [showRerunModal, setShowRerunModal] = useState(false);
+  const [rerunOverrides, setRerunOverrides] = useState<
+    Record<string, string>
+  >({});
+  const [rerunSubmitting, setRerunSubmitting] = useState(false);
+  const [rerunError, setRerunError] = useState<string | null>(null);
+  const [rerunErrorDetails, setRerunErrorDetails] = useState<string[]>([]);
 
   useEffect(() => {
     loadJob();
@@ -182,6 +290,81 @@ export default function LabelingDetail() {
     }
   };
 
+  // Open the re-run dialog with the override entries pre-filled from the
+  // job record's persisted `auto_label.prompt_overrides`
+  // (grounded-sam-prompt-guardrails-and-prelabel-retry Requirement 7.3).
+  const openRerunModal = () => {
+    setRerunError(null);
+    setRerunErrorDetails([]);
+    setRerunOverrides({ ...(rawJob?.auto_label?.prompt_overrides ?? {}) });
+    setShowRerunModal(true);
+  };
+
+  // Submit the Retry_Request
+  // (grounded-sam-prompt-guardrails-and-prelabel-retry Requirements
+  // 7.5-7.7): grounded-sam jobs assemble the pruned override map with the
+  // creation rules (entries non-empty after trimming whose label belongs
+  // to the Label_Set, raw values), omitting the body exactly when the
+  // pruned map equals the persisted one; a 202 closes the dialog and
+  // refreshes the detail; an error renders inline with the entered
+  // values retained.
+  const handleRerunPrelabels = async () => {
+    if (!jobId || !rawJob) return;
+    let body: { prompt_overrides: Record<string, string> } | undefined;
+    if (rawJob.auto_label?.model === 'grounded-sam') {
+      const labels = rawJob.label_set ?? [];
+      // The wizard's validation order (Requirement 7.3): over-length
+      // first, its pinned message keeping precedence, then the
+      // Prompt_Guardrail over the Effective_Prompts.
+      const overlongLabel = labels.find(
+        (label) =>
+          (rerunOverrides[label] || '').length > MAX_PROMPT_OVERRIDE_LENGTH
+      );
+      if (overlongLabel !== undefined) {
+        setRerunError(
+          `The text prompt for label "${overlongLabel}" exceeds ${MAX_PROMPT_OVERRIDE_LENGTH} characters`
+        );
+        setRerunErrorDetails([]);
+        return;
+      }
+      const guardrailViolation = findPromptGuardrailViolation(
+        labels,
+        rerunOverrides
+      );
+      if (guardrailViolation !== null) {
+        setRerunError(promptGuardrailMessage(guardrailViolation));
+        setRerunErrorDetails([]);
+        return;
+      }
+      const pruned: Record<string, string> = {};
+      for (const label of labels) {
+        const value = rerunOverrides[label];
+        if (typeof value === 'string' && value.trim() !== '') {
+          pruned[label] = value;
+        }
+      }
+      const persisted = rawJob.auto_label?.prompt_overrides ?? {};
+      body = promptOverrideMapsEqual(pruned, persisted)
+        ? undefined
+        : { prompt_overrides: pruned };
+    }
+    setRerunSubmitting(true);
+    setRerunError(null);
+    setRerunErrorDetails([]);
+    try {
+      await apiService.rerunPrelabels(jobId, body);
+      setShowRerunModal(false);
+      await loadJob();
+    } catch (error) {
+      setRerunError(
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      setRerunErrorDetails(extractValidationErrorMessages(error));
+    } finally {
+      setRerunSubmitting(false);
+    }
+  };
+
   const handleDownloadManifest = () => {
     if (job) {
       console.log('Downloading manifest from:', job.manifest_s3);
@@ -239,6 +422,13 @@ export default function LabelingDetail() {
     const prelabelAvailable = rawJob.prelabel_available_count ?? 0;
     const prelabelFailed = rawJob.prelabel_failed_count ?? 0;
     const prelabelResolved = prelabelAvailable + prelabelFailed > 0;
+    // Failure_Reason_Summary entries and re-run dialog composition
+    // (grounded-sam-prompt-guardrails-and-prelabel-retry Requirements
+    // 4.2, 7.3, 7.4): grounded-sam jobs edit one override entry per
+    // Label_Set label; every other family gets a plain confirmation.
+    const prelabelFailureReasons = rawJob.prelabel_failure_reasons || [];
+    const isGroundedSamJob = autoLabelModel === 'grounded-sam';
+    const rerunLabels = rawJob.label_set ?? [];
 
     return (
       <>
@@ -402,8 +592,51 @@ export default function LabelingDetail() {
             </SpaceBetween>
           </Container>
 
+          {prelabelFailed >= 1 && (
+            <Alert
+              type="warning"
+              header="Pre-labeling failures"
+              data-testid="prelabel-failures-alert"
+            >
+              <SpaceBetween size="xxs">
+                <Box>
+                  {prelabelFailed.toLocaleString()} pre-label task
+                  {prelabelFailed === 1 ? '' : 's'} failed.
+                </Box>
+                {prelabelFailureReasons.length > 0 && (
+                  <ul>
+                    {prelabelFailureReasons.map((entry, index) => (
+                      <li key={`${entry.reason}-${index}`}>
+                        {entry.reason} ({entry.count.toLocaleString()} image
+                        {entry.count === 1 ? '' : 's'})
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </SpaceBetween>
+            </Alert>
+          )}
+
           {(llmModelId !== null || prelabelResolved) && (
-            <Container header={<Header variant="h2">Auto-Labeling</Header>}>
+            <Container
+              header={
+                <Header
+                  variant="h2"
+                  actions={
+                    canRerunPrelabels(rawJob) ? (
+                      <Button
+                        data-testid="rerun-prelabels-button"
+                        onClick={openRerunModal}
+                      >
+                        {`Re-run pre-labels (${prelabelFailed.toLocaleString()} failed)`}
+                      </Button>
+                    ) : undefined
+                  }
+                >
+                  Auto-Labeling
+                </Header>
+              }
+            >
               <SpaceBetween size="l">
                 {llmModelId !== null && (
                   <KeyValuePairs
@@ -576,6 +809,112 @@ export default function LabelingDetail() {
             {stopError && <Alert type="error">{stopError}</Alert>}
           </SpaceBetween>
         </Modal>
+
+        {/* Re-run pre-labels dialog (the stop-modal precedent,
+            grounded-sam-prompt-guardrails-and-prelabel-retry
+            Requirements 7.3-7.7): grounded-sam jobs edit one
+            Prompt_Override entry per Label_Set label, pre-filled from
+            the persisted map, with the shared Prompt_Guidance and the
+            wizard's validation order; every other family confirms with
+            the failed count only. Mounted only while open so
+            zero-failed jobs render exactly as before (Requirement
+            4.3). */}
+        {showRerunModal && (
+          <Modal
+            visible
+            onDismiss={() => setShowRerunModal(false)}
+            header="Re-run pre-labels"
+            data-testid="rerun-prelabels-modal"
+            footer={
+              <Box float="right">
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button
+                    variant="link"
+                    onClick={() => setShowRerunModal(false)}
+                    disabled={rerunSubmitting}
+                    data-testid="rerun-prelabels-cancel"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onClick={handleRerunPrelabels}
+                    loading={rerunSubmitting}
+                    data-testid="rerun-prelabels-submit"
+                  >
+                    Re-run pre-labels
+                  </Button>
+                </SpaceBetween>
+              </Box>
+            }
+          >
+            <SpaceBetween size="s">
+              <Box>
+                {`Re-run pre-label generation for the ${prelabelFailed.toLocaleString()} failed pre-label task${prelabelFailed === 1 ? '' : 's'} of "${rawJob.job_name}"? The failed tasks are reset and queued again.`}
+              </Box>
+              {isGroundedSamJob && rerunLabels.length > 0 && (
+                <SpaceBetween size="m">
+                  <Box>
+                    Adjust the per-label text prompts below before
+                    re-running, or leave them unchanged to retry with the
+                    saved prompts.
+                  </Box>
+                  {rerunLabels.map((label) => (
+                    <FormField
+                      key={label}
+                      label={label}
+                      constraintText={PROMPT_GUIDANCE_CONSTRAINT}
+                      info={<PromptGuidanceContent />}
+                      errorText={
+                        // Over-length first (the wizard's pinned message
+                        // keeps precedence), then the Prompt_Guardrail
+                        // period variant — the wizard's field-level
+                        // convention (Requirements 7.3, 3.5).
+                        (rerunOverrides[label] || '').length >
+                        MAX_PROMPT_OVERRIDE_LENGTH
+                          ? `The text prompt for label "${label}" exceeds ${MAX_PROMPT_OVERRIDE_LENGTH} characters`
+                          : ALIGNMENT_BREAKING_PATTERN.test(
+                                rerunOverrides[label] || ''
+                              )
+                            ? promptGuardrailMessage({
+                                label,
+                                source: 'override',
+                              })
+                            : undefined
+                      }
+                    >
+                      <Input
+                        value={rerunOverrides[label] || ''}
+                        placeholder={label}
+                        onChange={({ detail }) =>
+                          setRerunOverrides((current) => ({
+                            ...current,
+                            [label]: detail.value,
+                          }))
+                        }
+                        ariaLabel={`Text prompt for ${label}`}
+                      />
+                    </FormField>
+                  ))}
+                </SpaceBetween>
+              )}
+              {rerunError && (
+                <Alert type="error" data-testid="rerun-prelabels-error">
+                  <SpaceBetween size="xxs">
+                    <Box>{rerunError}</Box>
+                    {rerunErrorDetails.length > 0 && (
+                      <ul>
+                        {rerunErrorDetails.map((message, index) => (
+                          <li key={`${message}-${index}`}>{message}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </SpaceBetween>
+                </Alert>
+              )}
+            </SpaceBetween>
+          </Modal>
+        )}
       </>
     );
   }

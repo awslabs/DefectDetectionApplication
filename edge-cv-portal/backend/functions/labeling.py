@@ -847,7 +847,10 @@ def _get_dda_labeling_job(job: Dict):
     blocked flag, and the notification state. For Skip_Verification_Mode
     jobs the count of completed auto-label attempts (succeeded or failed)
     substitutes for the submitted count in the progress computation
-    (Requirement 11.10).
+    (Requirement 11.10). When at least one active task has a Failed
+    pre-label, also adds `prelabel_failure_reasons` — the
+    Failure_Reason_Summary of grounded-sam-prompt-guardrails-and-
+    prelabel-retry Requirements 4.1/4.4.
     """
     tasks = _query_dda_job_tasks(job['job_id'])
     # Inactive tasks (deactivated after a distribution shortfall) never
@@ -879,6 +882,36 @@ def _get_dda_labeling_job(job: Dict):
         1 for t in active_tasks if t.get('prelabel_status') == 'Available')
     job['prelabel_failed_count'] = sum(
         1 for t in active_tasks if t.get('prelabel_status') == 'Failed')
+
+    # Failure_Reason_Summary (grounded-sam-prompt-guardrails-and-
+    # prelabel-retry, Requirements 4.1, 4.4): the distinct
+    # `prelabel_error` values among the active Failed tasks — the same
+    # active/Failed filter as prelabel_failed_count, so the uncapped
+    # counts sum to it — each with its occurrence count, ordered by
+    # descending count (ties by first occurrence in task order) and
+    # capped at 5 distinct reasons. Aggregated over the already-queried
+    # active tasks: zero extra table reads. Included only when at least
+    # one active Failed task exists, so zero-failed responses stay
+    # byte-identical (Req 4.4). `review_finalized` needs no handling
+    # here: the raw job item is returned wholesale below, so the flag
+    # passes through untouched whenever it is present on the item (the
+    # detail page's rerun-eligibility predicate reads it).
+    if job['prelabel_failed_count'] > 0:
+        reason_counts: Dict[str, int] = {}
+        for t in active_tasks:
+            if t.get('prelabel_status') != 'Failed':
+                continue
+            # A Failed task missing the error attribute (or carrying an
+            # empty one) counts under 'unknown'.
+            reason = t.get('prelabel_error') or 'unknown'
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        # Dicts preserve insertion (first-occurrence) order and sorted()
+        # is stable, so equal counts keep first-occurrence order.
+        job['prelabel_failure_reasons'] = [
+            {'reason': reason, 'count': count}
+            for reason, count in sorted(
+                reason_counts.items(), key=lambda entry: -entry[1])[:5]
+        ]
 
     # Per-member submitted/remaining counts for team jobs (Req 11.2).
     member_progress = []

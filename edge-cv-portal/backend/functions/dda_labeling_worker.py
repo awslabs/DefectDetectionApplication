@@ -8,6 +8,9 @@ handler dispatches on the payload's `action` field:
     {action: 'distribute',         job_id}              task 7.1 (this module)
     {action: 'notify_new_members', job_id, member_ids}  task 7.2 (this module)
     {action: 'generate_manifest',  job_id}              task 12.1 (this module)
+    {action: 'retry_prelabels',    job_id}              spec grounded-sam-prompt-
+                                                        guardrails-and-prelabel-retry,
+                                                        task 2.1 (this module)
 
 `distribute` (Requirements 5.1, 5.2, 5.6):
 
@@ -77,6 +80,32 @@ verification Admin_Review finalize (task 11.3):
    validation succeed (Req 10.1, 11.6, 11.7).
 6. Failure at any point: no manifest URI recorded, annotations
    untouched, status='Failed' with failure_reason (Req 10.9, 12.5).
+
+`retry_prelabels` (spec grounded-sam-prompt-guardrails-and-prelabel-
+retry, Requirements 5.10, 6.1-6.6, 6.8), invoked async by the
+`POST /labeling/{id}/rerun-prelabels` route (dda_labeling.
+rerun_prelabels):
+
+1. Re-check eligibility — a stop/finalize may race the async invoke
+   (the distribute status-guard pattern): DDA backend, status
+   InProgress, auto-labeling on (auto_label.enabled or
+   skip_verification), review_finalized falsy. Any miss records the
+   invocation skipped with zero writes (Req 6.8).
+2. Conditionally reset each prelabel_status='Failed' task to Pending,
+   REMOVing prelabel_error and autolabel_error (the consumer's success
+   path never removes them, and skip-verification review-eligibility
+   keys off autolabel_error). The condition (still Failed) partitions
+   concurrent retries and racing in-flight resolutions: a
+   ConditionalCheckFailedException counts the task not-reset
+   (Req 6.1, 6.4, 6.5).
+3. Skip-verification jobs with a positive reset count: one job update
+   re-arming autolabel_pending (+n) / autolabel_completed_count (-n)
+   and clearing review_ready before any enqueue, so the consumer's
+   decrement-to-zero machinery re-arms the review gate (Req 6.3).
+4. Enqueue exactly one auto-label message per reset task through the
+   shared fan-out helper — the distributor's byte-identical message
+   shape, with image_s3_uri taken from the stored task items instead
+   of dataset re-enumeration (Req 6.2, 6.6).
 """
 import json
 import logging
@@ -86,7 +115,7 @@ import time
 from collections import Counter
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
@@ -179,6 +208,9 @@ def handler(event, context):
     Actions:
         distribute         create Task_Assignments for a new DDA job
         generate_manifest  serialize the DDA manifest (task 12.1)
+        retry_prelabels    reset Failed pre-labels and re-enqueue them
+                           (spec grounded-sam-prompt-guardrails-and-
+                           prelabel-retry, task 2.1)
     """
     action = (event or {}).get('action')
     job_id = (event or {}).get('job_id')
@@ -192,6 +224,9 @@ def handler(event, context):
 
     if action == 'generate_manifest':
         return generate_manifest_job(job_id)
+
+    if action == 'retry_prelabels':
+        return retry_prelabels_job(job_id)
 
     message = f"Unknown worker action: {action!r}"
     logger.error(message)
@@ -415,11 +450,31 @@ def _enqueue_autolabel_messages(job: Dict, task_ids: List[str],
     """One SQS message per image on the auto-label queue. Guarded when
     AUTOLABEL_QUEUE_URL is unset: distribution proceeds without the
     fan-out (pre-labels simply never arrive)."""
+    _send_autolabel_fanout(job, [
+        (task_id, f"s3://{job['dataset_bucket']}/{image_key}")
+        for task_id, image_key in zip(task_ids, images)])
+
+
+def _send_autolabel_fanout(job: Dict,
+                           tasks: List[Tuple[str, str]]) -> int:
+    """Shared fan-out body for `distribute` and `retry_prelabels`
+    (refactored out of _enqueue_autolabel_messages by spec
+    grounded-sam-prompt-guardrails-and-prelabel-retry; distribute's
+    observable behavior — messages and logs — is unchanged).
+
+    Enqueues one auto-label SQS message per (task_id, image_s3_uri)
+    pair with the family's exact shape: llm-over-skip-verification
+    model precedence with the bedrock:{bedrock_model_id} fallback,
+    detection_prompt for the llm: family, per_label_prompts for
+    skip-verification jobs, SQS_BATCH_SIZE batching, and loud
+    per-batch partial-failure logging. Returns the number of messages
+    enqueued (entries the batch response reported failed are logged
+    and excluded)."""
     queue_url = os.environ.get('AUTOLABEL_QUEUE_URL')
     if not queue_url:
         logger.warning(f"AUTOLABEL_QUEUE_URL is not set; skipping "
                        f"auto-label fan-out for job {job['job_id']}")
-        return
+        return 0
 
     skip_verification = bool(job.get('skip_verification'))
     # The LLM family takes precedence over the skip-verification
@@ -433,11 +488,11 @@ def _enqueue_autolabel_messages(job: Dict, task_ids: List[str],
                  if skip_verification else model)
 
     entries = []
-    for task_id, image_key in zip(task_ids, images):
+    for task_id, image_s3_uri in tasks:
         message: Dict[str, Any] = {
             'job_id': job['job_id'],
             'task_id': task_id,
-            'image_s3_uri': f"s3://{job['dataset_bucket']}/{image_key}",
+            'image_s3_uri': image_s3_uri,
             'modality': job['task_type'],
             'label_set': list(job.get('label_set') or []),
             'model': model,
@@ -454,6 +509,7 @@ def _enqueue_autolabel_messages(job: Dict, task_ids: List[str],
         entries.append({'Id': str(len(entries)),
                         'MessageBody': json.dumps(message)})
 
+    failed_count = 0
     for start in range(0, len(entries), SQS_BATCH_SIZE):
         batch = entries[start:start + SQS_BATCH_SIZE]
         response = sqs_client.send_message_batch(
@@ -463,11 +519,165 @@ def _enqueue_autolabel_messages(job: Dict, task_ids: List[str],
             # The auto-label worker withholds Pending tasks until a
             # pre-label resolves; a lost message surfaces there. Log
             # loudly rather than failing the whole distribution.
+            failed_count += len(failed)
             logger.error(f"{len(failed)} auto-label messages failed to "
                          f"enqueue for job {job['job_id']}: {failed}")
 
     logger.info(f"Enqueued {len(entries)} auto-label messages for job "
                 f"{job['job_id']}")
+    return len(entries) - failed_count
+
+
+# ---------------------------------------------------------------------------
+# retry_prelabels (spec grounded-sam-prompt-guardrails-and-prelabel-retry,
+# task 2.1 — Requirements 5.10, 6.1-6.6, 6.8)
+# ---------------------------------------------------------------------------
+
+def retry_prelabels_job(job_id: str) -> Dict[str, Any]:
+    """Reset the job's Failed pre-label tasks to Pending and re-enqueue
+    their auto-label messages in the distributor's exact fan-out shape
+    (spec grounded-sam-prompt-guardrails-and-prelabel-retry).
+
+    Invoked async by dda_labeling.rerun_prelabels with
+    {action: 'retry_prelabels', job_id}. The route already validated
+    eligibility, but a stop/finalize may race the async invoke, so it
+    is re-checked here (the distribute_job status-guard pattern); any
+    miss records the invocation skipped with zero writes (Req 6.8).
+    """
+    if not job_id:
+        message = 'retry_prelabels requires a job_id'
+        logger.error(message)
+        return {'error': message}
+
+    job = labeling_jobs_table.get_item(Key={'job_id': job_id}).get('Item')
+    if not job:
+        message = f"Labeling job {job_id} not found"
+        logger.error(message)
+        return {'error': message, 'job_id': job_id}
+
+    auto_label = job.get('auto_label') or {}
+    skip_verification = bool(job.get('skip_verification'))
+    if job.get('labeling_backend') != 'DDA':
+        reason = 'job is not a DDA labeling job'
+    elif job.get('status') != 'InProgress':
+        reason = f"job is {job.get('status')}"
+    elif not (skip_verification or auto_label.get('enabled')):
+        reason = 'auto-labeling is not enabled for the job'
+    elif job.get('review_finalized'):
+        reason = 'the admin review has been finalized'
+    else:
+        reason = None
+    if reason:
+        logger.warning(f"Job {job_id}: {reason}; skipping pre-label "
+                       f"retry")
+        return {'job_id': job_id, 'action': 'retry_prelabels',
+                'skipped': True, 'reason': reason}
+
+    try:
+        return _retry_prelabels(job)
+    except Exception as e:  # noqa: BLE001 — unlike distribute, a retry
+        # failure never marks the job Failed: tasks already reset stay
+        # Pending (the platform's lost-fan-out posture) and the rerun
+        # action stays available for another attempt.
+        logger.error(f"Pre-label retry failed for job {job_id}: {e}",
+                     exc_info=True)
+        return {'job_id': job_id, 'action': 'retry_prelabels',
+                'error': str(e)}
+
+
+def _retry_prelabels(job: Dict) -> Dict[str, Any]:
+    job_id = job['job_id']
+    skip_verification = bool(job.get('skip_verification'))
+    failed_tasks = _failed_prelabel_tasks(job_id)
+
+    # Req 6.1/6.4: flip exactly the still-Failed tasks to Pending,
+    # REMOVing both error attributes — the consumer's success path
+    # never removes them, and skip-verification review-eligibility
+    # keys off autolabel_error, so a retried-then-successful task
+    # would otherwise stay review-ineligible forever. The condition
+    # partitions concurrent retries and racing in-flight resolutions:
+    # whichever update wins owns the task, and a
+    # ConditionalCheckFailedException counts it not-reset (Req 6.5).
+    now = int(datetime.utcnow().timestamp())
+    reset_tasks: List[Tuple[str, str]] = []
+    for task in failed_tasks:
+        task_id = task['task_id']
+        try:
+            labeling_tasks_table.update_item(
+                Key={'job_id': job_id, 'task_id': task_id},
+                UpdateExpression='SET prelabel_status = :pending, '
+                                 'updated_at = :now '
+                                 'REMOVE prelabel_error, autolabel_error',
+                ConditionExpression='prelabel_status = :failed',
+                ExpressionAttributeValues={
+                    ':pending': 'Pending',
+                    ':failed': 'Failed',
+                    ':now': now,
+                },
+            )
+        except ClientError as e:
+            if (e.response.get('Error', {}).get('Code')
+                    == 'ConditionalCheckFailedException'):
+                logger.info(f"Task {task_id} of job {job_id} is no "
+                            f"longer Failed; not reset")
+                continue
+            raise
+        reset_tasks.append((task_id, task.get('image_s3_uri')))
+
+    if skip_verification and reset_tasks:
+        # Req 6.3: reverse the counter movement the Failed resolutions
+        # already made — one job update, before any enqueue — so the
+        # consumer's existing decrement-to-zero machinery re-arms the
+        # review gate.
+        labeling_jobs_table.update_item(
+            Key={'job_id': job_id},
+            UpdateExpression='ADD autolabel_pending :n, '
+                             'autolabel_completed_count :minus_n '
+                             'SET review_ready = :false, '
+                             'updated_at = :now',
+            ExpressionAttributeValues={
+                ':n': len(reset_tasks),
+                ':minus_n': -len(reset_tasks),
+                ':false': False,
+                ':now': now,
+            },
+        )
+
+    # Req 6.2/6.6: exactly one Fanout_Message per reset task — the
+    # distributor's byte-identical shape via the shared helper, with
+    # image_s3_uri from the stored task item (no re-enumeration).
+    enqueued_count = (_send_autolabel_fanout(job, reset_tasks)
+                      if reset_tasks else 0)
+
+    logger.info(f"Pre-label retry for job {job_id}: reset "
+                f"{len(reset_tasks)} of {len(failed_tasks)} Failed "
+                f"task(s), enqueued {enqueued_count} message(s)")
+    return {'job_id': job_id, 'action': 'retry_prelabels',
+            'reset_count': len(reset_tasks),
+            'enqueued_count': enqueued_count}
+
+
+def _failed_prelabel_tasks(job_id: str) -> List[Dict]:
+    """The job's Failed_Prelabel_Task items — task_id plus the stored
+    image_s3_uri the retry fan-out reuses, so no dataset
+    re-enumeration happens (paginated query, the _job_task_ids
+    pattern)."""
+    tasks: List[Dict] = []
+    kwargs: Dict[str, Any] = {
+        'KeyConditionExpression': 'job_id = :jid',
+        'FilterExpression': 'prelabel_status = :failed',
+        'ProjectionExpression': 'task_id, image_s3_uri',
+        'ExpressionAttributeValues': {':jid': job_id,
+                                      ':failed': 'Failed'},
+    }
+    while True:
+        response = labeling_tasks_table.query(**kwargs)
+        tasks.extend(response.get('Items', []))
+        last_key = response.get('LastEvaluatedKey')
+        if not last_key:
+            break
+        kwargs['ExclusiveStartKey'] = last_key
+    return tasks
 
 
 # ---------------------------------------------------------------------------

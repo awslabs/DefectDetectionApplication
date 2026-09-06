@@ -74,6 +74,18 @@ routes — labeling.py's /labeling/{id}/stop pattern):
                                              generation (Req 9.7, 9.8,
                                              9.9, 11.6)
 
+Re-run pre-labels route (spec grounded-sam-prompt-guardrails-and-
+prelabel-retry, permission: manage_labeling_jobs; skip-verification
+jobs additionally require UseCaseAdmin/PortalAdmin):
+
+    POST /labeling/{id}/rerun-prelabels      re-run Pre_Label generation
+                                             for the job's Failed tasks
+                                             (every auto-label family),
+                                             optionally replacing a
+                                             grounded-sam job's
+                                             prompt_overrides (that
+                                             spec's Req 5)
+
 Storage: single-table `dda-portal-labeling-teams` — one partition per
 team (PK team_id) with item-type-prefixed sort keys:
     sk = 'META'              team metadata (usecase_id, team_name, ...)
@@ -234,6 +246,17 @@ DETECTION_PROMPT_MAX_LENGTH = 2000
 # Prompt_Override bound for the grounded-sam family (grounded-sam-
 # autolabel Requirement 2.6: length judged on the raw string).
 PROMPT_OVERRIDE_MAX_LENGTH = 256
+# The Prompt_Guardrail's reject set — exactly the ASCII period
+# (grounded-sam-prompt-guardrails-and-prelabel-retry Req 2.1, 2.2).
+# Derivation: grounded-sam-worker/handler.py `_marker_token_ids` builds
+# the detection caption's span-separator set from
+# `tokenizer.token_to_id('.')` alone (plus the [CLS]/[SEP]/[PAD]
+# specials), so an inner '.' in any per-label prompt splits its caption
+# span and deterministically trips the worker's span/prompt alignment
+# guard. `?` `!` `;` `,` and the CJK full stop `。` tokenize as ordinary
+# tokens with their own ids — they extend a phrase's span rather than
+# splitting it — so they are deliberately not rejected.
+ALIGNMENT_BREAKING_CHARACTER = '.'
 # Skip_Verification_Mode is admin-only (Requirement 9.1).
 SKIP_VERIFICATION_ADMIN_ROLES = ('UseCaseAdmin', 'PortalAdmin')
 # Sentinel assignee for unsubmitted tasks left behind when a team's
@@ -370,6 +393,11 @@ def handler(event, context):
             if (http_method == 'POST'
                     and resource == '/labeling/{id}/review/finalize'):
                 return finalize_admin_review(event, context)
+            # Re-run pre-labels for Failed tasks (grounded-sam-prompt-
+            # guardrails-and-prelabel-retry Req 5.1).
+            if (http_method == 'POST'
+                    and resource == '/labeling/{id}/rerun-prelabels'):
+                return rerun_prelabels(event, context)
 
         return create_response(404, {'error': 'Not found'})
 
@@ -1220,6 +1248,43 @@ def _validation_error(parameter: str, message: str, **extra) -> Dict:
     return error
 
 
+def _prompt_guardrail_errors(label_set: List[str],
+                             surviving_overrides: Dict) -> List[Dict]:
+    """Prompt_Guardrail for the grounded-sam family (grounded-sam-
+    prompt-guardrails-and-prelabel-retry Req 2.1-2.3, 5.5, 5.6): one
+    validation error per label whose Effective_Prompt contains the
+    ALIGNMENT_BREAKING_CHARACTER.
+
+    The Effective_Prompt is the label's surviving Prompt_Override when
+    one is present and non-empty after trimming, otherwise the label
+    name itself — exactly the value the consumer's
+    `_grounded_sam_prompts` sends to Grounding DINO. The error message
+    names the offending source: a period-bearing override, or a
+    period-bearing label name left as the fallback prompt. Shared by
+    job creation and the rerun route so both enforce (and word) the
+    rule identically (Req 2.5, 5.6).
+    """
+    errors: List[Dict] = []
+    for label in label_set:
+        override = surviving_overrides.get(label)
+        if isinstance(override, str) and override.strip():
+            if ALIGNMENT_BREAKING_CHARACTER in override:
+                errors.append(_validation_error(
+                    'auto_label',
+                    f"The text prompt for label '{label}' contains a "
+                    f'period; periods separate labels in the detection '
+                    f'caption',
+                    label=label))
+        elif ALIGNMENT_BREAKING_CHARACTER in label:
+            errors.append(_validation_error(
+                'auto_label',
+                f"Label '{label}' contains a period and has no text "
+                f'prompt; the label name is used as the text prompt — '
+                f'provide a prompt override without periods',
+                label=label))
+    return errors
+
+
 def _usecase_job_names(usecase_id: str) -> set:
     """Names of every Labeling_Job already stored for the Use_Case (name
     uniqueness, Req 4.1)."""
@@ -1679,6 +1744,14 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                             label=key))
                     elif value.strip():
                         prompt_overrides[key] = value
+                # Prompt_Guardrail (grounded-sam-prompt-guardrails-and-
+                # prelabel-retry Req 2.1-2.3): judged after the per-entry
+                # checks, over each label's Effective_Prompt — the
+                # surviving override, else the label name the Prompt_Map
+                # falls back to. One error per offending label; other
+                # families' arms apply no guardrail (Req 2.6).
+                errors.extend(_prompt_guardrail_errors(
+                    label_set or [], prompt_overrides))
             elif (isinstance(auto_label_model, str)
                     and auto_label_model.startswith('bedrock:')
                     and auto_label_model.split(':', 1)[1]):
@@ -3198,6 +3271,278 @@ def finalize_admin_review(event, context):
                      exc_info=True)
         return create_response(500, {
             'error': 'Failed to finalize the admin review'})
+
+
+# ---------------------------------------------------------------------------
+# Re-run pre-labels for Failed tasks (grounded-sam-prompt-guardrails-
+# and-prelabel-retry task 1.1 — Requirements 5.1-5.10)
+# ---------------------------------------------------------------------------
+# Authorization model mirrors the Admin_Review routes: @rbac_check
+# gates MANAGE_LABELING_JOBS in the job's Use_Case scope (injected by
+# the router), and skip-verification jobs additionally require the
+# UseCaseAdmin/PortalAdmin role (Req 5.2, 5.3). The route validates and
+# persists; the reset/re-enqueue mechanics run async in
+# dda_labeling_worker's `retry_prelabels` action, which re-checks
+# eligibility itself (Req 6.8).
+
+
+def _count_failed_prelabel_tasks(job_id: str) -> int:
+    """Live count of the job's Failed_Prelabel_Tasks — task items whose
+    `prelabel_status` is 'Failed' (Req 5.4: eligibility requires at
+    least one). Paginated COUNT query, no items materialized."""
+    count = 0
+    kwargs: Dict[str, Any] = {
+        'KeyConditionExpression': 'job_id = :jid',
+        'FilterExpression': 'prelabel_status = :failed',
+        'ExpressionAttributeValues': {
+            ':jid': job_id,
+            ':failed': 'Failed',
+        },
+        'Select': 'COUNT',
+    }
+    while True:
+        response = labeling_tasks_table.query(**kwargs)
+        count += int(response.get('Count', 0) or 0)
+        last_key = response.get('LastEvaluatedKey')
+        if not last_key:
+            break
+        kwargs['ExclusiveStartKey'] = last_key
+    return count
+
+
+@rbac_check([Permission.MANAGE_LABELING_JOBS], allow_global=True)
+def rerun_prelabels(event, context):
+    """POST /labeling/{id}/rerun-prelabels
+    body (optional): {prompt_overrides: {label: prompt}} — grounded-sam
+    jobs only.
+
+    Re-runs Pre_Label generation for the job's Failed_Prelabel_Tasks,
+    every auto-label family alike (Req 5.10). A grounded-sam job may
+    replace its `auto_label.prompt_overrides` in the same request,
+    validated with creation's rules plus the Prompt_Guardrail
+    (Req 5.5); a bodyless retry is judged against the persisted
+    Effective_Prompts so a prompt the alignment guard would
+    deterministically re-fail is refused with the corrective per-label
+    errors (Req 5.6). Nothing is mutated on any rejection (Req 5.8).
+    On acceptance the surviving overrides are persisted before the
+    worker is async-invoked with {action: 'retry_prelabels', job_id},
+    a `prelabels_rerun` audit event is written, and the caller gets
+    202 with the retried count (Req 5.9).
+    """
+    try:
+        user = get_user_from_event(event)
+        job_id = (event.get('pathParameters') or {}).get('id')
+
+        job = (labeling_jobs_table.get_item(Key={'job_id': job_id})
+               .get('Item') if job_id else None)
+        if not job:
+            return create_response(404, {
+                'error': 'Labeling job not found'})
+        if job.get('labeling_backend') != 'DDA':
+            return create_response(400, {
+                'error': 'Pre-labels can only be re-run for DDA labeling '
+                         'jobs',
+                'job_id': job_id,
+                'labeling_backend': job.get('labeling_backend'),
+            })
+
+        # Req 5.3: skip-verification jobs are admin-territory, exactly
+        # like their creation and Admin_Review (_require_review_admin's
+        # gate with a rerun-specific message): 403 plus an
+        # unauthorized_access audit event on denial.
+        if job.get('skip_verification'):
+            role = rbac_manager.get_user_role(
+                user['user_id'], job.get('usecase_id') or 'global', user)
+            role_value = role.value if role else None
+            if role_value not in SKIP_VERIFICATION_ADMIN_ROLES:
+                log_audit_event(
+                    user_id=user['user_id'],
+                    action='unauthorized_access',
+                    resource_type='labeling_job',
+                    resource_id=job_id,
+                    result='denied',
+                    details={
+                        'usecase_id': job.get('usecase_id', ''),
+                        'reason': 'rerunning pre-labels on a '
+                                  'skip-verification job requires '
+                                  'administrator authorization',
+                    },
+                )
+                return create_response(403, {
+                    'error': 'Re-running pre-labels on a '
+                             'skip-verification job requires '
+                             'administrator authorization',
+                })
+
+        # Req 5.4: eligibility gates, each answering a distinct 400
+        # naming the unmet condition. Nothing is reset or enqueued on
+        # any miss (the worker action never runs).
+        status = job.get('status')
+        if status != 'InProgress':
+            return create_response(400, {
+                'error': f'Pre-labels can only be re-run while the job '
+                         f'is InProgress (job status: {status})',
+                'job_id': job_id,
+                'status': status,
+            })
+        auto_label = job.get('auto_label') or {}
+        if not (auto_label.get('enabled') or job.get('skip_verification')):
+            return create_response(400, {
+                'error': 'Pre-labels can only be re-run for jobs with '
+                         'auto-labeling enabled',
+                'job_id': job_id,
+            })
+        if job.get('review_finalized'):
+            return create_response(400, {
+                'error': 'Pre-labels cannot be re-run after the admin '
+                         'review has been finalized',
+                'job_id': job_id,
+            })
+        failed_count = _count_failed_prelabel_tasks(job_id)
+        if failed_count < 1:
+            return create_response(400, {
+                'error': 'The job has no failed pre-label tasks to '
+                         're-run',
+                'job_id': job_id,
+            })
+
+        # --- request body (Req 5.5-5.8) ---
+        try:
+            body = json.loads(event.get('body') or '{}')
+        except (json.JSONDecodeError, TypeError):
+            return create_response(400, {
+                'error': 'Request body is not valid JSON'})
+        if not isinstance(body, dict):
+            body = {}
+        raw_overrides = body.get('prompt_overrides')
+
+        is_grounded_sam = auto_label.get('model') == 'grounded-sam'
+        if raw_overrides is not None and not is_grounded_sam:
+            # Req 5.7: overrides ride grounded-sam jobs only.
+            return create_response(400, {
+                'error': 'Validation failed',
+                'validation_errors': [_validation_error(
+                    'prompt_overrides',
+                    'Prompt overrides apply only to grounded-sam jobs')],
+            })
+
+        overrides_updated = False
+        survivors: Dict[str, str] = {}
+        if is_grounded_sam:
+            label_set = job.get('label_set') or []
+            errors: List[Dict] = []
+            if raw_overrides is not None:
+                # Req 5.5: creation's override rules verbatim — an
+                # object whose keys belong to the job's Label_Set,
+                # string values of raw length at most
+                # PROMPT_OVERRIDE_MAX_LENGTH, blank-after-trim values
+                # dropped, survivors kept character-for-character.
+                checked = raw_overrides
+                if not isinstance(checked, dict):
+                    errors.append(_validation_error(
+                        'auto_label',
+                        'prompt_overrides must be an object mapping '
+                        'label names to prompt strings'))
+                    checked = {}
+                for key, value in checked.items():
+                    if key not in label_set:
+                        errors.append(_validation_error(
+                            'auto_label',
+                            f"prompt_overrides key '{key}' is not a "
+                            f"label of this job's label set",
+                            label=key))
+                    elif not isinstance(value, str):
+                        errors.append(_validation_error(
+                            'auto_label',
+                            f"The prompt override for label '{key}' "
+                            f'must be text',
+                            label=key))
+                    elif len(value) > PROMPT_OVERRIDE_MAX_LENGTH:
+                        errors.append(_validation_error(
+                            'auto_label',
+                            f"The prompt override for label '{key}' "
+                            f'must be at most '
+                            f'{PROMPT_OVERRIDE_MAX_LENGTH} characters',
+                            label=key))
+                    elif value.strip():
+                        survivors[key] = value
+                # The submitted map replaces the persisted one, so the
+                # resulting Effective_Prompts are the submitted
+                # survivors, else the label-name fallback.
+                effective_overrides: Dict = survivors
+            else:
+                # Req 5.6: body absent — judge the persisted
+                # Effective_Prompts, so the incident job's unfixed
+                # retry is refused with the corrective errors.
+                persisted = auto_label.get('prompt_overrides')
+                effective_overrides = (persisted if isinstance(
+                    persisted, dict) else {})
+            errors.extend(_prompt_guardrail_errors(
+                label_set, effective_overrides))
+            if errors:
+                # Req 5.8: nothing persisted, reset, or enqueued.
+                return create_response(400, {
+                    'error': 'Validation failed',
+                    'validation_errors': errors,
+                })
+
+            if raw_overrides is not None:
+                # Req 5.5: persist the surviving overrides (key removed
+                # when none survives) before any reset or enqueue — the
+                # consumer reads prompt_overrides from the job record
+                # per message, so the retried tasks see this write.
+                now = int(datetime.utcnow().timestamp())
+                if survivors:
+                    labeling_jobs_table.update_item(
+                        Key={'job_id': job_id},
+                        UpdateExpression='SET auto_label.prompt_overrides'
+                                         ' = :po, updated_at = :now',
+                        ExpressionAttributeValues={
+                            ':po': survivors,
+                            ':now': now,
+                        },
+                    )
+                else:
+                    labeling_jobs_table.update_item(
+                        Key={'job_id': job_id},
+                        UpdateExpression='REMOVE '
+                                         'auto_label.prompt_overrides '
+                                         'SET updated_at = :now',
+                        ExpressionAttributeValues={':now': now},
+                    )
+                overrides_updated = True
+
+        # Req 5.9: trigger the Retry_Action asynchronously (the worker
+        # resets the Failed tasks and re-enqueues their fan-out
+        # messages), audit, and answer 202 with the retried count.
+        _invoke_labeling_worker(
+            {'action': 'retry_prelabels', 'job_id': job_id})
+
+        log_audit_event(
+            user_id=user['user_id'],
+            action='prelabels_rerun',
+            resource_type='labeling_job',
+            resource_id=job_id,
+            result='success',
+            details={
+                'usecase_id': job.get('usecase_id', ''),
+                'retried_count': failed_count,
+                'overrides_updated': overrides_updated,
+            },
+        )
+
+        return create_response(202, {
+            'job_id': job_id,
+            'retried_count': failed_count,
+            'message': f'Re-run started for {failed_count} failed '
+                       f'pre-label task(s)',
+        })
+
+    except Exception as e:
+        logger.error(f"Error re-running pre-labels: {str(e)}",
+                     exc_info=True)
+        return create_response(500, {
+            'error': 'Failed to re-run pre-labels'})
 
 
 # ---------------------------------------------------------------------------

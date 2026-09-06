@@ -32,6 +32,16 @@ the created job record SHALL contain no `prompt_overrides` key anywhere and
 SHALL equal, key for key, the record the pre-feature creation rules produce
 for the same submission. **Validates: Requirements 2.8, 7.1**
 
+Generator rebaseline (grounded-sam-prompt-guardrails-and-prelabel-retry
+Req 8.7, permitted rebaseline class 2): that spec's Prompt_Guardrail
+rejects any grounded-sam Effective_Prompt (surviving override, else
+label name) containing an ASCII period, so Property 3's valid space and
+Property 4's non-offending base portions draw period-free labels and
+override values (`_gsam_safe_label_names` / `_gsam_safe_values`).
+Property 15's other-family generators keep the full alphabet — no
+guardrail applies to sam/bedrock:/llm: (that spec's Req 2.6). No
+assertion changed.
+
 Oracles
 -------
 Every oracle is restated in this file, never imported from the code under
@@ -143,6 +153,16 @@ _label_names = st.text(alphabet=_TEXT_ALPHABET, min_size=1,
 
 _label_sets = st.lists(_label_names, min_size=1, max_size=5, unique=True)
 
+# Period-free variants for the grounded-sam valid spaces
+# (grounded-sam-prompt-guardrails-and-prelabel-retry Req 8.7, permitted
+# rebaseline class 2): the Prompt_Guardrail rejects any Effective_Prompt
+# — surviving override, else label name — containing '.', so the valid
+# domain excludes the period from labels and from override values.
+_gsam_safe_label_names = _label_names.filter(lambda name: "." not in name)
+
+_gsam_safe_label_sets = st.lists(_gsam_safe_label_names, min_size=1,
+                                 max_size=5, unique=True)
+
 # Blank-after-trim override values (dropped silently per Req 2.4).
 # "\u00a0" (NBSP) is unicode whitespace, so it is blank under str.strip.
 _blank_values = st.sampled_from(["", " ", "   ", "\t", "\n \t ", "\u00a0"])
@@ -162,6 +182,11 @@ _nonblank_values = st.one_of(
 )
 
 _override_values = st.one_of(_blank_values, _nonblank_values)
+
+# Period-free override values for the grounded-sam valid spaces (same
+# rebaseline; blank values never contain '.', so the filter only prunes
+# the non-blank arm — the boundary-length and padded shapes survive).
+_gsam_safe_values = _override_values.filter(lambda value: "." not in value)
 
 # Non-objects for the prompt_overrides value (None means "absent", so it
 # is not in this space — it belongs to Property 3's valid space).
@@ -186,14 +211,18 @@ def _valid_grounded_sam_cases(draw):
     """One valid grounded-sam submission: a geometry modality, a valid
     Label_Set, and an override state — absent (None) or a map over
     in-Label_Set keys with values mixing blank / non-blank / unicode /
-    boundary-length strings (including the present-but-empty map)."""
+    boundary-length strings (including the present-but-empty map).
+    Labels and values are period-free (the post-guardrail valid domain:
+    a period-bearing label with no surviving override, or a
+    period-bearing surviving value, is rejected since
+    grounded-sam-prompt-guardrails-and-prelabel-retry)."""
     modality = draw(st.sampled_from(GEOMETRY_MODALITIES))
-    labels = draw(_label_sets)
+    labels = draw(_gsam_safe_label_sets)
     overrides = None
     if draw(st.booleans()):
         keys = draw(st.lists(st.sampled_from(labels), unique=True,
                              max_size=len(labels)))
-        overrides = {key: draw(_override_values) for key in keys}
+        overrides = {key: draw(_gsam_safe_values) for key in keys}
     return SimpleNamespace(modality=modality, labels=labels,
                            overrides=overrides)
 
@@ -204,9 +233,18 @@ def _malformed_override_cases(draw):
     prompt_overrides, a key outside the Label_Set (including
     whitespace-padded spellings of real labels — override keys are not
     stripped), a non-string value, or a value of raw length 257. The
-    offense may sit beside otherwise-valid entries."""
+    offense may sit beside otherwise-valid entries.
+
+    The non-offending base portions (the Label_Set and the beside-the-
+    offense entries) draw from the period-free strategies so the drawn
+    offense stays the scenario's only offense under the Prompt_Guardrail
+    (grounded-sam-prompt-guardrails-and-prelabel-retry rebaseline). The
+    offending positions keep the full alphabet where the guardrail
+    cannot judge them: an unknown key (and its value) never enters the
+    surviving-override map, and an over-length value never survives —
+    each rejects for its own reason, period-bearing or not."""
     modality = draw(st.sampled_from(GEOMETRY_MODALITIES))
-    labels = draw(_label_sets)
+    labels = draw(_gsam_safe_label_sets)
     kind = draw(st.sampled_from(
         ("non_object", "unknown_key", "non_string_value", "over_length")))
     if kind == "non_object":
@@ -236,7 +274,7 @@ def _malformed_override_cases(draw):
     if base_pool:
         for key in draw(st.lists(st.sampled_from(base_pool), unique=True,
                                  max_size=len(base_pool))):
-            overrides[key] = draw(_override_values)
+            overrides[key] = draw(_gsam_safe_values)
     overrides[offender] = value
     return SimpleNamespace(modality=modality, labels=labels, kind=kind,
                            offender=offender, overrides=overrides)

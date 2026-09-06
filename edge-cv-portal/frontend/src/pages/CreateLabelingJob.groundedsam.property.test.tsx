@@ -66,6 +66,12 @@
  * - No CR/LF in labels or override values: both are single-line `<input>`
  *   elements, whose HTML value sanitization strips newlines before the
  *   wizard ever sees them — not an enterable character.
+ * - Generator rebaseline (grounded-sam-prompt-guardrails-and-prelabel-retry
+ *   Req 8.7, permitted rebaseline class 1): that spec's Prompt_Guardrail
+ *   rejects any grounded-sam Effective_Prompt (surviving override, else
+ *   label name) containing an ASCII period, so `labelArb` and
+ *   `overrideValueArb` exclude '.', shrinking the scenario space to the
+ *   post-guardrail valid domain. No assertion changed.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -507,6 +513,13 @@ describe('Feature: grounded-sam-autolabel, Property 1: The picker offers the pre
  * Label rows: pre-trimmed distinct unicode names within the wizard's
  * label constraints; `Object.prototype` member names excluded (see the
  * header's generator domain notes).
+ *
+ * Period-free (grounded-sam-prompt-guardrails-and-prelabel-retry
+ * Req 8.7, permitted rebaseline class 1): the Prompt_Guardrail rejects
+ * any Effective_Prompt — surviving override, else label name —
+ * containing '.', so the valid domain excludes the period from label
+ * names. Rename targets draw from this same pool, so they are covered
+ * by the same exclusion.
  */
 const labelArb = fc
   .string({ unit: 'grapheme', minLength: 1, maxLength: 8 })
@@ -516,6 +529,7 @@ const labelArb = fc
       s.length > 0 &&
       s.length <= 64 &&
       !/[\r\n]/.test(s) &&
+      !s.includes('.') &&
       !(s in Object.prototype)
   );
 
@@ -538,6 +552,13 @@ const whitespaceOnlyArb = fc
  * whitespace-padded (raw value must survive character-for-character), and
  * boundary lengths 255/256 — always within the 256-character limit so the
  * wizard step accepts the submission (Requirement 2.6 rejects longer).
+ *
+ * Period-free (grounded-sam-prompt-guardrails-and-prelabel-retry
+ * Req 8.7, permitted rebaseline class 1): the Prompt_Guardrail rejects a
+ * surviving override containing '.', so the valid domain excludes the
+ * period from values (blank arms never contain '.', and the
+ * boundary-length 'p'-runs were already period-free — the filter only
+ * prunes the free-text arms).
  */
 const overrideValueArb: fc.Arbitrary<string> = fc
   .oneof(
@@ -561,7 +582,12 @@ const overrideValueArb: fc.Arbitrary<string> = fc
         .map((n) => 'p'.repeat(n)),
     }
   )
-  .filter((v) => v.length <= MAX_PROMPT_OVERRIDE_LENGTH && !/[\r\n]/.test(v));
+  .filter(
+    (v) =>
+      v.length <= MAX_PROMPT_OVERRIDE_LENGTH &&
+      !/[\r\n]/.test(v) &&
+      !v.includes('.')
+  );
 
 /** The fixed catalog model backing the `bedrock:` non-grounded-sam prong. */
 const CATALOG_MODEL: CatalogModel = { id: 'm-1', label: 'Nova' };

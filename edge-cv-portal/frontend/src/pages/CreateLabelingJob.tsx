@@ -47,6 +47,13 @@ import type {
   LabelingJobDraft,
   PreviewRunReference,
 } from './labelingJobDraft';
+import {
+  ALIGNMENT_BREAKING_PATTERN,
+  PROMPT_GUIDANCE_CONSTRAINT,
+  PromptGuidanceContent,
+  findPromptGuardrailViolation,
+  promptGuardrailMessage,
+} from './promptOverrideGuardrails';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
@@ -875,6 +882,20 @@ export default function CreateLabelingJob() {
         );
         if (overlongLabel !== undefined) {
           return `The text prompt for label "${overlongLabel}" exceeds ${MAX_PROMPT_OVERRIDE_LENGTH} characters`;
+        }
+        // Prompt_Guardrail: no Effective_Prompt (surviving override, else
+        // the label name) may contain a period — an inner `.` splits the
+        // Grounding DINO caption into extra token spans and trips the
+        // worker's alignment guard on every image. Judged after the
+        // over-length rule so its pinned message keeps precedence
+        // (grounded-sam-prompt-guardrails-and-prelabel-retry
+        // Requirements 1.1, 1.2, 1.4; the backend re-validates).
+        const guardrailViolation = findPromptGuardrailViolation(
+          effectiveLabelSet,
+          groundedSamPromptOverrides
+        );
+        if (guardrailViolation !== null) {
+          return promptGuardrailMessage(guardrailViolation);
         }
       }
       // Detection_Prompt gating for the prompt-guided LLM family:
@@ -2014,12 +2035,25 @@ export default function CreateLabelingJob() {
                   key={label}
                   label={`Text prompt for "${label}"`}
                   description="Optional. Sent to Grounding DINO instead of the label name."
-                  constraintText="Optional, at most 256 characters"
+                  constraintText={PROMPT_GUIDANCE_CONSTRAINT}
+                  info={<PromptGuidanceContent />}
                   errorText={
+                    // Over-length first (its pinned message keeps
+                    // precedence), then the Prompt_Guardrail period
+                    // variant — the field-level mirror of the step error
+                    // (grounded-sam-prompt-guardrails-and-prelabel-retry
+                    // Requirement 1.3).
                     (groundedSamPromptOverrides[label] || '').length >
                     MAX_PROMPT_OVERRIDE_LENGTH
                       ? `The text prompt for label "${label}" exceeds ${MAX_PROMPT_OVERRIDE_LENGTH} characters`
-                      : undefined
+                      : ALIGNMENT_BREAKING_PATTERN.test(
+                            groundedSamPromptOverrides[label] || ''
+                          )
+                        ? promptGuardrailMessage({
+                            label,
+                            source: 'override',
+                          })
+                        : undefined
                   }
                 >
                   <Input
