@@ -3566,6 +3566,11 @@ class ApiService {
       label: string;
       image_limit?: number;
       token_limit?: number;
+      // Image_Input_Capability tri-state (llm-model-picker-search-and-image-filter
+      // Requirement 1.4): true = the model accepts image input, false = the
+      // model is positively known text-only, absent = unknown capability —
+      // consumers must never exclude a model whose field is absent.
+      image_input?: boolean;
     }[];
     region: string;
     permissions?: string;

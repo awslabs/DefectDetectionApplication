@@ -52,6 +52,16 @@
  * percentages of `payload.image_width` / `image_height`, which remain the
  * Source_Dimensions — the space the backend scales the Pre_Label back into —
  * so the new `sent_*` fields are display-only and are never passed to it.
+ *
+ * The session-recovery surface (labeling-setup-session-recovery Requirements
+ * 5.1-5.8, 7.5) is four optional props following the same optional-callback
+ * pattern as the sizing controls: `initialSelectedKeys` seeds the selection
+ * at mount, `onSelectedKeysChange` reports every selection change in full,
+ * `resumeRun` re-enters the existing poll loop once at mount (never a new
+ * start request), and `onRunStarted` reports each started run's identity.
+ * With none of them passed, behavior is identical to before — the one
+ * rendered-surface addition is the "Clear selection" control beside the
+ * selection summary while the selection is non-empty (Requirement 5.8).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Alert from '@cloudscape-design/components/alert';
@@ -407,6 +417,36 @@ export interface PromptTuningPreviewProps {
    * (Requirement 3.6).
    */
   onTokenBudgetChange?: (value: string) => void;
+  /**
+   * Initial Sample_Selection, e.g. restored from a Setup_Draft
+   * (labeling-setup-session-recovery Requirement 5.7). Read once at mount;
+   * restored keys count toward the cap and ride the next run exactly as
+   * off-page keys do. The picker still operates without it.
+   */
+  initialSelectedKeys?: string[];
+  /**
+   * Notified with the full ordered Sample_Selection on every selection
+   * change (labeling-setup-session-recovery Requirement 2.4). The picker
+   * still operates without it.
+   */
+  onSelectedKeysChange?: (keys: string[]) => void;
+  /**
+   * A Preview_Run to resume polling on mount — one entry into the existing
+   * poll loop, never a new start request (labeling-setup-session-recovery
+   * Requirements 5.1-5.4). Absent or null, no resume happens.
+   */
+  resumeRun?: { runId: string; sampleCount: number } | null;
+  /**
+   * Notified when this component starts a new Preview_Run, so the wizard
+   * can persist the run's identity for later resumption
+   * (labeling-setup-session-recovery Requirement 5.6). The run control
+   * still operates without it.
+   */
+  onRunStarted?: (ref: {
+    runId: string;
+    sampleCount: number;
+    startedAtMs: number;
+  }) => void;
 }
 
 export default function PromptTuningPreview({
@@ -424,6 +464,10 @@ export default function PromptTuningPreview({
   tokenBudget,
   onDownscaleMaxEdgeChange,
   onTokenBudgetChange,
+  initialSelectedKeys,
+  onSelectedKeysChange,
+  resumeRun,
+  onRunStarted,
 }: PromptTuningPreviewProps) {
   /* ------------------------- sample picker state ------------------------ */
   const [pageIndex, setPageIndex] = useState(0);
@@ -437,8 +481,16 @@ export default function PromptTuningPreview({
     Record<string, boolean>
   >({});
 
-  /** Selected keys in selection order, retained across pages and runs. */
-  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  /**
+   * Selected keys in selection order, retained across pages and runs.
+   * Initialized from `initialSelectedKeys` (read once at mount — the wizard
+   * remounts the component to re-apply a restore); every change is reported
+   * in full through `onSelectedKeysChange` (labeling-setup-session-recovery
+   * Requirements 2.4, 5.7).
+   */
+  const [selectedKeys, setSelectedKeys] = useState<string[]>(
+    initialSelectedKeys ?? []
+  );
   /** Presigned thumbnail URL per key seen so far, for result rendering. */
   const sampleUrls = useRef<Record<string, string>>({});
   const [capMessage, setCapMessage] = useState('');
@@ -555,11 +607,25 @@ export default function PromptTuningPreview({
 
   const pagesCount = Math.max(1, Math.ceil(totalFound / SAMPLE_PAGE_SIZE));
 
+  /**
+   * The one place the Sample_Selection changes: sets the new ordered list
+   * and reports it in full through `onSelectedKeysChange`
+   * (labeling-setup-session-recovery Requirement 2.4). A refused add (cap)
+   * changes nothing and therefore reports nothing.
+   */
+  const applySelection = useCallback(
+    (next: string[]) => {
+      setSelectedKeys(next);
+      onSelectedKeysChange?.(next);
+    },
+    [onSelectedKeysChange]
+  );
+
   const toggleSample = useCallback(
     (key: string, checked: boolean) => {
       if (!checked) {
         setCapMessage('');
-        setSelectedKeys((current) => current.filter((k) => k !== key));
+        applySelection(selectedKeys.filter((k) => k !== key));
         return;
       }
       if (selectedKeys.includes(key)) return;
@@ -572,10 +638,20 @@ export default function PromptTuningPreview({
         return;
       }
       setCapMessage('');
-      setSelectedKeys((current) => [...current, key]);
+      applySelection([...selectedKeys, key]);
     },
-    [selectedKeys]
+    [selectedKeys, applySelection]
   );
+
+  /**
+   * Clears the entire Sample_Selection — the escape hatch for a restored
+   * key whose object no longer appears on any listing page
+   * (labeling-setup-session-recovery Requirement 5.8).
+   */
+  const handleClearSelection = useCallback(() => {
+    setCapMessage('');
+    applySelection([]);
+  }, [applySelection]);
 
   /* --------------------------- polling --------------------------------- */
   const commitStatus = useCallback(
@@ -706,6 +782,31 @@ export default function PromptTuningPreview({
     [commitStatus]
   );
 
+  /* --------------------------- run resume ------------------------------- */
+  /**
+   * Resume a Preview_Run restored from a Setup_Draft: one mount-time entry
+   * into the existing poll loop — never a new start request. A Running run
+   * renders progressively exactly as an own-started run, a terminal run
+   * commits its results on the first poll, and a 404 lands on the existing
+   * "no longer available" message with the run control re-enabled, all via
+   * the loop's own mechanics (labeling-setup-session-recovery Requirements
+   * 5.1-5.4). The ref guards the attempt to once per mount, the
+   * `resumedUsecaseRef` pattern of the TestPanel precedent.
+   */
+  const resumeAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (resumeAttemptedRef.current) return;
+    resumeAttemptedRef.current = true;
+    if (!resumeRun) return;
+    // Mirror handleStartRun: in flight until the loop reaches a terminal
+    // status, a 404, or the overall bound.
+    setRunInFlight(true);
+    void pollRun(resumeRun.runId, resumeRun.sampleCount, {
+      taskType,
+      labelSet,
+    });
+  }, [resumeRun, pollRun, taskType, labelSet]);
+
   /* --------------------------- run start ------------------------------- */
   const handleStartRun = useCallback(async () => {
     setValidationErrors([]);
@@ -771,6 +872,13 @@ export default function PromptTuningPreview({
           ? { token_budget: budgetSelection }
           : {}),
       });
+      // Report the new run's identity so the wizard can persist it for
+      // later resumption (labeling-setup-session-recovery Requirement 5.6).
+      onRunStarted?.({
+        runId: started.run_id,
+        sampleCount: started.sample_count || samples.length,
+        startedAtMs: Date.now(),
+      });
       await pollRun(started.run_id, started.sample_count || samples.length, {
         taskType,
         labelSet,
@@ -801,6 +909,7 @@ export default function PromptTuningPreview({
     isLlmAutoLabelModel,
     downscaleSetting,
     budgetEntry,
+    onRunStarted,
   ]);
 
   const selectionSummary = useMemo(
@@ -903,9 +1012,23 @@ export default function PromptTuningPreview({
 
         {images.length > 0 && (
           <SpaceBetween size="xs">
-            <Box color="text-status-inactive" data-testid="preview-selection-count">
-              {selectionSummary}
-            </Box>
+            <SpaceBetween size="xs" direction="horizontal">
+              <Box color="text-status-inactive" data-testid="preview-selection-count">
+                {selectionSummary}
+              </Box>
+              {/* Clears the whole Sample_Selection while it is non-empty —
+                  the escape hatch for a restored key absent from every
+                  listing page (labeling-setup-session-recovery Req 5.8). */}
+              {selectedKeys.length > 0 && (
+                <Button
+                  variant="inline-link"
+                  data-testid="preview-clear-selection"
+                  onClick={handleClearSelection}
+                >
+                  Clear selection
+                </Button>
+              )}
+            </SpaceBetween>
             {capMessage && (
               <Box color="text-status-warning" data-testid="preview-selection-cap">
                 {capMessage}

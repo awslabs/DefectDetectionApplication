@@ -1,0 +1,25 @@
+{
+  "pbtResults": {
+    "1.4 Write property test for the example-ref merge": {
+      "status": "passed",
+      "lastRunTimestamp": 1788698182003
+    },
+    "1.2 Write property test for the serialization round trip": {
+      "status": "passed",
+      "lastRunTimestamp": 1788698179095
+    },
+    "1.5 Write property test for the resume window": {
+      "status": "passed",
+      "lastRunTimestamp": 1788698183317
+    },
+    "1.3 Write property test for tolerant reads and staleness purge": {
+      "status": "passed",
+      "lastRunTimestamp": 1788698180475
+    },
+    "3.3 Write property test for restore fidelity": {
+      "status": "passed",
+      "lastRunTimestamp": 1788698184636
+    }
+  },
+  "executionHistory": {}
+}

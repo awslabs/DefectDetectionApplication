@@ -251,6 +251,7 @@ function primeMocks(
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   primeMocks();
   vi.stubGlobal('fetch', fetchMock);
   // Cloudscape's file thumbnails go through object URLs; jsdom has none.

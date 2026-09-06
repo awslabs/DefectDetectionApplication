@@ -169,6 +169,7 @@ const runButton = () => screen.getByTestId('preview-run-button');
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.localStorage.clear();
   apiMocks.getImagePreview.mockResolvedValue(listing(KEYS));
   apiMocks.startPreviewRun.mockResolvedValue({
     run_id: 'run-1',

@@ -32,6 +32,18 @@ the persisted llm_model_token_limits settings item (default 10000), with
 the rest of the payload unchanged.
 
 _Requirements: 1.6, 3.1_
+
+Extended by task 1.4 (spec: llm-model-picker-search-and-image-filter) with
+section 4: the additive `image_input` capability annotation — True
+(Image_Capable) when the summary's inputModalities is a list containing
+'IMAGE', False (Text_Only) when it is a non-empty list without 'IMAGE',
+the key omitted for every Unknown_Capability shape of Requirement 1.3
+(absent key, non-list value, empty list, dotless profile id, fronted id
+matching no summary, denied foundation call), profiles resolving through
+non-ON_DEMAND fronted summaries, and the partial-denial catalog carrying
+no image_input key on any option.
+
+_Requirements: 1.1, 1.2, 1.3, 4.4, 4.5_
 """
 import json
 import os
@@ -40,6 +52,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from botocore.exceptions import ClientError
 
 from conftest import REGION
 
@@ -88,16 +101,28 @@ def options_env(aws_stack):
 
 
 class FakeBedrockControlClient:
-    """Stand-in for the bedrock control-plane client (list APIs)."""
+    """Stand-in for the bedrock control-plane client (list APIs), with an
+    optional denied-ListFoundationModels branch mimicking a missing IAM
+    permission (the shape data_accounts._is_access_denied recognizes);
+    the branch is off by default so every pre-existing test keeps the
+    exact client it was written against."""
 
-    def __init__(self, profiles=None, models=None):
+    def __init__(self, profiles=None, models=None,
+                 deny_foundation_models=False):
         self.profiles = profiles or []
         self.models = models or []
+        self.deny_foundation_models = deny_foundation_models
 
     def list_inference_profiles(self, **kwargs):
         return {"inferenceProfileSummaries": self.profiles}
 
     def list_foundation_models(self, **kwargs):
+        if self.deny_foundation_models:
+            raise ClientError(
+                {"Error": {"Code": "AccessDeniedException",
+                           "Message": "not authorized"}},
+                "ListFoundationModels",
+            )
         return {"modelSummaries": self.models}
 
 
@@ -323,3 +348,249 @@ def test_token_limit_is_carried_beside_image_limit(options_env, fake_bedrock,
         "amazon.titan-text-express-v1": 20,
         "us.amazon.nova-pro-v1:0": 4,
     }
+
+
+# ===========================================================================
+# 4. image_input capability annotation
+#    (llm-model-picker-search-and-image-filter task 1.4;
+#     Requirements 1.1, 1.2, 1.3, 4.4, 4.5)
+# ===========================================================================
+
+def use_listings(options_env, monkeypatch, profiles=None, models=None,
+                 deny_foundation_models=False):
+    """The fake_bedrock injection pattern with per-test listings: points
+    _get_bedrock_control_client at a FakeBedrockControlClient carrying
+    exactly the given profile/foundation summaries."""
+    client = FakeBedrockControlClient(
+        profiles=profiles, models=models,
+        deny_foundation_models=deny_foundation_models)
+    monkeypatch.setattr(options_env.data_accounts,
+                        "_get_bedrock_control_client",
+                        lambda region: client)
+
+
+def options_by_id(payload):
+    return {option["id"]: option for option in payload["models"]}
+
+
+def foundation_summary(model_id="amazon.nova-pro-v1:0", **overrides):
+    """An ACTIVE, ON_DEMAND foundation summary (option-filter-surviving
+    unless overridden); inputModalities only when passed in overrides."""
+    summary = {
+        "modelId": model_id,
+        "modelName": f"Summary {model_id}",
+        "modelLifecycle": {"status": "ACTIVE"},
+        "inferenceTypesSupported": ["ON_DEMAND"],
+    }
+    summary.update(overrides)
+    return summary
+
+
+# --- the six Unknown_Capability shapes of Requirement 1.3: each omits the
+# --- image_input key entirely, so absent data never marks a model.
+
+def test_absent_input_modalities_key_omits_image_input(options_env,
+                                                       monkeypatch):
+    """A summary carrying no inputModalities key at all resolves to
+    Unknown_Capability: the option carries no image_input key
+    (Requirement 1.3)."""
+    use_listings(options_env, monkeypatch, models=[
+        foundation_summary("amazon.titan-text-express-v1"),
+    ])
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    option = options_by_id(payload)["amazon.titan-text-express-v1"]
+    assert "image_input" not in option
+
+
+def test_non_list_input_modalities_omits_image_input(options_env,
+                                                     monkeypatch):
+    """A non-list inputModalities value resolves to Unknown_Capability -
+    even the string 'TEXT,IMAGE', for which naive membership ('IMAGE' in
+    value) would be True - so the option carries no image_input key
+    (Requirement 1.3)."""
+    use_listings(options_env, monkeypatch, models=[
+        foundation_summary("amazon.titan-text-express-v1",
+                           inputModalities="TEXT,IMAGE"),
+    ])
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    option = options_by_id(payload)["amazon.titan-text-express-v1"]
+    assert "image_input" not in option
+
+
+def test_empty_input_modalities_list_omits_image_input(options_env,
+                                                       monkeypatch):
+    """An empty inputModalities list resolves to Unknown_Capability, not
+    Text_Only: the option carries no image_input key (Requirement 1.3)."""
+    use_listings(options_env, monkeypatch, models=[
+        foundation_summary("amazon.titan-text-express-v1",
+                           inputModalities=[]),
+    ])
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    option = options_by_id(payload)["amazon.titan-text-express-v1"]
+    assert "image_input" not in option
+
+
+def test_dotless_profile_id_omits_image_input(options_env, monkeypatch):
+    """A profile id without a '.' separator has no derivable Fronted_Model,
+    so its option resolves to Unknown_Capability and carries no
+    image_input key - even while the foundation summaries carry modality
+    data (Requirement 1.3)."""
+    use_listings(
+        options_env, monkeypatch,
+        profiles=[{"inferenceProfileId": "dotlessprofile",
+                   "inferenceProfileName": "Dotless Profile"}],
+        models=[foundation_summary("amazon.nova-pro-v1:0",
+                                   inputModalities=["TEXT", "IMAGE"])],
+    )
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    assert "image_input" not in options_by_id(payload)["dotlessprofile"]
+
+
+def test_unmatched_fronted_id_omits_image_input(options_env, monkeypatch):
+    """A profile whose Fronted_Model id matches no summary of the
+    list_foundation_models response resolves to Unknown_Capability (no
+    image_input key), while a foundation option beside it still resolves
+    from its own summary (Requirements 1.1, 1.3)."""
+    use_listings(
+        options_env, monkeypatch,
+        profiles=[{"inferenceProfileId":
+                       "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                   "inferenceProfileName":
+                       "US Anthropic Claude Sonnet 4.5"}],
+        # No anthropic.claude-sonnet... summary; nova resolves from its own.
+        models=[foundation_summary("amazon.nova-pro-v1:0",
+                                   inputModalities=["TEXT", "IMAGE"])],
+    )
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    by_id = options_by_id(payload)
+    assert "image_input" not in \
+        by_id["us.anthropic.claude-sonnet-4-5-20250929-v1:0"]
+    assert by_id["amazon.nova-pro-v1:0"]["image_input"] is True
+
+
+def test_denied_foundation_call_omits_image_input(options_env, monkeypatch):
+    """When bedrock:ListFoundationModels is denied, no modality data is
+    resolvable at all: the profile option resolves to Unknown_Capability
+    and carries no image_input key (Requirement 1.3)."""
+    use_listings(
+        options_env, monkeypatch,
+        profiles=[{"inferenceProfileId": "us.amazon.nova-pro-v1:0",
+                   "inferenceProfileName": "US Amazon Nova Pro"}],
+        deny_foundation_models=True,
+    )
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    assert "image_input" not in options_by_id(payload)["us.amazon.nova-pro-v1:0"]
+
+
+# --- the two positively-known capabilities (Requirement 1.1), riding as
+# --- the single additive key beside the pre-existing fields (4.4).
+
+def test_image_capable_model_carries_image_input_true(options_env,
+                                                      monkeypatch):
+    """A foundation summary whose inputModalities list contains 'IMAGE'
+    yields image_input True (Image_Capable), and image_input is the only
+    key added beside the pre-existing option fields
+    (Requirements 1.1, 4.4)."""
+    use_listings(options_env, monkeypatch, models=[
+        foundation_summary("amazon.nova-pro-v1:0",
+                           inputModalities=["TEXT", "IMAGE"]),
+    ])
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    option = options_by_id(payload)["amazon.nova-pro-v1:0"]
+    assert option["image_input"] is True
+    assert set(option) == PRE_FEATURE_FIELDS | {"image_limit", "token_limit",
+                                                "image_input"}
+
+
+def test_text_only_model_carries_image_input_false(options_env, monkeypatch):
+    """A foundation summary whose inputModalities list is non-empty without
+    'IMAGE' yields image_input False (Text_Only) - the one classification
+    that positively establishes no image input (Requirements 1.1, 4.4)."""
+    use_listings(options_env, monkeypatch, models=[
+        foundation_summary("amazon.titan-text-express-v1",
+                           inputModalities=["TEXT"]),
+    ])
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    option = options_by_id(payload)["amazon.titan-text-express-v1"]
+    assert option["image_input"] is False
+    assert set(option) == PRE_FEATURE_FIELDS | {"image_limit", "token_limit",
+                                                "image_input"}
+
+
+# --- the join runs over ALL summaries, including ones the option filters
+# --- exclude (Requirement 1.2).
+
+def test_profile_resolves_through_non_on_demand_fronted_summary(
+        options_env, monkeypatch):
+    """A profile's capability resolves through its Fronted_Model summary
+    even when that summary is not ON_DEMAND invokable (the realistic
+    Anthropic case - that is why the profile exists): the fronted model
+    appears in no option, yet its inputModalities still resolve the
+    profile's image_input (Requirement 1.2)."""
+    use_listings(
+        options_env, monkeypatch,
+        profiles=[{"inferenceProfileId":
+                       "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                   "inferenceProfileName":
+                       "US Anthropic Claude Sonnet 4.5"}],
+        models=[foundation_summary(
+            "anthropic.claude-sonnet-4-5-20250929-v1:0",
+            inferenceTypesSupported=["INFERENCE_PROFILE"],
+            inputModalities=["TEXT", "IMAGE"])],
+    )
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    by_id = options_by_id(payload)
+    # The fronted summary itself is excluded from the options (not
+    # ON_DEMAND, and fronted by the listed profile)...
+    assert "anthropic.claude-sonnet-4-5-20250929-v1:0" not in by_id
+    # ...but its modalities resolved the profile's capability.
+    assert by_id["us.anthropic.claude-sonnet-4-5-20250929-v1:0"][
+        "image_input"] is True
+
+
+# --- partial denial: foundation denied, profiles OK (Requirements 4.4, 4.5).
+
+def test_partial_denial_keeps_every_profile_option_without_the_key(
+        options_env, monkeypatch):
+    """When bedrock:ListFoundationModels is denied while
+    bedrock:ListInferenceProfiles succeeds, the catalog carries every
+    Inference_Profile_Option - exactly as many options as before this
+    feature, in the same order, with the pre-feature key shape and the
+    permissions hint - and no option carries image_input
+    (Requirements 1.3, 4.4, 4.5)."""
+    use_listings(options_env, monkeypatch, profiles=PROFILES,
+                 deny_foundation_models=True)
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    assert "permissions" in payload
+
+    # Pre-feature membership and order (anthropic-first).
+    assert [option["id"] for option in payload["models"]] == [
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.amazon.nova-pro-v1:0",
+    ]
+    # No option carries the key; the key shape is exactly pre-feature plus
+    # the earlier additive limits.
+    for option in payload["models"]:
+        assert "image_input" not in option
+        assert set(option) == PRE_FEATURE_FIELDS | {"image_limit",
+                                                    "token_limit"}

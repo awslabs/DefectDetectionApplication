@@ -91,6 +91,7 @@ const pngFile = (name: string) =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.localStorage.clear();
   apiMocks.listUseCases.mockResolvedValue({
     usecases: [{ usecase_id: 'uc-1', name: 'UC1', s3_bucket: 'out-bucket' }],
     count: 1,

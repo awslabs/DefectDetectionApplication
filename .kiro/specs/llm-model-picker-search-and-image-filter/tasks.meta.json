@@ -1,0 +1,17 @@
+{
+  "pbtResults": {
+    "1.2 Write property test for capability truth": {
+      "status": "passed",
+      "lastRunTimestamp": 1788671980486
+    },
+    "1.3 Write property test for the additive differential": {
+      "status": "passed",
+      "lastRunTimestamp": 1788671981610
+    },
+    "2.3 Write property test for the family construction": {
+      "status": "passed",
+      "lastRunTimestamp": 1788672518652
+    }
+  },
+  "executionHistory": {}
+}

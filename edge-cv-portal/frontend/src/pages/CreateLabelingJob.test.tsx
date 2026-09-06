@@ -92,6 +92,7 @@ const NOVA = { id: 'us.amazon.nova-pro-v1:0', label: 'Nova Pro' };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.localStorage.clear();
   apiMocks.listUseCases.mockResolvedValue({
     usecases: [{ usecase_id: 'uc-1', name: 'UC1', s3_bucket: 'out-bucket' }],
     count: 1,

@@ -1205,6 +1205,19 @@ def _llm_model_image_limits() -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _image_input_capability(modalities) -> Optional[bool]:
+    """
+    Image_Input_Capability of one Input_Modalities value: True when the
+    value is a list containing 'IMAGE', False when it is a non-empty list
+    without 'IMAGE', None (Unknown_Capability) for everything else
+    (absent, non-list, empty list). Total over any input; never raises
+    (llm-model-picker-search-and-image-filter Requirements 1.1, 1.3, 1.5).
+    """
+    if not isinstance(modalities, list) or not modalities:
+        return None
+    return 'IMAGE' in modalities
+
+
 def _is_access_denied(error: ClientError) -> bool:
     code = error.response.get('Error', {}).get('Code', '')
     return code in ('AccessDenied', 'AccessDeniedException', 'UnauthorizedOperation')
@@ -1255,6 +1268,19 @@ def list_bedrock_model_options(event: Dict, user: Dict) -> Dict:
     resolve_token_budget against the effective Model_Token_Limits (default
     10000), which is what the labeling-job wizard pre-fills
     (llm-model-token-and-image-sizing Requirements 1.6, 3.1).
+
+    And an additive 'image_input' (OMITTED when unknown): the model's
+    Image_Input_Capability resolved from the inputModalities of the
+    bedrock:ListFoundationModels summaries - True (Image_Capable) when the
+    resolved list contains 'IMAGE', False (Text_Only) when it is non-empty
+    without 'IMAGE', and the field absent (Unknown_Capability) when no
+    modality list is resolvable. A foundation option resolves from its own
+    summary; an inference profile resolves through the foundation model it
+    fronts (profile id '<prefix>.<model-id>'), matched over ALL summaries
+    including ones the option filters exclude. Lets the labeling wizard's
+    auto-label picker exclude models positively known to lack image input
+    while every other consumer keeps the full catalog
+    (llm-model-picker-search-and-image-filter Requirements 1.1-1.5).
     """
     try:
         query = event.get('queryStringParameters') or {}
@@ -1286,8 +1312,23 @@ def list_bedrock_model_options(event: Dict, user: Dict) -> Dict:
         }
 
         model_options: List[Dict] = []
+        # Image_Input_Capability source: the inputModalities of EVERY
+        # summary of the list_foundation_models response, captured before
+        # (and independently of) the ACTIVE / ON_DEMAND / fronted-model
+        # option filters below - a profile's fronted model is typically
+        # NOT ON_DEMAND (that is why the profile exists), so filtering
+        # first would drop exactly the summaries the profile join needs.
+        # On the AccessDenied path the map stays empty and every option
+        # resolves to Unknown_Capability
+        # (llm-model-picker-search-and-image-filter Requirements 1.1-1.3).
+        model_modalities: Dict[str, Any] = {}
         try:
             response = client.list_foundation_models()
+            model_modalities = {
+                summary['modelId']: summary.get('inputModalities')
+                for summary in response.get('modelSummaries', [])
+                if summary.get('modelId')
+            }
             for summary in response.get('modelSummaries', []):
                 model_id = summary.get('modelId')
                 if not model_id:
@@ -1335,11 +1376,33 @@ def list_bedrock_model_options(event: Dict, user: Dict) -> Dict:
         # (llm-model-token-and-image-sizing Requirements 1.6, 3.1).
         image_limits = _llm_model_image_limits()
         token_limits = _llm_model_token_limits()
+        # Additive per-option Image_Input_Capability, omitted when unknown:
+        # a foundation option resolves from its own summary's
+        # inputModalities (its id IS a summary modelId in the map); a
+        # profile option resolves through its Fronted_Model - the portion
+        # of the profile id after the first '.', e.g.
+        # 'us.anthropic.claude...' fronts 'anthropic.claude...' - looked up
+        # across ALL summaries. No resolvable modality list (absent,
+        # non-list, or empty value; dotless profile id; unmatched fronted
+        # id; denied foundation call) leaves the field omitted, so unknown
+        # capability never shrinks any consumer's list. Membership, order,
+        # and every pre-feature field are untouched
+        # (llm-model-picker-search-and-image-filter Requirements 1.1-1.5).
+        profile_option_ids = {option['id'] for option in profile_options}
         for option in options:
             option['image_limit'] = resolve_model_image_limit(
                 option['id'], image_limits)
             option['token_limit'] = resolve_token_budget(
                 option['id'], None, token_limits)
+            if option['id'] in profile_option_ids:
+                modalities = (
+                    model_modalities.get(option['id'].split('.', 1)[1])
+                    if '.' in option['id'] else None)
+            else:
+                modalities = model_modalities.get(option['id'])
+            capability = _image_input_capability(modalities)
+            if capability is not None:
+                option['image_input'] = capability
 
         payload: Dict[str, Any] = {'models': options, 'region': region}
         if access_denied:

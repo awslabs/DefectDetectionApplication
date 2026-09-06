@@ -33,6 +33,20 @@ import PromptTuningPreview, {
   parseTokenBudget,
 } from '../components/labeling/PromptTuningPreview';
 import type { LabelingModality } from '../components/labeling/AnnotationCanvas';
+import {
+  DRAFT_SAVE_DEBOUNCE_MS,
+  canResumePreviewRun,
+  clearLabelingJobDraft,
+  draftsEquivalent,
+  exampleRefDisplayName,
+  mergedExampleRefs,
+  readLabelingJobDraft,
+  writeLabelingJobDraft,
+} from './labelingJobDraft';
+import type {
+  LabelingJobDraft,
+  PreviewRunReference,
+} from './labelingJobDraft';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 
@@ -109,6 +123,17 @@ export function fewShotAttachmentCounts(
 }
 
 /**
+ * Image_Input_Capability filter for the auto-label families: a model is
+ * excluded only when positively known to lack image input
+ * (`image_input === false`); unknown capability (field absent) is
+ * included (llm-model-picker-search-and-image-filter Requirements 2.1,
+ * 2.2).
+ */
+export function isImageCapableModel(m: { image_input?: boolean }): boolean {
+  return m.image_input !== false;
+}
+
+/**
  * The ordered Few_Shot_Example set for the uploaded example image
  * references: good examples in upload order first, then bad examples,
  * each carrying its designation and its position *within* that
@@ -144,6 +169,19 @@ export function isAutoLabelModelCompatible(
     return BEDROCK_MODALITIES.includes(taskType);
   return false;
 }
+
+/**
+ * Every task-type option either branch can offer, for reconstructing a
+ * restored Setup_Draft's selection by value before the branch-dependent
+ * option list re-renders (labeling-setup-session-recovery Requirement
+ * 3.2); an unknown value restores as no selection. The rendered options
+ * stay branch-filtered (`taskTypeOptions`).
+ */
+const ALL_TASK_TYPE_OPTIONS: SelectProps.Option[] = [
+  { label: 'Image Classification', value: 'Classification' },
+  { label: 'Semantic Segmentation', value: 'Segmentation' },
+  { label: 'Object Detection', value: 'ObjectDetection' },
+];
 
 const fileUploadI18nStrings = {
   uploadButtonText: (multiple: boolean) =>
@@ -235,9 +273,53 @@ export default function CreateLabelingJob() {
   // (llm-model-token-and-image-sizing Req 3.1, 3.2, 3.10).
   const [tokenBudget, setTokenBudget] = useState('');
   const [bedrockModels, setBedrockModels] = useState<
-    { id: string; label: string; image_limit?: number; token_limit?: number }[]
+    {
+      id: string;
+      label: string;
+      image_limit?: number;
+      token_limit?: number;
+      // Image_Input_Capability tri-state: absent = unknown, never exclude
+      // (llm-model-picker-search-and-image-filter Req 1.4, 2.2).
+      image_input?: boolean;
+    }[]
   >([]);
   const [bedrockModelsUnavailable, setBedrockModelsUnavailable] = useState(false);
+
+  // --- Setup_Draft recovery state (labeling-setup-session-recovery) -------
+  // Restored_Example_References still present in the form, per designation
+  // (Requirement 4.1).
+  const [restoredExampleRefs, setRestoredExampleRefs] = useState<{
+    good: string[];
+    bad: string[];
+  }>({ good: [], bad: [] });
+  // Write-through mirrors of the Prompt_Tuning_Preview's Sample_Selection
+  // and most recently started Preview_Run, fed by the preview's callbacks
+  // and serialized into the draft (Requirement 2.4).
+  const [previewSelectedKeys, setPreviewSelectedKeys] = useState<string[]>([]);
+  const [previewRunRef, setPreviewRunRef] =
+    useState<PreviewRunReference | null>(null);
+  // The pending Restore_Offer; rendered while it matches the selected use
+  // case (Requirement 3.1).
+  const [draftOffer, setDraftOffer] = useState<{
+    usecaseId: string;
+    draft: LabelingJobDraft;
+  } | null>(null);
+  // React key for the preview: a restore bumps it so the preview remounts
+  // with initialSelectedKeys and resumeRun applied deterministically.
+  const [previewRestoreNonce, setPreviewRestoreNonce] = useState(0);
+  // Once-per-use-case draft read guard (the TestPanel resumedUsecaseRef
+  // pattern; Requirement 3.1).
+  const draftReadUsecases = useRef<Set<string>>(new Set());
+  // Team id parked by a restore until the team list has loaded (Req 3.4).
+  const pendingTeamRestoreRef = useRef<string | null>(null);
+  // resumeRun for the next preview mount; cleared once a new run starts.
+  const restoredPreviewRunRef = useRef<PreviewRunReference | null>(null);
+  // Use case the restored example refs were restored under — they are
+  // discarded when the selection moves away from it (Requirement 4.5).
+  const restoredRefsUsecaseRef = useRef<string | null>(null);
+  // Set after successful creation so no debounced write re-creates the
+  // draft before navigation (Requirement 6.1).
+  const draftClearedRef = useRef(false);
 
   // Load use cases on mount
   useEffect(() => {
@@ -282,6 +364,31 @@ export default function CreateLabelingJob() {
     };
     loadUseCases();
   }, [useCaseIdFromUrl, selectedUsecaseId, setSelectedUsecaseId]);
+
+  // Setup_Draft read: once per resolved use case per mount, a stored
+  // draft raises the Restore_Offer; no draft leaves rendering unchanged
+  // (labeling-setup-session-recovery Requirements 3.1, 3.8).
+  useEffect(() => {
+    const usecaseId: string | undefined = selectedUseCase?.usecase_id;
+    if (!usecaseId || draftReadUsecases.current.has(usecaseId)) return;
+    draftReadUsecases.current.add(usecaseId);
+    const draft = readLabelingJobDraft(usecaseId);
+    if (draft !== null) {
+      setDraftOffer({ usecaseId, draft });
+    }
+  }, [selectedUseCase]);
+
+  // Restored_Example_References never cross use cases: moving away from
+  // the use case they were restored under discards them (Requirement 4.5).
+  useEffect(() => {
+    if (
+      restoredRefsUsecaseRef.current !== null &&
+      selectedUseCase?.usecase_id !== restoredRefsUsecaseRef.current
+    ) {
+      restoredRefsUsecaseRef.current = null;
+      setRestoredExampleRefs({ good: [], bad: [] });
+    }
+  }, [selectedUseCase]);
 
   // Load SageMaker workteams when use case changes (GroundTruth branch).
   useEffect(() => {
@@ -336,6 +443,21 @@ export default function CreateLabelingJob() {
       cancelled = true;
     };
   }, [labelingBackend, selectedUseCase]);
+
+  // Complete a restore's parked team selection once the use case's team
+  // list has settled: the parked id is selected when present in the loaded
+  // list and consumed either way, leaving the team unselected when the id
+  // is gone (labeling-setup-session-recovery Requirement 3.4).
+  useEffect(() => {
+    if (loadingTeams) return;
+    const pendingTeamId = pendingTeamRestoreRef.current;
+    if (pendingTeamId === null) return;
+    pendingTeamRestoreRef.current = null;
+    const team = labelingTeams.find((t) => t.team_id === pendingTeamId);
+    if (team) {
+      setSelectedTeam({ label: team.team_name, value: team.team_id });
+    }
+  }, [labelingTeams, loadingTeams]);
 
   // Load the Bedrock models available to the Portal for the auto-label
   // model select and the Skip_Verification model select (Requirements
@@ -430,19 +552,28 @@ export default function CreateLabelingJob() {
   )
     ? [{ label: 'Segment Anything (SAM)', value: 'sam' }]
     : [];
+  // The auto-label families offer only the models not positively known to
+  // be text-only; everything else (catalog-unavailable detection, per-model
+  // lookups, the Skip_Verification select) keeps reading the raw
+  // `bedrockModels` (llm-model-picker-search-and-image-filter Req 2.1,
+  // 2.2, 4.2, 4.6). `filteringTags` carries the bare catalog id so
+  // type-to-search matches it by contract (Req 3.2).
+  const imageCapableModels = bedrockModels.filter(isImageCapableModel);
   const bedrockAutoLabelOptions: SelectProps.Option[] =
     BEDROCK_MODALITIES.includes(modality)
-      ? bedrockModels.map((m) => ({
+      ? imageCapableModels.map((m) => ({
           label: `Bedrock: ${m.label}`,
           value: `bedrock:${m.id}`,
+          filteringTags: [m.id],
         }))
       : [];
   const llmAutoLabelOptions: SelectProps.Option[] = LLM_MODALITIES.includes(
     modality
   )
-    ? bedrockModels.map((m) => ({
+    ? imageCapableModels.map((m) => ({
         label: `${m.label} (prompt-guided)`,
         value: `llm:${m.id}`,
+        filteringTags: [m.id],
       }))
     : [];
   const flatAutoLabelOptions: SelectProps.Option[] = [
@@ -477,7 +608,17 @@ export default function CreateLabelingJob() {
     ? bedrockModels.find((m) => m.id === autoLabelModel.slice('llm:'.length))
         ?.image_limit ?? MODEL_IMAGE_LIMIT_DEFAULT
     : MODEL_IMAGE_LIMIT_DEFAULT;
-  const exampleImageCount = goodExampleFiles.length + badExampleFiles.length;
+  // Combined per-designation example counts: Restored_Example_References
+  // still in the form plus newly staged files. These feed the
+  // per-designation limits, the few-shot at-least-one rule, the
+  // attach/omit hint, the review step, and the preview's example-count
+  // props; with no restore they equal the file counts exactly
+  // (labeling-setup-session-recovery Requirement 4.2).
+  const combinedGoodExampleCount =
+    restoredExampleRefs.good.length + goodExampleFiles.length;
+  const combinedBadExampleCount =
+    restoredExampleRefs.bad.length + badExampleFiles.length;
+  const exampleImageCount = combinedGoodExampleCount + combinedBadExampleCount;
   const { attached: fewShotAttachedCount, omitted: fewShotOmittedCount } =
     fewShotAttachmentCounts(exampleImageCount, selectedModelImageLimit);
 
@@ -504,6 +645,142 @@ export default function CreateLabelingJob() {
     { label: 'Public (Mechanical Turk)', value: 'public' },
     { label: 'Vendor', value: 'vendor' },
   ];
+
+  /**
+   * Apply a restored Setup_Draft to the Wizard_Setup_State — every
+   * Requirement 2.1 field, set synchronously in the offer's Restore
+   * action so the wizard's reactive effects run over the restored values
+   * as one consistent update (labeling-setup-session-recovery Req 3.2).
+   */
+  const applyDraftRestore = (draft: LabelingJobDraft) => {
+    setActiveStepIndex(draft.activeStepIndex);
+    setLabelingBackend(draft.labelingBackend);
+    setJobName(draft.jobName);
+    setDescription(draft.description);
+    setDatasetS3Uri(draft.datasetS3Uri);
+    setMaskPrefix(draft.maskPrefix);
+    setTaskType(
+      ALL_TASK_TYPE_OPTIONS.find((o) => o.value === draft.taskTypeValue) ??
+        null
+    );
+    setWorkforceType(
+      workforceOptions.find((o) => o.value === draft.workforceTypeValue) ??
+        null
+    );
+    setLabelCategories(draft.labelCategories);
+    setInstructions(draft.gtInstructions);
+    setEnableAutomatedLabeling(draft.enableAutomatedLabeling);
+    setDdaLabels(draft.ddaLabels);
+    setDdaInstructions(draft.ddaInstructions);
+    setAutoLabelEnabled(draft.autoLabelEnabled);
+    // The recorded selection value restores verbatim, independent of the
+    // capability-filtered picker's current entries (Req 2.2, 3.5).
+    setAutoLabelModel(draft.autoLabelModel);
+    setDetectionPrompt(draft.detectionPrompt);
+    setFewShotEnabled(draft.fewShotEnabled);
+    setDownscaleMaxEdge(draft.downscaleMaxEdge);
+    setTokenBudget(draft.tokenBudget);
+    // Skip_Verification_Configuration is admin-only: a non-admin restores
+    // it disabled and empty, everything else applies (Req 3.6).
+    if (isAdmin) {
+      setSkipVerification(draft.skipVerification);
+      setSkipVerificationModelId(draft.skipVerificationModelId);
+      setPerLabelPrompts(draft.perLabelPrompts);
+    } else {
+      setSkipVerification(false);
+      setSkipVerificationModelId('');
+      setPerLabelPrompts({});
+    }
+
+    // Defuse the token-budget pre-fill: the compatibility effect replaces
+    // the budget whenever budgetPrefillModelRef disagrees with the model,
+    // so pre-marking it presents the restored budget instead (Req 3.3).
+    budgetPrefillModelRef.current = draft.autoLabelModel;
+
+    // Team re-selection (Req 3.4): the teams-loading effect nulls the
+    // selection when it starts, so the draft's team id is parked and the
+    // follow-up effect selects it once the list has loaded. When no
+    // reload will run (the backend selection is unchanged DDA and loading
+    // has settled), resolve against the already-loaded list immediately.
+    const pendingTeamId = draft.selectedTeam?.teamId ?? null;
+    const teamsSettled =
+      draft.labelingBackend === labelingBackend &&
+      labelingBackend === 'DDA' &&
+      !loadingTeams;
+    if (pendingTeamId !== null && teamsSettled) {
+      const team = labelingTeams.find((t) => t.team_id === pendingTeamId);
+      setSelectedTeam(
+        team ? { label: team.team_name, value: team.team_id } : null
+      );
+      pendingTeamRestoreRef.current = null;
+    } else {
+      pendingTeamRestoreRef.current = pendingTeamId;
+      setSelectedTeam(null);
+    }
+
+    // Restored example refs (Req 4.1) and the preview surface (Req 2.4,
+    // 5.5, 5.7). An out-of-window Preview_Run_Reference is dropped
+    // silently — no poll, no error (Req 5.5).
+    setRestoredExampleRefs(draft.exampleRefs);
+    restoredRefsUsecaseRef.current = draft.usecaseId;
+    setPreviewSelectedKeys(draft.previewSelectedKeys);
+    const resumableRun = canResumePreviewRun(draft.previewRun, Date.now())
+      ? draft.previewRun
+      : null;
+    restoredPreviewRunRef.current = resumableRun;
+    setPreviewRunRef(resumableRun);
+
+    // Remount the preview so initialSelectedKeys and resumeRun apply
+    // deterministically, then resolve the offer — saving resumes (Req 3.2).
+    setPreviewRestoreNonce((n) => n + 1);
+    setDraftOffer(null);
+  };
+
+  /**
+   * Resolve the Restore_Offer by discarding: the stored draft is removed
+   * and no other state changes (labeling-setup-session-recovery Req 3.7).
+   */
+  const handleDraftDiscard = () => {
+    if (draftOffer === null) return;
+    clearLabelingJobDraft(draftOffer.usecaseId);
+    setDraftOffer(null);
+  };
+
+  /**
+   * Restored_Example_Reference chips under a FileUpload field: one named,
+   * individually removable chip per restored ref of the designation
+   * (labeling-setup-session-recovery Requirement 4.1). Removal is
+   * reflected in the next draft write through state.
+   */
+  const restoredExampleChips = (kind: 'good' | 'bad') =>
+    restoredExampleRefs[kind].length > 0 ? (
+      <SpaceBetween size="xxs">
+        {restoredExampleRefs[kind].map((ref, idx) => (
+          <div key={`${idx}-${ref}`} data-testid="restored-example-chip">
+            <SpaceBetween direction="horizontal" size="xxs" alignItems="center">
+              <Box>{exampleRefDisplayName(ref)}</Box>
+              <Button
+                iconName="close"
+                variant="inline-icon"
+                ariaLabel={`Remove restored example ${exampleRefDisplayName(ref)}`}
+                onClick={() =>
+                  setRestoredExampleRefs((current) => ({
+                    good:
+                      kind === 'good'
+                        ? current.good.filter((_, i) => i !== idx)
+                        : current.good,
+                    bad:
+                      kind === 'bad'
+                        ? current.bad.filter((_, i) => i !== idx)
+                        : current.bad,
+                  }))
+                }
+              />
+            </SpaceBetween>
+          </div>
+        ))}
+      </SpaceBetween>
+    ) : null;
 
   /**
    * Validate the DDA labeling-setup step (Requirements 4.1-4.4, 8.1, 8.8,
@@ -534,10 +811,10 @@ export default function CreateLabelingJob() {
     if (ddaInstructions.length > MAX_INSTRUCTIONS_LENGTH) {
       return `Instructions exceed ${MAX_INSTRUCTIONS_LENGTH.toLocaleString()} characters`;
     }
-    if (goodExampleFiles.length > MAX_EXAMPLE_IMAGES) {
+    if (combinedGoodExampleCount > MAX_EXAMPLE_IMAGES) {
       return `At most ${MAX_EXAMPLE_IMAGES} good example images are allowed`;
     }
-    if (badExampleFiles.length > MAX_EXAMPLE_IMAGES) {
+    if (combinedBadExampleCount > MAX_EXAMPLE_IMAGES) {
       return `At most ${MAX_EXAMPLE_IMAGES} bad example images are allowed`;
     }
     const badTyped = [...goodExampleFiles, ...badExampleFiles].find(
@@ -749,6 +1026,13 @@ export default function CreateLabelingJob() {
    * the upload, the other reuses the cached references. Editing either
    * example list invalidates the cache, so the next call uploads the new
    * set. Throws on any failed upload, naming the file.
+   *
+   * The returned set is the Merged_Example_Refs — Restored_Example_
+   * References first, newly uploaded refs after, per designation — so the
+   * preview request and the job submission consume restored refs with
+   * zero changes to their builders, and only newly staged files are
+   * uploaded (labeling-setup-session-recovery Req 4.3). The cache keeps
+   * holding the raw upload result only.
    */
   const ensureExampleImagesUploaded = useCallback(async (): Promise<{
     good: string[];
@@ -756,12 +1040,133 @@ export default function CreateLabelingJob() {
   }> => {
     const cached = exampleUploadCache.current;
     if (cached && cached.key === exampleFilesKey) {
-      return cached.uris;
+      return mergedExampleRefs(restoredExampleRefs, cached.uris);
     }
     const uris = await uploadExampleImages();
     exampleUploadCache.current = { key: exampleFilesKey, uris };
-    return uris;
-  }, [exampleFilesKey, uploadExampleImages]);
+    return mergedExampleRefs(restoredExampleRefs, uris);
+  }, [exampleFilesKey, uploadExampleImages, restoredExampleRefs]);
+
+  /**
+   * Assemble the Setup_Draft from the live Wizard_Setup_State — every
+   * Requirement 2.1 field (labeling-setup-session-recovery). `exampleRefs`
+   * carries the Merged_Example_Refs as of now: the restored refs still in
+   * the form followed by the Current_Upload_Refs — the upload cache's URIs
+   * only while its identity key matches the currently staged files, so a
+   * draft never carries refs of a file set the Job_Creator has since
+   * changed (Req 2.3). `savedAtMs` is stamped by writeLabelingJobDraft.
+   */
+  const buildDraft = useCallback((): LabelingJobDraft => {
+    const cache = exampleUploadCache.current;
+    const cacheCurrent = cache !== null && cache.key === exampleFilesKey;
+    return {
+      version: 1,
+      savedAtMs: 0,
+      usecaseId: selectedUseCase?.usecase_id ?? '',
+      activeStepIndex,
+      labelingBackend,
+      jobName,
+      description,
+      datasetS3Uri,
+      maskPrefix,
+      taskTypeValue: (taskType?.value as string | undefined) ?? '',
+      workforceTypeValue: (workforceType?.value as string | undefined) ?? '',
+      labelCategories,
+      gtInstructions: instructions,
+      enableAutomatedLabeling,
+      ddaLabels,
+      ddaInstructions,
+      selectedTeam:
+        selectedTeam !== null
+          ? {
+              teamId: (selectedTeam.value as string | undefined) ?? '',
+              teamName: selectedTeam.label ?? '',
+            }
+          : null,
+      autoLabelEnabled,
+      autoLabelModel,
+      detectionPrompt,
+      fewShotEnabled,
+      downscaleMaxEdge,
+      tokenBudget,
+      skipVerification,
+      skipVerificationModelId,
+      perLabelPrompts,
+      exampleRefs: mergedExampleRefs(
+        restoredExampleRefs,
+        cacheCurrent ? cache.uris : { good: [], bad: [] }
+      ),
+      previewSelectedKeys,
+      previewRun: previewRunRef,
+    };
+  }, [
+    selectedUseCase,
+    activeStepIndex,
+    labelingBackend,
+    jobName,
+    description,
+    datasetS3Uri,
+    maskPrefix,
+    taskType,
+    workforceType,
+    labelCategories,
+    instructions,
+    enableAutomatedLabeling,
+    ddaLabels,
+    ddaInstructions,
+    selectedTeam,
+    autoLabelEnabled,
+    autoLabelModel,
+    detectionPrompt,
+    fewShotEnabled,
+    downscaleMaxEdge,
+    tokenBudget,
+    skipVerification,
+    skipVerificationModelId,
+    perLabelPrompts,
+    restoredExampleRefs,
+    previewSelectedKeys,
+    previewRunRef,
+    exampleFilesKey,
+  ]);
+
+  // Pristine_State draft, captured once per entry context: the first
+  // render's state is exactly the mount's initial values, including a
+  // dataset preselected via navigation state
+  // (labeling-setup-session-recovery Requirement 1.2).
+  const pristineDraftRef = useRef<LabelingJobDraft | null>(null);
+  if (pristineDraftRef.current === null) {
+    pristineDraftRef.current = buildDraft();
+  }
+
+  // Debounced Setup_Draft capture (labeling-setup-session-recovery Req
+  // 1.1): a burst of changes produces one write under the selected use
+  // case's key. Skipped while no use case is resolved, while a
+  // Restore_Offer for this use case is unresolved (Req 1.3 — new input
+  // must not clobber the draft being offered), after a successful
+  // creation (Req 6.1), and while the state still equals the mount's
+  // Pristine_State (Req 1.2 — visiting the page never creates a draft).
+  useEffect(() => {
+    if (!selectedUseCase) return;
+    const usecaseId: string = selectedUseCase.usecase_id;
+    if (draftOffer !== null && draftOffer.usecaseId === usecaseId) return;
+    if (draftClearedRef.current) return;
+    const timer = window.setTimeout(() => {
+      if (draftClearedRef.current) return;
+      const draft = buildDraft();
+      const pristine = pristineDraftRef.current;
+      // The comparison ignores the stamped usecaseId: a use case
+      // resolving is metadata, not Job_Creator input.
+      if (
+        pristine !== null &&
+        draftsEquivalent(draft, { ...pristine, usecaseId: draft.usecaseId })
+      ) {
+        return;
+      }
+      writeLabelingJobDraft(usecaseId, draft);
+    }, DRAFT_SAVE_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [buildDraft, selectedUseCase, draftOffer]);
 
   const handleSubmit = async () => {
     setCreating(true);
@@ -871,6 +1276,12 @@ export default function CreateLabelingJob() {
             : {}),
         });
 
+        // Successful creation removes the Setup_Draft before navigating;
+        // the flag stops any pending debounced write from re-creating it
+        // (labeling-setup-session-recovery Requirement 6.1).
+        draftClearedRef.current = true;
+        clearLabelingJobDraft(selectedUseCase.usecase_id);
+
         navigate('/labeling');
         return;
       }
@@ -919,6 +1330,11 @@ export default function CreateLabelingJob() {
         mask_prefix: maskPrefixValue,
         enable_automated_labeling: enableAutomatedLabeling,
       });
+
+      // Successful creation removes the Setup_Draft before navigating
+      // (labeling-setup-session-recovery Requirement 6.1).
+      draftClearedRef.current = true;
+      clearLabelingJobDraft(selectedUseCase.usecase_id);
 
       navigate('/labeling');
     } catch (err) {
@@ -1360,42 +1776,48 @@ export default function CreateLabelingJob() {
           label="Good examples (optional)"
           description="Up to 10 JPEG/PNG images showing correct labeling"
           errorText={
-            goodExampleFiles.length > MAX_EXAMPLE_IMAGES
+            combinedGoodExampleCount > MAX_EXAMPLE_IMAGES
               ? `At most ${MAX_EXAMPLE_IMAGES} good example images are allowed`
               : undefined
           }
         >
-          <FileUpload
-            value={goodExampleFiles}
-            onChange={({ detail }) => setGoodExampleFiles(detail.value)}
-            multiple
-            accept="image/jpeg,image/png"
-            showFileThumbnail
-            fileErrors={exampleFileErrors(goodExampleFiles)}
-            constraintText="JPEG or PNG"
-            i18nStrings={fileUploadI18nStrings}
-          />
+          <SpaceBetween size="xs">
+            <FileUpload
+              value={goodExampleFiles}
+              onChange={({ detail }) => setGoodExampleFiles(detail.value)}
+              multiple
+              accept="image/jpeg,image/png"
+              showFileThumbnail
+              fileErrors={exampleFileErrors(goodExampleFiles)}
+              constraintText="JPEG or PNG"
+              i18nStrings={fileUploadI18nStrings}
+            />
+            {restoredExampleChips('good')}
+          </SpaceBetween>
         </FormField>
 
         <FormField
           label="Bad examples (optional)"
           description="Up to 10 JPEG/PNG images showing labeling mistakes to avoid"
           errorText={
-            badExampleFiles.length > MAX_EXAMPLE_IMAGES
+            combinedBadExampleCount > MAX_EXAMPLE_IMAGES
               ? `At most ${MAX_EXAMPLE_IMAGES} bad example images are allowed`
               : undefined
           }
         >
-          <FileUpload
-            value={badExampleFiles}
-            onChange={({ detail }) => setBadExampleFiles(detail.value)}
-            multiple
-            accept="image/jpeg,image/png"
-            showFileThumbnail
-            fileErrors={exampleFileErrors(badExampleFiles)}
-            constraintText="JPEG or PNG"
-            i18nStrings={fileUploadI18nStrings}
-          />
+          <SpaceBetween size="xs">
+            <FileUpload
+              value={badExampleFiles}
+              onChange={({ detail }) => setBadExampleFiles(detail.value)}
+              multiple
+              accept="image/jpeg,image/png"
+              showFileThumbnail
+              fileErrors={exampleFileErrors(badExampleFiles)}
+              constraintText="JPEG or PNG"
+              i18nStrings={fileUploadI18nStrings}
+            />
+            {restoredExampleChips('bad')}
+          </SpaceBetween>
         </FormField>
 
         <FormField
@@ -1433,6 +1855,10 @@ export default function CreateLabelingJob() {
               disabled={!taskType || flatAutoLabelOptions.length === 0}
               empty="No compatible auto-label models for this task type"
               selectedAriaLabel="Selected"
+              filteringType="auto"
+              filteringAriaLabel="Search models"
+              filteringPlaceholder="Search by model name or id"
+              noMatch="No models match the search"
             />
             {bedrockModelsUnavailable && BEDROCK_MODALITIES.includes(modality) && (
               <Box color="text-status-inactive" padding={{ top: 'xxs' }}>
@@ -1461,6 +1887,38 @@ export default function CreateLabelingJob() {
                 />
               </Box>
             )}
+            {/* All-excluded affordance: the catalog loaded but every model
+                is positively known text-only, so the picker's LLM family is
+                empty — offer the same Free_Text_Fallback the
+                Catalog_Unavailable path offers
+                (llm-model-picker-search-and-image-filter Req 2.4). */}
+            {bedrockModels.length > 0 &&
+              imageCapableModels.length === 0 &&
+              LLM_MODALITIES.includes(modality) && (
+                <Box padding={{ top: 'xxs' }}>
+                  <Box
+                    color="text-status-inactive"
+                    padding={{ bottom: 'xxs' }}
+                  >
+                    No model in the catalog accepts image input. Enter a
+                    model identifier to use prompt-guided auto-labeling.
+                  </Box>
+                  <Input
+                    value={
+                      isLlmAutoLabelModel
+                        ? autoLabelModel.slice('llm:'.length)
+                        : ''
+                    }
+                    onChange={({ detail }) =>
+                      setAutoLabelModel(
+                        detail.value ? `llm:${detail.value}` : ''
+                      )
+                    }
+                    placeholder="e.g., us.amazon.nova-pro-v1:0"
+                    ariaLabel="Prompt-guided model identifier"
+                  />
+                </Box>
+              )}
           </FormField>
         )}
 
@@ -1532,6 +1990,10 @@ export default function CreateLabelingJob() {
             next run (Req 1.5, 5.1). */}
         {autoLabelEnabled && isLlmAutoLabelModel && (
           <PromptTuningPreview
+            /* A restore bumps the nonce so the preview remounts with the
+               restored Sample_Selection and resumeRun applied
+               deterministically (labeling-setup-session-recovery). */
+            key={previewRestoreNonce}
             usecaseId={selectedUseCase?.usecase_id || ''}
             datasetPrefix={datasetPrefix}
             model={autoLabelModel}
@@ -1539,8 +2001,8 @@ export default function CreateLabelingJob() {
             taskType={modality as LabelingModality}
             labelSet={effectiveLabelSet}
             fewShotEnabled={fewShotEnabled}
-            goodExampleCount={goodExampleFiles.length}
-            badExampleCount={badExampleFiles.length}
+            goodExampleCount={combinedGoodExampleCount}
+            badExampleCount={combinedBadExampleCount}
             ensureExampleImagesUploaded={ensureExampleImagesUploaded}
             /* The Downscale_Setting and Token_Budget_Selection live in
                wizard state so the values driving the Preview_Runs are the
@@ -1551,6 +2013,17 @@ export default function CreateLabelingJob() {
             tokenBudget={tokenBudget}
             onDownscaleMaxEdgeChange={setDownscaleMaxEdge}
             onTokenBudgetChange={setTokenBudget}
+            /* Sample_Selection and Preview_Run_Reference mirrors for the
+               Setup_Draft; a new run replaces the persisted reference and
+               retires the resumed one (labeling-setup-session-recovery
+               Req 2.4, 5.6, 5.7). */
+            initialSelectedKeys={previewSelectedKeys}
+            onSelectedKeysChange={setPreviewSelectedKeys}
+            resumeRun={restoredPreviewRunRef.current}
+            onRunStarted={(ref) => {
+              setPreviewRunRef(ref);
+              restoredPreviewRunRef.current = null;
+            }}
           />
         )}
 
@@ -1723,7 +2196,7 @@ export default function CreateLabelingJob() {
             <Box>
               <Box variant="awsui-key-label">Example Images</Box>
               <Box>
-                {goodExampleFiles.length} good, {badExampleFiles.length} bad
+                {combinedGoodExampleCount} good, {combinedBadExampleCount} bad
               </Box>
             </Box>
             <Box>
@@ -1803,6 +2276,38 @@ export default function CreateLabelingJob() {
       }
     >
       <SpaceBetween size="l">
+        {/* Restore_Offer: shown while a Setup_Draft exists for the
+            resolved use case, with exactly the two actions Restore and
+            Discard; not dismissible (labeling-setup-session-recovery
+            Requirements 3.1, 3.7). */}
+        {draftOffer !== null &&
+          draftOffer.usecaseId === selectedUseCase?.usecase_id && (
+            <Alert
+              type="info"
+              header="Restore your saved labeling job setup?"
+              data-testid="draft-restore-offer"
+              action={
+                <SpaceBetween direction="horizontal" size="xs">
+                  <Button
+                    data-testid="draft-restore-button"
+                    onClick={() => applyDraftRestore(draftOffer.draft)}
+                  >
+                    Restore draft
+                  </Button>
+                  <Button
+                    data-testid="draft-discard-button"
+                    onClick={handleDraftDiscard}
+                  >
+                    Discard
+                  </Button>
+                </SpaceBetween>
+              }
+            >
+              A setup draft for this use case was saved{' '}
+              {new Date(draftOffer.draft.savedAtMs).toLocaleString()}.
+              Restore it to continue where you left off, or discard it.
+            </Alert>
+          )}
         {error && (
           <Alert
             type="error"
