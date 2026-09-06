@@ -49,13 +49,35 @@ of labeling-pipeline state and request content restriction are Properties
 repeated.
 
 Requirements: 3.1, 3.5, 3.7, 8.8
+
+Spec: llm-model-token-and-image-sizing, task 7.4 (executor sizing
+report and downscaler refusals). Extends the same harness — every
+pre-existing case above holds unchanged — driving the *real*
+`generate_llm_prelabel` with a stub Converse client:
+
+- **The success payload's sizing report** (Req 5.10, 7.7): a run with a
+  Max_Image_Edge carries `source_width` / `source_height` /
+  `sent_width` / `sent_height` beside the applied `downscale_max_edge`,
+  with `image_width` / `image_height` keeping their Source meaning.
+- **A refused target** (Req 9.1): header-only bytes that must be
+  resized but cannot be decoded fail as `unsupported_image_content`,
+  the reason naming the key and the bound, with zero invocations.
+- **A refused example** (Req 8.5): an attached example the downscaler
+  cannot decode fails its target as `unreadable_example_image`, the
+  reason identifying the example (by attachment position, the reason
+  the Auto_Labeler records character-for-character) and the bound,
+  with zero invocations.
 """
+import io
 import json
+import uuid
 
 import pytest
 from botocore.exceptions import ClientError
 
 from dda_llm_prelabel import LlmPrelabelError
+from test_dda_autolabel_worker import png_bytes
+from test_dda_labeling_create_job import DATASET_BUCKET
 from test_dda_labeling_preview_routes import ARTIFACTS_BUCKET
 from test_preview_flow_integration import (  # noqa: F401 — `dda` is a fixture
     MODEL,
@@ -521,3 +543,143 @@ class TestNoRetryOrSecondInvocation:
                            "error": "preview run not found"}
         assert recorder.calls == []
         assert json.dumps(outcome)  # the async response stays serializable
+
+
+# ------------------------------------ sizing report and refusals
+#                     (llm-model-token-and-image-sizing, task 7.4 —
+#                     Req 5.10, 7.7, 9.1, 8.5)
+
+def real_png(width, height):
+    """A fully decodable PNG — unlike `png_bytes`' header-only bytes —
+    for the case that drives the Image_Downscaler through a real
+    decode-and-re-encode (test_dda_autolabel_worker_few_shot.real_png's
+    convention)."""
+    from PIL import Image  # lazy, matching the imaging-layer convention
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (120, 40, 200)).save(buffer,
+                                                           format="PNG")
+    return buffer.getvalue()
+
+
+def put_real_sample(env, name, *, width, height):
+    """One fully decodable PNG dataset object — `put_sample`'s stored
+    shape with real pixel data, for runs whose Downscale_Setting makes
+    the downscaler decode the target bytes."""
+    key = f"{env.prefix}{name}"
+    body = real_png(width, height)
+    env.s3.put_object(Bucket=DATASET_BUCKET, Key=key, Body=body)
+    env.sample_bytes[key] = body
+    return key
+
+
+def put_undecodable_example(env, designation, position, *, width, height):
+    """One example upload whose header-only bytes declare dimensions
+    above the bound: the downscaler must decode them, and cannot."""
+    key = (f"labeling-examples/{uuid.uuid4().hex[:8]}/"
+           f"{designation}{position}.png")
+    env.s3.put_object(Bucket=DATASET_BUCKET, Key=key,
+                      Body=png_bytes(width, height))
+    ref = f"s3://{DATASET_BUCKET}/{key}"
+    return {"ref": ref, "designation": designation, "position": position}
+
+
+class TestSizingReportAndRefusals:
+    """Req 5.10, 7.7, 9.1, 8.5: the payload's sizing report on a run
+    with a Max_Image_Edge, and the two downscaler refusal categories —
+    each refusal with zero Converse invocations."""
+
+    def test_success_payload_carries_the_four_dimension_fields(self, env):
+        """A 1000x600 target at a 512 bound is sent at 512x307; the
+        payload reports Source and Sent side by side with the applied
+        setting, and `image_width` / `image_height` keep their Source
+        meaning (Req 5.10, 7.7)."""
+        key = put_real_sample(env, "sized.png", width=1000, height=600)
+        stub, _ = env.use_bedrock([guidance([BOX])])
+
+        run_id = env.start_detection_run([key], downscale_max_edge=512)
+        outcome = env.drive_executor()
+
+        assert outcome["status"] == "Completed"
+        assert outcome["succeeded"] == 1 and outcome["failed"] == 0
+        payload = env.result_payload(run_id, 0)
+        assert set(payload) == {"sample_key", "state", "prelabel",
+                                "image_width", "image_height",
+                                "source_width", "source_height",
+                                "sent_width", "sent_height",
+                                "downscale_max_edge"}
+        # Source meaning kept (Req 7.7), duplicated into the explicit
+        # source_* fields for the sizing display.
+        assert payload["image_width"] == 1000
+        assert payload["image_height"] == 600
+        assert payload["source_width"] == 1000
+        assert payload["source_height"] == 600
+        # 1000x600 at 512 floors to 512x307 — the image actually sent.
+        assert payload["sent_width"] == 512
+        assert payload["sent_height"] == 307
+        assert payload["downscale_max_edge"] == 512
+        # The Pre_Label stays expressed in Source space.
+        assert payload["prelabel"]["image_width"] == 1000
+        assert payload["prelabel"]["image_height"] == 600
+        # One invocation, carrying the downscaled bytes (smaller than
+        # the stored source object).
+        assert len(stub.calls) == 1
+        sent = [block["image"]["source"]["bytes"]
+                for block in stub.calls[0]["messages"][0]["content"]
+                if "image" in block]
+        assert len(sent) == 1
+        assert sent[0] != env.sample_bytes[key]
+
+    def test_refused_target_is_unsupported_image_content(self, env):
+        """Req 9.1: header-only bytes declaring 3000x2000 must be
+        resized for the 512 bound but hold no pixels to decode — the
+        sample fails as `unsupported_image_content`, the reason naming
+        the key and the bound, before any Converse call."""
+        key = env.put_sample("undecodable.png", width=3000, height=2000)
+        stub, _ = env.use_bedrock([guidance([BOX])])
+
+        run_id = env.start_detection_run([key], downscale_max_edge=512)
+        outcome = env.drive_executor()
+
+        assert outcome["status"] == "Completed"
+        assert outcome["succeeded"] == 0 and outcome["failed"] == 1
+        item = env.sample_items(run_id)[0]
+        assert item["state"] == "Failed"
+        assert item["failure_category"] == "unsupported_image_content"
+        assert item["failure_reason"].startswith(
+            f"unsupported image content: {key} could not be resized to "
+            f"a longer edge of 512 pixels: ")
+        payload = env.result_payload(run_id, 0)
+        assert payload["state"] == "Failed"
+        assert payload["failure_category"] == "unsupported_image_content"
+        # The refusal precedes the invocation: zero Converse calls.
+        assert stub.calls == []
+
+    def test_refused_example_is_unreadable_example_image(self, env):
+        """Req 8.5: an attached example the downscaler cannot decode for
+        the run's bound fails the target as `unreadable_example_image`,
+        the reason identifying the example (by attachment position — the
+        reason the Auto_Labeler records for the same failure,
+        character-for-character) and the bound, still with zero
+        invocations — the 120x90 target itself passes through fine."""
+        key = env.put_sample("target-ok.png")
+        example = put_undecodable_example(env, "good", 0,
+                                          width=2000, height=1500)
+        stub, _ = env.use_bedrock([guidance([BOX])])
+
+        run_id = env.start_detection_run(
+            [key], downscale_max_edge=512,
+            few_shot={"enabled": True, "examples": [example]})
+        outcome = env.drive_executor()
+
+        assert outcome["status"] == "Completed"
+        assert outcome["succeeded"] == 0 and outcome["failed"] == 1
+        item = env.sample_items(run_id)[0]
+        assert item["state"] == "Failed"
+        assert item["failure_category"] == "unreadable_example_image"
+        assert item["failure_reason"].startswith(
+            "few-shot example image at position 1 could not be resized "
+            "to a longer edge of 512 pixels: ")
+        payload = env.result_payload(run_id, 0)
+        assert payload["failure_category"] == "unreadable_example_image"
+        assert stub.calls == []

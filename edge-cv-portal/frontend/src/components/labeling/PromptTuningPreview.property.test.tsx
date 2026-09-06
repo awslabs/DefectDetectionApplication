@@ -20,6 +20,14 @@
  *
  * Every property runs at `numRuns: 100`. Each fast-check run unmounts the
  * previous tree and re-primes the mocks, so runs are independent.
+ *
+ * The llm-model-token-and-image-sizing feature extends this file (its task
+ * 11.4) with the frontend halves of its criteria 3.1–3.4, 3.11, 5.1–5.4,
+ * 5.6, 7.7 and 9.8: sizing-control visibility per model family, client-side
+ * budget rejection (the client half of that feature's Property 11), the
+ * per-sample Source → Sent sizing display, and the failed-result display of
+ * the run's applied Downscale_Setting and Effective_Token_Budget. Those
+ * describes extend the properties above and weaken none of them.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -1537,6 +1545,14 @@ describe('Feature: llm-autolabel-prompt-tuning, Property 21: Submission carries 
             enabled: true,
             model: `llm:${values.formModel}`,
             detection_prompt: values.formPrompt,
+            // The sizing controls' form values at submission time — the
+            // untouched defaults here: a blank downscale select submits
+            // `null` (Downscale_Off) and the budget pre-fill (the catalog
+            // carries no token_limit, so the 10000 fallback) travels as
+            // the Token_Budget_Selection (llm-model-token-and-image-sizing
+            // Req 3.1, 3.6, 5.7).
+            downscale_max_edge: null,
+            token_budget: 10000,
           });
           expect(payload.few_shot.enabled).toBe(values.formFewShot);
           expect(payload.few_shot.examples).toEqual(
@@ -1562,4 +1578,770 @@ describe('Feature: llm-autolabel-prompt-tuning, Property 21: Submission carries 
       { numRuns: 100 }
     );
   }, 900_000);
+});
+
+// ---------------------------------------------------------------------------
+// llm-model-token-and-image-sizing (task 11.4) — the frontend halves of the
+// sizing criteria the design's placement table routes to this file
+// (3.1–3.4, 3.11, 5.1–5.4, 5.6, 7.7, 9.8). The backend halves live in the
+// backend property suites; nothing above is weakened.
+// ---------------------------------------------------------------------------
+
+/** Max_Image_Edge_Options, restated from the requirement (criterion 5.1). */
+const SIZING_EDGE_OPTIONS = [512, 768, 1024, 1280, 1536, 2048] as const;
+/** The accepted Token_Budget_Selection range (criteria 3.1, 3.3). */
+const SIZING_BUDGET_RANGE = '1 to 128000';
+/** The exact client-side violation wording for an out-of-range budget. */
+const SIZING_BUDGET_VIOLATION = `The output token budget must be a whole number from ${SIZING_BUDGET_RANGE}`;
+
+/** Wording for a run's applied Downscale_Setting (criterion 9.8). */
+const appliedDownscaleText = (value: number | null | undefined): string =>
+  typeof value === 'number' &&
+  (SIZING_EDGE_OPTIONS as readonly number[]).includes(value)
+    ? `${value} pixels`
+    : 'off';
+
+/** The Downscale_Setting select, or null while the control is not rendered. */
+function downscaleSelect() {
+  const host = screen.queryByTestId('preview-downscale-select');
+  return host ? createWrapper(host).findSelect() : null;
+}
+
+/** The Token_Budget_Selection native input, or null while not rendered. */
+function budgetInput(): HTMLInputElement | null {
+  const host = screen.queryByTestId('preview-token-budget-input');
+  if (!host) return null;
+  return createWrapper(host)
+    .findInput()!
+    .findNativeInput()
+    .getElement() as HTMLInputElement;
+}
+
+/** Select a Downscale_Setting in the control; `null` picks Downscale_Off. */
+function setDownscale(value: number | null) {
+  const select = downscaleSelect();
+  if (!select) throw new Error('The downscale control is not rendered');
+  select.openDropdown();
+  if (value === null) select.selectOption(1);
+  else select.selectOptionByValue(String(value));
+}
+
+const normalized = (node: HTMLElement): string =>
+  (node.textContent || '').replace(/\s+/g, ' ').trim();
+
+describe('Feature: llm-model-token-and-image-sizing, Frontend halves (criteria 3.1, 3.4, 5.1, 5.2, 5.3): sizing controls appear exactly for the llm: family and ride its run requests', () => {
+  /**
+   * *For any* auto-label model family (`llm:`, `sam`, `bedrock:`, none),
+   * *any* wizard-held Downscale_Setting and *any* valid-or-empty
+   * Token_Budget_Selection entry: the Downscale_Setting control and the
+   * Token_Budget_Selection control are presented if and only if the model
+   * is in the `llm:` family; when presented, the select offers exactly
+   * seven options — Downscale_Off, selected by default, plus the six
+   * Max_Image_Edge values labelled with their value in pixels — and the
+   * budget control displays the accepted range alongside; a started run
+   * carries the selected Downscale_Setting, and carries the entered budget
+   * exactly when the entry is non-empty; for every other family no
+   * Preview_API request is issued at all, so neither value is ever sent.
+   *
+   * **Validates: Requirements 3.1, 3.4, 5.1, 5.2, 5.3**
+   */
+  it('offers the two controls for llm: only and sends exactly the control values', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom<'llm' | 'sam' | 'bedrock' | 'none'>(
+          'llm',
+          'sam',
+          'bedrock',
+          'none'
+        ),
+        fc.constantFrom<number | null | undefined>(
+          undefined,
+          null,
+          ...SIZING_EDGE_OPTIONS
+        ),
+        fc.oneof(
+          fc.constant(''),
+          fc.integer({ min: 1, max: 128000 }).map(String)
+        ),
+        async (family, downscale, budgetEntry) => {
+          cleanup();
+          primeMocks({ images: LISTED_KEYS.slice(0, 1) });
+
+          const model =
+            family === 'llm'
+              ? `llm:${PREVIEW_MODEL.id}`
+              : family === 'sam'
+                ? 'sam'
+                : family === 'bedrock'
+                  ? `bedrock:${PREVIEW_MODEL.id}`
+                  : '';
+
+          render(
+            <PromptTuningPreview
+              {...previewProps({
+                model,
+                downscaleMaxEdge: downscale,
+                tokenBudget: budgetEntry,
+              })}
+            />
+          );
+          await waitFor(() =>
+            expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+          );
+          fireEvent.click(sampleCheckbox(LISTED_KEYS[0]));
+
+          if (family !== 'llm') {
+            // Hidden for `sam`, `bedrock:` and no model (criterion 5.2)...
+            expect(screen.queryByTestId('preview-sizing-controls')).toBeNull();
+            expect(screen.queryByTestId('preview-downscale-select')).toBeNull();
+            expect(
+              screen.queryByTestId('preview-token-budget-input')
+            ).toBeNull();
+
+            // ...and the preview issues no request at all for those
+            // families, so no request of theirs can carry either value.
+            fireEvent.click(runButton());
+            expect(
+              screen
+                .getAllByTestId('preview-validation-error')
+                .some((node) =>
+                  /is not a prompt-guided LLM model/.test(node.textContent || '')
+                )
+            ).toBe(true);
+            expect(apiMocks.startPreviewRun).not.toHaveBeenCalled();
+            return;
+          }
+
+          // Presented within the preview controls (criteria 3.1, 5.1).
+          expect(
+            screen.getByTestId('preview-sizing-controls')
+          ).toBeInTheDocument();
+
+          const select = downscaleSelect()!;
+          const triggerText = normalized(select.findTrigger().getElement());
+
+          // Exactly seven options: Downscale_Off plus each Max_Image_Edge
+          // value labelled with its value in pixels (criterion 5.1).
+          select.openDropdown();
+          const optionLabels = select
+            .findDropdown()
+            .findOptions()
+            .map((option) => normalized(option.getElement()));
+          select.closeDropdown();
+          expect(optionLabels).toHaveLength(7);
+          expect(optionLabels.slice(1)).toEqual(
+            SIZING_EDGE_OPTIONS.map((edge) => `${edge} pixels`)
+          );
+
+          // The control shows the wizard's setting; absent and null are the
+          // Downscale_Off default (criterion 5.1).
+          if (typeof downscale === 'number') {
+            expect(triggerText).toBe(`${downscale} pixels`);
+          } else {
+            expect(triggerText).toBe(optionLabels[0]);
+          }
+
+          // The budget control holds the wizard's entry and displays the
+          // accepted range alongside (criterion 3.1).
+          expect(budgetInput()!.value).toBe(budgetEntry);
+          expect(
+            screen.getByTestId('preview-sizing-controls').textContent
+          ).toContain(`Whole number from ${SIZING_BUDGET_RANGE}`);
+
+          // A started run carries the setting as selected, and the budget
+          // exactly when the entry is non-empty (criteria 3.4, 5.3).
+          await act(async () => {
+            fireEvent.click(runButton());
+          });
+          expect(apiMocks.startPreviewRun).toHaveBeenCalledTimes(1);
+          const request = apiMocks.startPreviewRun.mock.calls[0][0];
+          expect(request.downscale_max_edge).toBe(downscale ?? null);
+          if (budgetEntry === '') {
+            expect('token_budget' in request).toBe(false);
+          } else {
+            expect(request.token_budget).toBe(Number(budgetEntry));
+          }
+        }
+      ),
+      { numRuns: 100 }
+    );
+  }, 600_000);
+});
+
+describe('Feature: llm-model-token-and-image-sizing, Frontend half of Property 11 (criterion 3.3): client-side budget rejection sends nothing and keeps state', () => {
+  /**
+   * *For any* non-empty Token_Budget_Selection entry that is not a whole
+   * number from 1 to 128000 — non-numeric text, decimals, exponents, zero,
+   * negatives and above-ceiling integers — starting a Preview_Run is
+   * rejected with a validation message naming the accepted range, no
+   * Preview_API request and no upload is issued, and every entered value
+   * (the sample selection, the Downscale_Setting and the entry itself) is
+   * retained; correcting the entry to any whole number in range then starts
+   * a run carrying that number over the same retained selection.
+   *
+   * **Validates: Requirements 3.3, 3.4, 3.11**
+   */
+  it('rejects the start naming the range, issues nothing and retains every value', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.oneof(
+          fc.constantFrom(
+            '0',
+            '-1',
+            '128001',
+            '12.5',
+            'abc',
+            '1e3',
+            '- 7',
+            'ten thousand'
+          ),
+          fc.integer({ min: 128001, max: 100_000_000 }).map(String),
+          fc.integer({ min: -100_000_000, max: 0 }).map(String)
+        ),
+        fc.constantFrom<number | null>(null, ...SIZING_EDGE_OPTIONS),
+        fc.integer({ min: 1, max: SAMPLE_LIMIT }),
+        fc.integer({ min: 1, max: 128000 }),
+        async (invalidEntry, downscale, selectedCount, correctedBudget) => {
+          cleanup();
+          primeMocks({ images: LISTED_KEYS.slice(0, SAMPLE_LIMIT) });
+
+          render(
+            <PromptTuningPreview
+              {...previewProps({
+                downscaleMaxEdge: downscale,
+                tokenBudget: invalidEntry,
+              })}
+            />
+          );
+          await waitFor(() =>
+            expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+          );
+          const chosen = LISTED_KEYS.slice(0, selectedCount);
+          for (const key of chosen) fireEvent.click(sampleCheckbox(key));
+
+          const selectionBefore = screen.getByTestId('preview-selection-count')
+            .textContent;
+          const triggerBefore = normalized(
+            downscaleSelect()!.findTrigger().getElement()
+          );
+
+          fireEvent.click(runButton());
+
+          // The one violated rule is named with the accepted range
+          // (criterion 3.3).
+          expect(
+            screen
+              .getAllByTestId('preview-validation-error')
+              .map((node) => node.textContent || '')
+          ).toEqual([SIZING_BUDGET_VIOLATION]);
+
+          // Nothing was sent, nothing was uploaded, no result set appeared.
+          expect(apiMocks.startPreviewRun).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+          expect(screen.queryByTestId('preview-results')).toBeNull();
+
+          // Every entered value is retained and the flow stays usable.
+          expect(
+            screen.getByTestId('preview-selection-count').textContent
+          ).toBe(selectionBefore);
+          expect(chosen.every((key) => sampleCheckbox(key).checked)).toBe(true);
+          expect(
+            normalized(downscaleSelect()!.findTrigger().getElement())
+          ).toBe(triggerBefore);
+          expect(runButton()).toBeEnabled();
+
+          // Correcting the entry lets the same flow start a run carrying
+          // the corrected number and the retained setting and samples
+          // (criteria 3.4, 5.3).
+          fireEvent.change(budgetInput()!, {
+            target: { value: String(correctedBudget) },
+          });
+          await act(async () => {
+            fireEvent.click(runButton());
+          });
+          expect(
+            screen.queryAllByTestId('preview-validation-error')
+          ).toHaveLength(0);
+          expect(apiMocks.startPreviewRun).toHaveBeenCalledTimes(1);
+          const request = apiMocks.startPreviewRun.mock.calls[0][0];
+          expect(request.token_budget).toBe(correctedBudget);
+          expect(request.downscale_max_edge).toBe(downscale);
+          expect(request.sample_images).toEqual(chosen);
+        }
+      ),
+      { numRuns: 100 }
+    );
+  }, 600_000);
+});
+
+// ---------------------------------------------------------------------------
+// Sizing display (criteria 5.4, 5.11, 7.7)
+// ---------------------------------------------------------------------------
+
+/** The four payload dimension fields of the sizing display. */
+const SIZING_DIM_FIELDS = [
+  'source_width',
+  'source_height',
+  'sent_width',
+  'sent_height',
+] as const;
+
+interface SizingDims {
+  source_width?: number;
+  source_height?: number;
+  sent_width?: number;
+  sent_height?: number;
+}
+
+const presentDimsArb = fc.record({
+  source_width: fc.integer({ min: 1, max: 8000 }),
+  source_height: fc.integer({ min: 1, max: 8000 }),
+  sent_width: fc.integer({ min: 1, max: 8000 }),
+  sent_height: fc.integer({ min: 1, max: 8000 }),
+});
+
+/**
+ * Dimension quadruples over every display branch: arbitrary positive pairs
+ * (hitting the 1% floor and the 100% cap), the equal pair (exactly 100%),
+ * the backend's floor-scaled downscale algebra, and quadruples with a
+ * missing or non-positive subset (the unavailable branch, criterion 5.11).
+ */
+const sizingDimsArb: fc.Arbitrary<SizingDims> = fc.oneof(
+  presentDimsArb,
+  fc
+    .record({
+      w: fc.integer({ min: 1, max: 8000 }),
+      h: fc.integer({ min: 1, max: 8000 }),
+    })
+    .map(({ w, h }) => ({
+      source_width: w,
+      source_height: h,
+      sent_width: w,
+      sent_height: h,
+    })),
+  fc
+    .record({
+      w: fc.integer({ min: 600, max: 8000 }),
+      h: fc.integer({ min: 600, max: 8000 }),
+      edge: fc.constantFrom(...SIZING_EDGE_OPTIONS),
+    })
+    .map(({ w, h, edge }) => {
+      const long = Math.max(w, h);
+      if (long <= edge) {
+        return {
+          source_width: w,
+          source_height: h,
+          sent_width: w,
+          sent_height: h,
+        };
+      }
+      return {
+        source_width: w,
+        source_height: h,
+        sent_width: Math.max(1, Math.floor((w * edge) / long)),
+        sent_height: Math.max(1, Math.floor((h * edge) / long)),
+      };
+    }),
+  fc
+    .record({
+      base: presentDimsArb,
+      knockout: fc.subarray([...SIZING_DIM_FIELDS], {
+        minLength: 1,
+        maxLength: 4,
+      }),
+      replacement: fc.constantFrom<number | undefined>(undefined, 0, -3),
+    })
+    .map(({ base, knockout, replacement }) => {
+      const dims: SizingDims = { ...base };
+      for (const field of knockout) {
+        if (replacement === undefined) delete dims[field];
+        else dims[field] = replacement;
+      }
+      return dims;
+    })
+);
+
+/**
+ * The expected sizing row, re-derived from criteria 5.4 and 5.11 rather
+ * than taken from the component's own helper: all four extents present and
+ * positive yields `W × H → w × h (P%)` with `P` the longer-edge ratio
+ * rounded to the nearest whole percent and clamped into [1, 100]; anything
+ * else yields the unavailable indication.
+ */
+function expectedSizingText(dims: SizingDims): string {
+  const values = [
+    dims.source_width,
+    dims.source_height,
+    dims.sent_width,
+    dims.sent_height,
+  ];
+  if (
+    !values.every(
+      (value) =>
+        typeof value === 'number' && Number.isFinite(value) && value > 0
+    )
+  ) {
+    return 'dimensions unavailable';
+  }
+  const [sourceWidth, sourceHeight, sentWidth, sentHeight] =
+    values as number[];
+  const percent = Math.min(
+    100,
+    Math.max(
+      1,
+      Math.round(
+        (Math.max(sentWidth, sentHeight) /
+          Math.max(sourceWidth, sourceHeight)) *
+          100
+      )
+    )
+  );
+  return `${sourceWidth} × ${sourceHeight} → ${sentWidth} × ${sentHeight} (${percent}%)`;
+}
+
+type SizingOutcome =
+  | { kind: 'ok'; dims: SizingDims }
+  | {
+      kind: 'failed';
+      dims: SizingDims;
+      category: (typeof FAILURE_CATEGORIES)[number];
+      reason: string;
+    };
+
+const sizingOutcomeArb: fc.Arbitrary<SizingOutcome> = fc.oneof(
+  sizingDimsArb.map((dims): SizingOutcome => ({ kind: 'ok', dims })),
+  fc
+    .record({
+      dims: sizingDimsArb,
+      category: fc.constantFrom(...FAILURE_CATEGORIES),
+      reason: reasonArb,
+    })
+    .map((f): SizingOutcome => ({ kind: 'failed', ...f }))
+);
+
+/**
+ * The Source space every successful payload of the sizing-display property
+ * declares, and a probe box whose expected overlay percentages differ per
+ * axis — 15%/20%/25%/40% — so geometry positioned against anything but
+ * `image_width`/`image_height` (the Source_Dimensions) is caught.
+ */
+const SIZING_SOURCE_SPACE = { width: 200, height: 100 };
+const SIZING_PROBE_BOX = {
+  class: 'scratch',
+  left: 30,
+  top: 20,
+  width: 50,
+  height: 40,
+};
+
+describe('Feature: llm-model-token-and-image-sizing, Frontend halves (criteria 5.4, 5.11, 7.7): the sizing display reports Source → Sent with a clamped whole percent or the unavailable indication', () => {
+  /**
+   * *For any* mix of resolved Preview_Results and *any* dimension
+   * quadruples on their payloads: each entry whose Source_Dimensions and
+   * Sent_Dimensions are all determined shows them with the longer-edge
+   * ratio as a whole percent within 1 to 100 inclusive, as read-only text;
+   * each entry with any missing or non-positive extent shows the
+   * unavailable indication instead, with the rest of that result still
+   * rendered (the failure's category and reason, or the successful
+   * result's overlay); and successful geometry stays positioned in the
+   * Source_Dimensions space, unaffected by the Sent_Dimensions.
+   *
+   * **Validates: Requirements 5.4, 5.11, 7.7**
+   */
+  it('renders each sizing row from its own payload and keeps geometry in Source space', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(sizingOutcomeArb, { minLength: 1, maxLength: SAMPLE_LIMIT }),
+        async (outcomes) => {
+          cleanup();
+          primeMocks({ images: LISTED_KEYS.slice(0, outcomes.length) });
+          const keys = LISTED_KEYS.slice(0, outcomes.length);
+
+          apiMocks.startPreviewRun.mockResolvedValue({
+            run_id: 'run-1',
+            sample_count: keys.length,
+            status: 'Running',
+          });
+          apiMocks.getPreviewRun.mockResolvedValue(
+            runStatus(
+              'run-1',
+              'Completed',
+              keys.map((key, index) => {
+                const outcome = outcomes[index];
+                return {
+                  index,
+                  sample_key: key,
+                  state: (outcome.kind === 'failed'
+                    ? 'Failed'
+                    : 'Succeeded') as SampleState,
+                  result_url: `https://payloads.example/${index}.json`,
+                  ...(outcome.kind === 'failed'
+                    ? {
+                        failure_category: outcome.category,
+                        failure_reason: outcome.reason,
+                      }
+                    : {}),
+                };
+              })
+            )
+          );
+          fetchMock.mockImplementation(async (url: string) => {
+            const index = Number(/\/(\d+)\.json$/.exec(url)?.[1] ?? '0');
+            const outcome = outcomes[index];
+            const body =
+              outcome.kind === 'failed'
+                ? {
+                    sample_key: keys[index],
+                    state: 'Failed',
+                    failure_category: outcome.category,
+                    failure_reason: outcome.reason,
+                    ...outcome.dims,
+                  }
+                : {
+                    sample_key: keys[index],
+                    state: 'Succeeded',
+                    prelabel: {
+                      modality: 'ObjectDetection',
+                      boxes: [SIZING_PROBE_BOX],
+                    },
+                    image_width: SIZING_SOURCE_SPACE.width,
+                    image_height: SIZING_SOURCE_SPACE.height,
+                    ...outcome.dims,
+                  };
+            return { ok: true, status: 200, json: async () => body };
+          });
+
+          render(<PromptTuningPreview {...previewProps()} />);
+          await waitFor(() =>
+            expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+          );
+          for (const key of keys) fireEvent.click(sampleCheckbox(key));
+          await act(async () => {
+            fireEvent.click(runButton());
+          });
+          await waitFor(() =>
+            expect(screen.getByTestId('preview-results')).toBeInTheDocument()
+          );
+
+          expect(displayedKeys()).toEqual(keys);
+          const entries = screen.getAllByTestId('preview-result-entry');
+
+          outcomes.forEach((outcome, index) => {
+            const entry = within(entries[index]);
+
+            // The sizing row equals the payload-derived oracle (5.4, 5.11).
+            const sizingNode = entry.getByTestId('preview-result-sizing');
+            const sizingText = normalized(sizingNode);
+            expect(sizingText).toBe(expectedSizingText(outcome.dims));
+
+            // A displayed percentage is a whole percent within 1..100, and
+            // the row is read-only text (criterion 5.4).
+            const percentMatch = /\((\d+)%\)$/.exec(sizingText);
+            if (sizingText !== 'dimensions unavailable') {
+              expect(percentMatch).not.toBeNull();
+              const percent = Number(percentMatch![1]);
+              expect(percent).toBeGreaterThanOrEqual(1);
+              expect(percent).toBeLessThanOrEqual(100);
+            }
+            expect(
+              sizingNode.querySelector('input, textarea, select, button')
+            ).toBeNull();
+
+            if (outcome.kind === 'failed') {
+              // The rest of the failed result still renders (5.11).
+              expect(
+                entry.getByTestId('preview-result-failure')
+              ).toBeInTheDocument();
+              expect(
+                entry.getByTestId('preview-failure-category').textContent
+              ).toBe(CATEGORY_TEXT[outcome.category]);
+              expect(
+                entry.getByTestId('preview-failure-reason')
+              ).toHaveTextContent(outcome.reason);
+            } else {
+              // The rest of the successful result still renders, and its
+              // geometry is positioned against the Source_Dimensions alone
+              // (criterion 7.7): the probe box's percentages derive from
+              // image_width/image_height whatever the sent_* fields say.
+              expect(
+                entry.getByTestId('preview-result-image')
+              ).toBeInTheDocument();
+              const box = entry.getByTestId('preview-box');
+              expect(box.style.left).toBe('15%');
+              expect(box.style.top).toBe('20%');
+              expect(box.style.width).toBe('25%');
+              expect(box.style.height).toBe('40%');
+            }
+          });
+        }
+      ),
+      { numRuns: 100 }
+    );
+  }, 600_000);
+});
+
+describe('Feature: llm-model-token-and-image-sizing, Frontend halves (criteria 3.11, 5.6, 9.8): failed results name the run’s applied setting and budget, and changed controls apply to the next run', () => {
+  /**
+   * *For any* completed Preview_Run whose results failed, *any* applied
+   * Downscale_Setting and Effective_Token_Budget reported by the run
+   * status, and *any* subsequently chosen control values: every failed
+   * result shows the run's applied Downscale_Setting and
+   * Effective_Token_Budget beside its category and reason; changing either
+   * control afterwards keeps the sample selection, the displayed results
+   * and every other value, keeps the run control enabled, and the next run
+   * carries the changed values — whose failures then report the new
+   * applied values.
+   *
+   * **Validates: Requirements 3.11, 5.6, 9.8**
+   */
+  it('shows the applied values beside each failure and applies changed controls to the next run', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.record({
+          firstDownscale: fc.constantFrom<number | null | undefined>(
+            undefined,
+            null,
+            ...SIZING_EDGE_OPTIONS
+          ),
+          firstBudget: fc.oneof(
+            fc.constant(undefined),
+            fc.integer({ min: 1, max: 128000 })
+          ),
+          category: fc.constantFrom(...FAILURE_CATEGORIES),
+          reason: reasonArb,
+          sampleCount: fc.integer({ min: 1, max: 3 }),
+          nextDownscale: fc.constantFrom<number | null>(
+            null,
+            ...SIZING_EDGE_OPTIONS
+          ),
+          nextBudget: fc.integer({ min: 1, max: 128000 }),
+        }),
+        async (input) => {
+          cleanup();
+          primeMocks({ images: LISTED_KEYS.slice(0, input.sampleCount) });
+          const keys = LISTED_KEYS.slice(0, input.sampleCount);
+
+          const failedEntries: EntryFixture[] = keys.map((key, index) => ({
+            index,
+            sample_key: key,
+            state: 'Failed',
+            failure_category: input.category,
+            failure_reason: input.reason,
+          }));
+          apiMocks.getPreviewRun.mockResolvedValue({
+            ...runStatus('run-1', 'Completed', failedEntries),
+            // `undefined` models a status response omitting the field.
+            ...(input.firstDownscale !== undefined
+              ? { downscale_max_edge: input.firstDownscale }
+              : {}),
+            ...(input.firstBudget !== undefined
+              ? { token_budget: input.firstBudget }
+              : {}),
+          });
+
+          render(<PromptTuningPreview {...previewProps()} />);
+          await waitFor(() =>
+            expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+          );
+          for (const key of keys) fireEvent.click(sampleCheckbox(key));
+          await act(async () => {
+            fireEvent.click(runButton());
+          });
+
+          // Every failed result names the *run's* applied values beside its
+          // category and reason (criterion 9.8).
+          expect(displayedKeys()).toEqual(keys);
+          for (const element of screen.getAllByTestId('preview-result-entry')) {
+            const entry = within(element);
+            expect(
+              entry.getByTestId('preview-failure-category').textContent
+            ).toBe(CATEGORY_TEXT[input.category]);
+            expect(
+              entry.getByTestId('preview-failure-reason')
+            ).toHaveTextContent(input.reason);
+            expect(
+              normalized(entry.getByTestId('preview-failure-downscale'))
+            ).toBe(
+              `Image downscaling: ${appliedDownscaleText(input.firstDownscale)}`
+            );
+            expect(
+              normalized(entry.getByTestId('preview-failure-token-budget'))
+            ).toBe(
+              `Output token budget: ${
+                typeof input.firstBudget === 'number'
+                  ? input.firstBudget
+                  : 'not reported'
+              }`
+            );
+          }
+
+          // Changing both controls after the completed run keeps the sample
+          // selection and the displayed run — which keeps naming *its*
+          // applied values — and the run control stays usable (3.11, 5.6).
+          setDownscale(input.nextDownscale);
+          fireEvent.change(budgetInput()!, {
+            target: { value: String(input.nextBudget) },
+          });
+
+          expect(displayedKeys()).toEqual(keys);
+          expect(keys.every((key) => sampleCheckbox(key).checked)).toBe(true);
+          expect(
+            screen.getByTestId('preview-selection-count')
+          ).toHaveTextContent(
+            `${keys.length} of ${SAMPLE_LIMIT} sample images selected`
+          );
+          expect(runButton()).toBeEnabled();
+          expect(
+            normalized(
+              within(
+                screen.getAllByTestId('preview-result-entry')[0]
+              ).getByTestId('preview-failure-downscale')
+            )
+          ).toBe(
+            `Image downscaling: ${appliedDownscaleText(input.firstDownscale)}`
+          );
+
+          // The next run carries the changed values over the same samples
+          // (criteria 3.11, 5.6)...
+          apiMocks.startPreviewRun.mockReset();
+          apiMocks.getPreviewRun.mockReset();
+          apiMocks.startPreviewRun.mockResolvedValue({
+            run_id: 'run-2',
+            sample_count: keys.length,
+            status: 'Running',
+          });
+          apiMocks.getPreviewRun.mockResolvedValue({
+            ...runStatus('run-2', 'Completed', failedEntries),
+            downscale_max_edge: input.nextDownscale,
+            token_budget: input.nextBudget,
+          });
+          await act(async () => {
+            fireEvent.click(runButton());
+          });
+          expect(apiMocks.startPreviewRun).toHaveBeenCalledTimes(1);
+          const request = apiMocks.startPreviewRun.mock.calls[0][0];
+          expect(request.downscale_max_edge).toBe(input.nextDownscale);
+          expect(request.token_budget).toBe(input.nextBudget);
+          expect(request.sample_images).toEqual(keys);
+          expect(request.detection_prompt).toBe(
+            'Find scratches on the surface'
+          );
+
+          // ...and its failures report the new applied values (9.8).
+          for (const element of screen.getAllByTestId('preview-result-entry')) {
+            const entry = within(element);
+            expect(
+              normalized(entry.getByTestId('preview-failure-downscale'))
+            ).toBe(
+              `Image downscaling: ${appliedDownscaleText(input.nextDownscale)}`
+            );
+            expect(
+              normalized(entry.getByTestId('preview-failure-token-budget'))
+            ).toBe(`Output token budget: ${input.nextBudget}`);
+          }
+        }
+      ),
+      { numRuns: 100 }
+    );
+  }, 600_000);
 });

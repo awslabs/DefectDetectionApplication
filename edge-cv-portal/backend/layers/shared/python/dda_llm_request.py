@@ -99,6 +99,87 @@ def resolve_model_image_limit(model_identifier: str,
 
 
 # ---------------------------------------------------------------------------
+# Effective_Token_Budget resolution
+# ---------------------------------------------------------------------------
+
+# Model_Token_Limit_Default and Model_Token_Limit_Ceiling
+# (Requirements 1.2, 2.1).
+MODEL_TOKEN_LIMIT_DEFAULT = 10000
+MODEL_TOKEN_LIMIT_CEILING = 128000
+
+
+def _valid_token_value(value: Any) -> bool:
+    """
+    True only for a non-bool int in [1, MODEL_TOKEN_LIMIT_CEILING].
+
+    bool is rejected before the int check (bool is an int subclass —
+    Requirement 2.5); strings, including digit-only strings, and floats,
+    including whole-valued floats, are rejected with no numeric
+    conversion (Requirement 2.8); out-of-range integers are rejected
+    with no clamping (Requirement 2.9).
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return 1 <= value <= MODEL_TOKEN_LIMIT_CEILING
+
+
+def resolve_token_budget(model_identifier: Any,
+                         token_budget_selection: Any,
+                         limits: Any) -> int:
+    """
+    Resolve the Effective_Token_Budget for one request
+    (Requirements 2.1-2.10).
+
+    Three tiers, in order:
+      1. `token_budget_selection` when it is a valid token value
+         (Requirement 2.2)
+      2. `limits[model_identifier]` when the identifier is a string and
+         the entry is a valid token value (Requirement 2.3) — exact
+         string comparison with no trimming and no case folding
+         (Requirement 1.1)
+      3. MODEL_TOKEN_LIMIT_DEFAULT (10000) (Requirements 1.2, 2.4, 2.7)
+
+    Total and safe: every argument may be of any type. Returns an
+    integer in [1, 128000], raises nothing, mutates nothing, and is
+    deterministic (Requirements 2.1, 2.6). No field of the
+    Bedrock_Configuration, including the Global_Max_Tokens, takes part
+    in the resolution (Requirements 1.3, 1.7).
+
+    Deliberate divergence from `resolve_model_image_limit`
+    (Requirement 2.10): a non-string `model_identifier` skips the
+    lookup but does NOT discard a valid selection, because the selection
+    tier does not depend on the identifier. This asymmetry is intended;
+    do not "correct" it to match the image-limit resolver.
+
+    Idempotent on its own output — the return value is always a valid
+    token value, so
+    ``resolve_token_budget(m, resolve_token_budget(m, s, l), l)``
+    equals the inner call. The Preview_API relies on this: it resolves
+    once at run start (for the audit event and the run record) and
+    passes the resolved integer back in as the selection at execution
+    time.
+
+    Args:
+        model_identifier: The LLM_Auto_Label_Model identifier (the part
+            after the `llm:` prefix, as configured); any type
+        token_budget_selection: The Token_Budget_Selection for this
+            request, or None; any type
+        limits: The Model_Token_Limits configuration mapping, or None;
+            any type
+
+    Returns:
+        An integer in [1, MODEL_TOKEN_LIMIT_CEILING]
+    """
+    if _valid_token_value(token_budget_selection):
+        return token_budget_selection
+    if isinstance(model_identifier, str) and isinstance(limits, dict):
+        configured = limits.get(model_identifier)
+        if _valid_token_value(configured):
+            return configured
+    return MODEL_TOKEN_LIMIT_DEFAULT
+
+
+# ---------------------------------------------------------------------------
 # Few_Shot_Example selection
 # ---------------------------------------------------------------------------
 

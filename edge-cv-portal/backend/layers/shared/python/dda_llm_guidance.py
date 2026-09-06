@@ -419,6 +419,122 @@ def serialize_guidance(detections: List[Dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Coordinate space scaling (Sent_Dimensions -> Source_Dimensions)
+# ---------------------------------------------------------------------------
+
+def _scale_coordinate(value: float, source_extent: int,
+                      sent_extent: int) -> float:
+    """
+    Map one coordinate from Sent space into Source space
+    (Requirement 7.3).
+
+    Round-half-up via floor(v + 0.5): Python's built-in round() is
+    banker's rounding, which would map 2.5 to 2. Coordinates reaching
+    this function are validated non-negative, so floor(v + 0.5) is
+    exactly round-half-up here. The result is then clamped into
+    [0, source_extent] (Requirement 7.4).
+
+    Args:
+        value: The coordinate in Sent space
+        source_extent: The Source_Dimensions extent along this axis
+        sent_extent: The Sent_Dimensions extent along this axis (positive)
+
+    Returns:
+        The coordinate in Source space, as a float in [0, source_extent]
+    """
+    scaled = math.floor(value * source_extent / sent_extent + 0.5)
+    return float(min(source_extent, max(0, scaled)))
+
+
+def scale_detections(detections: List[Dict],
+                     sent_width: int, sent_height: int,
+                     source_width: int, source_height: int) -> List[Dict]:
+    """
+    Map validated Coordinate_Guidance from Sent space into Source space,
+    before any Pre_Label conversion (Requirement 7.3).
+
+    Returns `detections` unchanged, as **the same list object**, when the
+    two dimension pairs are equal or when either sent extent is not
+    positive: no scaling, no rounding, no clamping, no float round trip,
+    so the downstream Pre_Label is bit-for-bit the pre-feature Pre_Label
+    (Requirement 7.5). That is a genuine early return, not a multiply
+    by 1.0.
+
+    Box detections have their two corners mapped — (left, top) and
+    (left + width, top + height) — with the extents re-derived as the
+    differences, so the transform applies to coordinates rather than to
+    lengths and both corners land inside the source bounds. Polygon
+    detections have every vertex mapped. Scaling is applied *before*
+    conversion so guidance_to_prelabel stays untouched: Segmentation RLE
+    is rasterized at the Source_Dimensions directly and there is never a
+    mask to resample.
+
+    The caller is responsible for calling this only for the geometry
+    modalities — Classification carries no coordinates and must never
+    reach this function (Requirement 7.8).
+
+    Known edge case, intended and not a bug: a sub-pixel-extent box that
+    passed validation in Sent space can map to a zero-extent box in
+    Source space when the two spaces differ by a hair (e.g. 1001 vs
+    1000). guidance_to_prelabel then raises its existing GuidanceError
+    ("detection N ('c') converts to a bounding box with zero width or
+    height"), which reaches the caller as the pre-existing unusable
+    model output category with a pre-existing reason string — no new
+    category and no new reason (Requirements 9.3, 9.6).
+
+    Args:
+        detections: Internal Detection dicts (see module docstring), in
+            Sent space; left unmodified
+        sent_width: Sent_Dimensions width in pixels
+        sent_height: Sent_Dimensions height in pixels
+        source_width: Source_Dimensions width in pixels
+        source_height: Source_Dimensions height in pixels
+
+    Returns:
+        The same list object when no mapping applies, else new Detection
+        dicts in Source space, in guidance order
+    """
+    if (sent_width, sent_height) == (source_width, source_height):
+        return detections
+    if sent_width < 1 or sent_height < 1:
+        return detections
+
+    scaled: List[Dict] = []
+    for detection in detections:
+        if detection['geometry'] == GEOMETRY_BOX:
+            box = detection['box']
+            left = _scale_coordinate(box['left'], source_width, sent_width)
+            top = _scale_coordinate(box['top'], source_height, sent_height)
+            right = _scale_coordinate(
+                box['left'] + box['width'], source_width, sent_width
+            )
+            bottom = _scale_coordinate(
+                box['top'] + box['height'], source_height, sent_height
+            )
+            scaled.append({
+                'class': detection['class'],
+                'geometry': GEOMETRY_BOX,
+                'box': {
+                    'left': left,
+                    'top': top,
+                    'width': right - left,
+                    'height': bottom - top,
+                },
+            })
+        else:
+            scaled.append({
+                'class': detection['class'],
+                'geometry': GEOMETRY_POLYGON,
+                'vertices': [
+                    (_scale_coordinate(x, source_width, sent_width),
+                     _scale_coordinate(y, source_height, sent_height))
+                    for x, y in detection['vertices']
+                ],
+            })
+    return scaled
+
+
+# ---------------------------------------------------------------------------
 # Rasterization to RLE
 # ---------------------------------------------------------------------------
 

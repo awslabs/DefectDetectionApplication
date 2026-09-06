@@ -24,6 +24,14 @@ control-plane client (the same FakeBedrockControlClient shape used by
 test_bedrock_configuration.py).
 
 _Requirements: 7.1, 7.5_
+
+Extended by task 5.4 (spec: llm-model-token-and-image-sizing) with section
+3: every option also carries an additive `token_limit` beside
+`image_limit`, resolved through the shared resolve_token_budget against
+the persisted llm_model_token_limits settings item (default 10000), with
+the rest of the payload unchanged.
+
+_Requirements: 1.6, 3.1_
 """
 import json
 import os
@@ -213,9 +221,11 @@ def test_absent_or_malformed_configuration_defaults_every_model(
 
 def test_rest_of_the_option_payload_is_unchanged(options_env, fake_bedrock,
                                                  monkeypatch):
-    """Only `image_limit` is added: each option keeps its exact id and label,
-    the ordering is unchanged, and the payload's other keys are untouched, so
-    consumers that ignore the field are unaffected."""
+    """Only the additive per-model limits are added (`image_limit`, and
+    `token_limit` since llm-model-token-and-image-sizing task 5.1): each
+    option keeps its exact id and label, the ordering is unchanged, and the
+    payload's other keys are untouched, so consumers that ignore the fields
+    are unaffected."""
     monkeypatch.delenv("LLM_MODEL_IMAGE_LIMITS", raising=False)
     status, before = invoke_models(options_env)
     assert status == 200
@@ -225,12 +235,14 @@ def test_rest_of_the_option_payload_is_unchanged(options_env, fake_bedrock,
     status, after = invoke_models(options_env)
     assert status == 200
 
-    # Pre-feature shape: nothing but id, label and the additive field.
+    # Pre-feature shape: nothing but id, label and the additive fields.
     for option in after["models"]:
-        assert set(option) == PRE_FEATURE_FIELDS | {"image_limit"}
+        assert set(option) == PRE_FEATURE_FIELDS | {"image_limit",
+                                                    "token_limit"}
 
     def without_limit(payload):
-        return [{k: v for k, v in option.items() if k != "image_limit"}
+        return [{k: v for k, v in option.items()
+                 if k not in ("image_limit", "token_limit")}
                 for option in payload["models"]]
 
     # id/label pairs and their order survive the configuration change.
@@ -247,3 +259,67 @@ def test_rest_of_the_option_payload_is_unchanged(options_env, fake_bedrock,
     # The rest of the response body is unchanged.
     assert set(after) == set(before) == {"models", "region"}
     assert after["region"] == before["region"]
+
+
+# ===========================================================================
+# 3. token_limit beside image_limit
+#    (llm-model-token-and-image-sizing task 5.4; Requirements 1.6, 3.1)
+# ===========================================================================
+
+TOKEN_LIMITS_SETTING_KEY = "llm_model_token_limits"
+
+
+@pytest.fixture
+def settings_table(options_env):
+    """The moto-backed settings table this module's data_accounts binds."""
+    import boto3
+
+    return boto3.resource("dynamodb",
+                          region_name=REGION).Table(SETTINGS_TABLE_NAME)
+
+
+@pytest.fixture(autouse=True)
+def clean_token_limits_item(settings_table):
+    """No stored llm_model_token_limits item around any test in this
+    module, so the pre-existing image-limit cases keep the exact
+    environment they were written against."""
+    settings_table.delete_item(Key={"setting_key": TOKEN_LIMITS_SETTING_KEY})
+    yield
+    settings_table.delete_item(Key={"setting_key": TOKEN_LIMITS_SETTING_KEY})
+
+
+def token_limits_of(payload):
+    return {option["id"]: option["token_limit"]
+            for option in payload["models"]}
+
+
+def test_token_limit_is_carried_beside_image_limit(options_env, fake_bedrock,
+                                                   settings_table,
+                                                   monkeypatch):
+    """Each option carries `token_limit` resolved from the persisted
+    Model_Token_Limits through the shared resolve_token_budget - configured
+    models verbatim, unlisted models the default of 10000 - beside an
+    `image_limit` resolved from its own configuration exactly as before, so
+    the budget the wizard pre-fills reads the same source the request paths
+    resolve (Requirements 1.6, 3.1)."""
+    monkeypatch.setenv("LLM_MODEL_IMAGE_LIMITS",
+                       json.dumps({"us.amazon.nova-pro-v1:0": 4}))
+    settings_table.put_item(Item={
+        "setting_key": TOKEN_LIMITS_SETTING_KEY,
+        "value": {"us.amazon.nova-pro-v1:0": 20000,
+                  "amazon.titan-text-express-v1": 1},
+    })
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    assert token_limits_of(payload) == {
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0": 10000,  # unlisted
+        "amazon.titan-text-express-v1": 1,
+        "us.amazon.nova-pro-v1:0": 20000,
+    }
+    # image_limit rides beside it, resolved from its own source unchanged.
+    assert limits_of(payload) == {
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0": 20,
+        "amazon.titan-text-express-v1": 20,
+        "us.amazon.nova-pro-v1:0": 4,
+    }

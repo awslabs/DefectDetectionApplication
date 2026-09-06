@@ -16,14 +16,40 @@
  * - failure rendering with category and reason, and the untruncated raw
  *   model output disclosure for `unusable_model_output` (Req 9.7, 9.8).
  *
+ * The sizing controls and display (llm-model-token-and-image-sizing task
+ * 11.5, Requirements 3.1, 3.3, 3.10, 5.1, 5.2, 5.4, 5.11) are covered by
+ * example at the end of this file:
+ * - the Downscale_Setting select offering exactly seven options with
+ *   Downscale_Off selected by default, and both sizing controls hidden for
+ *   `sam`, `bedrock:` and no model (Req 5.1, 5.2);
+ * - invalid Token_Budget_Selection entries rejected with the accepted
+ *   range and no API call, and an empty entry omitting `token_budget`
+ *   from the run request (Req 3.1, 3.3, 3.10);
+ * - the per-sample sizing row: source → sent dimensions with the rounded
+ *   whole-percent ratio, its 1% floor, the 100% case, and the
+ *   dimensions-unavailable branch that still renders the rest of the
+ *   result (Req 5.4, 5.11).
+ *
  * The universal properties of this component are covered separately by
  * `PromptTuningPreview.property.test.tsx` (Properties 14–21).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import createWrapper from '@cloudscape-design/components/test-utils/dom';
 
-import PromptTuningPreview, { POLL_INTERVAL_MS } from './PromptTuningPreview';
+import PromptTuningPreview, {
+  DIMENSIONS_UNAVAILABLE_TEXT,
+  MAX_IMAGE_EDGE_OPTIONS,
+  POLL_INTERVAL_MS,
+  TOKEN_BUDGET_RANGE_TEXT,
+} from './PromptTuningPreview';
 import { ApiError } from '../../services/api';
 
 const { apiMocks, fetchMock } = vi.hoisted(() => ({
@@ -650,5 +676,238 @@ describe('PromptTuningPreview — run polling', () => {
       'HTTP 403'
     );
     expect(runButton()).toBeEnabled();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Sizing controls (llm-model-token-and-image-sizing task 11.5)        */
+/* ------------------------------------------------------------------ */
+
+describe('PromptTuningPreview — sizing controls', () => {
+  /** The Downscale_Setting select, from its dedicated test hook. */
+  const downscaleSelect = () =>
+    createWrapper(
+      screen.getByTestId('preview-downscale-select') as HTMLElement
+    ).findSelect()!;
+
+  /** The native input of the Token_Budget_Selection control. */
+  const budgetInput = () =>
+    screen
+      .getByTestId('preview-token-budget-input')
+      .querySelector('input') as HTMLInputElement;
+
+  it('offers exactly seven downscale options with Downscale_Off selected by default', async () => {
+    renderPreview();
+    await waitFor(() =>
+      expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+    );
+
+    const select = downscaleSelect();
+    // Downscale_Off is the default selection (Req 5.1).
+    expect(select.findTrigger().getElement().textContent).toContain(
+      'Downscale off'
+    );
+
+    select.openDropdown();
+    const optionLabels = select
+      .findDropdown()
+      .findOptions()
+      .map((option) => option.getElement().textContent);
+    // Exactly seven options: Downscale_Off plus the six Max_Image_Edge
+    // values, each labelled with its value in pixels (Req 5.1).
+    expect(optionLabels).toEqual([
+      'Downscale off (send the original image)',
+      ...MAX_IMAGE_EDGE_OPTIONS.map((edge) => `${edge} pixels`),
+    ]);
+    expect(optionLabels).toHaveLength(7);
+  });
+
+  it.each([
+    ['sam', 'sam'],
+    ['a bedrock: model', 'bedrock:us.amazon.nova-pro-v1:0'],
+    ['no model', ''],
+  ])('hides both sizing controls for %s', async (_family, model) => {
+    renderPreview({ model });
+    await waitFor(() =>
+      expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+    );
+
+    // Neither the Downscale_Setting nor the Token_Budget_Selection control
+    // is rendered outside the `llm:` family (Req 5.2).
+    expect(
+      screen.queryByTestId('preview-sizing-controls')
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId('preview-downscale-select')
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId('preview-token-budget-input')
+    ).not.toBeInTheDocument();
+  });
+
+  it('rejects each invalid budget entry with the accepted range and issues no API call', async () => {
+    for (const entered of ['0', '-1', '128001', '12.5', 'abc']) {
+      const view = renderPreview({ tokenBudget: entered });
+      await waitFor(() =>
+        expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+      );
+      fireEvent.click(sampleCheckbox(KEYS[0]));
+
+      await act(async () => {
+        fireEvent.click(runButton());
+      });
+
+      // The one violation names the accepted range (Req 3.1, 3.3).
+      const violations = screen
+        .getAllByTestId('preview-validation-error')
+        .map((node) => node.textContent);
+      expect(violations).toEqual([
+        `The output token budget must be a whole number from ${TOKEN_BUDGET_RANGE_TEXT}`,
+      ]);
+      // No Preview_API request was issued (Req 3.3).
+      expect(apiMocks.startPreviewRun).not.toHaveBeenCalled();
+      // The sample selection the Job_Creator made is retained (Req 3.3).
+      expect(sampleCheckbox(KEYS[0])).toBeChecked();
+
+      view.unmount();
+    }
+  });
+
+  it('omits token_budget from the run request when the budget entry is empty', async () => {
+    renderPreview({ tokenBudget: '' });
+    await waitFor(() =>
+      expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+    );
+    expect(budgetInput().value).toBe('');
+    fireEvent.click(sampleCheckbox(KEYS[0]));
+
+    await act(async () => {
+      fireEvent.click(runButton());
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.startPreviewRun).toHaveBeenCalledTimes(1)
+    );
+    const request = apiMocks.startPreviewRun.mock.calls[0][0];
+    // An empty entry omits the key entirely, so the Effective_Token_Budget
+    // resolves from the Model_Token_Limits and the default (Req 3.10).
+    expect(request).not.toHaveProperty('token_budget');
+    // The Downscale_Setting still rides the llm: request (Downscale_Off).
+    expect(request).toHaveProperty('downscale_max_edge', null);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Sizing display (llm-model-token-and-image-sizing task 11.5)         */
+/* ------------------------------------------------------------------ */
+
+describe('PromptTuningPreview — sizing display', () => {
+  it('renders source → sent dimensions with the whole-percent ratio, its 1% floor, the 100% case and the unavailable branch', async () => {
+    const emptyPrelabel = { modality: 'ObjectDetection', boxes: [] };
+    const payloadByUrl: Record<string, unknown> = {
+      // 1024/1920 = 53.33% → 53% (Req 5.4).
+      'https://payloads.example/0.json': {
+        sample_key: KEYS[0],
+        state: 'Succeeded',
+        prelabel: emptyPrelabel,
+        image_width: 1920,
+        image_height: 1080,
+        source_width: 1920,
+        source_height: 1080,
+        sent_width: 1024,
+        sent_height: 576,
+        downscale_max_edge: 1024,
+      },
+      // 10/10000 = 0.1% → rounds to 0, floored to the 1% minimum.
+      'https://payloads.example/1.json': {
+        sample_key: KEYS[1],
+        state: 'Succeeded',
+        prelabel: emptyPrelabel,
+        image_width: 10000,
+        image_height: 10000,
+        source_width: 10000,
+        source_height: 10000,
+        sent_width: 10,
+        sent_height: 10,
+        downscale_max_edge: 512,
+      },
+      // Unchanged dimensions → 100%.
+      'https://payloads.example/2.json': {
+        sample_key: KEYS[2],
+        state: 'Succeeded',
+        prelabel: emptyPrelabel,
+        image_width: 512,
+        image_height: 512,
+        source_width: 512,
+        source_height: 512,
+        sent_width: 512,
+        sent_height: 512,
+        downscale_max_edge: null,
+      },
+      // No source/sent pairs → the unavailable indication, with the rest
+      // of the result still rendered (Req 5.11).
+      'https://payloads.example/3.json': {
+        sample_key: KEYS[3],
+        state: 'Succeeded',
+        prelabel: emptyPrelabel,
+        image_width: 640,
+        image_height: 480,
+      },
+    };
+    apiMocks.startPreviewRun.mockResolvedValue({
+      run_id: 'run-1',
+      sample_count: 4,
+      status: 'Running',
+    });
+    apiMocks.getPreviewRun.mockResolvedValue(
+      runStatus(
+        'Completed',
+        [0, 1, 2, 3].map((index) => ({
+          index,
+          sample_key: KEYS[index],
+          state: 'Succeeded' as const,
+          result_url: `https://payloads.example/${index}.json`,
+        }))
+      )
+    );
+    fetchMock.mockImplementation(async (url: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => payloadByUrl[url],
+    }));
+
+    renderPreview();
+    await waitFor(() =>
+      expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+    );
+    for (const key of KEYS.slice(0, 4)) {
+      fireEvent.click(sampleCheckbox(key));
+    }
+    await act(async () => {
+      fireEvent.click(runButton());
+    });
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId('preview-result-sizing')).toHaveLength(4)
+    );
+    expect(
+      screen.getAllByTestId('preview-result-sizing').map((n) => n.textContent)
+    ).toEqual([
+      '1920 × 1080 → 1024 × 576 (53%)',
+      '10000 × 10000 → 10 × 10 (1%)',
+      '512 × 512 → 512 × 512 (100%)',
+      DIMENSIONS_UNAVAILABLE_TEXT,
+    ]);
+
+    // The sample with unavailable dimensions still renders the remaining
+    // Preview_Result content (Req 5.11).
+    const entries = screen.getAllByTestId('preview-result-entry');
+    expect(entries).toHaveLength(4);
+    expect(
+      within(entries[3]).getByTestId('preview-result-sample-key')
+    ).toHaveTextContent(KEYS[3]);
+    expect(
+      within(entries[3]).getByTestId('preview-empty-result')
+    ).toBeInTheDocument();
   });
 });

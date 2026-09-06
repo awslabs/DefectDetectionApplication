@@ -80,9 +80,9 @@ import base64
 import json
 import os
 import logging
-import struct
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import boto3
@@ -119,9 +119,29 @@ from dda_llm_guidance import validate_model_identifier
 from dda_llm_request import (
     FEW_SHOT_BAD,
     FEW_SHOT_GOOD,
+    MODEL_TOKEN_LIMIT_CEILING,
     image_format_for_key,
     resolve_model_image_limit,
+    resolve_token_budget,
     select_few_shot_examples,
+)
+# The one copy of the PNG IHDR / JPEG SOF header parser, relocated
+# verbatim to the shared layer (llm-model-token-and-image-sizing
+# Req 7.6); `_preview_image_dimensions` below is a thin delegation to
+# it. `dda_llm_image` imports no Pillow at import time, so attaching it
+# here costs nothing. MAX_IMAGE_EDGE_OPTIONS is the closed
+# Downscale_Setting option set the Preview_API validates against
+# (Req 5.5) — the same tuple the Image_Downscaler resolves through, so
+# a value this route accepts is a value the downscaler applies.
+# `normalize_downscale_setting` makes the RUN item's recorded
+# Downscale_Setting total and safe for the executor, the same way the
+# Auto_Labeler reads the job record's: an absent, null or malformed
+# recorded value resolves to Downscale_Off with no failure (Req 5.9,
+# 5.12).
+from dda_llm_image import (
+    MAX_IMAGE_EDGE_OPTIONS,
+    declared_dimensions,
+    normalize_downscale_setting,
 )
 # The one implementation of the `llm:` family model invocation, shared
 # with the Auto_Labeler (llm-autolabel-prompt-tuning Req 3.1, 3.2): the
@@ -135,7 +155,11 @@ from dda_llm_request import (
 # reaches the shared invocation.
 import dda_llm_prelabel
 from bedrock_common import get_bedrock_client
-from dda_llm_prelabel import LlmPrelabelError, generate_llm_prelabel
+from dda_llm_prelabel import (
+    LlmPrelabelError,
+    LlmPrelabelResult,
+    generate_llm_prelabel,
+)
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -157,6 +181,13 @@ USER_POOL_ID = os.environ.get('USER_POOL_ID')
 # Pre-labels and example images live in the portal's own artifacts
 # bucket (written by dda_autolabel_worker / the job creation wizard).
 PORTAL_ARTIFACTS_BUCKET = os.environ.get('PORTAL_ARTIFACTS_BUCKET')
+# Portal settings table: holds the persisted Model_Token_Limits item
+# (`llm_model_token_limits`) the per-invocation _llm_model_token_limits()
+# loader reads (llm-model-token-and-image-sizing Req 1.6, 1.8). Read
+# lazily per invocation, never at import, so an environment without the
+# settings stack simply falls back to the LLM_MODEL_TOKEN_LIMITS
+# deploy-time bootstrap.
+SETTINGS_TABLE = os.environ.get('SETTINGS_TABLE')
 
 teams_table = dynamodb.Table(LABELING_TEAMS_TABLE)
 labeling_jobs_table = dynamodb.Table(LABELING_JOBS_TABLE)
@@ -211,6 +242,12 @@ REVIEW_DECISIONS = ('accepted', 'rejected')
 
 def handler(event, context):
     """Main Lambda handler for DDA labeling operations."""
+    # The Model_Token_Limits memo is per invocation, never per container,
+    # so a warm container can never serve a mapping written by an earlier
+    # invocation (llm-model-token-and-image-sizing Req 1.6, 4.1). Cleared
+    # ahead of the action dispatch so the async Preview_Run executor
+    # invocation gets its own fresh read too.
+    _reset_model_token_limits_cache()
     try:
         # Non-HTTP entry, deliberately ahead of the HTTP dispatch: the
         # Preview_Run executor is *this same function*, self-invoked
@@ -1644,6 +1681,34 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                 auto_label, body, example_images)
             errors.extend(few_shot_errors)
 
+        # --- Downscale_Setting + Token_Budget_Selection (llm-model-
+        #     token-and-image-sizing Req 3.6, 5.7, 10.4, 10.6) ---
+        # Scoped to the `llm:` family exactly as few_shot is: sam /
+        # bedrock: submissions get neither key regardless of what they
+        # carried (Req 10.4), and a submission omitting both yields a
+        # record byte-identical to a pre-feature record with no
+        # validation message mentioning either value (Req 10.6).
+        # The record holds one representation only — the attribute is
+        # absent for Downscale_Off, an option integer otherwise —
+        # so a submitted null (the wizard's blank select) drops the key,
+        # and `normalize_downscale_setting`'s totality means a malformed
+        # value degrades to Downscale_Off rather than into the record.
+        # The Token_Budget_Selection is persisted unchanged exactly when
+        # it is what Req 3.6 persists: a non-boolean integer in
+        # [1, MODEL_TOKEN_LIMIT_CEILING]. An empty budget control omits
+        # the key, so the Auto_Labeler resolves through the
+        # Model_Token_Limits and the default (Req 3.8, 3.10).
+        downscale_max_edge = None
+        token_budget = None
+        if model_family == 'llm':
+            downscale_max_edge = normalize_downscale_setting(
+                auto_label.get('downscale_max_edge'))
+            raw_budget = auto_label.get('token_budget')
+            if (isinstance(raw_budget, int)
+                    and not isinstance(raw_budget, bool)
+                    and 1 <= raw_budget <= MODEL_TOKEN_LIMIT_CEILING):
+                token_budget = raw_budget
+
         # --- dataset prefix + use case (needed for enumeration) ---
         dataset_prefix = body.get('dataset_prefix')
         if not dataset_prefix:
@@ -1748,6 +1813,17 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                 # jobs and for submissions that carry no option at all.
                 **({'few_shot': few_shot_document}
                    if few_shot_document is not None else {}),
+                # llm-model-token-and-image-sizing Req 5.7/3.6: the
+                # submitted Downscale_Setting and Token_Budget_Selection,
+                # unchanged, `llm:` family only. Both attributes are
+                # absent for Downscale_Off / an omitted budget, so an
+                # unconfigured submission's record is byte-identical to
+                # a pre-feature record (Req 10.6) and sam / bedrock:
+                # records never carry either (Req 10.4).
+                **({'downscale_max_edge': downscale_max_edge}
+                   if downscale_max_edge is not None else {}),
+                **({'token_budget': token_budget}
+                   if token_budget is not None else {}),
             },
             'skip_verification': skip_verification,
             'submitted_count': 0,
@@ -3290,7 +3366,9 @@ def _write_preview_run_item(run_id: str, usecase_id: str, created_by: str,
                             sample_count: int, few_shot_enabled: bool,
                             attached_example_count: int,
                             omitted_example_count: int = 0,
-                            few_shot_examples: Optional[List[Dict]] = None
+                            few_shot_examples: Optional[List[Dict]] = None,
+                            downscale_max_edge: Optional[int] = None,
+                            token_budget: Optional[int] = None
                             ) -> Dict:
     """Write the `PREVIEW#{run_id}` / `RUN` item in status Running.
 
@@ -3314,6 +3392,18 @@ def _write_preview_run_item(run_id: str, usecase_id: str, created_by: str,
     key is written only when there is something to attach, so a run
     without Few_Shot_Examples produces exactly the item shape task 8.2
     wrote.
+
+    `downscale_max_edge` / `token_budget`
+    (llm-model-token-and-image-sizing Req 5.3, 1.6, 9.5):
+    `downscale_max_edge` is the validated Max_Image_Edge integer,
+    recorded only when a bound was selected — Downscale_Off leaves the
+    attribute absent, exactly as a pre-feature run item reads.
+    `token_budget` is the Effective_Token_Budget already resolved by the
+    start route, not the raw selection: the executor passes it back in
+    as the selection (re-resolution of a resolved value is the
+    identity), so the budget recorded here, the budget audited, the
+    budget the status route reports and the budget actually sent are the
+    same integer by construction.
     """
     now = _now_epoch()
     expires_at = now + _preview_lock_ttl_seconds(sample_count)
@@ -3337,6 +3427,10 @@ def _write_preview_run_item(run_id: str, usecase_id: str, created_by: str,
     }
     if few_shot_examples:
         item['few_shot_examples'] = few_shot_examples
+    if downscale_max_edge is not None:
+        item['downscale_max_edge'] = int(downscale_max_edge)
+    if token_budget is not None:
+        item['token_budget'] = int(token_budget)
     labeling_tasks_table.put_item(Item=item)
     return item
 
@@ -3467,15 +3561,43 @@ def _preview_result_key(usecase_id: str, run_id: str, index: int) -> str:
 
 
 def _preview_success_payload(sample_key: str, prelabel: Dict,
-                             width: int, height: int) -> Dict:
-    """Result payload for a Sample_Image that produced a Pre_Label."""
-    return {
+                             width: int, height: int,
+                             sent_dimensions: Optional[tuple] = None,
+                             downscale_max_edge: Optional[int] = None
+                             ) -> Dict:
+    """Result payload for a Sample_Image that produced a Pre_Label.
+
+    `image_width` / `image_height` keep their pre-feature meaning — the
+    Source_Dimensions, the coordinate space the Pre_Label geometry is
+    expressed in — so `PreviewResultCanvas` reads them unchanged
+    (llm-model-token-and-image-sizing Req 7.7).
+
+    Where the run carries a Downscale_Setting (`downscale_max_edge` is a
+    Max_Image_Edge value), the payload additionally carries the sizing
+    report (Req 5.4, 5.10): the Source_Dimensions duplicated into the
+    explicit `source_width` / `source_height`, the Sent_Dimensions of
+    the image actually sent as `sent_width` / `sent_height`, and the
+    applied `downscale_max_edge`. A Downscale_Off run keeps the payload
+    byte-identical to its pre-feature shape — sent equals source is
+    exactly the pre-feature meaning, and the wizard renders its
+    unavailable branch for the sizing row (Req 5.11) — so an
+    unconfigured run stays purely pre-feature end to end (Req 10.1).
+    """
+    payload = {
         'sample_key': sample_key,
         'state': PREVIEW_SAMPLE_SUCCEEDED,
         'prelabel': prelabel,
         'image_width': int(width),
         'image_height': int(height),
     }
+    if downscale_max_edge is not None:
+        sent_width, sent_height = sent_dimensions or (width, height)
+        payload['source_width'] = int(width)
+        payload['source_height'] = int(height)
+        payload['sent_width'] = int(sent_width)
+        payload['sent_height'] = int(sent_height)
+        payload['downscale_max_edge'] = int(downscale_max_edge)
+    return payload
 
 
 def _preview_failure_payload(sample_key: str, failure_category: str,
@@ -3643,6 +3765,123 @@ def _llm_model_image_limits() -> Dict[str, Any]:
                        'the default Model_Image_Limit for every model')
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+# Settings item key of the persisted Model_Token_Limits mapping — the
+# same item data_accounts.py's /token-limits routes read and write, so
+# the budget the wizard displays, the budget this route resolves and the
+# budget the Auto_Labeler resolves all come from one persisted
+# configuration (llm-model-token-and-image-sizing Req 1.6, 1.8).
+LLM_MODEL_TOKEN_LIMITS_SETTING_KEY = 'llm_model_token_limits'
+
+# Per-invocation memo of the effective Model_Token_Limits mapping,
+# cleared at the top of handler() — see _llm_model_token_limits().
+_model_token_limits_cache: Optional[Dict[str, Any]] = None
+
+
+def _reset_model_token_limits_cache() -> None:
+    """Drop the per-invocation Model_Token_Limits memo.
+
+    Called at the top of handler() so the memo never outlives one
+    invocation: a warm container serving a mapping cached before an
+    administrator's write would contradict Requirement 4.1's "returns
+    the persisted mapping" from the user's point of view.
+    """
+    global _model_token_limits_cache
+    _model_token_limits_cache = None
+
+
+def _decimal_to_native(obj):
+    """Decimal-typed numbers from a DynamoDB read as native Python types.
+
+    DynamoDB returns every number as Decimal, and resolve_token_budget
+    rejects non-int types by design (llm-model-token-and-image-sizing
+    Req 2.8), so the stored mapping is converted before the resolver
+    sees any value — otherwise every configured limit would silently
+    fall through to the default.
+    """
+    if isinstance(obj, Decimal):
+        return float(obj) if obj % 1 else int(obj)
+    if isinstance(obj, dict):
+        return {k: _decimal_to_native(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_decimal_to_native(i) for i in obj]
+    return obj
+
+
+def _read_stored_model_token_limits() -> Optional[Dict[str, Any]]:
+    """The persisted Model_Token_Limits mapping, or None.
+
+    Returns None — meaning "fall back to the environment bootstrap" —
+    when the settings table is not configured, the item is absent, the
+    read fails, or the item's value is not a mapping. An empty persisted
+    mapping is a real mapping and is returned as {} (Req 4.8), not as
+    None.
+    """
+    if not SETTINGS_TABLE:
+        return None
+    try:
+        response = dynamodb.Table(SETTINGS_TABLE).get_item(
+            Key={'setting_key': LLM_MODEL_TOKEN_LIMITS_SETTING_KEY})
+    except Exception as e:  # ClientError, table missing, throttling
+        logger.warning(f"Could not read model token limits, falling back "
+                       f"to the environment bootstrap: {str(e)}")
+        return None
+    item = response.get('Item')
+    if not item:
+        return None
+    value = item.get('value')
+    if not isinstance(value, dict):
+        return None
+    return _decimal_to_native(value)
+
+
+def _env_model_token_limits() -> Dict[str, Any]:
+    """The LLM_MODEL_TOKEN_LIMITS deploy-time bootstrap mapping.
+
+    An absent, blank, malformed or non-object value resolves to an
+    empty mapping, in which case every model resolves
+    Model_Token_Limit_Default rather than erroring.
+    """
+    raw = (os.environ.get('LLM_MODEL_TOKEN_LIMITS') or '').strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning('LLM_MODEL_TOKEN_LIMITS is not valid JSON; using '
+                       'the default Model_Token_Limit for every model')
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _llm_model_token_limits() -> Dict[str, Any]:
+    """The effective Model_Token_Limits mapping (Req 1.6, 1.8).
+
+    The same loader shape data_accounts.py and the Auto_Labeler carry,
+    so all three read equal entries for equal persisted configuration.
+    Source of truth is the persisted `llm_model_token_limits` settings
+    item; when that item is absent, unreadable, or its value is not a
+    mapping, the LLM_MODEL_TOKEN_LIMITS environment variable is the
+    deploy-time bootstrap.
+
+    WHOLE-MAPPING precedence, never a per-key merge: a merge would let
+    an environment entry survive a deletion from the persisted mapping,
+    contradicting Req 4.1 ("retain no entry that the submitted mapping
+    omits") and Req 4.8 (an empty mapping makes every model resolve the
+    default). An empty persisted mapping is therefore honored as empty.
+
+    Memoized PER INVOCATION — a module-level cache keyed by nothing and
+    cleared at the top of handler() — which is exactly the span over
+    which the resolution must be self-consistent: one preview run start,
+    or one executor invocation.
+    """
+    global _model_token_limits_cache
+    if _model_token_limits_cache is None:
+        stored = _read_stored_model_token_limits()
+        _model_token_limits_cache = (stored if stored is not None
+                                     else _env_model_token_limits())
+    return _model_token_limits_cache
 
 
 def _preview_request_body(event: Dict) -> Dict:
@@ -3910,6 +4149,53 @@ def _validate_preview_run_request(body: Dict) -> tuple:
         errors.extend(_validate_preview_few_shot(
             few_shot_examples, dataset_bucket))
 
+    # --- Downscale_Setting (llm-model-token-and-image-sizing Req 5.5) --
+    # Absent and null both mean Downscale_Off; the only other accepted
+    # values are the six Max_Image_Edge integers. The isinstance checks
+    # run before the membership test on purpose: bool is an int subclass
+    # and 1024.0 == 1024, so a boolean or a whole-valued float would
+    # otherwise slip through numeric equality. Strings — including
+    # '1024' and 'off' — are rejected with no conversion, which is why
+    # Downscale_Off is encoded as null rather than a string sentinel.
+    raw_downscale = body.get('downscale_max_edge')
+    downscale_max_edge = None
+    if raw_downscale is None:
+        pass  # Downscale_Off — the pre-feature request shape
+    elif (isinstance(raw_downscale, int)
+            and not isinstance(raw_downscale, bool)
+            and raw_downscale in MAX_IMAGE_EDGE_OPTIONS):
+        downscale_max_edge = raw_downscale
+    else:
+        errors.append(_validation_error(
+            'downscale_max_edge',
+            f"downscale_max_edge must be null for no downscaling or one "
+            f"of {', '.join(str(v) for v in MAX_IMAGE_EDGE_OPTIONS)}",
+            downscale_max_edge=raw_downscale))
+
+    # --- Token_Budget_Selection (Req 3.5) -------------------------------
+    # Absent means "resolve from the Model_Token_Limits and the default"
+    # (Req 3.10); a present value must be a non-boolean integer in
+    # [1, MODEL_TOKEN_LIMIT_CEILING]. Unlike downscale_max_edge, null is
+    # NOT a valid present value: an empty budget control omits the key
+    # entirely, so anything else present-and-invalid — null, a boolean,
+    # a digit string, a whole-valued float, an out-of-range integer — is
+    # rejected with the accepted range, with no numeric conversion and
+    # no clamping.
+    raw_budget = body.get('token_budget')
+    token_budget_selection = None
+    if 'token_budget' not in body:
+        pass  # absent — resolve through the mapping and the default
+    elif (isinstance(raw_budget, int)
+            and not isinstance(raw_budget, bool)
+            and 1 <= raw_budget <= MODEL_TOKEN_LIMIT_CEILING):
+        token_budget_selection = raw_budget
+    else:
+        errors.append(_validation_error(
+            'token_budget',
+            f'token_budget must be a whole number between 1 and '
+            f'{MODEL_TOKEN_LIMIT_CEILING}',
+            token_budget=raw_budget))
+
     config = {
         'usecase_id': usecase_id,
         'usecase': usecase,
@@ -3923,6 +4209,8 @@ def _validate_preview_run_request(body: Dict) -> tuple:
         'sample_keys': sample_keys,
         'few_shot_enabled': few_shot_enabled,
         'few_shot_examples': few_shot_examples,
+        'downscale_max_edge': downscale_max_edge,
+        'token_budget': token_budget_selection,
     }
     return config, errors
 
@@ -3971,7 +4259,9 @@ def start_preview_run(event, context):
 
         {usecase_id, dataset_prefix, model, detection_prompt, task_type,
          label_set, sample_images: [1..5 keys or s3:// URIs],
-         few_shot: {enabled, examples: [{ref, designation, position}]}}
+         few_shot: {enabled, examples: [{ref, designation, position}]},
+         downscale_max_edge: null | 512|768|1024|1280|1536|2048,
+         token_budget: 1..128000 (absent = mapping + default)}
 
     Responses:
         202 {run_id, sample_count, status: 'Running'}
@@ -4054,6 +4344,21 @@ def _start_preview_run(event, context):
                 resolve_model_image_limit(config['model_identifier'],
                                           _llm_model_image_limits()))
 
+        # llm-model-token-and-image-sizing Req 1.6, 3.5, 9.5: the
+        # Effective_Token_Budget is resolved exactly ONCE, at run start,
+        # from the validated Token_Budget_Selection and the same
+        # per-model configuration delivery the Auto_Labeler and the
+        # model-options listing read. The resolved integer — never the
+        # raw selection — is recorded on the RUN item, carried in the
+        # audit event and reported by the status route; the executor
+        # passes it back in as the selection, and the resolver's
+        # idempotence on its own output makes that re-resolution the
+        # identity, so the budget sent is provably the budget audited,
+        # even if an administrator rewrites the mapping in between.
+        token_budget = resolve_token_budget(
+            config['model_identifier'], config['token_budget'],
+            _llm_model_token_limits())
+
         _write_preview_run_item(
             run_id=run_id,
             usecase_id=usecase_id,
@@ -4069,6 +4374,12 @@ def _start_preview_run(event, context):
             # Recorded so the executor attaches this exact reference set
             # (Req 6.6, 7.6); absent when the option is off.
             few_shot_examples=stored_examples,
+            # The validated Downscale_Setting (absent for Downscale_Off)
+            # and the resolved Effective_Token_Budget, recorded so the
+            # executor applies exactly what was validated and audited
+            # here (Req 5.3, 1.6).
+            downscale_max_edge=config['downscale_max_edge'],
+            token_budget=token_budget,
         )
         # Every requested sample gets its Pending item up front, so the
         # status route answers with one entry per Sample_Image from the
@@ -4076,7 +4387,11 @@ def _start_preview_run(event, context):
         _write_preview_sample_items(run_id, sample_keys)
 
         # Req 3.8: requesting identity, Use_Case, model identifier and
-        # Sample_Image count.
+        # Sample_Image count. The two sizing fields ride the SAME event
+        # (llm-model-token-and-image-sizing Req 9.5) — still exactly one
+        # `preview_run` event per run: the applied Downscale_Setting
+        # (null for Downscale_Off) and the resolved
+        # Effective_Token_Budget.
         log_audit_event(
             user_id=user_sub,
             action='preview_run',
@@ -4090,6 +4405,8 @@ def _start_preview_run(event, context):
                 'task_type': config['task_type'],
                 'few_shot_enabled': config['few_shot_enabled'],
                 'attached_example_count': len(attached),
+                'downscale_max_edge': config['downscale_max_edge'],
+                'token_budget': token_budget,
             },
         )
 
@@ -4219,7 +4536,8 @@ def get_preview_run(event, context):
     """GET /labeling-preview/runs/{runId}
 
     Responses:
-        200 {run_id, status, sample_count, few_shot, results: [...]}
+        200 {run_id, status, sample_count, few_shot,
+             downscale_max_edge, token_budget, results: [...]}
         403 {error: 'Not authorized'}
         404 {error: 'Preview run not found'}
 
@@ -4277,8 +4595,21 @@ def _get_preview_run(event, context):
                 'attached': _preview_int(run.get('attached_example_count')),
                 'omitted': _preview_int(run.get('omitted_example_count')),
             },
+            # The run's applied Downscale_Setting, null for Downscale_Off
+            # (llm-model-token-and-image-sizing Req 5.10): the RUN item
+            # records the attribute only when a Max_Image_Edge was
+            # validated at start, and a pre-feature run means Off too.
+            'downscale_max_edge': (
+                _preview_int(run['downscale_max_edge'])
+                if run.get('downscale_max_edge') is not None else None),
             'results': results,
         }
+        # The Effective_Token_Budget resolved and recorded at run start
+        # (Req 1.6): always present for runs started after this feature;
+        # omitted only for an in-flight pre-feature run, which carried no
+        # per-model budget to report.
+        if run.get('token_budget') is not None:
+            response['token_budget'] = _preview_int(run['token_budget'])
         if run.get('run_error'):
             # A run that failed as a whole (e.g. the executor invoke never
             # landed) reports why, so the wizard can surface the failure
@@ -4379,42 +4710,15 @@ class PreviewSampleFailure(Exception):
 def _preview_image_dimensions(image_bytes: bytes) -> Optional[tuple]:
     """(width, height) parsed from PNG IHDR / JPEG SOF headers, or None.
 
-    A literal copy of `dda_autolabel_worker._image_dimensions`: the
-    dimensions feed the prompt text, so the preview must decode them the
-    same way the Auto_Labeler does or the two requests would differ for
-    the same image (Req 3.1). It is duplicated rather than imported
-    because the worker is a separate Lambda entry point in the same
-    bundle — moving it to the shared layer would touch the worker's own
-    code path, which this feature keeps byte-identical.
-
-    Kept dependency-free (no Pillow in the functions bundle).
+    A thin delegation to `dda_llm_image.declared_dimensions` — the same
+    algorithm this function has always used, relocated verbatim to the
+    shared layer so exactly one copy exists and the preview decodes
+    dimensions the same way the Auto_Labeler does by construction
+    (llm-model-token-and-image-sizing Req 7.6; llm-autolabel-prompt-tuning
+    Req 3.1). Accepts exactly the inputs it accepted before and stays
+    dependency-free (no Pillow).
     """
-    if image_bytes[:8] == b'\x89PNG\r\n\x1a\n' and len(image_bytes) >= 24:
-        width, height = struct.unpack('>II', image_bytes[16:24])
-        return (width, height) if width and height else None
-    if image_bytes[:2] == b'\xff\xd8':
-        index = 2
-        while index + 9 <= len(image_bytes):
-            if image_bytes[index] != 0xFF:
-                index += 1
-                continue
-            marker = image_bytes[index + 1]
-            # Padding / standalone markers carry no length segment.
-            if marker in (0xFF, 0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
-                index += 2
-                continue
-            if index + 4 > len(image_bytes):
-                break
-            segment_length = struct.unpack(
-                '>H', image_bytes[index + 2:index + 4])[0]
-            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
-                if index + 9 <= len(image_bytes):
-                    height, width = struct.unpack(
-                        '>HH', image_bytes[index + 5:index + 9])
-                    return (width, height) if width and height else None
-                break
-            index += 2 + segment_length
-    return None
+    return declared_dimensions(image_bytes)
 
 
 def _preview_s3_client(clients: Dict[str, Any], usecase: Dict, bucket: str):
@@ -4518,7 +4822,12 @@ def _run_preview_sample(run: Dict, clients: Dict[str, Any], usecase: Dict,
     can never carry two (Req 9.6).
 
     Returns:
-        `(prelabel, width, height)`
+        `(prelabel, (source_width, source_height), (sent_width,
+        sent_height))` — the Pre_Label first, as always, then the
+        Source_Dimensions, then the Sent_Dimensions of the image
+        actually sent to the model, straight from the shared
+        chokepoint's result (llm-model-token-and-image-sizing Req 5.10,
+        7.1). With no Downscale_Setting the two pairs are equal.
     """
     # 1. Sample_Image bytes — cross-account with the direct fallback.
     try:
@@ -4558,10 +4867,27 @@ def _run_preview_sample(run: Dict, clients: Dict[str, Any], usecase: Dict,
     #    Bedrock client seam is rebound onto the shared module for the
     #    same reason the worker rebinds it: this module stays the single
     #    place a client is obtained from.
+    #
+    #    The sizing inputs are the run's recorded values, passed straight
+    #    through to the shared chokepoint — the executor carries no
+    #    sizing logic of its own (llm-model-token-and-image-sizing
+    #    Req 5.4, 6.1). DynamoDB returns numbers as Decimal, so both
+    #    values pass through _decimal_to_native before the total-and-safe
+    #    resolvers see them, exactly as the Auto_Labeler reads the job
+    #    record's. `downscale_max_edge` is absent for Downscale_Off and
+    #    a malformed recorded value degrades to Downscale_Off with no
+    #    failure (Req 5.9, 5.12). `token_budget` is the
+    #    Effective_Token_Budget the start route already resolved and
+    #    audited; passing it back in as the selection makes re-resolution
+    #    the identity, so the budget sent is provably the budget audited,
+    #    even if an administrator rewrote the mapping in between
+    #    (Req 5.10, 1.6). The mapping itself comes from the same
+    #    per-invocation loader the start route and the model-options
+    #    listing read (Req 1.8).
     label_set = [str(label) for label in (run.get('label_set') or [])]
     dda_llm_prelabel.get_bedrock_client = get_bedrock_client
     try:
-        prelabel = generate_llm_prelabel(
+        result = generate_llm_prelabel(
             model_identifier=model_identifier,
             modality=run.get('task_type'),
             label_set=label_set,
@@ -4575,18 +4901,41 @@ def _run_preview_sample(run: Dict, clients: Dict[str, Any], usecase: Dict,
             height=height,
             few_shot_images=few_shot_images,
             model_image_limit=model_image_limit,
+            downscale_setting=normalize_downscale_setting(
+                _decimal_to_native(run.get('downscale_max_edge'))),
+            token_budget_selection=_decimal_to_native(
+                run.get('token_budget')),
+            model_token_limits=_llm_model_token_limits(),
         )
     except LlmPrelabelError as exc:
-        # 'timeout' | 'model_error' | 'unusable_model_output', with the
-        # reason string the Auto_Labeler records for the same response
-        # and the raw model text character-for-character (Req 3.10,
-        # 3.11, 9.1, 9.2, 9.3).
+        # 'timeout' | 'model_error' | 'unusable_model_output' from the
+        # invocation and its output, plus the shared chokepoint's
+        # 'unsupported_image_content' (a target the Image_Downscaler
+        # refuses) and 'unreadable_example_image' (a refused attached
+        # example) — every one a pre-existing category from
+        # PREVIEW_FAILURE_CATEGORIES, so this translation stays
+        # category-preserving with no new category and the reason string
+        # is the one the Auto_Labeler records for the same failure,
+        # character-for-character (Req 3.10, 3.11, 9.1, 9.2, 9.3;
+        # llm-model-token-and-image-sizing Req 9.1, 9.3, 8.5). The two
+        # downscale categories imply zero invocations for this sample.
         raise PreviewSampleFailure(exc.category, exc.reason,
                                    raw_model_output=exc.raw_text) from exc
     except Exception as exc:  # noqa: BLE001 — Req 9.1: still one category
         raise PreviewSampleFailure(
             'model_error', f'model error: {exc}') from exc
-    return prelabel, width, height
+    # The chokepoint returns the Pre_Label plus the Sent_Dimensions
+    # (llm-model-token-and-image-sizing Req 5.10). The seam contract for
+    # a stand-in bound to this module's `generate_llm_prelabel` binding
+    # is looser: a bare Pre_Label means "sent equals source", which is
+    # exactly the pre-feature meaning.
+    if isinstance(result, LlmPrelabelResult):
+        prelabel = result.prelabel
+        sent_dimensions = (result.sent_width, result.sent_height)
+    else:
+        prelabel = result
+        sent_dimensions = (width, height)
+    return prelabel, (width, height), sent_dimensions
 
 
 def _resolve_preview_dataset_location(usecase_id: str) -> tuple:
@@ -4647,6 +4996,17 @@ def execute_preview_run(run_id: Optional[str]) -> Dict[str, Any]:
         # Credentials cache, per bucket, for the life of the run.
         clients: Dict[str, Any] = {}
 
+        # The run's recorded Downscale_Setting, normalized once for the
+        # whole run (llm-model-token-and-image-sizing Req 5.10): None
+        # for Downscale_Off — the attribute is absent on an Off run's
+        # item, and a malformed recorded value degrades to Off the same
+        # way the Auto_Labeler degrades the job record's (Req 5.12).
+        # This is the same value `_run_preview_sample` hands the shared
+        # chokepoint, so the sizing report describes exactly the setting
+        # that was applied.
+        run_downscale_max_edge = normalize_downscale_setting(
+            _decimal_to_native(run.get('downscale_max_edge')))
+
         for item in samples:
             index = _preview_sample_index(item['task_id'])
             sample_key = item.get('sample_key') or ''
@@ -4661,10 +5021,21 @@ def execute_preview_run(run_id: Optional[str]) -> Dict[str, Any]:
                         PREVIEW_CATEGORY_IMAGE_ACCESS,
                         f'image {sample_key} is not accessible: '
                         f'{location_error}')
-                prelabel, width, height = _run_preview_sample(
-                    run, clients, usecase, dataset_bucket, sample_key)
+                # The Source_Dimensions and the Sent_Dimensions both
+                # ride along from the shared chokepoint; on a run with a
+                # Downscale_Setting the payload carries the sizing
+                # report beside the pre-feature fields
+                # (llm-model-token-and-image-sizing Req 5.4, 5.10), with
+                # `image_width` / `image_height` keeping their meaning
+                # as the Source_Dimensions (Req 7.7).
+                prelabel, source_dimensions, sent_dimensions = (
+                    _run_preview_sample(
+                        run, clients, usecase, dataset_bucket, sample_key))
+                width, height = source_dimensions
                 payload = _preview_success_payload(
-                    sample_key, prelabel, width, height)
+                    sample_key, prelabel, width, height,
+                    sent_dimensions=sent_dimensions,
+                    downscale_max_edge=run_downscale_max_edge)
             except PreviewSampleFailure as sample_failure:
                 failure = sample_failure
                 payload = _preview_failure_payload(

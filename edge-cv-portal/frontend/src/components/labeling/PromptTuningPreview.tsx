@@ -37,6 +37,21 @@
  *
  * Successful results are drawn by `PreviewResultCanvas`, which owns the
  * modality overlay rendering (req 4.1-4.4).
+ *
+ * The sizing controls (llm-model-token-and-image-sizing Requirements 3.1,
+ * 3.3, 3.4, 3.11, 5.1-5.4, 5.6, 5.11, 9.8) sit with the run control: a
+ * Downscale_Setting select of exactly seven options (Downscale_Off plus each
+ * Max_Image_Edge) and a Token_Budget_Selection entry showing its accepted
+ * range, both offered for the `llm:` family only and both live input to the
+ * *next* run, so changing either after a run keeps the sample selection and
+ * every other value with no extra mechanism. Each resolved result carries its
+ * Source → Sent dimensions and their ratio, and a failed result additionally
+ * names the run's applied Downscale_Setting and Effective_Token_Budget.
+ *
+ * `PreviewResultCanvas` is deliberately untouched: it positions geometry as
+ * percentages of `payload.image_width` / `image_height`, which remain the
+ * Source_Dimensions — the space the backend scales the Pre_Label back into —
+ * so the new `sent_*` fields are display-only and are never passed to it.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Alert from '@cloudscape-design/components/alert';
@@ -45,8 +60,11 @@ import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Checkbox from '@cloudscape-design/components/checkbox';
 import Container from '@cloudscape-design/components/container';
+import FormField from '@cloudscape-design/components/form-field';
 import Header from '@cloudscape-design/components/header';
+import Input from '@cloudscape-design/components/input';
 import Pagination from '@cloudscape-design/components/pagination';
+import Select from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
@@ -84,6 +102,94 @@ export const POLL_INTERVAL_MS = 2000;
 const PER_SAMPLE_BOUND_MS = 120_000;
 /** Slack over the per-sample bounds before the client gives up (1.8). */
 const RUN_BOUND_SLACK_MS = 60_000;
+
+/**
+ * Max_Image_Edge_Options — the six selectable Max_Image_Edge values, which
+ * with Downscale_Off make up the seven options the Downscale_Setting control
+ * offers and the only values it accepts (llm-model-token-and-image-sizing
+ * Requirement 5.1).
+ */
+export const MAX_IMAGE_EDGE_OPTIONS = [512, 768, 1024, 1280, 1536, 2048];
+/** Token_Budget_Selection bounds, mirroring the API rule (Req 3.1, 3.5). */
+export const TOKEN_BUDGET_MIN = 1;
+export const TOKEN_BUDGET_CEILING = 128000;
+/** The accepted range, shown beside the control and in the violation (3.1, 3.3). */
+export const TOKEN_BUDGET_RANGE_TEXT = `${TOKEN_BUDGET_MIN} to ${TOKEN_BUDGET_CEILING}`;
+
+/**
+ * The Token_Budget_Selection an entered value carries, or `null` when the
+ * entry is not a whole number in `[1, 128000]`. An empty entry is `undefined`
+ * — omitted from the request so the budget resolves from the Model_Token_Limits
+ * and the default (Requirement 3.10).
+ */
+export function parseTokenBudget(
+  entered: string | undefined
+): number | null | undefined {
+  const trimmed = (entered ?? '').trim();
+  if (!trimmed) return undefined;
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return value >= TOKEN_BUDGET_MIN && value <= TOKEN_BUDGET_CEILING
+    ? value
+    : null;
+}
+
+/**
+ * The ratio of the longer Sent edge to the longer Source edge as a whole
+ * percent within 1 to 100 inclusive (Requirement 5.4).
+ */
+export function sizingRatioPercent(
+  sourceWidth: number,
+  sourceHeight: number,
+  sentWidth: number,
+  sentHeight: number
+): number {
+  const sourceLong = Math.max(sourceWidth, sourceHeight);
+  const sentLong = Math.max(sentWidth, sentHeight);
+  return Math.min(100, Math.max(1, Math.round((sentLong / sourceLong) * 100)));
+}
+
+/** A determined pixel extent: a finite positive number. */
+function isExtent(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+/** Text shown when a dimension pair could not be determined (Req 5.11). */
+export const DIMENSIONS_UNAVAILABLE_TEXT = 'dimensions unavailable';
+
+/** The applied Downscale_Setting in words; absent and `null` are off. */
+export function downscaleSettingText(value?: number | null): string {
+  return typeof value === 'number' && MAX_IMAGE_EDGE_OPTIONS.includes(value)
+    ? `${value} pixels`
+    : 'off';
+}
+
+/**
+ * The per-sample sizing row — `1920 × 1080 → 1024 × 576 (53%)` — or the
+ * unavailable indication when either dimension pair is missing, in which case
+ * the rest of the result still renders (Requirements 5.4, 5.11).
+ */
+export function previewSizingText(payload?: PreviewResultPayload): string {
+  const sourceWidth = payload?.source_width;
+  const sourceHeight = payload?.source_height;
+  const sentWidth = payload?.sent_width;
+  const sentHeight = payload?.sent_height;
+  if (
+    !isExtent(sourceWidth) ||
+    !isExtent(sourceHeight) ||
+    !isExtent(sentWidth) ||
+    !isExtent(sentHeight)
+  ) {
+    return DIMENSIONS_UNAVAILABLE_TEXT;
+  }
+  const percent = sizingRatioPercent(
+    sourceWidth,
+    sourceHeight,
+    sentWidth,
+    sentHeight
+  );
+  return `${sourceWidth} × ${sourceHeight} → ${sentWidth} × ${sentHeight} (${percent}%)`;
+}
 
 /** Human wording for each failure category (req 9.7). */
 const FAILURE_CATEGORY_LABELS: Record<PreviewFailureCategory, string> = {
@@ -135,6 +241,8 @@ export function validatePreviewRunInputs(input: {
   fewShotEnabled: boolean;
   goodExampleCount: number;
   badExampleCount: number;
+  /** Token_Budget_Selection as entered; absent or empty means omitted. */
+  tokenBudget?: string;
 }): string[] {
   const violations: string[] = [];
 
@@ -205,6 +313,16 @@ export function validatePreviewRunInputs(input: {
     }
   }
 
+  // A non-empty Token_Budget_Selection that is not a whole number in the
+  // accepted range is one more violation in this same list, so the run is
+  // never started, no request is issued and no wizard state changes
+  // (llm-model-token-and-image-sizing Requirement 3.3).
+  if (parseTokenBudget(input.tokenBudget) === null) {
+    violations.push(
+      `The output token budget must be a whole number from ${TOKEN_BUDGET_RANGE_TEXT}`
+    );
+  }
+
   return violations;
 }
 
@@ -234,6 +352,10 @@ interface DisplayedRun {
   labelSet: string[];
   fewShot: PreviewRunResponse['few_shot'];
   status: PreviewRunResponse['status'];
+  /** The run's applied Downscale_Setting; `null`/absent is Downscale_Off. */
+  downscaleMaxEdge?: number | null;
+  /** The run's Effective_Token_Budget, shown beside a failure (Req 9.8). */
+  tokenBudget?: number;
   results: DisplayedResult[];
 }
 
@@ -262,6 +384,29 @@ export interface PromptTuningPreviewProps {
    * upload aborts the start with the message naming the failing file.
    */
   ensureExampleImagesUploaded: () => Promise<{ good: string[]; bad: string[] }>;
+  /**
+   * Downscale_Setting as it stands in the wizard: `null` for Downscale_Off,
+   * otherwise one Max_Image_Edge value (llm-model-token-and-image-sizing
+   * Requirement 5.1). Absent behaves as Downscale_Off.
+   */
+  downscaleMaxEdge?: number | null;
+  /**
+   * Token_Budget_Selection as it stands in the wizard, as entered. Empty
+   * omits the value from the run request (Requirement 3.10).
+   */
+  tokenBudget?: string;
+  /**
+   * Notified when the Job_Creator changes the Downscale_Setting, so the
+   * wizard's value follows the control and is submitted with the job
+   * (Requirement 5.7). The control still operates without it.
+   */
+  onDownscaleMaxEdgeChange?: (value: number | null) => void;
+  /**
+   * Notified when the Job_Creator changes the Token_Budget_Selection, so the
+   * wizard's value follows the control and is submitted with the job
+   * (Requirement 3.6).
+   */
+  onTokenBudgetChange?: (value: string) => void;
 }
 
 export default function PromptTuningPreview({
@@ -275,6 +420,10 @@ export default function PromptTuningPreview({
   goodExampleCount,
   badExampleCount,
   ensureExampleImagesUploaded,
+  downscaleMaxEdge,
+  tokenBudget,
+  onDownscaleMaxEdgeChange,
+  onTokenBudgetChange,
 }: PromptTuningPreviewProps) {
   /* ------------------------- sample picker state ------------------------ */
   const [pageIndex, setPageIndex] = useState(0);
@@ -293,6 +442,40 @@ export default function PromptTuningPreview({
   /** Presigned thumbnail URL per key seen so far, for result rendering. */
   const sampleUrls = useRef<Record<string, string>>({});
   const [capMessage, setCapMessage] = useState('');
+
+  /* ------------------------- sizing controls ---------------------------- */
+  /**
+   * The Downscale_Setting and Token_Budget_Selection the *next* run will
+   * carry. The wizard stays the source of truth — every change is reported
+   * through the change callbacks and a replaced prop value (the model
+   * compatibility effect replacing the shown budget, Requirement 3.2) is
+   * followed here — so the controls work whether or not the wizard is wired.
+   * Both are live input to the next run, so changing either after a completed
+   * run keeps the sample selection and every other value and leaves the run
+   * control enabled (Requirements 3.11, 5.6) with no further mechanism.
+   */
+  const [downscaleSetting, setDownscaleSetting] = useState<number | null>(
+    downscaleMaxEdge ?? null
+  );
+  const [budgetEntry, setBudgetEntry] = useState<string>(tokenBudget ?? '');
+
+  useEffect(() => {
+    setDownscaleSetting(downscaleMaxEdge ?? null);
+  }, [downscaleMaxEdge]);
+
+  useEffect(() => {
+    setBudgetEntry(tokenBudget ?? '');
+  }, [tokenBudget]);
+
+  /**
+   * The same gate the wizard's Few_Shot_Option toggle uses
+   * (`autoLabelEnabled && isLlmAutoLabelModel`): the component is rendered
+   * only while auto-labeling is enabled, so the model prop carries the rest.
+   * `sam`, `bedrock:` and no model render neither control and send neither
+   * value (Requirement 5.2).
+   */
+  const isLlmAutoLabelModel =
+    model.startsWith('llm:') && model.length > 'llm:'.length;
 
   /* --------------------------- run state -------------------------------- */
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
@@ -428,6 +611,8 @@ export default function PromptTuningPreview({
           labelSet: snapshot.labelSet,
           fewShot: status.few_shot,
           status: status.status,
+          downscaleMaxEdge: status.downscale_max_edge,
+          tokenBudget: status.token_budget,
           results,
         };
       });
@@ -536,6 +721,7 @@ export default function PromptTuningPreview({
       fewShotEnabled,
       goodExampleCount,
       badExampleCount,
+      tokenBudget: isLlmAutoLabelModel ? budgetEntry : '',
     });
     if (violations.length > 0) {
       // No request is issued and no wizard state is touched (req 1.4).
@@ -561,6 +747,13 @@ export default function PromptTuningPreview({
     }
 
     const samples = [...selectedKeys];
+    // Both sizing values ride the request for the `llm:` family only, and the
+    // budget only when the control holds a value (Requirements 3.4, 5.2, 5.3,
+    // 3.10). The validation above has already established the entry is a whole
+    // number in range, so this parse cannot be `null` here.
+    const budgetSelection = isLlmAutoLabelModel
+      ? parseTokenBudget(budgetEntry)
+      : undefined;
     try {
       const started = await apiService.startPreviewRun({
         usecase_id: usecaseId,
@@ -571,6 +764,12 @@ export default function PromptTuningPreview({
         label_set: labelSet,
         sample_images: samples,
         few_shot: { enabled: fewShotEnabled, examples },
+        ...(isLlmAutoLabelModel
+          ? { downscale_max_edge: downscaleSetting }
+          : {}),
+        ...(typeof budgetSelection === 'number'
+          ? { token_budget: budgetSelection }
+          : {}),
       });
       await pollRun(started.run_id, started.sample_count || samples.length, {
         taskType,
@@ -599,11 +798,55 @@ export default function PromptTuningPreview({
     usecaseId,
     datasetPrefix,
     pollRun,
+    isLlmAutoLabelModel,
+    downscaleSetting,
+    budgetEntry,
   ]);
 
   const selectionSummary = useMemo(
     () => `${selectedKeys.length} of ${SAMPLE_LIMIT} sample images selected`,
     [selectedKeys.length]
+  );
+
+  /* ----------------------- sizing control wiring ------------------------ */
+  /** Exactly seven options: Downscale_Off plus each Max_Image_Edge (5.1). */
+  const downscaleOptions = useMemo(
+    () => [
+      { value: '', label: 'Downscale off (send the original image)' },
+      ...MAX_IMAGE_EDGE_OPTIONS.map((edge) => ({
+        value: String(edge),
+        label: `${edge} pixels`,
+      })),
+    ],
+    []
+  );
+
+  const selectedDownscaleOption = useMemo(() => {
+    const value = downscaleSetting === null ? '' : String(downscaleSetting);
+    return (
+      downscaleOptions.find((option) => option.value === value) ??
+      downscaleOptions[0]
+    );
+  }, [downscaleOptions, downscaleSetting]);
+
+  const handleDownscaleChange = useCallback(
+    (raw: string | undefined) => {
+      // No value outside the seven options is accepted: anything else is
+      // Downscale_Off (Requirement 5.1).
+      const parsed = Number(raw);
+      const next = MAX_IMAGE_EDGE_OPTIONS.includes(parsed) ? parsed : null;
+      setDownscaleSetting(next);
+      onDownscaleMaxEdgeChange?.(next);
+    },
+    [onDownscaleMaxEdgeChange]
+  );
+
+  const handleBudgetChange = useCallback(
+    (value: string) => {
+      setBudgetEntry(value);
+      onTokenBudgetChange?.(value);
+    },
+    [onTokenBudgetChange]
   );
 
   return (
@@ -764,6 +1007,47 @@ export default function PromptTuningPreview({
           </SpaceBetween>
         )}
 
+        {/* ------------------------ sizing controls --------------------- */}
+        {isLlmAutoLabelModel && (
+          <div data-testid="preview-sizing-controls">
+            <SpaceBetween size="xs">
+              <FormField
+                label="Image downscaling"
+                description="Resize each image so its longer edge is at most this many pixels before it is sent to the model. Applies to the dataset image and every attached example image."
+              >
+                <div data-testid="preview-downscale-select">
+                  <Select
+                    selectedOption={selectedDownscaleOption}
+                    options={downscaleOptions}
+                    onChange={({ detail }) =>
+                      handleDownscaleChange(detail.selectedOption.value)
+                    }
+                    ariaLabel="Image downscaling"
+                    selectedAriaLabel="Selected"
+                  />
+                </div>
+              </FormField>
+
+              <FormField
+                label="Output token budget"
+                description="The maximum output tokens each model request may use. Leave empty to use the configured limit for this model."
+                constraintText={`Whole number from ${TOKEN_BUDGET_RANGE_TEXT}`}
+              >
+                <div data-testid="preview-token-budget-input">
+                  <Input
+                    value={budgetEntry}
+                    type="number"
+                    inputMode="numeric"
+                    placeholder={`${TOKEN_BUDGET_MIN} to ${TOKEN_BUDGET_CEILING}`}
+                    ariaLabel="Output token budget"
+                    onChange={({ detail }) => handleBudgetChange(detail.value)}
+                  />
+                </div>
+              </FormField>
+            </SpaceBetween>
+          </div>
+        )}
+
         {/* --------------------------- run control ---------------------- */}
         {validationErrors.length > 0 && (
           <Alert
@@ -850,6 +1134,19 @@ export default function PromptTuningPreview({
                       {result.sampleKey}
                     </Box>
 
+                    {/* Source → Sent dimensions and the ratio, or the
+                        unavailable indication with the rest of the result
+                        still rendered (req 5.4, 5.11). */}
+                    {result.state !== 'Pending' && (
+                      <Box
+                        fontSize="body-s"
+                        color="text-body-secondary"
+                        data-testid="preview-result-sizing"
+                      >
+                        {previewSizingText(result.payload)}
+                      </Box>
+                    )}
+
                     {result.state === 'Pending' && (
                       <div data-testid="preview-result-pending">
                         <StatusIndicator type="in-progress">
@@ -873,6 +1170,26 @@ export default function PromptTuningPreview({
                           <Box data-testid="preview-failure-reason">
                             {result.failureReason ||
                               'The model produced no usable result for this image.'}
+                          </Box>
+                          {/* The run's applied sizing inputs beside the
+                              category and reason (req 9.8). */}
+                          <Box
+                            fontSize="body-s"
+                            color="text-body-secondary"
+                            data-testid="preview-failure-downscale"
+                          >
+                            Image downscaling:{' '}
+                            {downscaleSettingText(displayed.downscaleMaxEdge)}
+                          </Box>
+                          <Box
+                            fontSize="body-s"
+                            color="text-body-secondary"
+                            data-testid="preview-failure-token-budget"
+                          >
+                            Output token budget:{' '}
+                            {typeof displayed.tokenBudget === 'number'
+                              ? displayed.tokenBudget
+                              : 'not reported'}
                           </Box>
                           {result.failureCategory ===
                             'unusable_model_output' && (

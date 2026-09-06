@@ -17,6 +17,28 @@ Validates Requirements 3.1, 6.6, 7.6
 **Property 2: Preview and Auto_Labeler derive identical outcomes from
 identical model output** — Validates Requirements 3.2, 3.11, 9.3
 
+Extended for llm-model-token-and-image-sizing (task 9.2) with the sizing
+dimension of the same identity claim:
+
+**Property 5: Preview and Auto_Labeler requests stay byte-identical under
+downscaling** — Validates Requirements 1.4, 6.1, 6.8, 8.4, 8.6
+
+The sizing property drives the same two entry points over a widened space:
+a Downscale_Setting (Downscale_Off plus every Max_Image_Edge option), a
+Token_Budget_Selection, a Model_Token_Limits mapping persisted as the
+`llm_model_token_limits` settings item both per-invocation loaders read,
+and source dimensions widened so a subset of drawn targets and examples
+genuinely exceeds each drawn bound — real decode-and-re-encode resizes,
+not just pass-throughs. `IdentityEnv` plants the drawn values where the
+system persists them (`auto_label.downscale_max_edge` /
+`auto_label.token_budget` on the job record for the worker;
+`downscale_max_edge` plus the start-route-resolved `token_budget` on the
+`RUN` document for the preview), and a spy on the chokepoint's
+`downscale_image` binding proves each image block was downscaled exactly
+once per path. Everything Properties 1 and 2 assert is untouched: their
+generators, environments and assertions run exactly as before, with the
+sizing fields inert.
+
 One stub for both paths is what makes the comparison meaningful: each module
 rebinds its own `get_bedrock_client` onto `dda_llm_prelabel` immediately
 before delegating, so the captured `converse(**kwargs)` list holds the two
@@ -53,6 +75,7 @@ environments are built inside the test bodies from `AutolabelEnv`
 `_Patcher` (test_property_llm_autolabel_preservation.py) stands in for
 monkeypatch.
 """
+import io
 import json
 import os
 import sys
@@ -65,10 +88,14 @@ from botocore.exceptions import ReadTimeoutError
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from dda_llm_image import MAX_IMAGE_EDGE_OPTIONS, downscale_image
 from dda_llm_request import (
     FEW_SHOT_HEADER,
     FEW_SHOT_TARGET_INTRO,
     MODEL_IMAGE_LIMIT_DEFAULT,
+    few_shot_identification_text,
+    image_format_for_key,
+    resolve_token_budget,
     select_few_shot_examples,
 )
 from test_dda_autolabel_worker import (
@@ -117,6 +144,30 @@ CLAMPED_TIMEOUT = 120
 # trailing whitespace, quotes, braces, a newline and a non-ASCII character.
 AWKWARD_PROMPT = '  Find every "scratch" {and dent}\n  on the panel — ✓  '
 
+# A dedicated portal settings table for the `llm_model_token_limits` item
+# (llm-model-token-and-image-sizing Req 1.8): the sizing property points
+# both modules' SETTINGS_TABLE at it so the Preview_API's and the
+# Auto_Labeler's per-invocation loaders read the drawn mapping through the
+# same persisted item, exactly as production delivers it.
+IDENTITY_SETTINGS_TABLE = "test-settings-request-identity"
+
+
+def real_image_bytes(width, height, image_format, seed=0):
+    """A fully decodable image — unlike `png_bytes` / `jpeg_bytes`'
+    header-only bytes — for the sizing cases that drive the
+    Image_Downscaler through a real decode-and-re-encode
+    (test_dda_llm_prelabel.real_png_bytes's convention). The seed varies
+    the fill color so distinct images carry distinct bytes even at equal
+    dimensions."""
+    from PIL import Image  # lazy, matching the imaging-layer convention
+
+    color = ((37 * seed + 11) % 256, (59 * seed + 23) % 256,
+             (83 * seed + 41) % 256)
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(
+        buffer, format="PNG" if image_format == "png" else "JPEG")
+    return buffer.getvalue()
+
 
 # ---------------------------------------------------------------- fixtures
 
@@ -156,6 +207,25 @@ def prelabel(aws_stack):
     """The shared invocation module both paths delegate to."""
     import dda_llm_prelabel
     return dda_llm_prelabel
+
+
+@pytest.fixture(scope="module")
+def settings_table(aws_stack):
+    """The moto-backed portal settings table the sizing property writes
+    the `llm_model_token_limits` item into."""
+    client = boto3.client("dynamodb", region_name=REGION)
+    try:
+        client.create_table(
+            TableName=IDENTITY_SETTINGS_TABLE,
+            KeySchema=[{"AttributeName": "setting_key", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "setting_key", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+    except client.exceptions.ResourceInUseException:
+        pass
+    return boto3.resource("dynamodb",
+                          region_name=REGION).Table(IDENTITY_SETTINGS_TABLE)
 
 
 class _EnvPatcher(_Patcher):
@@ -198,7 +268,7 @@ class IdentityEnv:
     """
 
     def __init__(self, stack, worker, dda, prelabel, patcher, stub,
-                 image_limit=None):
+                 image_limit=None, token_limits=None, settings_table=None):
         self.stack = stack
         self.worker = worker
         self.dda = dda
@@ -229,43 +299,98 @@ class IdentityEnv:
                            json.dumps({MODEL_ID: image_limit}))
             self.image_limit = image_limit
 
+        # llm-model-token-and-image-sizing: the Model_Token_Limits mapping
+        # is persisted as the `llm_model_token_limits` settings item, the
+        # one place both per-invocation loaders read (Req 1.8, 6.8). With
+        # `settings_table` supplied (the sizing property), the drawn
+        # mapping is written through DynamoDB — so both paths read it back
+        # through the real Decimal conversion — and both modules'
+        # per-invocation memos are cleared so no earlier example's mapping
+        # can leak in. A `None` mapping deterministically resolves to the
+        # empty mapping (SETTINGS_TABLE off, blank environment bootstrap).
+        # The legacy environments (Properties 1 and 2) pass neither
+        # argument and are untouched.
+        self.sizing = settings_table is not None
+        self.token_limits_mapping = {}
+        if self.sizing:
+            patcher.setattr(worker, "_model_token_limits_cache", None)
+            patcher.setattr(dda, "_model_token_limits_cache", None)
+            patcher.setenv("LLM_MODEL_TOKEN_LIMITS", "")
+            if token_limits is None:
+                patcher.setattr(worker, "SETTINGS_TABLE", None)
+                patcher.setattr(dda, "SETTINGS_TABLE", None)
+            else:
+                settings_table.put_item(Item={
+                    "setting_key": worker.LLM_MODEL_TOKEN_LIMITS_SETTING_KEY,
+                    "value": token_limits,
+                })
+                patcher.setattr(worker, "SETTINGS_TABLE",
+                                IDENTITY_SETTINGS_TABLE)
+                patcher.setattr(dda, "SETTINGS_TABLE",
+                                IDENTITY_SETTINGS_TABLE)
+                self.token_limits_mapping = dict(token_limits)
+
     # ------------------------------------------------------------- seams
     def _client_factory(self, region, timeout_seconds):
         self.recorded.append((region, timeout_seconds))
         return self.stub
 
     # ------------------------------------------------------------- setup
-    def seed_target(self, extension, width, height):
-        """The one object both paths label."""
+    def seed_target(self, extension, width, height, real=False):
+        """The one object both paths label.
+
+        `real` seeds fully decodable pixel data instead of the header-only
+        bytes, for the sizing cases whose drawn bound makes the
+        Image_Downscaler genuinely decode and re-encode the target.
+        """
         self.image_key = f"datasets/{uuid.uuid4().hex[:8]}/target{extension}"
-        self.image_bytes = (png_bytes(width, height)
-                            if extension.lower() == ".png"
-                            else jpeg_bytes(width, height))
+        image_format = ("png" if extension.lower() == ".png" else "jpeg")
+        if real:
+            self.image_bytes = real_image_bytes(width, height, image_format,
+                                                seed=7)
+        else:
+            self.image_bytes = (png_bytes(width, height)
+                                if image_format == "png"
+                                else jpeg_bytes(width, height))
         self.s3.put_object(Bucket=DATASET_BUCKET, Key=self.image_key,
                            Body=self.image_bytes)
         self.image_uri = f"s3://{DATASET_BUCKET}/{self.image_key}"
         return self.image_key
 
     def seed_examples(self, good_count, bad_count, bucket=DATASET_BUCKET,
-                      bare=False):
+                      bare=False, dimensions=None):
         """Stored Few_Shot_Example references, good then bad in stored order.
 
-        Every example gets distinct bytes (distinct pixel dimensions), so a
-        request that attached the same *count* of examples in a different
-        order, or attached a different subset, cannot pass the comparison.
-        References are full `s3://bucket/key` URIs — the spelling the wizard
-        stores — unless `bare` is set, which the seam-difference test uses.
+        Every example gets distinct bytes (distinct pixel dimensions and,
+        for real images, distinct fill colors), so a request that attached
+        the same *count* of examples in a different order, or attached a
+        different subset, cannot pass the comparison. References are full
+        `s3://bucket/key` URIs — the spelling the wizard stores — unless
+        `bare` is set, which the seam-difference test uses.
+
+        `dimensions` — a `(width, height)` pair per example in seeded
+        order — switches to fully decodable pixel data, for the sizing
+        cases whose drawn bound makes the Image_Downscaler genuinely
+        decode and re-encode the examples that exceed it.
         """
         examples = []
         self.example_bytes = {}
         base = f"labeling-examples/{uuid.uuid4().hex[:8]}"
+        index = 0
         for designation, count in ((GOOD, good_count), (BAD, bad_count)):
             for position in range(count):
                 extension = "png" if (position % 2 == 0) else "jpg"
                 key = f"{base}/{designation}/{position}.{extension}"
-                body = (png_bytes(11 + position, 7 + position)
-                        if extension == "png"
-                        else jpeg_bytes(13 + position, 9 + position))
+                if dimensions is None:
+                    body = (png_bytes(11 + position, 7 + position)
+                            if extension == "png"
+                            else jpeg_bytes(13 + position, 9 + position))
+                else:
+                    width, height = dimensions[index]
+                    body = real_image_bytes(
+                        width, height,
+                        "png" if extension == "png" else "jpeg", seed=index)
+                index += 1
                 self.s3.put_object(Bucket=bucket, Key=key, Body=body)
                 ref = key if bare else f"s3://{bucket}/{key}"
                 self.example_bytes[ref] = body
@@ -289,6 +414,23 @@ class IdentityEnv:
         leak into the request (Req 3.1 names Detection_Prompt, Label_Set and
         dimensions as the prompt inputs).
         """
+        auto_label = {
+            "enabled": True,
+            "model": MODEL,
+            "detection_prompt": case.detection_prompt,
+            "few_shot": self._few_shot_document(case),
+        }
+        # llm-model-token-and-image-sizing Req 5.7, 3.6: `create_dda_job`
+        # persists `auto_label.downscale_max_edge` / `auto_label.token_budget`
+        # only when the submission carried them — Downscale_Off and an empty
+        # budget leave the record without the keys, so the drawn `None`s are
+        # planted as absence, exactly the record shape production writes.
+        downscale_setting = getattr(case, "downscale_setting", None)
+        if downscale_setting is not None:
+            auto_label["downscale_max_edge"] = downscale_setting
+        token_budget_selection = getattr(case, "token_budget_selection", None)
+        if token_budget_selection is not None:
+            auto_label["token_budget"] = token_budget_selection
         return {
             "job_id": f"labeling-{uuid.uuid4().hex[:8]}",
             "usecase_id": self.usecase_id,
@@ -296,12 +438,7 @@ class IdentityEnv:
             "label_set": list(case.label_set),
             "skip_verification": False,
             "per_label_prompts": case.per_label_prompts or {},
-            "auto_label": {
-                "enabled": True,
-                "model": MODEL,
-                "detection_prompt": case.detection_prompt,
-                "few_shot": self._few_shot_document(case),
-            },
+            "auto_label": auto_label,
         }
 
     def sqs_message(self, case, job):
@@ -318,8 +455,16 @@ class IdentityEnv:
     def run_document(self, case):
         """The `PREVIEW#{run_id}` / `RUN` item the executor reads, carrying
         the validated example references `_write_preview_run_item` records
-        additively under `few_shot_examples`."""
-        return {
+        additively under `few_shot_examples`.
+
+        For the sizing property it also carries what the start route
+        records (llm-model-token-and-image-sizing Req 5.3, 1.6): the
+        validated `downscale_max_edge` (absent for Downscale_Off) and
+        `token_budget` as the Effective_Token_Budget already resolved at
+        run start — re-resolution at execution time is the identity, which
+        is exactly how the executor reads it back.
+        """
+        document = {
             "job_id": f"PREVIEW#preview-{uuid.uuid4().hex[:8]}",
             "task_id": "RUN",
             "usecase_id": self.usecase_id,
@@ -330,6 +475,12 @@ class IdentityEnv:
             "few_shot_enabled": case.few_shot_enabled,
             "few_shot_examples": [dict(example) for example in self.examples],
         }
+        if self.sizing:
+            downscale_setting = getattr(case, "downscale_setting", None)
+            if downscale_setting is not None:
+                document["downscale_max_edge"] = downscale_setting
+            document["token_budget"] = self.expected_token_budget(case)
+        return document
 
     def worker_prelabel(self, case):
         """`dda_autolabel_worker._generate_llm_prelabel` — the labeling-time
@@ -341,13 +492,30 @@ class IdentityEnv:
 
     def preview_prelabel(self, case):
         """`dda_labeling._run_preview_sample` — the Preview_API's per-sample
-        body, with its own S3 read, dimension gate and few-shot resolution."""
-        prelabel, _width, _height = self.dda._run_preview_sample(
-            self.run_document(case), {}, self.usecase, DATASET_BUCKET,
-            self.image_key)
+        body, with its own S3 read, dimension gate and few-shot resolution.
+
+        The executor returns the Source_Dimensions and the Sent_Dimensions
+        beside the Pre_Label (llm-model-token-and-image-sizing Req 5.10);
+        both are stashed for the sizing assertions and the return value
+        keeps its meaning as the Pre_Label alone.
+        """
+        prelabel, source_dimensions, sent_dimensions = (
+            self.dda._run_preview_sample(
+                self.run_document(case), {}, self.usecase, DATASET_BUCKET,
+                self.image_key))
+        self.preview_source_dimensions = source_dimensions
+        self.preview_sent_dimensions = sent_dimensions
         return prelabel
 
     # -------------------------------------------------------- assertions
+    def expected_token_budget(self, case):
+        """The Effective_Token_Budget both paths must send: the shared
+        resolver over the drawn selection and the drawn mapping
+        (llm-model-token-and-image-sizing Req 1.4)."""
+        return resolve_token_budget(
+            MODEL_ID, getattr(case, "token_budget_selection", None),
+            self.token_limits_mapping)
+
     def attached_examples(self):
         """What the shared selection says both paths must attach."""
         attached, _omitted = select_few_shot_examples(
@@ -381,15 +549,55 @@ _prompt_text = st.one_of(
     ).filter(lambda text: text.strip()),
 )
 
+# Sizing dimensions (llm-model-token-and-image-sizing task 9.2): the
+# 40-400 px space widened so a subset of drawn targets exceeds *every*
+# Max_Image_Edge option — including 2048 — and a subset of drawn examples
+# exceeds each bound too, so real decode-and-re-encode resizes happen on
+# both kinds of image block rather than only pass-throughs.
+_sizing_target_edge = st.one_of(
+    st.integers(min_value=40, max_value=400),      # below every bound
+    st.integers(min_value=520, max_value=1400),    # above 512/768/1024/1280
+    st.integers(min_value=1560, max_value=2600),   # above 1536 and 2048
+)
+_sizing_example_edge = st.one_of(
+    st.integers(min_value=24, max_value=300),      # below every bound
+    st.integers(min_value=520, max_value=2200),    # above a drawn subset
+)
+
+# Model_Token_Limits mappings as an administrator could persist them:
+# absent entirely, empty, carrying the model's entry, and carrying only
+# decoys — a whitespace-padded spelling and an unrelated identifier —
+# that exact string comparison must not match (Req 1.1).
+_token_limits_mappings = st.one_of(
+    st.none(),
+    st.dictionaries(
+        keys=st.sampled_from([
+            MODEL_ID,
+            f" {MODEL_ID} ",
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
+        ]),
+        values=st.integers(min_value=1,
+                           max_value=128000),
+        max_size=3,
+    ),
+)
+
 
 @st.composite
-def _identity_cases(draw):
+def _identity_cases(draw, sizing=False):
     """A full `llm:` job configuration: modality, Label_Set, dimensions, key
     extension, Detection_Prompt, few-shot state and Model_Image_Limit.
 
     The example counts and limits are drawn together so the generated space
     includes limits that attach everything, limits that force omission, and
     `limit == 1` which attaches nothing at all (Req 7.2, 7.4).
+
+    With `sizing` set (llm-model-token-and-image-sizing task 9.2) the case
+    additionally draws a Downscale_Setting, a Token_Budget_Selection, a
+    Model_Token_Limits mapping and per-example dimensions, and the source
+    dimensions are widened so a subset exceeds each bound. Without it —
+    the predecessor properties — those fields are inert (`None`) and every
+    draw is exactly what it always was.
     """
     modality = draw(st.sampled_from(MODALITIES))
     label_set = (list(CLASSIFICATION_LABELS) if modality == "Classification"
@@ -398,21 +606,54 @@ def _identity_cases(draw):
     per_label_prompts = draw(st.one_of(
         st.none(),
         st.just({label: f"guidance for {label}" for label in label_set})))
+    dimension_edge = (_sizing_target_edge if sizing
+                      else st.integers(min_value=40, max_value=400))
+    width = draw(dimension_edge)
+    height = draw(dimension_edge)
+    extension = draw(st.sampled_from([".png", ".jpg", ".jpeg", ".JPG"]))
+    detection_prompt = draw(_prompt_text)
+    few_shot_enabled = draw(st.booleans())
+    good_count = draw(st.integers(min_value=0, max_value=4))
+    bad_count = draw(st.integers(min_value=0, max_value=4))
+    # None means "no configured limit": both paths resolve the shared
+    # default of 20.
+    image_limit = draw(st.one_of(st.none(),
+                                 st.integers(min_value=1, max_value=6)))
+
+    downscale_setting = None
+    token_budget_selection = None
+    token_limits = None
+    example_dimensions = None
+    if sizing:
+        downscale_setting = draw(
+            st.sampled_from((None,) + MAX_IMAGE_EDGE_OPTIONS))
+        # Valid-or-absent, the two states the system persists: request
+        # validation and job creation reject everything else before a
+        # record exists (Req 3.5, 3.6).
+        token_budget_selection = draw(st.one_of(
+            st.none(), st.integers(min_value=1, max_value=128000)))
+        token_limits = draw(_token_limits_mappings)
+        total = good_count + bad_count
+        example_dimensions = draw(st.lists(
+            st.tuples(_sizing_example_edge, _sizing_example_edge),
+            min_size=total, max_size=total))
+
     return SimpleNamespace(
         modality=modality,
         label_set=label_set,
         per_label_prompts=per_label_prompts,
-        width=draw(st.integers(min_value=40, max_value=400)),
-        height=draw(st.integers(min_value=40, max_value=400)),
-        extension=draw(st.sampled_from([".png", ".jpg", ".jpeg", ".JPG"])),
-        detection_prompt=draw(_prompt_text),
-        few_shot_enabled=draw(st.booleans()),
-        good_count=draw(st.integers(min_value=0, max_value=4)),
-        bad_count=draw(st.integers(min_value=0, max_value=4)),
-        # None means "no configured limit": both paths resolve the shared
-        # default of 20.
-        image_limit=draw(st.one_of(st.none(),
-                                   st.integers(min_value=1, max_value=6))),
+        width=width,
+        height=height,
+        extension=extension,
+        detection_prompt=detection_prompt,
+        few_shot_enabled=few_shot_enabled,
+        good_count=good_count,
+        bad_count=bad_count,
+        image_limit=image_limit,
+        downscale_setting=downscale_setting,
+        token_budget_selection=token_budget_selection,
+        token_limits=token_limits,
+        example_dimensions=example_dimensions,
     )
 
 
@@ -669,6 +910,219 @@ def _preview_outcome(env, dda, case):
             failed=True, prelabel=None, reason=payload["failure_reason"],
             category=payload["failure_category"],
             raw_model_output=payload.get("raw_model_output"))
+
+
+# =========================================================================== #
+# Property 5 (llm-model-token-and-image-sizing)
+# =========================================================================== #
+
+def declared(image_bytes):
+    """(width, height) parsed from the container header, for assertion
+    diagnostics."""
+    from dda_llm_image import declared_dimensions
+    return declared_dimensions(image_bytes)
+
+
+def summarize(downscale_records):
+    """One diagnostic tuple per recorded `downscale_image` call."""
+    return [(record.format, record.setting, record.source_dimensions,
+             declared(record.bytes)) for record in downscale_records]
+
+
+def _spy_on_downscale(patcher, prelabel):
+    """Wrap the chokepoint's `downscale_image` binding with a recorder that
+    delegates to the real Image_Downscaler (test_dda_llm_prelabel's
+    `spy_downscale` convention, patched through `_Patcher` because
+    Hypothesis cannot consume the function-scoped monkeypatch)."""
+    real = prelabel.downscale_image
+    calls = []
+
+    def recording(image_bytes, image_format, downscale_setting, **kwargs):
+        calls.append(SimpleNamespace(
+            bytes=image_bytes, format=image_format,
+            setting=downscale_setting,
+            source_dimensions=kwargs.get("source_dimensions")))
+        return real(image_bytes, image_format, downscale_setting, **kwargs)
+
+    patcher.setattr(prelabel, "downscale_image", recording)
+    return calls
+
+
+def _sizing_reply(case):
+    """A Coordinate_Guidance document valid in **Sent** space for every
+    drawn dimension pair: the smallest sent edge the sizing generators can
+    produce is 7 px (a 40x2600 source at the 512 bound), so a 2x2 box at
+    the origin is always within bounds."""
+    return guidance([{
+        "class": case.label_set[0],
+        "box": {"left": 0, "top": 0, "width": 2, "height": 2},
+    }])
+
+
+@settings(max_examples=100, deadline=None)
+@given(case=_identity_cases(sizing=True))
+def test_property_preview_and_worker_stay_byte_identical_under_downscaling(
+        aws_stack, worker, dda, prelabel, settings_table, case):
+    """Feature: llm-model-token-and-image-sizing, Property 5: Preview and
+    Auto_Labeler requests stay byte-identical under downscaling — *For any*
+    Labeling_Modality, Label_Set, Detection_Prompt, per-label prompt map,
+    source image bytes, Few_Shot_Example set, Downscale_Setting,
+    Token_Budget_Selection and `llm:` model identifier, the Converse request
+    the Preview_API issues and the Converse request the Auto_Labeler issues
+    SHALL be equal in every element — model id, ordered content blocks in
+    the order of Requirement 8.6, image bytes and formats, prompt text, and
+    inference configuration — and exactly one invocation SHALL be issued
+    per image.
+
+    **Validates: Requirements 1.4, 6.1, 6.8, 8.4, 8.6**
+    """
+    patcher = _EnvPatcher()
+    try:
+        stub = RecordingConverseClient(reply=_sizing_reply(case))
+        env = IdentityEnv(aws_stack, worker, dda, prelabel, patcher, stub,
+                          image_limit=case.image_limit,
+                          token_limits=case.token_limits,
+                          settings_table=settings_table)
+        env.seed_target(case.extension, case.width, case.height, real=True)
+        env.seed_examples(case.good_count, case.bad_count,
+                          dimensions=case.example_dimensions)
+        downscale_calls = _spy_on_downscale(patcher, prelabel)
+
+        worker_prelabel = env.worker_prelabel(case)
+        worker_downscales = list(downscale_calls)
+        del downscale_calls[:]
+        preview_prelabel = env.preview_prelabel(case)
+        preview_downscales = list(downscale_calls)
+
+        # Exactly one invocation per image, from each path.
+        assert len(stub.calls) == 2, (
+            f"expected one Converse call per path, got {len(stub.calls)}")
+        worker_call, preview_call = stub.calls
+
+        # The central claim: the whole request, element for element, under
+        # the drawn Downscale_Setting and Token_Budget_Selection (Req 1.4,
+        # 6.8).
+        assert preview_call == worker_call, (
+            "preview and Auto_Labeler requests differ\n"
+            f"worker : {worker_call!r}\npreview: {preview_call!r}")
+        assert set(worker_call) == {"modelId", "messages", "inferenceConfig"}
+        assert worker_call["modelId"] == MODEL_ID
+        assert env.recorded == [(BEDROCK_CONFIG["region"],
+                                 CLAMPED_TIMEOUT)] * 2
+
+        # Req 1.4: both requests carry the Token_Budget_Resolver's output
+        # for the drawn selection and the persisted mapping — the worker
+        # resolving the job record's selection, the preview re-resolving
+        # the budget the start route recorded — never the
+        # Global_Max_Tokens.
+        expected_budget = env.expected_token_budget(case)
+        assert worker_call["inferenceConfig"]["maxTokens"] == expected_budget
+        assert preview_call["inferenceConfig"]["maxTokens"] == expected_budget
+
+        # The request really is the one this configuration calls for.
+        attached = env.attached_examples() if case.few_shot_enabled else []
+        blocks = image_blocks(worker_call)
+        assert len(blocks) == len(attached) + 1
+        assert len(blocks) <= env.image_limit
+
+        # Target image last, carrying the *downscaled* bytes of the seeded
+        # object in the key-derived format — recomputed here through the
+        # deterministic Image_Downscaler (Property 4), so a pass-through
+        # setting must yield the seeded bytes exactly (Req 6.1, 8.6).
+        target_format = ("png" if case.extension.lower() == ".png"
+                         else "jpeg")
+        expected_target, sent_width, sent_height = downscale_image(
+            env.image_bytes, target_format, case.downscale_setting,
+            source_dimensions=(case.width, case.height))
+        assert blocks[-1]["image"]["source"]["bytes"] == expected_target
+        assert blocks[-1]["image"]["format"] == target_format
+        if (case.downscale_setting is None
+                or max(case.width, case.height) <= case.downscale_setting):
+            assert blocks[-1]["image"]["source"]["bytes"] == env.image_bytes
+
+        # Each attached example carries the downscaled bytes of its seeded
+        # object, in selection order and its own key-derived format
+        # (Req 8.4, 8.6).
+        expected_example_bytes = []
+        for example in attached:
+            seeded = env.example_bytes[example["ref"]]
+            if case.downscale_setting is None:
+                expected_example_bytes.append(seeded)
+            else:
+                resized, _w, _h = downscale_image(
+                    seeded, image_format_for_key(example["ref"]),
+                    case.downscale_setting)
+                expected_example_bytes.append(resized)
+        actual_example_bytes = [block["image"]["source"]["bytes"]
+                                for block in blocks[:-1]]
+        assert actual_example_bytes == expected_example_bytes, (
+            f"attached example bytes differ from the downscaled seeds\n"
+            f"actual   dims: {[declared(b) for b in actual_example_bytes]}\n"
+            f"expected dims: {[declared(b) for b in expected_example_bytes]}\n"
+            f"worker downscales : {summarize(worker_downscales)}\n"
+            f"preview downscales: {summarize(preview_downscales)}")
+        assert [block["image"]["format"] for block in blocks[:-1]] == [
+            image_format_for_key(example["ref"]) for example in attached]
+
+        # The block sequence is the Requirement 8.6 order for every
+        # setting: header, each example identified then attached, the
+        # target intro, the target image, then the prompt.
+        content = worker_call["messages"][0]["content"]
+        texts = text_blocks(worker_call)
+        assert case.detection_prompt in texts[-1]
+        # The prompt names the dimensions of the image actually sent.
+        assert (f"The image is {sent_width} pixels wide and "
+                f"{sent_height} pixels tall") in texts[-1]
+        if attached:
+            assert len(content) == 2 * len(attached) + 4
+            ordinals = {}
+            expected_labels = []
+            for example in attached:
+                designation = example["designation"]
+                ordinals[designation] = ordinals.get(designation, 0) + 1
+                expected_labels.append(few_shot_identification_text(
+                    designation, ordinals[designation]))
+            assert texts[0] == FEW_SHOT_HEADER
+            assert texts[1:-2] == expected_labels
+            assert texts[-2] == FEW_SHOT_TARGET_INTRO
+            for index in range(len(attached)):
+                assert content[2 * index + 1] == {
+                    "text": expected_labels[index]}
+                assert "image" in content[2 * index + 2]
+        else:
+            assert len(content) == 2
+            assert FEW_SHOT_HEADER not in texts
+            assert FEW_SHOT_TARGET_INTRO not in texts
+        assert "image" in content[-2]
+        assert content[-2] == blocks[-1]
+
+        # The chokepoint's downscaler binding ran exactly once per image
+        # block on each path — the target first (with the caller's
+        # Source_Dimensions), then each attached example — and never at
+        # Downscale_Off (Req 6.1, 8.1).
+        for path_name, path_downscales in (("worker", worker_downscales),
+                                           ("preview", preview_downscales)):
+            if case.downscale_setting is None:
+                assert path_downscales == [], path_name
+                continue
+            assert len(path_downscales) == len(blocks), (
+                f"{path_name} path: expected one downscale per image block\n"
+                f"calls: {summarize(path_downscales)}")
+            assert all(call.setting == case.downscale_setting
+                       for call in path_downscales)
+            assert path_downscales[0].bytes == env.image_bytes
+            assert path_downscales[0].source_dimensions == (case.width,
+                                                            case.height)
+            assert [call.bytes for call in path_downscales[1:]] == [
+                env.example_bytes[example["ref"]] for example in attached]
+
+        # The executor reports the same Sent_Dimensions the request
+        # embodies, and the same shared conversion yields the same
+        # Pre_Label on both paths.
+        assert env.preview_sent_dimensions == (sent_width, sent_height)
+        assert preview_prelabel == worker_prelabel
+    finally:
+        patcher.undo()
 
 
 # =========================================================================== #

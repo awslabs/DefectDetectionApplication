@@ -23,6 +23,14 @@ by data_accounts.py. These tests cover:
 Runs against the shared moto stack from conftest.py.
 
 _Requirements: 10.6_
+
+Extended by task 5.4 (spec: llm-model-token-and-image-sizing) with section
+6: the GET/PUT /data-accounts/bedrock-configuration/token-limits routes,
+their PortalAdmin gate (reached identically to /models), and the mutual
+isolation between the llm_model_token_limits item and the
+bedrock_configuration item.
+
+_Requirements: 4.1, 4.3, 4.4, 4.7_
 """
 import json
 import os
@@ -458,3 +466,165 @@ class TestBedrockModelOptions:
             "us.amazon.nova-pro-v1:0",
         ]
         assert "permissions" in payload
+
+
+# ===========================================================================
+# 6. Model_Token_Limits routes
+#    GET/PUT /data-accounts/bedrock-configuration/token-limits
+#    (llm-model-token-and-image-sizing task 5.4;
+#    Requirements 4.1, 4.3, 4.4, 4.7)
+# ===========================================================================
+
+TOKEN_LIMITS_SETTING_KEY = "llm_model_token_limits"
+TOKEN_LIMITS_MAPPING = {"us.amazon.nova-pro-v1:0": 10000}
+
+
+def invoke_token_limits(bedrock_env, method, user, mapping=None):
+    """GET/PUT /data-accounts/bedrock-configuration/token-limits."""
+    event = {
+        "httpMethod": method,
+        "resource": "/data-accounts/{id}/token-limits",
+        "path": f"/data-accounts/{RESOURCE_ID}/token-limits",
+        "pathParameters": {"id": RESOURCE_ID},
+        "body": (json.dumps({"model_token_limits": mapping})
+                 if mapping is not None else None),
+        "requestContext": {
+            "authorizer": {
+                "claims": {
+                    "sub": user["user_id"],
+                    "email": user["email"],
+                    "cognito:username": user["username"],
+                    "custom:role": user["role"],
+                }
+            }
+        },
+    }
+    response = bedrock_env.data_accounts.handler(event, None)
+    return response["statusCode"], json.loads(response["body"])
+
+
+def stored_token_limits(bedrock_env):
+    return bedrock_env.settings_table.get_item(
+        Key={"setting_key": TOKEN_LIMITS_SETTING_KEY}).get("Item")
+
+
+class TestModelTokenLimitsRoutes:
+
+    @pytest.fixture(autouse=True)
+    def clean_token_limits(self, bedrock_env):
+        """Each test starts with no stored llm_model_token_limits item
+        (the module fixture already clears bedrock_configuration)."""
+        bedrock_env.settings_table.delete_item(
+            Key={"setting_key": TOKEN_LIMITS_SETTING_KEY})
+        yield
+
+    # -- the PortalAdmin gate, reached identically to /models --------------
+
+    @pytest.mark.parametrize("role", ["Viewer", "Operator", "DataScientist",
+                                      "UseCaseAdmin"])
+    @pytest.mark.parametrize("method", ["GET", "PUT"])
+    def test_non_portal_admin_is_denied_identically_to_models(
+            self, bedrock_env, role, method):
+        """Both /token-limits methods sit behind the same
+        Permission.BEDROCK_CONFIG_WRITE gate the /models listing reaches:
+        the 403 payload is identical and nothing is persisted
+        (Requirement 4.3)."""
+        user = make_user(role)
+        status, payload = invoke_token_limits(
+            bedrock_env, method, user, mapping=TOKEN_LIMITS_MAPPING)
+        models_status, models_payload = invoke_models(bedrock_env, user)
+
+        assert status == models_status == 403
+        assert payload == models_payload
+        assert "bedrock-config:write" in payload["required_permissions"]
+        assert stored_token_limits(bedrock_env) is None
+
+    def test_denied_write_records_unauthorized_access_audit(
+            self, bedrock_env, audit_table):
+        """A denied token-limits write leaves the same denied-attempt
+        audit trail an unauthorized configuration write leaves
+        (Requirement 4.3)."""
+        viewer = make_user("Viewer")
+        status, _ = invoke_token_limits(bedrock_env, "PUT", viewer,
+                                        mapping=TOKEN_LIMITS_MAPPING)
+        assert status == 403
+
+        records = [i for i in audit_table.scan()["Items"]
+                   if i["user_id"] == viewer["user_id"]
+                   and i["action"] == "unauthorized_access"]
+        assert len(records) == 1
+        assert records[0]["result"] == "denied"
+        assert ("bedrock-config:write"
+                in records[0]["details"]["required_permissions"])
+        assert records[0]["details"]["path"].endswith("/token-limits")
+
+    # -- the two routes -----------------------------------------------------
+
+    def test_portal_admin_reads_bounds_and_writes_roundtrip(self, bedrock_env):
+        """GET returns the mapping plus default, ceiling and source; PUT
+        persists the submitted mapping and returns it (Requirement 4.1)."""
+        admin = make_user("PortalAdmin")
+
+        status, payload = invoke_token_limits(bedrock_env, "GET", admin)
+        assert status == 200
+        assert set(payload) >= {"model_token_limits", "default", "ceiling",
+                                "source"}
+        assert payload["default"] == 10000
+        assert payload["ceiling"] == 128000
+        assert payload["source"] == "environment"  # no item stored yet
+
+        status, payload = invoke_token_limits(bedrock_env, "PUT", admin,
+                                              mapping=TOKEN_LIMITS_MAPPING)
+        assert status == 200
+        assert payload["model_token_limits"] == TOKEN_LIMITS_MAPPING
+
+        status, payload = invoke_token_limits(bedrock_env, "GET", admin)
+        assert status == 200
+        assert payload["model_token_limits"] == TOKEN_LIMITS_MAPPING
+        assert payload["source"] == "settings"
+
+        item = stored_token_limits(bedrock_env)
+        assert item["setting_key"] == TOKEN_LIMITS_SETTING_KEY
+        assert item["value"] == TOKEN_LIMITS_MAPPING
+
+    # -- mutual isolation with the configuration item ------------------------
+
+    def test_token_limits_write_leaves_configuration_item_untouched(
+            self, bedrock_env):
+        """A token-limits PUT leaves the stored bedrock_configuration item
+        - every field, write metadata included - exactly as it was
+        (Requirement 4.4)."""
+        admin = make_user("PortalAdmin")
+        status, _ = invoke(bedrock_env, "PUT", admin, body=VALID_CONFIG)
+        assert status == 200
+        config_before = stored_item(bedrock_env)
+        assert config_before is not None
+
+        status, _ = invoke_token_limits(bedrock_env, "PUT", admin,
+                                        mapping=TOKEN_LIMITS_MAPPING)
+        assert status == 200
+
+        assert stored_item(bedrock_env) == config_before
+        status, payload = invoke(bedrock_env, "GET", admin)
+        assert status == 200
+        assert payload["bedrock_configuration"] == VALID_CONFIG
+
+    def test_configuration_write_leaves_token_limits_item_untouched(
+            self, bedrock_env):
+        """A bedrock_configuration PUT leaves the stored
+        llm_model_token_limits item - every field, write metadata included
+        - exactly as it was (Requirement 4.7)."""
+        admin = make_user("PortalAdmin")
+        status, _ = invoke_token_limits(bedrock_env, "PUT", admin,
+                                        mapping=TOKEN_LIMITS_MAPPING)
+        assert status == 200
+        limits_before = stored_token_limits(bedrock_env)
+        assert limits_before is not None
+
+        status, _ = invoke(bedrock_env, "PUT", admin, body=VALID_CONFIG)
+        assert status == 200
+
+        assert stored_token_limits(bedrock_env) == limits_before
+        status, payload = invoke_token_limits(bedrock_env, "GET", admin)
+        assert status == 200
+        assert payload["model_token_limits"] == TOKEN_LIMITS_MAPPING

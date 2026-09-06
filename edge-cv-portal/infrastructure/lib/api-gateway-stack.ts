@@ -787,6 +787,25 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
+    // Per-model output token limits (llm-model-token-and-image-sizing
+    // Requirements 4.1, 4.3). Like /models above, these ride the reserved
+    // 'bedrock-configuration' data-account id:
+    //   GET/PUT /data-accounts/bedrock-configuration/token-limits
+    // Authorization beyond the Cognito authorizer is the PortalAdmin
+    // 'bedrock-config:write' gate enforced inside
+    // data_accounts.handle_bedrock_configuration, which dispatches this path
+    // ahead of the bare GET/PUT, so the write gate and its denied-attempt
+    // audit entry are inherited unchanged.
+    const dataAccountTokenLimitsResource = dataAccountIdResource.addResource('token-limits');
+    dataAccountTokenLimitsResource.addMethod('GET', dataAccountsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    dataAccountTokenLimitsResource.addMethod('PUT', dataAccountsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
     // Workflow Manager endpoints
     const workflowsResource = this.api.root.addResource('workflows');
     workflowsResource.addMethod('GET', workflowsIntegration, {

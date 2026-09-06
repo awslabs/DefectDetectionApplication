@@ -391,6 +391,14 @@ describe('CreateLabelingJob — submitted payload carries detection_prompt', () 
           enabled: true,
           model: `llm:${NOVA.id}`,
           detection_prompt: PROMPT,
+          // The untouched sizing controls submit their defaults for the
+          // `llm:` family: a blank downscale select is `null`
+          // (Downscale_Off) and the budget pre-fill — the catalog carries
+          // no token_limit here, so the 10000 fallback — travels as the
+          // Token_Budget_Selection (llm-model-token-and-image-sizing
+          // Req 3.1, 3.6, 5.7).
+          downscale_max_edge: null,
+          token_budget: 10000,
         },
       })
     );

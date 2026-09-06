@@ -44,6 +44,17 @@ Feature: llm-auto-labeling (task 6.2) adds, against the same stack:
   audit event before validation errors are assembled (Req 9.3, 9.1),
   and a caller without the create permission is rejected through the
   existing rbac_check gate with nothing persisted (Req 9.2)
+
+Feature: llm-model-token-and-image-sizing (task 7.4) adds, against the
+same stack:
+
+- `auto_label.downscale_max_edge` and `auto_label.token_budget`
+  persisted unchanged for the `llm:` family when submitted (Req 5.7,
+  3.6); absent when not submitted, and a null downscale (the wizard's
+  blank select) left absent too, so an unconfigured submission's record
+  is byte-identical to a pre-feature record (Req 10.6); never written
+  for `sam` or `bedrock:` jobs, even when planted on the submission
+  (Req 10.4)
 """
 import json
 import os
@@ -964,3 +975,80 @@ class TestCreatePermission:
         assert json.loads(response["body"])["error"] == (
             "Insufficient permissions")
         env.assert_nothing_persisted()
+
+
+# ---------------------------- job-record sizing persistence (task 7.4)
+# Feature: llm-model-token-and-image-sizing
+
+
+def llm_sized_auto_label(**sizing):
+    """An llm: auto_label body carrying the two sizing values
+    (Req 3.6, 5.7)."""
+    auto_label = llm_auto_label()
+    auto_label.update(sizing)
+    return auto_label
+
+
+class TestLlmSizingPersistence:
+    """Req 3.6, 5.7, 10.4, 10.6: `auto_label.downscale_max_edge` and
+    `auto_label.token_budget` are persisted unchanged for the `llm:`
+    family only, and only when submitted."""
+
+    def test_both_values_persisted_unchanged_for_llm(self, env):
+        """Req 5.7, 3.6: the submitted Max_Image_Edge and
+        Token_Budget_Selection land on the record exactly as
+        submitted, beside the prompt."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(auto_label=llm_sized_auto_label(
+            downscale_max_edge=1024, token_budget=20000))
+        assert status == 201
+        job = env.get_job(body["job_id"])
+        assert job["auto_label"] == {
+            "enabled": True,
+            "model": LLM_MODEL,
+            "detection_prompt": LLM_PROMPT,
+            "downscale_max_edge": 1024,
+            "token_budget": 20000,
+        }
+
+    def test_omitted_values_leave_the_record_pre_feature(self, env):
+        """Req 10.6: a submission carrying neither value yields an
+        auto_label document byte-identical to a pre-feature record —
+        neither key is written, and nothing rejects the omission."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(auto_label=llm_auto_label())
+        assert status == 201
+        assert env.get_job(body["job_id"])["auto_label"] == {
+            "enabled": True,
+            "model": LLM_MODEL,
+            "detection_prompt": LLM_PROMPT,
+        }
+
+    def test_null_downscale_is_downscale_off_and_left_absent(self, env):
+        """The wizard's blank select submits null; the record holds one
+        representation of Downscale_Off only — the attribute absent."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(auto_label=llm_sized_auto_label(
+            downscale_max_edge=None))
+        assert status == 201
+        assert "downscale_max_edge" not in env.get_job(
+            body["job_id"])["auto_label"]
+
+    @pytest.mark.parametrize("model,task_type,label_set", [
+        ("sam", "Segmentation", ["scratch"]),
+        ("bedrock:anthropic.claude-3-haiku", "Classification", None),
+    ])
+    def test_never_written_for_sam_or_bedrock(self, env, model, task_type,
+                                              label_set):
+        """Req 10.4: sizing values planted on a sam / bedrock:
+        submission never reach the record — those families carry
+        neither attribute."""
+        env.put_images(["a.jpg"])
+        status, body = env.create(
+            task_type=task_type, label_set=label_set,
+            auto_label={"enabled": True, "model": model,
+                        "downscale_max_edge": 1024,
+                        "token_budget": 20000})
+        assert status == 201
+        assert env.get_job(body["job_id"])["auto_label"] == {
+            "enabled": True, "model": model}

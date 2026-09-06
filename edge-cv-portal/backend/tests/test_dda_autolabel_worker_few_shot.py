@@ -32,11 +32,40 @@ Covers, against the moto-backed stack from conftest.py and the
   reach `Available`, with no batch item failures.
 
 Requirements: 6.5, 6.7, 7.3, 7.4, 10.3
+
+Spec: llm-model-token-and-image-sizing, task 8.2 (job-record sizing
+reads). Extends the same harness — every pre-existing case above holds
+unchanged, since Few_Shot_Example selection is independent of the
+Downscale_Setting (Req 8.3):
+
+- **Reading both values off the job record** (Req 5.8, 8.1): a persisted
+  `auto_label.downscale_max_edge` downscales the target and every
+  attached example with that one setting (DynamoDB Decimals converted
+  before the resolvers see them), and a persisted valid
+  `auto_label.token_budget` is the request's `maxTokens`, unchanged by
+  whatever the Model_Token_Limits mapping says today.
+- **Malformed values are never failures** (Req 3.8, 5.9, 5.12, 10.10): a
+  malformed, null or absent `downscale_max_edge` is Downscale_Off — the
+  source bytes pass through byte-identically, proven with undecodable
+  header-only bytes that any wrongly-applied bound would refuse — and a
+  malformed or absent `token_budget` falls through to the mapping and
+  then the default of 10000.
+- **A refused example fails only its own dataset image** (Req 8.5, 9.2):
+  driven through the real SQS handler with a multi-record batch, an
+  example the Image_Downscaler cannot decode for the job's setting marks
+  that task Failed with a reason naming the example and the requested
+  bound, invokes no model for it, and leaves the sibling records'
+  outcomes untouched, with no batch item failures.
+
+Requirements: 3.8, 5.8, 5.9, 5.12, 8.1, 8.5, 9.2, 10.10
 """
+import io
 import json
 import os
 import sys
 import uuid
+from decimal import Decimal
+from types import SimpleNamespace
 
 import boto3
 import pytest
@@ -528,3 +557,311 @@ class TestBatchEndToEnd:
             b"\x89PNG")
         assert PROMPT in absent_content[1]["text"]
         assert "example" not in absent_content[1]["text"].lower()
+
+
+# --------------------------------------------- job-record sizing reads
+#                     (llm-model-token-and-image-sizing, task 8.2 —
+#                     Req 3.8, 5.8, 5.9, 5.12, 8.1, 8.5, 9.2, 10.10)
+
+# The shared-layer Model_Token_Limit_Default: every request whose
+# Token_Budget_Selection and Model_Token_Limits entry are both invalid
+# or absent must carry exactly this maxTokens (Req 3.8).
+DEFAULT_TOKEN_BUDGET = 10000
+
+
+def real_png(width, height):
+    """A fully decodable PNG — unlike `png_bytes`' header-only bytes —
+    for the cases that drive the Image_Downscaler through a real
+    decode-and-re-encode (test_dda_llm_prelabel.real_png_bytes's
+    convention)."""
+    from PIL import Image  # lazy, matching the imaging-layer convention
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (120, 40, 200)).save(buffer,
+                                                           format="PNG")
+    return buffer.getvalue()
+
+
+def decoded_size(image_bytes):
+    """(width, height) of a Converse image block's bytes, via a real
+    decode."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        return image.size
+
+
+def put_real_example(env, designation, position, *, width, height):
+    """One fully decodable PNG example upload — `put_example`'s stored
+    shape with real pixel data, for jobs whose Downscale_Setting makes
+    the downscaler decode the example bytes."""
+    key = (f"labeling-examples/{uuid.uuid4().hex[:8]}/{designation}/"
+           f"{position}.png")
+    body = real_png(width, height)
+    env.s3.put_object(Bucket=ARTIFACTS_BUCKET, Key=key, Body=body)
+    env.example_bytes[key] = body
+    return {"ref": key, "designation": designation, "position": position}
+
+
+def make_sized_llm_job(env, downscale_max_edge=_ABSENT, token_budget=_ABSENT,
+                       few_shot=_ABSENT):
+    """A persisted `llm:` job carrying the two sizing values, written
+    through DynamoDB so the worker reads them back exactly as production
+    does — numbers as Decimal (Req 5.8, 3.7)."""
+    job_id = env.make_llm_job(few_shot=few_shot)
+    for name, value in (("downscale_max_edge", downscale_max_edge),
+                        ("token_budget", token_budget)):
+        if value is not _ABSENT:
+            env.stack.tables.labeling_jobs.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression=f"SET auto_label.{name} = :value",
+                ExpressionAttributeValues={":value": value})
+    return job_id
+
+
+def run_llm_task(env, job_id, image_body=None):
+    """One image + task + record for `job_id` through the real handler,
+    returning the recorded state for assertions."""
+    uri = env.put_image(f"imgs/{uuid.uuid4()}.png", width=WIDTH,
+                        height=HEIGHT, body=image_body)
+    task_id = env.make_task(job_id, uri)
+    bedrock, _ = env.use_bedrock(replies=[guidance([BOX])])
+    result = env.run([env.record(job_id, task_id, uri, "ObjectDetection",
+                                 LABELS, MODEL, detection_prompt=PROMPT)])
+    return SimpleNamespace(result=result, task_id=task_id, bedrock=bedrock)
+
+
+@pytest.fixture
+def sizing_env(env):
+    """FewShotEnv pinned to the environment-bootstrap Model_Token_Limits
+    source: no settings-table read (other test modules leave
+    SETTINGS_TABLE set in os.environ) and no inherited mapping, so every
+    budget assertion resolves against exactly what its test configures."""
+    env.monkeypatch.setattr(env.worker, "SETTINGS_TABLE", None)
+    env.monkeypatch.delenv("LLM_MODEL_TOKEN_LIMITS", raising=False)
+    return env
+
+
+class TestJobRecordSizingReads:
+    """Req 5.8, 3.8: `auto_label.downscale_max_edge` and
+    `auto_label.token_budget` are read off the job record — through the
+    Decimal conversion DynamoDB imposes — and reach the request."""
+
+    def test_persisted_setting_and_budget_reach_the_request(self,
+                                                            sizing_env):
+        """A valid persisted setting downscales the target and a valid
+        persisted budget is the request's maxTokens, unchanged by what
+        the Model_Token_Limits mapping says today (Req 5.8, 3.7). Both
+        arrive as Decimal, so this also pins the conversion — without it
+        each value would silently degrade to Off / the mapping."""
+        env = sizing_env
+        env.monkeypatch.setenv("LLM_MODEL_TOKEN_LIMITS",
+                               json.dumps({MODEL_ID: 64000}))
+        job_id = make_sized_llm_job(env, downscale_max_edge=512,
+                                    token_budget=20000)
+
+        run = run_llm_task(env, job_id, image_body=real_png(1000, 600))
+
+        assert run.result == {"batchItemFailures": []}
+        assert (env.get_task(job_id, run.task_id)["prelabel_status"]
+                == "Available")
+        assert len(run.bedrock.calls) == 1
+        call = run.bedrock.calls[0]
+        # The persisted budget wins the resolution over the mapping.
+        assert call["inferenceConfig"]["maxTokens"] == 20000
+        content = call["messages"][0]["content"]
+        # The target is sent at the record's bound: 1000x600 at 512
+        # floors to 512x307, and the prompt names those Sent_Dimensions.
+        assert decoded_size(content[0]["image"]["source"]["bytes"]) == (
+            512, 307)
+        assert "512 pixels wide" in content[1]["text"]
+        assert "307 pixels tall" in content[1]["text"]
+        # The stored Pre_Label stays in Source coordinate space.
+        prelabel = env.prelabel_json(job_id, run.task_id)
+        assert prelabel["image_width"] == 1000
+        assert prelabel["image_height"] == 600
+
+    @pytest.mark.parametrize("stored", [
+        pytest.param(_ABSENT, id="absent"),
+        pytest.param(None, id="null"),
+        pytest.param(True, id="boolean"),
+        pytest.param("1024", id="string"),
+        pytest.param(999, id="not-an-option"),
+        pytest.param(Decimal("512.5"), id="fractional-number"),
+    ])
+    def test_malformed_or_absent_downscale_is_downscale_off(self, sizing_env,
+                                                            stored):
+        """Req 5.9, 5.12, 10.10: a malformed, null or absent
+        `downscale_max_edge` is Downscale_Off with no failure. The
+        header-only 3000x2000 target is undecodable, so any
+        wrongly-applied bound would refuse it — pass-through is the only
+        way this task reaches Available."""
+        env = sizing_env
+        job_id = make_sized_llm_job(env, downscale_max_edge=stored)
+        body = png_bytes(3000, 2000)
+
+        run = run_llm_task(env, job_id, image_body=body)
+
+        assert run.result == {"batchItemFailures": []}
+        assert (env.get_task(job_id, run.task_id)["prelabel_status"]
+                == "Available")
+        content = run.bedrock.calls[0]["messages"][0]["content"]
+        # Byte-identical pass-through; Sent equals Source at Off.
+        assert content[0]["image"]["source"]["bytes"] == body
+        assert "3000 pixels wide" in content[1]["text"]
+        assert "2000 pixels tall" in content[1]["text"]
+
+    @pytest.mark.parametrize("stored", [
+        pytest.param(_ABSENT, id="absent"),
+        pytest.param(None, id="null"),
+        pytest.param(True, id="boolean"),
+        pytest.param("20000", id="string"),
+        pytest.param(0, id="zero"),
+        pytest.param(128001, id="above-ceiling"),
+        pytest.param(Decimal("9999.5"), id="fractional-number"),
+    ])
+    def test_malformed_or_absent_budget_resolves_the_default(self, sizing_env,
+                                                             stored):
+        """Req 3.8, 10.10: with no Model_Token_Limits entry for the
+        model, a malformed or absent `token_budget` resolves the default
+        of 10000 — never a failure, never the Global_Max_Tokens."""
+        env = sizing_env
+        job_id = make_sized_llm_job(env, token_budget=stored)
+
+        run = run_llm_task(env, job_id)
+
+        assert run.result == {"batchItemFailures": []}
+        assert (env.get_task(job_id, run.task_id)["prelabel_status"]
+                == "Available")
+        assert len(run.bedrock.calls) == 1
+        assert (run.bedrock.calls[0]["inferenceConfig"]["maxTokens"]
+                == DEFAULT_TOKEN_BUDGET)
+
+    def test_malformed_budget_falls_through_to_the_mapping(self, sizing_env):
+        """Req 3.8: the invalid persisted selection falls through to the
+        Model_Token_Limits entry, not straight to the default."""
+        env = sizing_env
+        env.monkeypatch.setenv("LLM_MODEL_TOKEN_LIMITS",
+                               json.dumps({MODEL_ID: 64000}))
+        job_id = make_sized_llm_job(env, token_budget=True)
+
+        run = run_llm_task(env, job_id)
+
+        assert run.result == {"batchItemFailures": []}
+        assert (env.get_task(job_id, run.task_id)["prelabel_status"]
+                == "Available")
+        assert run.bedrock.calls[0]["inferenceConfig"]["maxTokens"] == 64000
+
+
+class TestExampleDownscaling:
+    """Req 8.1: every attached Few_Shot_Example is downscaled with the
+    target's setting, in the layout the setting leaves untouched."""
+
+    def test_examples_downscaled_with_the_targets_setting(self, sizing_env):
+        env = sizing_env
+        oversize = put_real_example(env, GOOD, 0, width=1200, height=800)
+        fitting = put_real_example(env, BAD, 0, width=300, height=200)
+        job_id = make_sized_llm_job(
+            env, downscale_max_edge=512,
+            few_shot={"enabled": True, "examples": [oversize, fitting]})
+
+        run = run_llm_task(env, job_id, image_body=real_png(1000, 600))
+
+        assert run.result == {"batchItemFailures": []}
+        assert (env.get_task(job_id, run.task_id)["prelabel_status"]
+                == "Available")
+        content = run.bedrock.calls[0]["messages"][0]["content"]
+        # The few-shot layout is unchanged by the setting.
+        assert [content[index]["text"] for index in (0, 1, 3, 5)] == [
+            FEW_SHOT_HEADER, "Good example 1:", "Bad example 1:",
+            FEW_SHOT_TARGET_INTRO]
+        assert len(content) == 8
+        # The oversize example carries re-encoded bytes at the target's
+        # bound: 1200x800 at 512 floors to 512x341.
+        good_bytes = content[2]["image"]["source"]["bytes"]
+        assert good_bytes != env.example_bytes[oversize["ref"]]
+        assert decoded_size(good_bytes) == (512, 341)
+        assert content[2]["image"]["format"] == "png"
+        # The already-fitting example passes through byte-identically.
+        assert content[4]["image"]["source"]["bytes"] == (
+            env.example_bytes[fitting["ref"]])
+        # The target is downscaled with the same setting, and the prompt
+        # names its Sent_Dimensions alone — no example dimensions.
+        assert decoded_size(content[6]["image"]["source"]["bytes"]) == (
+            512, 307)
+        assert "512 pixels wide" in content[7]["text"]
+        assert "307 pixels tall" in content[7]["text"]
+
+
+class TestRefusedExampleBatchContinuation:
+    """Req 8.5, 9.2 through the real SQS handler: an example the
+    Image_Downscaler refuses fails only its own dataset image, with no
+    model invocation for it, while the batch continues."""
+
+    def test_refused_example_fails_only_its_own_dataset_image(self,
+                                                              sizing_env):
+        env = sizing_env
+        # Header-only bytes declaring 2000x1500 — above the 512 bound,
+        # so the downscaler must decode them, and cannot.
+        undecodable = env.put_example(GOOD, 0, width=2000, height=1500)
+        broken_job = make_sized_llm_job(
+            env, downscale_max_edge=512,
+            few_shot={"enabled": True, "examples": [undecodable]})
+        broken_uri = env.put_image(f"imgs/{uuid.uuid4()}.png",
+                                   width=WIDTH, height=HEIGHT)
+        broken_task = env.make_task(broken_job, broken_uri)
+
+        # Same setting with a decodable example: the sibling succeeds.
+        healthy = put_real_example(env, GOOD, 0, width=1200, height=800)
+        healthy_job = make_sized_llm_job(
+            env, downscale_max_edge=512,
+            few_shot={"enabled": True, "examples": [healthy]})
+        healthy_uri = env.put_image(f"imgs/{uuid.uuid4()}.png",
+                                    width=WIDTH, height=HEIGHT)
+        healthy_task = env.make_task(healthy_job, healthy_uri)
+
+        # Neither sizing value on the record: the pre-feature request.
+        plain_job = make_sized_llm_job(env)
+        plain_uri = env.put_image(f"imgs/{uuid.uuid4()}.png",
+                                  width=WIDTH, height=HEIGHT)
+        plain_task = env.make_task(plain_job, plain_uri)
+
+        bedrock, _ = env.use_bedrock(replies=[guidance([BOX])])
+
+        result = env.run([
+            env.record(broken_job, broken_task, broken_uri,
+                       "ObjectDetection", LABELS, MODEL,
+                       detection_prompt=PROMPT),
+            env.record(healthy_job, healthy_task, healthy_uri,
+                       "ObjectDetection", LABELS, MODEL,
+                       detection_prompt=PROMPT),
+            env.record(plain_job, plain_task, plain_uri,
+                       "ObjectDetection", LABELS, MODEL,
+                       detection_prompt=PROMPT),
+        ])
+
+        # The refusal is absorbed per record: no batch item failure, and
+        # only the broken job's task is Failed (Req 9.2).
+        assert result == {"batchItemFailures": []}
+        failed = env.get_task(broken_job, broken_task)
+        assert failed["prelabel_status"] == "Failed"
+        # The reason names the example and the requested bound (Req 8.5).
+        assert failed["prelabel_error"].startswith(
+            "few-shot example image at position 1 could not be resized "
+            "to a longer edge of 512 pixels: ")
+        assert not env.prelabel_exists(broken_job, broken_task)
+
+        assert (env.get_task(healthy_job, healthy_task)["prelabel_status"]
+                == "Available")
+        assert (env.get_task(plain_job, plain_task)["prelabel_status"]
+                == "Available")
+
+        # The broken record invoked no model (Req 8.5); the two healthy
+        # records issued one call each, in record order, each with its
+        # own sizing behavior intact.
+        assert len(bedrock.calls) == 2
+        healthy_content = bedrock.calls[0]["messages"][0]["content"]
+        assert decoded_size(
+            healthy_content[2]["image"]["source"]["bytes"]) == (512, 341)
+        plain_content = bedrock.calls[1]["messages"][0]["content"]
+        assert len(plain_content) == 2

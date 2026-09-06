@@ -13,11 +13,22 @@
  * - the Classification label shown beside the image (Req 4.3);
  * - the zero-detection indication, present for an empty Pre_Label in every
  *   modality and absent for a populated one (Req 4.4).
+ *
+ * The regression guard at the end (llm-model-token-and-image-sizing task
+ * 11.5, Requirement 7.7) pins the component to its pre-sizing-feature
+ * surface: the props interface gained no new props, the source references
+ * none of the sizing fields, and the `PromptTuningPreview` call site still
+ * hands it `payload.image_width` / `image_height` — the Source_Dimensions —
+ * unchanged, so the new `sent_*` fields stay display-only.
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
 import PreviewResultCanvas from './PreviewResultCanvas';
+import type { PreviewResultPayload } from '../../services/api';
+// Verbatim component sources for the regression guard (Vite raw imports).
+import canvasSource from './PreviewResultCanvas.tsx?raw';
+import previewSource from './PromptTuningPreview.tsx?raw';
 import {
   CLASS_PALETTE,
   decodeRleColumnMajor,
@@ -341,5 +352,102 @@ describe('PreviewResultCanvas — Classification and emptiness', () => {
 
     expect(screen.queryByTestId('preview-empty-result')).not.toBeInTheDocument();
     expect(screen.getAllByTestId('preview-box')).toHaveLength(1);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Sizing regression guard (llm-model-token-and-image-sizing Req 7.7)  */
+/* ------------------------------------------------------------------ */
+
+describe('PreviewResultCanvas — sizing regression guard', () => {
+  it('declares exactly the pre-feature props — the canvas gained no new props', () => {
+    const interfaceMatch = canvasSource.match(
+      /export interface PreviewResultCanvasProps \{([\s\S]*?)\n\}/
+    );
+    expect(interfaceMatch).not.toBeNull();
+    const propNames = Array.from(
+      interfaceMatch![1].matchAll(/^ {2}(\w+)\??:/gm),
+      (m) => m[1]
+    );
+    expect(propNames).toEqual([
+      'imageUrl',
+      'taskType',
+      'labelSet',
+      'prelabel',
+      'imageWidth',
+      'imageHeight',
+      'alt',
+    ]);
+  });
+
+  it('references none of the sizing fields anywhere in its source', () => {
+    for (const forbidden of [
+      'sent_width',
+      'sent_height',
+      'sentWidth',
+      'sentHeight',
+      'source_width',
+      'source_height',
+      'downscale',
+      'token_budget',
+      'tokenBudget',
+    ]) {
+      expect(canvasSource).not.toContain(forbidden);
+    }
+  });
+
+  it('still receives payload.image_width / image_height unchanged from the preview', () => {
+    // The one call site keeps feeding the payload's Source_Dimensions to
+    // the canvas, exactly as before the sizing feature (Req 7.7).
+    expect(previewSource).toMatch(
+      /imageWidth=\{result\.payload\.image_width \?\? 0\}/
+    );
+    expect(previewSource).toMatch(
+      /imageHeight=\{result\.payload\.image_height \?\? 0\}/
+    );
+    // And never the Sent_Dimensions.
+    expect(previewSource).not.toMatch(/imageWidth=\{[^}]*sent_/);
+    expect(previewSource).not.toMatch(/imageHeight=\{[^}]*sent_/);
+  });
+
+  it('positions geometry against the Source_Dimensions even when the payload carries divergent sent dimensions', () => {
+    // A payload in the extended result shape: Source_Dimensions 200×100,
+    // Sent_Dimensions 100×50. The canvas is handed the source pair through
+    // the unchanged call-site expression, so the box lands at percentages
+    // of the source image, not of the downscaled one.
+    const payload: PreviewResultPayload = {
+      sample_key: 'images/one.jpg',
+      state: 'Succeeded',
+      prelabel: {
+        modality: 'ObjectDetection',
+        boxes: [{ class: 'scratch', left: 50, top: 25, width: 100, height: 50 }],
+      },
+      image_width: 200,
+      image_height: 100,
+      source_width: 200,
+      source_height: 100,
+      sent_width: 100,
+      sent_height: 50,
+      downscale_max_edge: 512,
+    };
+
+    render(
+      <PreviewResultCanvas
+        imageUrl={IMAGE_URL}
+        taskType="ObjectDetection"
+        labelSet={LABEL_SET}
+        prelabel={payload.prelabel!}
+        imageWidth={payload.image_width ?? 0}
+        imageHeight={payload.image_height ?? 0}
+      />
+    );
+
+    const box = screen.getByTestId('preview-box');
+    // 50/200 and 25/100 — the source space. Sent-space rendering would put
+    // the box at 50% / 50% instead.
+    expect(box.style.left).toBe('25%');
+    expect(box.style.top).toBe('25%');
+    expect(box.style.width).toBe('50%');
+    expect(box.style.height).toBe('50%');
   });
 });

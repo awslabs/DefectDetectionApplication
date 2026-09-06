@@ -28,7 +28,10 @@ import {
 import { useUsecase } from '../contexts/UsecaseContext';
 import { useAuth } from '../contexts/AuthContext';
 import S3Browser from '../components/S3Browser';
-import PromptTuningPreview from '../components/labeling/PromptTuningPreview';
+import PromptTuningPreview, {
+  TOKEN_BUDGET_RANGE_TEXT,
+  parseTokenBudget,
+} from '../components/labeling/PromptTuningPreview';
 import type { LabelingModality } from '../components/labeling/AnnotationCanvas';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
@@ -77,6 +80,15 @@ export const MAX_DETECTION_PROMPT_LENGTH = 2000;
  * the wizard's attach/omit hint.
  */
 export const MODEL_IMAGE_LIMIT_DEFAULT = 20;
+
+/**
+ * Model_Token_Limit_Default — the Token_Budget_Selection pre-fill when the
+ * model catalog carries no `token_limit` for the selected model, matching
+ * the backend's resolver default (llm-model-token-and-image-sizing
+ * Requirements 3.1, 3.2). The backend stays authoritative for the
+ * Effective_Token_Budget; this only seeds the control.
+ */
+export const MODEL_TOKEN_LIMIT_DEFAULT = 10000;
 
 /**
  * Attached/omitted Few_Shot_Example split for `total` stored example
@@ -210,8 +222,20 @@ export default function CreateLabelingJob() {
   // Few_Shot_Option — per-job, disabled by default, offered only for the
   // prompt-guided LLM family (llm-autolabel-prompt-tuning Req 6.1, 10.5).
   const [fewShotEnabled, setFewShotEnabled] = useState(false);
+  // Downscale_Setting — Downscale_Off (`null`) by default, offered only for
+  // the prompt-guided LLM family; lifted here so the value chosen in the
+  // Prompt_Tuning_Preview rides into job submission
+  // (llm-model-token-and-image-sizing Req 5.1, 5.2, 5.7).
+  const [downscaleMaxEdge, setDownscaleMaxEdge] = useState<number | null>(
+    null
+  );
+  // Token_Budget_Selection as entered — pre-filled from the selected
+  // model's catalog `token_limit` and replaced on every model change;
+  // empty omits the value from submission
+  // (llm-model-token-and-image-sizing Req 3.1, 3.2, 3.10).
+  const [tokenBudget, setTokenBudget] = useState('');
   const [bedrockModels, setBedrockModels] = useState<
-    { id: string; label: string; image_limit?: number }[]
+    { id: string; label: string; image_limit?: number; token_limit?: number }[]
   >([]);
   const [bedrockModelsUnavailable, setBedrockModelsUnavailable] = useState(false);
 
@@ -345,6 +369,12 @@ export default function CreateLabelingJob() {
     }
   }, [labelingBackend, taskType]);
 
+  // The model the Token_Budget_Selection was last pre-filled for, so the
+  // budget is replaced exactly when the model selection changes and any
+  // other re-run of the compatibility effect leaves an entered value
+  // alone (llm-model-token-and-image-sizing Req 3.2).
+  const budgetPrefillModelRef = useRef('');
+
   // Enforce the model/modality matrix client-side: drop an auto-label
   // model selection that is incompatible with the chosen modality
   // (Requirement 8.8).
@@ -358,8 +388,27 @@ export default function CreateLabelingJob() {
     // (llm-autolabel-prompt-tuning Req 6.9, 10.5).
     if (!autoLabelModel.startsWith('llm:')) {
       setFewShotEnabled(false);
+      // The sizing values belong to the `llm:` family only, so leaving it
+      // returns both to their defaults and `sam`, `bedrock:` and no-model
+      // states submit neither (llm-model-token-and-image-sizing Req 3.2,
+      // 5.2, 10.4, 10.6).
+      setDownscaleMaxEdge(null);
+      setTokenBudget('');
+      budgetPrefillModelRef.current = '';
+    } else if (budgetPrefillModelRef.current !== autoLabelModel) {
+      // A newly selected `llm:` model replaces the shown budget with the
+      // model's catalog `token_limit` (falling back to 10000), discarding
+      // the previous model's value and touching nothing else — the
+      // Detection_Prompt, Label_Set, selected samples, Few_Shot_Option and
+      // Downscale_Setting stay as they are
+      // (llm-model-token-and-image-sizing Req 3.1, 3.2).
+      budgetPrefillModelRef.current = autoLabelModel;
+      const catalogTokenLimit = bedrockModels.find(
+        (m) => m.id === autoLabelModel.slice('llm:'.length)
+      )?.token_limit;
+      setTokenBudget(String(catalogTokenLimit ?? MODEL_TOKEN_LIMIT_DEFAULT));
     }
-  }, [taskType, autoLabelModel]);
+  }, [taskType, autoLabelModel, bedrockModels]);
 
   const isDda = labelingBackend === 'DDA';
   const modality = (taskType?.value as string) || '';
@@ -518,6 +567,13 @@ export default function CreateLabelingJob() {
         // (llm-autolabel-prompt-tuning Req 6.2; the backend re-validates).
         if (fewShotEnabled && exampleImageCount === 0) {
           return 'At least one example image is required for the few-shot examples option';
+        }
+        // Token_Budget_Selection: a non-empty entry must be a whole number
+        // in the accepted range. Rejection issues no creation request and
+        // retains every entered value (llm-model-token-and-image-sizing
+        // Req 3.3; the backend re-validates).
+        if (parseTokenBudget(tokenBudget) === null) {
+          return `The output token budget must be a whole number from ${TOKEN_BUDGET_RANGE_TEXT}`;
         }
       }
     }
@@ -750,6 +806,12 @@ export default function CreateLabelingJob() {
           }
         }
 
+        // Token_Budget_Selection for the `llm:` family: a number when the
+        // control holds one (validateDdaSetup already rejected an invalid
+        // non-empty entry), `undefined` when the control is empty so the
+        // key is omitted (llm-model-token-and-image-sizing Req 3.6, 3.10).
+        const tokenBudgetSelection = parseTokenBudget(tokenBudget);
+
         await apiService.createLabelingJob({
           usecase_id: selectedUseCase.usecase_id,
           job_name: jobName.trim(),
@@ -786,7 +848,23 @@ export default function CreateLabelingJob() {
                   // entered (llm-auto-labeling Requirement 2.5), only for
                   // the prompt-guided LLM family.
                   ...(autoLabelModel.startsWith('llm:')
-                    ? { detection_prompt: detectionPrompt }
+                    ? {
+                        detection_prompt: detectionPrompt,
+                        // Downscale_Setting as it stands in the form; a
+                        // blank select submits `null` (Downscale_Off), and
+                        // `sam`/`bedrock:` selections submit nothing
+                        // (llm-model-token-and-image-sizing Req 5.2, 5.7,
+                        // 10.4).
+                        downscale_max_edge: downscaleMaxEdge,
+                        // The Token_Budget_Selection travels only when the
+                        // control is non-empty — validated in range above —
+                        // so an empty field omits the key and the budget
+                        // resolves from the Model_Token_Limits and the
+                        // default (Req 3.3, 3.6, 3.10).
+                        ...(typeof tokenBudgetSelection === 'number'
+                          ? { token_budget: tokenBudgetSelection }
+                          : {}),
+                      }
                     : {}),
                 },
               }
@@ -1464,6 +1542,15 @@ export default function CreateLabelingJob() {
             goodExampleCount={goodExampleFiles.length}
             badExampleCount={badExampleFiles.length}
             ensureExampleImagesUploaded={ensureExampleImagesUploaded}
+            /* The Downscale_Setting and Token_Budget_Selection live in
+               wizard state so the values driving the Preview_Runs are the
+               ones job submission persists (llm-model-token-and-image-sizing
+               Req 3.6, 5.7). The preview's controls write back through the
+               change callbacks. */
+            downscaleMaxEdge={downscaleMaxEdge}
+            tokenBudget={tokenBudget}
+            onDownscaleMaxEdgeChange={setDownscaleMaxEdge}
+            onTokenBudgetChange={setTokenBudget}
           />
         )}
 

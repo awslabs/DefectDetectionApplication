@@ -31,7 +31,14 @@ Auto_Labeler model and resolves the task's `prelabel_status`:
   in skip-verification mode the Per_Label_Prompts). The strict
   `parse_guidance` validates the returned Coordinate_Guidance JSON and
   `guidance_to_prelabel` converts it to the modality's existing
-  Pre_Label shape. A timeout is recorded distinguishably from a model
+  Pre_Label shape. The job record's persisted Downscale_Setting
+  (`auto_label.downscale_max_edge`) and Token_Budget_Selection
+  (`auto_label.token_budget`) are read beside the few-shot document and
+  passed into the same chokepoint, with the Model_Token_Limits mapping
+  from the persisted settings item over the LLM_MODEL_TOKEN_LIMITS
+  bootstrap (llm-model-token-and-image-sizing Req 3.7, 5.8); malformed
+  or absent values degrade to Downscale_Off and the default budget with
+  no failure. A timeout is recorded distinguishably from a model
   error, and only image and prompt content are sent to the model.
 - **SAM path** (model `sam`): synchronous invoke of the dda_sam_worker
   container Lambda (env SAM_WORKER_FUNCTION_NAME) with a 15-minute
@@ -65,8 +72,8 @@ Requirements: 8.2, 8.5, 8.6, 9.4, 9.10, 12.1, 12.2
 import json
 import logging
 import os
-import struct
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
@@ -90,6 +97,15 @@ from bedrock_common import (
 # 3.2). Same functions bundle, so it is imported directly.
 import dda_llm_prelabel
 from dda_llm_prelabel import LlmPrelabelError, generate_llm_prelabel
+# The one copy of the PNG IHDR / JPEG SOF header parser, relocated
+# verbatim to the shared layer (llm-model-token-and-image-sizing
+# Req 7.6); `_image_dimensions` below is a thin delegation to it.
+# `normalize_downscale_setting` makes the job record's Downscale_Setting
+# total and safe: a malformed, null or absent `downscale_max_edge`
+# resolves to Downscale_Off with no failure (Req 5.9, 5.12, 10.10).
+# `dda_llm_image` imports no Pillow at import time, so attaching it here
+# costs nothing.
+from dda_llm_image import declared_dimensions, normalize_downscale_setting
 # Few_Shot_Example selection and the Model_Image_Limit contract live in
 # the shared layer, so labeling time and the Prompt_Tuning_Preview
 # attach the same subset in the same order
@@ -110,6 +126,10 @@ LABELING_TASKS_TABLE = os.environ.get(
     'LABELING_TASKS_TABLE', 'dda-portal-labeling-tasks')
 PORTAL_ARTIFACTS_BUCKET = os.environ.get('PORTAL_ARTIFACTS_BUCKET')
 SAM_WORKER_FUNCTION_NAME = os.environ.get('SAM_WORKER_FUNCTION_NAME')
+# Portal settings table holding the persisted Model_Token_Limits item —
+# the same table bedrock_common already reads the Bedrock_Configuration
+# from (llm-model-token-and-image-sizing Req 1.6, 1.8).
+SETTINGS_TABLE = os.environ.get('SETTINGS_TABLE')
 
 jobs_table = dynamodb.Table(LABELING_JOBS_TABLE)
 tasks_table = dynamodb.Table(LABELING_TASKS_TABLE)
@@ -164,35 +184,15 @@ def _parse_s3_uri(uri: str) -> Tuple[str, str]:
 def _image_dimensions(image_bytes: bytes) -> Optional[Tuple[int, int]]:
     """(width, height) parsed from PNG IHDR / JPEG SOF headers, or None.
 
-    Kept dependency-free (no Pillow in the functions bundle); used to
-    validate bounding boxes against the image bounds (Req 8.2).
+    A thin delegation to `dda_llm_image.declared_dimensions` — the same
+    algorithm this function has always used, relocated verbatim to the
+    shared layer so exactly one copy exists
+    (llm-model-token-and-image-sizing Req 7.6). Accepts exactly the
+    inputs it accepted before, stays dependency-free (no Pillow), and is
+    still used to validate bounding boxes against the image bounds
+    (Req 8.2).
     """
-    if image_bytes[:8] == b'\x89PNG\r\n\x1a\n' and len(image_bytes) >= 24:
-        width, height = struct.unpack('>II', image_bytes[16:24])
-        return (width, height) if width and height else None
-    if image_bytes[:2] == b'\xff\xd8':
-        index = 2
-        while index + 9 <= len(image_bytes):
-            if image_bytes[index] != 0xFF:
-                index += 1
-                continue
-            marker = image_bytes[index + 1]
-            # Padding / standalone markers carry no length segment.
-            if marker in (0xFF, 0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
-                index += 2
-                continue
-            if index + 4 > len(image_bytes):
-                break
-            segment_length = struct.unpack(
-                '>H', image_bytes[index + 2:index + 4])[0]
-            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
-                if index + 9 <= len(image_bytes):
-                    height, width = struct.unpack(
-                        '>HH', image_bytes[index + 5:index + 9])
-                    return (width, height) if width and height else None
-                break
-            index += 2 + segment_length
-    return None
+    return declared_dimensions(image_bytes)
 
 
 def _image_format(key: str) -> str:
@@ -252,6 +252,125 @@ def _read_image_bytes(job: Dict, image_s3_uri: str) -> Tuple[bytes, str]:
         raise GenerationFailure(
             f'image s3://{bucket}/{key} is not accessible: {exc}') from exc
     return body, key
+
+
+# ---------------------------------------------------------------------------
+# Model_Token_Limits delivery (llm-model-token-and-image-sizing Req 1.6,
+# 1.8, 3.7, 3.8) — the same loader shape dda_labeling.py and
+# data_accounts.py carry, so all three read equal entries for equal
+# persisted configuration.
+# ---------------------------------------------------------------------------
+
+# The persisted Model_Token_Limits mapping lives in the portal settings
+# table under this key, maintained by data_accounts.py independently of
+# the bedrock_configuration item.
+LLM_MODEL_TOKEN_LIMITS_SETTING_KEY = 'llm_model_token_limits'
+
+# Per-invocation memo of the effective Model_Token_Limits mapping.
+# Cleared at the top of handler() so one SQS batch resolves against one
+# self-consistent mapping and a warm container can never serve a stale
+# mapping after an administrator's write — see _llm_model_token_limits().
+_model_token_limits_cache: Optional[Dict[str, Any]] = None
+
+
+def _reset_model_token_limits_cache() -> None:
+    """Drop the per-invocation Model_Token_Limits memo.
+
+    Called at the top of handler(), so the mapping is re-read at the
+    start of every invocation.
+    """
+    global _model_token_limits_cache
+    _model_token_limits_cache = None
+
+
+def _decimal_to_native(obj):
+    """Convert Decimal objects from DynamoDB to native Python types.
+
+    DynamoDB returns every number as Decimal, and both
+    `resolve_token_budget` and `normalize_downscale_setting` reject
+    non-int types by design (Req 2.8) — without this conversion every
+    persisted value would silently fall through to its default. A whole
+    number becomes int; a fractional number becomes float, which the
+    resolvers correctly treat as invalid.
+    """
+    if isinstance(obj, Decimal):
+        return float(obj) if obj % 1 else int(obj)
+    elif isinstance(obj, dict):
+        return {k: _decimal_to_native(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_decimal_to_native(i) for i in obj]
+    return obj
+
+
+def _read_stored_model_token_limits() -> Optional[Dict[str, Any]]:
+    """The persisted Model_Token_Limits mapping, or None when there is none.
+
+    Returns None — meaning "fall back to the environment bootstrap" —
+    when the settings table is not configured, the item is absent, the
+    read fails, or the item's value is not a mapping. An empty persisted
+    mapping is a real mapping and is returned as {} (Req 4.8), not as
+    None.
+    """
+    if not SETTINGS_TABLE:
+        return None
+    try:
+        response = dynamodb.Table(SETTINGS_TABLE).get_item(
+            Key={'setting_key': LLM_MODEL_TOKEN_LIMITS_SETTING_KEY}
+        )
+    except Exception as exc:  # ClientError, table missing, throttling
+        logger.warning('Could not read model token limits, falling back '
+                       'to the environment bootstrap: %s', exc)
+        return None
+
+    item = response.get('Item')
+    if not item:
+        return None
+    value = item.get('value')
+    if not isinstance(value, dict):
+        return None
+    return _decimal_to_native(value)
+
+
+def _env_model_token_limits() -> Dict[str, Any]:
+    """The LLM_MODEL_TOKEN_LIMITS deploy-time bootstrap mapping.
+
+    An absent, blank, malformed or non-object value resolves to an empty
+    mapping, in which case every model resolves
+    Model_Token_Limit_Default rather than erroring.
+    """
+    raw = (os.environ.get('LLM_MODEL_TOKEN_LIMITS') or '').strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning('LLM_MODEL_TOKEN_LIMITS is not valid JSON; using '
+                       'the default Model_Token_Limit for every model')
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _llm_model_token_limits() -> Dict[str, Any]:
+    """The effective Model_Token_Limits mapping, memoized per invocation.
+
+    Source of truth is the persisted `llm_model_token_limits` settings
+    item (Req 1.6, 4.1). When that item is absent, unreadable, or its
+    value is not a mapping, the LLM_MODEL_TOKEN_LIMITS environment
+    variable is used instead — the deploy-time bootstrap for an
+    environment where no PortalAdmin has written the item yet.
+
+    WHOLE-MAPPING precedence, never a per-key merge: a merge would let
+    an environment entry survive a deletion from the persisted mapping,
+    contradicting Req 4.1 ("retain no entry that the submitted mapping
+    omits") and Req 4.8 (an empty mapping makes every model resolve the
+    default). An empty persisted mapping is therefore honored as empty.
+    """
+    global _model_token_limits_cache
+    if _model_token_limits_cache is None:
+        stored = _read_stored_model_token_limits()
+        _model_token_limits_cache = (stored if stored is not None
+                                     else _env_model_token_limits())
+    return _model_token_limits_cache
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +672,9 @@ def _generate_llm_prelabel(message: Dict, job: Dict, model_id: str) -> Dict:
     cross-account image read, the pixel-dimension gate, the
     Detection_Prompt / Per_Label_Prompts resolution from the message
     with the job item as fallback, the Few_Shot_Example resolution from
-    the job record, and the `GenerationFailure` translation that keeps
+    the job record, the Downscale_Setting and Token_Budget_Selection
+    reads from the job record (llm-model-token-and-image-sizing Req 5.8,
+    3.7), and the `GenerationFailure` translation that keeps
     `prelabel_error` byte-identical for every failure mode (Req 3.10,
     3.11).
 
@@ -597,12 +718,30 @@ def _generate_llm_prelabel(message: Dict, job: Dict, model_id: str) -> Dict:
     few_shot_images, model_image_limit = _resolve_few_shot_images(
         job, model_id)
 
+    # Sizing inputs from the job record, beside the few_shot document
+    # they were persisted with (llm-model-token-and-image-sizing Req 5.8,
+    # 3.7). DynamoDB returns numbers as Decimal, so both values pass
+    # through _decimal_to_native before the total-and-safe resolvers see
+    # them. A malformed, null or absent downscale_max_edge is
+    # Downscale_Off, and a malformed or absent token_budget falls through
+    # to the Model_Token_Limits mapping and then the default — neither is
+    # ever a failure (Req 3.8, 5.9, 5.12, 10.10). A persisted valid
+    # budget wins the resolution unchanged for the life of the job,
+    # whatever the mapping says today (Req 3.7). Only the `llm:` family
+    # reaches this function, so neither value is read for `sam` or
+    # `bedrock:` jobs (Req 10.4).
+    auto_label = job.get('auto_label') or {}
+    downscale_setting = normalize_downscale_setting(
+        _decimal_to_native(auto_label.get('downscale_max_edge')))
+    token_budget_selection = _decimal_to_native(
+        auto_label.get('token_budget'))
+
     # This module's `get_bedrock_client` stays the single Bedrock client
     # seam for every model family the worker drives, so the shared
     # invocation module builds its client through the same binding.
     dda_llm_prelabel.get_bedrock_client = get_bedrock_client
     try:
-        return generate_llm_prelabel(
+        result = generate_llm_prelabel(
             model_identifier=model_id,
             modality=modality,
             label_set=label_set,
@@ -614,6 +753,9 @@ def _generate_llm_prelabel(message: Dict, job: Dict, model_id: str) -> Dict:
             height=height,
             few_shot_images=few_shot_images,
             model_image_limit=model_image_limit,
+            downscale_setting=downscale_setting,
+            token_budget_selection=token_budget_selection,
+            model_token_limits=_llm_model_token_limits(),
         )
     except LlmPrelabelError as exc:
         # Every category carries the reason string this worker has
@@ -622,6 +764,11 @@ def _generate_llm_prelabel(message: Dict, job: Dict, model_id: str) -> Dict:
         # autolabel_error and the autolabel_pending accounting are
         # unchanged.
         raise GenerationFailure(exc.reason) from exc
+    # The shared chokepoint now returns the Pre_Label plus the
+    # Sent_Dimensions (llm-model-token-and-image-sizing Req 5.10); the
+    # worker stores the Pre_Label alone — the Sent_Dimensions are the
+    # Preview_API's reporting concern (Req 7.10, 10.1).
+    return result.prelabel
 
 
 # ---------------------------------------------------------------------------
@@ -877,6 +1024,11 @@ def handler(event, context):
     absorbed per record (marked Failed on the task) and malformed
     messages are logged and dropped — neither poisons the batch.
     """
+    # One Model_Token_Limits read per invocation: the memo is dropped
+    # here so this batch resolves against one self-consistent mapping
+    # and a warm container never serves a stale one
+    # (llm-model-token-and-image-sizing Req 1.6, 1.8).
+    _reset_model_token_limits_cache()
     batch_item_failures = []
     for record in (event or {}).get('Records', []):
         message_id = record.get('messageId')

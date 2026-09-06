@@ -43,7 +43,13 @@ from shared_utils import (
 # Model_Image_Limit resolution (llm-autolabel-prompt-tuning Requirement 7.1).
 # The same shared-layer function the Preview_API and the Auto_Labeler use, so
 # the model dropdown reports exactly the bound the request paths apply.
-from dda_llm_request import resolve_model_image_limit
+# Model_Token_Limit resolution (llm-model-token-and-image-sizing Requirement
+# 1.6): the same resolver both request paths use, so the budget the wizard
+# pre-fills equals the maxTokens every Converse request carries.
+from dda_llm_request import (
+    resolve_model_image_limit, resolve_token_budget,
+    MODEL_TOKEN_LIMIT_DEFAULT, MODEL_TOKEN_LIMIT_CEILING,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -66,6 +72,19 @@ BEDROCK_CONFIG_RESOURCE_ID = 'bedrock-configuration'
 
 # Settings-table key read by workflow_generator.get_bedrock_configuration().
 BEDROCK_CONFIG_SETTING_KEY = 'bedrock_configuration'
+
+# --------------------------------------------------------------------------
+# Model_Token_Limits (llm-model-token-and-image-sizing Requirement 4)
+# --------------------------------------------------------------------------
+
+# Settings-table key of the Model_Token_Limits item. Held entirely
+# independently of BEDROCK_CONFIG_SETTING_KEY: no operation on either item
+# reads or writes the other (Requirements 4.4, 4.7).
+LLM_MODEL_TOKEN_LIMITS_SETTING_KEY = 'llm_model_token_limits'
+
+# Submission bounds (Requirements 4.1, 4.2).
+MODEL_TOKEN_LIMITS_MAX_ENTRIES = 200
+MODEL_TOKEN_LIMITS_MAX_KEY_LENGTH = 256
 
 # --------------------------------------------------------------------------
 # Camera_Registry Staleness_Threshold (camera-registry-sync Requirement 4.3)
@@ -111,6 +130,12 @@ DEFAULT_BEDROCK_CONFIG = {
 # bedrock control-plane clients (list-foundation-models /
 # list-inference-profiles) cached per region for warm invocations.
 _bedrock_control_clients: Dict[str, Any] = {}
+
+# Per-invocation memo of the effective Model_Token_Limits mapping and the
+# source it came from, as (mapping, source). Cleared at the top of handler()
+# so it is never shared across invocations of a warm container - see
+# _llm_model_token_limits().
+_model_token_limits_cache: Optional[tuple] = None
 
 
 def is_portal_admin(user: Dict) -> bool:
@@ -186,12 +211,18 @@ def handler(event: Dict, context: Any) -> Dict:
     GET    /api/v1/data-accounts/bedrock-configuration        - Read Bedrock_Configuration
     PUT    /api/v1/data-accounts/bedrock-configuration        - Update Bedrock_Configuration
     GET    /api/v1/data-accounts/bedrock-configuration/models - List invokable model options
+    GET    /api/v1/data-accounts/bedrock-configuration/token-limits - Read Model_Token_Limits
+    PUT    /api/v1/data-accounts/bedrock-configuration/token-limits - Replace Model_Token_Limits
 
     Reserved id 'camera-registry-configuration' (camera-registry-sync
     Requirement 4.3, PortalAdmin only):
     GET    /api/v1/data-accounts/camera-registry-configuration - Read Staleness_Threshold
     PUT    /api/v1/data-accounts/camera-registry-configuration - Update Staleness_Threshold
     """
+    # The Model_Token_Limits memo is per invocation, never per container, so
+    # a warm container can never serve a mapping written by an earlier
+    # invocation (llm-model-token-and-image-sizing Requirement 4.1).
+    _reset_model_token_limits_cache()
     try:
         http_method = event.get('httpMethod')
         path = event.get('path', '')
@@ -646,6 +677,18 @@ def handle_bedrock_configuration(event: Dict, user: Dict, http_method: str) -> D
     is_models_path = (event.get('path') or '').rstrip('/').endswith('/models')
     if http_method == 'GET' and is_models_path:
         return list_bedrock_model_options(event, user)
+
+    # GET/PUT /data-accounts/bedrock-configuration/token-limits: the
+    # Model_Token_Limits item (llm-model-token-and-image-sizing Requirement
+    # 4). A sibling of the /models dispatch above and ahead of the bare
+    # GET/PUT, so it inherits the PortalAdmin gate and its denied-attempt
+    # audit entry exactly as an unauthorized configuration write does
+    # (Requirement 4.3).
+    is_token_limits_path = (
+        (event.get('path') or '').rstrip('/').endswith('/token-limits'))
+    if is_token_limits_path:
+        return handle_model_token_limits(event, user, http_method)
+
     if http_method == 'GET':
         return get_bedrock_configuration_setting(event, user)
     if http_method == 'PUT':
@@ -730,6 +773,268 @@ def update_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
     except Exception as e:
         logger.error(f"Error updating Bedrock configuration: {str(e)}")
         return create_response(500, {'error': 'Failed to update Bedrock configuration'})
+
+
+# --------------------------------------------------------------------------
+# Model_Token_Limits settings API
+# (llm-model-token-and-image-sizing Requirements 1.6, 1.8, 4.1 - 4.8)
+# --------------------------------------------------------------------------
+
+def _reset_model_token_limits_cache() -> None:
+    """Drop the per-invocation Model_Token_Limits memo.
+
+    Called at the top of handler() and after a successful write, so the
+    mapping is re-read at the start of every invocation and immediately
+    after it changes.
+    """
+    global _model_token_limits_cache
+    _model_token_limits_cache = None
+
+
+def _read_stored_model_token_limits() -> Optional[Dict[str, Any]]:
+    """The persisted Model_Token_Limits mapping, or None when there is none.
+
+    Returns None - meaning "fall back to the environment bootstrap" - when
+    the settings table is not configured, the item is absent, the read
+    fails, or the item's value is not a mapping. An empty persisted mapping
+    is a real mapping and is returned as {} (Requirement 4.8), not as None.
+
+    DynamoDB returns every number as Decimal; the value is run through
+    _decimal_to_native so resolve_token_budget - which rejects non-int
+    types by design (Requirement 2.8) - sees native ints.
+    """
+    if not SETTINGS_TABLE:
+        return None
+    try:
+        response = dynamodb.Table(SETTINGS_TABLE).get_item(
+            Key={'setting_key': LLM_MODEL_TOKEN_LIMITS_SETTING_KEY}
+        )
+    except Exception as e:  # ClientError, table missing, throttling
+        logger.warning(f"Could not read model token limits, falling back to "
+                       f"the environment bootstrap: {str(e)}")
+        return None
+
+    item = response.get('Item')
+    if not item:
+        return None
+    value = item.get('value')
+    if not isinstance(value, dict):
+        return None
+    return _decimal_to_native(value)
+
+
+def _env_model_token_limits() -> Dict[str, Any]:
+    """The LLM_MODEL_TOKEN_LIMITS deploy-time bootstrap mapping.
+
+    An absent, blank, malformed or non-object value resolves to an empty
+    mapping, in which case every model resolves Model_Token_Limit_Default
+    rather than erroring.
+    """
+    raw = (os.environ.get('LLM_MODEL_TOKEN_LIMITS') or '').strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning('LLM_MODEL_TOKEN_LIMITS is not valid JSON; using the '
+                       'default Model_Token_Limit for every model')
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _load_model_token_limits() -> tuple:
+    """(mapping, source) for the effective Model_Token_Limits, memoized.
+
+    Source of truth is the persisted `llm_model_token_limits` settings item
+    (Requirements 1.6, 4.1). When that item is absent, unreadable, or its
+    value is not a mapping, the LLM_MODEL_TOKEN_LIMITS environment variable
+    is used instead - the deploy-time bootstrap for an environment where no
+    PortalAdmin has written the item yet. `source` is 'settings' or
+    'environment' accordingly, so an administrator can see which is in
+    force.
+
+    WHOLE-MAPPING precedence, never a per-key merge: a merge would let an
+    environment entry survive a deletion from the persisted mapping, which
+    would contradict Requirement 4.1 ("retain no entry that the submitted
+    mapping omits") and Requirement 4.8 (an empty mapping makes every model
+    resolve the default). An empty persisted mapping is therefore honored
+    as empty.
+
+    Memoized PER INVOCATION - a module-level cache keyed by nothing and
+    cleared at the top of handler() - not per container. Per-invocation is
+    exactly the span over which the resolution must be self-consistent;
+    caching across invocations would let a warm container serve a stale
+    mapping after an administrator's write.
+    """
+    global _model_token_limits_cache
+    if _model_token_limits_cache is None:
+        stored = _read_stored_model_token_limits()
+        if stored is not None:
+            _model_token_limits_cache = (stored, 'settings')
+        else:
+            _model_token_limits_cache = (_env_model_token_limits(),
+                                         'environment')
+    return _model_token_limits_cache
+
+
+def _llm_model_token_limits() -> Dict[str, Any]:
+    """The effective Model_Token_Limits mapping (see _load_model_token_limits).
+
+    The same loader shape the Preview_API and the Auto_Labeler carry, so all
+    three read equal entries for equal persisted configuration
+    (Requirements 1.6, 1.8).
+    """
+    return _load_model_token_limits()[0]
+
+
+def validate_model_token_limits(value) -> List[str]:
+    """Validate a submitted Model_Token_Limits mapping (Requirement 4.2).
+
+    Rules, with every violation reported (nothing short-circuits past the
+    mapping check, which is the one violation that makes the rest
+    unevaluable):
+      - the value is a mapping
+      - at most MODEL_TOKEN_LIMITS_MAX_ENTRIES (200) entries
+      - every key a non-empty string of at most 256 characters
+      - every value a non-bool integer in [1, MODEL_TOKEN_LIMIT_CEILING]
+
+    Booleans are classified as non-integers, consistently with
+    resolve_token_budget. Model_Token_Limit_Ceiling applies here and to no
+    field of the Bedrock_Configuration.
+
+    Returns [] when valid.
+    """
+    if not isinstance(value, dict):
+        return ['model_token_limits must be an object mapping model '
+                'identifiers to integer token limits']
+
+    errors: List[str] = []
+
+    if len(value) > MODEL_TOKEN_LIMITS_MAX_ENTRIES:
+        errors.append(
+            f'model_token_limits must contain at most '
+            f'{MODEL_TOKEN_LIMITS_MAX_ENTRIES} entries '
+            f'(received {len(value)})')
+
+    for model_identifier, limit in value.items():
+        if (not isinstance(model_identifier, str)
+                or not model_identifier
+                or len(model_identifier) > MODEL_TOKEN_LIMITS_MAX_KEY_LENGTH):
+            errors.append(
+                f'model identifier must be a non-empty string of at most '
+                f'{MODEL_TOKEN_LIMITS_MAX_KEY_LENGTH} characters')
+        # Evaluated for every entry regardless of the key's validity, so a
+        # single response enumerates every invalid element.
+        if (isinstance(limit, bool) or not isinstance(limit, int)
+                or not (1 <= limit <= MODEL_TOKEN_LIMIT_CEILING)):
+            errors.append(
+                f"limit for '{model_identifier}' must be an integer between "
+                f"1 and {MODEL_TOKEN_LIMIT_CEILING}")
+
+    return errors
+
+
+def handle_model_token_limits(event: Dict, user: Dict,
+                              http_method: str) -> Dict:
+    """GET / PUT the Model_Token_Limits item.
+
+    Routed from handle_bedrock_configuration, so the PortalAdmin gate
+    (Permission.BEDROCK_CONFIG_WRITE) and its denied-attempt audit entry are
+    inherited unchanged (Requirement 4.3).
+
+    A PUT REPLACES the persisted mapping in its entirety - a plain put_item
+    of the whole value, never an update expression that merges - so no entry
+    the submission omits survives (Requirement 4.1), and the empty mapping
+    persists as empty (Requirement 4.8). Nothing here reads or writes the
+    `bedrock_configuration` item, which is how Requirement 4.4 holds; and
+    update_bedrock_configuration_setting is not touched, which is how
+    Requirement 4.7 holds.
+    """
+    if http_method == 'GET':
+        return get_model_token_limits_setting(event, user)
+    if http_method == 'PUT':
+        return update_model_token_limits_setting(event, user)
+    return create_response(404, {'error': 'Not found'})
+
+
+def get_model_token_limits_setting(event: Dict, user: Dict) -> Dict:
+    """Return the effective Model_Token_Limits plus its bounds and source."""
+    try:
+        limits, source = _load_model_token_limits()
+        return create_response(200, {
+            'model_token_limits': limits,
+            'default': MODEL_TOKEN_LIMIT_DEFAULT,
+            'ceiling': MODEL_TOKEN_LIMIT_CEILING,
+            'source': source,
+        })
+    except Exception as e:
+        logger.error(f"Error reading model token limits: {str(e)}")
+        return create_response(500, {'error': 'Failed to read model token limits'})
+
+
+def update_model_token_limits_setting(event: Dict, user: Dict) -> Dict:
+    """Replace the persisted Model_Token_Limits with the submitted mapping.
+
+    Request body is the wrapped form {"model_token_limits": {...}}. The
+    whole item is written with put_item, so the persisted mapping is exactly
+    the submitted mapping - no entry the submission omits survives
+    (Requirement 4.1), and {} persists as empty (Requirement 4.8).
+    """
+    try:
+        if not SETTINGS_TABLE:
+            return create_response(500, {'error': 'Settings storage is not configured'})
+
+        try:
+            body = json.loads(event.get('body') or '{}')
+        except (json.JSONDecodeError, TypeError):
+            return create_response(400, {'error': 'Request body is not valid JSON'})
+        if not isinstance(body, dict):
+            return create_response(400, {'error': 'Request body must be a JSON object'})
+
+        limits = body.get('model_token_limits')
+
+        errors = validate_model_token_limits(limits)
+        if errors:
+            # The entire change is rejected and nothing is written, so the
+            # persisted mapping is left unchanged (Requirement 4.2).
+            return create_response(400, {
+                'error': 'Invalid model token limits',
+                'validation_errors': errors,
+            })
+
+        value = dict(limits)
+        timestamp = int(datetime.utcnow().timestamp() * 1000)
+        # Whole-item replacement, never a merging update expression.
+        dynamodb.Table(SETTINGS_TABLE).put_item(Item={
+            'setting_key': LLM_MODEL_TOKEN_LIMITS_SETTING_KEY,
+            'value': value,
+            'updated_at': timestamp,
+            'updated_by': user['user_id'],
+        })
+        # The mapping just changed; drop the per-invocation memo so any
+        # later read in this invocation sees the write.
+        _reset_model_token_limits_cache()
+
+        log_audit_event(
+            user_id=user['user_id'],
+            action='update_model_token_limits',
+            resource_type='setting',
+            resource_id=LLM_MODEL_TOKEN_LIMITS_SETTING_KEY,
+            result='success',
+            details={
+                'model_token_limits': value,
+                'entry_count': len(value),
+            }
+        )
+
+        return create_response(200, {
+            'message': 'Model token limits updated successfully',
+            'model_token_limits': value,
+        })
+
+    except Exception as e:
+        logger.error(f"Error updating model token limits: {str(e)}")
+        return create_response(500, {'error': 'Failed to update model token limits'})
 
 
 # --------------------------------------------------------------------------
@@ -944,6 +1249,12 @@ def list_bedrock_model_options(event: Dict, user: Dict) -> Dict:
     shared resolve_model_image_limit (default 20), for the labeling-job
     wizard's few-shot attach/omit hint (llm-autolabel-prompt-tuning
     Requirements 7.1, 7.5).
+
+    And an additive 'token_limit': the model's Effective_Token_Budget with
+    no Token_Budget_Selection, resolved through the shared
+    resolve_token_budget against the effective Model_Token_Limits (default
+    10000), which is what the labeling-job wizard pre-fills
+    (llm-model-token-and-image-sizing Requirements 1.6, 3.1).
     """
     try:
         query = event.get('queryStringParameters') or {}
@@ -1017,10 +1328,18 @@ def list_bedrock_model_options(event: Dict, user: Dict) -> Dict:
         # paths resolve (llm-autolabel-prompt-tuning Requirements 7.1, 7.5).
         # Every other field of every option is left exactly as it was, so
         # consumers that ignore image_limit are unaffected.
+        # Additive per-option Effective_Token_Budget with no selection - what
+        # the labeling-job wizard pre-fills for the selected model, resolved
+        # from the same persisted Model_Token_Limits the request paths read,
+        # so the displayed budget equals every request's maxTokens
+        # (llm-model-token-and-image-sizing Requirements 1.6, 3.1).
         image_limits = _llm_model_image_limits()
+        token_limits = _llm_model_token_limits()
         for option in options:
             option['image_limit'] = resolve_model_image_limit(
                 option['id'], image_limits)
+            option['token_limit'] = resolve_token_budget(
+                option['id'], None, token_limits)
 
         payload: Dict[str, Any] = {'models': options, 'region': region}
         if access_denied:

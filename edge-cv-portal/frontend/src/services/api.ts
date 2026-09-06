@@ -710,6 +710,18 @@ export interface StartPreviewRunRequest {
     /** At most 10 per designation; omitted refs are never read. */
     examples: PreviewFewShotExample[];
   };
+  /**
+   * Downscale_Setting for every image of the run: one Max_Image_Edge value
+   * from 512 | 768 | 1024 | 1280 | 1536 | 2048, or `null`/omitted for
+   * Downscale_Off (llm-model-token-and-image-sizing Requirements 5.1, 5.3).
+   */
+  downscale_max_edge?: number | null;
+  /**
+   * Token_Budget_Selection, a whole number in [1, 128000]. Omitted when the
+   * control is empty, so the Effective_Token_Budget resolves from the
+   * Model_Token_Limits and the default of 10000 (Requirements 3.4, 3.10).
+   */
+  token_budget?: number;
 }
 
 /** 202 response of `POST /labeling-preview/runs`. */
@@ -758,6 +770,13 @@ export interface PreviewRunResponse {
     attached: number;
     omitted: number;
   };
+  /**
+   * The Downscale_Setting applied to the run: a Max_Image_Edge value, or
+   * `null` for Downscale_Off (llm-model-token-and-image-sizing Req 9.8).
+   */
+  downscale_max_edge?: number | null;
+  /** The Effective_Token_Budget applied to every request of the run. */
+  token_budget?: number;
   results: PreviewResultEntry[];
 }
 
@@ -773,8 +792,21 @@ export interface PreviewResultPayload {
   sample_key: string;
   state: PreviewSampleState;
   prelabel?: DdaAnnotation;
+  /**
+   * Source_Dimensions — the space the Pre_Label geometry is expressed in, so
+   * `PreviewResultCanvas` keeps reading these unchanged
+   * (llm-model-token-and-image-sizing Requirement 7.7).
+   */
   image_width?: number;
   image_height?: number;
+  /** Source_Dimensions, named explicitly for the sizing display (Req 5.4). */
+  source_width?: number;
+  source_height?: number;
+  /** Sent_Dimensions — the Downscaled_Image actually sent (Req 5.4, 5.10). */
+  sent_width?: number;
+  sent_height?: number;
+  /** The applied Downscale_Setting, `null` for Downscale_Off (Req 5.10). */
+  downscale_max_edge?: number | null;
   failure_category?: PreviewFailureCategory;
   failure_reason?: string;
   raw_model_output?: string;
@@ -1840,7 +1872,25 @@ class ApiService {
     label_set?: string[];
     team_id?: string;
     example_images?: { good: string[]; bad: string[] };
-    auto_label?: { enabled: boolean; model?: string; detection_prompt?: string };
+    auto_label?: {
+      enabled: boolean;
+      model?: string;
+      detection_prompt?: string;
+      /**
+       * Downscale_Setting persisted with the job for the `llm:` family
+       * only: `null` is Downscale_Off, an integer is one Max_Image_Edge
+       * value (llm-model-token-and-image-sizing Requirements 5.2, 5.7,
+       * 10.4).
+       */
+      downscale_max_edge?: number | null;
+      /**
+       * Token_Budget_Selection persisted with the job for the `llm:`
+       * family only; omitted when the control is empty so the
+       * Effective_Token_Budget resolves from the Model_Token_Limits and
+       * the default (Requirements 3.6, 3.10).
+       */
+      token_budget?: number;
+    };
     /**
      * Few_Shot_Option for the `llm:` auto-label family
      * (llm-autolabel-prompt-tuning Requirements 6.4, 6.9, 10.6). Persisted
@@ -3506,13 +3556,48 @@ class ApiService {
   // `image_limit` is the model's Model_Image_Limit resolved from the
   // backend's configuration (default 20), used by the labeling-job
   // wizard's few-shot attach/omit hint (llm-autolabel-prompt-tuning
-  // Requirements 7.1, 7.5).
+  // Requirements 7.1, 7.5). `token_limit` is the Effective_Token_Budget the
+  // backend resolves for the model with no selection applied — the value the
+  // wizard pre-fills into the Token_Budget_Selection control
+  // (llm-model-token-and-image-sizing Requirements 1.6, 3.1).
   async getBedrockModels(): Promise<{
-    models: { id: string; label: string; image_limit?: number }[];
+    models: {
+      id: string;
+      label: string;
+      image_limit?: number;
+      token_limit?: number;
+    }[];
     region: string;
     permissions?: string;
   }> {
     return this.request('/data-accounts/bedrock-configuration/models');
+  }
+
+  // Model_Token_Limits endpoints (llm-model-token-and-image-sizing
+  // Requirement 4). The mapping is a settings item independent of the
+  // Bedrock_Configuration, riding the same reserved 'bedrock-configuration'
+  // data-accounts route. `source` reports whether the persisted settings item
+  // or the deploy-time environment bootstrap is currently effective.
+  async getModelTokenLimits(): Promise<{
+    model_token_limits: Record<string, number>;
+    default: number;
+    ceiling: number;
+    source: 'settings' | 'environment';
+  }> {
+    return this.request('/data-accounts/bedrock-configuration/token-limits');
+  }
+
+  // PortalAdmin-only. The submitted mapping REPLACES the persisted one in its
+  // entirety — an omitted model identifier is dropped, and an empty mapping is
+  // a valid state that resolves every model to the default (Req 4.1, 4.8).
+  async updateModelTokenLimits(mapping: Record<string, number>): Promise<{
+    message: string;
+    model_token_limits: Record<string, number>;
+  }> {
+    return this.request('/data-accounts/bedrock-configuration/token-limits', {
+      method: 'PUT',
+      body: JSON.stringify({ model_token_limits: mapping }),
+    });
   }
 
   async updateBedrockConfiguration(config: {

@@ -700,6 +700,32 @@ export class ComputeStack extends cdk.Stack {
           ? JSON.stringify(llmModelImageLimitsContext)
           : '{}';
 
+    // Per-model Model_Token_Limit bootstrap for `llm:` auto-label requests
+    // (llm-model-token-and-image-sizing Req 1.8): a JSON object keyed by the
+    // model identifier following the `llm:` prefix, e.g.
+    // {"us.amazon.nova-pro-v1:0": 10000}. Set with
+    // -c llmModelTokenLimits='{"model-id": 10000}'; the default of {} means
+    // every model resolves the Model_Token_Limit_Default of 10000. A missing,
+    // non-integer or out-of-range entry also resolves to that default in
+    // resolve_token_budget, so configuration can never push a request past
+    // Model_Token_Limit_Ceiling (128000) or down to zero tokens. Deliberately
+    // built by the same string-passthrough / object-stringify / '{}' shape as
+    // llmModelImageLimits, and carried by exactly the same three handlers that
+    // build or report `llm:` requests (DdaLabelingHandler preview,
+    // DdaAutolabelWorker labeling time, DataAccountsHandler model options), so
+    // the delivery mechanism for both per-model settings is one mechanism
+    // (Req 1.8) and the displayed budget equals the sent budget (Req 1.6).
+    // It is a bootstrap only: the persisted llm_model_token_limits settings
+    // item takes whole-mapping precedence over this value.
+    const llmModelTokenLimitsContext =
+      this.node.tryGetContext('llmModelTokenLimits');
+    const llmModelTokenLimits =
+      typeof llmModelTokenLimitsContext === 'string'
+        ? llmModelTokenLimitsContext
+        : llmModelTokenLimitsContext
+          ? JSON.stringify(llmModelTokenLimitsContext)
+          : '{}';
+
     // ---------------------------------------------------------------------
     // Station Quick Setup Lambdas (Requirements 4.4, 5.1, 8.1)
     //
@@ -1270,6 +1296,12 @@ export class ComputeStack extends cdk.Stack {
         // per option so the wizard's attach/omit hint uses the same source
         // the request paths do (llm-autolabel-prompt-tuning Req 7.1, 7.5).
         LLM_MODEL_IMAGE_LIMITS: llmModelImageLimits,
+        // Same bootstrap for the resolved Model_Token_Limit reported beside
+        // each option's image_limit, so the Effective_Token_Budget the wizard
+        // pre-fills is resolved from the same source the preview and the
+        // autolabel worker resolve it from
+        // (llm-model-token-and-image-sizing Req 1.6, 1.8).
+        LLM_MODEL_TOKEN_LIMITS: llmModelTokenLimits,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(30),
@@ -1855,14 +1887,35 @@ export class ComputeStack extends cdk.Stack {
         // Req 7.1) — the same value the autolabel worker resolves, so
         // preview and labeling time attach the same example subset.
         LLM_MODEL_IMAGE_LIMITS: llmModelImageLimits,
+        // Per-model Model_Token_Limit bootstrap for the Effective_Token_Budget
+        // resolved once at Preview_Run start; the same value the autolabel
+        // worker reads, which is what makes the previewed and the labeling-time
+        // maxTokens equal (llm-model-token-and-image-sizing Req 1.6, 1.8).
+        LLM_MODEL_TOKEN_LIMITS: llmModelTokenLimits,
       },
-      layers: [sharedLayer],
+      // The same imagingLayer LayerVersion DdaLabelingWorker attaches above —
+      // one Pillow/libjpeg-turbo/zlib build shared by every function that runs
+      // the Image_Downscaler, which is the environmental precondition for the
+      // byte-identical downscale output the preview and the autolabel worker
+      // must produce (llm-model-token-and-image-sizing Req 6.1, 6.6). Pillow is
+      // imported lazily inside the re-encode path, so Downscale_Off pays
+      // nothing for the attachment.
+      layers: [sharedLayer, imagingLayer],
       // 900 s is a cap, not a reservation: the HTTP routes still answer in
       // well under a second, but the same function also runs the async
       // Prompt_Tuning_Preview executor, which is up to 5 sequential model
       // invocations at 120 s each plus S3 reads
       // (llm-autolabel-prompt-tuning Req 3.3).
       timeout: cdk.Duration.seconds(900),
+      // Up from the 128 MB default: the Image_Downscaler accepts sources up to
+      // Max_Source_Pixel_Count (100 M pixels), whose Pillow decode buffer plus
+      // the resized buffer and the encoder working set peaks in the 400-500 MB
+      // region, which 128 MB cannot hold at all. 2048 MB also sits above the
+      // ~1769 MB point where Lambda allocates a full vCPU, and CPU is what
+      // decides whether the 5 s Downscale_Duration_Bound is met; it matches
+      // DdaLabelingWorker's allocation so there is one number for Pillow in
+      // this stack (llm-model-token-and-image-sizing Req 6.11).
+      memorySize: 2048,
     });
     this.ddaLabelingHandler = ddaLabelingHandler;
 
@@ -1961,9 +2014,27 @@ export class ComputeStack extends cdk.Stack {
         // at labeling time (llm-autolabel-prompt-tuning Req 7.1); shared
         // with the preview path so both attach the same example subset.
         LLM_MODEL_IMAGE_LIMITS: llmModelImageLimits,
+        // Per-model Model_Token_Limit bootstrap for jobs whose record carries
+        // no valid Token_Budget_Selection; delivered through the same mechanism
+        // as LLM_MODEL_IMAGE_LIMITS and read from the same persisted settings
+        // item the preview reads (llm-model-token-and-image-sizing Req 1.6, 1.8).
+        LLM_MODEL_TOKEN_LIMITS: llmModelTokenLimits,
       },
-      layers: [sharedLayer],
+      // The same imagingLayer LayerVersion DdaLabelingWorker and
+      // DdaLabelingHandler attach: one Pillow build across every function that
+      // runs the Image_Downscaler, so the preview and labeling time emit
+      // byte-identical downscaled bytes for the same source and setting
+      // (llm-model-token-and-image-sizing Req 6.1, 6.6).
+      layers: [sharedLayer, imagingLayer],
       timeout: cdk.Duration.seconds(300),
+      // Up from the 128 MB default, for the same reason as
+      // DdaLabelingHandler: a worst-case accepted source (100 M pixels) peaks
+      // around 400-500 MB across the Pillow decode buffer, the resized buffer
+      // and the encoder working set, and 2048 MB is above the ~1769 MB
+      // full-vCPU threshold that the 5 s Downscale_Duration_Bound depends on
+      // (llm-model-token-and-image-sizing Req 6.11). Negligible cost here:
+      // these invocations are already dominated by a 120 s model call.
+      memorySize: 2048,
     });
 
     ddaAutolabelWorker.addEventSource(new SqsEventSource(ddaAutolabelQueue, {

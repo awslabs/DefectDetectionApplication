@@ -44,6 +44,25 @@ The Preview_Run executor (task 9.1) is deliberately never exercised:
 the self-invoke goes to `FakeLambdaClient`, which only records it, so
 per-sample resolution is simulated by calling the state helpers
 directly.
+
+Spec: llm-model-token-and-image-sizing, task 7.4 (sizing inputs on the
+same two routes). Extends the same harness — every pre-existing case
+above holds unchanged:
+
+- The `downscale_max_edge` and `token_budget` validation branches, each
+  rejection carrying its fixed message (the six permitted values / the
+  accepted range), singly and combined with a pre-existing rule in the
+  one all-rules-evaluated pass, with nothing persisted, no lock and no
+  executor invoked (Req 5.5, 3.5)
+- The RUN item's two new attributes: the validated Max_Image_Edge
+  (absent for Downscale_Off) and the resolved Effective_Token_Budget
+  (Req 5.3, 1.6)
+- The single `preview_run` audit event's `downscale_max_edge` (null for
+  Off) and `token_budget` details (Req 9.5)
+- The status response's `downscale_max_edge` (null for Off) and
+  `token_budget` fields (Req 5.10)
+- A run started with the budget key omitted resolving the shared-layer
+  default of 10000 everywhere the budget is reported (Req 3.10, 1.6)
 """
 import json
 import sys
@@ -689,3 +708,208 @@ class TestStatusRoute:
         status, body = env.status(started["run_id"])
         assert status == 500
         assert body == {"error": "Failed to read the preview run"}
+
+
+# ----------------------------------------- sizing inputs (task 7.4)
+# Spec: llm-model-token-and-image-sizing — Req 3.5, 3.10, 5.5, 5.10,
+# 9.5, plus 5.3/1.6 for the RUN item's recorded values.
+
+DOWNSCALE_MESSAGE = ("downscale_max_edge must be null for no downscaling "
+                     "or one of 512, 768, 1024, 1280, 1536, 2048")
+TOKEN_BUDGET_MESSAGE = ("token_budget must be a whole number between 1 "
+                        "and 128000")
+# The shared-layer Model_Token_Limit_Default: a run started with no
+# usable Token_Budget_Selection and no mapping entry must record
+# exactly this budget (Req 3.10).
+DEFAULT_TOKEN_BUDGET = 10000
+
+
+def start_with_body(env, body):
+    """POST /labeling-preview/runs with an explicit body dict.
+
+    `preview_body` drops None-valued overrides, so explicit JSON nulls
+    (the wizard's blank downscale select, a null budget) can only reach
+    validation through a hand-built event."""
+    event = {
+        "httpMethod": "POST",
+        "resource": "/labeling-preview/runs",
+        "path": "/v1/labeling-preview/runs",
+        "pathParameters": None,
+        "queryStringParameters": None,
+        "body": json.dumps(body),
+    }
+    event.update(env._claims(env.creator))
+    response = env.module.handler(event, env.context)
+    return response["statusCode"], json.loads(response["body"])
+
+
+@pytest.fixture
+def budget_env(env, monkeypatch):
+    """`env` pinned to the environment-bootstrap Model_Token_Limits
+    source with no settings-table read and no inherited mapping (the
+    sizing_env convention from test_dda_autolabel_worker_few_shot.py),
+    so budget resolution lands on the shared-layer default."""
+    monkeypatch.setattr(env.module, "SETTINGS_TABLE", None)
+    monkeypatch.delenv("LLM_MODEL_TOKEN_LIMITS", raising=False)
+    return env
+
+
+class TestSizingValidation:
+    """Req 5.5, 3.5: the two sizing rules join the single
+    all-rules-evaluated pass; every rejection persists nothing, claims
+    no lock and invokes no executor."""
+
+    @pytest.mark.parametrize("bad_downscale", [
+        pytest.param(True, id="boolean"),
+        pytest.param("1024", id="digit-string"),
+        pytest.param("off", id="word-string"),
+        pytest.param(1024.0, id="whole-float"),
+        pytest.param(1023, id="off-by-one"),
+        pytest.param(4096, id="not-an-option"),
+    ])
+    def test_invalid_downscale_rejected_listing_the_options(self, env,
+                                                            bad_downscale):
+        """Req 5.5: a boolean, string, float or out-of-set integer is
+        rejected with the message listing the six permitted values."""
+        status, body = env.start(downscale_max_edge=bad_downscale)
+        assert status == 400
+        errors = [err for err in body["validation_errors"]
+                  if err["parameter"] == "downscale_max_edge"]
+        assert len(errors) == 1
+        assert errors[0]["message"] == DOWNSCALE_MESSAGE
+        env.assert_no_preview_state()
+
+    @pytest.mark.parametrize("bad_budget", [
+        pytest.param(True, id="boolean"),
+        pytest.param("20000", id="digit-string"),
+        pytest.param(20000.0, id="whole-float"),
+        pytest.param(0, id="below-range"),
+        pytest.param(128001, id="above-ceiling"),
+    ])
+    def test_invalid_token_budget_rejected_naming_the_range(self, env,
+                                                            bad_budget):
+        """Req 3.5: a present-and-invalid budget is rejected with the
+        accepted range, with no numeric conversion and no clamping."""
+        status, body = env.start(token_budget=bad_budget)
+        assert status == 400
+        errors = [err for err in body["validation_errors"]
+                  if err["parameter"] == "token_budget"]
+        assert len(errors) == 1
+        assert errors[0]["message"] == TOKEN_BUDGET_MESSAGE
+        env.assert_no_preview_state()
+
+    def test_null_downscale_accepted_null_budget_rejected(self, env):
+        """The two nulls diverge by design: null downscale_max_edge is
+        Downscale_Off, while an empty budget control omits the key
+        entirely — a present null budget is a violation."""
+        body = env.preview_body()
+        body["downscale_max_edge"] = None
+        body["token_budget"] = None
+        status, response = start_with_body(env, body)
+        assert status == 400
+        assert parameters(response) == {"token_budget"}
+        env.assert_no_preview_state()
+
+    def test_sizing_violations_enumerated_with_existing_rules(self, env):
+        """Req 3.5, 5.5: both sizing violations and a pre-existing
+        rule's ride one response — the single pass, not the first
+        offender."""
+        status, body = env.start(downscale_max_edge=640, token_budget=-1,
+                                 detection_prompt="")
+        assert status == 400
+        assert {"downscale_max_edge", "token_budget",
+                "detection_prompt"} <= parameters(body)
+        env.assert_no_preview_state()
+
+    @pytest.mark.parametrize("overrides", [
+        pytest.param({"downscale_max_edge": 512}, id="smallest-edge"),
+        pytest.param({"downscale_max_edge": 2048}, id="largest-edge"),
+        pytest.param({"token_budget": 1}, id="budget-floor"),
+        pytest.param({"token_budget": 128000}, id="budget-ceiling"),
+    ])
+    def test_boundary_sizing_values_accepted(self, env, overrides):
+        status, _ = env.start(**overrides)
+        assert status == 202
+
+
+class TestSizingRunState:
+    """Req 5.3, 1.6, 9.5, 5.10: the validated Downscale_Setting and the
+    resolved Effective_Token_Budget ride the RUN item, the single audit
+    event and the status response."""
+
+    def test_run_item_records_the_setting_and_the_resolved_budget(self,
+                                                                  env):
+        """A valid Token_Budget_Selection wins every resolution tier, so
+        the recorded Effective_Token_Budget is the selection itself."""
+        status, body = env.start(downscale_max_edge=1024,
+                                 token_budget=20000)
+        assert status == 202
+        run = env.run_item(body["run_id"])
+        assert int(run["downscale_max_edge"]) == 1024
+        assert int(run["token_budget"]) == 20000
+
+    def test_downscale_off_leaves_the_run_attribute_absent(self, env):
+        """A run without a bound reads exactly like a pre-feature RUN
+        item: the attribute is absent, not null."""
+        status, body = env.start(token_budget=20000)
+        assert status == 202
+        run = env.run_item(body["run_id"])
+        assert "downscale_max_edge" not in run
+        assert int(run["token_budget"]) == 20000
+
+    def test_audit_event_carries_both_sizing_details(self, env):
+        """Req 9.5: still exactly one preview_run event, now carrying
+        the applied Downscale_Setting and the Effective_Token_Budget."""
+        status, _ = env.start(downscale_max_edge=768, token_budget=5000)
+        assert status == 202
+        events = env.audit_events("preview_run")
+        assert len(events) == 1
+        details = events[0]["details"]
+        assert int(details["downscale_max_edge"]) == 768
+        assert int(details["token_budget"]) == 5000
+
+    def test_audit_event_records_null_downscale_for_an_off_run(self, env):
+        status, _ = env.start(token_budget=5000)
+        assert status == 202
+        events = env.audit_events("preview_run")
+        assert len(events) == 1
+        assert events[0]["details"]["downscale_max_edge"] is None
+        assert int(events[0]["details"]["token_budget"]) == 5000
+
+    def test_status_reports_both_sizing_fields(self, env):
+        """Req 5.10: the wizard reads the applied setting and budget off
+        the same status poll it already makes."""
+        _, started = env.start(downscale_max_edge=2048, token_budget=64000)
+        status, body = env.status(started["run_id"])
+        assert status == 200
+        assert body["downscale_max_edge"] == 2048
+        assert body["token_budget"] == 64000
+
+    def test_status_reports_null_downscale_for_an_off_run(self, env):
+        _, started = env.start(token_budget=64000)
+        status, body = env.status(started["run_id"])
+        assert status == 200
+        assert body["downscale_max_edge"] is None
+        assert body["token_budget"] == 64000
+
+    def test_empty_budget_omits_the_key_and_resolves_the_default(
+            self, budget_env):
+        """Req 3.10, 1.6: a run started with the budget key omitted
+        resolves the shared-layer default of 10000, recorded on the RUN
+        item, audited, and reported by the status route."""
+        env = budget_env
+        assert "token_budget" not in env.preview_body()
+
+        status, started = env.start()
+        assert status == 202
+        run = env.run_item(started["run_id"])
+        assert int(run["token_budget"]) == DEFAULT_TOKEN_BUDGET
+
+        events = env.audit_events("preview_run")
+        assert len(events) == 1
+        assert int(events[0]["details"]["token_budget"]) == (
+            DEFAULT_TOKEN_BUDGET)
+
+        status, body = env.status(started["run_id"])
+        assert status == 200
+        assert body["token_budget"] == DEFAULT_TOKEN_BUDGET
