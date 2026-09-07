@@ -112,14 +112,30 @@ class FakeSleep:
 
 
 class FakeShadowAccessor:
-    """Records reported writes; optionally appends ordering events."""
+    """Records reported writes; optionally appends ordering events.
 
-    def __init__(self, events=None):
+    ``get_state`` drives ``get_thing_shadow_state_request`` for the
+    partial-delta resolution tests: a dict is returned as the shadow
+    state, a callable is invoked (and may raise), an exception instance
+    is raised, and the default ``None`` mirrors a never-written shadow
+    (also the production accessor's swallowed-error return). GET calls
+    are recorded in ``gets``.
+    """
+
+    def __init__(self, events=None, get_state=None):
         self.writes = []
+        self.gets = []
         self._events = events
+        self.get_state = get_state
 
     def get_thing_shadow_state_request(self, thing_name, shadow_name):
-        return None
+        self.gets.append((thing_name, shadow_name))
+        state = self.get_state
+        if callable(state):
+            return state()
+        if isinstance(state, BaseException):
+            raise state
+        return state
 
     def update_thing_shadow_state_request(self, thing_name, shadow_name, state):
         self.writes.append(state)

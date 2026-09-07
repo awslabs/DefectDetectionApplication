@@ -33,6 +33,15 @@ Key behaviors:
   older one. Processing runs on a dedicated daemon thread (started with
   :meth:`start`) so downloads — up to 3 × 120 s — never block the agent's
   camera-report scheduling.
+- **Partial-delta tolerance** (bug found on hardware): AWS IoT computes
+  the shadow delta per-field against the reported state, so a desired
+  field equal to the previous request's echo (e.g. ``op``/``bucket`` on a
+  pin→pin replace) is omitted from the delivered document. When required
+  fields are missing, :meth:`process_one` fetches the CURRENT full
+  desired document through the shadow accessor and uses it iff its
+  ``requestId`` matches the delivery's; a failed GET or a mismatched
+  requestId is reported ``failed`` naming the incomplete delivery —
+  never a silent hang.
 - **Retrieval retry policy** (Requirements 2.8–2.11): at most
   :data:`RETRIEVAL_MAX_ATTEMPTS` attempts, each bounded at
   :data:`RETRIEVAL_ATTEMPT_TIMEOUT_SECONDS` by a wall-clock bound on the
@@ -119,6 +128,29 @@ class _RetrievalFailure(Exception):
     """Every retrieval attempt for a pin request failed. The message names
     the final attempt's cause — ``retrieval failure: …`` or
     ``checksum mismatch`` (Requirement 2.11)."""
+
+
+class _PartialDeliveryFailure(Exception):
+    """A partial delta document could not be resolved to the full desired
+    document (shadow GET failed or the slot's requestId no longer matches
+    the delivery's). The request is reported ``failed`` with this message
+    — never silently dropped (which would hang the request pending
+    forever on the portal side)."""
+
+
+def _is_partial_delivery(desired: Mapping[str, Any]) -> bool:
+    """Whether a delivered desired document is missing fields its
+    operation requires — the partial-delta case (see
+    :meth:`StaticImagePinWorker.process_one`): no ``op`` at all, or a pin
+    operation missing any of the transport reference fields."""
+    op = desired.get("op")
+    if not op:
+        return True
+    if op == OP_PIN and any(
+        not desired.get(field) for field in ("bucket", "key", "sha256")
+    ):
+        return True
+    return False
 
 
 def default_marker_path() -> str:
@@ -254,6 +286,26 @@ class StaticImagePinWorker:
             )
             return None
 
+        # Partial-delta resolution (bug found on hardware): AWS IoT
+        # computes the delta per-field against the reported state, so any
+        # desired field equal to the previous request's echo — e.g. `op`
+        # and `bucket` on a pin→pin replace — is omitted from the
+        # delivered document, starving the request of required fields.
+        # Resolve by fetching the CURRENT full desired document from the
+        # shadow and using it iff its requestId matches this delivery's.
+        # Newest-wins is preserved: the GET returns the current single
+        # slot, which is definitionally the newest request. Resolved
+        # before the marker check; no marker re-evaluation is needed
+        # afterwards because requestId is always present in a delta (it
+        # changes with every request). A failed resolution is carried
+        # into the outcome below — never a silent drop.
+        resolution_failure: Optional[str] = None
+        if _is_partial_delivery(desired):
+            try:
+                desired = self._resolve_partial_delivery(desired, request_id)
+            except _PartialDeliveryFailure as exc:
+                resolution_failure = str(exc)
+
         # Idempotence: a request already carried to a terminal outcome is
         # re-reported from the marker, never re-executed (Reqs 3.5, 7.4).
         marker = self._read_marker()
@@ -273,6 +325,8 @@ class StaticImagePinWorker:
         reason: Optional[str] = None
         metadata: Optional[Dict[str, Any]] = None
         try:
+            if resolution_failure is not None:
+                raise _PartialDeliveryFailure(resolution_failure)
             if op == OP_REMOVE:
                 metadata = self._apply_remove()
             elif op == OP_PIN:
@@ -282,6 +336,9 @@ class StaticImagePinWorker:
                 raise StaticImagePinError(
                     "unsupported static-image pin operation '{}'".format(op)
                 )
+        except _PartialDeliveryFailure as exc:
+            status = STATUS_FAILED
+            reason = str(exc)
         except _RetrievalFailure as exc:
             status = STATUS_FAILED
             reason = str(exc)
@@ -323,6 +380,64 @@ class StaticImagePinWorker:
             return None
         request_id = marker.get("requestId")
         return str(request_id) if request_id else None
+
+    def applied_marker(self) -> Optional[Dict[str, Any]]:
+        """The full recorded terminal-outcome marker document, or ``None``
+        when there is no (readable) marker.
+
+        Seam for the owning agent's stable ``absent_since`` derivation
+        (Requirement 6.2, second hardware finding): a marker recording an
+        applied ``remove`` carries the removal's ``completedAtEpochMs``,
+        which the agent reports as the Static_Image_Camera's
+        ``absentSince`` — stable across reports and restarts."""
+        return self._read_marker()
+
+    # --- partial-delta resolution (hardware-found bug) ------------------------
+
+    def _resolve_partial_delivery(
+        self, delta_doc: Mapping[str, Any], request_id: str
+    ) -> Dict[str, Any]:
+        """Fetch the CURRENT full ``desired.staticImagePin`` document
+        through the shadow accessor to fill in the fields a partial delta
+        omitted.
+
+        The full document is used iff its ``requestId`` matches the
+        delivery's; otherwise (or when the GET fails — the production
+        accessor swallows errors and returns ``None``/``False``) a
+        :class:`_PartialDeliveryFailure` is raised so the request is
+        reported ``failed`` naming the incomplete delivery, never
+        silently hung."""
+        state = None
+        try:
+            state = self._shadow.get_thing_shadow_state_request(
+                self.thing_name, self.shadow_name
+            )
+        except Exception as exc:  # noqa: BLE001 - GET failure -> reported
+            raise _PartialDeliveryFailure(
+                "incomplete delta delivery for request '{}': required "
+                "fields were omitted and the full desired document could "
+                "not be read from the shadow ({})".format(request_id, exc)
+            ) from exc
+        if not isinstance(state, Mapping):
+            raise _PartialDeliveryFailure(
+                "incomplete delta delivery for request '{}': required "
+                "fields were omitted and the full desired document could "
+                "not be read from the shadow".format(request_id)
+            )
+        desired = state.get("desired")
+        full = desired.get("staticImagePin") if isinstance(desired, Mapping) else None
+        if not isinstance(full, Mapping) or full.get("requestId") != request_id:
+            raise _PartialDeliveryFailure(
+                "incomplete delta delivery for request '{}': required "
+                "fields were omitted and the shadow's current desired "
+                "document does not carry this request".format(request_id)
+            )
+        logger.info(
+            "Resolved a partial delta delivery for static-image pin "
+            "request %s from the shadow's full desired document",
+            request_id,
+        )
+        return dict(full)
 
     # --- retrieval (Requirements 2.8-2.11) -----------------------------------
 

@@ -16,15 +16,29 @@
 # Feature: cloud-static-camera-provisioning, Property 15: Inventory
 # presence tracks the pin state
 
-*For any* combination of configured Image_Sources, discovery snapshot, and
-pinned flag, ``build_inventory`` includes exactly one
-``static-image-camera`` entry when the flag is true — carrying origin
-``edge-discovered`` and the fixed identity — and zero such entries when
-false, with all other inventory entries identical to the pre-feature
-merge; the flag reflects the store's pinned state regardless of whether
-the pin was device- or cloud-initiated.
+*For any* combination of configured Image_Sources, discovery snapshot,
+pinned flag, and absence timestamp, ``build_inventory`` includes exactly
+one ``static-image-camera`` entry when the flag is true — carrying origin
+``edge-discovered`` and the fixed identity — exactly one ABSENT entry
+(``absent=True`` with the supplied ``absentSince`` and the same fixed
+identity) when the flag is false and an ``static_image_absent_since``
+timestamp is supplied (unpinned after having been reported), and zero
+such entries when the flag is false with no timestamp (never reported),
+with all other inventory entries identical to the pre-feature merge; the
+flag reflects the store's pinned state regardless of whether the pin was
+device- or cloud-initiated.
 
 **Validates: Requirements 6.1, 6.2, 6.5, 7.6**
+
+CONTRACT CHANGE (second hardware finding, jetson-thor1 /
+LocalServer.arm64JP7 1.0.23 — Req 6.2): this property originally
+required ZERO entries whenever the flag was false. AWS IoT shadow
+updates MERGE nested maps, so an entry merely omitted from a full report
+persists in the shadow document and the Portal keeps upserting the stale
+entry as present — the registry entry never goes absent. The unpinned-
+after-reported case now yields exactly one explicitly ABSENT entry (the
+discovered-camera absence pattern the Portal reducer already consumes);
+only the never-reported case yields zero entries.
 
 The pinned flag is derived from a REAL temp-dir ``StaticImageStore``
 pinned through the Device_Pin_API primitive (device origin), through a
@@ -172,17 +186,41 @@ def _pin_store(tmp_dir, origin):
     return store
 
 
+def _assert_fixed_identity(static_image):
+    assert static_image["id"] == STATIC_IMAGE_CAMERA_ID
+    assert static_image["model"] == STATIC_IMAGE_CAMERA_IDENTITY["model"]
+    assert static_image["address"] == STATIC_IMAGE_CAMERA_IDENTITY["address"]
+    assert (
+        static_image["physicalId"]
+        == STATIC_IMAGE_CAMERA_IDENTITY["physical_id"]
+    )
+    assert static_image["protocol"] == STATIC_IMAGE_CAMERA_IDENTITY["protocol"]
+    assert static_image["serial"] == STATIC_IMAGE_CAMERA_IDENTITY["serial"]
+    assert static_image["vendor"] == STATIC_IMAGE_CAMERA_IDENTITY["vendor"]
+
+
 @settings(deadline=None)
 @given(
     sources=_image_sources(),
     cameras=_discovered_cameras(),
     origin=_pin_origins,
+    absent_since=st.one_of(
+        st.none(),
+        st.integers(min_value=0, max_value=2_000_000_000_000),
+    ),
 )
-def test_inventory_presence_tracks_pin_state(sources, cameras, origin):
+def test_inventory_presence_tracks_pin_state(
+    sources, cameras, origin, absent_since
+):
     """# Feature: cloud-static-camera-provisioning, Property 15: Inventory
     presence tracks the pin state
 
     **Validates: Requirements 6.1, 6.2, 6.5, 7.6**
+
+    Contract update (Req 6.2, second hardware finding): unpinned after
+    having been reported (``absent_since`` supplied) yields exactly one
+    ABSENT entry rather than zero entries; only never-reported
+    (``absent_since=None``) yields zero entries.
     """
     tmp_dir = tempfile.mkdtemp(prefix="pin-inventory-")
     try:
@@ -201,6 +239,7 @@ def test_inventory_presence_tracks_pin_state(sources, cameras, origin):
             snapshot,
             static_image_pinned=pinned,
             static_image_metadata=metadata,
+            static_image_absent_since=absent_since,
         )
 
         static_entries = [
@@ -217,14 +256,16 @@ def test_inventory_presence_tracks_pin_state(sources, cameras, origin):
         # All other entries are identical to the pre-feature merge.
         assert others == baseline
 
-        if not pinned:
-            # Zero entries when unpinned: absent from the full report, so
-            # the Portal's existing absence handling applies (6.2).
+        if not pinned and absent_since is None:
+            # Never reported: zero entries (nothing for the Portal to
+            # absence-track).
             assert static_entries == []
             return
 
         # Exactly one entry, fixed identity, discovery-managed origin
-        # (6.1, 6.5).
+        # (6.1, 6.5) — present while pinned, explicitly ABSENT once
+        # unpinned after having been reported (6.2: an omitted key would
+        # persist in the shadow document under IoT merge semantics).
         assert len(static_entries) == 1
         entry = static_entries[0]
         assert entry.camera_source_id == STATIC_IMAGE_CAMERA_ID
@@ -232,23 +273,24 @@ def test_inventory_presence_tracks_pin_state(sources, cameras, origin):
         assert entry.type == TYPE_STATIC_IMAGE
         assert entry.origin == ORIGIN_EDGE_DISCOVERED
         assert entry.discovered is True
-        assert entry.absent is False
         assert entry.params == {}
 
         static_image = entry.capabilities["staticImage"]
-        assert static_image["id"] == STATIC_IMAGE_CAMERA_ID
-        assert static_image["model"] == STATIC_IMAGE_CAMERA_IDENTITY["model"]
-        assert static_image["address"] == STATIC_IMAGE_CAMERA_IDENTITY["address"]
-        assert (
-            static_image["physicalId"]
-            == STATIC_IMAGE_CAMERA_IDENTITY["physical_id"]
-        )
-        assert static_image["protocol"] == STATIC_IMAGE_CAMERA_IDENTITY["protocol"]
-        assert static_image["serial"] == STATIC_IMAGE_CAMERA_IDENTITY["serial"]
-        assert static_image["vendor"] == STATIC_IMAGE_CAMERA_IDENTITY["vendor"]
+        _assert_fixed_identity(static_image)
 
-        # The pin store's metadata rides along in the capabilities.
-        for key, value in metadata.items():
-            assert static_image[key] == value
+        if pinned:
+            assert entry.absent is False
+            # The pin store's metadata rides along in the capabilities;
+            # a supplied absence timestamp is ignored while pinned.
+            for key, value in metadata.items():
+                assert static_image[key] == value
+        else:
+            assert entry.absent is True
+            assert entry.absent_since == absent_since
+            # No pin metadata on the absent entry — identity only.
+            assert set(static_image) == {
+                "id", "model", "address", "physicalId", "protocol",
+                "serial", "vendor",
+            }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

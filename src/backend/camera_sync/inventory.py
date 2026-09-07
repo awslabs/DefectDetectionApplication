@@ -109,6 +109,7 @@ def build_inventory(
     discovery_result,
     static_image_pinned: bool = False,
     static_image_metadata: Optional[Mapping[str, Any]] = None,
+    static_image_absent_since: Optional[int] = None,
 ) -> List[CameraSourceState]:
     """Pure merge of configured Image_Sources with discovered hardware.
 
@@ -123,11 +124,25 @@ def build_inventory(
     exactly one virtual ``static-image-camera`` entry with the fixed
     identity, origin ``edge-discovered`` (so the Portal's existing
     discovery-managed mutation rejection, absence handling, picker, and
-    binding flows apply with zero special-casing). When false the entry is
-    simply absent from the full report, which the Portal's existing
-    absence reduction handles. All other entries are identical to the
-    pre-feature merge. ``static_image_metadata`` (the pin store's status
-    metadata) is folded into the entry's ``staticImage`` capabilities.
+    binding flows apply with zero special-casing). All other entries are
+    identical to the pre-feature merge. ``static_image_metadata`` (the
+    pin store's status metadata) is folded into the entry's
+    ``staticImage`` capabilities.
+
+    ``static_image_absent_since`` (second hardware finding, jetson-thor1
+    / LocalServer.arm64JP7 1.0.23 — Requirement 6.2): AWS IoT shadow
+    updates MERGE nested maps, so a camera key simply omitted from a full
+    report persists in the shadow document and the Portal keeps seeing
+    the stale entry as present. An unpinned, previously reported
+    Static_Image_Camera must therefore be reported explicitly ABSENT —
+    the same absence pattern discovered physical cameras use — not just
+    dropped from the report. When ``static_image_pinned`` is false and
+    the caller passes an ``static_image_absent_since`` timestamp (epoch
+    ms — the caller's signal that the camera was previously reported and
+    when its absence was first established), the merge appends exactly
+    one ``static-image-camera`` entry with the fixed identity,
+    ``absent=True``, and that timestamp. When false and ``None`` (never
+    reported), no entry is appended. Ignored while pinned.
     """
     tracked = _normalize_discovery(discovery_result)
 
@@ -257,14 +272,32 @@ def build_inventory(
         )
 
     # Static_Image_Camera (cloud-static-camera-provisioning, Requirements
-    # 6.1, 6.2, 7.6): present exactly while a Pinned_Image exists.
+    # 6.1, 6.2, 7.6): present exactly while a Pinned_Image exists;
+    # explicitly ABSENT (never merely omitted — shadow merge semantics
+    # keep omitted keys alive, Req 6.2) once unpinned after having been
+    # reported.
     if static_image_pinned:
         entries.append(_static_image_entry(static_image_metadata))
+    elif static_image_absent_since is not None:
+        entries.append(_static_image_absent_entry(static_image_absent_since))
 
     return entries
 
 
 # --- helpers -----------------------------------------------------------------
+
+
+def _static_image_identity() -> Dict[str, Any]:
+    """The fixed Static_Image_Camera enumeration identity (Req 6.1)."""
+    return {
+        "id": STATIC_IMAGE_CAMERA_ID,
+        "model": STATIC_IMAGE_CAMERA_IDENTITY["model"],
+        "address": STATIC_IMAGE_CAMERA_IDENTITY["address"],
+        "physicalId": STATIC_IMAGE_CAMERA_IDENTITY["physical_id"],
+        "protocol": STATIC_IMAGE_CAMERA_IDENTITY["protocol"],
+        "serial": STATIC_IMAGE_CAMERA_IDENTITY["serial"],
+        "vendor": STATIC_IMAGE_CAMERA_IDENTITY["vendor"],
+    }
 
 
 def _static_image_entry(
@@ -276,15 +309,7 @@ def _static_image_entry(
     discovery-managed mutation rejection covers it, Requirement 6.5), and
     ``staticImage`` capabilities carrying the fixed enumeration identity
     plus the pin store's metadata (width/height/format/fileName/…)."""
-    static_image: Dict[str, Any] = {
-        "id": STATIC_IMAGE_CAMERA_ID,
-        "model": STATIC_IMAGE_CAMERA_IDENTITY["model"],
-        "address": STATIC_IMAGE_CAMERA_IDENTITY["address"],
-        "physicalId": STATIC_IMAGE_CAMERA_IDENTITY["physical_id"],
-        "protocol": STATIC_IMAGE_CAMERA_IDENTITY["protocol"],
-        "serial": STATIC_IMAGE_CAMERA_IDENTITY["serial"],
-        "vendor": STATIC_IMAGE_CAMERA_IDENTITY["vendor"],
-    }
+    static_image = _static_image_identity()
     if pin_metadata:
         static_image.update(dict(pin_metadata))
     return CameraSourceState(
@@ -295,6 +320,30 @@ def _static_image_entry(
         params={},
         capabilities={"staticImage": static_image},
         discovered=True,
+    )
+
+
+def _static_image_absent_entry(absent_since: int) -> CameraSourceState:
+    """The ABSENT Static_Image_Camera entry for an unpinned, previously
+    reported camera (Requirement 6.2 — second hardware finding).
+
+    Same fixed identity/type/origin as the present entry, no pin
+    metadata (nothing is pinned), ``absent=True`` with the stable
+    ``absent_since`` timestamp — exactly the absence pattern discovered
+    physical cameras report, which the Portal reducer already consumes
+    (incoming ``absent``/``absentSince`` -> registry entry marked absent
+    with ``absent_since``); a later re-pin reports the present entry
+    again and restores it (Requirement 6.1)."""
+    return CameraSourceState(
+        camera_source_id=STATIC_IMAGE_CAMERA_ID,
+        name=STATIC_IMAGE_CAMERA_NAME,
+        type=TYPE_STATIC_IMAGE,
+        origin=ORIGIN_EDGE_DISCOVERED,
+        params={},
+        capabilities={"staticImage": _static_image_identity()},
+        discovered=True,
+        absent=True,
+        absent_since=int(absent_since),
     )
 
 

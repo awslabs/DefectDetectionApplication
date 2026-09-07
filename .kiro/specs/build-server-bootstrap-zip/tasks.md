@@ -73,7 +73,7 @@ function modules — see `test_source_selection_preservation.py` header and
   - Run the full portal_builds suite: `python3 -m pytest test/backend-test/portal_builds -q -p no:cacheprovider`
   - Ensure all tests pass, ask the user if questions arise
 
-- [ ] 5. Deploy and verify live (Lambda-managed asset)
+- [x] 5. Deploy and verify live (Lambda-managed asset)
   - The fix lands in BuildFleetHandler (EdgeCVPortalBuildFleetStack) and the dispatcher handler; it is NOT live until a portal infrastructure deploy runs
   - Honor `.kiro/steering/builds.md`: confirm no component build is running (`pgrep -af "gdk component build"` / `pgrep -af "build-custom.sh"`) before deploying; NEVER deploy while one runs
   - Run `edge-cv-portal/deploy-infrastructure.sh`

@@ -155,6 +155,73 @@ CAMERA_REPORT = {
     "version": 1,
 }
 
+STATIC_CAMERA_SK = "CAMERA#static-image-camera"
+
+
+def static_camera_report(version=1):
+    """The device's static-image-camera inventory entry as reported
+    present (the stale shape shadow merge keeps re-delivering)."""
+    return {
+        "name": "Static Image Camera", "type": "StaticImage",
+        "origin": "edge-discovered", "params": {},
+        "capabilities": {"staticImage": {"id": "static-image-camera"}},
+        "discovered": True, "absent": False, "version": version,
+    }
+
+
+def put_static_camera_entry(ingest_env, device_id, usecase_id, *,
+                            absent=False, absent_since=None, version=1):
+    """Seed a CAMERA#static-image-camera registry entry."""
+    item = {
+        "device_id": device_id, "sk": STATIC_CAMERA_SK,
+        "camera_source_id": "static-image-camera",
+        "usecase_id": usecase_id,
+        "name": "Static Image Camera", "type": "StaticImage",
+        "origin": "edge-discovered", "params": {},
+        "capabilities": {"staticImage": {"id": "static-image-camera"}},
+        "version": version, "sync_status": "synced", "absent": absent,
+    }
+    if absent_since is not None:
+        item["absent_since"] = absent_since
+    ingest_env.registry.put_item(Item=item)
+
+
+def get_static_camera_entry(ingest_env, device_id):
+    return ingest_env.registry.get_item(
+        Key={"device_id": device_id, "sk": STATIC_CAMERA_SK}).get("Item")
+
+
+class RecordingIotClient:
+    """iot-data client double recording update_thing_shadow calls (or
+    failing them, for the best-effort path)."""
+
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.writes = []
+
+    def update_thing_shadow(self, thingName, shadowName, payload):
+        if self.fail:
+            raise RuntimeError("injected shadow write failure")
+        self.writes.append(
+            (thingName, shadowName, json.loads(payload)))
+        return {}
+
+
+@pytest.fixture
+def recording_iot(ingest_env, monkeypatch):
+    """Route camera_sync's use-case iot-data seam to a recording fake."""
+    client = RecordingIotClient()
+    usecases = []
+
+    def fake_iot_data_client(usecase_id):
+        usecases.append(usecase_id)
+        return client
+
+    monkeypatch.setattr(ingest_env.camera_sync, "iot_data_client",
+                        fake_iot_data_client)
+    client.usecases = usecases
+    return client
+
 
 # ==========================================================================
 # Confirmations route to the pin reducer (Req 4.1)
@@ -340,3 +407,223 @@ class TestNonPendingConfirmations:
         assert stored["status"] == "failed"
         assert stored["failure_reason"] == "retrieval failure"
         assert "device_metadata" not in stored
+
+
+# ==========================================================================
+# Applied-remove convergence (Req 6.2 mitigation — second hardware
+# finding, jetson-thor1 / LocalServer.arm64JP7 1.0.23): deployed device
+# builds omit the static camera from the post-unpin report, but shadow
+# updates MERGE nested maps, so the stale key keeps re-upserting the
+# registry entry as present. On an applied remove the ingest must (a)
+# mark the registry entry absent AFTER the camera reduction and (b)
+# best-effort null the stale shadow key.
+# ==========================================================================
+
+REMOVE_COMPLETED_AT = 1_730_000_100_000
+
+
+class TestAppliedRemoveConvergence:
+    def _applied_remove(self, ingest_env, device_id, usecase_id,
+                        reported_extra=None, stale_cameras=True):
+        """One documents event carrying the applied-remove confirmation
+        PLUS (by default) the stale present cameras map — exactly what
+        shadow merge semantics deliver: the device's post-unpin report
+        omitted the key, so the merged reported state still carries it
+        present."""
+        item = put_pending_pin_item(ingest_env, device_id, usecase_id,
+                                    op=ingest_env.pin_requests.OP_REMOVE)
+        reported = {"staticImagePin": confirmation(item)}
+        if stale_cameras:
+            reported["cameras"] = {
+                "static-image-camera": static_camera_report(version=2)}
+        reported.update(reported_extra or {})
+        ingest(ingest_env, device_id, reported)
+        return item
+
+    def test_applied_remove_marks_registry_entry_absent(
+            self, ingest_env, recording_iot):
+        device_id, usecase_id = register_device(ingest_env)
+        put_static_camera_entry(ingest_env, device_id, usecase_id)
+
+        item = self._applied_remove(ingest_env, device_id, usecase_id)
+
+        stored = get_item(ingest_env, device_id, item["pin_request_id"])
+        assert stored["status"] == "applied"
+        entry = get_static_camera_entry(ingest_env, device_id)
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == REMOVE_COMPLETED_AT
+
+    def test_applied_remove_writes_shadow_null_for_stale_key(
+            self, ingest_env, recording_iot):
+        device_id, usecase_id = register_device(ingest_env)
+        put_static_camera_entry(ingest_env, device_id, usecase_id)
+
+        self._applied_remove(ingest_env, device_id, usecase_id)
+
+        assert recording_iot.usecases == [usecase_id]
+        assert recording_iot.writes == [(
+            device_id, "dda-camera-registry",
+            {"state": {"reported": {"cameras": {
+                "static-image-camera": None}}}},
+        )]
+
+    def test_absent_marking_wins_over_stale_entry_in_same_event(
+            self, ingest_env, recording_iot):
+        """The documents event carrying the remove confirmation ALSO
+        carries the stale (shadow-merged) present cameras map; the camera
+        reducer upserts it first (as a fresh, higher-versioned present
+        entry), and the pin convergence — running after — must win
+        within the event."""
+        device_id, usecase_id = register_device(ingest_env)
+        put_static_camera_entry(ingest_env, device_id, usecase_id)
+
+        self._applied_remove(
+            ingest_env, device_id, usecase_id,
+            reported_extra={"cameras": {
+                "static-image-camera": static_camera_report(version=5)}})
+
+        entry = get_static_camera_entry(ingest_env, device_id)
+        assert int(entry["version"]) == 5  # the camera reducer DID upsert
+        assert entry["absent"] is True     # ...and the convergence won
+        assert int(entry["absent_since"]) == REMOVE_COMPLETED_AT
+
+    def test_shadow_null_failure_is_logged_not_fatal(
+            self, ingest_env, monkeypatch, caplog):
+        """A failing shadow write never fails the record: the transition
+        and the absent-marking persist and no batch failure is reported
+        (ingest() asserts an empty batchItemFailures)."""
+        device_id, usecase_id = register_device(ingest_env)
+        put_static_camera_entry(ingest_env, device_id, usecase_id)
+        failing = RecordingIotClient(fail=True)
+        monkeypatch.setattr(ingest_env.camera_sync, "iot_data_client",
+                            lambda usecase_id: failing)
+
+        item = self._applied_remove(ingest_env, device_id, usecase_id)
+
+        stored = get_item(ingest_env, device_id, item["pin_request_id"])
+        assert stored["status"] == "applied"
+        entry = get_static_camera_entry(ingest_env, device_id)
+        assert entry["absent"] is True
+        assert any("static-image camera shadow key" in record.getMessage()
+                   for record in caplog.records)
+
+    def test_no_registry_entry_means_nothing_created(
+            self, ingest_env, recording_iot):
+        """Absent-marking is condition-guarded: no CAMERA# item and no
+        stale key in the report — nothing is created (the shadow-key
+        cleanup still runs, harmlessly)."""
+        device_id, usecase_id = register_device(ingest_env)
+
+        self._applied_remove(ingest_env, device_id, usecase_id,
+                             stale_cameras=False)
+
+        assert get_static_camera_entry(ingest_env, device_id) is None
+        assert len(recording_iot.writes) == 1
+
+    def test_already_absent_entry_keeps_original_timestamp(
+            self, ingest_env, recording_iot):
+        """A remove confirmed after the stale key was already cleared
+        (the event's cameras map no longer carries the entry): the
+        recorded absence keeps its original timestamp."""
+        device_id, usecase_id = register_device(ingest_env)
+        original_since = 1_729_000_000_000
+        put_static_camera_entry(ingest_env, device_id, usecase_id,
+                                absent=True, absent_since=original_since)
+
+        self._applied_remove(ingest_env, device_id, usecase_id,
+                             reported_extra={"cameras": {}},
+                             stale_cameras=False)
+
+        entry = get_static_camera_entry(ingest_env, device_id)
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == original_since
+
+    def test_applied_pin_confirmation_triggers_no_convergence(
+            self, ingest_env, recording_iot):
+        """Only applied REMOVES converge: an applied pin neither
+        absence-marks the entry nor writes to the shadow."""
+        device_id, usecase_id = register_device(ingest_env)
+        put_static_camera_entry(ingest_env, device_id, usecase_id)
+        item = put_pending_pin_item(ingest_env, device_id, usecase_id,
+                                    with_object=True)
+
+        # A real applied-pin event reports the entry present.
+        ingest(ingest_env, device_id, {
+            "staticImagePin": confirmation(item, metadata=APPLIED_METADATA),
+            "cameras": {"static-image-camera": static_camera_report(
+                version=2)},
+        })
+
+        entry = get_static_camera_entry(ingest_env, device_id)
+        assert entry["absent"] is False
+        assert recording_iot.writes == []
+
+    def test_duplicate_remove_delivery_converges_once(
+            self, ingest_env, recording_iot):
+        """The convergence is keyed to the condition-guarded pending ->
+        applied transition, so duplicate documents-event re-reduction
+        writes the shadow null exactly once."""
+        device_id, usecase_id = register_device(ingest_env)
+        put_static_camera_entry(ingest_env, device_id, usecase_id)
+
+        item = self._applied_remove(ingest_env, device_id, usecase_id)
+        ingest(ingest_env, device_id,
+               {"staticImagePin": confirmation(item)})
+
+        assert len(recording_iot.writes) == 1
+
+
+# ==========================================================================
+# Reported deletion of the static camera (post-null events / builds not
+# reporting the entry): absence-tracked, never deleted (Req 6.2)
+# ==========================================================================
+
+class TestStaticCameraReportedDeletion:
+    def test_report_omitting_static_entry_marks_absent_not_deleted(
+            self, ingest_env):
+        """Once the shadow null lands, subsequent full reports omit the
+        static camera entirely; the recorded entry must go (stay) absent
+        through the deletion path — not be deleted like a physical
+        configured source."""
+        device_id, usecase_id = register_device(ingest_env)
+        put_static_camera_entry(ingest_env, device_id, usecase_id)
+
+        ingest(ingest_env, device_id, {
+            "reportedAt": 1_730_000_400_000,
+            "cameras": {"cfg-1": CAMERA_REPORT},
+        })
+
+        entry = get_static_camera_entry(ingest_env, device_id)
+        assert entry is not None, "entry must not be deleted (Req 6.2)"
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == 1_730_000_400_000
+
+    def test_already_absent_entry_is_untouched_by_omitting_reports(
+            self, ingest_env):
+        device_id, usecase_id = register_device(ingest_env)
+        original_since = 1_729_500_000_000
+        put_static_camera_entry(ingest_env, device_id, usecase_id,
+                                absent=True, absent_since=original_since)
+
+        ingest(ingest_env, device_id,
+               {"reportedAt": 1_730_000_500_000, "cameras": {}})
+
+        entry = get_static_camera_entry(ingest_env, device_id)
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == original_since
+
+    def test_physical_camera_deletion_path_is_unchanged(self, ingest_env):
+        """The special case is scoped to the static camera id: a physical
+        source missing from the full report still reduces to deletion."""
+        device_id, usecase_id = register_device(ingest_env)
+        ingest(ingest_env, device_id, {
+            "cameras": {"cfg-1": CAMERA_REPORT},
+        })
+        assert ingest_env.registry.get_item(
+            Key={"device_id": device_id, "sk": "CAMERA#cfg-1"}).get("Item")
+
+        ingest(ingest_env, device_id, {"cameras": {}})
+
+        assert ingest_env.registry.get_item(
+            Key={"device_id": device_id, "sk": "CAMERA#cfg-1"}).get(
+                "Item") is None

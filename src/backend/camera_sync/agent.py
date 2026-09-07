@@ -67,7 +67,11 @@ from camera_sync.inventory import (
     build_inventory,
     configured_camera_source_id,
 )
-from camera_sync.pin_worker import StaticImagePinWorker
+from camera_sync.pin_worker import (
+    OP_REMOVE,
+    STATUS_APPLIED,
+    StaticImagePinWorker,
+)
 from camera_sync.version_state import CameraSyncStateStore, versions_from_reported
 from utils.static_image_camera import STATIC_IMAGE_CAMERA_ID, get_store
 
@@ -403,6 +407,15 @@ class EdgeSyncAgent:
         self._retry_delay = self._backoff_initial
         self._reported_versions: Dict[str, int] = {}
 
+        # Stable absence timestamp for an unpinned, previously reported
+        # Static_Image_Camera (Requirement 6.2 — second hardware finding:
+        # shadow updates MERGE nested maps, so the entry must be reported
+        # explicitly absent, never merely omitted). Derived once per
+        # absence episode (see _static_image_absent_since) and cleared
+        # when the store is pinned again, so it never churns between
+        # reports (a churning timestamp would version-bump every report).
+        self._static_absent_since_ms: Optional[int] = None
+
         # Portal-change apply state (Requirements 5.3, 5.4). All three are
         # one-shot: retained across failed shadow writes (offline retry)
         # and cleared once a report carrying them is successfully written.
@@ -729,7 +742,23 @@ class EdgeSyncAgent:
             state = None
         reported = state.get("reported") if isinstance(state, Mapping) else None
         self._reported_versions = versions_from_reported(reported)
+        self._seed_static_absence(reported)
         return state if isinstance(state, Mapping) else None
+
+    def _seed_static_absence(self, reported: Optional[Mapping]) -> None:
+        """Restart stability for the Static_Image_Camera's absence
+        timestamp (Requirement 6.2): when the shadow's current reported
+        state already carries the entry absent, adopt its ``absentSince``
+        so a restart neither invents a new timestamp nor version-churns
+        the entry. Ignored once the store is pinned again (the pinned
+        branch of ``_load_inventory`` clears it)."""
+        cameras = (reported or {}).get("cameras") if isinstance(reported, Mapping) else None
+        entry = cameras.get(STATIC_IMAGE_CAMERA_ID) if isinstance(cameras, Mapping) else None
+        if not isinstance(entry, Mapping) or not entry.get("absent"):
+            return
+        absent_since = entry.get("absentSince")
+        if isinstance(absent_since, (int, float)):
+            self._static_absent_since_ms = int(absent_since)
 
     def _build_current_document(self) -> Dict[str, Any]:
         snapshot = (
@@ -784,7 +813,12 @@ class EdgeSyncAgent:
 
         The static-image pin state (cloud-static-camera-provisioning,
         Requirement 6.1) gates the virtual `static-image-camera` entry;
-        a store failure never breaks camera reporting."""
+        a store failure never breaks camera reporting. An unpinned,
+        previously reported camera is reported explicitly ABSENT (with a
+        stable ``absentSince``) rather than omitted — shadow updates
+        MERGE nested maps, so an omitted key would persist in the shadow
+        document and the Portal would keep seeing the stale entry as
+        present forever (Requirement 6.2, second hardware finding)."""
         static_image_pinned = False
         static_image_metadata = None
         try:
@@ -796,6 +830,11 @@ class EdgeSyncAgent:
                 "Static image pin state could not be read; reporting the "
                 "inventory without the static camera entry"
             )
+        static_image_absent_since: Optional[int] = None
+        if static_image_pinned:
+            self._static_absent_since_ms = None  # absence episode over
+        else:
+            static_image_absent_since = self._static_image_absent_since()
         with self._make_session() as session:
             image_sources = self._image_source_accessor.list_image_sources(
                 None, session
@@ -805,7 +844,62 @@ class EdgeSyncAgent:
                 snapshot,
                 static_image_pinned=static_image_pinned,
                 static_image_metadata=static_image_metadata,
+                static_image_absent_since=static_image_absent_since,
             )
+
+    def _static_image_absent_since(self) -> Optional[int]:
+        """The ``absentSince`` to report for the unpinned
+        Static_Image_Camera, or ``None`` when it was never reported (no
+        entry belongs in the report then).
+
+        "Previously reported" is answered from two independent records —
+        the version state store (persisted on every successful report,
+        so it tracks entries first reported at runtime, after the
+        start-time shadow GET) and the start-time shadow reported
+        versions floor (which survives state-file loss/corruption); the
+        two cover each other's failure modes, and either one knowing the
+        entry means the Portal has seen it.
+
+        The timestamp itself is derived at most once per absence episode
+        and cached (``_static_absent_since_ms`` — also seeded from the
+        shadow's reported entry at start), so it never churns between
+        reports: the pin worker marker's ``completedAtEpochMs`` when the
+        marker records an applied ``remove`` (cloud-initiated removal —
+        the exact removal instant, stable across restarts), else the
+        wall clock at the first absent observation."""
+        if not self._static_previously_reported():
+            return None
+        if self._static_absent_since_ms is None:
+            self._static_absent_since_ms = self._derive_static_absent_since()
+        return self._static_absent_since_ms
+
+    def _static_previously_reported(self) -> bool:
+        if STATIC_IMAGE_CAMERA_ID in self._reported_versions:
+            return True
+        try:
+            state = self._state_store.load()
+        except Exception:  # noqa: BLE001 - state read must not break reports
+            logger.exception("Camera sync state store read failed")
+            state = None
+        return bool(state) and STATIC_IMAGE_CAMERA_ID in state
+
+    def _derive_static_absent_since(self) -> int:
+        marker = None
+        try:
+            marker = self.pin_worker.applied_marker()
+        except Exception:  # noqa: BLE001 - marker read must not break reports
+            logger.exception(
+                "Could not read the static-image pin marker for the "
+                "absence timestamp"
+            )
+        if (
+            isinstance(marker, Mapping)
+            and marker.get("op") == OP_REMOVE
+            and marker.get("status") == STATUS_APPLIED
+            and isinstance(marker.get("completedAtEpochMs"), (int, float))
+        ):
+            return int(marker["completedAtEpochMs"])
+        return int(self._wall_clock() * 1000)
 
     def _write_report(self) -> bool:
         try:

@@ -112,6 +112,11 @@ def test_accepted_submission_effects(pin_env, operator, case):
     assert update["shadow_name"] == "dda-camera-registry"
     desired = update["payload"]["state"]["desired"]
     assert list(desired.keys()) == ["staticImagePin"]
+    # The stale reported echo is cleared in the SAME update — without it,
+    # IoT's per-field delta computation starves the device of any desired
+    # field equal to the previous echo (the pin→pin replace hang observed
+    # on hardware).
+    assert update["payload"]["state"]["reported"] == {"staticImagePin": None}
     section = desired["staticImagePin"]
     assert section["requestId"] == pin_request_id
     assert section["op"] == case["op"]

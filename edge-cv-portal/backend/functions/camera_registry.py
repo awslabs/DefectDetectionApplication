@@ -905,6 +905,15 @@ def write_desired_pin(usecase_id: str, device_id: str,
     """Replace the desired.staticImagePin slot on the device's registry
     shadow (top-level merge — never clobbers desired.changes).
 
+    The SAME update also clears the device's stale reported.staticImagePin
+    echo. Without the clear, IoT's per-field delta computation starves the
+    device of any desired field equal to the previous echo (observed on
+    hardware: a pin→pin replace delivered a delta with no `op`/`bucket`,
+    hanging the request pending forever). Clearing loses nothing: the
+    device re-echoes on confirmation, the portal has already ingested the
+    prior confirmation through the documents event, and the ingest treats
+    an absent reported section as a no-op.
+
     Returns an error response on failure, None on success (Req 1.9's
     delivery-initiation failure surface).
     """
@@ -914,7 +923,8 @@ def write_desired_pin(usecase_id: str, device_id: str,
             thingName=device_id,
             shadowName=SHADOW_NAME,
             payload=json.dumps(
-                {'state': {'desired': {'staticImagePin': section}}},
+                {'state': {'desired': {'staticImagePin': section},
+                           'reported': {'staticImagePin': None}}},
                 default=lambda o: float(o) if isinstance(o, Decimal) else o,
             ),
         )

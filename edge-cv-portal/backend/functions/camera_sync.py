@@ -293,6 +293,15 @@ SK_CAMERA_PREFIX = "CAMERA#"
 SK_META = "META"
 SK_CONFLICT_PREFIX = "CONFLICT#"
 
+# The Sync_Channel named shadow (camera-registry-sync design) — needed
+# here for the stale-key cleanup write below.
+SHADOW_NAME = "dda-camera-registry"
+
+# The fixed virtual Static_Image_Camera identifier and its registry SK
+# (feature cloud-static-camera-provisioning, Requirement 6.1/6.2).
+STATIC_IMAGE_CAMERA_ID = "static-image-camera"
+SK_STATIC_IMAGE_CAMERA = f"{SK_CAMERA_PREFIX}{STATIC_IMAGE_CAMERA_ID}"
+
 
 class MalformedReport(Exception):
     """A shadow-report record that can never be processed (dead-letter it)."""
@@ -328,7 +337,7 @@ def _pin_s3_client():
 
 
 def _process_pin_section(table, thing_name: str, reported: Dict[str, Any],
-                         now_ms: int) -> None:
+                         now_ms: int, usecase_id: Optional[str] = None) -> None:
     """Route ``reported.staticImagePin`` to the Pin_Request reducer
     (cloud-static-camera-provisioning task 3.1).
 
@@ -338,6 +347,20 @@ def _process_pin_section(table, thing_name: str, reported: Dict[str, Any],
     already been persisted when this runs). Duplicate documents-event
     re-reduction is a condition-guarded no-op inside
     apply_pin_confirmation (Reqs 4.1, 4.8, 5.6, 7.5).
+
+    Applied REMOVE convergence (Req 6.2, second hardware finding —
+    jetson-thor1 / LocalServer.arm64JP7 1.0.23): deployed device builds
+    OMIT the static camera from the post-unpin full report, but AWS IoT
+    shadow updates MERGE nested maps, so the omitted key persists in the
+    shadow document and every subsequent documents event keeps
+    re-upserting the stale entry as present. When a remove confirmation
+    transitions its Pin_Request to ``applied``, this handler therefore
+    (a) marks the device's ``CAMERA#static-image-camera`` registry entry
+    absent (running AFTER the camera reduction, so it wins within this
+    event), and (b) best-effort clears the stale shadow key with an
+    explicit null so future events stop resurrecting the entry. The
+    condition-guarded transition inside apply_pin_confirmation makes the
+    convergence run at most once per remove Pin_Request.
     """
     pin_section = reported.get("staticImagePin")
     if pin_section is None:
@@ -348,13 +371,135 @@ def _process_pin_section(table, thing_name: str, reported: Dict[str, Any],
         # to a logged skip instead of breaking camera ingestion.
         import pin_requests
 
-        pin_requests.apply_pin_confirmation(
+        outcome = pin_requests.apply_pin_confirmation(
             table, thing_name, pin_section, now_ms=now_ms,
             s3_client=_pin_s3_client())
+        if outcome == pin_requests.STATUS_APPLIED and \
+                _confirmed_op(table, thing_name, pin_section) == \
+                pin_requests.OP_REMOVE:
+            _converge_static_camera_removal(
+                table, thing_name, usecase_id, pin_section, now_ms)
     except Exception:  # noqa: BLE001 — section isolation (task 3.1)
         logger.exception(
             "Skipping malformed/unprocessable reported.staticImagePin "
             "section for '%s' (camera reduction unaffected)", thing_name)
+
+
+def _confirmed_op(table, device_id: str,
+                  pin_section: Dict[str, Any]) -> Optional[str]:
+    """The confirmed Pin_Request's operation type: from the device's echo
+    (which carries every desired field verbatim), falling back to the
+    stored item for a defensive echo missing ``op``."""
+    op = pin_section.get("op")
+    if op:
+        return str(op)
+    import pin_requests
+
+    request_id = pin_section.get("requestId")
+    if not request_id:
+        return None
+    item = pin_requests.get_pin_request_item(
+        table, device_id, str(request_id))
+    return (item or {}).get("op")
+
+
+def _converge_static_camera_removal(table, device_id: str,
+                                    usecase_id: Optional[str],
+                                    pin_section: Dict[str, Any],
+                                    now_ms: int) -> None:
+    """Registry + shadow convergence for an applied remove Pin_Request
+    (Req 6.2 mitigation for deployed device builds — see
+    ``_process_pin_section``). Both steps are best-effort and isolated:
+    a failure is logged, never fatal to the ingest."""
+    try:
+        completed = int(pin_section.get("completedAtEpochMs"))
+    except (TypeError, ValueError):
+        completed = int(now_ms)
+    try:
+        _mark_static_camera_absent(table, device_id, completed)
+    except Exception:  # noqa: BLE001 — best-effort convergence
+        logger.exception(
+            "Could not mark the static-image camera registry entry "
+            "absent for '%s' after an applied remove", device_id)
+    _clear_static_camera_shadow_key(device_id, usecase_id)
+
+
+def _mark_static_camera_absent(table, device_id: str,
+                               absent_since_ms: int) -> bool:
+    """Mark the device's ``CAMERA#static-image-camera`` registry entry
+    absent with the given timestamp — only when the entry exists and is
+    not already absent (an existing absence keeps its original
+    ``absent_since``). Returns whether the entry was transitioned."""
+    from botocore.exceptions import ClientError
+
+    try:
+        table.update_item(
+            Key={"device_id": device_id, "sk": SK_STATIC_IMAGE_CAMERA},
+            UpdateExpression="SET absent = :true, absent_since = :since",
+            ConditionExpression=(
+                "attribute_exists(sk) AND "
+                "(attribute_not_exists(absent) OR absent = :false)"),
+            ExpressionAttributeValues={
+                ":true": True,
+                ":false": False,
+                ":since": int(absent_since_ms),
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == \
+                "ConditionalCheckFailedException":
+            return False  # no entry, or already absent — nothing to do
+        raise
+
+
+def iot_data_client(usecase_id: str):
+    """Assumed-role (or single-account) iot-data client for the Use_Case
+    (the camera_registry.py seam, replicated as a module attribute so
+    tests can install recording fakes). Imported lazily: the shared
+    layer provides shared_utils on the deployed Lambda."""
+    from shared_utils import (
+        get_usecase, get_usecase_client, get_usecase_region,
+    )
+
+    usecase = get_usecase(usecase_id)
+    return get_usecase_client("iot-data", usecase,
+                              region=get_usecase_region(usecase))
+
+
+def _clear_static_camera_shadow_key(device_id: str,
+                                    usecase_id: Optional[str]) -> None:
+    """Best-effort removal of the stale ``reported.cameras
+    .static-image-camera`` key from the device's Sync_Channel shadow.
+
+    Shadow updates merge nested maps, so an explicit null is the only
+    way to delete the key a deployed device build stopped reporting;
+    once cleared, subsequent documents events no longer resurrect the
+    entry as present. Any failure (unresolvable use case, assume-role or
+    shadow-write error) is logged only — the registry absent-marking
+    above already corrects this event, and the next applied remove (or a
+    device build reporting the entry explicitly absent) re-converges.
+    """
+    if not usecase_id:
+        logger.warning(
+            "No usecase_id available for '%s'; skipping the static-image "
+            "camera shadow key cleanup", device_id)
+        return
+    try:
+        client = iot_data_client(usecase_id)
+        client.update_thing_shadow(
+            thingName=device_id,
+            shadowName=SHADOW_NAME,
+            payload=json.dumps({"state": {"reported": {
+                "cameras": {STATIC_IMAGE_CAMERA_ID: None}}}}),
+        )
+        logger.info(
+            "Cleared the stale reported.cameras.%s shadow key for '%s'",
+            STATIC_IMAGE_CAMERA_ID, device_id)
+    except Exception:  # noqa: BLE001 — best-effort cleanup only
+        logger.exception(
+            "Could not clear the stale static-image camera shadow key "
+            "for '%s' (will keep converging via absent-marking)", device_id)
 
 
 def _resolve_usecase_id(thing_name: str) -> Optional[str]:
@@ -554,13 +699,30 @@ def _process_report(
 
     # Sources missing from the full report: reported deletions.
     for csid in _deletion_candidates(entries, reported):
+        if csid == STATIC_IMAGE_CAMERA_ID:
+            # Req 6.2: the virtual Static_Image_Camera is absence-tracked,
+            # never deleted. Once the mitigation's shadow-key null (or a
+            # device build predating the entry) removes the key from the
+            # report entirely, keep the recorded entry ABSENT instead of
+            # running the deletion reduction; already-absent entries keep
+            # their original absent_since (condition-guarded no-op).
+            try:
+                _mark_static_camera_absent(table, thing_name, now_ms)
+            except Exception:  # noqa: BLE001 — isolation, like the pin path
+                logger.exception(
+                    "Could not absence-mark the static-image camera "
+                    "registry entry for '%s'", thing_name)
+            continue
         outcome = reduce_report(entries.get(csid), None, now_ms)
         _persist_outcome(table, thing_name, usecase_id, csid, outcome)
 
     # Static-image Pin_Request confirmations (cloud-static-camera-
     # provisioning task 3.1): reported.staticImagePin routes to the pin
-    # reducer, isolated from the camera reduction above.
-    _process_pin_section(table, thing_name, reported, now_ms)
+    # reducer, isolated from the camera reduction above. Runs AFTER the
+    # camera reduction so the applied-remove convergence's absent-marking
+    # wins over the stale (shadow-merged) present entry within this event.
+    _process_pin_section(table, thing_name, reported, now_ms,
+                         usecase_id=usecase_id)
 
     # Every processed report stamps the device META item (Reqs 1.6, 3.2).
     meta_item = stamp_meta(meta, now_ms)

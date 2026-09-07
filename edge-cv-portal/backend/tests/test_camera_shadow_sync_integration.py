@@ -553,6 +553,63 @@ def portal_shadow_client(sync_env, monkeypatch):
         emulator=emulator))
 
 
+@pytest.fixture
+def ingest_shadow_client(sync_env, monkeypatch):
+    """Route the SQS ingest handler's assumed-role iot-data client (the
+    applied-remove convergence's stale-key cleanup seam, camera_sync.py)
+    to a per-test emulator."""
+    holder = {}
+    monkeypatch.setattr(
+        sync_env.camera_sync, "iot_data_client",
+        lambda usecase_id: holder["emulator"])
+    return SimpleNamespace(bind=lambda emulator: holder.update(
+        emulator=emulator))
+
+
+# --- shadow merge-semantics guards ----------------------------------------------
+#
+# Second hardware finding (jetson-thor1 / LocalServer.arm64JP7 1.0.23,
+# Req 6.2): AWS IoT shadow updates MERGE nested maps — a camera key
+# omitted from a full report PERSISTS in the shadow document; only an
+# explicit null deletes it. The original removal round-trip test faked a
+# device that reported the static entry explicitly absent, so the merge
+# semantics were never exercised on the removal path and the
+# omission-based removal design passed silently. These guards pin the
+# emulator's merge behavior so the harness can never silently diverge
+# from AWS again; the removal round-trip tests below rely on them.
+
+
+class TestShadowMergeSemantics:
+    def test_keys_omitted_from_an_update_persist(self):
+        """A full report omitting a previously reported camera key leaves
+        the key in the shadow document — omission is NOT deletion."""
+        emulator = NamedShadowEmulator("thing-merge")
+        emulator.update_thing_shadow_state_request(
+            "thing-merge", SHADOW_NAME,
+            {"reported": {"cameras": {"a": {"version": 1},
+                                      "b": {"version": 1}}}})
+        emulator.update_thing_shadow_state_request(
+            "thing-merge", SHADOW_NAME,
+            {"reported": {"cameras": {"a": {"version": 2}}}})
+
+        assert emulator.reported["cameras"]["a"] == {"version": 2}
+        assert emulator.reported["cameras"]["b"] == {"version": 1}, (
+            "omitted nested keys must persist (AWS shadow merge)")
+
+    def test_explicit_null_deletes_a_nested_key(self):
+        emulator = NamedShadowEmulator("thing-merge")
+        emulator.update_thing_shadow_state_request(
+            "thing-merge", SHADOW_NAME,
+            {"reported": {"cameras": {"a": {"version": 1},
+                                      "b": {"version": 1}}}})
+        emulator.update_thing_shadow(  # the portal-side cleanup contract
+            "thing-merge", SHADOW_NAME,
+            json.dumps({"state": {"reported": {"cameras": {"b": None}}}}))
+
+        assert "b" not in emulator.reported["cameras"]
+        assert emulator.reported["cameras"]["a"] == {"version": 1}
+
+
 # --- direction 1: edge -> portal over the rule/SQS path -------------------------
 
 
@@ -762,9 +819,17 @@ class TestPortalToEdge:
 # ships in task 6) transitions the PIN_REQUEST# item to applied with the
 # device-reported metadata through the real rule/SQS ingest path, and a
 # reported.cameras inventory including ``static-image-camera`` upserts the
-# registry entry through the untouched camera reduction. The removal round
-# trip marks the entry absent through the same absence handling physical
-# cameras use (the device reports the entry with absent + absentSince).
+# registry entry through the untouched camera reduction.
+#
+# Removal round trips (reworked after the second hardware finding —
+# Req 6.2): the deployed-build test models what LocalServer.arm64JP7
+# 1.0.23 actually does — the post-unpin full report OMITS the static
+# entry, which under shadow merge semantics leaves the stale key present
+# in the document — and asserts convergence through the portal-side
+# mitigation (registry absent-marking + explicit shadow-key null in the
+# ingest). The fixed-build test models the corrected device contract —
+# the entry reported explicitly ABSENT with absentSince, the physical-
+# camera absence pattern.
 #
 # Requirements: 1.2, 4.2, 6.1, 6.2, 7.5
 
@@ -902,19 +967,15 @@ class TestStaticImagePinRoundTrip:
         assert view["deviceMetadata"] == metadata
         assert view["deviceReported"]["present"] is True
 
-    def test_removal_round_trip_marks_registry_entry_absent(
-            self, sync_env, env, tmp_path, portal_shadow_client,
-            pin_transport):
-        """Removal Pin_Request round trip: desired slot replaced with the
-        remove document, fake device confirmation transitions it to
-        applied, and the post-unpin inventory report marks the registry
-        entry absent through the physical-camera absence handling
-        (Reqs 6.2, 7.5)."""
+    def _pinned_preamble(self, sync_env, env, tmp_path,
+                         portal_shadow_client, ingest_shadow_client,
+                         operator):
+        """Pin round trip establishing an applied pinned state; returns
+        the device with its registry entry present."""
         device = make_edge_device(sync_env, env, tmp_path)
         portal_shadow_client.bind(device.emulator)
-        operator = env.make_user(role="Operator")
+        ingest_shadow_client.bind(device.emulator)
 
-        # Established pinned state (pin round trip preamble).
         staging_key = stage_pin_upload(sync_env, _tiny_png_bytes())
         status, body = invoke_registry_api(
             sync_env, "POST", device.thing_name, operator,
@@ -928,8 +989,11 @@ class TestStaticImagePinRoundTrip:
                       "fileName": "before.png"},
             cameras={"static-image-camera": static_camera_report()})
         ingest(sync_env, device.thing_name, device.emulator)
+        return device
 
-        # Portal removal request (Req 7.2 surface).
+    def _submit_removal(self, sync_env, device, operator):
+        """Portal removal request (Req 7.2 surface); returns the removal
+        Pin_Request id and the remove desired document."""
         status, body = invoke_registry_api(
             sync_env, "DELETE", device.thing_name, operator,
             sub_path="/static-image/pin")
@@ -943,10 +1007,99 @@ class TestStaticImagePinRoundTrip:
         assert desired["requestId"] == removal_id
         assert desired["op"] == "remove"
         assert "bucket" not in desired and "key" not in desired
+        return removal_id, desired
 
-        # Fake device: unpin applied; the next inventory report carries
-        # the entry absence-tracked (absent + absentSince), the same
-        # handling physical discovered cameras get.
+    def test_removal_round_trip_converges_for_deployed_builds(
+            self, sync_env, env, tmp_path, portal_shadow_client,
+            ingest_shadow_client, pin_transport):
+        """Deployed-build (LocalServer.arm64JP7 1.0.23) removal round
+        trip — the second hardware finding's exact shape: the post-unpin
+        FULL report OMITS the static entry, shadow merge keeps the stale
+        key present in the document, and convergence comes from the
+        ingest's applied-remove mitigation: registry entry marked absent
+        with the confirmation timestamp, stale shadow key cleared with an
+        explicit null, and subsequent events keep the entry absent — it
+        is never deleted and never resurrected as present (Reqs 6.2,
+        7.5)."""
+        operator = env.make_user(role="Operator")
+        device = self._pinned_preamble(
+            sync_env, env, tmp_path, portal_shadow_client,
+            ingest_shadow_client, operator)
+        removal_id, desired = self._submit_removal(sync_env, device,
+                                                   operator)
+
+        # Fake 1.0.23 device: unpin applied and confirmed, but the full
+        # report OMITS the static entry (an empty cameras update models
+        # the omission) — the shadow document STILL carries the stale
+        # present entry (merge semantics, the guard tests above).
+        completed_at = 1_730_000_300_000
+        confirm_on_device(device, desired, completed_at=completed_at,
+                          cameras={})
+        assert "static-image-camera" in device.emulator.reported["cameras"]
+
+        ingest(sync_env, device.thing_name, device.emulator)
+
+        items = device_items(sync_env, device.thing_name)
+        assert items[f"PIN_REQUEST#{removal_id}"]["status"] == "applied"
+
+        # (a) Registry entry marked absent with the confirmation
+        # timestamp — not deleted (Req 6.2) — despite the same event's
+        # cameras map still carrying the stale present entry.
+        entry = items["CAMERA#static-image-camera"]
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == completed_at
+
+        # (b) The stale shadow key was cleared with an explicit null, so
+        # future documents events stop resurrecting the entry.
+        assert "static-image-camera" not in \
+            device.emulator.reported["cameras"]
+
+        # The null write emitted its own documents event; ingesting it
+        # (the static entry now genuinely missing from the report) keeps
+        # the entry absent through the absence-tracked deletion path.
+        ingest(sync_env, device.thing_name, device.emulator)
+        entry = device_items(
+            sync_env, device.thing_name)["CAMERA#static-image-camera"]
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == completed_at
+
+        # A later full device report still omitting the entry never
+        # brings it back (and never deletes it).
+        device.emulator.update_thing_shadow_state_request(
+            device.thing_name, SHADOW_NAME,
+            {"reported": {"cameras": {}, "reportedAt": completed_at + 60_000}})
+        ingest(sync_env, device.thing_name, device.emulator)
+        entry = device_items(
+            sync_env, device.thing_name)["CAMERA#static-image-camera"]
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == completed_at
+
+        # Status route: removal applied, device reports no Pinned_Image.
+        status, view = invoke_registry_api(
+            sync_env, "GET", device.thing_name, operator,
+            sub_path="/static-image")
+        assert status == 200
+        assert view["latest"]["pinRequestId"] == removal_id
+        assert view["latest"]["op"] == "remove"
+        assert view["latest"]["status"] == "applied"
+        assert view["deviceReported"]["present"] is False
+        assert int(view["deviceReported"]["absentSince"]) == completed_at
+
+    def test_removal_round_trip_with_absence_reporting_build(
+            self, sync_env, env, tmp_path, portal_shadow_client,
+            ingest_shadow_client, pin_transport):
+        """Fixed-build removal round trip (the corrected device contract,
+        rides the next component build): the post-unpin report carries
+        the entry explicitly ABSENT with absentSince — the physical-
+        camera absence pattern — and the registry converges to absent
+        with the device's timestamp (Reqs 6.2, 7.5)."""
+        operator = env.make_user(role="Operator")
+        device = self._pinned_preamble(
+            sync_env, env, tmp_path, portal_shadow_client,
+            ingest_shadow_client, operator)
+        removal_id, desired = self._submit_removal(sync_env, device,
+                                                   operator)
+
         absent_since = 1_730_000_300_000
         confirm_on_device(
             device, desired, completed_at=absent_since,
@@ -955,10 +1108,11 @@ class TestStaticImagePinRoundTrip:
         ingest(sync_env, device.thing_name, device.emulator)
 
         items = device_items(sync_env, device.thing_name)
-        removal_item = items[f"PIN_REQUEST#{removal_id}"]
-        assert removal_item["status"] == "applied"
+        assert items[f"PIN_REQUEST#{removal_id}"]["status"] == "applied"
 
-        # Marked absent with the reported timestamp — not deleted (6.2).
+        # Marked absent with the device-reported timestamp — not deleted
+        # (6.2); the device keeps the key alive in the shadow, so no
+        # merge staleness arises in the first place.
         entry = items["CAMERA#static-image-camera"]
         assert entry["absent"] is True
         assert int(entry["absent_since"]) == absent_since

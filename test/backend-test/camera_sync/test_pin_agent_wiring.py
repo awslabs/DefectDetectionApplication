@@ -63,11 +63,12 @@ from pin_worker_support import (
 class _RecordingPinWorker:
     """StaticImagePinWorker double recording the agent's wiring calls."""
 
-    def __init__(self, applied_id=None):
+    def __init__(self, applied_id=None, marker=None):
         self.desired_docs = []
         self.started = 0
         self.stopped = 0
         self._applied_id = applied_id
+        self.marker = marker
         self.report_inventory = None
 
     def on_desired(self, desired):
@@ -75,6 +76,9 @@ class _RecordingPinWorker:
 
     def applied_request_id(self):
         return self._applied_id
+
+    def applied_marker(self):
+        return self.marker
 
     def start(self):
         self.started += 1
@@ -102,7 +106,10 @@ class _FakeImageSourceAccessor:
         return []
 
 
-def _make_agent(tmp_path, shadow, pin_worker):
+def _make_agent(tmp_path, shadow, pin_worker, wall_clock=None):
+    kwargs = {}
+    if wall_clock is not None:
+        kwargs["wall_clock"] = wall_clock
     return EdgeSyncAgent(
         iot_shadow_accessor=shadow,
         image_source_accessor=_FakeImageSourceAccessor(),
@@ -111,6 +118,7 @@ def _make_agent(tmp_path, shadow, pin_worker):
         state_store=CameraSyncStateStore(str(tmp_path / "camera_sync_state.json")),
         thing_name="test-thing",
         pin_worker=pin_worker,
+        **kwargs,
     )
 
 
@@ -345,3 +353,177 @@ def test_report_headroom_with_both_pin_sections():
         "reported": {**report, "staticImagePin": echo},
     }
     assert _encoded_size(shadow_state) <= 8 * 1024
+
+
+# --- unpinned-after-reported ABSENT reporting (Requirement 6.2 — second
+# --- hardware finding: shadow updates MERGE nested maps, so an omitted
+# --- camera key persists in the shadow document; the unpinned static
+# --- camera must be reported explicitly absent, never merely omitted) ----
+
+
+class _FakeStaticStore:
+    """utils.static_image_camera.get_store() double with a togglable
+    pin state (the agent only calls ``status()``)."""
+
+    def __init__(self, pinned=False, metadata=None):
+        self.pinned = pinned
+        self.metadata = metadata
+
+    def status(self):
+        return {
+            "pinned": self.pinned,
+            "cameraId": "static-image-camera",
+            "metadata": self.metadata,
+        }
+
+
+_REMOVE_MARKER = {
+    "requestId": "req-remove-9",
+    "op": "remove",
+    "status": "applied",
+    "metadata": None,
+    "completedAtEpochMs": 1_730_000_777_000,
+}
+
+
+def _patch_store(monkeypatch, store):
+    import camera_sync.agent as agent_module
+
+    monkeypatch.setattr(agent_module, "get_store", lambda: store)
+
+
+def _static_entry(document):
+    return document["cameras"].get("static-image-camera")
+
+
+def test_unpinned_never_reported_yields_no_static_entry(
+        tmp_path, monkeypatch):
+    """Never pinned, never reported: the report carries no static entry
+    (nothing exists in the shadow for merge semantics to keep alive)."""
+    _patch_store(monkeypatch, _FakeStaticStore(pinned=False))
+    agent = _make_agent(tmp_path, _FakeShadow(state=None),
+                        _RecordingPinWorker())
+    agent._refresh_reported_versions()
+
+    document = agent._build_current_document()
+
+    assert _static_entry(document) is None
+
+
+def test_unpin_after_runtime_report_yields_stable_absent_entry(
+        tmp_path, monkeypatch):
+    """Pin -> report -> unpin: the next reports carry the entry
+    explicitly ABSENT with one stable absentSince (no timestamp churn,
+    no version churn between absent reports), derived from the wall
+    clock when no remove marker exists (device-initiated unpin).
+
+    'Previously reported' is answered by the version state store here —
+    the entry was first reported at runtime, after the start-time shadow
+    GET, so the reported-versions floor alone would not know it."""
+    store = _FakeStaticStore(pinned=True,
+                             metadata={"width": 4, "height": 4})
+    _patch_store(monkeypatch, store)
+    wall = FakeClock(start=1_730_000_500.0)
+    agent = _make_agent(tmp_path, _FakeShadow(state=None),
+                        _RecordingPinWorker(), wall_clock=wall)
+    agent._refresh_reported_versions()
+
+    pinned_doc = agent._build_current_document()
+    pinned_entry = _static_entry(pinned_doc)
+    assert pinned_entry["absent"] is False
+
+    store.pinned = False
+    store.metadata = None
+    absent_doc = agent._build_current_document()
+    entry = _static_entry(absent_doc)
+    assert entry is not None, (
+        "the unpinned, previously reported static camera must be "
+        "reported explicitly absent (Req 6.2)")
+    assert entry["absent"] is True
+    assert entry["absentSince"] == int(wall.now * 1000)
+    assert entry["version"] == pinned_entry["version"] + 1
+    # Identity retained; no pin metadata on the absent entry.
+    assert entry["capabilities"]["staticImage"]["id"] == "static-image-camera"
+    assert "width" not in entry["capabilities"]["staticImage"]
+
+    # Stability: later reports reuse the same timestamp and version.
+    wall.advance(3600.0)
+    entry2 = _static_entry(agent._build_current_document())
+    assert entry2["absentSince"] == entry["absentSince"]
+    assert entry2["version"] == entry["version"]
+
+
+def test_absent_since_uses_remove_marker_timestamp(tmp_path, monkeypatch):
+    """A cloud-initiated removal's marker records the exact removal
+    instant; the absent entry reports it as absentSince (stable across
+    restarts) instead of the wall clock."""
+    _patch_store(monkeypatch, _FakeStaticStore(pinned=False))
+    shadow = _FakeShadow(state={
+        "desired": {},
+        "reported": {"cameras": {"static-image-camera": {
+            "version": 3, "absent": False}}},
+    })
+    wall = FakeClock(start=1_730_000_900.0)
+    agent = _make_agent(tmp_path, shadow,
+                        _RecordingPinWorker(marker=dict(_REMOVE_MARKER)),
+                        wall_clock=wall)
+    agent._refresh_reported_versions()
+
+    entry = _static_entry(agent._build_current_document())
+
+    assert entry["absent"] is True
+    assert entry["absentSince"] == _REMOVE_MARKER["completedAtEpochMs"]
+    assert entry["version"] > 3  # absence transition version-bumps
+
+
+def test_restart_adopts_absent_since_from_shadow(tmp_path, monkeypatch):
+    """After a restart, an already-absent shadow entry seeds the
+    timestamp: the agent re-reports the SAME absentSince rather than
+    inventing a new one (no churn across restarts)."""
+    _patch_store(monkeypatch, _FakeStaticStore(pinned=False))
+    seeded_since = 1_730_000_600_000
+    shadow = _FakeShadow(state={
+        "desired": {},
+        "reported": {"cameras": {"static-image-camera": {
+            "version": 7, "absent": True, "absentSince": seeded_since}}},
+    })
+    wall = FakeClock(start=1_730_009_999.0)
+    agent = _make_agent(tmp_path, shadow, _RecordingPinWorker(),
+                        wall_clock=wall)
+    agent._refresh_reported_versions()
+
+    entry = _static_entry(agent._build_current_document())
+
+    assert entry["absent"] is True
+    assert entry["absentSince"] == seeded_since
+
+
+def test_repin_restores_present_entry_and_resets_absence(
+        tmp_path, monkeypatch):
+    """Unpin -> re-pin -> unpin: the re-pin reports the present entry
+    again (Req 6.1 restore) and closes the absence episode, so the next
+    unpin derives a FRESH absentSince."""
+    store = _FakeStaticStore(pinned=True, metadata={"format": "PNG"})
+    _patch_store(monkeypatch, store)
+    wall = FakeClock(start=1_730_001_000.0)
+    agent = _make_agent(tmp_path, _FakeShadow(state=None),
+                        _RecordingPinWorker(), wall_clock=wall)
+    agent._refresh_reported_versions()
+    agent._build_current_document()  # first pinned report
+
+    store.pinned = False
+    first_absent = _static_entry(agent._build_current_document())
+    assert first_absent["absent"] is True
+    first_since = first_absent["absentSince"]
+
+    store.pinned = True
+    repinned = _static_entry(agent._build_current_document())
+    assert repinned["absent"] is False
+    assert "absentSince" not in repinned
+
+    wall.advance(120.0)
+    store.pinned = False
+    second_absent = _static_entry(agent._build_current_document())
+    assert second_absent["absent"] is True
+    assert second_absent["absentSince"] == int(wall.now * 1000)
+    assert second_absent["absentSince"] != first_since
