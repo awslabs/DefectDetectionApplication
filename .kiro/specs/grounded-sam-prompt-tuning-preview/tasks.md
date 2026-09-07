@@ -151,8 +151,8 @@ flowchart TD
   - Non-regression inventory: the only amended pre-existing files are the four task-4.1 suites, in exactly the declared ways; `dda_autolabel_worker.py`, `grounded-sam-worker/`, `dda-labeling-api-stack.ts`, `promptOverrideGuardrails.tsx`, and `AnnotationCanvas.tsx` show **no diff**; if any other pre-existing assertion has to change, stop and raise it as a design violation (Req 10.4)
   - _Requirements: 6.3, 9.1, 9.2, 9.4, 9.5, 10.1, 10.2, 10.3, 10.4_
 
-- [ ] 6. Deploy and verify live
-  - [-] 6.1 Deploy the compute stack (worker flag MANDATORY) and the frontend
+- [x] 6. Deploy and verify live
+  - [x] 6.1 Deploy the compute stack (worker flag MANDATORY) and the frontend
     - Follow `.kiro/steering/builds.md` gates first: `pgrep -af "gdk component build"` and `pgrep -af "build-custom.sh"` must both be empty — portal deploys never overlap component builds
     - From `edge-cv-portal/infrastructure`, inspect before deploying: `npx cdk diff EdgeCVPortalComputeStack -c deployGroundedSamWorker=true -c cloudFrontDomain=https://d23v4ltibogb5x.cloudfront.net` — expect the `DdaLabelingHandler` env/policy additions and backend asset update, and **no** `DdaGroundedSamWorker` replacement/deletion
     - Deploy: `npx cdk deploy EdgeCVPortalComputeStack -c deployGroundedSamWorker=true -c cloudFrontDomain=https://d23v4ltibogb5x.cloudfront.net --require-approval never` — **the `-c deployGroundedSamWorker=true` flag is MANDATORY: a flag-less deploy DELETES the live worker (`DdaGroundedSamWorkerA3B13-i6P1oAqkvVtZ`); this has happened twice, the second time from another checkout (`.kiro/specs/grounded-sam-mask-offset/verification-notes.md` §2)**
@@ -160,7 +160,7 @@ flowchart TD
     - Capture both to spec-named logs, e.g. `edge-cv-portal/deploy-grounded-sam-prompt-tuning-preview-$(date -u +%Y%m%dT%H%M%SZ).log`; after deploying, handle the `cdk.out` drift guards per builds.md before any subsequent component build
     - _Requirements: 8.1, 8.3_
 
-  - [~] 6.2 Live verification — the tune loop proven against the cookie dataset
+  - [x] 6.2 Live verification — the tune loop proven against the cookie dataset
     - Account 164152369890, us-east-1, portal `https://d23v4ltibogb5x.cloudfront.net`, rest-api `yqvyoowugk`. Record everything in `.kiro/specs/grounded-sam-prompt-tuning-preview/verification-notes.md` (the mask-offset precedent)
     - Start a Grounded_SAM_Preview_Run via the deployed routes (the synthesized-event precedent from the prior specs' verification notes) against the use case backed by `s3://ryvan-cookies/training-images/` with `label_set: ["cookie_gap"]`, `prompt_overrides: {"cookie_gap": "gap between broken cookie pieces"}`, modality Segmentation, 2-3 sample images; poll `GET /labeling-preview/runs/{runId}` to Completed; verify each resolved sample's payload carries validated regions (Label_Set class, non-empty RLE decodable by the shared `dda_manifest.rle_decode`, worker-reported dimensions)
     - Start a second run over the same samples with `prompt_overrides: {"cookie_gap": "crack"}`; poll to Completed; verify the two runs' region sets differ (mask count, RLE bytes, or scores) — the tune loop proven live; note warm/cold per-sample timings against the 240 s bound

@@ -83,6 +83,11 @@
         "executionId": "626d538a-706e-4b1b-a5e1-360c2489571b",
         "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
         "timestamp": 1788767162186
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788789543841
       }
     ],
     "6.2 Live verification — the tune loop proven against the cookie dataset": [
@@ -90,6 +95,16 @@
         "executionId": "626d538a-706e-4b1b-a5e1-360c2489571b",
         "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
         "timestamp": 1788762985138
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788789552178
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788790324177
       }
     ],
     "2.5 Write the score-rendering property test": [
@@ -183,6 +198,13 @@
         "executionId": "626d538a-706e-4b1b-a5e1-360c2489571b",
         "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
         "timestamp": 1788765234885
+      }
+    ],
+    "6. Deploy and verify live": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788790325391
       }
     ]
   }
