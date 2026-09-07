@@ -297,7 +297,7 @@ describe('camera registry API routes (Requirements 1.1, 3.2)', () => {
       .sort();
   }
 
-  test('exactly the seven Camera_Registry routes are registered', () => {
+  test('exactly the seven Camera_Registry routes plus the four Portal_Pin_API routes are registered', () => {
     expect(routes()).toEqual(
       [
         'GET /devices/{id}/cameras',
@@ -307,6 +307,11 @@ describe('camera registry API routes (Requirements 1.1, 3.2)', () => {
         'GET /devices/{id}/cameras/conflicts',
         'POST /devices/{id}/cameras/conflicts/{cid}/reapply',
         'POST /devices/{id}/cameras/refresh',
+        // Portal_Pin_API (cloud-static-camera-provisioning task 4.1)
+        'GET /devices/{id}/cameras/static-image',
+        'POST /devices/{id}/cameras/static-image/upload-url',
+        'POST /devices/{id}/cameras/static-image/pin',
+        'DELETE /devices/{id}/cameras/static-image/pin',
       ].sort()
     );
   });
@@ -322,7 +327,7 @@ describe('camera registry API routes (Requirements 1.1, 3.2)', () => {
     )
       .map((m: any) => m.Properties)
       .filter((props) => props.HttpMethod !== 'OPTIONS');
-    expect(methods.length).toBe(7);
+    expect(methods.length).toBe(11);
     for (const props of methods) {
       expect(props.AuthorizationType).toBe('COGNITO_USER_POOLS');
       expect(props.AuthorizerId).toBeDefined();
@@ -397,5 +402,118 @@ describe('use-case onboarding IoT rule (Requirement 3.2)', () => {
         ]),
       }),
     });
+  });
+});
+
+describe('static-image pin infrastructure (cloud-static-camera-provisioning task 4.2, Requirement 2.7)', () => {
+  /** Every IAM inline/managed policy attached to the given role logical id. */
+  function policiesOfRole(roleRef: string): any[] {
+    return [
+      ...Object.values(computeTemplate.findResources('AWS::IAM::Policy')),
+      ...Object.values(computeTemplate.findResources('AWS::IAM::ManagedPolicy')),
+    ].filter((policy: any) =>
+      (policy.Properties.Roles ?? []).some((r: any) => r.Ref === roleRef)
+    );
+  }
+
+  function statementsOfRole(roleRef: string): any[] {
+    return policiesOfRole(roleRef).flatMap(
+      (policy: any) => policy.Properties.PolicyDocument.Statement
+    );
+  }
+
+  test('CameraRegistryHandler is sized for the 50 MB pin decode and wired to the component bucket', () => {
+    const [, handler] = findResource(
+      computeTemplate,
+      'AWS::Lambda::Function',
+      (props) => props.Handler === 'camera_registry.handler'
+    );
+    // ≥ 1024 MB for the staged-image download + Pillow decode.
+    expect(handler.Properties.MemorySize).toBeGreaterThanOrEqual(1024);
+    // Image_Transport bucket wiring (dda-component-{region}-{account}).
+    const componentBucket =
+      handler.Properties.Environment.Variables.COMPONENT_BUCKET;
+    expect(componentBucket).toBeDefined();
+    expect(JSON.stringify(componentBucket)).toContain('dda-component-');
+  });
+
+  test('CameraRegistryHandler carries the Pillow imaging layer', () => {
+    const [, handler] = findResource(
+      computeTemplate,
+      'AWS::Lambda::Function',
+      (props) => props.Handler === 'camera_registry.handler'
+    );
+    const layerRefs = (handler.Properties.Layers ?? []).map(
+      (layer: any) => layer.Ref ?? ''
+    );
+    expect(layerRefs.some((ref: string) => ref.startsWith('ImagingLayer'))).toBe(
+      true
+    );
+  });
+
+  test('CameraRegistryHandler S3 grant is scoped to the static-image-pins/ prefix', () => {
+    const [, handler] = findResource(
+      computeTemplate,
+      'AWS::Lambda::Function',
+      (props) => props.Handler === 'camera_registry.handler'
+    );
+    const roleRef = handler.Properties.Role['Fn::GetAtt'][0];
+    const statement = statementsOfRole(roleRef).find(
+      (s: any) => s.Sid === 'StaticImagePinPrefixAccess'
+    );
+    expect(statement).toBeDefined();
+    expect(statement.Effect).toBe('Allow');
+    expect([...statement.Action].sort()).toEqual([
+      's3:DeleteObject',
+      's3:GetObject',
+      's3:PutObject',
+    ]);
+    // Object actions confined to the pin prefix of the component bucket —
+    // never the whole bucket.
+    const resource = JSON.stringify(statement.Resource);
+    expect(resource).toContain('dda-component-');
+    expect(resource).toContain('/static-image-pins/*');
+  });
+
+  test('CameraSyncHandler may delete canonical pin objects on terminal transitions', () => {
+    const [, handler] = findResource(
+      computeTemplate,
+      'AWS::Lambda::Function',
+      (props) => props.Handler === 'camera_sync.handler'
+    );
+    const roleRef = handler.Properties.Role['Fn::GetAtt'][0];
+    const statement = statementsOfRole(roleRef).find(
+      (s: any) => s.Sid === 'StaticImagePinCanonicalCleanup'
+    );
+    expect(statement).toBeDefined();
+    expect(statement.Action).toBe('s3:DeleteObject');
+    expect(JSON.stringify(statement.Resource)).toContain(
+      '/static-image-pins/*'
+    );
+  });
+
+  test('a 1-day staging lifecycle rule is applied to the component bucket (Req 2.7 infrastructure half)', () => {
+    // The component bucket is created out-of-band by the GDK publish
+    // script, so the rule lands through an AwsCustomResource
+    // PutBucketLifecycleConfiguration call rather than a Bucket construct.
+    const customResources = Object.values(
+      computeTemplate.findResources('Custom::AWS')
+    ).filter((resource: any) =>
+      JSON.stringify(resource.Properties.Create ?? '').includes(
+        'putBucketLifecycleConfiguration'
+      )
+    );
+    expect(customResources).toHaveLength(1);
+    const create = JSON.stringify(
+      (customResources[0] as any).Properties.Create
+    );
+    expect(create).toContain('dda-static-image-pin-staging-expiry');
+    expect(create).toContain('static-image-pins/staging/');
+    expect(create).toContain('\\"Days\\":1');
+    expect(create).toContain('\\"Status\\":\\"Enabled\\"');
+    // The update path re-asserts the same configuration.
+    expect(
+      JSON.stringify((customResources[0] as any).Properties.Update ?? '')
+    ).toContain('putBucketLifecycleConfiguration');
   });
 });

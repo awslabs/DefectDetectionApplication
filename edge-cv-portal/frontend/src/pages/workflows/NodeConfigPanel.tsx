@@ -1299,6 +1299,33 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
             {`Current value: ${textValue(effective) || '(not set)'}`}
             {hint !== null && ` \u2014 linked to ${hint.cameraName} on ${hint.sourceDeviceId}`}
           </Box>
+          {/* Cloud static-image pin shortcut (cloud-static-camera-
+              provisioning task 9.2, Requirement 6.3 entry point): routes
+              to the chosen reference device's Cameras tab, where the
+              static-image panel lives. The device chooser above comes
+              first — the shortcut stays disabled until a device is
+              chosen. No picker listing logic changes: once pinned, the
+              static camera appears in the registry-backed list like any
+              camera. */}
+          <Button
+            variant="inline-link"
+            iconName="external"
+            disabled={selectedDeviceId === null}
+            onClick={() => {
+              if (selectedDeviceId === null) return;
+              const params = new URLSearchParams();
+              if (selectedUsecaseId) params.set('usecase_id', selectedUsecaseId);
+              params.set('tab', 'cameras');
+              window.open(
+                `/devices/${encodeURIComponent(selectedDeviceId)}?${params.toString()}`,
+                '_blank',
+                'noopener'
+              );
+            }}
+            data-testid="pin-static-image-shortcut"
+          >
+            Pin a static test image…
+          </Button>
         </SpaceBetween>
         {/* Catalog-served examples stay available as quick manual fills. */}
         <ExampleChips

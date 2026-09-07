@@ -103,6 +103,85 @@ export interface CameraMutationResponse {
 }
 
 // --------------------------------------------------------------------------
+// Static-image pin provisioning wire shapes (cloud-static-camera-
+// provisioning task 9.1 — camera_registry.py Portal_Pin_API routes)
+// --------------------------------------------------------------------------
+
+/** Response of `POST /devices/{id}/cameras/static-image/upload-url`. */
+export interface StaticImageUploadUrlResponse {
+  deviceId: string;
+  /** Presigned PUT for the staging key (15-minute TTL). */
+  uploadUrl: string;
+  stagingKey: string;
+  bucket: string;
+  expiresInSeconds: number;
+}
+
+/**
+ * Response of the pin submit (POST .../static-image/pin) and removal
+ * (DELETE .../static-image/pin) routes: the new Pin_Request in the
+ * `pending` Sync_Status (Reqs 1.5, 7.2).
+ */
+export interface StaticImagePinSubmitResponse {
+  pinRequestId: string;
+  deviceId: string;
+  status: string;
+}
+
+/** Device-reported image metadata recorded at confirmation (Req 1.7). */
+export interface StaticImagePinMetadata {
+  width?: number | null;
+  height?: number | null;
+  format?: string | null;
+  fileName?: string | null;
+}
+
+/** The most recent non-superseded Pin_Request (Reqs 4.4, 5.7). */
+export interface StaticImagePinLatest {
+  pinRequestId: string;
+  op?: 'pin' | 'remove' | string | null;
+  status?: 'pending' | 'applied' | 'failed' | string | null;
+  createdAt?: number | null;
+  completedAt?: number | null;
+  failureReason?: string | null;
+  deviceMetadata?: StaticImagePinMetadata | null;
+}
+
+/** One status-history record (superseded requests retained, Req 5.7). */
+export interface StaticImagePinHistoryEntry {
+  pinRequestId: string;
+  op?: string | null;
+  status?: string | null;
+  createdAt?: number | null;
+}
+
+/**
+ * Device-reported pinned state derived from the CAMERA#static-image-camera
+ * registry entry, presented as the current state even when it disagrees
+ * with the recorded Pin_Request outcome (Reqs 4.6, 4.8).
+ */
+export interface StaticImageDeviceReported {
+  present: boolean;
+  absent: boolean;
+  absentSince?: number | null;
+}
+
+/** Response of `GET /devices/{id}/cameras/static-image` (status view). */
+export interface StaticImagePinStatusResponse {
+  deviceId: string;
+  usecaseId?: string | null;
+  latest: StaticImagePinLatest | null;
+  /** True for a device with zero Pin_Requests (Reqs 1.10, 4.7). */
+  noPinRequest: boolean;
+  deviceReported: StaticImageDeviceReported | null;
+  history: StaticImagePinHistoryEntry[];
+  /** Included exactly while `latest` is `pending` (Req 4.5). */
+  connectivity?: 'connected' | 'disconnected';
+  /** Present when the most recent pin-type request is applied (Req 1.7). */
+  deviceMetadata?: StaticImagePinMetadata;
+}
+
+// --------------------------------------------------------------------------
 // The advisory binding hint stored on the node (Requirements 7.2, 7.5)
 // --------------------------------------------------------------------------
 
@@ -263,11 +342,17 @@ export function isV4l2CompatibleCamera(camera: CameraSourceEntry): boolean {
 /**
  * Whether a Camera_Source is Aravis-compatible for the
  * `aravis_camera_source` picker (Requirement 3.2): a discovered bus
- * camera (type `AravisDiscovered`), or a configured `Camera`-type
- * Image_Source carrying a non-empty string `cameraId` parameter.
+ * camera (type `AravisDiscovered`), a configured `Camera`-type
+ * Image_Source carrying a non-empty string `cameraId` parameter, or the
+ * registry-backed Static_Image_Camera entry (type `StaticImage`) — the
+ * device serves the static camera through the same aravis frame-feed
+ * path bus cameras use (see the static-image-camera-source base spec;
+ * cloud-static-camera-provisioning Requirements 6.3, 6.4). Mirrors the
+ * deploy-time compatible set {Camera, AravisDiscovered, StaticImage} so
+ * the picker never offers a source the validator would reject.
  */
 export function isAravisCompatibleCamera(camera: CameraSourceEntry): boolean {
-  if (camera.type === 'AravisDiscovered') {
+  if (camera.type === 'AravisDiscovered' || camera.type === 'StaticImage') {
     return true;
   }
   return camera.type === 'Camera' && cameraIdValue(camera) !== null;

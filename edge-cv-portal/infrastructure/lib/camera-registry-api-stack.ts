@@ -37,6 +37,12 @@ export interface CameraRegistryApiStackProps extends cdk.NestedStackProps {
  * - GET    /devices/{id}/cameras/conflicts                (Viewer)
  * - POST   /devices/{id}/cameras/conflicts/{cid}/reapply  (Operator)
  * - POST   /devices/{id}/cameras/refresh                  (Viewer)
+ *
+ * Portal_Pin_API routes (cloud-static-camera-provisioning, task 4.1):
+ * - GET    /devices/{id}/cameras/static-image             (Viewer)
+ * - POST   /devices/{id}/cameras/static-image/upload-url  (Operator)
+ * - POST   /devices/{id}/cameras/static-image/pin         (Operator)
+ * - DELETE /devices/{id}/cameras/static-image/pin         (Operator)
  */
 export class CameraRegistryApiStack extends cdk.NestedStack {
   constructor(scope: Construct, id: string, props: CameraRegistryApiStackProps) {
@@ -121,6 +127,23 @@ export class CameraRegistryApiStack extends cdk.NestedStack {
 
     // POST /devices/{id}/cameras/refresh — on-demand GetThingShadow pull (Viewer)
     addMethod(camerasResource.addResource('refresh'), 'POST');
+
+    // Portal_Pin_API static-image routes (cloud-static-camera-provisioning
+    // task 4.1) — another static sibling of the {csid} path param.
+    //
+    // GET /devices/{id}/cameras/static-image — provisioning status (Viewer)
+    const staticImageResource = camerasResource.addResource('static-image');
+    addMethod(staticImageResource, 'GET');
+
+    // POST /devices/{id}/cameras/static-image/upload-url — presigned PUT
+    // for a staging key (Operator)
+    addMethod(staticImageResource.addResource('upload-url'), 'POST');
+
+    // POST/DELETE /devices/{id}/cameras/static-image/pin — pin submit /
+    // removal Pin_Request (Operator)
+    const staticImagePinResource = staticImageResource.addResource('pin');
+    addMethod(staticImagePinResource, 'POST');
+    addMethod(staticImagePinResource, 'DELETE');
 
     // PUT/DELETE /devices/{id}/cameras/{csid} — update / pending-delete (Operator)
     const cameraResource = camerasResource.addResource('{csid}');

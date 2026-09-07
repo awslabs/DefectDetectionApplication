@@ -13,6 +13,7 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as iot from 'aws-cdk-lib/aws-iot';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as cr from 'aws-cdk-lib/custom-resources';
 import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
 import { Construct } from 'constructs';
 import * as path from 'path';
@@ -1504,17 +1505,110 @@ export class ComputeStack extends cdk.Stack {
     // Camera_Registry API Lambda (camera_registry.py) — device cameras
     // read/mutate routes, conflict listing/re-apply, and on-demand refresh
     // (GetThingShadow pull through the assumed use-case role).
+    // The Portal_Pin_API routes (cloud-static-camera-provisioning task
+    // 4.1) live in the same handler: the Image_Transport is the GDK
+    // component bucket (created out-of-band by
+    // gdk-component-build-and-publish.sh — every onboarded device
+    // account's TES role can already read it), images live under the
+    // static-image-pins/ prefix, and pin submissions decode up to 50 MB
+    // with Pillow (imaging layer attached below, memory sized for the
+    // decode).
+    const componentBucketNameForPins = `dda-component-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}`;
+    const staticImagePinPrefix = 'static-image-pins';
+
     const cameraRegistryHandler = new lambda.Function(this, 'CameraRegistryHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'camera_registry.handler',
+      // The functions directory asset bundles camera_sync.py and
+      // pin_requests.py alongside camera_registry.py (both are imported
+      // by the handler module).
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
       role: createLambdaRole('CameraRegistry'),
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2025-02-14-camera-registry',
+        COMPONENT_BUCKET: componentBucketNameForPins,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(30),
+      // ≥ 1024 MB for the 50 MB staged-image download + Pillow decode of
+      // the pin submit route (design Decision 2).
+      memorySize: 1024,
+    });
+
+    // Prefix-scoped Image_Transport grant: presigned staging PUTs,
+    // HeadObject/GetObject validation reads, the canonical CopyObject
+    // (GetObject on the staging source + PutObject on the canonical
+    // destination), and staged/canonical object deletes — all confined to
+    // the static-image-pins/ prefix of the component bucket.
+    cameraRegistryHandler.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'StaticImagePinPrefixAccess',
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
+      resources: [
+        `arn:aws:s3:::${componentBucketNameForPins}/${staticImagePinPrefix}/*`,
+      ],
+    }));
+
+    // The SQS ingest handler transitions Pin_Requests to terminal states
+    // (applied/failed) and deletes the canonical pin object best-effort on
+    // each terminal transition (pin_requests.py, Open Decision 4).
+    cameraSyncHandler.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'StaticImagePinCanonicalCleanup',
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:DeleteObject'],
+      resources: [
+        `arn:aws:s3:::${componentBucketNameForPins}/${staticImagePinPrefix}/*`,
+      ],
+    }));
+
+    // Staging-prefix lifecycle backstop (Req 2.7's infrastructure half,
+    // the dda_labeling preview-prefix precedent): presigned-PUT staging
+    // objects the submit route never consumed expire after 1 day.
+    // Canonical objects are deleted by the Portal when their Pin_Request
+    // leaves pending, so no rule covers them. The component bucket is
+    // created out-of-band by the GDK publish script (not CDK-managed), so
+    // the rule is applied through a custom resource; the bucket carries no
+    // other lifecycle configuration (this PUT owns the whole config).
+    const stagingLifecycleRule = {
+      ID: 'dda-static-image-pin-staging-expiry',
+      Status: 'Enabled',
+      Filter: { Prefix: `${staticImagePinPrefix}/staging/` },
+      Expiration: { Days: 1 },
+      AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
+    };
+    new cr.AwsCustomResource(this, 'StaticImagePinStagingLifecycle', {
+      onCreate: {
+        service: 'S3',
+        action: 'putBucketLifecycleConfiguration',
+        parameters: {
+          Bucket: componentBucketNameForPins,
+          LifecycleConfiguration: { Rules: [stagingLifecycleRule] },
+        },
+        physicalResourceId: cr.PhysicalResourceId.of(
+          `${componentBucketNameForPins}/${stagingLifecycleRule.ID}`,
+        ),
+      },
+      onUpdate: {
+        service: 'S3',
+        action: 'putBucketLifecycleConfiguration',
+        parameters: {
+          Bucket: componentBucketNameForPins,
+          LifecycleConfiguration: { Rules: [stagingLifecycleRule] },
+        },
+        physicalResourceId: cr.PhysicalResourceId.of(
+          `${componentBucketNameForPins}/${stagingLifecycleRule.ID}`,
+        ),
+      },
+      // No onDelete: removing the portal stacks must not silently drop the
+      // expiry backstop for a bucket the stacks do not own.
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['s3:PutLifecycleConfiguration'],
+          resources: [`arn:aws:s3:::${componentBucketNameForPins}`],
+        }),
+      ]),
     });
 
     // Deploy-time Camera_Binding delivery: deployments.py writes
@@ -1855,6 +1949,12 @@ export class ComputeStack extends cdk.Stack {
         'Pillow imaging layer for DDA labeling mask rendering (built by ' +
         'backend/layers/imaging/build.sh)',
     });
+
+    // The same imagingLayer LayerVersion the labeling functions attach:
+    // the Portal_Pin_API pin submit route (camera_registry.py) decodes
+    // staged uploads with Pillow via the lazy-import imaging-layer
+    // convention (cloud-static-camera-provisioning task 4.1).
+    cameraRegistryHandler.addLayers(imagingLayer);
 
     // Auto-label queue + DLQ (camera-shadow queue pattern). The visibility
     // timeout equals the consumer Lambda timeout (300 s) so a message is

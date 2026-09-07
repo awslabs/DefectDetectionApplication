@@ -512,3 +512,100 @@ class TestLegacyPathCheck:
             version_item([camera_node()], has_binding_points=False),
             ["line-a", "line-b"], {}, {}, [])
         assert errors == []
+
+
+# ==========================================================================
+# Static_Image_Camera bindings through the existing validation paths
+# (cloud-static-camera-provisioning task 3.4 — Reqs 6.4, 6.7, 6.8)
+# ==========================================================================
+
+def static_image_entry(absent=False):
+    """The ``static-image-camera`` registry entry as the device-report
+    reduction records it (origin edge-discovered, type StaticImage)."""
+    return {"type": "StaticImage",
+            "name": "Static Image Camera",
+            "origin": "edge-discovered",
+            "params": {},
+            "sync_status": "synced",
+            "absent": absent}
+
+
+class TestStaticImageCameraBindings:
+    """One example each against the existing deployment validation paths
+    with a static registry entry — no static-camera special-casing exists
+    anywhere in the validator (Req 6.6 is structural)."""
+
+    def test_present_static_entry_binds_like_any_camera(self, deployments):
+        """Req 6.4: the static camera is bindable through the same
+        binding flow as physical cameras."""
+        errors, warnings = deployments.validate_camera_bindings(
+            version_item([camera_node("n1", "acme.cam")]), ["line-a"],
+            {"line-a": snapshot({"static-image-camera":
+                                 static_image_entry()})},
+            {"line-a": {"n1": {"cameraSourceId": "static-image-camera"}}},
+            [])
+        assert errors == []
+        assert warnings == []
+
+    def test_static_entry_binds_to_aravis_camera_source_node(
+            self, deployments):
+        """Reqs 6.3/6.4 gap fix (task 9): a StaticImage entry binds to an
+        aravis_camera_source node — the device serves the static camera
+        through the same aravis frame-feed path bus cameras use (see the
+        static-image-camera-source base spec). Before the fix this
+        binding was rejected with CAMERA_TYPE_INCOMPATIBLE; that behavior
+        is gone."""
+        errors, warnings = deployments.validate_camera_bindings(
+            version_item([aravis_node()]), ["line-a"],
+            {"line-a": snapshot({"static-image-camera":
+                                 static_image_entry()})},
+            {"line-a": {"n1": {"cameraSourceId": "static-image-camera"}}},
+            [])
+        assert errors == []
+        assert warnings == []
+
+    def test_absent_static_entry_produces_standard_absence_warning(
+            self, deployments):
+        """Req 6.7: binding an absent static entry produces the same
+        absence warning physical cameras get, identifying the condition
+        and requiring explicit confirmation."""
+        errors, warnings = deployments.validate_camera_bindings(
+            version_item([camera_node("n1", "acme.cam")]), ["line-a"],
+            {"line-a": snapshot({"static-image-camera":
+                                 static_image_entry(absent=True)})},
+            {"line-a": {"n1": {"cameraSourceId": "static-image-camera"}}},
+            [])
+        assert errors == []
+        [warning] = warnings
+        assert warning["code"] == deployments.CAMERA_WARNING_SOURCE_DEGRADED
+        assert warning["cameraSourceId"] == "static-image-camera"
+        assert warning["conditions"] == ["absent"]
+        assert warning["confirmed"] is False  # explicit confirmation gate
+
+        # The same submission with the warning id confirmed passes the gate.
+        errors, [confirmed] = deployments.validate_camera_bindings(
+            version_item([camera_node("n1", "acme.cam")]), ["line-a"],
+            {"line-a": snapshot({"static-image-camera":
+                                 static_image_entry(absent=True)})},
+            {"line-a": {"n1": {"cameraSourceId": "static-image-camera"}}},
+            [warning["id"]])
+        assert errors == []
+        assert confirmed["confirmed"] is True
+
+    def test_missing_static_entry_rejected_naming_camera_and_device(
+            self, deployments):
+        """Req 6.8: a binding referencing the static camera on a device
+        whose registry has no such entry gets the same missing-source
+        rejection physical cameras get, naming the camera and device."""
+        errors, warnings = deployments.validate_camera_bindings(
+            version_item([camera_node("n1", "acme.cam")]), ["line-a"],
+            {"line-a": snapshot({"cfg-1": registry_entry()})},
+            {"line-a": {"n1": {"cameraSourceId": "static-image-camera"}}},
+            [])
+        assert warnings == []
+        [error] = errors
+        assert error["code"] == deployments.CAMERA_ERROR_SOURCE_MISSING
+        assert error["cameraSourceId"] == "static-image-camera"
+        assert error["device"] == "line-a"
+        assert "static-image-camera" in error["message"]
+        assert "line-a" in error["message"]

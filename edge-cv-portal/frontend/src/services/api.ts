@@ -22,6 +22,9 @@ import type {
   CameraSourceMutationBody,
   DeviceCameraConflictsResponse,
   DeviceCamerasResponse,
+  StaticImagePinStatusResponse,
+  StaticImagePinSubmitResponse,
+  StaticImageUploadUrlResponse,
 } from '../pages/workflows/cameraReference';
 import type { CameraBindingContext } from '../pages/deployments/cameraBindings';
 import type {
@@ -1584,6 +1587,79 @@ class ApiService {
     return this.request<DeviceCamerasResponse>(
       `/devices/${deviceId}/cameras/refresh?usecase_id=${usecaseId}`,
       { method: 'POST' }
+    );
+  }
+
+  // Static-image pin provisioning (cloud-static-camera-provisioning
+  // task 9.1 — Portal_Pin_API routes in camera_registry.py)
+
+  /**
+   * Presigned PUT + staging key for a static-image pin upload (Operator,
+   * cloud-static-camera-provisioning Req 1.1 upload path). The staged
+   * object is validated and copied server-side by the pin submit route.
+   */
+  async getStaticImageUploadUrl(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticImageUploadUrlResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticImageUploadUrlResponse>(
+      `/devices/${deviceId}/cameras/static-image/upload-url?usecase_id=${usecaseId}`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Submit a staged upload as a pin (or replace) Pin_Request for the
+   * device's Static_Image_Camera (Operator, Reqs 1.1-1.5, 7.1).
+   */
+  async pinStaticImage(
+    deviceId: string,
+    usecaseId: string,
+    body: { stagingKey: string; fileName: string }
+  ): Promise<StaticImagePinSubmitResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticImagePinSubmitResponse>(
+      `/devices/${deviceId}/cameras/static-image/pin?usecase_id=${usecaseId}`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Create a removal Pin_Request for the device's Pinned_Image
+   * (Operator, Req 7.2).
+   */
+  async removeStaticImagePin(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticImagePinSubmitResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticImagePinSubmitResponse>(
+      `/devices/${deviceId}/cameras/static-image/pin?usecase_id=${usecaseId}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * The device's static-camera provisioning status: latest Pin_Request,
+   * device-reported pinned state, history, and connectivity while
+   * pending (Viewer, Reqs 1.7, 1.10, 4.4-4.8, 5.7).
+   */
+  async getStaticImagePinStatus(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticImagePinStatusResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticImagePinStatusResponse>(
+      `/devices/${deviceId}/cameras/static-image?usecase_id=${usecaseId}`
     );
   }
 

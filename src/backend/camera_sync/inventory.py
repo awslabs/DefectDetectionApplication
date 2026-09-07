@@ -53,6 +53,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from camera_discovery.aravis import DiscoveredAravisCamera
+from utils.static_image_camera import (
+    STATIC_IMAGE_CAMERA_ID,
+    STATIC_IMAGE_CAMERA_IDENTITY,
+)
 
 ORIGIN_EDGE_CONFIGURED = "edge-configured"
 ORIGIN_EDGE_DISCOVERED = "edge-discovered"
@@ -64,6 +68,14 @@ TYPE_V4L2_DISCOVERED = "V4L2Discovered"
 #: Reported ``type`` for discovered-only Aravis (GenICam) bus cameras
 #: (aravis-camera-input Requirement 2.1).
 TYPE_ARAVIS_DISCOVERED = "AravisDiscovered"
+
+#: Reported ``type`` for the virtual Static_Image_Camera (feature
+#: cloud-static-camera-provisioning, Requirement 6.1).
+TYPE_STATIC_IMAGE = "StaticImage"
+
+#: Reported ``name`` for the Static_Image_Camera entry — the fixed
+#: enumeration model name (Requirement 6.1).
+STATIC_IMAGE_CAMERA_NAME = STATIC_IMAGE_CAMERA_IDENTITY["model"]
 
 #: The configured Image_Source ``type`` whose ``cameraId`` references an
 #: Aravis camera (merge key for Requirement 2.4).
@@ -92,13 +104,30 @@ def configured_camera_source_id(image_source_id: str) -> str:
     return "cfg-" + str(image_source_id)
 
 
-def build_inventory(image_sources, discovery_result) -> List[CameraSourceState]:
+def build_inventory(
+    image_sources,
+    discovery_result,
+    static_image_pinned: bool = False,
+    static_image_metadata: Optional[Mapping[str, Any]] = None,
+) -> List[CameraSourceState]:
     """Pure merge of configured Image_Sources with discovered hardware.
 
     ``image_sources`` is an iterable of Image_Source records (model
     objects, ORM rows, or dicts). ``discovery_result`` is a
     ``camera_discovery.DiscoveryResult`` or ``InventorySnapshot`` (the
     latter carries absence tracking, Requirement 2.4).
+
+    ``static_image_pinned`` (feature cloud-static-camera-provisioning,
+    Requirements 6.1, 6.2, 6.5, 7.6): when true — the store holds a
+    Pinned_Image, whether device- or cloud-initiated — the merge appends
+    exactly one virtual ``static-image-camera`` entry with the fixed
+    identity, origin ``edge-discovered`` (so the Portal's existing
+    discovery-managed mutation rejection, absence handling, picker, and
+    binding flows apply with zero special-casing). When false the entry is
+    simply absent from the full report, which the Portal's existing
+    absence reduction handles. All other entries are identical to the
+    pre-feature merge. ``static_image_metadata`` (the pin store's status
+    metadata) is folded into the entry's ``staticImage`` capabilities.
     """
     tracked = _normalize_discovery(discovery_result)
 
@@ -227,10 +256,46 @@ def build_inventory(image_sources, discovery_result) -> List[CameraSourceState]:
             )
         )
 
+    # Static_Image_Camera (cloud-static-camera-provisioning, Requirements
+    # 6.1, 6.2, 7.6): present exactly while a Pinned_Image exists.
+    if static_image_pinned:
+        entries.append(_static_image_entry(static_image_metadata))
+
     return entries
 
 
 # --- helpers -----------------------------------------------------------------
+
+
+def _static_image_entry(
+    pin_metadata: Optional[Mapping[str, Any]],
+) -> CameraSourceState:
+    """The virtual Static_Image_Camera inventory entry (Requirement 6.1).
+
+    Fixed id ``static-image-camera``, origin ``edge-discovered`` (so the
+    discovery-managed mutation rejection covers it, Requirement 6.5), and
+    ``staticImage`` capabilities carrying the fixed enumeration identity
+    plus the pin store's metadata (width/height/format/fileName/…)."""
+    static_image: Dict[str, Any] = {
+        "id": STATIC_IMAGE_CAMERA_ID,
+        "model": STATIC_IMAGE_CAMERA_IDENTITY["model"],
+        "address": STATIC_IMAGE_CAMERA_IDENTITY["address"],
+        "physicalId": STATIC_IMAGE_CAMERA_IDENTITY["physical_id"],
+        "protocol": STATIC_IMAGE_CAMERA_IDENTITY["protocol"],
+        "serial": STATIC_IMAGE_CAMERA_IDENTITY["serial"],
+        "vendor": STATIC_IMAGE_CAMERA_IDENTITY["vendor"],
+    }
+    if pin_metadata:
+        static_image.update(dict(pin_metadata))
+    return CameraSourceState(
+        camera_source_id=STATIC_IMAGE_CAMERA_ID,
+        name=STATIC_IMAGE_CAMERA_NAME,
+        type=TYPE_STATIC_IMAGE,
+        origin=ORIGIN_EDGE_DISCOVERED,
+        params={},
+        capabilities={"staticImage": static_image},
+        discovered=True,
+    )
 
 
 def _normalize_discovery(discovery_result) -> Dict[str, Tuple[Any, bool, Optional[int]]]:

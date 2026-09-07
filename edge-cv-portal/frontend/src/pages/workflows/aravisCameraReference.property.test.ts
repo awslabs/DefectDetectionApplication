@@ -6,8 +6,11 @@
  *
  * For any list of Camera_Registry entries, the Aravis picker option
  * list SHALL contain exactly the entries that are Aravis-compatible
- * (type `AravisDiscovered`, or type `Camera` carrying a non-empty
- * camera id parameter) — no incompatible entry offered, no compatible
+ * (type `AravisDiscovered`, type `Camera` carrying a non-empty camera
+ * id parameter, or type `StaticImage` — the registry-backed
+ * Static_Image_Camera, added by cloud-static-camera-provisioning
+ * Reqs 6.3/6.4: the device serves it through the same aravis
+ * frame-feed path) — no incompatible entry offered, no compatible
  * entry omitted.
  *
  * **Validates: Requirements 3.2**
@@ -102,7 +105,15 @@ const anyCameraArb: fc.Arbitrary<CameraSourceEntry> = fc.record(
     camera_source_id: idArb,
     name: fc.oneof(fc.string({ unit: 'grapheme', maxLength: 20 }), fc.constant(null)),
     type: fc.oneof(
-      fc.constantFrom('AravisDiscovered', 'Camera', 'V4L2Discovered', 'RTSP', 'CSI', 'ICam'),
+      fc.constantFrom(
+        'AravisDiscovered',
+        'Camera',
+        'StaticImage',
+        'V4L2Discovered',
+        'RTSP',
+        'CSI',
+        'ICam'
+      ),
       fc.string({ maxLength: 12 }),
       fc.constant(null)
     ),
@@ -151,9 +162,15 @@ const priorParametersArb: fc.Arbitrary<Record<string, JsonValue>> = fc
 // Oracles (restate the specified semantics independently)
 // --------------------------------------------------------------------------
 
-/** Requirement 3.2 compatibility, restated from the acceptance criterion. */
+/**
+ * Requirement 3.2 compatibility, restated from the acceptance criterion.
+ * Conscious re-record: cloud-static-camera-provisioning Reqs 6.3/6.4
+ * added `StaticImage` (the registry-backed Static_Image_Camera) — the
+ * device serves it through the same aravis frame-feed path bus cameras
+ * use (static-image-camera-source base spec).
+ */
 function compatibleOracle(camera: CameraSourceEntry): boolean {
-  if (camera.type === 'AravisDiscovered') {
+  if (camera.type === 'AravisDiscovered' || camera.type === 'StaticImage') {
     return true;
   }
   if (camera.type !== 'Camera') {

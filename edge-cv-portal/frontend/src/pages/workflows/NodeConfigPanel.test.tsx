@@ -1055,6 +1055,56 @@ describe('NodeConfigPanel', () => {
         );
       });
     });
+
+    // ----------------------------------------------------------------------
+    // Static test image pin shortcut (cloud-static-camera-provisioning
+    // task 9.2, Requirement 6.3 entry point)
+    // ----------------------------------------------------------------------
+
+    describe('static test image pin shortcut (cloud-static-camera-provisioning)', () => {
+      it('requires the reference device first, then routes to the device Cameras tab', async () => {
+        const windowOpen = vi
+          .spyOn(window, 'open')
+          .mockImplementation(() => null);
+        const { container } = render(
+          <NodeConfigPanel node={pickerNode()} onParametersChange={vi.fn()} />
+        );
+        await waitFor(() => expect(listDevices).toHaveBeenCalled());
+
+        // Device chooser first: the shortcut stays disabled until the
+        // reference device is chosen.
+        expect(screen.getByTestId('pin-static-image-shortcut')).toBeDisabled();
+
+        const [deviceSelect] = createWrapper(container).findAllSelects();
+        await waitFor(() => {
+          deviceSelect.openDropdown();
+          expect(deviceSelect.findDropdown().findOptions()).toHaveLength(2);
+        });
+        deviceSelect.selectOptionByValue('dev-1');
+
+        const shortcut = screen.getByTestId('pin-static-image-shortcut');
+        await waitFor(() => expect(shortcut).not.toBeDisabled());
+        fireEvent.click(shortcut);
+
+        expect(windowOpen).toHaveBeenCalledWith(
+          '/devices/dev-1?usecase_id=uc-1&tab=cameras',
+          '_blank',
+          'noopener'
+        );
+        windowOpen.mockRestore();
+      });
+
+      it('is not offered in manual entry mode', () => {
+        const { container } = render(
+          <NodeConfigPanel node={pickerNode()} onParametersChange={vi.fn()} />
+        );
+        const toggle = container.querySelector(
+          'input[aria-label="Manual entry for device"]'
+        )!;
+        fireEvent.click(toggle);
+        expect(screen.queryByTestId('pin-static-image-shortcut')).toBeNull();
+      });
+    });
   });
 
   // ------------------------------------------------------------------------
@@ -1261,6 +1311,46 @@ describe('NodeConfigPanel', () => {
       const options = cameraSelect.findDropdown().findOptions();
       expect(options[0].getElement().textContent).not.toContain('Stale');
       expect(options[1].getElement().textContent).toContain('Stale');
+    });
+
+    it('offers the registry-backed StaticImage entry for aravis_camera_source nodes (cloud-static-camera-provisioning Req 6.3)', async () => {
+      // The device serves the Static_Image_Camera through the same
+      // aravis frame-feed path bus cameras use (static-image-camera-source
+      // base spec), so the picker lists it alongside Aravis-compatible
+      // sources while still filtering incompatible entries.
+      const withStatic: CameraSourceEntry[] = [
+        ...ARAVIS_REGISTRY_CAMERAS,
+        {
+          camera_source_id: 'static-image-camera',
+          name: 'Static Image Camera',
+          type: 'StaticImage',
+          params: {},
+          origin: 'edge-discovered',
+          sync_status: 'synced',
+        },
+      ];
+      getDeviceCameras.mockResolvedValue({
+        device_id: 'dev-1',
+        state: 'synced',
+        cameras: withStatic,
+        count: withStatic.length,
+      });
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(ARAVIS)} onParametersChange={vi.fn()} />
+      );
+      await waitFor(() => expect(listDevices).toHaveBeenCalledWith('uc-1'));
+
+      const cameraSelect = await selectReferenceDevice(container);
+      await waitFor(() => {
+        cameraSelect.openDropdown();
+        expect(cameraSelect.findDropdown().findOptions()).toHaveLength(3);
+      });
+
+      const dropdownText = cameraSelect.findDropdown().getElement().textContent!;
+      expect(dropdownText).toContain('Static Image Camera');
+      // Incompatible entries stay filtered out.
+      expect(dropdownText).not.toContain('USB webcam');
+      expect(dropdownText).not.toContain('Path-only camera');
     });
 
     it('populates camera_id/gain/exposure and records the hint on selection (Requirement 3.3)', async () => {

@@ -6,12 +6,20 @@
  * (Req 1.6), discovery-managed edit/delete blocking (Req 5.6), and the
  * conflict re-apply flow (Req 6.4), plus unit tests for the exported
  * pure helpers.
+ *
+ * Plus the static image camera panel (cloud-static-camera-provisioning
+ * task 9.3): each Sync_Status rendering, the no-request state, the
+ * failure reason, the connectivity hint while pending (Reqs 1.10, 4.4,
+ * 4.5, 4.7); the pin/replace/remove flows calling the Portal_Pin_API
+ * routes; and mutation actions hidden without the device-mutation
+ * permission (Req 8.1's frontend gate).
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import createWrapper from '@cloudscape-design/components/test-utils/dom';
 import DeviceCamerasTab, {
+  canManageDeviceCameras,
   formatEpochMs,
   summarizeRecord,
   summarizeCapabilities,
@@ -20,11 +28,13 @@ import DeviceCamerasTab, {
   parseParamsInput,
   summarizeConflictVersion,
 } from './DeviceCamerasTab';
+import type { UserRole } from '../types';
 import type {
   CameraConflictEvent,
   CameraSourceEntry,
   DeviceCameraConflictsResponse,
   DeviceCamerasResponse,
+  StaticImagePinStatusResponse,
 } from '../pages/workflows/cameraReference';
 
 const {
@@ -35,6 +45,11 @@ const {
   deleteDeviceCamera,
   reapplyCameraConflict,
   refreshDeviceCameras,
+  getStaticImagePinStatus,
+  getStaticImageUploadUrl,
+  pinStaticImage,
+  removeStaticImagePin,
+  authState,
 } = vi.hoisted(() => ({
   getDeviceCameras: vi.fn(),
   getDeviceCameraConflicts: vi.fn(),
@@ -43,6 +58,11 @@ const {
   deleteDeviceCamera: vi.fn(),
   reapplyCameraConflict: vi.fn(),
   refreshDeviceCameras: vi.fn(),
+  getStaticImagePinStatus: vi.fn(),
+  getStaticImageUploadUrl: vi.fn(),
+  pinStaticImage: vi.fn(),
+  removeStaticImagePin: vi.fn(),
+  authState: { role: undefined as string | undefined },
 }));
 
 vi.mock('../services/api', () => ({
@@ -54,7 +74,19 @@ vi.mock('../services/api', () => ({
     deleteDeviceCamera,
     reapplyCameraConflict,
     refreshDeviceCameras,
+    getStaticImagePinStatus,
+    getStaticImageUploadUrl,
+    pinStaticImage,
+    removeStaticImagePin,
   },
+}));
+
+// The tab reads only `user?.role` from the auth context (permission gate
+// for the static-image pin mutations).
+vi.mock('../contexts/AuthContext', () => ({
+  useAuth: () => ({
+    user: authState.role ? { role: authState.role } : null,
+  }),
 }));
 
 // --------------------------------------------------------------------------
@@ -140,6 +172,23 @@ function conflictsResponse(
   return { device_id: DEVICE_ID, usecase_id: USECASE_ID, conflicts, count: conflicts.length };
 }
 
+/** Provisioning status response fixture; defaults to the no-request state. */
+function pinStatusResponse(
+  overrides: Partial<StaticImagePinStatusResponse> = {}
+): StaticImagePinStatusResponse {
+  return {
+    deviceId: DEVICE_ID,
+    usecaseId: USECASE_ID,
+    latest: null,
+    noPinRequest: true,
+    deviceReported: null,
+    history: [],
+    ...overrides,
+  };
+}
+
+const PIN_CREATED_AT_MS = 1700000300000;
+
 function renderTab() {
   return render(<DeviceCamerasTab deviceId={DEVICE_ID} usecaseId={USECASE_ID} />);
 }
@@ -148,12 +197,18 @@ async function waitForLoaded() {
   await waitFor(() => {
     expect(screen.getByTestId('device-cameras-table')).toBeInTheDocument();
   });
+  // The static image panel resolves its own status fetch.
+  await waitFor(() => {
+    expect(getStaticImagePinStatus).toHaveBeenCalled();
+  });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  authState.role = undefined;
   getDeviceCameras.mockResolvedValue(camerasResponse());
   getDeviceCameraConflicts.mockResolvedValue(conflictsResponse());
+  getStaticImagePinStatus.mockResolvedValue(pinStatusResponse());
 });
 
 // --------------------------------------------------------------------------
@@ -486,5 +541,253 @@ describe('DeviceCamerasTab conflicts', () => {
 
     expect(screen.getByText('Re-applied')).toBeInTheDocument();
     expect(screen.queryByText('Re-apply portal version')).not.toBeInTheDocument();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Static image camera panel (cloud-static-camera-provisioning task 9.3)
+// --------------------------------------------------------------------------
+
+describe('canManageDeviceCameras', () => {
+  it('is true exactly for the roles holding the device-mutation permission', () => {
+    // Mirrors the backend RBAC grants (manage_devices: Operator,
+    // UseCaseAdmin, plus the PortalAdmin super user).
+    expect(canManageDeviceCameras('Operator')).toBe(true);
+    expect(canManageDeviceCameras('UseCaseAdmin')).toBe(true);
+    expect(canManageDeviceCameras('PortalAdmin')).toBe(true);
+    expect(canManageDeviceCameras('DataScientist')).toBe(false);
+    expect(canManageDeviceCameras('Viewer')).toBe(false);
+    expect(canManageDeviceCameras('DataLabeler')).toBe(false);
+    expect(canManageDeviceCameras(undefined)).toBe(false);
+    expect(canManageDeviceCameras(null)).toBe(false);
+  });
+});
+
+describe('DeviceCamerasTab static image panel states', () => {
+  it('renders the no-request state for a device with zero pin requests (Reqs 1.10, 4.7)', async () => {
+    renderTab();
+    await waitForLoaded();
+
+    expect(screen.getByTestId('static-image-panel')).toBeInTheDocument();
+    expect(screen.getByTestId('static-image-no-request')).toBeInTheDocument();
+    expect(screen.queryByTestId('static-image-status')).not.toBeInTheDocument();
+  });
+
+  it('renders a pending request with the connectivity hint (Reqs 4.4, 4.5)', async () => {
+    getStaticImagePinStatus.mockResolvedValue(
+      pinStatusResponse({
+        latest: {
+          pinRequestId: 'req-1',
+          op: 'pin',
+          status: 'pending',
+          createdAt: PIN_CREATED_AT_MS,
+        },
+        noPinRequest: false,
+        connectivity: 'disconnected',
+      })
+    );
+    renderTab();
+    await waitForLoaded();
+
+    await waitFor(() => {
+      expect(screen.getByText('Pin pending')).toBeInTheDocument();
+    });
+    const hint = screen.getByTestId('static-image-connectivity-hint');
+    expect(hint.textContent).toContain('currently disconnected');
+    expect(screen.queryByTestId('static-image-no-request')).not.toBeInTheDocument();
+  });
+
+  it('renders an applied pin with the device-reported state and metadata (Reqs 1.7, 4.6)', async () => {
+    getStaticImagePinStatus.mockResolvedValue(
+      pinStatusResponse({
+        latest: {
+          pinRequestId: 'req-2',
+          op: 'pin',
+          status: 'applied',
+          createdAt: PIN_CREATED_AT_MS,
+          completedAt: PIN_CREATED_AT_MS + 5000,
+          deviceMetadata: {
+            width: 1920,
+            height: 1080,
+            format: 'PNG',
+            fileName: 'golden-sample.png',
+          },
+        },
+        noPinRequest: false,
+        deviceReported: { present: true, absent: false },
+        deviceMetadata: {
+          width: 1920,
+          height: 1080,
+          format: 'PNG',
+          fileName: 'golden-sample.png',
+        },
+      })
+    );
+    renderTab();
+    await waitForLoaded();
+
+    await waitFor(() => {
+      expect(screen.getByText('Pin applied')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Device reports a pinned image')).toBeInTheDocument();
+    const metadata = screen.getByTestId('static-image-metadata');
+    expect(metadata.textContent).toContain('1920 px');
+    expect(metadata.textContent).toContain('1080 px');
+    expect(metadata.textContent).toContain('PNG');
+    expect(metadata.textContent).toContain('golden-sample.png');
+    expect(screen.queryByTestId('static-image-connectivity-hint')).not.toBeInTheDocument();
+  });
+
+  it('renders a failed request with the device-reported failure reason (Req 4.3 display)', async () => {
+    getStaticImagePinStatus.mockResolvedValue(
+      pinStatusResponse({
+        latest: {
+          pinRequestId: 'req-3',
+          op: 'pin',
+          status: 'failed',
+          createdAt: PIN_CREATED_AT_MS,
+          failureReason: 'checksum mismatch',
+        },
+        noPinRequest: false,
+      })
+    );
+    renderTab();
+    await waitForLoaded();
+
+    await waitFor(() => {
+      expect(screen.getByText('Pin failed')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('static-image-failure-reason').textContent).toContain(
+      'checksum mismatch'
+    );
+  });
+});
+
+describe('DeviceCamerasTab static image panel permission gating', () => {
+  it('hides the pin/replace/remove actions without the device-mutation permission', async () => {
+    authState.role = 'Viewer' satisfies UserRole;
+    renderTab();
+    await waitForLoaded();
+
+    // Status is still visible (view permission), actions are not.
+    expect(screen.getByTestId('static-image-panel')).toBeInTheDocument();
+    expect(screen.queryByTestId('static-image-pin-button')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('static-image-remove-button')).not.toBeInTheDocument();
+  });
+
+  it('shows the actions for a role holding the device-mutation permission', async () => {
+    authState.role = 'Operator' satisfies UserRole;
+    renderTab();
+    await waitForLoaded();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('static-image-pin-button')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('static-image-remove-button')).toBeInTheDocument();
+  });
+});
+
+describe('DeviceCamerasTab static image pin/replace/remove flows', () => {
+  const fetchMock = vi.fn();
+
+  beforeEach(() => {
+    authState.role = 'Operator';
+    vi.stubGlobal('fetch', fetchMock);
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: true, status: 200 });
+    getStaticImageUploadUrl.mockResolvedValue({
+      deviceId: DEVICE_ID,
+      uploadUrl: 'https://upload.example/staging-put',
+      stagingKey: 'static-image-pins/staging/u-1',
+      bucket: 'dda-component-bucket',
+      expiresInSeconds: 900,
+    });
+    pinStaticImage.mockResolvedValue({
+      pinRequestId: 'req-9',
+      deviceId: DEVICE_ID,
+      status: 'pending',
+    });
+    removeStaticImagePin.mockResolvedValue({
+      pinRequestId: 'req-10',
+      deviceId: DEVICE_ID,
+      status: 'pending',
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('pins an image: upload-url, presigned PUT, then the pin submit (Reqs 1.1, 1.5)', async () => {
+    const { container } = renderTab();
+    await waitForLoaded();
+
+    const file = new File(['png-bytes'], 'sample.png', { type: 'image/png' });
+    const upload = createWrapper(container).findFileUpload()!;
+    fireEvent.change(upload.findNativeInput().getElement(), {
+      target: { files: [file] },
+    });
+
+    const pinButton = screen.getByTestId('static-image-pin-button');
+    await waitFor(() => expect(pinButton).not.toBeDisabled());
+    fireEvent.click(pinButton);
+
+    await waitFor(() => {
+      expect(pinStaticImage).toHaveBeenCalledWith(DEVICE_ID, USECASE_ID, {
+        stagingKey: 'static-image-pins/staging/u-1',
+        fileName: 'sample.png',
+      });
+    });
+    expect(getStaticImageUploadUrl).toHaveBeenCalledWith(DEVICE_ID, USECASE_ID);
+    // The image bytes went to the presigned URL, not the API.
+    expect(fetchMock).toHaveBeenCalledWith('https://upload.example/staging-put', {
+      method: 'PUT',
+      body: file,
+    });
+    // The panel refreshes the provisioning status after the submit.
+    await waitFor(() => {
+      expect(getStaticImagePinStatus.mock.calls.length).toBeGreaterThan(1);
+    });
+  });
+
+  it('labels the pin action as replace while the device reports a pinned image (Req 7.1)', async () => {
+    getStaticImagePinStatus.mockResolvedValue(
+      pinStatusResponse({
+        latest: {
+          pinRequestId: 'req-2',
+          op: 'pin',
+          status: 'applied',
+          createdAt: PIN_CREATED_AT_MS,
+        },
+        noPinRequest: false,
+        deviceReported: { present: true, absent: false },
+      })
+    );
+    renderTab();
+    await waitForLoaded();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('static-image-pin-button').textContent).toContain(
+        'Replace image'
+      );
+    });
+  });
+
+  it('removes the pinned image after confirmation (Req 7.2)', async () => {
+    renderTab();
+    await waitForLoaded();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('static-image-remove-button')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId('static-image-remove-button'));
+    fireEvent.click(screen.getByTestId('static-image-remove-confirm'));
+
+    await waitFor(() => {
+      expect(removeStaticImagePin).toHaveBeenCalledWith(DEVICE_ID, USECASE_ID);
+    });
+    await waitFor(() => {
+      expect(getStaticImagePinStatus.mock.calls.length).toBeGreaterThan(1);
+    });
   });
 });

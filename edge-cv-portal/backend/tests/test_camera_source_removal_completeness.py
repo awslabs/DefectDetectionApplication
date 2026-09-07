@@ -106,6 +106,9 @@ class TestDeploymentsRemoval:
             {"ICam", "V4L2Discovered", "Camera"})
         assert compat["csi_camera_source"] == frozenset(
             {"NvidiaCSI", "Camera"})
-        # aravis_camera_source is unchanged by this feature.
+        # aravis_camera_source is unchanged by this feature. Re-recorded
+        # consciously: cloud-static-camera-provisioning Reqs 6.3/6.4
+        # added StaticImage — the device serves the Static_Image_Camera
+        # through the same aravis frame-feed path bus cameras use.
         assert compat["aravis_camera_source"] == frozenset(
-            {"Camera", "AravisDiscovered"})
+            {"Camera", "AravisDiscovered", "StaticImage"})

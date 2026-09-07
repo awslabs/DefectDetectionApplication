@@ -78,6 +78,19 @@ const V4L2_DISCOVERED: CameraSourceEntry = {
   absent: false,
 };
 
+/** The device-reported Static_Image_Camera registry entry as the camera
+ * reduction records it (cloud-static-camera-provisioning Req 6.1). */
+const STATIC_IMAGE: CameraSourceEntry = {
+  camera_source_id: 'static-image-camera',
+  name: 'Static Image Camera',
+  type: 'StaticImage',
+  params: {},
+  origin: 'edge-discovered',
+  sync_status: 'synced',
+  stale: false,
+  absent: false,
+};
+
 const NODE_HINTED: BindingContextNode = {
   node_id: 'cam_in_1',
   node_type: 'camera_source',
@@ -327,10 +340,13 @@ describe('CameraBindingMatrix', () => {
   });
 
   it('offers only Aravis-compatible sources for an aravis_camera_source row with hint pre-selection (aravis-camera-input Requirement 5.1)', () => {
-    // Mixed registry: two Aravis-compatible entries (a discovered bus
-    // camera and a configured Camera-type source with a cameraId), a
-    // V4L2Discovered entry, and a Camera-type entry without a cameraId —
-    // the last two must not be offered to the Aravis node.
+    // Mixed registry: three Aravis-compatible entries (a discovered bus
+    // camera, a configured Camera-type source with a cameraId, and the
+    // registry-backed StaticImage entry — cloud-static-camera-provisioning
+    // Reqs 6.3/6.4: the device serves the static camera through the same
+    // aravis frame-feed path), a V4L2Discovered entry, and a Camera-type
+    // entry without a cameraId — the last two must not be offered to the
+    // Aravis node.
     const aravisNode: BindingContextNode = {
       node_id: 'arv_in_1',
       node_type: 'aravis_camera_source',
@@ -345,7 +361,13 @@ describe('CameraBindingMatrix', () => {
       targets: {
         'thing-1': {
           state: 'synced',
-          cameras: [HEALTHY, ARAVIS_DISCOVERED, ARAVIS_CONFIGURED, V4L2_DISCOVERED],
+          cameras: [
+            HEALTHY,
+            ARAVIS_DISCOVERED,
+            ARAVIS_CONFIGURED,
+            V4L2_DISCOVERED,
+            STATIC_IMAGE,
+          ],
           preselected: { arv_in_1: 'arv-1' },
         },
       },
@@ -360,9 +382,10 @@ describe('CameraBindingMatrix', () => {
       .findDropdown({ expandToViewport: true })
       .findOptions()
       .map((o) => o.getElement().textContent);
-    expect(aravisOptions).toHaveLength(2);
+    expect(aravisOptions).toHaveLength(3);
     expect(aravisOptions[0]).toContain('Basler acA1920');
     expect(aravisOptions[1]).toContain('Inspection GigE cam');
+    expect(aravisOptions[2]).toContain('Static Image Camera');
     aravisSelect.closeDropdown();
 
     // Hint pre-selection is unchanged: the hinted compatible entry is
@@ -373,7 +396,42 @@ describe('CameraBindingMatrix', () => {
     // The camera_source row still offers every registered entry.
     const cameraSelect = createWrapper(bodyCell(container, 2, 2).getElement()).findSelect()!;
     cameraSelect.openDropdown();
-    expect(cameraSelect.findDropdown({ expandToViewport: true }).findOptions()).toHaveLength(4);
+    expect(cameraSelect.findDropdown({ expandToViewport: true }).findOptions()).toHaveLength(5);
+  });
+
+  it('offers a registry-backed static-image-camera entry through the same binding flow as physical cameras (cloud-static-camera-provisioning Req 6.4)', () => {
+    // A camera-backed node row (no type-compatibility filter) offers the
+    // device's registry entries generically — the static entry appears
+    // alongside physical cameras with zero special-casing.
+    const context = bindingContext({
+      camera_input_nodes: [NODE_PLAIN],
+      targets: {
+        'thing-1': {
+          state: 'synced',
+          cameras: [HEALTHY, STATIC_IMAGE],
+          preselected: {},
+        },
+      },
+    });
+    const { container, props } = renderMatrix({ context });
+
+    const select = createWrapper(bodyCell(container, 1, 2).getElement()).findSelect()!;
+    select.openDropdown();
+    const options = select
+      .findDropdown({ expandToViewport: true })
+      .findOptions()
+      .map((o) => o.getElement().textContent);
+    expect(options).toHaveLength(2);
+    expect(options[0]).toContain('Line 1 inspection cam');
+    expect(options[1]).toContain('Static Image Camera');
+
+    // Selecting it emits an ordinary camera binding cell.
+    select.selectOptionByValue('static-image-camera', { expandToViewport: true });
+    expect(props.onCellChange).toHaveBeenCalledWith('thing-1', 'cam_in_2', {
+      mode: 'camera',
+      cameraSourceId: 'static-image-camera',
+      suggested: false,
+    });
   });
 
   it('shows the empty state for a context without Camera_Input_Nodes (Requirement 8.9 contract)', () => {

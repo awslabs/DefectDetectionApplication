@@ -20,9 +20,11 @@ import {
   Box,
   Button,
   Container,
+  FileUpload,
   FormField,
   Header,
   Input,
+  KeyValuePairs,
   Modal,
   Select,
   SpaceBetween,
@@ -32,6 +34,8 @@ import {
   Textarea,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
+import type { UserRole } from '../types';
 import type { JsonValue } from '../pages/workflows/types';
 import {
   cameraDisplayName,
@@ -39,6 +43,7 @@ import {
   CameraSourceEntry,
   DeviceCameraConflictsResponse,
   DeviceCamerasResponse,
+  StaticImagePinStatusResponse,
 } from '../pages/workflows/cameraReference';
 
 // ---------------------------------------------------------------------------
@@ -102,6 +107,27 @@ export function isDiscoveryManaged(camera: CameraSourceEntry): boolean {
 }
 
 /**
+ * Roles holding the device-mutation permission (`manage_devices`) that
+ * gates the Camera_Registry mutation routes and the static-image pin
+ * mutations server-side (cloud-static-camera-provisioning Req 8.1) —
+ * the backend RBAC matrix's Operator-and-above set.
+ */
+export const DEVICE_MUTATION_ROLES: readonly UserRole[] = [
+  'Operator',
+  'UseCaseAdmin',
+  'PortalAdmin',
+];
+
+/**
+ * True when the role may pin, replace, or remove a device's static
+ * image from the Portal (mirrors the server-side manage_devices gate;
+ * the backend enforces it regardless).
+ */
+export function canManageDeviceCameras(role: UserRole | undefined | null): boolean {
+  return role !== undefined && role !== null && DEVICE_MUTATION_ROLES.includes(role);
+}
+
+/**
  * Whether the reported device status counts as disconnected for the
  * inventory's disconnected indicator (Req 4.2). The status comes from
  * the existing device-status lookup (Greengrass core-device health).
@@ -149,6 +175,317 @@ export function summarizeConflictVersion(
 }
 
 // ---------------------------------------------------------------------------
+// Static image camera panel (cloud-static-camera-provisioning task 9.1)
+// ---------------------------------------------------------------------------
+
+/** Poll interval for the status route while the latest request is pending. */
+const PIN_STATUS_POLL_MS = 10000;
+
+const FILE_UPLOAD_I18N = {
+  uploadButtonText: () => 'Choose image',
+  dropzoneText: () => 'Drop an image to upload',
+  removeFileAriaLabel: (index: number) => `Remove file ${index + 1}`,
+  errorIconAriaLabel: 'Error',
+};
+
+interface StaticImagePanelProps {
+  deviceId: string;
+  usecaseId: string;
+  /** Whether the user holds the device-mutation permission (Req 8.1). */
+  canMutate: boolean;
+}
+
+/**
+ * The "Static image camera" provisioning panel: shows the latest
+ * Pin_Request's Sync_Status, the device-reported pinned state, the
+ * applied image metadata, the failure reason, and a connectivity hint
+ * while pending (Reqs 1.7, 1.10, 4.4-4.7); offers upload-and-pin,
+ * replace, and remove actions gated on the mutation permission
+ * (Reqs 1.5, 7.2, 8.1); polls the status route while pending.
+ */
+function StaticImagePanel({ deviceId, usecaseId, canMutate }: StaticImagePanelProps) {
+  const [status, setStatus] = useState<StaticImagePinStatusResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [pinning, setPinning] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeConfirmVisible, setRemoveConfirmVisible] = useState(false);
+
+  const loadStatus = useCallback(async () => {
+    if (!deviceId || !usecaseId) return;
+    try {
+      setLoadError(null);
+      const response = await apiService.getStaticImagePinStatus(deviceId, usecaseId);
+      setStatus(response);
+    } catch (err: any) {
+      setLoadError(err.message || 'Failed to load the static image camera status');
+    } finally {
+      setLoading(false);
+    }
+  }, [deviceId, usecaseId]);
+
+  useEffect(() => {
+    loadStatus();
+  }, [loadStatus]);
+
+  // Poll the status route while the latest Pin_Request is pending.
+  const pending = status?.latest?.status === 'pending';
+  useEffect(() => {
+    if (!pending) return undefined;
+    const interval = setInterval(() => {
+      loadStatus();
+    }, PIN_STATUS_POLL_MS);
+    return () => clearInterval(interval);
+  }, [pending, loadStatus]);
+
+  const handlePin = async () => {
+    const file = files[0];
+    if (!file) {
+      setActionError('Choose an image file to pin');
+      return;
+    }
+    try {
+      setPinning(true);
+      setActionError(null);
+      // Upload path (design Decision 2): presigned PUT to a staging key,
+      // then the pin submit validates and copies the staged object.
+      const upload = await apiService.getStaticImageUploadUrl(deviceId, usecaseId);
+      const put = await fetch(upload.uploadUrl, { method: 'PUT', body: file });
+      if (!put.ok) {
+        throw new Error(`Image upload failed (HTTP ${put.status})`);
+      }
+      await apiService.pinStaticImage(deviceId, usecaseId, {
+        stagingKey: upload.stagingKey,
+        fileName: file.name,
+      });
+      setFiles([]);
+      await loadStatus();
+    } catch (err: any) {
+      setActionError(err.message || 'Failed to pin the image');
+    } finally {
+      setPinning(false);
+    }
+  };
+
+  const confirmRemove = async () => {
+    try {
+      setRemoving(true);
+      setActionError(null);
+      await apiService.removeStaticImagePin(deviceId, usecaseId);
+      setRemoveConfirmVisible(false);
+      await loadStatus();
+    } catch (err: any) {
+      setActionError(err.message || 'Failed to remove the pinned image');
+      setRemoveConfirmVisible(false);
+    } finally {
+      setRemoving(false);
+    }
+  };
+
+  const latest = status?.latest ?? null;
+  const deviceReported = status?.deviceReported ?? null;
+  const metadata = latest?.deviceMetadata ?? status?.deviceMetadata ?? null;
+  const pinButtonLabel = deviceReported?.present ? 'Replace image' : 'Pin image';
+
+  const statusIndicator = () => {
+    if (latest === null) return null;
+    const opLabel = latest.op === 'remove' ? 'Removal' : 'Pin';
+    switch (latest.status) {
+      case 'pending':
+        return <StatusIndicator type="pending">{`${opLabel} pending`}</StatusIndicator>;
+      case 'applied':
+        return <StatusIndicator type="success">{`${opLabel} applied`}</StatusIndicator>;
+      case 'failed':
+        return <StatusIndicator type="error">{`${opLabel} failed`}</StatusIndicator>;
+      default:
+        return <StatusIndicator type="info">{latest.status || 'Unknown'}</StatusIndicator>;
+    }
+  };
+
+  return (
+    <Container
+      data-testid="static-image-panel"
+      header={
+        <Header
+          variant="h2"
+          description="Pin a still image from the Portal; the device serves it as
+            the static-image-camera source while an image is pinned."
+        >
+          Static image camera
+        </Header>
+      }
+    >
+      {loading ? (
+        <Box textAlign="center" padding="m">
+          <Spinner />
+        </Box>
+      ) : loadError ? (
+        <SpaceBetween size="s">
+          <Alert type="error">{loadError}</Alert>
+          <Button onClick={() => loadStatus()}>Retry</Button>
+        </SpaceBetween>
+      ) : (
+        <SpaceBetween size="m">
+          {actionError && (
+            <Alert type="error" dismissible onDismiss={() => setActionError(null)}>
+              {actionError}
+            </Alert>
+          )}
+
+          {/* No cloud Pin_Request exists (Reqs 1.10, 4.7). */}
+          {status?.noPinRequest && (
+            <Box color="text-body-secondary" data-testid="static-image-no-request">
+              No cloud pin request exists for this device. Upload an image
+              to pin it to the device&apos;s static image camera.
+            </Box>
+          )}
+
+          {/* Latest Pin_Request Sync_Status (Req 4.4). */}
+          {latest !== null && (
+            <SpaceBetween size="xxs">
+              <SpaceBetween direction="horizontal" size="xs">
+                <span data-testid="static-image-status">{statusIndicator()}</span>
+                <Box variant="small" color="text-body-secondary">
+                  {`Request ${latest.pinRequestId} · created ${formatEpochMs(latest.createdAt)}`}
+                </Box>
+              </SpaceBetween>
+              {latest.status === 'failed' && latest.failureReason && (
+                <Box
+                  variant="small"
+                  color="text-status-error"
+                  data-testid="static-image-failure-reason"
+                >
+                  {latest.failureReason}
+                </Box>
+              )}
+            </SpaceBetween>
+          )}
+
+          {/* Connectivity hint while the request is pending (Req 4.5). */}
+          {pending && status?.connectivity && (
+            <Alert
+              type={status.connectivity === 'disconnected' ? 'warning' : 'info'}
+              data-testid="static-image-connectivity-hint"
+            >
+              {status.connectivity === 'disconnected'
+                ? 'The device is currently disconnected. The request stays pending and applies when the device reconnects.'
+                : 'The device is connected. The pending request should apply shortly.'}
+            </Alert>
+          )}
+
+          {/* Device-reported pinned state — the current state even when it
+              disagrees with the recorded outcome (Reqs 4.6, 4.8). */}
+          {deviceReported !== null && (
+            <Box data-testid="static-image-device-reported">
+              {deviceReported.present ? (
+                <StatusIndicator type="success">
+                  Device reports a pinned image
+                </StatusIndicator>
+              ) : (
+                <StatusIndicator type="stopped">
+                  {`Device reports the static camera absent${
+                    deviceReported.absentSince
+                      ? ` since ${formatEpochMs(deviceReported.absentSince)}`
+                      : ''
+                  }`}
+                </StatusIndicator>
+              )}
+            </Box>
+          )}
+
+          {/* Applied image metadata (Req 1.7). */}
+          {metadata && (
+            <div data-testid="static-image-metadata">
+              <KeyValuePairs
+                columns={4}
+                items={[
+                  { label: 'Width', value: metadata.width != null ? `${metadata.width} px` : '-' },
+                  { label: 'Height', value: metadata.height != null ? `${metadata.height} px` : '-' },
+                  { label: 'Format', value: metadata.format || '-' },
+                  { label: 'File name', value: metadata.fileName || '-' },
+                ]}
+              />
+            </div>
+          )}
+
+          {/* Pin / replace / remove, gated on the mutation permission. */}
+          {canMutate && (
+            <SpaceBetween size="xs">
+              <FormField
+                label={pinButtonLabel === 'Replace image' ? 'Replace the pinned image' : 'Pin an image'}
+                description="JPEG, PNG, or BMP, at most 50 MB"
+              >
+                <FileUpload
+                  value={files}
+                  onChange={({ detail }) => setFiles(detail.value)}
+                  accept="image/jpeg,image/png,image/bmp"
+                  constraintText="JPEG, PNG, or BMP"
+                  i18nStrings={FILE_UPLOAD_I18N}
+                />
+              </FormField>
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button
+                  variant="primary"
+                  onClick={handlePin}
+                  loading={pinning}
+                  disabled={files.length === 0}
+                  data-testid="static-image-pin-button"
+                >
+                  {pinButtonLabel}
+                </Button>
+                <Button
+                  onClick={() => setRemoveConfirmVisible(true)}
+                  loading={removing}
+                  data-testid="static-image-remove-button"
+                >
+                  Remove pinned image
+                </Button>
+              </SpaceBetween>
+            </SpaceBetween>
+          )}
+        </SpaceBetween>
+      )}
+
+      {/* Removal confirmation (Req 7.2). */}
+      <Modal
+        visible={removeConfirmVisible}
+        onDismiss={() => setRemoveConfirmVisible(false)}
+        header="Remove pinned image"
+        footer={
+          <Box float="right">
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button
+                variant="link"
+                onClick={() => setRemoveConfirmVisible(false)}
+                disabled={removing}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={confirmRemove}
+                loading={removing}
+                data-testid="static-image-remove-confirm"
+              >
+                Remove
+              </Button>
+            </SpaceBetween>
+          </Box>
+        }
+      >
+        <Box>
+          Remove the device&apos;s pinned static image? The removal is
+          delivered through the sync channel; the static image camera
+          disappears from the device&apos;s camera inventory once applied.
+        </Box>
+      </Modal>
+    </Container>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -174,6 +511,7 @@ interface DeviceCamerasTabProps {
 }
 
 export default function DeviceCamerasTab({ deviceId, usecaseId }: DeviceCamerasTabProps) {
+  const { user } = useAuth();
   const [camerasResponse, setCamerasResponse] = useState<DeviceCamerasResponse | null>(null);
   const [conflictsResponse, setConflictsResponse] =
     useState<DeviceCameraConflictsResponse | null>(null);
@@ -511,6 +849,14 @@ export default function DeviceCamerasTab({ deviceId, usecaseId }: DeviceCamerasT
               : 'No camera sources registered for this device'}
           </Box>
         }
+      />
+
+      {/* Static image camera provisioning (cloud-static-camera-
+          provisioning task 9.1) */}
+      <StaticImagePanel
+        deviceId={deviceId}
+        usecaseId={usecaseId}
+        canMutate={canManageDeviceCameras(user?.role)}
       />
 
       {/* Conflict events (Reqs 6.3, 6.4) */}

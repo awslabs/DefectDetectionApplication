@@ -312,6 +312,51 @@ def _registry_table():
     return _dynamodb().Table(table_name)
 
 
+_pin_cleanup_s3_client = None
+
+
+def _pin_s3_client():
+    """Lazy S3 client for the best-effort canonical pin-object cleanup on
+    terminal Pin_Request transitions (created lazily so test mocks are
+    honored, cached like the iot/dynamodb clients)."""
+    global _pin_cleanup_s3_client
+    if _pin_cleanup_s3_client is None:
+        import boto3
+
+        _pin_cleanup_s3_client = boto3.client("s3")
+    return _pin_cleanup_s3_client
+
+
+def _process_pin_section(table, thing_name: str, reported: Dict[str, Any],
+                         now_ms: int) -> None:
+    """Route ``reported.staticImagePin`` to the Pin_Request reducer
+    (cloud-static-camera-provisioning task 3.1).
+
+    Section isolation by construction: any failure here — a malformed
+    pin section, a missing pin_requests module, a persistence error — is
+    logged and skipped without affecting the camera reduction (which has
+    already been persisted when this runs). Duplicate documents-event
+    re-reduction is a condition-guarded no-op inside
+    apply_pin_confirmation (Reqs 4.1, 4.8, 5.6, 7.5).
+    """
+    pin_section = reported.get("staticImagePin")
+    if pin_section is None:
+        return  # absent section: nothing to do (tolerant)
+    try:
+        # Bundled into the same Lambda asset (the camera_registry.py
+        # precedent); imported lazily so a packaging regression degrades
+        # to a logged skip instead of breaking camera ingestion.
+        import pin_requests
+
+        pin_requests.apply_pin_confirmation(
+            table, thing_name, pin_section, now_ms=now_ms,
+            s3_client=_pin_s3_client())
+    except Exception:  # noqa: BLE001 — section isolation (task 3.1)
+        logger.exception(
+            "Skipping malformed/unprocessable reported.staticImagePin "
+            "section for '%s' (camera reduction unaffected)", thing_name)
+
+
 def _resolve_usecase_id(thing_name: str) -> Optional[str]:
     """The device's usecase_id from the portal devices table (Req 1.4)."""
     devices_table = os.environ.get("DEVICES_TABLE")
@@ -330,6 +375,12 @@ def _parse_record(record: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any]]
     Returns None for the report when the shadow document carries no
     reported state (e.g. a desired-only update on a never-reported shadow)
     — nothing to ingest, not an error.
+
+    The returned reported document also carries ``reported.staticImagePin``
+    when present (cloud-static-camera-provisioning task 3.1) — extracted
+    tolerantly: an absent section means nothing to do, and a malformed
+    section is never a MalformedReport (it is isolated at process time so
+    the camera path is untouched).
 
     Raises MalformedReport for anything that can never be processed.
     """
@@ -505,6 +556,11 @@ def _process_report(
     for csid in _deletion_candidates(entries, reported):
         outcome = reduce_report(entries.get(csid), None, now_ms)
         _persist_outcome(table, thing_name, usecase_id, csid, outcome)
+
+    # Static-image Pin_Request confirmations (cloud-static-camera-
+    # provisioning task 3.1): reported.staticImagePin routes to the pin
+    # reducer, isolated from the camera reduction above.
+    _process_pin_section(table, thing_name, reported, now_ms)
 
     # Every processed report stamps the device META item (Reqs 1.6, 3.2).
     meta_item = stamp_meta(meta, now_ms)

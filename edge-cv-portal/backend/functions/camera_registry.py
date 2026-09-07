@@ -48,6 +48,7 @@ with PK ``device_id`` and item-type-prefixed SK — ``CAMERA#{csid}``,
 ``META``, ``CONFLICT#{ts}#{uuid}`` — written by the Portal_Sync_Service
 (camera_sync.py).
 """
+import hashlib
 import json
 import logging
 import os
@@ -70,6 +71,10 @@ from shared_utils import (
 # The refresh route runs the exact same reduction as the SQS ingest path
 # (camera_sync.py is bundled into the same Lambda code asset).
 import camera_sync
+
+# Pin_Request lifecycle core (cloud-static-camera-provisioning), bundled
+# into the same Lambda code asset like camera_sync.py.
+import pin_requests
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -106,6 +111,39 @@ DISCOVERY_MANAGED = 'DISCOVERY_MANAGED'
 
 ORIGIN_EDGE_DISCOVERED = 'edge-discovered'
 ORIGIN_PORTAL_CREATED = 'portal-created'
+
+# ---------------------------------------------------------------------------
+# Portal_Pin_API constants (cloud-static-camera-provisioning task 2.1)
+# ---------------------------------------------------------------------------
+
+# Image_Transport: the Portal component bucket (the usecases.py /
+# shared_components.py convention — every onboarded device account's TES
+# role can already read it).
+COMPONENT_BUCKET = os.environ.get('COMPONENT_BUCKET')
+
+# S3 layout (design "Data Models"): presigned-PUT staging keys under
+# static-image-pins/staging/ (1-day lifecycle expiry, task 4.1) and
+# canonical per-request keys written only by CopyObject after validation.
+STATIC_IMAGE_PIN_PREFIX = 'static-image-pins'
+STATIC_IMAGE_STAGING_PREFIX = f'{STATIC_IMAGE_PIN_PREFIX}/staging/'
+UPLOAD_URL_TTL_SECONDS = 15 * 60
+
+# Mirror the device-side StaticImageStore constants
+# (src/backend/utils/static_image_camera.py) so portal validation accepts
+# exactly what the device pin operation accepts (Reqs 1.1, 1.3, 1.4).
+# MAX_PIN_IMAGE_BYTES is read at call time so tests can inject a small
+# boundary-straddling limit.
+MAX_PIN_IMAGE_BYTES = 50 * 1024 * 1024
+SUPPORTED_PIN_FORMATS = ('JPEG', 'PNG', 'BMP')
+
+# Every field a desired.staticImagePin document may carry. The shadow
+# write always sends the full field set with absent fields as explicit
+# nulls, so the IoT shadow merge replaces the single slot wholesale — a
+# remove document clears the previous pin's reference fields instead of
+# merging with them (Decision 1: newest request structurally replaces
+# the previous one).
+DESIRED_PIN_FIELDS = ('requestId', 'op', 'requestedAtEpochMs', 'bucket',
+                      'key', 'sha256', 'sizeBytes', 'format', 'fileName')
 
 
 def now_ms() -> int:
@@ -761,6 +799,397 @@ def refresh_cameras(device_id: str, user: Dict, event: Dict,
 
 
 # ---------------------------------------------------------------------------
+# Portal_Pin_API routes (cloud-static-camera-provisioning task 2.1)
+#
+#   POST   /devices/{id}/cameras/static-image/upload-url   (MANAGE_DEVICES)
+#   POST   /devices/{id}/cameras/static-image/pin          (MANAGE_DEVICES)
+#   DELETE /devices/{id}/cameras/static-image/pin          (MANAGE_DEVICES)
+#   GET    /devices/{id}/cameras/static-image              (VIEW_DEVICES)
+# ---------------------------------------------------------------------------
+
+_pin_s3_client = None
+
+
+def pin_s3_client():
+    """Lazy S3 client for the Image_Transport (component bucket).
+
+    A swappable module seam (the iot_data_client pattern) so tests can
+    install recording/failing fakes.
+    """
+    global _pin_s3_client
+    if _pin_s3_client is None:
+        _pin_s3_client = boto3.client('s3')
+    return _pin_s3_client
+
+
+def resolve_pin_usecase_id(device_id: str,
+                           items: Optional[List[Dict[str, Any]]] = None
+                           ) -> Optional[str]:
+    """The Target_Device's Use_Case from Portal-side records ONLY (Req 8.5).
+
+    Devices table first (the camera_sync._resolve_usecase_id pattern), the
+    device's own registry items second. Caller-supplied scoping parameters
+    are never consulted. None means the device has no Portal record —
+    rejected with 404 before any side effect (Reqs 1.8, 8.7).
+    """
+    devices_table = os.environ.get('DEVICES_TABLE')
+    if devices_table:
+        response = dynamodb.Table(devices_table).get_item(
+            Key={'device_id': device_id})
+        usecase_id = (response.get('Item') or {}).get('usecase_id')
+        if usecase_id:
+            return str(usecase_id)
+    if items is None:
+        items = query_device_items(device_id)
+    return device_usecase_id(items)
+
+
+def pin_device_not_registered(device_id: str) -> Dict:
+    """404 for a device with no Portal record (Reqs 1.8, 8.7)."""
+    return create_response(404, {
+        'error': f"Device '{device_id}' is not registered in the Portal",
+    })
+
+
+def pin_size_limit_response(limit: int) -> Dict:
+    """400 naming the size limit (Req 1.4 — '50 MB' for the default)."""
+    return create_response(400, {
+        'error': 'Image file exceeds the maximum pin size of '
+                 f'{limit} bytes ({limit / (1024 * 1024):g} MB)',
+    })
+
+
+def pin_unsupported_format_response() -> Dict:
+    """400 enumerating the Supported_Image_Formats (Req 1.3), mirroring
+    the StaticImageStore rejection message."""
+    return create_response(400, {
+        'error': 'The submitted file could not be decoded as a supported '
+                 'image format. Supported formats: {}.'.format(
+                     ', '.join(SUPPORTED_PIN_FORMATS)),
+    })
+
+
+def validate_pin_image(data: bytes):
+    """(image_format, error_response) for a staged upload's bytes.
+
+    Pillow via the imaging-layer convention (lazy import, the
+    synthetic_data.py precedent); the default decompression-bomb guard
+    stays enabled, and a bomb rejection surfaces as the standard
+    unsupported-format 400. Full decode (img.load) so truncated files
+    are rejected exactly like the device-side pin would reject them.
+    """
+    import io
+
+    from PIL import Image  # lazy import — the imaging-layer convention
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            image_format = img.format
+            if image_format not in SUPPORTED_PIN_FORMATS:
+                return None, pin_unsupported_format_response()
+            img.load()
+    except Exception:  # noqa: BLE001 — any decode failure is a 400
+        return None, pin_unsupported_format_response()
+    return image_format, None
+
+
+def desired_pin_section(document: Dict[str, Any]) -> Dict[str, Any]:
+    """The full-width desired.staticImagePin section for a shadow write:
+    every known field explicit (absent ones null) so the slot is replaced
+    wholesale under IoT shadow merge semantics."""
+    return {field: document.get(field) for field in DESIRED_PIN_FIELDS}
+
+
+def write_desired_pin(usecase_id: str, device_id: str,
+                      section: Dict[str, Any]) -> Optional[Dict]:
+    """Replace the desired.staticImagePin slot on the device's registry
+    shadow (top-level merge — never clobbers desired.changes).
+
+    Returns an error response on failure, None on success (Req 1.9's
+    delivery-initiation failure surface).
+    """
+    try:
+        client = iot_data_client(usecase_id)
+        client.update_thing_shadow(
+            thingName=device_id,
+            shadowName=SHADOW_NAME,
+            payload=json.dumps(
+                {'state': {'desired': {'staticImagePin': section}}},
+                default=lambda o: float(o) if isinstance(o, Decimal) else o,
+            ),
+        )
+        return None
+    except Exception as e:  # noqa: BLE001 — any shadow-path failure is a 502
+        logger.error(f"Pin desired write failed for {device_id}: {e}")
+        return create_response(502, {
+            'error': 'Failed to initiate delivery of the pin request '
+                     'through the device sync channel',
+        })
+
+
+def delete_staged_pin_object(s3, staging_key: str) -> None:
+    """Best-effort staging cleanup (the 1-day lifecycle rule is the
+    backstop)."""
+    try:
+        s3.delete_object(Bucket=COMPONENT_BUCKET, Key=staging_key)
+    except Exception:  # noqa: BLE001 — best-effort cleanup only
+        logger.warning(
+            f"Best-effort delete of staged pin object {staging_key} failed")
+
+
+def audit_pin_request(user: Dict, action: str, device_id: str,
+                      usecase_id: str, pin_request_id: str, op: str,
+                      extra: Optional[Dict] = None) -> None:
+    """Acceptance audit event (Req 8.4): acting user and timestamp are
+    stamped by log_audit_event; details carry the device, operation type,
+    and Pin_Request identifier."""
+    details = {
+        'device_id': device_id,
+        'usecase_id': usecase_id,
+        'pin_request_id': pin_request_id,
+        'operation': op,
+    }
+    if extra:
+        details.update(extra)
+    log_audit_event(user['user_id'], action, 'camera_registry', device_id,
+                    'success', details)
+
+
+def fail_pin_request(table, item: Dict[str, Any], reason: str, s3) -> None:
+    """Transition a just-written pending item to failed (Req 1.9)."""
+    pin_requests.transition_pin_request(
+        table, item, pin_requests.STATUS_FAILED,
+        completed_at_ms=now_ms(), failure_reason=reason, s3_client=s3)
+
+
+def get_static_image_upload_url(device_id: str, user: Dict, event: Dict) -> Dict:
+    """POST /devices/{id}/cameras/static-image/upload-url (Operator).
+
+    Presigned PUT for a fresh staging key (15-minute TTL). The staged
+    object is validated and server-side-copied by the pin submit route;
+    clients can never write the canonical object (Decision 2).
+    """
+    usecase_id = resolve_pin_usecase_id(device_id)
+    if not usecase_id:
+        return pin_device_not_registered(device_id)
+    error = authorize(user, event, device_id, usecase_id, MUTATE_PERMISSION)
+    if error:
+        return error
+    if not COMPONENT_BUCKET:
+        return create_response(500, {'error': 'Component bucket not configured'})
+
+    staging_key = f"{STATIC_IMAGE_STAGING_PREFIX}{uuid.uuid4().hex}"
+    upload_url = pin_s3_client().generate_presigned_url(
+        'put_object',
+        Params={'Bucket': COMPONENT_BUCKET, 'Key': staging_key},
+        ExpiresIn=UPLOAD_URL_TTL_SECONDS,
+    )
+    return create_response(200, {
+        'deviceId': device_id,
+        'uploadUrl': upload_url,
+        'stagingKey': staging_key,
+        'bucket': COMPONENT_BUCKET,
+        'expiresInSeconds': UPLOAD_URL_TTL_SECONDS,
+    })
+
+
+def pin_static_image(device_id: str, user: Dict, event: Dict,
+                     body: Any) -> Dict:
+    """POST /devices/{id}/cameras/static-image/pin (Operator).
+
+    Validates the staged object (Reqs 1.1, 1.3, 1.4), then runs the
+    submission flow: supersede any pending Pin_Request (Req 5.3), write
+    the new item as pending, copy the content to the canonical key
+    strictly before any Sync_Channel write (Req 2.1), replace the
+    desired.staticImagePin slot wholesale (Reqs 2.2–2.4), audit (Req 8.4).
+    A store- or shadow-step failure transitions the item to failed with an
+    error identifying the failing step (Reqs 1.9, 2.5).
+    """
+    usecase_id = resolve_pin_usecase_id(device_id)
+    if not usecase_id:
+        return pin_device_not_registered(device_id)
+    error = authorize(user, event, device_id, usecase_id, MUTATE_PERMISSION)
+    if error:
+        return error
+
+    if not isinstance(body, dict):
+        return create_response(400, {'error': 'JSON object body required'})
+    staging_key = body.get('stagingKey')
+    if (not staging_key or not isinstance(staging_key, str)
+            or not staging_key.startswith(STATIC_IMAGE_STAGING_PREFIX)):
+        return create_response(400, {
+            'error': 'stagingKey (a key issued by the upload-url route, '
+                     f'under {STATIC_IMAGE_STAGING_PREFIX}) is required',
+        })
+    file_name = body.get('fileName')
+    if not file_name or not isinstance(file_name, str):
+        return create_response(400, {'error': 'fileName is required'})
+    if not COMPONENT_BUCKET:
+        return create_response(500, {'error': 'Component bucket not configured'})
+
+    s3 = pin_s3_client()
+    limit = MAX_PIN_IMAGE_BYTES
+
+    # HeadObject size check before downloading (design error table).
+    try:
+        head = s3.head_object(Bucket=COMPONENT_BUCKET, Key=staging_key)
+    except ClientError:
+        return create_response(400, {
+            'error': 'Staged upload not found; request a new upload URL '
+                     'and upload the image again',
+        })
+    if int(head.get('ContentLength') or 0) > limit:
+        delete_staged_pin_object(s3, staging_key)
+        return pin_size_limit_response(limit)
+
+    data = s3.get_object(Bucket=COMPONENT_BUCKET,
+                         Key=staging_key)['Body'].read()
+    if len(data) > limit:  # defense in depth over the HeadObject check
+        delete_staged_pin_object(s3, staging_key)
+        return pin_size_limit_response(limit)
+
+    image_format, error = validate_pin_image(data)
+    if error:
+        delete_staged_pin_object(s3, staging_key)
+        return error
+    sha256 = hashlib.sha256(data).hexdigest()
+
+    now = now_ms()
+    pin_request_id = pin_requests.new_pin_request_id(now)
+    canonical_key = f"{STATIC_IMAGE_PIN_PREFIX}/{device_id}/{pin_request_id}"
+    item = pin_requests.build_pin_request_item(
+        device_id, usecase_id, pin_requests.OP_PIN, now,
+        pin_request_id=pin_request_id,
+        s3_bucket=COMPONENT_BUCKET, s3_key=canonical_key, sha256=sha256,
+        size_bytes=len(data), image_format=image_format,
+        file_name=file_name,
+    )
+    section = desired_pin_section(pin_requests.build_desired_document(item))
+
+    # The ≤ 1024 B bound on the serialized section, enforced before any
+    # side effect (Reqs 2.3, 2.4; Decision 1's shadow budget).
+    if pin_requests.desired_document_size_bytes(section) > \
+            pin_requests.MAX_DESIRED_SECTION_BYTES:
+        delete_staged_pin_object(s3, staging_key)
+        return create_response(400, {
+            'error': 'Pin request sync document would exceed the size '
+                     f'limit of {pin_requests.MAX_DESIRED_SECTION_BYTES} '
+                     'bytes',
+        })
+
+    table = dynamodb.Table(CAMERA_REGISTRY_TABLE)
+    pin_requests.supersede_pending_requests(table, device_id, now,
+                                            s3_client=s3)
+    pin_requests.insert_pin_request(table, item)
+
+    # Content stored in the Image_Transport strictly BEFORE any
+    # Sync_Channel write (Req 2.1). CopyObject after validation: the
+    # canonical object is never client-writable (Decision 2).
+    try:
+        s3.copy_object(
+            Bucket=COMPONENT_BUCKET, Key=canonical_key,
+            CopySource={'Bucket': COMPONENT_BUCKET, 'Key': staging_key},
+        )
+    except Exception as e:  # noqa: BLE001 — any store failure is Req 2.5
+        logger.error(f"Pin canonical copy failed for {device_id}: {e}")
+        fail_pin_request(table, item,
+                         'image transport storage failed', s3)
+        return create_response(502, {
+            'error': 'Failed to store the pin image content for device '
+                     'delivery',
+        })
+
+    error = write_desired_pin(usecase_id, device_id, section)
+    if error:
+        fail_pin_request(table, item,
+                         'sync channel delivery initiation failed', s3)
+        return error
+
+    delete_staged_pin_object(s3, staging_key)
+    audit_pin_request(user, 'pin_static_image', device_id, usecase_id,
+                      pin_request_id, pin_requests.OP_PIN,
+                      {'file_name': file_name, 'size_bytes': len(data),
+                       'format': image_format, 'sha256': sha256})
+    return create_response(201, {
+        'pinRequestId': pin_request_id,
+        'deviceId': device_id,
+        'status': pin_requests.STATUS_PENDING,
+    })
+
+
+def remove_static_image_pin(device_id: str, user: Dict, event: Dict) -> Dict:
+    """DELETE /devices/{id}/cameras/static-image/pin (Operator).
+
+    Removal Pin_Request (op: remove, no Image_Transport object) through
+    the same lifecycle and desired-slot replacement (Req 7.2).
+    """
+    usecase_id = resolve_pin_usecase_id(device_id)
+    if not usecase_id:
+        return pin_device_not_registered(device_id)
+    error = authorize(user, event, device_id, usecase_id, MUTATE_PERMISSION)
+    if error:
+        return error
+
+    now = now_ms()
+    pin_request_id = pin_requests.new_pin_request_id(now)
+    item = pin_requests.build_pin_request_item(
+        device_id, usecase_id, pin_requests.OP_REMOVE, now,
+        pin_request_id=pin_request_id,
+    )
+    section = desired_pin_section(pin_requests.build_desired_document(item))
+
+    s3 = pin_s3_client()
+    table = dynamodb.Table(CAMERA_REGISTRY_TABLE)
+    pin_requests.supersede_pending_requests(table, device_id, now,
+                                            s3_client=s3)
+    pin_requests.insert_pin_request(table, item)
+
+    error = write_desired_pin(usecase_id, device_id, section)
+    if error:
+        fail_pin_request(table, item,
+                         'sync channel delivery initiation failed', s3)
+        return error
+
+    audit_pin_request(user, 'remove_static_image', device_id, usecase_id,
+                      pin_request_id, pin_requests.OP_REMOVE)
+    return create_response(200, {
+        'pinRequestId': pin_request_id,
+        'deviceId': device_id,
+        'status': pin_requests.STATUS_PENDING,
+    })
+
+
+def get_static_image_status(device_id: str, user: Dict, event: Dict) -> Dict:
+    """GET /devices/{id}/cameras/static-image (Viewer).
+
+    The provisioning status view (Reqs 1.7, 1.10, 4.4–4.8, 5.7):
+    latest non-superseded request, history, deviceReported state from the
+    CAMERA#static-image-camera registry entry, and connectivity (mapped
+    to exactly connected/disconnected) while the latest request is
+    pending.
+    """
+    items = query_device_items(device_id)
+    usecase_id = resolve_pin_usecase_id(device_id, items=items)
+    if not usecase_id:
+        return pin_device_not_registered(device_id)
+    error = authorize(user, event, device_id, usecase_id, VIEW_PERMISSION)
+    if error:
+        return error
+
+    camera_entry = next(
+        (item for item in items
+         if item.get('sk') == pin_requests.SK_STATIC_IMAGE_CAMERA), None)
+    view = pin_requests.build_status_view(
+        device_id, items,
+        usecase_id=usecase_id,
+        camera_entry=camera_entry,
+        connectivity_provider=lambda: device_connectivity_status(
+            usecase_id, device_id),
+    )
+    return create_response(200, view)
+
+
+# ---------------------------------------------------------------------------
 # Handler / routing
 # ---------------------------------------------------------------------------
 
@@ -804,6 +1233,20 @@ def handler(event, context):
                 body = json.loads(event['body'], parse_float=Decimal)
             except (json.JSONDecodeError, ValueError):
                 return create_response(400, {'error': 'Invalid JSON body'})
+
+        # Portal_Pin_API static-image routes (cloud-static-camera-
+        # provisioning task 2.1) — most specific paths first.
+        if http_method == 'POST' and \
+                path.endswith('/cameras/static-image/upload-url'):
+            return get_static_image_upload_url(device_id, user, event)
+        if http_method == 'POST' and \
+                path.endswith('/cameras/static-image/pin'):
+            return pin_static_image(device_id, user, event, body)
+        if http_method == 'DELETE' and \
+                path.endswith('/cameras/static-image/pin'):
+            return remove_static_image_pin(device_id, user, event)
+        if http_method == 'GET' and path.endswith('/cameras/static-image'):
+            return get_static_image_status(device_id, user, event)
 
         # Static segments before path params (conflicts/refresh), reads
         # before mutations.

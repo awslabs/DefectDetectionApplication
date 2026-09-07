@@ -43,12 +43,15 @@ from camera_sync.hooks import (
 from camera_sync.inventory import (
     ORIGIN_EDGE_CONFIGURED,
     ORIGIN_EDGE_DISCOVERED,
+    STATIC_IMAGE_CAMERA_NAME,
     TYPE_ARAVIS_DISCOVERED,
+    TYPE_STATIC_IMAGE,
     TYPE_V4L2_DISCOVERED,
     CameraSourceState,
     build_inventory,
     configured_camera_source_id,
 )
+from camera_sync.pin_worker import StaticImagePinWorker
 from camera_sync.version_state import (
     DEFAULT_STATE_PATH,
     CameraSyncStateStore,
@@ -77,8 +80,11 @@ __all__ = [
     "set_active_agent",
     "ORIGIN_EDGE_CONFIGURED",
     "ORIGIN_EDGE_DISCOVERED",
+    "STATIC_IMAGE_CAMERA_NAME",
     "TYPE_ARAVIS_DISCOVERED",
+    "TYPE_STATIC_IMAGE",
     "TYPE_V4L2_DISCOVERED",
+    "StaticImagePinWorker",
     "CameraSourceState",
     "build_inventory",
     "configured_camera_source_id",

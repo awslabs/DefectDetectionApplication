@@ -58,7 +58,9 @@ export default function DeviceDetail() {
   const { deviceId } = useParams<{ deviceId: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const [activeTabId, setActiveTabId] = useState('overview');
+  // ?tab= deep-links a specific tab (e.g. the Workflow_Builder camera
+  // picker's "Pin a static test image…" shortcut targets tab=cameras).
+  const [activeTabId, setActiveTabId] = useState(searchParams.get('tab') || 'overview');
   const [showRestartModal, setShowRestartModal] = useState(false);
   const [device, setDevice] = useState<Device | null>(null);
   const [loading, setLoading] = useState(true);

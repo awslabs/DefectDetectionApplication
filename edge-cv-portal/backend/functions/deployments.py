@@ -2843,11 +2843,17 @@ CAMERA_WARNING_LEGACY_PATH = 'COMPILED_PATH_UNREGISTERED'   # 9.5
 #: NvidiaCSI source or a configured Camera-type Image_Source flagged CSI
 #: (Requirement 6.2). aravis_camera_source must bind to an Aravis-backed
 #: source: a discovered bus camera or a configured Camera-type
-#: Image_Source (aravis-camera-input Requirement 5.2).
+#: Image_Source (aravis-camera-input Requirement 5.2). The StaticImage
+#: entry (the device-reported Static_Image_Camera) is also bindable to
+#: aravis_camera_source nodes: the device serves the static camera
+#: through the same aravis frame-feed path bus cameras use (see the
+#: static-image-camera-source base spec; cloud-static-camera-provisioning
+#: Requirements 6.3, 6.4).
 _CAMERA_COMPATIBLE_SOURCE_TYPES = {
     'icam_source': frozenset({'ICam', 'V4L2Discovered', 'Camera'}),
     'csi_camera_source': frozenset({'NvidiaCSI', 'Camera'}),
-    'aravis_camera_source': frozenset({'Camera', 'AravisDiscovered'}),
+    'aravis_camera_source': frozenset(
+        {'Camera', 'AravisDiscovered', 'StaticImage'}),
 }
 
 #: Camera_Source types that are never a camera. Custom camera-backed node

@@ -1,0 +1,65 @@
+{
+  "pbtResults": {
+    "1.2 Write property test for Pin_Request lifecycle and supersede": {
+      "status": "passed",
+      "lastRunTimestamp": 1788755982552
+    },
+    "1.3 Write property test for confirmation reduction and status view": {
+      "status": "passed",
+      "lastRunTimestamp": 1788756149679
+    },
+    "2.2 Write property test for submission validation acceptance": {
+      "status": "passed",
+      "lastRunTimestamp": 1788757461358
+    },
+    "2.3 Write property test for accepted-submission effects": {
+      "status": "passed",
+      "lastRunTimestamp": 1788757466508
+    },
+    "2.4 Write property test for delivery-initiation failure": {
+      "status": "passed",
+      "lastRunTimestamp": 1788757471331
+    },
+    "2.5 Write property test for unknown device rejection": {
+      "status": "passed",
+      "lastRunTimestamp": 1788757476037
+    },
+    "2.6 Write property test for authorization decisions and audit": {
+      "status": "passed",
+      "lastRunTimestamp": 1788757480891
+    },
+    "2.7 Write property test for use-case resolution ignoring caller scoping": {
+      "status": "passed",
+      "lastRunTimestamp": 1788757489159
+    },
+    "6.2 Write property test for retrieval verification and retry": {
+      "status": "passed",
+      "lastRunTimestamp": 1788764229761
+    },
+    "6.3 Write property test for failure retaining the prior image": {
+      "status": "passed",
+      "lastRunTimestamp": 1788764231645
+    },
+    "6.4 Write property test for idempotent redelivery": {
+      "status": "passed",
+      "lastRunTimestamp": 1788764233008
+    },
+    "6.5 Write property test for confirmation ordering": {
+      "status": "passed",
+      "lastRunTimestamp": 1788764235164
+    },
+    "6.6 Write property test for newest-request-wins on the device": {
+      "status": "passed",
+      "lastRunTimestamp": 1788764236282
+    },
+    "7.3 Write property test for cloud/device pin equivalence": {
+      "status": "passed",
+      "lastRunTimestamp": 1788765477202
+    },
+    "7.4 Write property test for inventory presence tracking the pin state": {
+      "status": "passed",
+      "lastRunTimestamp": 1788765479004
+    }
+  },
+  "executionHistory": {}
+}

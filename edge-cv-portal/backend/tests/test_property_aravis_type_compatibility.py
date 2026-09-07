@@ -9,11 +9,13 @@ deploy-time Camera_Binding validation — validate_camera_bindings
 snapshot, and binding set, `validate_camera_bindings` SHALL produce a
 type-incompatibility error for a binding exactly when the bound
 Camera_Source's type is outside the node type's declared compatible set
-— `{Camera, AravisDiscovered}` for `aravis_camera_source`,
+— `{Camera, AravisDiscovered, StaticImage}` for `aravis_camera_source`,
 `{NvidiaCSI, Camera}` for `csi_camera_source` and
 `{ICam, V4L2Discovered, Camera}` for `icam_source`
 (csi-icam-input-nodes Requirements 6.1, 6.2 renamed/split the legacy
-`camera_source` type into those two).
+`camera_source` type into those two; cloud-static-camera-provisioning
+Reqs 6.3/6.4 added StaticImage to the aravis set — the device serves
+the Static_Image_Camera through the same aravis frame-feed path).
 
 **Validates: Requirements 5.2, 5.3**
 
@@ -50,10 +52,15 @@ def deployments(aws_stack):
 #: was split into csi_camera_source (NVIDIA CSI through the host capture
 #: service) and icam_source (direct V4L2 smart camera) by
 #: csi-icam-input-nodes Requirements 6.2 and 6.1 respectively.
+#: StaticImage (the device-reported Static_Image_Camera) was added to
+#: the aravis set by cloud-static-camera-provisioning Reqs 6.3/6.4 —
+#: the device serves the static camera through the same aravis
+#: frame-feed path bus cameras use (conscious oracle re-record).
 _COMPATIBLE = {
     "csi_camera_source": frozenset({"NvidiaCSI", "Camera"}),
     "icam_source": frozenset({"ICam", "V4L2Discovered", "Camera"}),
-    "aravis_camera_source": frozenset({"Camera", "AravisDiscovered"}),
+    "aravis_camera_source": frozenset(
+        {"Camera", "AravisDiscovered", "StaticImage"}),
 }
 
 _NODE_TYPES = sorted(_COMPATIBLE)
@@ -62,8 +69,8 @@ _NODE_TYPES = sorted(_COMPATIBLE)
 #: plus types outside both (Folder is Requirement 9.4's categorical
 #: mismatch; RTSP/HTTPPull are network-stream types) and an unknown one.
 _SOURCE_TYPES = ["Camera", "ICam", "NvidiaCSI", "V4L2Discovered",
-                 "AravisDiscovered", "Folder", "RTSP", "HTTPPull",
-                 "SomethingElse"]
+                 "AravisDiscovered", "StaticImage", "Folder", "RTSP",
+                 "HTTPPull", "SomethingElse"]
 
 _NODE_IDS = ["n1", "n2", "n3", "n4"]
 _DEVICES = ["line-a", "line-b", "line-c"]
@@ -137,8 +144,10 @@ def test_aravis_type_incompatibility_is_flagged_exactly(deployments, case):
     A CAMERA_TYPE_INCOMPATIBLE error is produced exactly for the
     bindings whose Camera_Source type is outside the node type's
     compatible set per the compatibility-map oracle: an
-    aravis_camera_source node accepts only {Camera, AravisDiscovered}
-    (5.2), a csi_camera_source node accepts {NvidiaCSI, Camera} and an
+    aravis_camera_source node accepts only {Camera, AravisDiscovered,
+    StaticImage} (5.2; cloud-static-camera-provisioning Reqs 6.3/6.4
+    added StaticImage), a csi_camera_source node accepts
+    {NvidiaCSI, Camera} and an
     icam_source node {ICam, V4L2Discovered, Camera} (csi-icam-input-nodes
     6.2/6.1) — and no other error is produced for these healthy, fully
     bound cases.

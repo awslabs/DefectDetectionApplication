@@ -64,6 +64,7 @@ from conftest import REGION, TEST_ENV
 CAMERA_REGISTRY_TABLE_NAME = "test-camera-registry-shadow-sync"
 SETTINGS_TABLE_NAME = "test-settings-shadow-sync"
 DLQ_NAME = "test-camera-shadow-sync-dlq"
+COMPONENT_BUCKET_NAME = "test-dda-component-shadow-sync"
 
 SHADOW_NAME = "dda-camera-registry"
 
@@ -400,13 +401,16 @@ def sync_env(aws_stack):
     )
     sqs = boto3.client("sqs", region_name=REGION)
     dlq_url = sqs.create_queue(QueueName=DLQ_NAME)["QueueUrl"]
+    s3 = boto3.client("s3", region_name=REGION)
+    s3.create_bucket(Bucket=COMPONENT_BUCKET_NAME)
 
     os.environ["CAMERA_REGISTRY_TABLE"] = CAMERA_REGISTRY_TABLE_NAME
     os.environ["SETTINGS_TABLE"] = SETTINGS_TABLE_NAME
     os.environ["CAMERA_SHADOW_REPORT_DLQ_URL"] = dlq_url
+    os.environ["COMPONENT_BUCKET"] = COMPONENT_BUCKET_NAME
 
-    sys.modules.pop("camera_sync", None)
-    sys.modules.pop("camera_registry", None)
+    for module_name in ("camera_sync", "camera_registry", "pin_requests"):
+        sys.modules.pop(module_name, None)
     import camera_sync
     import camera_registry
 
@@ -416,6 +420,8 @@ def sync_env(aws_stack):
         camera_registry=camera_registry,
         registry=resource.Table(CAMERA_REGISTRY_TABLE_NAME),
         devices=resource.Table(TEST_ENV["DEVICES_TABLE"]),
+        s3=s3,
+        bucket=COMPONENT_BUCKET_NAME,
     )
 
 
@@ -746,3 +752,224 @@ class TestPortalToEdge:
         assert entry["params"]["devicePath"] == "/dev/video3"
         assert not any(sk.startswith("CONFLICT#") for sk in
                        device_items(sync_env, device.thing_name))
+
+
+# --- static-image pin round trip (cloud-static-camera-provisioning 3.3) ---------
+#
+# Same harness, extended end-to-end: the real Portal_Pin_API pin submit
+# populates the desired.staticImagePin slot on the emulated shadow, a fake
+# device confirmation document (the StaticImagePinWorker's reported echo,
+# ships in task 6) transitions the PIN_REQUEST# item to applied with the
+# device-reported metadata through the real rule/SQS ingest path, and a
+# reported.cameras inventory including ``static-image-camera`` upserts the
+# registry entry through the untouched camera reduction. The removal round
+# trip marks the entry absent through the same absence handling physical
+# cameras use (the device reports the entry with absent + absentSince).
+#
+# Requirements: 1.2, 4.2, 6.1, 6.2, 7.5
+
+
+@pytest.fixture
+def pin_transport(sync_env, monkeypatch):
+    """Route the pin routes' Image_Transport seam to the moto S3 client."""
+    monkeypatch.setattr(sync_env.camera_registry, "pin_s3_client",
+                        lambda: sync_env.s3)
+
+
+def _tiny_png_bytes(size=(4, 4), color=(0, 128, 255)):
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def stage_pin_upload(sync_env, payload):
+    """PUT a payload to a fresh staging key (the presigned-PUT stand-in)."""
+    staging_key = f"static-image-pins/staging/{uuid.uuid4().hex}"
+    sync_env.s3.put_object(Bucket=sync_env.bucket, Key=staging_key,
+                           Body=payload)
+    return staging_key
+
+
+def static_camera_report(absent=False, absent_since=None, version=1):
+    """The device's ``static-image-camera`` inventory entry (the task 7.2
+    build_inventory shape), present or absence-tracked."""
+    report = {
+        "name": "Static Image Camera",
+        "type": "StaticImage",
+        "origin": "edge-discovered",
+        "params": {},
+        "capabilities": {"staticImage": {"width": 4, "height": 4,
+                                         "format": "PNG"}},
+        "discovered": True,
+        "absent": absent,
+        "version": version,
+    }
+    if absent and absent_since is not None:
+        report["absentSince"] = absent_since
+    return report
+
+
+def confirm_on_device(device, desired, status="applied", metadata=None,
+                      completed_at=1_730_000_200_000, cameras=None):
+    """The fake device confirmation: verbatim echo of the processed desired
+    fields plus the outcome, merged with an inventory report in one shadow
+    update (top-level merge, one documents event)."""
+    echo = dict(desired)
+    echo["status"] = status
+    if metadata is not None:
+        echo["metadata"] = metadata
+    echo["completedAtEpochMs"] = completed_at
+    reported = {"staticImagePin": echo}
+    if cameras is not None:
+        reported["cameras"] = cameras
+        reported["reportedAt"] = completed_at
+    device.emulator.update_thing_shadow_state_request(
+        device.thing_name, SHADOW_NAME, {"reported": reported})
+
+
+class TestStaticImagePinRoundTrip:
+    def test_pin_round_trip_applies_and_upserts_registry_entry(
+            self, sync_env, env, tmp_path, portal_shadow_client,
+            pin_transport):
+        """Portal pin submit -> desired slot populated (Req 1.2) -> fake
+        device confirmation -> item applied with metadata (Req 4.2) ->
+        reported.cameras including static-image-camera upserts the
+        registry entry through the untouched camera path (Req 6.1)."""
+        import hashlib
+
+        device = make_edge_device(sync_env, env, tmp_path)
+        portal_shadow_client.bind(device.emulator)
+        operator = env.make_user(role="Operator")
+
+        payload = _tiny_png_bytes()
+        staging_key = stage_pin_upload(sync_env, payload)
+        status, body = invoke_registry_api(
+            sync_env, "POST", device.thing_name, operator,
+            sub_path="/static-image/pin",
+            body={"stagingKey": staging_key, "fileName": "round-trip.png"})
+        assert status == 201
+        assert body["status"] == "pending"
+        pin_request_id = body["pinRequestId"]
+
+        # The desired slot carries the reference document — never bytes.
+        desired = device.emulator.desired["staticImagePin"]
+        assert desired["requestId"] == pin_request_id
+        assert desired["op"] == "pin"
+        assert desired["sha256"] == hashlib.sha256(payload).hexdigest()
+        assert desired["fileName"] == "round-trip.png"
+        # The canonical object is retrievable through the Image_Transport.
+        stored = sync_env.s3.get_object(Bucket=desired["bucket"],
+                                        Key=desired["key"])
+        assert stored["Body"].read() == payload
+        items = device_items(sync_env, device.thing_name)
+        assert items[f"PIN_REQUEST#{pin_request_id}"]["status"] == "pending"
+
+        # Fake device confirmation + inventory report, through the real
+        # rule/SQS ingest path.
+        metadata = {"width": 4, "height": 4, "format": "PNG",
+                    "fileName": "round-trip.png"}
+        confirm_on_device(device, desired, metadata=metadata,
+                          cameras={"static-image-camera":
+                                   static_camera_report()})
+        ingest(sync_env, device.thing_name, device.emulator)
+
+        items = device_items(sync_env, device.thing_name)
+        pin_item = items[f"PIN_REQUEST#{pin_request_id}"]
+        assert pin_item["status"] == "applied"
+        assert pin_item["device_metadata"]["width"] == 4
+        assert pin_item["device_metadata"]["fileName"] == "round-trip.png"
+        assert int(pin_item["completed_at"]) == 1_730_000_200_000
+
+        # Registry entry upserted through the same inventory sync used
+        # for physical cameras (Req 6.1).
+        entry = items["CAMERA#static-image-camera"]
+        assert entry["origin"] == "edge-discovered"
+        assert entry["type"] == "StaticImage"
+        assert entry["name"] == "Static Image Camera"
+        assert entry["absent"] is False
+        assert entry["usecase_id"] == device.usecase_id
+
+        # Status route: applied + device metadata + device-reported
+        # presence (Reqs 1.7, 4.6 surfaces).
+        status, view = invoke_registry_api(
+            sync_env, "GET", device.thing_name, operator,
+            sub_path="/static-image")
+        assert status == 200
+        assert view["latest"]["pinRequestId"] == pin_request_id
+        assert view["latest"]["status"] == "applied"
+        assert view["deviceMetadata"] == metadata
+        assert view["deviceReported"]["present"] is True
+
+    def test_removal_round_trip_marks_registry_entry_absent(
+            self, sync_env, env, tmp_path, portal_shadow_client,
+            pin_transport):
+        """Removal Pin_Request round trip: desired slot replaced with the
+        remove document, fake device confirmation transitions it to
+        applied, and the post-unpin inventory report marks the registry
+        entry absent through the physical-camera absence handling
+        (Reqs 6.2, 7.5)."""
+        device = make_edge_device(sync_env, env, tmp_path)
+        portal_shadow_client.bind(device.emulator)
+        operator = env.make_user(role="Operator")
+
+        # Established pinned state (pin round trip preamble).
+        staging_key = stage_pin_upload(sync_env, _tiny_png_bytes())
+        status, body = invoke_registry_api(
+            sync_env, "POST", device.thing_name, operator,
+            sub_path="/static-image/pin",
+            body={"stagingKey": staging_key, "fileName": "before.png"})
+        assert status == 201
+        pin_desired = dict(device.emulator.desired["staticImagePin"])
+        confirm_on_device(
+            device, pin_desired,
+            metadata={"width": 4, "height": 4, "format": "PNG",
+                      "fileName": "before.png"},
+            cameras={"static-image-camera": static_camera_report()})
+        ingest(sync_env, device.thing_name, device.emulator)
+
+        # Portal removal request (Req 7.2 surface).
+        status, body = invoke_registry_api(
+            sync_env, "DELETE", device.thing_name, operator,
+            sub_path="/static-image/pin")
+        assert status == 200
+        assert body["status"] == "pending"
+        removal_id = body["pinRequestId"]
+
+        # The desired slot was replaced wholesale: the remove document
+        # carries no transport reference fields (nulls delete on merge).
+        desired = device.emulator.desired["staticImagePin"]
+        assert desired["requestId"] == removal_id
+        assert desired["op"] == "remove"
+        assert "bucket" not in desired and "key" not in desired
+
+        # Fake device: unpin applied; the next inventory report carries
+        # the entry absence-tracked (absent + absentSince), the same
+        # handling physical discovered cameras get.
+        absent_since = 1_730_000_300_000
+        confirm_on_device(
+            device, desired, completed_at=absent_since,
+            cameras={"static-image-camera": static_camera_report(
+                absent=True, absent_since=absent_since, version=2)})
+        ingest(sync_env, device.thing_name, device.emulator)
+
+        items = device_items(sync_env, device.thing_name)
+        removal_item = items[f"PIN_REQUEST#{removal_id}"]
+        assert removal_item["status"] == "applied"
+
+        # Marked absent with the reported timestamp — not deleted (6.2).
+        entry = items["CAMERA#static-image-camera"]
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == absent_since
+
+        # Status route: removal applied, device reports no Pinned_Image.
+        status, view = invoke_registry_api(
+            sync_env, "GET", device.thing_name, operator,
+            sub_path="/static-image")
+        assert status == 200
+        assert view["latest"]["pinRequestId"] == removal_id
+        assert view["latest"]["op"] == "remove"
+        assert view["latest"]["status"] == "applied"
+        assert view["deviceReported"]["present"] is False
+        assert int(view["deviceReported"]["absentSince"]) == absent_since

@@ -122,6 +122,26 @@ describe('isAravisCompatibleCamera (Requirement 3.2)', () => {
     ).toBe(true);
   });
 
+  it('accepts the registry-backed StaticImage entry (cloud-static-camera-provisioning Reqs 6.3/6.4)', () => {
+    // The device serves the Static_Image_Camera through the same aravis
+    // frame-feed path bus cameras use (static-image-camera-source base
+    // spec), so the picker lists it for aravis_camera_source nodes.
+    expect(
+      isAravisCompatibleCamera({
+        camera_source_id: 'static-image-camera',
+        name: 'Static Image Camera',
+        type: 'StaticImage',
+        params: {},
+        origin: 'edge-discovered',
+        sync_status: 'synced',
+      })
+    ).toBe(true);
+    // Compatible even without params, like AravisDiscovered.
+    expect(
+      isAravisCompatibleCamera({ camera_source_id: 'static-image-camera', type: 'StaticImage' })
+    ).toBe(true);
+  });
+
   it('rejects other types and Camera entries without a non-empty cameraId', () => {
     expect(isAravisCompatibleCamera({ camera_source_id: 'v4l', type: 'V4L2Discovered' })).toBe(
       false

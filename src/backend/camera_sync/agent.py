@@ -67,7 +67,9 @@ from camera_sync.inventory import (
     build_inventory,
     configured_camera_source_id,
 )
+from camera_sync.pin_worker import StaticImagePinWorker
 from camera_sync.version_state import CameraSyncStateStore, versions_from_reported
+from utils.static_image_camera import STATIC_IMAGE_CAMERA_ID, get_store
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +88,11 @@ DEBOUNCE_SECONDS = 5.0
 MAX_REPORT_DELAY_SECONDS = 30.0
 
 #: A report exceeding this size gets its capability metadata truncated
-#: (the shadow document limit is 8 KB; 7 KB leaves headroom for the state
-#: wrapper and shadow metadata).
-MAX_REPORT_BYTES = 7 * 1024
+#: (the shadow document limit is 8 KB; 6 KB leaves headroom for the state
+#: wrapper, shadow metadata, and the ``staticImagePin`` desired/reported
+#: sections sharing this shadow — feature cloud-static-camera-provisioning
+#: design Decision 1).
+MAX_REPORT_BYTES = 6 * 1024
 
 #: Exponential backoff for failed shadow writes (offline device). Retries
 #: never give up: the first post-reconnect success is the catch-up state.
@@ -361,6 +365,7 @@ class EdgeSyncAgent:
         debounce_seconds: float = DEBOUNCE_SECONDS,
         backoff_initial_seconds: float = BACKOFF_INITIAL_SECONDS,
         backoff_max_seconds: float = BACKOFF_MAX_SECONDS,
+        pin_worker: Optional[StaticImagePinWorker] = None,
     ):
         self._shadow = iot_shadow_accessor
         self._image_source_accessor = image_source_accessor
@@ -379,6 +384,18 @@ class EdgeSyncAgent:
         self._debounce = float(debounce_seconds)
         self._backoff_initial = float(backoff_initial_seconds)
         self._backoff_max = float(backoff_max_seconds)
+
+        # Cloud-initiated static-image pin worker (feature
+        # cloud-static-camera-provisioning): the agent owns the worker's
+        # lifecycle and shares the shadow transport with it; the worker's
+        # terminal outcomes trigger an inventory report so the
+        # `static-image-camera` entry publishes promptly (Requirement 6.1).
+        if pin_worker is None:
+            pin_worker = StaticImagePinWorker(
+                iot_shadow_accessor, self.thing_name, shadow_name
+            )
+        self.pin_worker = pin_worker
+        self.pin_worker.report_inventory = self.report_inventory
 
         self._lock = threading.Lock()
         self._dirty = False
@@ -417,7 +434,9 @@ class EdgeSyncAgent:
             logger.warning("Edge sync agent already running")
             return
 
-        self._refresh_reported_versions()
+        state = self._refresh_reported_versions()
+        self.pin_worker.start()
+        self._handoff_desired_pin(state)
         self._stop_event = threading.Event()
         self._wakeup = threading.Event()
         with self._lock:
@@ -430,13 +449,37 @@ class EdgeSyncAgent:
         self._thread.start()
 
     def stop(self) -> None:
-        """Stop the report worker and wait for it to exit."""
+        """Stop the report worker (and the owned pin worker) and wait for
+        them to exit."""
         self._stop_event.set()
         self._wakeup.set()
+        self.pin_worker.stop()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join()
         self._thread = None
+
+    def _handoff_desired_pin(self, state: Optional[Mapping]) -> None:
+        """Startup/reconnect catch-up (Requirement 5.2): the same shadow
+        GET that seeds the version floor hands an unprocessed
+        ``desired.staticImagePin`` to the pin worker — a request already
+        carried to a terminal outcome (marker match) is skipped; the
+        worker's own marker check re-reports it on delta redelivery."""
+        desired = state.get("desired") if isinstance(state, Mapping) else None
+        pin = desired.get("staticImagePin") if isinstance(desired, Mapping) else None
+        if not isinstance(pin, Mapping) or not pin.get("requestId"):
+            return
+        try:
+            applied = self.pin_worker.applied_request_id()
+        except Exception:  # noqa: BLE001 - marker read must not break start
+            logger.exception(
+                "Could not read the static-image pin marker at start; "
+                "handing the desired pin document to the worker"
+            )
+            applied = None
+        if applied is not None and pin.get("requestId") == applied:
+            return
+        self.pin_worker.on_desired(pin)
 
     # --- report triggers (Requirement 3.1) --------------------------------
 
@@ -469,6 +512,12 @@ class EdgeSyncAgent:
         state = message.get("state") if isinstance(message, Mapping) else None
         if not isinstance(state, Mapping):
             state = message if isinstance(message, Mapping) else {}
+        # Cloud-initiated static-image pin (cloud-static-camera-provisioning):
+        # the `staticImagePin` section routes to the owned pin worker; the
+        # camera `changes` apply path below is untouched.
+        static_pin = state.get("staticImagePin")
+        if isinstance(static_pin, Mapping) and static_pin:
+            self.pin_worker.on_desired(static_pin)
         changes = state.get("changes")
         if isinstance(changes, Mapping) and changes:
             self.apply_desired_changes(changes)
@@ -498,8 +547,12 @@ class EdgeSyncAgent:
         # Discovery-managed sources are immutable from the Portal
         # (defense in depth behind the portal-side rejection, Req 5.6):
         # only cfg- configured sources can be updated or deleted, and a
-        # create must not target a disc- discovery id.
-        targets_discovered = csid.startswith(_DISCOVERED_PREFIX)
+        # create must not target a disc- discovery id. The literal
+        # `static-image-camera` id is likewise discovery-managed (feature
+        # cloud-static-camera-provisioning, Requirement 6.5).
+        targets_discovered = (
+            csid.startswith(_DISCOVERED_PREFIX) or csid == STATIC_IMAGE_CAMERA_ID
+        )
         if targets_discovered or (
             op != "create" and not csid.startswith(_CONFIGURED_PREFIX)
         ):
@@ -662,9 +715,11 @@ class EdgeSyncAgent:
 
     # --- report construction ----------------------------------------------
 
-    def _refresh_reported_versions(self) -> None:
+    def _refresh_reported_versions(self) -> Optional[Mapping]:
         """Version floor for state-file loss: the shadow's current
-        reported versions (never lowers a version, Requirement 3.5)."""
+        reported versions (never lowers a version, Requirement 3.5).
+        Returns the shadow state so ``start()`` can also inspect
+        ``desired.staticImagePin`` from the same GET (Requirement 5.2)."""
         try:
             state = self._shadow.get_thing_shadow_state_request(
                 self.thing_name, self.shadow_name
@@ -674,6 +729,7 @@ class EdgeSyncAgent:
             state = None
         reported = state.get("reported") if isinstance(state, Mapping) else None
         self._reported_versions = versions_from_reported(reported)
+        return state if isinstance(state, Mapping) else None
 
     def _build_current_document(self) -> Dict[str, Any]:
         snapshot = (
@@ -724,12 +780,32 @@ class EdgeSyncAgent:
     def _load_inventory(self, snapshot) -> List[CameraSourceState]:
         """Read Image_Sources through the existing accessor (read-only,
         Requirement 11.3) and merge with the discovery snapshot; the merge
-        runs inside the session so relationship attributes resolve."""
+        runs inside the session so relationship attributes resolve.
+
+        The static-image pin state (cloud-static-camera-provisioning,
+        Requirement 6.1) gates the virtual `static-image-camera` entry;
+        a store failure never breaks camera reporting."""
+        static_image_pinned = False
+        static_image_metadata = None
+        try:
+            status = get_store().status()
+            static_image_pinned = bool(status.get("pinned"))
+            static_image_metadata = status.get("metadata")
+        except Exception:  # noqa: BLE001 - store failure must not break reports
+            logger.exception(
+                "Static image pin state could not be read; reporting the "
+                "inventory without the static camera entry"
+            )
         with self._make_session() as session:
             image_sources = self._image_source_accessor.list_image_sources(
                 None, session
             )
-            return build_inventory(image_sources, snapshot)
+            return build_inventory(
+                image_sources,
+                snapshot,
+                static_image_pinned=static_image_pinned,
+                static_image_metadata=static_image_metadata,
+            )
 
     def _write_report(self) -> bool:
         try:
