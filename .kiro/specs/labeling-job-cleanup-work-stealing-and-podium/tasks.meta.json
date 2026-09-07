@@ -235,6 +235,16 @@
         "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
         "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
         "timestamp": 1788793038029
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788800610758
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788801552927
       }
     ],
     "5.2 Live verification — scratch job driven through steal, podium, and deletion on ryvan-cookies": [
@@ -242,6 +252,16 @@
         "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
         "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
         "timestamp": 1788793039337
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788801560924
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788802764702
       }
     ],
     "3. Infrastructure: the three routes in the DDA labeling nested stack": [
@@ -431,6 +451,13 @@
         "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
         "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
         "timestamp": 1788799791454
+      }
+    ],
+    "5. Deploy and verify live": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788802766199
       }
     ]
   }
