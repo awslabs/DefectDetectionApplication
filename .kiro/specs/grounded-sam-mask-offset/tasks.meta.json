@@ -1,0 +1,22 @@
+{
+  "pbtResults": {
+    "1. Write bug condition exploration test (against the REAL ONNX models)": {
+      "status": "passed",
+      "failingExample": "Expected failures on unfixed code, now 5 geometries (task 2 added the reclassified scale=1 cases): portrait-576x768 IoU=0.3287 disp=110.8px; landscape-768x576 IoU=0.8194 disp=20.2px; square-512x512 IoU=0.4712 disp=71.8px; landscape-1024x768-scale1 IoU=0.8009 disp=26.0px vector=(-0.3,+26.0); portrait-768x1024-scale1 IoU=0.2939 disp=138.0px vector=(-51.9,+127.9). All thresholds: IoU>=0.85, centroid<3% diagonal. Traced-crop geometry 1024x683 (resized==baked crop (683,1024)) aligns: IoU=0.9948, 0.2px.",
+      "lastRunTimestamp": 1788749420928
+    },
+    "2. Write preservation property tests (BEFORE implementing fix)": {
+      "status": "passed",
+      "lastRunTimestamp": 1788749411827
+    },
+    "3.2 Verify bug condition exploration test now passes": {
+      "status": "passed",
+      "lastRunTimestamp": 1788749996291
+    },
+    "3.3 Verify preservation tests still pass": {
+      "status": "passed",
+      "lastRunTimestamp": 1788750025946
+    }
+  },
+  "executionHistory": {}
+}

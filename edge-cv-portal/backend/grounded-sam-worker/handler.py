@@ -527,15 +527,69 @@ def _detect(image_rgb, caption: str, phrases: List[str],
 # SAM mask pass (Segmentation only)
 # ---------------------------------------------------------------------------
 
+def _resize_logits(logits, width: int, height: int):
+    """
+    Bilinear resize of a 2-D float32 logit grid to (H, W) via Pillow —
+    the same interpolation the probe used to pin the winning convention
+    (variant (e), see `_run_sam_decoder`).
+    """
+    import numpy as np
+    from PIL import Image
+
+    return np.asarray(
+        Image.fromarray(np.ascontiguousarray(logits, dtype=np.float32))
+        .resize((width, height), Image.BILINEAR))
+
+
 def _run_sam_decoder(decoder, embeddings, box: Dict, scale: float,
                      width: int, height: int):
     """
     Run the SAM ONNX decoder for one box prompt. Returns
-    (masks, iou_predictions) with masks at the source resolution.
+    (low_res_masks, iou_predictions): mask logits on the decoder's
+    fixed 256x256 grid over the PADDED encoder canvas — NOT source
+    resolution. `_segment_masks` applies the official segment-anything
+    postprocess externally to map them to the source image.
 
     The box rides the canonical two-point encoding — top-left labeled 2,
     bottom-right labeled 3 — scaled into the encoder's resized frame the
-    same way point prompts are.
+    same way point prompts are. That `coords * scale` feed is CORRECT
+    for the deployed export and must not change (see below).
+
+    PINNED CONVENTION — why `low_res_masks` and not the graph's `masks`
+    output. Empirically probed against the real mobile_sam_20230629
+    samexporter artifacts (.kiro/specs/grounded-sam-mask-offset;
+    probe matrix in tests/test_gsam_mask_offset_exploration.py):
+
+    - The deployed decoder's in-graph `masks` postprocess has its
+      pad-crop CONSTANT-FOLDED to the export's tracing shape
+      (683, 1024) instead of derived from `orig_im_size`, so `masks`
+      comes back warped/offset for every image whose `_sam_preprocess`
+      resized geometry (new_h, new_w) differs from (683, 1024).
+      scale = 1 does not protect an image: on unfixed code, 1024x768
+      scored IoU 0.8009 (+26 px down) and 768x1024 IoU 0.2939 (138 px)
+      against a known ground-truth rectangle; only 1024x683 — the
+      traced crop itself — aligned (IoU 0.9948, 0.2 px).
+    - Canvas-frame control: feeding `orig_im_size = (683, 1024)` makes
+      the graph's final resize the identity on its baked crop, and the
+      mask then lands EXACTLY on the scaled prompt (portrait prompt
+      (85,128,341,427) -> mask bbox (86,128,340,425)) — proving the
+      `coords * scale` prompt feed is correct (design hypotheses
+      H1/H3/H4 refuted) and isolating the defect to the constant-folded
+      crop, not the prompt transform.
+    - Probe matrix: variants (a) original-frame coords, (b) 1024-frame
+      coords + graph `masks` (the pre-fix handler behavior), (c) swapped
+      `orig_im_size` [W, H], and (d) resized-frame `orig_im_size` +
+      external warp ALL scored below the 0.85 IoU threshold. Variant
+      (e) — 1024-frame coords + `low_res_masks` + external official
+      postprocess (upsample to the encoder canvas, crop the pre-padding
+      region [:new_h, :new_w], resize to source) — scored IoU 0.9942
+      (portrait 576x768), 0.9979 (landscape 768x576), 0.9996 (square
+      512x512) with centroid displacement <= 0.5 px. This function plus
+      `_segment_masks` implement variant (e).
+
+    `orig_im_size` is still fed (the graph declares the input and
+    onnxruntime requires it) but only the ignored `masks` output
+    consumes it.
     """
     import numpy as np
 
@@ -566,8 +620,20 @@ def _run_sam_decoder(decoder, embeddings, box: Dict, scale: float,
             feeds[name] = np.asarray([height, width], dtype=np.float32)
 
     outputs = decoder.run(None, feeds)
-    masks, iou_predictions = outputs[0], outputs[1]
-    return masks, iou_predictions
+    by_name = dict(zip(
+        (output.name for output in decoder.get_outputs()), outputs))
+    low_res_masks = by_name.get('low_res_masks')
+    iou_predictions = by_name.get('iou_predictions', outputs[1])
+    if low_res_masks is None:
+        # Name fallback: the low-res logits are the decoder output on the
+        # fixed 256x256 grid — never the orig-size `masks` output (whose
+        # constant-folded pad-crop is the defect this bypasses).
+        low_res_masks = next(
+            value for name, value in by_name.items()
+            if name != 'masks'
+            and getattr(value, 'ndim', 0) >= 3
+            and tuple(value.shape[-2:]) == (256, 256))
+    return low_res_masks, iou_predictions
 
 
 def _rle_encode_fast(mask_2d) -> str:
@@ -585,6 +651,17 @@ def _segment_masks(image_rgb, detections: List[Dict]) -> List[Tuple[Dict, str]]:
     """
     Convert each retained detection's box into a source-resolution
     canonical RLE mask: embed the image once, then decode per box.
+
+    Mask geometry (pinned convention — probe evidence in
+    `_run_sam_decoder`): the graph's own `masks` output is bypassed
+    because its pad-crop is constant-folded to the tracing shape
+    (683, 1024); the official segment-anything postprocess runs here
+    instead, on the decoder's `low_res_masks` — bilinear-upsample the
+    256x256 logits to the padded encoder canvas
+    (encoder_size x encoder_size), crop the pre-padding content region
+    [:new_h, :new_w] (recomputed with `_sam_preprocess`'s exact
+    rounding), bilinear-resize to the source image (W, H), then
+    threshold at MASK_LOGIT_THRESHOLD.
 
     Detections whose thresholded mask comes back empty are dropped —
     they carry nothing a labeler could verify (the sibling sam-worker's
@@ -604,13 +681,23 @@ def _segment_masks(image_rgb, detections: List[Dict]) -> List[Tuple[Dict, str]]:
     encoder_input_name = encoder.get_inputs()[0].name
     embeddings = encoder.run(None, {encoder_input_name: tensor})[0]
 
+    # Pre-padding content region on the encoder canvas — must mirror
+    # _sam_preprocess's rounding exactly or the crop drifts by a pixel.
+    new_w = max(1, int(round(width * scale)))
+    new_h = max(1, int(round(height * scale)))
+
     results: List[Tuple[Dict, str]] = []
     for detection in detections:
-        masks, iou_predictions = _run_sam_decoder(
+        low_res_masks, iou_predictions = _run_sam_decoder(
             decoder, embeddings, detection['box'], scale, width, height)
         pred_scores = np.asarray(iou_predictions).reshape(-1)
         best = int(np.argmax(pred_scores))
-        mask_logits = np.asarray(masks).reshape(-1, height, width)[best]
+        low = np.asarray(low_res_masks)
+        low_logits = low.reshape(-1, low.shape[-2], low.shape[-1])[best]
+        # Official postprocess, outside the graph: canvas upsample ->
+        # content crop -> source resize -> threshold (probe variant (e)).
+        canvas = _resize_logits(low_logits, encoder_size, encoder_size)
+        mask_logits = _resize_logits(canvas[:new_h, :new_w], width, height)
         binary = (mask_logits > MASK_LOGIT_THRESHOLD).astype(np.uint8)
         if int(binary.sum()) == 0:
             logger.info(

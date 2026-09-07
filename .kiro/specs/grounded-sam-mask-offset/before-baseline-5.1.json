@@ -1,0 +1,225 @@
+{
+  "000000": {
+    "image": "anomaly-1.jpg",
+    "size_wxh": [
+      576,
+      768
+    ],
+    "od_boxes": [
+      {
+        "class": "cookie_gap",
+        "score": 0.6455,
+        "box_xyxy": [
+          10.1,
+          235.9,
+          484.3,
+          699.1
+        ]
+      },
+      {
+        "class": "cookie_gap",
+        "score": 0.4541,
+        "box_xyxy": [
+          144.9,
+          357.3,
+          370.3,
+          600.3
+        ]
+      }
+    ],
+    "before_masks": [
+      {
+        "area_px": 104787,
+        "centroid_xy": [
+          177.6,
+          582.4
+        ],
+        "best_box": {
+          "box_xyxy": [
+            10,
+            236,
+            484,
+            699
+          ],
+          "containment": 0.8364,
+          "iou": 0.3689,
+          "centroid_in_box": true
+        },
+        "all_boxes": [
+          {
+            "box_xyxy": [
+              10,
+              236,
+              484,
+              699
+            ],
+            "containment": 0.8364,
+            "iou": 0.3689,
+            "centroid_in_box": true
+          },
+          {
+            "box_xyxy": [
+              145,
+              357,
+              370,
+              600
+            ],
+            "containment": 0.2989,
+            "iou": 0.2435,
+            "centroid_in_box": true
+          }
+        ],
+        "class": "cookie_gap"
+      },
+      {
+        "area_px": 2127,
+        "centroid_xy": [
+          222.6,
+          693.7
+        ],
+        "best_box": {
+          "box_xyxy": [
+            10,
+            236,
+            484,
+            699
+          ],
+          "containment": 0.552,
+          "iou": 0.0053,
+          "centroid_in_box": true
+        },
+        "all_boxes": [
+          {
+            "box_xyxy": [
+              10,
+              236,
+              484,
+              699
+            ],
+            "containment": 0.552,
+            "iou": 0.0053,
+            "centroid_in_box": true
+          },
+          {
+            "box_xyxy": [
+              145,
+              357,
+              370,
+              600
+            ],
+            "containment": 0.0,
+            "iou": 0.0,
+            "centroid_in_box": false
+          }
+        ],
+        "class": "cookie_gap"
+      }
+    ]
+  },
+  "000001": {
+    "image": "anomaly-10.jpg",
+    "size_wxh": [
+      576,
+      768
+    ],
+    "od_boxes": [
+      {
+        "class": "cookie_gap",
+        "score": 0.6985,
+        "box_xyxy": [
+          27.6,
+          155.1,
+          485.0,
+          591.1
+        ]
+      }
+    ],
+    "before_masks": [
+      {
+        "area_px": 136850,
+        "centroid_xy": [
+          201.3,
+          527.5
+        ],
+        "best_box": {
+          "box_xyxy": [
+            28,
+            155,
+            485,
+            591
+          ],
+          "containment": 0.6484,
+          "iou": 0.3574,
+          "centroid_in_box": true
+        },
+        "all_boxes": [
+          {
+            "box_xyxy": [
+              28,
+              155,
+              485,
+              591
+            ],
+            "containment": 0.6484,
+            "iou": 0.3574,
+            "centroid_in_box": true
+          }
+        ],
+        "class": "cookie_gap"
+      }
+    ]
+  },
+  "000002": {
+    "image": "anomaly-11.jpg",
+    "size_wxh": [
+      576,
+      768
+    ],
+    "od_boxes": [
+      {
+        "class": "cookie_gap",
+        "score": 0.6327,
+        "box_xyxy": [
+          85.1,
+          172.8,
+          533.0,
+          638.9
+        ]
+      }
+    ],
+    "before_masks": [
+      {
+        "area_px": 128749,
+        "centroid_xy": [
+          228.9,
+          554.0
+        ],
+        "best_box": {
+          "box_xyxy": [
+            85,
+            173,
+            533,
+            639
+          ],
+          "containment": 0.6755,
+          "iou": 0.3458,
+          "centroid_in_box": true
+        },
+        "all_boxes": [
+          {
+            "box_xyxy": [
+              85,
+              173,
+              533,
+              639
+            ],
+            "containment": 0.6755,
+            "iou": 0.3458,
+            "centroid_in_box": true
+          }
+        ],
+        "class": "cookie_gap"
+      }
+    ]
+  }
+}
