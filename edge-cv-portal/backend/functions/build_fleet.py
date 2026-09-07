@@ -273,8 +273,20 @@ INITIATED_STATE_AFTER_ACTION = {
 #: repository clone and the Source_Sync onto the selected ref (design
 #: §2/A3). The repo's own setup-build-server.sh is executed afterwards so
 #: the build environment (snap docker, docker-compose, Python 3.11, AWS
-#: CLI, botocore[crt], GDK) exactly matches the manual process. SSM agent
-#: is preinstalled on Ubuntu 22.04.
+#: CLI, botocore[crt], GDK) exactly matches the manual process. The SSM
+#: agent (and only the SSM agent) is preinstalled on Ubuntu 22.04 cloud
+#: images.
+#:
+#: zip/unzip are installed ROOT-SIDE, in the apt line below, because
+#: build-custom.sh's packaging step (the ZIP_MEMBERS `zip` invocation and
+#: the `zip -T` integrity check) requires them and Ubuntu server cloud
+#: images (22.04/24.04, standard and Pro) do not ship them. Relying on the
+#: synced ref's setup-build-server.sh is not enough: its apt line is
+#: ref-dependent (an older ref runs an older script without zip) and
+#: failure-tolerant (`run_cmd ... || add_warning`), which is exactly how
+#: the 2026-09-07 incident happened — Build_Job 53312133 died with
+#: `zip: command not found` (exit 127) at the packaging step after ~1.5h
+#: of successful work on a freshly bootstrapped server.
 #:
 #: Placeholders, all bound by `_user_data_body()`:
 #:   `{repo_dir}`     the clone location, fed from the shared resolver
@@ -302,7 +314,7 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y git
+apt-get install -y git zip unzip
 
 # Clone the source repository for the build agent (design §2/§5).
 sudo -u ubuntu -H git clone {repo_url} {repo_dir}

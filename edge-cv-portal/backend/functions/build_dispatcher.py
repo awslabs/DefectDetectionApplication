@@ -1173,7 +1173,12 @@ def runner_bootstrap_user_data(job: Optional[Dict[str, Any]] = None,
         *bootstrap_log_redirect_commands(),
         HOME_EXPORT_COMMAND,
         'export DEBIAN_FRONTEND=noninteractive',
-        'apt-get update -y && apt-get install -y git',
+        # zip/unzip installed root-side for build-custom.sh's packaging
+        # step (ZIP_MEMBERS zip + `zip -T`): Ubuntu cloud images do not
+        # ship them and the synced ref's setup-build-server.sh apt line is
+        # ref-dependent and failure-tolerant (the 2026-09-07
+        # zip-command-not-found incident, job 53312133).
+        'apt-get update -y && apt-get install -y git zip unzip',
         *repo_parent_prepare_commands(repo_dir),
         repo_ownership_heal_command(repo_dir),
         *run_as_build_user_commands(body),

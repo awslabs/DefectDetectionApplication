@@ -232,7 +232,14 @@ def frozen_runner_bootstrap(repo_url, repo_dir, source_ref, region):
     re-spelled from the output recorded on unfixed code (task 2
     observation run). Inputs mirror the real inputs: the configured
     repository URL, the resolved repo dir, the job's selected ref (''
-    when none), and the dispatch region ('' when none resolves)."""
+    when none), and the dispatch region ('' when none resolves).
+
+    CONSCIOUS RE-RECORD (build-server-bootstrap-zip, 2026-09-07): the apt
+    line now pins `... git zip unzip` — the dispatcher's root apt line
+    gained zip/unzip so build-custom.sh's packaging step (ZIP_MEMBERS zip
+    + `zip -T`) stops dying with exit 127 on fresh runners (the job
+    53312133 incident). Only that one line changed; the oracle stays
+    byte-level and must not be weakened."""
     qdir = shlex.quote(repo_dir)
     body = ['export HOME="${HOME:-/home/ubuntu}"']
     if region:
@@ -251,7 +258,7 @@ def frozen_runner_bootstrap(repo_url, repo_dir, source_ref, region):
         "fi",
         'export HOME="${HOME:-/root}"',
         "export DEBIAN_FRONTEND=noninteractive",
-        "apt-get update -y && apt-get install -y git",
+        "apt-get update -y && apt-get install -y git zip unzip",
         'mkdir -p "$(dirname %s)"' % qdir,
         'chown ubuntu:ubuntu "$(dirname %s)" 2>/dev/null || true' % qdir,
         "if [ -d %s ]; then chown -R ubuntu:ubuntu %s 2>/dev/null || true; fi"
@@ -283,7 +290,13 @@ def frozen_fleet_user_data(repo_url, repo_dir, source_ref):
     observation: the launch handler renders this SAME text for
     `ubuntu_version` 22.04 and absent alike (the release selects only
     the AMI, never the bootstrap text), so this one oracle covers both
-    launch shapes of Req 3.8."""
+    launch shapes of Req 3.8.
+
+    CONSCIOUS RE-RECORD (build-server-bootstrap-zip, 2026-09-07): the apt
+    line now pins `apt-get install -y git zip unzip` — see
+    frozen_runner_bootstrap above; the fleet bootstrap gained the same
+    root-side zip/unzip install. Only that one line changed; the oracle
+    stays byte-level and must not be weakened."""
     return "\n".join([
         "#!/bin/bash",
         "set -x",
@@ -294,7 +307,7 @@ def frozen_fleet_user_data(repo_url, repo_dir, source_ref):
         "",
         "export DEBIAN_FRONTEND=noninteractive",
         "apt-get update",
-        "apt-get install -y git",
+        "apt-get install -y git zip unzip",
         "",
         "# Clone the source repository for the build agent (design "
         "\u00a72/\u00a75).",

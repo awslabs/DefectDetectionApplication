@@ -1,0 +1,22 @@
+{
+  "pbtResults": {
+    "1. Write bug condition exploration test": {
+      "status": "passed",
+      "failingExample": "Exploration test FAILED as expected on unfixed code (6 failed, 1 skipped), confirming isBugCondition(X) for every render path. Counterexamples: build_fleet.render_user_data(...) and USER_DATA_TEMPLATE root apt line = \"apt-get install -y git\" (root_installed_packages = [\"git\"], no zip/unzip) — including the incident-shaped render_user_data('https://example.invalid/dda.git') with defaults; build_dispatcher.runner_bootstrap_user_data(job, repo_dir) root apt line = \"apt-get update -y && apt-get install -y git\" (packages = [\"git\"]) for jobs with and without source_ref. Hypothesis: \"The test always failed when commented parts were varied together\" — every (repo_dir, source_ref) combination fails. The empty no-repo-URL dispatcher case legitimately renders '' and was skip-asserted.",
+      "lastRunTimestamp": 1788747865147
+    },
+    "2. Write preservation property tests (BEFORE implementing fix)": {
+      "status": "passed",
+      "lastRunTimestamp": 1788748518402
+    },
+    "3.2 Verify bug condition exploration test now passes": {
+      "status": "passed",
+      "lastRunTimestamp": 1788748611831
+    },
+    "3.3 Verify preservation tests still pass": {
+      "status": "passed",
+      "lastRunTimestamp": 1788748657730
+    }
+  },
+  "executionHistory": {}
+}

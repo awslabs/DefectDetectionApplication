@@ -285,7 +285,14 @@ def frozen_runner_bootstrap(repo_url, repo_dir, source_ref, region):
     re-spelled from the output recorded on unfixed code (the task 2
     observation run). Inputs mirror the real inputs: the configured
     repository URL, the resolved repo dir, the job's selected ref (''
-    when none), and the dispatch region."""
+    when none), and the dispatch region.
+
+    CONSCIOUS RE-RECORD (build-server-bootstrap-zip, 2026-09-07): the apt
+    line below now pins `... git zip unzip` — the dispatcher's root apt
+    line gained zip/unzip so build-custom.sh's packaging step (ZIP_MEMBERS
+    zip + `zip -T`) stops dying with exit 127 on fresh runners (the job
+    53312133 incident). Only that one line changed; the oracle stays
+    byte-level and must not be weakened."""
     qdir = shlex.quote(repo_dir)
     body = ['export HOME="${HOME:-/home/ubuntu}"']
     if region:
@@ -304,7 +311,7 @@ def frozen_runner_bootstrap(repo_url, repo_dir, source_ref, region):
         "fi",
         'export HOME="${HOME:-/root}"',
         "export DEBIAN_FRONTEND=noninteractive",
-        "apt-get update -y && apt-get install -y git",
+        "apt-get update -y && apt-get install -y git zip unzip",
         'mkdir -p "$(dirname %s)"' % qdir,
         'chown ubuntu:ubuntu "$(dirname %s)" 2>/dev/null || true' % qdir,
         "if [ -d %s ]; then chown -R ubuntu:ubuntu %s 2>/dev/null || true; fi"
